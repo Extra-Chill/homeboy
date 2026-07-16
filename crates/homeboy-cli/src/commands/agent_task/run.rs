@@ -177,6 +177,9 @@ where
         .and_then(|task| task.workspace.root.as_ref())
         .map(std::path::PathBuf::from);
     let task_base_sha = source_worktree_path.as_deref().and_then(git_head_sha);
+    if let Some(dispatcher) = &attempt_dispatcher {
+        dispatcher.prepare_for_cook()?;
+    }
     // Keep this cook on one runtime generation through provider work and PR finalization.
     let _runtime_generation = homeboy::core::runtime_promotion::pin_cook_generation(&cook_id)?;
     let title = args

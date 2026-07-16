@@ -283,11 +283,18 @@ impl AgentTaskExecutorAdapter for CommittingExecutor {
 #[derive(Debug, Clone)]
 struct MirroredAttemptDispatcher {
     executor: CommittingExecutor,
+    prepared: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for MirroredAttemptDispatcher {
     fn durable_recipe(&self) -> homeboy::core::Result<serde_json::Value> {
         Ok(serde_json::json!({ "kind": "local" }))
+    }
+
+    fn prepare_for_cook(&self) -> homeboy::core::Result<()> {
+        self.prepared
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
     fn dispatch_attempt(
@@ -296,6 +303,10 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for Mirrore
         run_id: &str,
         _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> homeboy::core::Result<()> {
+        assert!(
+            self.prepared.load(std::sync::atomic::Ordering::SeqCst),
+            "cook must prepare the dispatcher before pinning and dispatching its attempt"
+        );
         homeboy::core::agent_tasks::service::run_loaded_plan(
             plan,
             Some(run_id),
@@ -362,6 +373,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         let executor = CommittingExecutor {
             workspace: source.clone(),
         };
+        let prepared = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (value, exit_code) = run_cook_with_executor_and_dispatcher(
             AgentTaskCookArgs {
                 dispatch: DispatchArgs {
@@ -412,14 +424,20 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 ai_used_for: "test".to_string(),
             },
             executor.clone(),
-            Some(Arc::new(MirroredAttemptDispatcher { executor })),
+            Some(Arc::new(MirroredAttemptDispatcher {
+                executor,
+                prepared: prepared.clone(),
+            })),
         )
         .expect("cook completes");
 
+        assert!(prepared.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(exit_code, 0, "{value:#}");
         assert_eq!(value["status"], "green_no_finalize");
-        let lifecycle =
-            lifecycle_status("cook-committed-work-attempt-1").expect("local cook lifecycle");
+        let attempt_run_id = value["attempts"][0]["run_id"]
+            .as_str()
+            .expect("cook report attempt run id");
+        let lifecycle = lifecycle_status(attempt_run_id).expect("local cook lifecycle");
         assert_eq!(lifecycle.lifecycle.provider_runtime.len(), 1);
         assert_eq!(
             lifecycle.lifecycle.provider_runtime[0].metadata["model"],
