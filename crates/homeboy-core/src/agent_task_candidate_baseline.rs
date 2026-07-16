@@ -41,12 +41,13 @@ pub(crate) fn validate_gate_feedback_candidate_baseline(
         .and_then(Value::as_str)
         .filter(|diff| !diff.trim().is_empty())
         .ok_or_else(|| invalid("gate-feedback candidate has no complete current diff"))?;
-    if patch_tree(root, current_diff)? != workspace_tree(root)? {
+    let current_diff = format!("{}\n", current_diff.trim_end_matches('\n'));
+    if patch_tree(root, &current_diff)? != workspace_tree(root)? {
         return Err(invalid(
             "recorded current diff does not match the promoted candidate worktree state",
         ));
     }
-    Ok(current_diff.to_string())
+    Ok(current_diff)
 }
 
 fn verify_patch_is_present(root: &Path, patch: &str) -> Result<()> {
@@ -150,8 +151,9 @@ mod tests {
         let artifacts = tempfile::tempdir().expect("artifact tempdir");
         let artifact = artifacts.path().join("remediation.patch");
         std::fs::write(&artifact, remediation).expect("remediation artifact");
+        let transported_diff = current_diff.trim_end_matches('\n');
         let cook_loop = serde_json::json!({
-            "current_diff": current_diff,
+            "current_diff": transported_diff,
             "patch_artifact": {
                 "path": artifact,
                 "sha256": format!("{:x}", Sha256::digest(remediation.as_bytes()))
