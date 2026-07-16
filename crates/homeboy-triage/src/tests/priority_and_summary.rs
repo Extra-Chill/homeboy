@@ -1,5 +1,5 @@
-use super::super::*;
 use super::*;
+use crate::*;
 
 #[test]
 fn priority_actions_use_default_labels_when_unconfigured() {
@@ -63,7 +63,7 @@ fn global_priority_labels_apply_when_component_and_fleet_unset() {
 
 #[test]
 fn fleet_priority_labels_apply_to_fleet_components() {
-    crate::test_support::with_isolated_home(|home| {
+    homeboy_core::test_support::with_isolated_home(|home| {
         let component_dir = home.path().join(".config/homeboy/components");
         let project_dir = home.path().join(".config/homeboy/projects/site");
         let fleet_dir = home.path().join(".config/homeboy/fleets");

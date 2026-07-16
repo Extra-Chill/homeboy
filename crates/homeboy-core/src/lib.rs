@@ -228,7 +228,6 @@ pub(crate) mod transient_workspace_policy;
 #[doc(hidden)]
 #[allow(dead_code)]
 pub mod test_support;
-pub mod triage;
 pub mod tunnel;
 #[cfg(test)]
 mod tunnel_tests;

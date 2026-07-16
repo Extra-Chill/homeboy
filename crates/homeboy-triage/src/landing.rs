@@ -3,12 +3,12 @@
 
 use std::collections::BTreeSet;
 
-use crate::component;
-use crate::error::{Error, Result};
-use crate::git::release_download::{parse_github_url, GitHubRepo};
-use crate::observation::TriagePullRequestSignals;
-use crate::scope::ScopeOutput;
-use crate::worktree::{self, TaskWorktreeRecord, TaskWorktreeState};
+use homeboy_core::component;
+use homeboy_core::error::{Error, Result};
+use homeboy_core::git::release_download::{parse_github_url, GitHubRepo};
+use homeboy_core::observation::TriagePullRequestSignals;
+use homeboy_core::scope::ScopeOutput;
+use homeboy_core::worktree::{self, TaskWorktreeRecord, TaskWorktreeState};
 
 use super::gh::{ensure_gh_ready, non_empty, run_gh, summarize_checks};
 use super::observation::usize_to_i64;

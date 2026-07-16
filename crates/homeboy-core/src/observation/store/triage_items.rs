@@ -4,7 +4,7 @@ use uuid::Uuid;
 use super::*;
 
 impl ObservationStore {
-    pub(crate) fn record_triage_items(
+    pub fn record_triage_items(
         &self,
         items: &[NewTriageItemRecord],
     ) -> Result<Vec<TriageItemRecord>> {
@@ -108,7 +108,7 @@ impl ObservationStore {
             .map_err(sqlite_error("read triage item record"))
     }
 
-    pub(crate) fn list_triage_items_for_run(&self, run_id: &str) -> Result<Vec<TriageItemRecord>> {
+    pub fn list_triage_items_for_run(&self, run_id: &str) -> Result<Vec<TriageItemRecord>> {
         validate_required("run_id", run_id)?;
         let mut statement = self
             .connection

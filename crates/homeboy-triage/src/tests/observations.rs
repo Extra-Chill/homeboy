@@ -1,5 +1,5 @@
-use super::super::*;
 use super::*;
+use crate::*;
 
 #[test]
 fn compare_triage_observations_reports_new_resolved_and_changed_items() {
