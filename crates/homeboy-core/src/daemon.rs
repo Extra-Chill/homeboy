@@ -12,7 +12,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::api_jobs::{
-    DaemonActiveJobRecoveryEvidence, JobStatus, JobStore, RunnerJobLifecycleMetadata,
+    DaemonActiveJobRecoveryEvidence, JobStatus, JobStore, LocalRunnerJob,
+    RunnerJobLifecycleMetadata,
 };
 use crate::build_identity;
 use crate::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
@@ -1611,11 +1612,17 @@ fn enqueue_exec_job(
         request.metadata.as_ref(),
     );
     let runner = job_store
-        .run_local_child_background_with_source_snapshot_metadata_and_path_materialization_plan(
+        .run_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
             operation,
             source_snapshot.clone(),
             run_ref_metadata,
             path_materialization_plan.clone(),
+            Some(LocalRunnerJob {
+                runner_id: plan.runner.id.clone(),
+                command: plan.command.clone(),
+                cwd: Some(plan.cwd.clone()),
+                lifecycle: request.lifecycle.clone(),
+            }),
             move |job| {
                 let mut plan = plan;
                 plan.env.insert(

@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use super::persistence::request_metadata_string;
 use super::remote_runner::RemoteRunnerJobRequest;
+use super::store::LocalRunnerJob;
 use super::types::{ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, Job, JobStatus};
 use crate::redaction::redact_argv_display;
 
@@ -92,6 +93,51 @@ pub(super) fn active_daemon_job_summary(job: &Job, now_ms: u64) -> ActiveRunnerJ
             .map(|expires_at| expires_at.saturating_sub(now_ms)),
         lifecycle: None,
         durable_run_id: None,
+        stale_reason: job.stale_reason.clone(),
+        lifecycle_state: Some(runner_job_lifecycle_state(job).to_string()),
+        retryable: Some(runner_job_retryable(job)),
+        active_child_count: None,
+        active_cell_count: None,
+    }
+}
+
+pub(super) fn active_local_runner_job_summary(
+    job: &Job,
+    local: &LocalRunnerJob,
+    now_ms: u64,
+) -> ActiveRunnerJobSummary {
+    let started_at_ms = job.started_at_ms.unwrap_or(job.created_at_ms);
+    let lifecycle = local.lifecycle.clone();
+    ActiveRunnerJobSummary {
+        runner_id: local.runner_id.clone(),
+        job_id: job.id.to_string(),
+        operation: job.operation.clone(),
+        source: lifecycle
+            .as_ref()
+            .and_then(|lifecycle| lifecycle.source.clone())
+            .unwrap_or_else(|| "runner-daemon".to_string()),
+        kind: lifecycle
+            .as_ref()
+            .and_then(|lifecycle| lifecycle.kind.clone())
+            .unwrap_or_else(|| job.operation.clone()),
+        status: job.status,
+        command: redact_argv_display(&local.command),
+        cwd: local.cwd.clone(),
+        started_at_ms,
+        updated_at_ms: job.updated_at_ms,
+        elapsed_ms: now_ms.saturating_sub(started_at_ms),
+        heartbeat_age_ms: now_ms.saturating_sub(job.updated_at_ms),
+        claim: super::types::JobClaimMetadata {
+            claim_id: job.claim_id.clone(),
+            claimed_by_runner_id: job.claimed_by_runner_id.clone(),
+            claimed_at_ms: job.claimed_at_ms,
+            claim_expires_at_ms: job.claim_expires_at_ms,
+        },
+        claim_expires_in_ms: job
+            .claim_expires_at_ms
+            .map(|expires_at| expires_at.saturating_sub(now_ms)),
+        lifecycle: lifecycle.clone(),
+        durable_run_id: lifecycle.and_then(|lifecycle| lifecycle.durable_run_id),
         stale_reason: job.stale_reason.clone(),
         lifecycle_state: Some(runner_job_lifecycle_state(job).to_string()),
         retryable: Some(runner_job_retryable(job)),
