@@ -18,6 +18,7 @@ fn lab_cook_dispatcher_recipe_round_trips_exact_transport() {
         allow_local_fallback: true,
         allow_dirty_lab_workspace: false,
         skip_deps_hydration: true,
+        detach_after_handoff: true,
         source_path: Some(PathBuf::from("/controller/source")),
         job_overrides: runners::LabJobOverrides {
             env: [("MODE".to_string(), "test".to_string())].into(),

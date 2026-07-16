@@ -54,8 +54,21 @@ pub(super) struct StoredJob {
     pub(super) events: Vec<JobEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) remote_runner: Option<remote_runner::StoredRemoteRunnerJob>,
+    /// Typed execution identity for a daemon-local child submitted on behalf of
+    /// a remote runner. This lets `/jobs` project the accepted runner job without
+    /// inventing a synthetic durable run ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) local_runner: Option<LocalRunnerJob>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) local_child: Option<LocalChildExecution>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct LocalRunnerJob {
+    pub(crate) runner_id: String,
+    pub(crate) command: Vec<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) lifecycle: Option<super::remote_runner::RunnerJobLifecycleMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,6 +266,23 @@ impl JobStore {
         metadata: Option<Value>,
         path_materialization_plan: Option<PathMaterializationPlan>,
     ) -> Job {
+        self.create_with_source_snapshot_metadata_path_materialization_and_local_runner(
+            operation,
+            source_snapshot,
+            metadata,
+            path_materialization_plan,
+            None,
+        )
+    }
+
+    fn create_with_source_snapshot_metadata_path_materialization_and_local_runner(
+        &self,
+        operation: impl Into<String>,
+        source_snapshot: Option<SourceSnapshot>,
+        metadata: Option<Value>,
+        path_materialization_plan: Option<PathMaterializationPlan>,
+        local_runner: Option<LocalRunnerJob>,
+    ) -> Job {
         let now = timestamp_ms();
         let job = Job {
             id: Uuid::new_v4(),
@@ -283,6 +313,7 @@ impl JobStore {
                 job: job.clone(),
                 events: Vec::new(),
                 remote_runner: None,
+                local_runner,
                 local_child: None,
             },
         );
@@ -988,6 +1019,11 @@ impl JobStore {
                     .map(|remote| {
                         super::summary::active_runner_job_summary(&stored.job, &remote.request, now)
                     })
+                    .or_else(|| {
+                        stored.local_runner.as_ref().map(|local| {
+                            super::summary::active_local_runner_job_summary(&stored.job, local, now)
+                        })
+                    })
                     .unwrap_or_else(|| super::summary::active_daemon_job_summary(&stored.job, now))
             })
             .collect();
@@ -1156,11 +1192,38 @@ impl JobStore {
         T: Serialize + Send + 'static,
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
     {
-        let job = self.create_with_source_snapshot_metadata_and_path_materialization_plan(
+        self.run_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
             operation,
             source_snapshot,
             metadata,
             path_materialization_plan,
+            None,
+            run,
+        )
+    }
+
+    pub(crate) fn run_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner<
+        T,
+        F,
+    >(
+        &self,
+        operation: impl Into<String>,
+        source_snapshot: Option<SourceSnapshot>,
+        metadata: Option<Value>,
+        path_materialization_plan: Option<PathMaterializationPlan>,
+        local_runner: Option<LocalRunnerJob>,
+        run: F,
+    ) -> JobRunner
+    where
+        T: Serialize + Send + 'static,
+        F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
+    {
+        let job = self.create_with_source_snapshot_metadata_path_materialization_and_local_runner(
+            operation,
+            source_snapshot,
+            metadata,
+            path_materialization_plan,
+            local_runner,
         );
         self.reserve_local_child(job.id)
             .expect("new local child reservation must persist");

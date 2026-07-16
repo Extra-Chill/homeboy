@@ -9,6 +9,7 @@ pub use remote_runner::{
     RunnerJobLifecycleMetadata,
 };
 pub(crate) use store::LocalChildStartDiscriminator;
+pub(crate) use store::LocalRunnerJob;
 pub use store::{JobHandle, JobRunner, JobStore};
 pub use summary::active_runner_job_run_summary;
 pub use types::{
@@ -117,6 +118,47 @@ mod tests {
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].id, first.id);
         assert_eq!(jobs[1].id, second.id);
+    }
+
+    #[test]
+    fn local_runner_jobs_retain_durable_identity_in_active_projection() {
+        let store = JobStore::default();
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let runner = store
+            .run_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
+                "runner.exec",
+                None,
+                None,
+                None,
+                Some(super::store::LocalRunnerJob {
+                    runner_id: "homeboy-lab".to_string(),
+                    command: vec!["homeboy".to_string(), "agent-task".to_string(), "run-plan".to_string()],
+                    cwd: Some("/runner/worktree".to_string()),
+                    lifecycle: Some(RunnerJobLifecycleMetadata {
+                        source: Some("runner-daemon".to_string()),
+                        kind: Some("agent-task-run-plan".to_string()),
+                        durable_run_id: Some("agent-task-durable-run".to_string()),
+                        active_child_count: None,
+                        active_cell_count: None,
+                    }),
+                }),
+                move |_job| {
+                    let _ = wait.recv();
+                    Ok(serde_json::json!({}))
+                },
+            );
+
+        let active = store.active_runner_jobs();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].job_id, runner.job_id.to_string());
+        assert_eq!(active[0].runner_id, "homeboy-lab");
+        assert_eq!(
+            active[0].durable_run_id.as_deref(),
+            Some("agent-task-durable-run")
+        );
+        assert_eq!(active[0].kind, "agent-task-run-plan");
+        release.send(()).expect("release runner job");
+        runner.handle.join().expect("runner job exits");
     }
 
     #[test]

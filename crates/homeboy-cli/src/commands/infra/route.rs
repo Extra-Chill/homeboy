@@ -289,6 +289,7 @@ fn run_split_placement_cook(
         allow_local_fallback: cli.placement.allows_local_fallback(),
         allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
         skip_deps_hydration: cli.skip_deps_hydration,
+        detach_after_handoff: cli.detach_after_handoff,
         source_path,
         job_overrides: lab_job_overrides(cli)?,
     });
@@ -319,6 +320,7 @@ struct LabCookAttemptDispatcher {
     allow_local_fallback: bool,
     allow_dirty_lab_workspace: bool,
     skip_deps_hydration: bool,
+    detach_after_handoff: bool,
     source_path: Option<PathBuf>,
     job_overrides: runners::LabJobOverrides,
 }
@@ -375,6 +377,10 @@ pub(crate) fn reconstruct_cook_attempt_dispatcher(
             "skip_deps_hydration",
             value("skip_deps_hydration")?,
         )?,
+        detach_after_handoff: decode_cook_dispatch_field(
+            "detach_after_handoff",
+            value("detach_after_handoff")?,
+        )?,
         source_path: decode_cook_dispatch_field("source_path", value("source_path")?)?,
         job_overrides: runners::LabJobOverrides {
             env: decode_cook_dispatch_field("job_overrides.env", overrides["env"].clone())?,
@@ -422,6 +428,7 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCook
             "allow_local_fallback": self.allow_local_fallback,
             "allow_dirty_lab_workspace": self.allow_dirty_lab_workspace,
             "skip_deps_hydration": self.skip_deps_hydration,
+            "detach_after_handoff": self.detach_after_handoff,
             "source_path": self.source_path,
             "job_overrides": {
                 "env": self.job_overrides.env,
@@ -480,7 +487,7 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCook
                 mutation_flag: None,
                 timeout: None,
                 active_run_id: Some(run_id),
-                detach_after_handoff: false,
+                detach_after_handoff: self.detach_after_handoff,
                 output_file_requested: false,
                 read_only_polling: false,
                 require_controller_git_bundle: false,
@@ -534,14 +541,7 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCook
                     self.runner_id
                 )]),
             )),
-            LabRouteOutcome::InFlight(_) => Err(Error::validation_invalid_argument(
-                "agent-task cook attempt",
-                format!("Lab handoff for provider attempt {run_id} is still in flight"),
-                Some(run_id.to_string()),
-                Some(vec![format!(
-                    "Inspect the controller-owned attempt with `homeboy agent-task status {run_id}`."
-                )]),
-            )),
+            LabRouteOutcome::InFlight(_) => Ok(()),
         }
     }
 }
