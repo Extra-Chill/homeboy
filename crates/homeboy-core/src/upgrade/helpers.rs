@@ -144,7 +144,6 @@ pub fn run_upgrade_with_method(
     runner_targets: &[String],
     source_path: Option<&Path>,
 ) -> Result<UpgradeResult> {
-    refuse_upgrade_while_durable_runs_are_active()?;
     let promotion_lease = crate::runtime_promotion::acquire(
         "controller upgrade",
         source_path
@@ -243,6 +242,11 @@ pub fn run_upgrade_with_method(
         previous_build_identity.as_deref(),
     )?;
     let upgrade_completed = should_sync_after_upgrade(new_version.as_deref());
+    if upgrade_completed {
+        // This is deliberately a short switch, not a drain: records admitted
+        // before it retain their immutable runtime pin and remain executable.
+        crate::controller_runtime::activate_current_generation()?;
+    }
 
     // Auto-update all installed extensions after the upgrade command completes.
     // This prevents CI/local extension version drift that causes baseline
@@ -315,39 +319,6 @@ pub fn run_upgrade_with_method(
         services_restarted,
         services_pending_restart,
     })
-}
-
-pub(crate) fn refuse_upgrade_while_durable_runs_are_active() -> Result<()> {
-    let active = crate::agent_task_lifecycle::list_records()?
-        .into_iter()
-        .filter(|record| {
-            matches!(
-                record.state,
-                crate::agent_task_lifecycle::AgentTaskRunState::Queued
-                    | crate::agent_task_lifecycle::AgentTaskRunState::Running
-            )
-        })
-        .filter_map(|record| {
-            record
-                .metadata
-                .get(crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
-                .and_then(|runtime| runtime.pointer("/originating/build_identity"))
-                .and_then(serde_json::Value::as_str)
-                .map(|identity| format!("{} ({identity})", record.run_id))
-        })
-        .collect::<Vec<_>>();
-    if active.is_empty() {
-        return Ok(());
-    }
-    Err(Error::validation_invalid_argument(
-        "upgrade",
-        format!(
-            "refusing to replace the controller binary while durable orchestration run(s) are active: {}",
-            active.join(", ")
-        ),
-        None,
-        Some(vec!["Wait for the listed runs to become terminal, or recover them through their pinned controller runtime before upgrading.".to_string()]),
-    ))
 }
 
 // Upgrade output must remain visible when a controller captures stdout/stderr.
