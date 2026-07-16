@@ -98,7 +98,7 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
                 "homeboy",
                 "agent-task",
                 "promote",
-                value["aggregate_path"].as_str().expect("aggregate path"),
+                "run-review-completed",
                 "--task-id",
                 "task-a",
                 "--artifact-id",

@@ -152,13 +152,8 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
     let promotion_candidates = aggregate_review
         .as_ref()
         .map(|review| {
-            let promotion_source = aggregate_source
-                .as_ref()
-                .map(|(_aggregate, path)| path.as_str())
-                .or(record.aggregate_path.as_deref())
-                .unwrap_or(&args.run_id);
             promotion_candidates(
-                promotion_source,
+                &record.run_id,
                 args.to_worktree.as_deref(),
                 args.provider_command.as_deref(),
                 &args.provider_argv,
