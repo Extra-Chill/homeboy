@@ -1162,6 +1162,71 @@ fn terminal_runner_reconciliation_never_resurrects_a_controller_record() {
 }
 
 #[test]
+fn late_inner_aggregate_recovers_patch_after_transport_only_terminal_result() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-disconnected-child",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+
+        // The outer daemon envelope has no captured patch, so its terminal
+        // transport result alone cannot represent the inner agent-task output.
+        let mut transport_only = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        transport_only.events.clear();
+        reconcile_runner_job_snapshot(&mut record, &transport_only)
+            .expect("transport-only terminal result");
+        assert_eq!(record.state, AgentTaskRunState::Succeeded);
+        assert!(artifacts(&record.run_id)
+            .expect("transport-only artifacts")
+            .artifacts
+            .is_empty());
+
+        let mut aggregate = succeeded_aggregate(&test_plan());
+        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "inner-patch".to_string(),
+            kind: "patch".to_string(),
+            name: Some("candidate.patch".to_string()),
+            label: None,
+            role: Some("patch".to_string()),
+            semantic_key: None,
+            path: Some("artifacts/candidate.patch".to_string()),
+            url: Some("homeboy://agent-task/run/agent-task-disconnected-child/artifacts#task=task-a&artifact=inner-patch".to_string()),
+            mime: Some("text/x-diff".to_string()),
+            size_bytes: Some(18_928),
+            sha256: Some("062f5c460c2dfb279277b75d5a16a04e3178ace1f35ce7b10da5e17441b37071".to_string()),
+            metadata: Value::Null,
+        });
+        let lifecycle_snapshot = terminal_child_snapshot(&aggregate);
+        reconcile_runner_job_snapshot(&mut record, &lifecycle_snapshot)
+            .expect("late inner lifecycle evidence is adopted");
+
+        let artifacts = artifacts(&record.run_id).expect("controller-visible artifacts");
+        assert_eq!(artifacts.artifacts.len(), 1);
+        assert_eq!(artifacts.artifacts[0].id, "inner-patch");
+        assert_eq!(artifacts.artifacts[0].size_bytes, Some(18_928));
+        assert_eq!(
+            artifacts.artifacts[0].sha256.as_deref(),
+            Some("062f5c460c2dfb279277b75d5a16a04e3178ace1f35ce7b10da5e17441b37071")
+        );
+        assert_eq!(
+            store::read_aggregate(&record.run_id)
+                .expect("persisted inner aggregate")
+                .outcomes[0]
+                .artifacts[0]
+                .sha256
+                .as_deref(),
+            Some("062f5c460c2dfb279277b75d5a16a04e3178ace1f35ce7b10da5e17441b37071")
+        );
+    });
+}
+
+#[test]
 fn disconnected_runner_marks_nonterminal_proxy_stale_without_advancing_heartbeat() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
