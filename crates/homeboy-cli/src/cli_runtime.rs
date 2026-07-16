@@ -107,6 +107,10 @@ impl CliRuntime {
         // the secret-env plan and validate workload dispatch for remote-runner
         // jobs without core depending on runner behavior.
         crate::core::runner::register_runner_job_preparation_provider();
+        // Register the lab-workspace provenance provider so the agent-task
+        // scheduler can verify lab-materialized workspaces without core depending
+        // on runner behavior.
+        crate::core::runner::register_lab_workspace_provenance_provider();
         // Register the command-label resolver so core::runner can map dispatched
         // argv to a hot-command label without depending on the full CLI parser.
         crate::core::runner::set_command_label_resolver(|argv| {
