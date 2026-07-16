@@ -9,11 +9,11 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::defaults;
-use crate::error::{Error, Result};
-use crate::git::release_download::{detect_remote_url, parse_github_url, GitHubRepo};
-use crate::observation::TriagePullRequestSignals;
-use crate::scope::{self, Scope, ScopeKind, ScopeOutput};
+use homeboy_core::defaults;
+use homeboy_core::error::{Error, Result};
+use homeboy_core::git::release_download::{detect_remote_url, parse_github_url, GitHubRepo};
+use homeboy_core::observation::TriagePullRequestSignals;
+use homeboy_core::scope::{self, Scope, ScopeKind, ScopeOutput};
 
 use super::gh::{ensure_gh_ready, non_empty, run_gh, summarize_checks};
 use super::observation::usize_to_i64;

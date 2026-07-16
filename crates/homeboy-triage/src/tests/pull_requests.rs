@@ -1,5 +1,5 @@
-use super::super::*;
 use super::*;
+use crate::*;
 
 #[test]
 fn summarize_checks_prefers_failures_over_pending() {

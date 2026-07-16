@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
-use homeboy::core::triage::{
-    self, TriageCommandOutput, TriageLandingOptions, TriageOptions, TriageTarget,
+use homeboy_triage::{
+    self as triage, TriageCommandOutput, TriageLandingOptions, TriageOptions, TriageTarget,
     TriageWatchOptions,
 };
 use homeboy::core::Error;
@@ -362,7 +362,7 @@ fn canonicalize_for_compare(path: &str) -> String {
 mod tests {
     use super::{resolve_component_target, TriageArgs};
     use clap::Parser;
-    use homeboy::core::triage::TriageTarget;
+    use homeboy_triage::TriageTarget;
 
     #[derive(Parser)]
     struct TestCli {

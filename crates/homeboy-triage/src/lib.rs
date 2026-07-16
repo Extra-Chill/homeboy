@@ -14,7 +14,7 @@ mod shared;
 mod types;
 mod watch;
 
-pub use crate::scope::Scope as TriageTarget;
+pub use homeboy_core::scope::Scope as TriageTarget;
 
 pub use landing::landing;
 pub use report::{parse_issue_numbers_file, parse_stale_days, run};
@@ -34,9 +34,11 @@ pub use watch::{
     TriageWatchTargetOutput,
 };
 
-// Internal re-exports so sibling submodules can continue to use `super::X` paths.
-pub(super) use gh::{non_empty, run_gh, summarize_checks};
-pub(super) use report::triage_command;
+// Internal re-exports so sibling submodules can continue to use `super::X` /
+// `crate::X` paths. `pub(crate)` (not `pub(super)`) because this is now the crate
+// root — `pub(super)` would reference a nonexistent parent of the crate root.
+pub(crate) use gh::{non_empty, run_gh, summarize_checks};
+pub(crate) use report::triage_command;
 
 // Test-only re-exports consumed by `tests` via `use super::*;`. The glob pulls every
 // `pub(super)` helper from each concern submodule into this module's namespace so the
@@ -46,8 +48,8 @@ mod test_reexports {
     pub(super) use chrono::{DateTime, Utc};
     pub(super) use serde_json::Value;
 
-    pub(super) use crate::git::release_download::GitHubRepo;
-    pub(super) use crate::observation::TriagePullRequestSignals;
+    pub(super) use homeboy_core::git::release_download::GitHubRepo;
+    pub(super) use homeboy_core::observation::TriagePullRequestSignals;
 
     pub(super) use super::landing::{
         annotate_local_worktrees, annotate_ordered_dependent_rebases, branch_matches,
@@ -66,7 +68,7 @@ mod test_reexports {
 }
 
 #[cfg(test)]
-use crate::observation::{NewTriageItemRecord, TriageItemRecord};
+use homeboy_core::observation::{NewTriageItemRecord, TriageItemRecord};
 #[cfg(test)]
 use observation::{compare_triage_observations, triage_observation_metadata};
 #[cfg(test)]

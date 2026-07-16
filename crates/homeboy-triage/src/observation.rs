@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::observation::{
+use homeboy_core::observation::{
     NewRunRecord, NewTriageItemRecord, ObservationStore, RunListFilter, RunStatus,
     TriageItemRecord, TriagePullRequestSignals,
 };

@@ -750,6 +750,7 @@ dependencies = [
  "homeboy-process",
  "homeboy-product-identity",
  "homeboy-redaction",
+ "homeboy-triage",
  "libc",
  "regex",
  "reqwest",
@@ -896,6 +897,16 @@ name = "homeboy-redaction"
 version = "0.1.0"
 dependencies = [
  "regex",
+ "serde_json",
+]
+
+[[package]]
+name = "homeboy-triage"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "homeboy-core",
+ "serde",
  "serde_json",
 ]
 

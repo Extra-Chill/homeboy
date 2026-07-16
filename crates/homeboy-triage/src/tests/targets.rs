@@ -1,5 +1,5 @@
-use super::super::*;
 use super::*;
+use crate::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -189,7 +189,7 @@ fn fetch_component_report_surfaces_source_repo_when_triage_differs() {
 
 #[test]
 fn component_target_threads_registered_triage_remote_override() {
-    crate::test_support::with_isolated_home(|home| {
+    homeboy_core::test_support::with_isolated_home(|home| {
         let checkout = home.path().join("playground");
         std::fs::create_dir_all(&checkout).unwrap();
         let component_dir = home.path().join(".config/homeboy/components");
@@ -224,7 +224,7 @@ fn component_target_threads_registered_triage_remote_override() {
 
 #[test]
 fn rig_target_threads_rig_component_triage_remote_override() {
-    crate::test_support::with_isolated_home(|home| {
+    homeboy_core::test_support::with_isolated_home(|home| {
         let rig_dir = home.path().join(".config/homeboy/rigs");
         std::fs::create_dir_all(&rig_dir).unwrap();
         std::fs::write(
@@ -259,7 +259,7 @@ fn rig_target_threads_rig_component_triage_remote_override() {
 
 #[test]
 fn path_target_synthesizes_component_from_git_origin() {
-    crate::test_support::with_isolated_home(|home| {
+    homeboy_core::test_support::with_isolated_home(|home| {
         let checkout = home.path().join("ad-hoc-checkout");
         std::fs::create_dir_all(&checkout).unwrap();
         let status = std::process::Command::new("git")
@@ -299,7 +299,7 @@ fn path_target_synthesizes_component_from_git_origin() {
 
 #[test]
 fn path_target_uses_explicit_component_id_when_provided() {
-    crate::test_support::with_isolated_home(|home| {
+    homeboy_core::test_support::with_isolated_home(|home| {
         let checkout = home.path().join("checkout-dir");
         std::fs::create_dir_all(&checkout).unwrap();
         let status = std::process::Command::new("git")
@@ -335,7 +335,7 @@ fn path_target_uses_explicit_component_id_when_provided() {
 
 #[test]
 fn path_target_surfaces_remote_url_is_not_github_for_non_github_origin() {
-    crate::test_support::with_isolated_home(|home| {
+    homeboy_core::test_support::with_isolated_home(|home| {
         let checkout = home.path().join("non-github");
         std::fs::create_dir_all(&checkout).unwrap();
         let status = std::process::Command::new("git")
@@ -373,7 +373,7 @@ fn path_target_rejects_missing_directory() {
 
 #[test]
 fn path_target_rejects_non_git_directory() {
-    crate::test_support::with_isolated_home(|home| {
+    homeboy_core::test_support::with_isolated_home(|home| {
         let checkout = home.path().join("not-a-git-repo");
         std::fs::create_dir_all(&checkout).unwrap();
 

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::engine::command::{
+use homeboy_core::engine::command::{
     isolate_process_tree, wait_with_bounded_output_until_cancelled, BoundedCommandOutput,
     DEFAULT_CAPTURE_LIMIT_BYTES,
 };

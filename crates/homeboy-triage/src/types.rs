@@ -2,8 +2,8 @@
 
 use serde::Serialize;
 
-use crate::observation::TriagePullRequestSignals;
-use crate::scope::{ScopeComponentRef, ScopeOutput};
+use homeboy_core::observation::TriagePullRequestSignals;
+use homeboy_core::scope::{ScopeComponentRef, ScopeOutput};
 
 use super::TriageWatchOutput;
 
