@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
-use crate::error::{Error, Result};
+use homeboy_error::{Error, Result};
 
 /// Entry returned from directory listing
 #[derive(Debug, Clone)]
@@ -97,7 +97,7 @@ pub fn local() -> LocalFs {
 
 /// Ensure all app directories exist
 pub fn ensure_app_dirs() -> Result<()> {
-    use crate::paths;
+    use homeboy_paths as paths;
 
     let dirs = [
         paths::homeboy()?,
@@ -171,12 +171,12 @@ fn write_file_atomic_with_owner_only(
 }
 
 /// Create parent directories and atomically persist pretty-printed JSON.
-pub(crate) fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     write_json_file_with_owner_only(path, value, false)
 }
 
 /// Create parent directories and atomically persist owner-only JSON on Unix.
-pub(crate) fn write_json_file_owner_only<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub fn write_json_file_owner_only<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     write_json_file_with_owner_only(path, value, true)
 }
 
@@ -203,7 +203,7 @@ fn write_json_file_with_owner_only<T: Serialize>(
 }
 
 /// Create a file owner-only on Unix before writing its contents.
-pub(crate) fn write_file_owner_only(path: &Path, content: &str, operation: &str) -> Result<()> {
+pub fn write_file_owner_only(path: &Path, content: &str, operation: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;

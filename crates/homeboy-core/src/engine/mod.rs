@@ -6,11 +6,13 @@
 // crate. Re-exported here so existing `crate::engine::{shell,command,...}`
 // call sites keep working unchanged.
 pub use homeboy_engine_primitives::{
-    baseline, command, identifier, output_parse, shell, template, text,
+    baseline, codebase_scan, command, identifier, output_parse, shell, template, text,
 };
+// local_files was `pub(crate)` in-tree; preserve that visibility across the
+// crate boundary rather than widening it via the `pub use` above.
+pub(crate) use homeboy_engine_primitives::local_files;
 
 pub mod cli_tool;
-pub mod codebase_scan;
 pub mod detail_output;
 pub mod edit_op;
 pub mod edit_op_apply;
@@ -20,7 +22,6 @@ pub mod format_write;
 pub mod hooks;
 pub mod invocation;
 pub mod language;
-pub(crate) mod local_files;
 pub mod resource;
 pub mod run_dir;
 pub mod symbol_graph;
