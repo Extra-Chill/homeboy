@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.288.6] - 2026-07-16
+
+### Changed
+- extract is_test_path primitive, sever the extension->code_audit cycle (#8425)
+- invert runs_service->runner evidence via provider hook
+
+### Fixed
+- Fix controller ownership of Lab task plans
+
 ## [0.288.5] - 2026-07-16
 
 ### Changed
