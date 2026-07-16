@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub mod finding_kind;
+pub use finding_kind::AuditFinding;
 pub mod fingerprint;
 pub mod test_mapping;
 pub use fingerprint::{

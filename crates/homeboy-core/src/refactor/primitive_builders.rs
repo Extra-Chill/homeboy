@@ -1,5 +1,5 @@
-use crate::code_audit::AuditFinding;
 use crate::refactor::auto::{Insertion, InsertionKind, NewFile, RefactorPrimitive};
+use homeboy_audit_contract::AuditFinding;
 
 pub fn insertion(
     kind: InsertionKind,

@@ -39,8 +39,8 @@ pub struct RefactorSourceRequest {
     pub root: PathBuf,
     pub sources: Vec<String>,
     pub changed_since: Option<String>,
-    pub only: Vec<crate::code_audit::AuditFinding>,
-    pub exclude: Vec<crate::code_audit::AuditFinding>,
+    pub only: Vec<homeboy_audit_contract::AuditFinding>,
+    pub exclude: Vec<homeboy_audit_contract::AuditFinding>,
     pub settings: Vec<(String, serde_json::Value)>,
     pub lint: LintSourceOptions,
     pub test: TestSourceOptions,
@@ -907,7 +907,7 @@ mod tests {
             root: root.clone(),
             sources: vec!["audit".to_string()],
             changed_since: None,
-            only: vec![crate::code_audit::AuditFinding::DuplicateFunction],
+            only: vec![homeboy_audit_contract::AuditFinding::DuplicateFunction],
             exclude: vec![],
             settings: vec![],
             lint: LintSourceOptions::default(),
@@ -1039,8 +1039,8 @@ mod tests {
     // for edits that `--write` silently declines (cascading findings, manual-only
     // fixes). Before the fix, dry-run exit 1 + write applies nothing = stuck PR.
 
-    use crate::code_audit::AuditFinding;
     use crate::refactor::auto::{Fix, FixResult, Insertion, InsertionKind, NewFile};
+    use homeboy_audit_contract::AuditFinding;
 
     fn auto_insertion() -> Insertion {
         Insertion {

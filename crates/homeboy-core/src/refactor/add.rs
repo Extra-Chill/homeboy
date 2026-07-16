@@ -113,7 +113,7 @@ pub fn add_import(
             insertions: vec![Insertion {
                 primitive: None,
                 kind: InsertionKind::ImportAdd,
-                finding: crate::code_audit::AuditFinding::MissingImport,
+                finding: homeboy_audit_contract::AuditFinding::MissingImport,
                 manual_only: false,
                 auto_apply: false,
                 blocked_reason: None,

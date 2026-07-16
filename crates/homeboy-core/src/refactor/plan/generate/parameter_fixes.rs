@@ -166,7 +166,7 @@ fn build_param_removal(
             old_text: old_sig.to_string(),
             new_text: new_sig,
         },
-        crate::code_audit::AuditFinding::UnusedParameter,
+        homeboy_audit_contract::AuditFinding::UnusedParameter,
         String::new(),
         format!(
             "Remove unused parameter '{}' from '{}' (position {}, no callers pass it)",

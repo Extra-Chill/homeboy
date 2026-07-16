@@ -285,8 +285,8 @@ fn merge_same_file_insertions(fixes: &mut [Fix]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::AuditFinding;
     use crate::refactor::auto::{Insertion, InsertionKind};
+    use homeboy_audit_contract::AuditFinding;
 
     fn removal_insertion(start_line: usize, end_line: usize, description: &str) -> Insertion {
         Insertion {

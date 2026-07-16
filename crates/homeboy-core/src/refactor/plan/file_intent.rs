@@ -202,8 +202,8 @@ fn priority(intent: &FileIntent) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::AuditFinding;
     use crate::refactor::auto::contracts::{Fix, Insertion, InsertionKind};
+    use homeboy_audit_contract::AuditFinding;
 
     fn make_fix(file: &str, kind: InsertionKind) -> Fix {
         Fix {

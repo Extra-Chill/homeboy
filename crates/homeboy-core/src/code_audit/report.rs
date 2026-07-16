@@ -298,7 +298,7 @@ fn build_finding_groups(result: &CodeAuditResult) -> Vec<AuditSummaryGroup> {
                 "homeboy review audit {} --only {}",
                 result.component_id, kind
             ),
-            confidence: group.kind.confidence(),
+            confidence: crate::code_audit::findings::finding_confidence(&group.kind),
             kind,
             count: group.count,
             warnings: group.severities.warnings,

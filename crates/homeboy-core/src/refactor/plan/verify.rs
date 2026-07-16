@@ -15,7 +15,7 @@ pub(crate) fn rewrite_callers_after_dedup(fix: &fixer::Fix, root: &Path) {
         if !matches!(insertion.kind, fixer::InsertionKind::FunctionRemoval { .. }) {
             continue;
         }
-        if insertion.finding != crate::code_audit::AuditFinding::DuplicateFunction {
+        if insertion.finding != homeboy_audit_contract::AuditFinding::DuplicateFunction {
             continue;
         }
 
@@ -82,8 +82,8 @@ pub struct AuditRefactorOutcome {
 
 pub fn run_audit_refactor(
     initial_result: CodeAuditResult,
-    only_kinds: &[crate::code_audit::AuditFinding],
-    exclude_kinds: &[crate::code_audit::AuditFinding],
+    only_kinds: &[homeboy_audit_contract::AuditFinding],
+    exclude_kinds: &[homeboy_audit_contract::AuditFinding],
     scoring: AuditConvergenceScoring,
     write: bool,
 ) -> crate::Result<AuditRefactorOutcome> {
@@ -155,8 +155,8 @@ fn resolve_verify_config(component_id: &str) -> Option<crate::extension::Autofix
 
 fn run_fix_iteration(
     audit_result: &CodeAuditResult,
-    only_kinds: &[crate::code_audit::AuditFinding],
-    exclude_kinds: &[crate::code_audit::AuditFinding],
+    only_kinds: &[homeboy_audit_contract::AuditFinding],
+    exclude_kinds: &[homeboy_audit_contract::AuditFinding],
     scoring: AuditConvergenceScoring,
 ) -> crate::Result<(
     fixer::FixResult,
