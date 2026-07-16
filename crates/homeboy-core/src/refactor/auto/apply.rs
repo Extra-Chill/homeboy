@@ -24,8 +24,8 @@ pub fn apply_fixes_via_edit_ops(
     new_files: &mut [NewFile],
     root: &Path,
 ) -> Vec<ApplyChunkResult> {
-    use crate::engine::edit_op::{fix_to_edit_ops, new_file_to_edit_op, TaggedEditOp};
     use crate::engine::edit_op_apply::apply_edit_ops;
+    use crate::refactor::edit_op_tagged::{fix_to_edit_ops, new_file_to_edit_op, TaggedEditOp};
 
     // Merge same-file insertions (same as old path)
     merge_same_file_insertions(fixes);
@@ -53,8 +53,11 @@ pub fn apply_fixes_via_edit_ops(
         return Vec::new();
     }
 
-    // Execute all ops through the unified apply path
-    let report = match apply_edit_ops(&all_ops, root) {
+    // Execute all ops through the unified apply path. `apply_edit_ops` takes
+    // plain engine `EditOp`s; the refactor/audit tags on `TaggedEditOp` are
+    // only needed for reporting, not application.
+    let plain_ops: Vec<_> = all_ops.iter().map(|t| t.op.clone()).collect();
+    let report = match apply_edit_ops(&plain_ops, root) {
         Ok(r) => r,
         Err(e) => {
             // Fatal error — return a single reverted chunk
