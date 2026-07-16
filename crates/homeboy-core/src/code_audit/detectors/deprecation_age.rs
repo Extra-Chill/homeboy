@@ -24,7 +24,7 @@ use semver::Version;
 use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
-use crate::component::{DetectorProfileConfig, VersionSource};
+use homeboy_audit_contract::{DetectorProfileConfig, VersionSource};
 
 /// Default age threshold: flag when the current minor is more than
 /// this many minors ahead of the deprecated version on the same major,

@@ -4,7 +4,7 @@ use regex::{Captures, Regex};
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use crate::component::{
+use homeboy_audit_contract::{
     SourcePolicyMatchMode, SourcePolicyRule, SourcePolicyRuleBody, SourcePolicyTerm,
 };
 

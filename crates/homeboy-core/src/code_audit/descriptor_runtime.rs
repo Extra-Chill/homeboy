@@ -14,7 +14,8 @@ use super::{
     time_audit_detector, AuditExecutionPlan, AuditTiming, DetectorDescriptor, DetectorRuntime,
     Finding, FingerprintDetectorRunner, GenericDetectorRunner, RootDetectorRunner,
 };
-use crate::component::{self, AuditConfig};
+use crate::component;
+use homeboy_audit_contract::AuditConfig;
 use homeboy_engine_primitives::codebase_scan::CodebaseSnapshot;
 use std::path::Path;
 

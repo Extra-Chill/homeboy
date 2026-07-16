@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::component::{CommandStatusContractConfig, CommandStatusContractScenario};
+use homeboy_audit_contract::{CommandStatusContractConfig, CommandStatusContractScenario};
 
 use super::super::{AuditFinding, Finding, Severity};
 

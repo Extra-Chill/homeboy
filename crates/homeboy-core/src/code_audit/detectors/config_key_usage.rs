@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use regex::Regex;
 
-use crate::component::{ConfigKeyUsagePattern, ConfigKeyUsageRule};
+use homeboy_audit_contract::{ConfigKeyUsagePattern, ConfigKeyUsageRule};
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};

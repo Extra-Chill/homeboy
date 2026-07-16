@@ -2,9 +2,9 @@ use std::path::Path;
 
 use crate::code_audit::conventions::AuditFinding;
 use crate::code_audit::findings::{Finding, Severity};
-use crate::component::ArtifactPortabilityConfig;
 use crate::execution_contract::EXECUTION_CONTRACT;
 use crate::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
+use homeboy_audit_contract::ArtifactPortabilityConfig;
 use serde_json::Value;
 
 pub(crate) const DEFAULT_OBSERVATION_RUN_WINDOW: usize = 1000;
