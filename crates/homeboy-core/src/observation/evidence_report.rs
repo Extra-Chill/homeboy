@@ -499,7 +499,7 @@ pub fn directory_publication_guidance(
         });
     }
 
-    if crate::runners::is_remote_runner_artifact_path(&artifact.path) {
+    if crate::execution_contract::is_remote_runner_artifact_path(&artifact.path) {
         return Some(unpublished_directory_guidance(
             "runner_resident",
             "directory artifact is runner-resident; mirror it to the controller artifact store before using it as review evidence",
@@ -585,7 +585,7 @@ fn artifact_exists(artifact: &ArtifactRecord) -> bool {
         return true;
     }
     if artifact.artifact_type == "remote_file"
-        || crate::runners::is_remote_runner_artifact_path(&artifact.path)
+        || crate::execution_contract::is_remote_runner_artifact_path(&artifact.path)
     {
         return true;
     }

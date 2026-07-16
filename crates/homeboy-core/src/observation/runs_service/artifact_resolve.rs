@@ -194,7 +194,7 @@ pub fn classify_artifact_storage(artifact: &ArtifactRecord) -> ArtifactStorage {
     if artifact.artifact_type == "file" {
         return ArtifactStorage::LocalFile;
     }
-    if crate::runners::is_remote_runner_artifact_path(&artifact.path)
+    if crate::execution_contract::is_remote_runner_artifact_path(&artifact.path)
         || artifact.artifact_type == "remote_file"
     {
         return ArtifactStorage::Remote;

@@ -99,7 +99,7 @@ fn classify_persisted_artifact(
             "owning run is active or has an unknown lifecycle state",
         )
     } else if artifact.artifact_type == "url"
-        || crate::runners::is_remote_runner_artifact_path(&artifact.path)
+        || crate::execution_contract::is_remote_runner_artifact_path(&artifact.path)
         || EXECUTION_CONTRACT
             .artifacts
             .is_metadata_only_ref(&artifact.path)

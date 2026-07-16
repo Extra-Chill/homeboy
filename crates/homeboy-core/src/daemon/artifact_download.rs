@@ -130,7 +130,7 @@ fn resolve_artifact_download(
 
     if artifact.artifact_type != "file" {
         if artifact.artifact_type == "remote_file"
-            || runner::is_remote_runner_artifact_path(&artifact.path)
+            || crate::execution_contract::is_remote_runner_artifact_path(&artifact.path)
         {
             let download = runner::download_remote_artifact(&artifact.path, None)?;
             let filename = download
@@ -378,7 +378,7 @@ fn artifact_retrieval_contract(
 ) -> serde_json::Value {
     let content_available = artifact.artifact_type == "file"
         || artifact.artifact_type == "remote_file"
-        || runner::is_remote_runner_artifact_path(&artifact.path);
+        || crate::execution_contract::is_remote_runner_artifact_path(&artifact.path);
     let run_id = route_run_id.unwrap_or(&artifact.run_id);
     if content_available {
         let content_url = format!(

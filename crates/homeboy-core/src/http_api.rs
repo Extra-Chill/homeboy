@@ -369,7 +369,7 @@ fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
     };
     if artifact.artifact_type != "file" {
         if artifact.artifact_type == "remote_file"
-            || runner::is_remote_runner_artifact_path(&artifact.path)
+            || crate::execution_contract::is_remote_runner_artifact_path(&artifact.path)
         {
             let download = runner::download_remote_artifact(&artifact.path, None)?;
             let content = std::fs::read(&download.output_path).map_err(|err| {
