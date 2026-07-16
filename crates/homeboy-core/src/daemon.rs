@@ -836,14 +836,9 @@ pub fn force_stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult>
     {
         return Err(corrupt_daemon_lease_error(&path, validation.stale_reason));
     }
-    let state = validation.state.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "lease_id",
-            "forced daemon stop requires a persisted live daemon lease",
-            Some(expected_lease_id.to_string()),
-            None,
-        )
-    })?;
+    let Some(state) = validation.state else {
+        return reconcile_absent_lease_stop(expected_lease_id, state_path_display);
+    };
     if state.lease_id != expected_lease_id {
         return Err(Error::validation_invalid_argument(
             "lease_id",
@@ -936,14 +931,14 @@ fn stop_with_force_for_lease(expected_lease_id: &str, force: bool) -> Result<Dae
     let _lock = acquire_daemon_operation_lock()?;
     let path = state_path()?;
     let validation = validate_lease_file(&path)?;
-    let state = validation.state.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "lease_id",
-            "daemon lifecycle stop requires a live recorded lease",
-            Some(expected_lease_id.to_string()),
-            None,
-        )
-    })?;
+    if validation.invalid_pid.is_some()
+        || (validation.state.is_none() && validation.stale_reason.is_some() && path.exists())
+    {
+        return Err(corrupt_daemon_lease_error(&path, validation.stale_reason));
+    }
+    let Some(state) = validation.state else {
+        return reconcile_absent_lease_stop(expected_lease_id, path.display().to_string());
+    };
     if state.lease_id != expected_lease_id {
         return Err(Error::validation_invalid_argument(
             "lease_id",
@@ -956,6 +951,42 @@ fn stop_with_force_for_lease(expected_lease_id: &str, force: bool) -> Result<Dae
         ));
     }
     stop_unlocked_with_force(force)
+}
+
+/// A lease-bound stop can be replayed after a previous stop removed a dead
+/// lease. It never signals a process without persisted ownership evidence.
+fn reconcile_absent_lease_stop(
+    expected_lease_id: &str,
+    state_path: String,
+) -> Result<DaemonStopResult> {
+    let active_job_ids = active_daemon_job_ids()?;
+    if !active_job_ids.is_empty() {
+        let mut error = Error::validation_invalid_argument(
+            "daemon_stop",
+            format!(
+                "refusing daemon stop for missing lease `{expected_lease_id}` while active durable jobs exist: {}",
+                active_job_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            Some(expected_lease_id.to_string()),
+            Some(vec![
+                "Inspect `homeboy daemon status` and reconcile the active durable jobs before replacing this daemon."
+                    .to_string(),
+            ]),
+        );
+        error.details["active_job_ids"] = serde_json::json!(active_job_ids);
+        error.details["lifecycle_mutation"] = serde_json::json!("stop");
+        return Err(error);
+    }
+    Ok(DaemonStopResult {
+        stopped: false,
+        pid: None,
+        state_path,
+        termination_evidence: None,
+    })
 }
 
 fn stop_unlocked() -> Result<DaemonStopResult> {

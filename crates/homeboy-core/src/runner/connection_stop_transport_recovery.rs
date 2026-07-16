@@ -281,6 +281,12 @@ fn confirm_remote_daemon_stopped_after_transport_error(
             daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable")
         ));
     }
+    if status.stale_reason_code == Some(DaemonStaleReasonCode::LeaseMissing) && !status.reachable {
+        // A lease-bound stop can already have removed a dead lease. With no
+        // active work, reconnect may continue to ensure-running, which still
+        // reattaches any demonstrably live owner instead of replacing it.
+        return Ok(());
+    }
     let clean_stop = status
         .termination_evidence
         .as_ref()
@@ -509,6 +515,24 @@ mod tests {
 
         confirm_remote_daemon_stopped_after_transport_error(&session, &status)
             .expect("the exact already-dead owner is safe to disconnect");
+    }
+
+    #[test]
+    fn transport_drop_reconciles_missing_lease_after_idempotent_stop() {
+        let session = direct_ssh_session("lease-removed");
+        let status = remote_daemon::RemoteDaemonStatus {
+            daemon: None,
+            stale_reason: None,
+            stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
+            fresh: false,
+            reachable: false,
+            active_jobs: 0,
+            endpoint_probe_error: None,
+            termination_evidence: None,
+        };
+
+        confirm_remote_daemon_stopped_after_transport_error(&session, &status)
+            .expect("missing lease after a zero-job stop is idempotently reconciled");
     }
 
     #[test]
