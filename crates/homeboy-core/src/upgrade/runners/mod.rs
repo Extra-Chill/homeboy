@@ -27,5 +27,47 @@ pub(super) use reporting::*;
 pub(super) use source_checkout::*;
 pub(super) use version::*;
 
+use std::path::Path;
+
+use crate::error::Result;
+use crate::upgrade::{
+    ExtensionUpgradeEntry, InstallMethod, RunnerUpgradeEntry, RunnerUpgradeProvider,
+};
+
+/// The runner layer's `RunnerUpgradeProvider`, delegating to this cluster's
+/// upgrade orchestration. Registered with core at startup.
+pub struct RunnerUpgrade;
+
+impl RunnerUpgradeProvider for RunnerUpgrade {
+    fn upgrade_configured_runners_with_explicit_source_path(
+        &self,
+        force: bool,
+        method_override: Option<InstallMethod>,
+        source_path: Option<&Path>,
+        explicit_source_path: bool,
+        runner_targets: &[String],
+        extension_updates: &[ExtensionUpgradeEntry],
+    ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
+        upgrade_configured_runners_with_explicit_source_path(
+            force,
+            method_override,
+            source_path,
+            explicit_source_path,
+            runner_targets,
+            extension_updates,
+        )
+    }
+
+    fn source_checkout_build_identity(&self, source_path: &Path) -> Option<String> {
+        source_checkout_build_identity(source_path)
+    }
+}
+
+/// Register this cluster's runner-upgrade provider with core. Called once at
+/// startup.
+pub fn register() {
+    crate::upgrade::register_runner_upgrade_provider(Box::new(RunnerUpgrade));
+}
+
 #[cfg(test)]
 mod tests;

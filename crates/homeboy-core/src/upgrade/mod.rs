@@ -2,6 +2,7 @@ mod constants;
 mod execution;
 mod helpers;
 mod planning;
+mod runner_upgrade_provider;
 mod runners;
 mod services;
 mod types;
@@ -14,6 +15,9 @@ pub use helpers::{
     run_upgrade_with_method,
 };
 pub use planning::resolve_binary_on_path;
+pub(crate) use runner_upgrade_provider::with_runner_upgrade;
+pub use runner_upgrade_provider::{register_runner_upgrade_provider, RunnerUpgradeProvider};
+pub use runners::register as register_runner_upgrade;
 pub use types::{
     ExtensionUpgradeEntry, InstallMethod, RunnerUpgradeEntry, ServiceRestartEntry, UpgradeResult,
     VersionCheck,
