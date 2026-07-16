@@ -278,7 +278,7 @@ where
             ));
         }
 
-        let promotion = match promote_attempt(&options, &run_id) {
+        let promotion = match promote_or_load_attempt(&options, &run_id) {
             Ok(report) => report,
             Err(error) => {
                 attempts.push(AgentTaskCookAttemptReport {
@@ -422,23 +422,14 @@ where
                         ));
                     }
                 };
-                let baseline = match materialize_follow_up_baseline(&promotion, &run_id) {
-                    Ok(baseline) => baseline,
-                    Err(error) => {
-                        return Ok(cook_report(
-                            cook_id,
-                            "policy_failure",
-                            attempts,
-                            None,
-                            Some(error.to_string()),
-                            1,
-                        ));
-                    }
-                };
-                follow_up_request.workspace.root = Some(baseline.path.display().to_string());
-                // Requests retain artifact facts for review, never authorization.
-                follow_up_request.inputs["cook_loop"]["artifact_provenance"] =
-                    baseline.artifact_provenance();
+                // This is durable evidence, not the process-local baseline
+                // capability. A restarted controller re-materializes and
+                // verifies that capability from the exact promoted artifact.
+                follow_up_request.inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
+                    "source_run_id": run_id,
+                    "source_task_id": promotion.source.task_id,
+                    "source_patch_artifact_sha256": promotion.patch_artifact.sha256,
+                });
                 let mut follow_up_plan = AgentTaskPlan::new(
                     format!("{cook_id}-cook-attempt-{}", attempt + 1),
                     vec![follow_up_request],
@@ -447,20 +438,44 @@ where
                 follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
                 follow_up_plan.options.retry.max_attempts = 1;
                 super::record_recipe_attempt(&cook_id, attempt + 1, &next_run_id, &follow_up_plan)?;
-                if let Some(dispatcher) = &options.attempt_dispatcher {
-                    dispatcher.dispatch_attempt(
-                        follow_up_plan,
-                        &next_run_id,
-                        Some(baseline.capability()),
-                    )?;
-                } else {
-                    run_loaded_plan_with_derived_cook_baseline(
-                        follow_up_plan,
-                        Some(&next_run_id),
-                        executor.clone(),
-                        Some(baseline.capability()),
-                        Some(cook_attempt_harvest_context(&options.harvest_context)),
-                    )?;
+                // A restarted controller may find this exact retry already
+                // accepted or terminal. Its durable recipe is the dispatch
+                // boundary; never send the provider a second copy.
+                if attempt_needs_execution(&next_run_id) {
+                    let baseline = match materialize_follow_up_baseline(&promotion, &run_id) {
+                        Ok(baseline) => baseline,
+                        Err(error) => {
+                            return Ok(cook_report(
+                                cook_id,
+                                "policy_failure",
+                                attempts,
+                                None,
+                                Some(error.to_string()),
+                                1,
+                            ));
+                        }
+                    };
+                    let mut follow_up_plan = follow_up_plan;
+                    follow_up_plan.tasks[0].workspace.root =
+                        Some(baseline.path.display().to_string());
+                    // Requests retain artifact facts for review, never authorization.
+                    follow_up_plan.tasks[0].inputs["cook_loop"]["artifact_provenance"] =
+                        baseline.artifact_provenance();
+                    if let Some(dispatcher) = &options.attempt_dispatcher {
+                        dispatcher.dispatch_attempt(
+                            follow_up_plan,
+                            &next_run_id,
+                            Some(baseline.capability()),
+                        )?;
+                    } else {
+                        run_loaded_plan_with_derived_cook_baseline(
+                            follow_up_plan,
+                            Some(&next_run_id),
+                            executor.clone(),
+                            Some(baseline.capability()),
+                            Some(cook_attempt_harvest_context(&options.harvest_context)),
+                        )?;
+                    }
                 }
                 remediation_category_usage.add(reservation);
                 run_id = next_run_id;
@@ -1033,6 +1048,70 @@ fn promote_attempt(
     })
 }
 
+/// Promotion is the durable boundary between a terminal provider result and
+/// controller-owned gates. Reconciliation must reuse this exact report rather
+/// than apply the selected artifact again.
+fn promote_or_load_attempt(
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+) -> Result<AgentTaskPromotionReport> {
+    if let Some(promotion) = persisted_promotion_for_attempt(run_id)? {
+        return Ok(promotion);
+    }
+    let promotion = promote_attempt(options, run_id)?;
+    crate::agent_task_lifecycle::record_promotion(
+        run_id,
+        serde_json::to_value(&promotion).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize cook promotion".to_string()),
+            )
+        })?,
+    )?;
+    Ok(promotion)
+}
+
+fn persisted_promotion_for_attempt(run_id: &str) -> Result<Option<AgentTaskPromotionReport>> {
+    let record = agent_task_lifecycle::status(run_id)?;
+    let Some(value) = record.metadata.get("latest_promotion") else {
+        return Ok(None);
+    };
+    let promotion: AgentTaskPromotionReport =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            Error::validation_invalid_argument(
+                "latest_promotion",
+                format!("persisted cook promotion is invalid: {error}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    if promotion.source.run_id.as_deref() != Some(run_id) {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.source.run_id",
+            "persisted cook promotion does not belong to this attempt",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    Ok(Some(promotion))
+}
+
+fn attempt_needs_execution(run_id: &str) -> bool {
+    agent_task_lifecycle::status(run_id)
+        .map(|record| {
+            !matches!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Succeeded
+                    | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                    | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+                    | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+                    | agent_task_lifecycle::AgentTaskRunState::Failed
+                    | agent_task_lifecycle::AgentTaskRunState::Cancelled
+            )
+        })
+        .unwrap_or(true)
+}
+
 fn finalize_cook_pr(
     options: &AgentTaskCookServiceOptions,
     successful_run_id: &str,
@@ -1451,6 +1530,41 @@ mod tests {
             "operator_notification": {"status": "completed", "message": "complete"},
             "provenance": {"worktree_path": "/repo"}
         })).unwrap()
+    }
+
+    #[test]
+    fn restarted_cook_uses_only_its_exact_persisted_promotion() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = AgentTaskPlan::new("cook-persisted", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some("run-persisted")).unwrap();
+            agent_task_lifecycle::record_promotion(
+                "run-persisted",
+                serde_json::to_value(promotion("run-persisted")).unwrap(),
+            )
+            .unwrap();
+
+            let restored = persisted_promotion_for_attempt("run-persisted")
+                .unwrap()
+                .expect("durable promotion");
+            assert_eq!(restored.source.run_id.as_deref(), Some("run-persisted"));
+            assert_eq!(restored.patch_artifact.id, "patch");
+        });
+    }
+
+    #[test]
+    fn persisted_promotion_from_another_attempt_is_rejected() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = AgentTaskPlan::new("cook-persisted", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some("run-persisted")).unwrap();
+            agent_task_lifecycle::record_promotion(
+                "run-persisted",
+                serde_json::to_value(promotion("different-run")).unwrap(),
+            )
+            .unwrap();
+
+            let error = persisted_promotion_for_attempt("run-persisted").unwrap_err();
+            assert!(error.message.contains("does not belong to this attempt"));
+        });
     }
 
     #[test]
