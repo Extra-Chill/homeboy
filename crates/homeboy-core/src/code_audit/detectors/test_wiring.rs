@@ -5,7 +5,7 @@ use regex::Regex;
 
 use super::conventions::unwired_test_file_finding;
 use super::findings::{Finding, Severity};
-use crate::component::{AuditConfig, TestWiringPolicy};
+use homeboy_audit_contract::{AuditConfig, TestWiringPolicy};
 
 pub(crate) fn run(root: &Path, audit_config: &AuditConfig) -> Vec<Finding> {
     let mut findings = Vec::new();
