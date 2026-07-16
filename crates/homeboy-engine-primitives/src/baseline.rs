@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::error::{Error, Result};
+use homeboy_error::{Error, Result};
 
 pub trait Fingerprintable {
     fn fingerprint(&self) -> String;
@@ -400,8 +400,7 @@ pub fn load_from_git_ref<M: for<'de> Deserialize<'de> + Serialize>(
     key: &str,
 ) -> Option<Baseline<M>> {
     let git_spec = format!("{}:{}", git_ref, HOMEBOY_JSON);
-    let content =
-        crate::engine::command::run_in_optional(source_path, "git", &["show", &git_spec])?;
+    let content = crate::command::run_in_optional(source_path, "git", &["show", &git_spec])?;
 
     let root: Value = serde_json::from_str(&content).ok()?;
     let value = root.get(BASELINES_KEY)?.get(key)?;
