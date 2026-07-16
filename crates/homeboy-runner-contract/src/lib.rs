@@ -17,6 +17,76 @@ pub enum RunnerKind {
     Ssh,
 }
 
+/// Which side of a runner exchange owns a lifecycle resource.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerLifecycleOwner {
+    Controller,
+    Runner,
+    Broker,
+    Local,
+}
+
+impl RunnerLifecycleOwner {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Controller => "controller",
+            Self::Runner => "runner",
+            Self::Broker => "broker",
+            Self::Local => "local",
+        }
+    }
+}
+
+/// File + byte counts for a workspace sync.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct ByteFileCounts {
+    pub files: usize,
+    pub bytes: u64,
+}
+
+/// A lease describing a runner's materialized workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceLease {
+    pub runner_id: String,
+    pub local_path: String,
+    pub remote_path: String,
+    pub sync_mode: String,
+    pub materialized: bool,
+    pub lifecycle_owner: RunnerLifecycleOwner,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_dirty: Option<bool>,
+}
+
+/// A summary of a runner's current workspace materialization.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunnerWorkspaceCurrentSummary {
+    pub local_path: String,
+    pub remote_path: String,
+    pub sync_mode: RunnerWorkspaceSyncMode,
+    pub materialized: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_dirty: Option<bool>,
+    /// Commit SHA of the synthetic git checkout created for a `snapshot-git`
+    /// sync, so write-capable agent-task dispatches can trace the dirty
+    /// controller-side worktree back to the synthetic commit that carries it
+    /// into the runner workspace. `None` for plain `snapshot`/`git` syncs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synthetic_checkout_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synthetic_checkout_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synthetic_checkout_tree: Option<String>,
+}
+
 /// A reference to an artifact produced by a runner job. Plain data describing
 /// where/how to fetch the artifact; behavior-free so core can name it without a
 /// core -> runner edge.

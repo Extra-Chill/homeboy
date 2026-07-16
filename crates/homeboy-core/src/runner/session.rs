@@ -12,25 +12,11 @@ use crate::api_jobs::{ActiveRunnerJobSummary, Job, JobArtifactMetadata, JobStatu
 mod session_enums {
     use super::*;
 
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(rename_all = "snake_case")]
-    pub enum RunnerLifecycleOwner {
-        Controller,
-        Runner,
-        Broker,
-        Local,
-    }
-
-    impl RunnerLifecycleOwner {
-        pub fn as_str(&self) -> &'static str {
-            match self {
-                Self::Controller => "controller",
-                Self::Runner => "runner",
-                Self::Broker => "broker",
-                Self::Local => "local",
-            }
-        }
-    }
+    // RunnerLifecycleOwner now lives in the shared runner-contract crate so core
+    // (dev_run, run_outcome_envelope, and the types that reference it) can name it
+    // without a core -> runner edge. Re-exported so runner-internal call sites
+    // resolve unchanged.
+    pub use homeboy_runner_contract::RunnerLifecycleOwner;
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     #[serde(rename_all = "snake_case")]
@@ -375,21 +361,9 @@ impl RunnerJob {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerWorkspaceLease {
-    pub runner_id: String,
-    pub local_path: String,
-    pub remote_path: String,
-    pub sync_mode: String,
-    pub materialized: bool,
-    pub lifecycle_owner: RunnerLifecycleOwner,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_commit: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_dirty: Option<bool>,
-}
+// RunnerWorkspaceLease now lives in the shared runner-contract crate (core's
+// dev_run names it). Re-exported so runner-internal call sites resolve.
+pub use homeboy_runner_contract::RunnerWorkspaceLease;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerNamedWorkspaceLease {

@@ -90,7 +90,16 @@ pub(super) fn remote_runner_result_from_exec_output(
             outcome.with_result(serde_json::to_value(result).unwrap_or(serde_json::Value::Null));
     }
     if let Some(handoff) = exec_output.handoff.as_ref() {
-        outcome.add_handoff(handoff);
+        let lifecycle_owner = serde_json::to_value(&handoff.lifecycle_owner)
+            .ok()
+            .and_then(|value| value.as_str().map(ToString::to_string))
+            .unwrap_or_else(|| "unknown".to_string());
+        outcome.add_handoff(
+            handoff.runner_id.clone(),
+            handoff.transport.clone(),
+            lifecycle_owner,
+            handoff.job.as_ref().map(|job| job.job_id.clone()),
+        );
     }
     data["outcome"] = serde_json::to_value(outcome).unwrap_or(serde_json::Value::Null);
     let artifacts = mirror_file_artifact_content(exec_output.artifacts, &exec_output.remote_cwd);

@@ -406,40 +406,18 @@ pub(super) struct RunnerWorkspaceMetadata {
     pub resource_lifecycle: Option<ResourceLifecycleRecord>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct RunnerWorkspaceCurrentSummary {
-    pub local_path: String,
-    pub remote_path: String,
-    pub sync_mode: RunnerWorkspaceSyncMode,
-    pub materialized: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_commit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_dirty: Option<bool>,
-    /// Commit SHA of the synthetic git checkout created for a `snapshot-git`
-    /// sync, so write-capable agent-task dispatches can trace the dirty
-    /// controller-side worktree back to the synthetic commit that carries it
-    /// into the runner workspace. `None` for plain `snapshot`/`git` syncs.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub synthetic_checkout_commit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub synthetic_checkout_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub synthetic_checkout_tree: Option<String>,
-}
+// RunnerWorkspaceCurrentSummary now lives in the shared runner-contract crate
+// (core's dev_run names it). Re-exported so runner-internal call sites resolve.
+pub use homeboy_runner_contract::RunnerWorkspaceCurrentSummary;
 
 /// File + byte counts for a synced/snapshotted workspace tree.
 ///
 /// Shared across the workspace-sync and git-dependency materialization outputs
 /// so the `files` / `bytes` pair is declared once. Serialized flat via
 /// `#[serde(flatten)]` to preserve the historical top-level JSON keys.
-#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
-pub struct ByteFileCounts {
-    pub files: usize,
-    pub bytes: u64,
-}
+// ByteFileCounts now lives in the shared runner-contract crate (core's dev_run
+// names it). Re-exported so runner-internal call sites resolve.
+pub use homeboy_runner_contract::ByteFileCounts;
 
 pub(super) type SnapshotStats = ByteFileCounts;
 
