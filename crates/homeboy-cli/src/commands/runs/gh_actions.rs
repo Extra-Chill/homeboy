@@ -312,7 +312,7 @@ fn build_run_record(
             gh_run.common.id
         )),
         cwd: None,
-        homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        homeboy_version: Some(homeboy_product_identity::product_version().to_string()),
         git_sha: gh_run.common.head_sha.clone(),
         rig_id: None,
         metadata_json: metadata,

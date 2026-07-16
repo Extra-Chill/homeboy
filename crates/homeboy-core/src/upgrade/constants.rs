@@ -1,4 +1,4 @@
-pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const VERSION: &str = homeboy_product_identity::product_version();
 
 pub(crate) const GITHUB_RELEASES_API: &str =
     "https://api.github.com/repos/Extra-Chill/homeboy/releases/latest";

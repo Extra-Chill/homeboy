@@ -23,7 +23,7 @@ pub(super) fn run_doctor(args: FuzzDoctorArgs) -> homeboy::core::Result<FuzzDoct
         command: "fuzz.doctor".to_string(),
         status: status.to_string(),
         homeboy: FuzzDoctorHomeboyOutput {
-            controller_version: env!("CARGO_PKG_VERSION").to_string(),
+            controller_version: homeboy_product_identity::product_version().to_string(),
         },
         extension: FuzzDoctorExtensionOutput {
             id: extension.id.clone(),

@@ -3238,7 +3238,7 @@ esac
             warning.refresh_command,
             format!(
                 "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect && homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab",
-                env!("CARGO_PKG_VERSION")
+                homeboy_product_identity::product_version()
             )
         );
         assert!(warning.message.contains("daemon control plane"));
@@ -3249,7 +3249,7 @@ esac
             vec![
                 format!(
                     "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-                    env!("CARGO_PKG_VERSION")
+                    homeboy_product_identity::product_version()
                 ),
                 "homeboy runner disconnect homeboy-lab".to_string(),
                 "homeboy runner connect homeboy-lab".to_string(),

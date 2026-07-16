@@ -821,7 +821,7 @@ pub(super) fn persist_fuzz_run_evidence(
         cwd: std::env::current_dir()
             .ok()
             .map(|path| path.to_string_lossy().to_string()),
-        homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        homeboy_version: Some(homeboy_product_identity::product_version().to_string()),
         git_sha: None,
         rig_id: input.rig_id.map(str::to_string),
         metadata_json: metadata,

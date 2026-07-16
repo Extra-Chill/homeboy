@@ -199,7 +199,7 @@ pub(crate) fn lab_runner_homeboy_metadata(
     configured_executable: &str,
     status: &RunnerStatusReport,
 ) -> serde_json::Value {
-    let controller_version = env!("CARGO_PKG_VERSION");
+    let controller_version = homeboy_product_identity::product_version();
     let controller_build_identity = crate::build_identity::current().display;
     let refresh_commands = vec![
         runner_homeboy_align_to_controller_command(runner_id),
@@ -312,7 +312,7 @@ fn parse_major_minor(version: &str) -> Option<(u64, u64)> {
 pub(crate) fn classify_runner_homeboy_version_drift(
     status: &RunnerStatusReport,
 ) -> RunnerHomeboyVersionDrift {
-    let controller_version = env!("CARGO_PKG_VERSION");
+    let controller_version = homeboy_product_identity::product_version();
     let Some(runner_version) = status
         .session
         .as_ref()
@@ -377,7 +377,7 @@ pub(crate) fn lab_runner_homeboy_compatible_drift_warning(
     ) {
         return None;
     }
-    let controller_version = env!("CARGO_PKG_VERSION");
+    let controller_version = homeboy_product_identity::product_version();
     let runner_version = status
         .session
         .as_ref()
@@ -400,7 +400,8 @@ fn lab_runner_homeboy_version_drift(status: &RunnerStatusReport) -> bool {
 }
 
 fn runner_daemon_newer_than_controller(status: &RunnerStatusReport) -> bool {
-    let Some(controller) = parse_version_triplet(env!("CARGO_PKG_VERSION")) else {
+    let Some(controller) = parse_version_triplet(homeboy_product_identity::product_version())
+    else {
         return false;
     };
     status
@@ -701,7 +702,7 @@ pub(crate) fn stale_runner_homeboy_error(
                     .as_ref()
                     .map(|session| session.homeboy_version.as_str())
                     .unwrap_or("<unknown>"),
-                env!("CARGO_PKG_VERSION")
+                homeboy_product_identity::product_version()
             )
         });
     let refresh = refresh_commands.join(" && ");
@@ -754,7 +755,7 @@ pub(crate) fn runner_homeboy_align_to_controller_command(runner_id: &str) -> Str
     format!(
         "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
         shell::quote_arg(runner_id),
-        env!("CARGO_PKG_VERSION")
+        homeboy_product_identity::product_version()
     )
 }
 

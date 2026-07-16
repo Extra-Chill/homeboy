@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::build_identity;
 use crate::execution_contract::EXECUTION_CONTRACT;
 use crate::observation::{
     ArtifactRecord, ObservationStore, RecordedHomeboyFinding, RunRecord, TraceSpanRecord,
@@ -98,7 +99,7 @@ pub fn build_bundle(
         format: BUNDLE_FORMAT.to_string(),
         version: BUNDLE_VERSION,
         created_at: chrono::Utc::now().to_rfc3339(),
-        homeboy_version: env!("CARGO_PKG_VERSION").to_string(),
+        homeboy_version: build_identity::current().version,
         run_count: runs.len(),
         artifact_count: artifacts.len(),
         artifact_byte_count: artifact_bytes.len(),

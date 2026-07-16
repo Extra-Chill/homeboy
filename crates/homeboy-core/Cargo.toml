@@ -7,7 +7,6 @@ authors = ["Chris Huber <chubes@extrachill.com>"]
 description = "Core engine for homeboy: build/deploy/test/triage orchestration, runners, agent-task, code audit, and evidence"
 repository = "https://github.com/Extra-Chill/homeboy"
 publish = false
-build = "build.rs"
 
 [lib]
 name = "homeboy_core"

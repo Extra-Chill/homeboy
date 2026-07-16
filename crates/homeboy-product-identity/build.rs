@@ -6,18 +6,18 @@ use std::process::Command;
 fn main() {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR missing"));
-    let workspace_root = manifest_dir
+    let root = manifest_dir
         .parent()
         .and_then(Path::parent)
-        .expect("homeboy-core must be nested below the workspace root");
-    let manifest = workspace_root.join("Cargo.toml");
+        .expect("product identity must be nested below the workspace root");
+    let manifest = root.join("Cargo.toml");
 
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!(
-        "cargo:rustc-env=HOMEBOY_BUILD_VERSION={}",
+        "cargo:rustc-env=HOMEBOY_PRODUCT_VERSION={}",
         root_package_version(&manifest)
     );
-    emit_git_build_identity(workspace_root);
+    emit_git_identity(root);
 }
 
 fn root_package_version(manifest: &Path) -> String {
@@ -35,9 +35,10 @@ fn root_package_version(manifest: &Path) -> String {
         .expect("root Cargo.toml [package] must contain a version")
 }
 
-fn emit_git_build_identity(workspace_root: &Path) {
-    let git_dir = resolve_git_dir(workspace_root).unwrap_or_else(|| workspace_root.join(".git"));
+fn emit_git_identity(root: &Path) {
+    let git_dir = resolve_git_dir(root).unwrap_or_else(|| root.join(".git"));
     println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+    println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
     if let Ok(head) = fs::read_to_string(git_dir.join("HEAD")) {
         if let Some(reference) = head.trim().strip_prefix("ref: ") {
             println!(
@@ -47,51 +48,46 @@ fn emit_git_build_identity(workspace_root: &Path) {
         }
     }
 
-    if let Some(commit) = git_output(workspace_root, &["rev-parse", "--short=12", "HEAD"]) {
-        println!("cargo:rustc-env=HOMEBOY_BUILD_GIT_COMMIT={commit}");
+    if let Some(commit) = git_output(root, &["rev-parse", "--short=12", "HEAD"]) {
+        println!("cargo:rustc-env=HOMEBOY_PRODUCT_GIT_COMMIT={commit}");
     }
-    if let Some(status) = git_output(workspace_root, &["status", "--porcelain"]) {
+    if let Some(status) = git_output(root, &["status", "--porcelain"]) {
         println!(
-            "cargo:rustc-env=HOMEBOY_BUILD_GIT_DIRTY={}",
-            if status.trim().is_empty() {
-                "false"
-            } else {
-                "true"
-            }
+            "cargo:rustc-env=HOMEBOY_PRODUCT_GIT_DIRTY={}",
+            if status.is_empty() { "false" } else { "true" }
         );
     }
 }
 
-fn resolve_git_dir(workspace_root: &Path) -> Option<PathBuf> {
-    let git_path = workspace_root.join(".git");
+fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
+    let git_path = root.join(".git");
     if git_path.is_dir() {
         return Some(git_path);
     }
 
-    let git_file = fs::read_to_string(&git_path).ok()?;
-    let raw_path = git_file.trim().strip_prefix("gitdir: ")?.trim();
+    let raw_path = fs::read_to_string(&git_path)
+        .ok()?
+        .trim()
+        .strip_prefix("gitdir: ")?
+        .trim()
+        .to_string();
     let path = PathBuf::from(raw_path);
     Some(if path.is_absolute() {
         path
     } else {
-        workspace_root.join(path)
+        root.join(path)
     })
 }
 
-fn git_output(workspace_root: &Path, args: &[&str]) -> Option<String> {
+fn git_output(root: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
-        .arg(workspace_root)
+        .arg(root)
         .args(args)
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

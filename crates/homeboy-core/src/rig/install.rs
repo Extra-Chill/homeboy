@@ -225,7 +225,7 @@ fn validate_rig_spec_file(path: &Path, source_root: &Path, rig_id: &str) -> Resu
             e.to_string(),
             format!("parse rig spec {}", path.display()),
             None,
-            env!("CARGO_PKG_VERSION"),
+            homeboy_product_identity::product_version(),
         )
     })?;
     if spec.id.is_empty() {

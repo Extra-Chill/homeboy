@@ -182,7 +182,7 @@ fn persist_patch_run(input: PatchRunInput<'_>) -> Result<()> {
         status: if input.exit_code == 0 { "pass" } else { "fail" }.to_string(),
         command: Some(input.command.join(" ")),
         cwd: Some(input.cwd.to_string()),
-        homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        homeboy_version: Some(crate::build_identity::current().version),
         git_sha: input
             .source_snapshot
             .and_then(|snapshot| snapshot.git_sha.clone()),
