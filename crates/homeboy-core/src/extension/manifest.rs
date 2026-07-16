@@ -1,4 +1,4 @@
-use crate::component::AuditConfig;
+use homeboy_audit_contract::AuditConfig;
 use crate::config::ConfigEntity;
 use crate::error::{Error, Result};
 use crate::paths;
