@@ -1167,6 +1167,34 @@ pub fn list_records() -> Result<Vec<AgentTaskRunRecord>> {
     Ok(records)
 }
 
+/// Resolve an aggregate artifact back to its controller-owned durable run.
+/// Aggregate paths are passed to promotion commands after the controller has
+/// finished, so the path rather than a transient process-local identifier is
+/// the durable source identity.
+pub fn run_id_for_aggregate_path(path: &std::path::Path) -> Result<Option<String>> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut matching_run_ids = store::read_records()?
+        .into_iter()
+        .filter_map(|record| {
+            let aggregate_path = store::aggregate_path(&record.run_id).ok()?;
+            let aggregate_path = aggregate_path.canonicalize().unwrap_or(aggregate_path);
+            (aggregate_path == path).then_some(record.run_id)
+        })
+        .collect::<Vec<_>>();
+    matching_run_ids.sort();
+    matching_run_ids.dedup();
+    match matching_run_ids.as_slice() {
+        [] => Ok(None),
+        [run_id] => Ok(Some(run_id.clone())),
+        _ => Err(Error::validation_invalid_argument(
+            "source",
+            "aggregate path is associated with multiple durable agent-task runs",
+            Some(path.display().to_string()),
+            None,
+        )),
+    }
+}
+
 pub fn run_record_exists(run_id: &str) -> Result<bool> {
     store::record_exists(&sanitize_run_id(run_id))
 }
@@ -1777,6 +1805,9 @@ fn resolve_run_id(run_id: &str) -> Result<String> {
 pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let record = store::mutate_record(&run_id, |record| {
+        if record.metadata.get("latest_promotion") == Some(&promotion) {
+            return false;
+        }
         record.updated_at = Some(now_timestamp());
         let metadata = record.ensure_metadata_object();
         let promotions = metadata
@@ -1792,5 +1823,8 @@ pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRe
         metadata.insert("latest_promotion".to_string(), promotion);
         true
     })?;
-    Ok(record.expect("promotion mutation always changes the record"))
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
 }
