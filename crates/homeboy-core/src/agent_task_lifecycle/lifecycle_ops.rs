@@ -47,7 +47,6 @@ pub fn reconcile_deferred_candidate(run_id: &str) -> Result<bool> {
         // read retries from durable state rather than inventing a projection.
         Err(_) => return Ok(false),
     };
-    let plan = store::read_plan_path(&record.plan_path)?;
     let mut changed = false;
 
     for outcome in &mut aggregate.outcomes {
@@ -167,6 +166,7 @@ pub fn reconcile_deferred_candidate(run_id: &str) -> Result<bool> {
         return Ok(false);
     }
 
+    let plan = store::read_controller_plan(&run_id)?;
     aggregate.status = aggregate_status(&aggregate.outcomes);
     aggregate.totals = aggregate_totals(plan.tasks.len(), &aggregate.outcomes);
     let aggregate_path = store::aggregate_path(&run_id)?.display().to_string();
@@ -463,7 +463,7 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     if !is_terminal_run_state(record.state) {
         if let (Ok(aggregate), Ok(plan)) = (
             store::read_aggregate(&record.run_id),
-            store::read_plan_path(&record.plan_path),
+            store::read_controller_plan(&record.run_id),
         ) {
             let aggregate_path = store::aggregate_path(&record.run_id)
                 .map(|path| path.display().to_string())
@@ -691,6 +691,34 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
     }
 }
 
+/// Replays already-persisted terminal runner evidence into an incomplete
+/// controller projection. It is intentionally limited to an existing terminal
+/// job snapshot and cannot dispatch or resume provider work.
+pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if !is_terminal_run_state(record.state) {
+        return Ok(false);
+    }
+    let (Some(runner_id), Some(runner_job_id)) = (
+        transport_proxy_runner_id(&record),
+        transport_proxy_runner_job_id(&record),
+    ) else {
+        return Ok(false);
+    };
+    let snapshot = crate::runners::runner_job_log_snapshot(&runner_id, &runner_job_id)?;
+    if !matches!(
+        snapshot.job.status,
+        crate::api_jobs::JobStatus::Succeeded
+            | crate::api_jobs::JobStatus::Failed
+            | crate::api_jobs::JobStatus::Cancelled
+    ) {
+        return Ok(false);
+    }
+    reconcile_runner_job_snapshot(&mut record, &snapshot)?;
+    store::write_record(&record)?;
+    Ok(store::read_aggregate(&record.run_id).is_ok())
+}
+
 /// Resume an unbound proxy where the controller never learned the runner job
 /// identity. The persisted command and workspace belong to the runner, so this
 /// must execute through the runner rather than through the local scheduler.
@@ -824,10 +852,10 @@ pub(crate) fn reconcile_runner_job_snapshot(
         // A transport-only terminal result can arrive before the daemon has
         // published the inner agent-task aggregate. Adopt that later evidence
         // when it proves the same controller run rather than losing its patch.
-        if let Some(event) = crate::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(
-            Some(&snapshot.events),
-        ) {
-            project_terminal_runner_lifecycle_event(record, snapshot, &event)?;
+        if let Some(event) = terminal_runner_lifecycle_event(record, snapshot)? {
+            if store::read_aggregate(&record.run_id).ok().as_ref() != Some(&event.aggregate) {
+                project_terminal_runner_lifecycle_event(record, snapshot, &event)?;
+            }
         }
         return Ok(());
     }
@@ -863,18 +891,39 @@ pub(crate) fn reconcile_runner_job_snapshot(
         crate::api_jobs::JobStatus::Succeeded
         | crate::api_jobs::JobStatus::Failed
         | crate::api_jobs::JobStatus::Cancelled => {
-            if let Some(event) = crate::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(
-                Some(&snapshot.events),
-            ) {
+            if let Some(event) = terminal_runner_lifecycle_event(&reconciled, snapshot)? {
                 project_terminal_runner_lifecycle_event(&mut reconciled, snapshot, &event)?;
             } else {
-                apply_runner_job_terminal_state(&mut reconciled, snapshot.job.status, &snapshot.events);
+                apply_runner_job_terminal_state(
+                    &mut reconciled,
+                    snapshot.job.status,
+                    &snapshot.events,
+                );
                 store::write_record(&reconciled)?;
             }
         }
     }
     *record = reconciled;
     Ok(())
+}
+
+fn terminal_runner_lifecycle_event(
+    record: &AgentTaskRunRecord,
+    snapshot: &crate::runner::RunnerJobLogSnapshot,
+) -> Result<Option<crate::runner::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent>> {
+    let runner_id = record.runner_id().unwrap_or_default();
+    let runner_job_id = record.runner_job_id().unwrap_or_default();
+    if let Some(event) = crate::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_persisted_job_events(
+        &snapshot.events,
+        runner_id,
+        runner_job_id,
+        &record.run_id,
+    )? {
+        return Ok(Some(event));
+    }
+    Ok(crate::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(
+        Some(&snapshot.events),
+    ))
 }
 
 fn project_terminal_runner_lifecycle_event(

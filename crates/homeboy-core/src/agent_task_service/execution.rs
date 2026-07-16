@@ -285,7 +285,14 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
         return Ok(None);
     }
 
-    let aggregate = agent_task_lifecycle::read_aggregate(&record.run_id).map_err(|_| {
+    let aggregate = match agent_task_lifecycle::read_aggregate(&record.run_id) {
+        Ok(aggregate) => aggregate,
+        Err(_) => {
+            // A terminal Lab result may have been persisted before its typed
+            // aggregate projection. Reconcile only that recorded terminal
+            // evidence; never resume or rerun the provider for this path.
+            agent_task_lifecycle::recover_terminal_transport_proxy_evidence(&record.run_id)?;
+            agent_task_lifecycle::read_aggregate(&record.run_id).map_err(|_| {
         Error::validation_invalid_argument(
             "run_id",
             format!(
@@ -298,7 +305,9 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
                 record.run_id
             )]),
         )
-    })?;
+            })?
+        }
+    };
     Ok(Some(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
         value: crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),

@@ -1247,6 +1247,81 @@ fn late_inner_aggregate_recovers_patch_after_transport_only_terminal_result() {
 }
 
 #[test]
+fn terminal_proxy_reconciliation_hydrates_persisted_nested_result_idempotently() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-persisted-result",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        record.plan_path =
+            "/home/lab/.local/share/homeboy/agent-task-runs/agent-task-persisted-result/plan.json"
+                .to_string();
+        store::write_record(&record).expect("runner-local plan projection");
+        apply_runner_job_terminal_state(&mut record, crate::api_jobs::JobStatus::Succeeded, &[]);
+        store::write_record(&record).expect("legacy terminal projection without aggregate");
+
+        let mut aggregate = succeeded_aggregate(&test_plan());
+        aggregate.outcomes[0].artifacts = vec![AgentTaskArtifact {
+            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "final-patch".to_string(),
+            kind: "patch".to_string(),
+            name: Some("final.patch".to_string()),
+            label: None,
+            role: Some("patch".to_string()),
+            semantic_key: None,
+            path: Some("artifacts/final.patch".to_string()),
+            url: None,
+            mime: Some("text/x-diff".to_string()),
+            size_bytes: Some(18_928),
+            sha256: Some(
+                "062f5c460c2dfb279277b75d5a16a04e3178ace1f35ce7b10da5e17441b37071".to_string(),
+            ),
+            metadata: json!({ "source_snapshot": "snapshot-1" }),
+        }];
+        aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
+            kind: "transcript".to_string(),
+            uri: "homeboy://lab/transcript".to_string(),
+            label: Some("Provider transcript".to_string()),
+        }];
+        aggregate.outcomes[0].metadata = json!({
+            "provider": "opencode",
+            "provider_run_id": "provider-run-1",
+        });
+        let snapshot = persisted_terminal_result_snapshot(&aggregate);
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("hydrate persisted result");
+        let status = status(&record.run_id).expect("hydrated status without runner plan access");
+        let artifact_report = artifacts(&record.run_id).expect("hydrated artifacts");
+        assert_eq!(status.state, AgentTaskRunState::Succeeded);
+        assert_eq!(artifact_report.artifacts.len(), 1);
+        assert_eq!(artifact_report.artifacts[0].id, "final-patch");
+        assert_eq!(artifact_report.artifacts[0].size_bytes, Some(18_928));
+        assert_eq!(
+            artifact_report.artifacts[0].sha256.as_deref(),
+            Some("062f5c460c2dfb279277b75d5a16a04e3178ace1f35ce7b10da5e17441b37071")
+        );
+        assert!(artifact_report
+            .evidence_refs
+            .iter()
+            .any(|reference| reference.kind == "transcript"));
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent replay");
+        assert_eq!(
+            artifacts(&record.run_id)
+                .expect("replayed artifacts")
+                .artifacts
+                .len(),
+            1
+        );
+    });
+}
+
+#[test]
 fn disconnected_runner_marks_nonterminal_proxy_stale_without_advancing_heartbeat() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
@@ -3301,6 +3376,24 @@ fn terminal_child_snapshot(aggregate: &AgentTaskAggregate) -> crate::runner::Run
             })),
         }],
     }
+}
+
+fn persisted_terminal_result_snapshot(
+    aggregate: &AgentTaskAggregate,
+) -> crate::runner::RunnerJobLogSnapshot {
+    let mut snapshot = terminal_child_snapshot(aggregate);
+    snapshot.events[0].kind = JobEventKind::Result;
+    snapshot.events[0].data = Some(json!({
+        "exit_code": 0,
+        "stdout": format!("HOMEBOY_RUNNER_PROGRESS {{\"phase\":\"finished\"}}\n{}", json!({
+            "schema": "homeboy/command-result/v3",
+            "command": "agent-task",
+            "success": true,
+            "exit_code": 0,
+            "data": aggregate,
+        }))
+    }));
+    snapshot
 }
 
 fn succeeded_aggregate(plan: &AgentTaskPlan) -> AgentTaskAggregate {
