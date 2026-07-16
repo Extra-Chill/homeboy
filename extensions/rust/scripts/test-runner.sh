@@ -330,6 +330,19 @@ TEST_ARGS=(
     --manifest-path "${PROJECT_PATH}/Cargo.toml"
 )
 
+# For a full/workspace run, test every workspace member -- not just the root
+# package. At a hybrid root (a Cargo.toml that is both [package] and [workspace]),
+# `cargo test` without `--workspace` only runs the root package's tests, silently
+# skipping every member crate. Only add it for full-scope runs and only when the
+# scope args don't already select specific packages (e.g. a changed-files scope
+# that passes `-p <crate>`).
+if [ "$SCOPE_KIND" = "workspace" ] || [ "$SCOPE_KIND" = "full" ]; then
+    case " $(printf '%s' "$SCOPE_JSON" | jq -r '.args[]?' | tr '\n' ' ') " in
+        *" -p "* | *" --package "* | *" --workspace "* | *" --exclude "*) ;;
+        *) TEST_ARGS+=(--workspace) ;;
+    esac
+fi
+
 if [ -n "${HOMEBOY_TEST_SCOPE_MESSAGE:-}" ]; then
     echo "$HOMEBOY_TEST_SCOPE_MESSAGE"
 fi
