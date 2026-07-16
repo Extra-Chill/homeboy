@@ -685,9 +685,10 @@ fn materialize_agent_task_cook_plan(
     if dispatch.cwd.is_none() && dispatch.workspace.is_none() {
         dispatch.workspace = Some(cook.to_worktree.clone());
     }
-    let request =
+    let mut request =
         homeboy::core::agent_tasks::dispatch_service::resolve_dispatch_request(dispatch.into())?;
-    homeboy::core::agent_tasks::dispatch_service::build_dispatch_plan(&request).map(Some)
+    homeboy::core::agent_tasks::dispatch_service::build_controller_dispatch_plan(&mut request)
+        .map(Some)
 }
 
 fn lab_route_dispatch_timeout(command: &Commands) -> Option<std::time::Duration> {

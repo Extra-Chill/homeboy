@@ -144,12 +144,7 @@ where
             .clone()
             .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
         let mut request = dispatch_service::resolve_dispatch_request(dispatch_args.into())?;
-        if request.core.resolved_provider_policy.is_none() {
-            request.core.resolved_provider_policy = Some(
-                dispatch_service::controller_resolved_execution_policy(&request),
-            );
-        }
-        let plan = match dispatch_service::build_dispatch_plan(&request) {
+        let plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
             Ok(plan) => plan,
             // A managed promotion handle may be intentionally unavailable until
             // after provider execution. Keep the compiled task durable and let
@@ -161,7 +156,7 @@ where
                     ) =>
             {
                 request.workspace = None;
-                dispatch_service::build_dispatch_plan(&request)?
+                dispatch_service::build_controller_dispatch_plan(&mut request)?
             }
             Err(error) => return Err(error),
         };

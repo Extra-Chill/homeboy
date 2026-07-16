@@ -1264,6 +1264,97 @@ mod tests {
     }
 
     #[test]
+    fn controller_plan_compilation_uses_initial_global_rotation_model() {
+        with_isolated_home(|_| {
+            let mut config = defaults::load_config();
+            config.agent_task.rotation = Some(
+                crate::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                    entries: vec![
+                        crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            model: Some("openai/gpt-5.6-terra".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            );
+            defaults::save_config(&config).expect("save config");
+            let mut request = dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Cook with the selected global model.".to_string()),
+                backend: Some("opencode".to_string()),
+                ..DispatchRequestOverrides::default()
+            });
+
+            let plan =
+                crate::agent_task_dispatch_service::build_controller_dispatch_plan(&mut request)
+                    .expect("controller plan");
+
+            assert_eq!(
+                plan.tasks[0].executor.model.as_deref(),
+                Some("openai/gpt-5.6-terra")
+            );
+            assert_eq!(
+                plan.tasks[0]
+                    .executor
+                    .runtime_selection
+                    .as_ref()
+                    .and_then(|selection| selection.model.as_deref()),
+                Some("openai/gpt-5.6-terra")
+            );
+        });
+    }
+
+    #[test]
+    fn controller_plan_compilation_preserves_submitted_provider_policy() {
+        with_isolated_home(|_| {
+            let mut config = defaults::load_config();
+            config.agent_task.rotation = Some(
+                crate::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                    entries: vec![
+                        crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            model: Some("global-model".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            );
+            defaults::save_config(&config).expect("save config");
+            let submitted_policy =
+                crate::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
+                    backend: "opencode".to_string(),
+                    selector: None,
+                    model: Some("submitted-model".to_string()),
+                    rotation: None,
+                    rotation_starts_with_first_entry: false,
+                    retry: AgentTaskRetryPolicy::default(),
+                    liveness_timeout_ms: None,
+                };
+            let mut request = dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Cook with the submitted model.".to_string()),
+                core: DispatchCoreInputs {
+                    resolved_provider_policy: Some(submitted_policy.clone()),
+                    ..DispatchCoreInputs::default()
+                },
+                ..DispatchRequestOverrides::default()
+            });
+
+            let plan =
+                crate::agent_task_dispatch_service::build_controller_dispatch_plan(&mut request)
+                    .expect("controller plan");
+
+            assert_eq!(
+                request.core.resolved_provider_policy,
+                Some(submitted_policy)
+            );
+            assert_eq!(
+                plan.tasks[0].executor.model.as_deref(),
+                Some("submitted-model")
+            );
+        });
+    }
+
+    #[test]
     fn builds_dispatch_plan_from_stored_prompt_reference() {
         with_isolated_home(|_| {
             agent_task_prompts::save_prompt("homeboy-7388", "Use the prompt store.")

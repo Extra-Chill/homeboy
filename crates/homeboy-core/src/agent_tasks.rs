@@ -200,8 +200,9 @@ pub mod dispatch_service {
         preflight_dispatch_provider_secrets,
     };
     pub use super::super::agent_task_dispatch_service::{
-        controller_resolved_execution_policy, dispatch, dispatch_with_provider_requirements,
-        resolve_dispatch_request, resolve_dispatch_request_with_default, run_dispatch_command,
+        build_controller_dispatch_plan, controller_resolved_execution_policy, dispatch,
+        dispatch_with_provider_requirements, resolve_dispatch_request,
+        resolve_dispatch_request_with_default, run_dispatch_command,
         run_dispatch_command_with_provider_catalog, AgentTaskDispatchCommand,
         AgentTaskDispatchReport, AgentTaskDispatchRequest, DispatchCoreInputs,
         DISPATCH_RESULT_SCHEMA,
