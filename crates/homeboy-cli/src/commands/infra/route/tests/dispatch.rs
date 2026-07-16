@@ -1,6 +1,27 @@
 #![cfg(test)]
 
 use super::*;
+
+#[test]
+fn explicit_local_promotion_defers_target_resolution_to_promotion() {
+    let args = [
+        "homeboy",
+        "--placement",
+        "local",
+        "agent-task",
+        "promote",
+        "/tmp/aggregate.json",
+        "--to-worktree",
+        "fixture@dirty-candidate",
+    ];
+    let cli = Cli::parse_from(args);
+    let normalized = args
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(route_after_parse(&cli, &normalized, None).unwrap(), None);
+}
 use clap::Parser;
 use homeboy::command_contract::{lab_runner_supports_contract_label, LabCommandPortability};
 use std::fs;
