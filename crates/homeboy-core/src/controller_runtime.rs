@@ -68,34 +68,16 @@ pub(crate) fn pin_current() -> Result<Value> {
     }))
 }
 
-/// Select the durable active generation while serializing only admission.  The
-/// first admission initializes it; subsequent admissions must use the already
-/// selected immutable artifact rather than whichever binary happened to start
-/// the submitting process.
+/// Pin the process submitting a durable run while serializing admission. The
+/// active-generation pointer is diagnostic state only: every fresh run must
+/// retain the executable that created it, rather than inherit a previous
+/// controller's selection.
 pub(crate) fn admit_current() -> Result<RuntimeAdmission> {
     let root = runtime_root()?;
     let lock_path = root.join(ADMISSION_LOCK_DIR);
     acquire_admission_lock(&lock_path)?;
-    let active = root.join(ACTIVE_GENERATION_FILE);
-    let runtime = if active.exists() {
-        let value = fs::read_to_string(&active).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("read active controller generation".to_string()),
-            )
-        })?;
-        serde_json::from_str(&value).map_err(|error| {
-            Error::validation_invalid_json(
-                error,
-                Some("parse active controller generation".to_string()),
-                None,
-            )
-        })?
-    } else {
-        let runtime = pin_current()?;
-        write_active_generation(&active, &runtime)?;
-        runtime
-    };
+    let runtime = pin_current()?;
+    write_active_generation(&root.join(ACTIVE_GENERATION_FILE), &runtime)?;
     if let Err(error) = validate_pin(&runtime) {
         let _ = fs::remove_dir(&lock_path);
         return Err(error);
@@ -388,13 +370,39 @@ mod tests {
     }
 
     #[test]
-    fn admission_reuses_the_selected_generation() {
+    fn admission_replaces_a_stale_active_generation_with_the_submitting_runtime() {
         crate::test_support::with_isolated_home(|_| {
-            let first = admit_current().expect("first admission");
-            let selected = first.runtime.clone();
-            drop(first);
-            let second = admit_current().expect("second admission");
-            assert_eq!(second.runtime, selected);
+            let mut runtime_a = pin_current().expect("pin runtime A");
+            runtime_a["originating"]["build_identity"] = json!("homeboy runtime-a");
+            runtime_a["requested"] = json!("homeboy runtime-a");
+            runtime_a["current"] = json!("homeboy runtime-a");
+            runtime_a["executed"] = json!("homeboy runtime-a");
+            let active = runtime_root()
+                .expect("runtime root")
+                .join(ACTIVE_GENERATION_FILE);
+            write_active_generation(&active, &runtime_a).expect("write stale runtime A");
+
+            let runtime_b = admit_current().expect("runtime B admission");
+            let current = build_identity::current().display;
+
+            assert_eq!(runtime_b.runtime["originating"]["build_identity"], current);
+            assert_eq!(runtime_b.runtime["requested"], current);
+            validate_for_mutation(
+                &json!({ CONTROLLER_RUNTIME_METADATA_KEY: runtime_a }),
+                &current,
+            )
+            .expect_err("runtime B must retain runtime A's immutable pin");
+            validate_for_mutation(
+                &json!({ CONTROLLER_RUNTIME_METADATA_KEY: runtime_b.runtime }),
+                &current,
+            )
+            .expect("runtime B can mutate its fresh run");
+
+            let active: Value = serde_json::from_str(
+                &fs::read_to_string(active).expect("read refreshed active generation"),
+            )
+            .expect("parse refreshed active generation");
+            assert_eq!(active["originating"]["build_identity"], current);
         });
     }
 }
