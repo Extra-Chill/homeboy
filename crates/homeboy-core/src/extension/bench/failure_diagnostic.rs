@@ -85,8 +85,8 @@ fn text_after<'a>(text: &'a str, start: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::baseline::BaselineFlags;
     use crate::extension::bench::parsing::BenchRunExecution;
+    use homeboy_engine_primitives::baseline::BaselineFlags;
 
     #[test]
     fn test_bench_failure_stderr_tail() {

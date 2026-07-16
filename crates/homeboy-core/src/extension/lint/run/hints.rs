@@ -2,7 +2,7 @@
 //! refactor --from lint --write` CTAs while preserving the active scope flags.
 
 use super::types::LintRunWorkflowArgs;
-use crate::engine::shell;
+use homeboy_engine_primitives::shell;
 
 pub(super) fn build_autofix_hint(args: &LintRunWorkflowArgs) -> String {
     let lint_command = lint_autofix_command(args);

@@ -1,5 +1,5 @@
-use crate::engine::output_parse::ParseSpec;
 use crate::lifecycle::LifecycleContract;
+use homeboy_engine_primitives::output_parse::ParseSpec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

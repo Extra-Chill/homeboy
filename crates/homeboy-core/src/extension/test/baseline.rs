@@ -9,8 +9,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::baseline::{self as generic, BaselineConfig};
 use crate::error::Result;
+use homeboy_engine_primitives::baseline::{self as generic, BaselineConfig};
 
 const BASELINE_KEY: &str = "test";
 

@@ -608,10 +608,10 @@ fn parse_ahead_behind(value: &str) -> Option<(Option<u32>, Option<u32>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::baseline::BaselineFlags;
     use crate::engine::run_dir::RunDir;
     use crate::extension::trace::run::{run_trace_workflow, TraceRunnerInputs};
     use crate::extension::ExtensionCapability;
+    use homeboy_engine_primitives::baseline::BaselineFlags;
     use std::path::Path;
 
     #[test]

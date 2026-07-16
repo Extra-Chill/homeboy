@@ -31,7 +31,6 @@ mod tests {
     use super::types::{BenchListWorkflowArgs, BenchListWorkflowResult, BenchRunWorkflowArgs};
     use super::workflow::bench_component_script_env;
     use crate::component::Component;
-    use crate::engine::baseline::BaselineFlags;
     use crate::engine::invocation::InvocationRequirements;
     use crate::engine::resource::{
         self, ChildProcessIdentity, ExtensionChildProcessSample, ExtensionChildResourceSample,
@@ -42,6 +41,7 @@ mod tests {
     use crate::extension::bench::responsiveness::BenchResponsivenessSummary;
     use crate::extension::bench::test_support::{results_with_scenarios, scenario_with_iterations};
     use crate::extension::path_list_env_value;
+    use homeboy_engine_primitives::baseline::BaselineFlags;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;

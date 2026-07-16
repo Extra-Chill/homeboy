@@ -3,10 +3,10 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
-use crate::engine::baseline::BaselineFlags;
 use crate::engine::invocation::InvocationRequirements;
 use crate::extension::trace::baseline::TraceBaselineComparison;
 use crate::rig::TraceDependencySpec;
+use homeboy_engine_primitives::baseline::BaselineFlags;
 
 use super::super::attach::TraceAttachment;
 use super::super::canonicality::TraceCanonicalPolicy;

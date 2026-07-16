@@ -1,11 +1,11 @@
 //! Shared workflow types — args, results, and summary structures.
 
-use crate::engine::baseline::BaselineFlags;
 use crate::extension::lint::baseline as lint_baseline;
 use crate::extension::self_check::SelfCheckCaptureMetadata;
 use crate::extension::ExtensionPhaseTiming;
 use crate::finding::{FindingProducerSummary, HomeboyFinding};
 use crate::refactor::AppliedRefactor;
+use homeboy_engine_primitives::baseline::BaselineFlags;
 use serde::Serialize;
 use std::collections::BTreeMap;
 

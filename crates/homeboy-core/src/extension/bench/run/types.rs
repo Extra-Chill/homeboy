@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::engine::baseline::BaselineFlags;
 use crate::engine::invocation::InvocationRequirements;
 use crate::extension::bench::baseline::BenchBaselineComparison;
 use crate::extension::bench::diagnostic::BenchDiagnostic;
@@ -15,6 +14,7 @@ use crate::extension::bench::responsiveness::{
     BenchFailureMemorySample, BenchResponsivenessSummary,
 };
 use crate::gate::HomeboyGateResult;
+use homeboy_engine_primitives::baseline::BaselineFlags;
 
 #[derive(Debug, Clone)]
 pub struct BenchRunWorkflowArgs {

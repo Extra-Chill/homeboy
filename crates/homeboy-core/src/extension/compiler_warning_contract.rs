@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::engine::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
+use homeboy_engine_primitives::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
 
 use super::ExtensionManifest;
 

@@ -1,8 +1,8 @@
 use serde::Serialize;
 
-use crate::engine::template;
 use crate::project::Project;
 use crate::server::execute_local_command_in_dir;
+use homeboy_engine_primitives::template;
 
 use super::{load_extension, ExtensionManifest};
 

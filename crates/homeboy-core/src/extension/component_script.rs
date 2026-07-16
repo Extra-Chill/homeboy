@@ -278,7 +278,7 @@ fn command_with_args(command: &str, script_args: &[String]) -> String {
     format!(
         "{} {}",
         command,
-        crate::engine::shell::quote_args(script_args)
+        homeboy_engine_primitives::shell::quote_args(script_args)
     )
 }
 

@@ -1,7 +1,7 @@
-use crate::engine::identifier;
 use crate::error::{Error, Result};
 use crate::git;
 use crate::paths;
+use homeboy_engine_primitives::identifier;
 use std::path::{Path, PathBuf};
 
 use super::load_extension;

@@ -5,10 +5,10 @@ use crate::component::Component;
 use crate::engine::invocation::{InvocationGuard, InvocationRequirements};
 use crate::engine::resource::{self, ExtensionChildResourceSummary};
 use crate::engine::run_dir::{self, RunDir};
-use crate::engine::shell;
 use crate::error::{Error, Result};
 use crate::extension::{ExtensionCapability, ExtensionPhaseTiming};
 use crate::server::CommandOutput;
+use homeboy_engine_primitives::shell;
 use serde_json::json;
 
 const STRICT_VALIDATION_DEPENDENCIES_ENV: &str = "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES";

@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use crate::engine::local_files;
-use crate::engine::output_parse::{Aggregate, DeriveRule, ParseRule, ParseSpec};
 use crate::error::Result;
 use crate::extension::test::analyze::{TestAnalysis, TestAnalysisInput, TestFailure};
 use crate::extension::test::TestCounts;
 use crate::structured_sidecar;
+use homeboy_engine_primitives::local_files;
+use homeboy_engine_primitives::output_parse::{Aggregate, DeriveRule, ParseRule, ParseSpec};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CoverageOutput {

@@ -166,10 +166,10 @@ fn source_revision_at(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::baseline::BaselineFlags;
     use crate::engine::invocation::InvocationRequirements;
     use crate::extension::bench::parsing::{self, BenchRunExecution};
     use crate::extension::ExtensionCapability;
+    use homeboy_engine_primitives::baseline::BaselineFlags;
 
     #[test]
     fn run_metadata_captures_reproducible_bench_context() {
