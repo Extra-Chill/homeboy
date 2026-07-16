@@ -288,9 +288,16 @@ fn liveness_summary(runs: &[AgentTaskDiscoveryRun]) -> AgentTaskLivenessSummary 
 fn classify_liveness(
     record: &AgentTaskRunRecord,
     last_update_age_minutes: Option<i64>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> AgentTaskLiveness {
     if record.state != agent_task_lifecycle::AgentTaskRunState::Running {
-        // Queued runs are genuinely pending work, not stale.
+        if record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+            && handoff_acceptance_expired(record, now)
+        {
+            return AgentTaskLiveness::Unreconciled;
+        }
+        // Queued runs are genuinely pending work unless their controller-owned
+        // Lab handoff exceeded its durable acceptance deadline.
         return AgentTaskLiveness::Active;
     }
 
@@ -311,6 +318,19 @@ fn classify_liveness(
         // we genuinely cannot confirm this run either way.
         (false, false) => AgentTaskLiveness::Unreconciled,
     }
+}
+
+fn handoff_acceptance_expired(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    record
+        .metadata
+        .get("handoff_acceptance")
+        .filter(|acceptance| acceptance.get("state").and_then(Value::as_str) == Some("pending"))
+        .and_then(|acceptance| acceptance.get("deadline_at").and_then(Value::as_str))
+        .and_then(|deadline| chrono::DateTime::parse_from_rfc3339(deadline).ok())
+        .is_some_and(|deadline| deadline.with_timezone(&chrono::Utc) <= now)
 }
 
 /// Label where a run executes so an operator can trace the runner process.
@@ -365,7 +385,7 @@ fn discovery_run(
     let last_update = record.updated_at.clone();
     let last_update_age_minutes = age_minutes(last_update.as_deref(), now);
     let source = run_source(&record);
-    let liveness = classify.then(|| classify_liveness(&record, last_update_age_minutes));
+    let liveness = classify.then(|| classify_liveness(&record, last_update_age_minutes, now));
 
     // Runner metadata describes execution placement, not necessarily lifecycle
     // record ownership. Controller handoff projections retain their durable

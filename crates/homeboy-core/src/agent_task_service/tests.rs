@@ -741,6 +741,54 @@ fn discovery_keeps_controller_handoff_commands_resolvable_after_runner_reconnect
     });
 }
 
+#[test]
+fn reconcile_terminalizes_an_unaccepted_controller_handoff_after_its_deadline() {
+    with_isolated_home(|_| {
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        agent_task_lifecycle::record_lab_offload_planned(
+            agent_task_lifecycle::LabOffloadProxyPlan {
+                run_id: "controller-handoff-unaccepted",
+                runner_id: "homeboy-lab",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+                durable_plan: Some(&discovery_plan()),
+            },
+        )
+        .expect("controller handoff persisted before runner acceptance");
+        agent_task_lifecycle::rewrite_record_for_test("controller-handoff-unaccepted", |record| {
+            record.metadata["handoff_acceptance"]["deadline_at"] =
+                serde_json::json!("2000-01-01T00:00:00+00:00");
+        })
+        .expect("expire acceptance deadline");
+
+        let active = discover_runs(AgentTaskDiscoveryFilter::Active).expect("listed");
+        let run = active
+            .runs
+            .iter()
+            .find(|run| run.run_id == "controller-handoff-unaccepted")
+            .expect("unaccepted handoff listed");
+        assert_eq!(run.liveness, Some(AgentTaskLiveness::Unreconciled));
+        assert_eq!(
+            run.commands.status,
+            "homeboy agent-task status controller-handoff-unaccepted"
+        );
+
+        let reconciliation = reconcile_stale_active_runs(false).expect("reconciled");
+        assert_eq!(reconciliation.reconciled, 1);
+        assert_eq!(reconciliation.runs[0].action, "reconciled");
+        assert_eq!(
+            lifecycle_status("controller-handoff-unaccepted")
+                .expect("terminal controller record")
+                .state,
+            AgentTaskRunState::Cancelled
+        );
+    });
+}
+
 #[derive(Clone)]
 struct SucceedingExecutor;
 
