@@ -23,14 +23,16 @@
 //! - **Same model as `utils/baseline.rs`** — dumb primitive, smart consumers
 
 mod extract;
+pub mod items;
 mod loading;
 mod parser;
+mod strings;
 mod types;
 
-pub use super::grammar_strings::find_unclosed_raw_string_on_line;
-use super::grammar_strings::{line_closes_regular_string, line_has_unclosed_regular_string};
+pub use strings::find_unclosed_raw_string_on_line;
+use strings::{line_closes_regular_string, line_has_unclosed_regular_string};
 
-pub(crate) use extract::cached_regex;
+pub use extract::cached_regex;
 pub use extract::{extract, namespace, Symbol};
 pub use loading::{load_for_extension_path, load_grammar, load_grammar_json};
 pub use parser::{ContextualLine, Region, StructuralContext};
@@ -364,13 +366,13 @@ mod tests {
 
     #[test]
     fn extract_rust_imports() {
-        let content = "use std::path::Path;\nuse crate::error::Result;\n\nfn foo() {}\n";
+        let content = "use std::path::Path;\nuse homeboy_error::Result;\n\nfn foo() {}\n";
         let grammar = rust_grammar();
         let paths = import_paths(&extract(content, &grammar));
 
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0], "std::path::Path");
-        assert_eq!(paths[1], "crate::error::Result");
+        assert_eq!(paths[1], "homeboy_error::Result");
     }
 
     #[test]
@@ -615,7 +617,7 @@ mod integration_tests {
         // Test against a sample of Rust code
         let sample = r#"
 use std::path::Path;
-use crate::error::Result;
+use homeboy_error::Result;
 
 pub struct Config {
     data: String,

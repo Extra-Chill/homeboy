@@ -8,9 +8,12 @@ mod dev_run;
 mod env_provider;
 mod execution;
 mod fingerprint;
-pub mod grammar;
-pub mod grammar_items;
-mod grammar_strings;
+// The grammar parsing engine is a language-agnostic primitive; it now lives in
+// homeboy-engine-primitives. Re-exported here so existing
+// `crate::extension::grammar` / `crate::extension::grammar_items` paths keep
+// resolving. (grammar_items is now the `items` submodule of grammar.)
+pub use homeboy_engine_primitives::grammar;
+pub use homeboy_engine_primitives::grammar::items as grammar_items;
 mod lifecycle;
 pub mod lint;
 mod maintenance;

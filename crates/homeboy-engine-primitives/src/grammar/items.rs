@@ -17,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::grammar::{self, Grammar, Symbol};
+use super::{extract, Grammar, Symbol};
 
 // ============================================================================
 // Types
@@ -66,7 +66,7 @@ pub fn parse_items(content: &str, grammar: &Grammar) -> Vec<GrammarItem> {
     let test_range = find_test_module_range(&lines, grammar);
 
     // Extract all symbols using the grammar engine
-    let symbols = grammar::extract(content, grammar);
+    let symbols = extract(content, grammar);
 
     // Map grammar concepts to item kinds
     let item_symbols: Vec<(&Symbol, &str)> = symbols
@@ -591,7 +591,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::extension::grammar::{
+    use crate::grammar::{
         BlockSyntax, CommentSyntax, ConceptPattern, FingerprintGrammar, Grammar, LanguageMeta,
         StringSyntax,
     };
