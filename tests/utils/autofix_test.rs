@@ -1,4 +1,4 @@
-use homeboy::core::refactor::auto::{
+use crate::refactor::auto::{
     parse_fix_results_file, standard_outcome, summarize_optional_fix_results, AutofixMode,
 };
 
@@ -13,7 +13,10 @@ fn test_standard_outcome_dry_run_preview() {
 
     assert_eq!(outcome.status, "auto_fix_preview");
     assert!(!outcome.rerun_recommended);
-    assert!(outcome.hints.iter().any(|h| h.contains("Dry-run only")));
+    assert!(outcome
+        .hints
+        .iter()
+        .any(|h: &String| h.contains("Dry-run only")));
 }
 
 #[test]
@@ -37,7 +40,7 @@ fn test_standard_outcome_write_rerun_hint() {
     assert!(outcome
         .hints
         .iter()
-        .any(|h| h.contains("Re-run checks: homeboy review test homeboy --analyze")));
+        .any(|h: &String| h.contains("Re-run checks: homeboy review test homeboy --analyze")));
 }
 
 #[test]

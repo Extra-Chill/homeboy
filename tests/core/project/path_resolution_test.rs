@@ -6,13 +6,13 @@
 
 use super::*;
 
-use crate::core::component::ScopedExtensionConfig;
-use crate::core::extension::{DeployCapability, ExtensionManifest};
+use crate::component::ScopedExtensionConfig;
+use crate::extension::{DeployCapability, ExtensionManifest};
 use crate::test_support::with_isolated_home;
 use std::collections::HashMap;
 
 fn install_wordpress_extension() {
-    crate::core::extension::save_manifest(&ExtensionManifest {
+    crate::extension::save_manifest(&ExtensionManifest {
         id: "wordpress".to_string(),
         name: "WordPress".to_string(),
         version: "1.0.0".to_string(),

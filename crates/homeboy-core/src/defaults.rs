@@ -16,7 +16,9 @@ pub use policy::{
     ReleaseGateConfig, ReleaseGateLocalHotPolicy, RELEASE_GATE_LOCAL_HOT_ENV,
 };
 
-#[cfg(test)]
+// Available to the shared test harness under the `test-support` feature, not
+// just this crate's own `#[cfg(test)]` builds. (#8400)
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use io::reset_config_cache_for_test;
 
 pub(crate) use builtins::deploy_generated_build_dir;

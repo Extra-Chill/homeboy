@@ -12,6 +12,12 @@ publish = false
 name = "homeboy_core"
 path = "src/lib.rs"
 
+[features]
+# Exposes the hermetic `test_support` harness to dependent crates (the root
+# binary) so their tests can reuse core's isolation helpers without duplicating
+# them. Enabled as a dev-dependency feature by the root crate. (#8400)
+test-support = []
+
 [dependencies]
 homeboy-cli-contract = { version = "0.1.0", path = "../homeboy-cli-contract" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }

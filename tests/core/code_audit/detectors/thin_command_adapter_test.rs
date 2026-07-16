@@ -1,6 +1,6 @@
 use super::AuditFinding;
 use super::ThinCommandAdapterConfig;
-use crate::core::component::ThinCommandAdapterMarkerGroup;
+use crate::component::ThinCommandAdapterMarkerGroup;
 
 fn write(root: &std::path::Path, rel: &str, body: &str) {
     let path = root.join(rel);

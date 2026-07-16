@@ -1,6 +1,6 @@
 use super::*;
-use crate::core::api_jobs::{JobEventKind, JobStatus, JobStore};
-use crate::core::observation::{ArtifactRecord, NewRunRecord, ObservationStore};
+use crate::api_jobs::{JobEventKind, JobStatus, JobStore};
+use crate::observation::{ArtifactRecord, NewRunRecord, ObservationStore};
 use crate::test_support::HomeGuard;
 use base64::Engine;
 #[cfg(unix)]
@@ -46,7 +46,7 @@ fn status_reports_active_job_recovery_evidence_without_mutating_the_store() {
     let mut state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
     state.lease_id = "evidence-lease".to_string();
     write_daemon_state_for_test(&state);
-    let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+    let path = crate::paths::daemon_jobs_file().expect("jobs path");
     let store = JobStore::open_without_reconciliation(&path)
         .expect("store")
         .with_daemon_lease(state.lease_id.clone());
@@ -63,7 +63,7 @@ fn status_reports_active_job_recovery_evidence_without_mutating_the_store() {
     assert_eq!(evidence.operation, "runner.exec");
     assert_eq!(
         evidence.disposition,
-        crate::core::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
+        crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
     );
 }
 
@@ -73,7 +73,7 @@ fn status_marks_pidless_jobs_non_recoverable_while_the_lease_is_live() {
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.lease_id = "live-evidence-lease".to_string();
     write_daemon_state_for_test(&state);
-    let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+    let path = crate::paths::daemon_jobs_file().expect("jobs path");
     let store = JobStore::open_without_reconciliation(&path)
         .expect("store")
         .with_daemon_lease(state.lease_id);
@@ -85,7 +85,7 @@ fn status_marks_pidless_jobs_non_recoverable_while_the_lease_is_live() {
     assert_eq!(status.active_job_recovery_evidence.len(), 1);
     assert_eq!(
         status.active_job_recovery_evidence[0].disposition,
-        crate::core::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
+        crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
     );
 }
 
@@ -103,7 +103,7 @@ fn write_legacy_daemon_state_for_test(pid: u32, address: &str) -> (std::path::Pa
 }
 
 fn create_local_runner_for_file_api(id: &str, workspace_root: &std::path::Path) {
-    crate::core::runner::create(
+    crate::runner::create(
         &serde_json::json!({
             "id": id,
             "kind": "local",
@@ -1430,7 +1430,7 @@ fn daemon_http_error_envelope_includes_error_payload() {
 #[test]
 fn routes_remote_runner_session_registration() {
     let _home = HomeGuard::new();
-    crate::core::runner::create(
+    crate::runner::create(
         r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/runner/workspaces"}"#,
         false,
     )
@@ -1456,12 +1456,9 @@ fn routes_remote_runner_session_registration() {
         serde_json::json!("controller")
     );
 
-    let status = crate::core::runner::status("homeboy-lab").expect("runner status");
+    let status = crate::runner::status("homeboy-lab").expect("runner status");
     assert!(status.connected);
-    assert_eq!(
-        status.state,
-        crate::core::runner::RunnerSessionState::Connected
-    );
+    assert_eq!(status.state, crate::runner::RunnerSessionState::Connected);
     let session = status.session.expect("session");
     assert_eq!(session.controller_id.as_deref(), Some("extra-chill"));
     assert_eq!(
@@ -1510,7 +1507,7 @@ fn route_with_body_validates_exec_requests() {
 
 fn create_lab_local_runner() -> HomeGuard {
     let home = HomeGuard::new();
-    crate::core::runner::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+    crate::runner::create(r#"{"id":"lab-local","kind":"local"}"#, false)
         .expect("create lab local runner");
     home
 }
@@ -1632,13 +1629,13 @@ fn daemon_exec_derives_implicit_command_secret_names_before_workload_validation(
         .expect("cwd")
         .to_string_lossy()
         .to_string();
-    let plan = crate::core::plan::HomeboyPlan::builder_for_description(
-        crate::core::plan::PlanKind::LabOffload,
+    let plan = crate::plan::HomeboyPlan::builder_for_description(
+        crate::plan::PlanKind::LabOffload,
         "test",
     )
     .build();
-    let command_contract = crate::core::runner::LabOffloadCommand {
-        command: crate::command_contract::LabCommandContract::portable(
+    let command_contract = crate::runner::LabOffloadCommand {
+        command: crate::lab_contract::LabCommandContract::portable(
             "tunnel preview-client start",
             None,
             false,
@@ -1648,8 +1645,8 @@ fn daemon_exec_derives_implicit_command_secret_names_before_workload_validation(
         required_capabilities: Vec::new(),
         workload: None,
     };
-    let workload = crate::core::runner::workload::build_runner_workload(
-        crate::core::runner::workload::RunnerWorkloadBuildInput {
+    let workload = crate::runner::workload::build_runner_workload(
+        crate::runner::workload::RunnerWorkloadBuildInput {
             plan: &plan,
             command: &command_contract,
             capture_patch: false,
@@ -1893,20 +1890,20 @@ fn exec_capture_patch_records_remote_delta_artifact() {
 #[test]
 fn runner_exec_rejects_requests_that_violate_runner_policy_before_daemon_dispatch() {
     let _home = HomeGuard::new();
-    crate::core::server::create(
+    crate::server::create(
         r#"{"id":"lab-server","host":"192.0.2.10","user":"user"}"#,
         false,
     )
     .expect("create server");
-    crate::core::runner::create(
+    crate::runner::create(
         r#"{"id":"lab-server","kind":"ssh","server_id":"lab-server","workspace_root":"/srv/homeboy"}"#,
         false,
     )
     .expect("create ssh runner");
 
-    let err = crate::core::runner::exec(
+    let err = crate::runner::exec(
         "lab-server",
-        crate::core::runner::RunnerExecOptions {
+        crate::runner::RunnerExecOptions {
             cwd: Some("/srv/homeboy/project".to_string()),
             project_id: None,
             allow_diagnostic_ssh: false,
@@ -1942,7 +1939,7 @@ fn runner_exec_rejects_requests_that_violate_runner_policy_before_daemon_dispatc
     assert_eq!(err.details["field"], "raw_exec");
 }
 
-fn wait_for_job(store: &JobStore, job_id: &str) -> crate::core::api_jobs::Job {
+fn wait_for_job(store: &JobStore, job_id: &str) -> crate::api_jobs::Job {
     let id = uuid::Uuid::parse_str(job_id).expect("uuid");
     for _ in 0..100 {
         let job = store.get(id).expect("job");

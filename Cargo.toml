@@ -91,6 +91,12 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 default = []
 slow-tests = []
 
+# Root-binary tests reuse the hermetic harness that now lives in homeboy-core.
+# Enabling the core crate's `test-support` feature for dev builds exposes
+# `homeboy_core::test_support` (re-exported as `crate::test_support`). (#8400)
+[dev-dependencies]
+homeboy-core = { version = "0.1.0", path = "crates/homeboy-core", features = ["test-support"] }
+
 [profile.dist]
 inherits = "release"
 lto = "thin"

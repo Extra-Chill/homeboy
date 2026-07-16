@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 use std::fs;
 
-use crate::core::rig::pipeline::{cleanup_shared_paths, run_pipeline};
-use crate::core::rig::spec::{PipelineStep, RigSpec, SharedPathOp, SharedPathSpec};
-use crate::core::rig::state::RigState;
+use crate::rig::pipeline::{cleanup_shared_paths, run_pipeline};
+use crate::rig::spec::{PipelineStep, RigSpec, SharedPathOp, SharedPathSpec};
+use crate::rig::state::RigState;
 use crate::test_support::with_isolated_home;
 
 fn rig_with_shared_path(id: &str, shared: SharedPathSpec, op: SharedPathOp) -> RigSpec {

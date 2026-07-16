@@ -63,7 +63,7 @@ fn clear_config_cache() {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn reset_config_cache_for_test() {
     clear_config_cache();
 }

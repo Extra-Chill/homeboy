@@ -107,7 +107,7 @@ impl HermeticTestContext {
             .env("HOMEBOY_RUNTIME_TMPDIR", self.runtime_dir())
             .env("TMPDIR", self.temp_dir())
             .env(
-                crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+                crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
                 self.invocation_runtime.path(),
             )
             .env("HOMEBOY_NO_UPDATE_CHECK", "1");
@@ -151,18 +151,18 @@ pub(crate) struct AuditHomeGuard {
     _guard: MutexGuard<'static, ()>,
 }
 
-pub(crate) struct ArtifactRootOverrideGuard;
+pub struct ArtifactRootOverrideGuard;
 
 impl ArtifactRootOverrideGuard {
     pub(crate) fn new(path: PathBuf) -> Self {
-        crate::core::set_artifact_root_override(Some(path));
+        crate::set_artifact_root_override(Some(path));
         Self
     }
 }
 
 impl Drop for ArtifactRootOverrideGuard {
     fn drop(&mut self) {
-        crate::core::set_artifact_root_override(None);
+        crate::set_artifact_root_override(None);
     }
 }
 
@@ -197,10 +197,10 @@ impl HomeGuard {
         let prior_artifact_root = std::env::var("HOMEBOY_ARTIFACT_ROOT").ok();
         let prior_runtime_tmpdir = std::env::var("HOMEBOY_RUNTIME_TMPDIR").ok();
         let prior_invocation_runtime =
-            std::env::var(crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
+            std::env::var(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
         let prior_no_update_check = std::env::var("HOMEBOY_NO_UPDATE_CHECK").ok();
         let prior_daemon_binary_sha =
-            std::env::var(crate::core::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV).ok();
+            std::env::var(crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV).ok();
         // The isolated HOME hosts `~/.config/homeboy/extensions/**/*.sh`
         // capability scripts that tests execute. On `noexec`-`/tmp` hosts a
         // plain `TempDir::new()` lands the whole HOME on a `noexec` mount,
@@ -215,19 +215,19 @@ impl HomeGuard {
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
         std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", "1");
         std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir());
-        crate::core::set_artifact_root_override(None);
+        crate::set_artifact_root_override(None);
         // Pin invocation runtime to a SHORT tempdir, isolated from `$TMPDIR`
         // and from the home tempdir (which itself can already live on a long
         // path on macOS, e.g. `/var/folders/<14>/T/.tmpXXXXXX/...`). Using
         // `/tmp` directly keeps tests within the platform `sockaddr_un`
         // budget regardless of host configuration.
         std::env::set_var(
-            crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+            crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
             context.invocation_runtime.path(),
         );
         // Avoid hashing the giant debug test binary on every daemon-state write.
         std::env::set_var(
-            crate::core::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
+            crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
             TEST_DAEMON_BINARY_SHA,
         );
         Self {
@@ -393,50 +393,61 @@ impl Drop for HomeGuard {
             Some(value) => std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", value),
             None => std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR"),
         }
-        crate::core::set_artifact_root_override(None);
+        crate::set_artifact_root_override(None);
         match &self.prior_invocation_runtime {
             Some(value) => std::env::set_var(
-                crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+                crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
                 value,
             ),
-            None => std::env::remove_var(
-                crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
-            ),
+            None => {
+                std::env::remove_var(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV)
+            }
         }
         match &self.prior_no_update_check {
             Some(value) => std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", value),
             None => std::env::remove_var("HOMEBOY_NO_UPDATE_CHECK"),
         }
         match &self.prior_daemon_binary_sha {
-            Some(value) => {
-                std::env::set_var(crate::core::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV, value)
-            }
-            None => std::env::remove_var(crate::core::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV),
+            Some(value) => std::env::set_var(crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV, value),
+            None => std::env::remove_var(crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV),
         }
         reset_cached_test_state();
     }
 }
 
-pub(crate) fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
+pub fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
     let home = HomeGuard::new();
     body(&home.context.root)
 }
 
-pub(crate) fn with_isolated_audit_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
+pub fn with_isolated_audit_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
     let guard = AuditHomeGuard::new();
     body(&guard.home.context.root)
 }
 
-#[cfg(test)]
-fn reset_cached_test_state() {
-    crate::core::defaults::reset_config_cache_for_test();
-    crate::commands::utils::entity_suggest::reset_entity_suggestion_cache_for_test();
+/// Optional command-layer cache reset hook.
+///
+/// `test_support` lives in `homeboy-core`, which must not depend upward on the
+/// CLI `commands` layer. When the root binary's tests need a command-layer
+/// cache (e.g. the entity-suggestion cache) reset during home isolation, it
+/// registers a hook via [`set_command_layer_reset_hook`]. Core's own tests do
+/// not register one, so this is a no-op there. (#8400)
+static COMMAND_LAYER_RESET_HOOK: OnceLock<fn()> = OnceLock::new();
+
+/// Register a command-layer cache reset invoked on each isolated-home setup.
+/// Idempotent: only the first registration wins.
+pub fn set_command_layer_reset_hook(hook: fn()) {
+    let _ = COMMAND_LAYER_RESET_HOOK.set(hook);
 }
 
-#[cfg(not(test))]
-fn reset_cached_test_state() {}
+fn reset_cached_test_state() {
+    crate::defaults::reset_config_cache_for_test();
+    if let Some(hook) = COMMAND_LAYER_RESET_HOOK.get() {
+        hook();
+    }
+}
 
-pub(crate) fn write_source_extension(home: &std::path::Path, id: &str, file_extension: &str) {
+pub fn write_source_extension(home: &std::path::Path, id: &str, file_extension: &str) {
     let extension_dir = home.join(".config/homeboy/extensions").join(id);
     std::fs::create_dir_all(&extension_dir).expect("extension dir");
     std::fs::write(
@@ -466,11 +477,11 @@ pub(crate) fn write_source_extension(home: &std::path::Path, id: &str, file_exte
     }
 }
 
-pub(crate) fn shared_git_repo_fixture(name: &str) -> (TempDir, PathBuf) {
+pub fn shared_git_repo_fixture(name: &str) -> (TempDir, PathBuf) {
     shared_git_repo_fixture_from_template(name, shared_empty_git_repo_template())
 }
 
-pub(crate) fn shared_committed_git_repo_fixture(name: &str) -> (TempDir, PathBuf) {
+pub fn shared_committed_git_repo_fixture(name: &str) -> (TempDir, PathBuf) {
     shared_git_repo_fixture_from_template(name, shared_committed_git_repo_template())
 }
 
@@ -520,7 +531,7 @@ fn copy_dir_all(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_git_fixture_command(repo: &Path, args: &[&str]) {
+pub fn run_git_fixture_command(repo: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)
@@ -554,7 +565,7 @@ fn run_git_template_command(repo: &Path, args: &[&str]) {
     );
 }
 
-pub(crate) fn git_fixture_output(repo: &Path, args: &[&str]) -> String {
+pub fn git_fixture_output(repo: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)
@@ -655,7 +666,7 @@ pub(crate) fn home_env_guard() -> MutexGuard<'static, ()> {
 }
 
 /// Serializes tests that mutate or capture process-global environment state.
-pub(crate) fn env_lock() -> MutexGuard<'static, ()> {
+pub fn env_lock() -> MutexGuard<'static, ()> {
     home_lock().lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -672,7 +683,7 @@ fn audit_lock() -> &'static Mutex<()> {
 /// Spin up a single-shot localhost HTTP server returning `status` once, used to
 /// probe public-artifact-URL reachability. Returns the base URL ending in
 /// `/homeboy`. Shared by `runs` and `bench` artifact-viewer tests.
-pub(crate) fn serve_public_artifact_base_once(status: u16) -> String {
+pub fn serve_public_artifact_base_once(status: u16) -> String {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 

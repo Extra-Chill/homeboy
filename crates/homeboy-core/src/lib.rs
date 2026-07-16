@@ -148,11 +148,16 @@ pub use homeboy_lab_contract::path_materialization;
 pub mod performance_hotspots;
 pub mod phase_timing;
 pub mod plan;
+// Shared hermetic test helpers. Compiled for this crate's own tests and, via the
+// `test-support` feature, exposed to dependent crates (the root binary) whose
+// tests reuse the same isolation harness. (#8400)
 pub mod preview_client;
 pub mod preview_consumer;
 pub mod preview_ingress;
 #[cfg(test)]
 mod preview_ingress_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 // process moved to the internal `homeboy-process` crate. Re-exported so existing
 // `crate::core::process::*` call sites keep working unchanged.
 pub use homeboy_process as process;

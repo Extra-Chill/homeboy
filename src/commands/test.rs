@@ -519,6 +519,14 @@ fn test_observation_initial_metadata(
     })
 }
 
+// Command-layer integration test for component scripts. It drives
+// `crate::commands::test::run` and other CLI types, so it lives in the root
+// binary's test tree (moved out of homeboy-core, which cannot depend upward on
+// the command layer). (#8400)
+#[cfg(test)]
+#[path = "../../tests/core/extension/component_script_test.rs"]
+mod component_script_test;
+
 #[cfg(test)]
 mod tests {
     use super::*;
