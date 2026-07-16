@@ -657,8 +657,9 @@ mod surface {
             .filter(|entry| !entry.hidden)
             .map(|entry| entry.name.clone())
             .collect();
-        let docs_index_commands =
-            documented_command_index_entries(include_str!("../../docs/commands/commands-index.md"));
+        let docs_index_commands = documented_command_index_entries(include_str!(
+            "../../../../docs/commands/commands-index.md"
+        ));
 
         command_surface_doctor_report(
             source_registry_commands,

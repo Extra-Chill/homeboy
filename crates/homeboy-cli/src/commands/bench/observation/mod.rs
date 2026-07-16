@@ -16,7 +16,7 @@ pub(in crate::commands::bench::observation) use homeboy::core::observation::Arti
 pub(in crate::commands::bench::observation) use lifecycle::BenchObservationSummary;
 
 #[cfg(test)]
-#[path = "../../../../tests/commands/bench/observation_artifact_test.rs"]
+#[path = "../../../../../../tests/commands/bench/observation_artifact_test.rs"]
 mod observation_artifact_test;
 
 #[cfg(test)]

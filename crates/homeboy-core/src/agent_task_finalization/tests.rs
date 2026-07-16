@@ -80,8 +80,7 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
                 None,
             ));
         }
-        let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } =
-            actual
+        let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } = actual
         else {
             unreachable!("test candidate is Git")
         };
@@ -746,8 +745,8 @@ fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
             record.lifecycle.provider_runtime.clear();
         })
         .expect("obsolete record persisted");
-        let before = crate::agent_task_lifecycle::status(&record.run_id)
-            .expect("obsolete record loads");
+        let before =
+            crate::agent_task_lifecycle::status(&record.run_id).expect("obsolete record loads");
         assert!(before.lifecycle.provider_runtime.is_empty());
 
         let mut backend = MockBackend {
@@ -764,10 +763,7 @@ fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
         let after = crate::agent_task_lifecycle::status(&record.run_id)
             .expect("obsolete record remains readable");
 
-        assert_eq!(
-            error.code,
-            crate::ErrorCode::ValidationInvalidArgument
-        );
+        assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
         assert_eq!(before, after);
         assert!(!backend.committed);
         assert!(!backend.pushed);
@@ -817,12 +813,9 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
             artifact_bindings: Vec::new(),
             queue: AgentTaskQueueStatus::default(),
         };
-        let record = crate::agent_task_lifecycle::record_completed_run(
-            &plan,
-            &aggregate,
-            Some("cook-3678"),
-        )
-        .expect("durable aggregate recorded");
+        let record =
+            crate::agent_task_lifecycle::record_completed_run(&plan, &aggregate, Some("cook-3678"))
+                .expect("durable aggregate recorded");
         let runtimes = &record.lifecycle.provider_runtime;
 
         assert_eq!(
@@ -927,8 +920,7 @@ fn stale_candidate_mutation_is_rejected_before_commit_and_push() {
     let repo = real_git_repo();
     std::fs::write(repo.path().join("candidate"), "before").unwrap();
     let candidate =
-        crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap())
-            .unwrap();
+        crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap()).unwrap();
     std::fs::write(repo.path().join("candidate"), "after").unwrap();
     let mut backend = real_git_backend(repo.path(), candidate);
     let error = finalize_pr_with_backend(
@@ -946,8 +938,7 @@ fn head_drift_is_rejected_before_commit_and_push() {
     let repo = real_git_repo();
     std::fs::write(repo.path().join("candidate"), "candidate").unwrap();
     let candidate =
-        crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap())
-            .unwrap();
+        crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap()).unwrap();
     assert!(Command::new("git")
         .args(["add", "candidate"])
         .current_dir(repo.path())
@@ -976,8 +967,7 @@ fn changed_file_order_and_duplicates_are_normalized() {
     std::fs::write(repo.path().join("a"), "a").unwrap();
     std::fs::write(repo.path().join("b"), "b").unwrap();
     let candidate =
-        crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap())
-            .unwrap();
+        crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap()).unwrap();
     let mut backend = real_git_backend(repo.path(), candidate);
     let report = finalize_pr_with_backend(
         real_git_finalization_options(
@@ -990,8 +980,7 @@ fn changed_file_order_and_duplicates_are_normalized() {
     assert_eq!(report.changed_files, vec!["a", "b"]);
     let mut mismatch = real_git_backend(
         repo.path(),
-        crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap())
-            .unwrap(),
+        crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap()).unwrap(),
     );
     assert!(finalize_pr_with_backend(
         real_git_finalization_options(repo.path(), vec!["a".to_string()]),
@@ -1256,12 +1245,10 @@ fn options() -> AgentTaskPrFinalizationOptions {
             schema: "homeboy/agent-task-review-dossier/v1".to_string(),
             summary: "Finalize a verified candidate.".to_string(),
             what_changed: vec!["Updates the finalization contract.".to_string()],
-            how_to_test: vec![
-                crate::agent_task_review_dossier::AgentTaskReviewTestStep {
-                    command: "cargo test agent_task_finalization".to_string(),
-                    expected: "passes".to_string(),
-                },
-            ],
+            how_to_test: vec![crate::agent_task_review_dossier::AgentTaskReviewTestStep {
+                command: "cargo test agent_task_finalization".to_string(),
+                expected: "passes".to_string(),
+            }],
             compatibility: "No compatibility impact.".to_string(),
             evidence: Vec::new(),
             ai_assistance: crate::agent_task_review_dossier::AgentTaskReviewAiAssistance {

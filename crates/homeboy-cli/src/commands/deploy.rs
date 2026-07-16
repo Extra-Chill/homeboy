@@ -544,5 +544,5 @@ fn multi_deploy_actionable(projects: &[ProjectDeployResult]) -> CommandActionabl
 }
 
 #[cfg(test)]
-#[path = "../../tests/commands/deploy_test.rs"]
+#[path = "../../../../tests/commands/deploy_test.rs"]
 mod deploy_test;

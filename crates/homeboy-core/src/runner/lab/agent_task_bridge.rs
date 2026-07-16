@@ -24,9 +24,7 @@ use crate::api_jobs::JobEvent;
 use crate::api_jobs::JobEventKind;
 use crate::artifact_manifest::ArtifactManifest;
 use crate::engine::local_files::write_file_owner_only;
-use crate::lab_contract::{
-    RunnerWorkloadAgentTask, RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
-};
+use crate::lab_contract::{RunnerWorkloadAgentTask, RunnerWorkloadAgentTaskLifecycleMirrorPolicy};
 use crate::notification_route::NotificationRoute;
 use crate::runner::agent_task_lifecycle_event::{
     agent_task_run_plan_lifecycle_event_from_job_events, is_agent_task_run_plan_envelope,

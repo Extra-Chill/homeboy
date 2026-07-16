@@ -515,20 +515,20 @@ mod settings_tests;
 mod warmup_tests;
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/bench_default_baseline_dispatch_test.rs"]
+#[path = "../../../../../../tests/core/rig/bench_default_baseline_dispatch_test.rs"]
 mod bench_default_baseline_dispatch_test;
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/bench_default_baseline_output_test.rs"]
+#[path = "../../../../../../tests/core/rig/bench_default_baseline_output_test.rs"]
 mod bench_default_baseline_output_test;
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/bench_prepare_pipeline_test.rs"]
+#[path = "../../../../../../tests/core/rig/bench_prepare_pipeline_test.rs"]
 mod bench_prepare_pipeline_test;
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/bench_resource_lease_test.rs"]
+#[path = "../../../../../../tests/core/rig/bench_resource_lease_test.rs"]
 mod bench_resource_lease_test;
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/bench_rig_concurrency_dispatch_test.rs"]
+#[path = "../../../../../../tests/core/rig/bench_rig_concurrency_dispatch_test.rs"]
 mod bench_rig_concurrency_dispatch_test;
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/bench_rig_path_override_test.rs"]
+#[path = "../../../../../../tests/core/rig/bench_rig_path_override_test.rs"]
 mod bench_rig_path_override_test;

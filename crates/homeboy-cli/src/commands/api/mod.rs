@@ -233,7 +233,7 @@ fn build_api_json(args: &ApiArgs) -> String {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/commands/api_test.rs"]
+#[path = "../../../../../tests/commands/api_test.rs"]
 mod api_test;
 
 fn build_body(body: &Option<String>, form: &[String]) -> Option<serde_json::Value> {

@@ -784,5 +784,5 @@ fn run_preview_ingress(command: TunnelPreviewIngressCommand) -> CmdResult<Tunnel
 }
 
 #[cfg(test)]
-#[path = "../../tests/commands/tunnel_test.rs"]
+#[path = "../../../../tests/commands/tunnel_test.rs"]
 mod tests;

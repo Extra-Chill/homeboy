@@ -108,5 +108,5 @@ fn build_input(method: &str, args: RequestArgs) -> HttpRequestInput {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/commands/http_test.rs"]
+#[path = "../../../../../tests/commands/http_test.rs"]
 mod http_test;
