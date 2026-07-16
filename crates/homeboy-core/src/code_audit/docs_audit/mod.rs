@@ -118,7 +118,7 @@ pub struct AuditResult {
 const DEFAULT_DOC_EXCLUDES: &[&str] = &["changelog.md"];
 
 pub(crate) fn find_doc_files(docs_path: &Path, excluded_targets: &[String]) -> Vec<String> {
-    use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+    use homeboy_engine_primitives::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
     if !docs_path.exists() {
         return Vec::new();

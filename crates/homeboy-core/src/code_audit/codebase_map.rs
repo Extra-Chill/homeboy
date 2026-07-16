@@ -12,8 +12,8 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::code_audit::fingerprint::{self, FileFingerprint};
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use crate::{component, extension, Error};
+use homeboy_engine_primitives::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
 // ============================================================================
 // Types

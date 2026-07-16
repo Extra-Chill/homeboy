@@ -8,8 +8,8 @@ use std::path::Path;
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
-use crate::engine::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
+use homeboy_engine_primitives::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use homeboy_engine_primitives::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
 
 #[path = "../test_quality.rs"]
 mod test_quality;

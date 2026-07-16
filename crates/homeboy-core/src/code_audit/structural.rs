@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::engine::codebase_scan::{CodebaseSnapshot, ExtensionFilter, ScanConfig};
+use homeboy_engine_primitives::codebase_scan::{CodebaseSnapshot, ExtensionFilter, ScanConfig};
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};

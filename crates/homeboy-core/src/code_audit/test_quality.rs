@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use homeboy_engine_primitives::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
 use crate::code_audit::conventions::AuditFinding;
 use crate::code_audit::findings::{Finding, Severity};

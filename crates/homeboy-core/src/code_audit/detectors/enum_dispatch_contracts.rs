@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::engine::codebase_scan::CodebaseSnapshot;
+use homeboy_engine_primitives::codebase_scan::CodebaseSnapshot;
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
@@ -654,7 +654,7 @@ mod tests {
         )
         .expect("write fixture");
 
-        use crate::engine::codebase_scan::{ExtensionFilter, ScanConfig};
+        use homeboy_engine_primitives::codebase_scan::{ExtensionFilter, ScanConfig};
         let snapshot = CodebaseSnapshot::build(
             dir.path(),
             &ScanConfig {

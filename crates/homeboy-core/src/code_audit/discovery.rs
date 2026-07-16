@@ -8,8 +8,8 @@ use super::fingerprint::{fingerprint_content, normalize_convention_tags, FileFin
 use super::walker::{
     extension_provided_file_extensions, is_extension_provided_source_file, is_test_path,
 };
-use crate::engine::codebase_scan::CodebaseSnapshot;
 use homeboy_audit_contract::AuditConfig;
+use homeboy_engine_primitives::codebase_scan::CodebaseSnapshot;
 
 type DiscoveryGroupKey = (String, Language, bool, Vec<String>);
 
