@@ -121,6 +121,7 @@ impl Drop for AttemptWorkspace {
     }
 }
 
+#[derive(Debug)]
 pub(super) struct HarvestPreflight {
     pub(super) base_sha: Option<String>,
     pub(super) source_provenance: Option<serde_json::Value>,
@@ -130,6 +131,7 @@ pub(super) struct HarvestPreflight {
 /// A gate-feedback retry may start from the promoted, uncommitted candidate.
 /// This patch is derived only after its recorded provenance reproduces the
 /// exact worktree tree, so it cannot authorize arbitrary existing dirt.
+#[derive(Debug)]
 pub(super) struct CandidateBaseline {
     patch: String,
 }

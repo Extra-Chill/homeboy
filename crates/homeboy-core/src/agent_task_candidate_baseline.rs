@@ -35,12 +35,41 @@ pub(crate) fn validate_gate_feedback_candidate_baseline(
     }
     let patch = String::from_utf8(patch)
         .map_err(|error| invalid(&format!("recorded patch artifact is not UTF-8: {error}")))?;
-    if patch_tree(root, &patch)? != workspace_tree(root)? {
+    verify_patch_is_present(root, &patch)?;
+    let current_diff = cook_loop
+        .get("current_diff")
+        .and_then(Value::as_str)
+        .filter(|diff| !diff.trim().is_empty())
+        .ok_or_else(|| invalid("gate-feedback candidate has no complete current diff"))?;
+    if patch_tree(root, current_diff)? != workspace_tree(root)? {
         return Err(invalid(
-            "recorded patch artifact does not match the promoted candidate worktree state",
+            "recorded current diff does not match the promoted candidate worktree state",
         ));
     }
-    Ok(patch)
+    Ok(current_diff.to_string())
+}
+
+fn verify_patch_is_present(root: &Path, patch: &str) -> Result<()> {
+    let patch_file = tempfile::NamedTempFile::new().map_err(|error| invalid(&error.to_string()))?;
+    std::fs::write(patch_file.path(), patch).map_err(|error| invalid(&error.to_string()))?;
+    let output = Command::new("git")
+        .args([
+            "apply",
+            "--reverse",
+            "--check",
+            "--binary",
+            &patch_file.path().display().to_string(),
+        ])
+        .current_dir(root)
+        .output()
+        .map_err(|error| invalid(&error.to_string()))?;
+    if !output.status.success() {
+        return Err(invalid(&format!(
+            "recorded patch artifact is not present in the candidate worktree: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
 }
 
 fn patch_tree(root: &Path, patch: &str) -> Result<String> {
@@ -93,4 +122,61 @@ fn invalid(message: &str) -> Error {
         None,
         None,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layered_remediation_uses_complete_current_diff() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        git(temp.path(), &["init", "-b", "main"]);
+        git(temp.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        std::fs::write(temp.path().join("tracked.txt"), "one\n").expect("base file");
+        git(temp.path(), &["add", "tracked.txt"]);
+        git(temp.path(), &["commit", "-m", "base"]);
+
+        std::fs::write(temp.path().join("tracked.txt"), "three\n").expect("candidate file");
+        std::fs::write(temp.path().join("untracked.txt"), "candidate\n")
+            .expect("untracked candidate file");
+        git(temp.path(), &["add", "-N", "untracked.txt"]);
+        let current_diff = git(temp.path(), &["diff", "--binary"]);
+        let remediation = "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-two\n+three\n";
+        let artifacts = tempfile::tempdir().expect("artifact tempdir");
+        let artifact = artifacts.path().join("remediation.patch");
+        std::fs::write(&artifact, remediation).expect("remediation artifact");
+        let cook_loop = serde_json::json!({
+            "current_diff": current_diff,
+            "patch_artifact": {
+                "path": artifact,
+                "sha256": format!("{:x}", Sha256::digest(remediation.as_bytes()))
+            }
+        });
+
+        assert_eq!(
+            validate_gate_feedback_candidate_baseline(temp.path(), &cook_loop)
+                .expect("layered candidate baseline"),
+            current_diff
+        );
+    }
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
 }
