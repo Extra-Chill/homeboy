@@ -846,7 +846,7 @@ fn materialize_agent_task_retry_handoff(
         return Ok(None);
     }
 
-    let source_plan = agent_task_lifecycle::load_plan(&retry.run_id)?;
+    let source_plan = agent_task_lifecycle::load_controller_plan(&retry.run_id)?;
     let primary_workspace = retry_plan_primary_workspace(&source_plan)?;
     let record = agent_task_lifecycle::retry(&retry.run_id, retry.new_run_id.as_deref())?;
     let plan = agent_task_lifecycle::load_plan(&record.run_id)?;

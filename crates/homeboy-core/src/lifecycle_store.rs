@@ -38,6 +38,12 @@ pub(super) fn read_plan_path(path: &str) -> Result<AgentTaskPlan> {
     Ok(plan)
 }
 
+pub(super) fn read_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
+    let plan = read_json(&run_dir(run_id)?.join("plan.json"))?;
+    validate_execution_budget(&plan)?;
+    Ok(plan)
+}
+
 /// Execution owns the one permitted durable legacy rewrite. Read-only callers
 /// (notably status) use `read_plan_path` and never mutate a plan preview.
 pub(super) fn read_plan_path_for_execution(path: &str) -> Result<AgentTaskPlan> {

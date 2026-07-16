@@ -332,6 +332,13 @@ pub fn load_plan(run_id: &str) -> Result<AgentTaskPlan> {
     store::read_plan_path(&record.plan_path)
 }
 
+/// Load the plan owned by this controller's durable run identity. Runner paths
+/// projected into lifecycle metadata are transport evidence, not retry input.
+pub fn load_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
+    let run_id = resolve_run_id(run_id)?;
+    store::read_controller_plan(&run_id)
+}
+
 /// Load a durable plan for a scheduler or provider execution. This is the only
 /// read path allowed to upgrade a legacy execution-budget envelope.
 pub fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
@@ -1698,7 +1705,7 @@ pub fn mark_resuming(run_id: &str) -> Result<AgentTaskRunRecord> {
 
 pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRunRecord> {
     let source = store::read_record(&resolve_run_id(run_id)?)?;
-    let plan = store::read_plan_path(&source.plan_path)?;
+    let plan = load_controller_plan(&source.run_id)?;
     let mut retry = submit_plan(&plan, requested_run_id)?;
     let metadata = retry.ensure_metadata_object();
     if let Some(route) =

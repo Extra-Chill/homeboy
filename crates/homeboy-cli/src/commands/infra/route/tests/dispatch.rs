@@ -635,7 +635,6 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
         );
         agent_task_lifecycle::submit_plan(&source_plan, Some("failed-run"))
             .expect("source run submitted");
-        let source_plan = agent_task_lifecycle::load_plan("failed-run").expect("source plan");
         let failure = Error::internal_unexpected("provider exited before completion");
         agent_task_lifecycle::record_pre_execution_failure(
             "failed-run",
@@ -644,6 +643,18 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
             &failure,
         )
         .expect("source failure persisted");
+        let store = homeboy::core::observation::ObservationStore::open_initialized()
+            .expect("observation store");
+        let mut observed = store
+            .get_run("failed-run")
+            .expect("read source run")
+            .expect("source run exists");
+        observed.metadata_json["agent_task_run"]["plan_path"] = serde_json::json!(
+            "/home/chubes/.local/share/homeboy/agent-task-runs/failed-run/plan.json"
+        );
+        store
+            .upsert_imported_run_preserving_terminal(&observed)
+            .expect("mirror runner transport path");
 
         let normalized = [
             "homeboy",
