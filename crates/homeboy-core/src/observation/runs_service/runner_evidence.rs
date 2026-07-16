@@ -72,6 +72,14 @@ pub trait RunnerEvidenceProvider: Send + Sync {
         artifact_id: &str,
     ) -> Result<Value>;
 
+    /// Cancel a job running on a runner, returning the terminal job record and
+    /// its events.
+    fn runner_job_cancel(
+        &self,
+        runner_id: &str,
+        job_id: &str,
+    ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)>;
+
     /// Refresh mirrored daemon evidence for a run, returning any mirrored runs.
     fn refresh_mirrored_daemon_evidence(&self, run_id: &str) -> Result<Option<Vec<RunRecord>>>;
 
@@ -116,6 +124,19 @@ impl RunnerEvidenceProvider for NoopRunnerEvidenceProvider {
         _job_id: &str,
         _artifact_id: &str,
     ) -> Result<Value> {
+        Err(Error::validation_invalid_argument(
+            "runner",
+            "no runner evidence provider is registered",
+            None,
+            None,
+        ))
+    }
+
+    fn runner_job_cancel(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+    ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
         Err(Error::validation_invalid_argument(
             "runner",
             "no runner evidence provider is registered",
@@ -228,6 +249,13 @@ mod tests {
             }
             fn runner_artifact_content(&self, _: &str, _: &str, _: &str) -> Result<Value> {
                 Ok(Value::Null)
+            }
+            fn runner_job_cancel(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
+                unreachable!()
             }
             fn refresh_mirrored_daemon_evidence(&self, _: &str) -> Result<Option<Vec<RunRecord>>> {
                 Ok(None)

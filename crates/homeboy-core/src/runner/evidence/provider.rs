@@ -60,6 +60,14 @@ impl RunnerEvidenceProvider for RunnerEvidence {
         super::super::connection::runner_artifact_content(runner_id, job_id, artifact_id)
     }
 
+    fn runner_job_cancel(
+        &self,
+        runner_id: &str,
+        job_id: &str,
+    ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
+        super::super::execution::runner_job_cancel(runner_id, job_id)
+    }
+
     fn refresh_mirrored_daemon_evidence(&self, run_id: &str) -> Result<Option<Vec<RunRecord>>> {
         super::mirror::refresh_mirrored_daemon_evidence(run_id)
     }
