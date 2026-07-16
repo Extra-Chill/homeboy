@@ -363,7 +363,55 @@ fn should_skip_file_path(path: &str, ignore_patterns: &[String]) -> bool {
 }
 
 fn should_skip_directory_path(path: &str, ignore_patterns: &[String]) -> bool {
-    path == "./" || path == "../" || path.len() < 4 || matches_ignore_pattern(path, ignore_patterns)
+    path == "./"
+        || path == "../"
+        || path.len() < 4
+        || !is_repo_directory_claim(path)
+        || matches_ignore_pattern(path, ignore_patterns)
+}
+
+/// Whether a backtick-quoted `foo/` reference in prose is plausibly a
+/// repository directory claim (and therefore worth verifying against the
+/// filesystem) versus a conceptual/runtime directory name.
+///
+/// A bare single-segment name like `artifact-bytes/` or `manifests/` is almost
+/// always prose describing a runtime output directory or a naming convention,
+/// not a path that exists in the repo. Only treat a directory reference as a
+/// repo-path claim when it is **anchored** — rooted at a known repo prefix
+/// (`/`, `./`, `../`, or a top-level source dir) — or has **two or more path
+/// segments** (`foo/bar/`), which is far more likely to name a real tree.
+/// (#8343)
+fn is_repo_directory_claim(path: &str) -> bool {
+    if path.starts_with('/') || path.starts_with("./") || path.starts_with("../") {
+        return true;
+    }
+
+    // Two or more directory segments (e.g. `foo/bar/`) → likely a real path.
+    // A single trailing slash yields exactly one non-empty segment.
+    if path
+        .trim_end_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .count()
+        >= 2
+    {
+        return true;
+    }
+
+    // Single-segment: only a claim when rooted at a known repo top-level dir.
+    const REPO_ROOTS: &[&str] = &[
+        "src/",
+        "crates/",
+        "tests/",
+        "test/",
+        "docs/",
+        "examples/",
+        "benches/",
+        "scripts/",
+        "assets/",
+        ".github/",
+    ];
+    REPO_ROOTS.iter().any(|root| path == *root)
 }
 
 #[derive(Clone, Copy)]
@@ -453,6 +501,60 @@ mod tests {
 
         // Should skip domain-like paths
         assert!(!claims.iter().any(|c| c.value.contains("mysite.com")));
+    }
+
+    #[test]
+    fn unanchored_single_segment_dir_is_not_a_repo_claim() {
+        // #8343: bare single-segment directory names in prose describe runtime
+        // output dirs or naming conventions, not repo paths.
+        let content = "Artifacts land under `artifact-bytes/` at runtime, following the `manifests/` convention.";
+        let claims = extract_claims(content, "docs/commands/fuzz.md", &[]);
+
+        assert!(
+            !claims
+                .iter()
+                .any(|c| c.value == "artifact-bytes/" || c.value == "manifests/"),
+            "unanchored single-segment prose dir names must not be claimed, got {:?}",
+            claims.iter().map(|c| &c.value).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn anchored_and_multi_segment_dirs_still_claimed() {
+        // Real repo directory references must still be verified.
+        let content =
+            "See `src/core/` for the engine and `crates/` for extracted crates and `foo/bar/` nested.";
+        let claims = extract_claims(content, "docs/architecture.md", &[]);
+        let values: Vec<&str> = claims.iter().map(|c| c.value.as_str()).collect();
+
+        assert!(
+            values.contains(&"src/core/"),
+            "anchored multi-segment kept: {values:?}"
+        );
+        assert!(
+            values.contains(&"crates/"),
+            "known repo root kept: {values:?}"
+        );
+        assert!(
+            values.contains(&"foo/bar/"),
+            "multi-segment kept: {values:?}"
+        );
+    }
+
+    #[test]
+    fn is_repo_directory_claim_classification() {
+        // Anchored.
+        assert!(is_repo_directory_claim("/etc/config/"));
+        assert!(is_repo_directory_claim("./local/"));
+        assert!(is_repo_directory_claim("../sibling/"));
+        // Known single-segment repo roots.
+        assert!(is_repo_directory_claim("src/"));
+        assert!(is_repo_directory_claim("crates/"));
+        // Multi-segment.
+        assert!(is_repo_directory_claim("foo/bar/"));
+        // Unanchored single-segment → not a repo claim.
+        assert!(!is_repo_directory_claim("artifact-bytes/"));
+        assert!(!is_repo_directory_claim("manifests/"));
     }
 
     #[test]
