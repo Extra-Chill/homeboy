@@ -9,9 +9,11 @@
 pub mod baseline;
 pub mod codebase_scan;
 pub mod command;
+pub mod detail_output;
 pub mod identifier;
 pub mod local_files;
 pub mod output_parse;
 pub mod shell;
 pub mod template;
 pub mod text;
+pub mod validation;
