@@ -349,6 +349,13 @@ pub(super) fn remote_daemon_connect_action_with_controller_identity(
         return Ok(RemoteDaemonConnectAction::Start);
     };
 
+    // `daemon status` proves this exact recorded PID is no longer running.
+    // With no durable work left to reconcile, ensure-running can safely replace
+    // the stale lease without requiring another orphan-adoption cycle.
+    if status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead) && status.active_jobs == 0 {
+        return Ok(RemoteDaemonConnectAction::Start);
+    }
+
     if !status.reachable {
         return Err(format!(
             "remote daemon is unreachable; refusing to replace or persist a session{}",
