@@ -287,7 +287,3 @@ pub(crate) fn source_path(component: &Component, path_override: Option<&str>) ->
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(&component.local_path))
 }
-
-#[cfg(test)]
-#[path = "../../../../tests/core/extension/component_script_test.rs"]
-mod component_script_test;

@@ -29,6 +29,7 @@ fn timeout_mirrors_remote_job_without_cancelling() {
             claimed_at_ms: None,
             claim_expires_at_ms: None,
             artifacts: Vec::new(),
+            runner_job_projection: None,
         };
         let err = daemon_job_wait_timeout(
             &runner,
@@ -126,6 +127,7 @@ fn running_job_with_id(id: uuid::Uuid) -> Job {
         claimed_at_ms: None,
         claim_expires_at_ms: None,
         artifacts: Vec::new(),
+        runner_job_projection: None,
     }
 }
 
@@ -368,6 +370,7 @@ fn lab_offload_handoff_persists_run_when_job_is_accepted() {
             claimed_at_ms: None,
             claim_expires_at_ms: None,
             artifacts: Vec::new(),
+            runner_job_projection: None,
         };
 
         let run_id = persist_lab_offload_handoff_run(
@@ -1269,6 +1272,7 @@ fn terminal_lab_result_transport_error_preserves_recovery_ids() {
         claimed_at_ms: None,
         claim_expires_at_ms: None,
         artifacts: Vec::new(),
+        runner_job_projection: None,
     };
     let source = Error::internal_json(
         "error decoding response body",
@@ -1394,6 +1398,7 @@ fn daemon_polling_rejects_a_response_for_a_different_job() {
         claimed_at_ms: None,
         claim_expires_at_ms: None,
         artifacts: Vec::new(),
+        runner_job_projection: None,
     };
 
     let err =
@@ -1504,5 +1509,6 @@ fn running_job() -> Job {
         claimed_at_ms: None,
         claim_expires_at_ms: None,
         artifacts: Vec::new(),
+        runner_job_projection: None,
     }
 }

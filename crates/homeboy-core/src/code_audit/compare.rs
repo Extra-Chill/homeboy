@@ -1,5 +1,5 @@
 use super::{CodeAuditResult, Finding, Severity};
-use crate::code_audit::findings::normalized_finding_description_for_fingerprint;
+use crate::code_audit::baseline::finding_baseline_fingerprint;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AuditConvergenceScoring {
@@ -50,13 +50,7 @@ pub fn score_delta(
 }
 
 pub fn finding_fingerprint(finding: &Finding) -> String {
-    format!(
-        "{}::{:?}::{}::{}",
-        finding.file,
-        finding.kind,
-        finding.convention,
-        normalized_finding_description_for_fingerprint(&finding.description)
-    )
+    finding_baseline_fingerprint(finding)
 }
 
 #[cfg(test)]
@@ -98,24 +92,61 @@ mod tests {
     }
 
     #[test]
-    fn finding_fingerprint_different_for_distinct() {
+    fn finding_fingerprint_ignores_volatile_structural_metrics() {
         let f1 = Finding {
-            convention: "naming".to_string(),
+            convention: "structural".to_string(),
             severity: Severity::Warning,
             file: "src/target.rs".to_string(),
-            description: "Existing finding".to_string(),
+            description: "File has 1,024 lines (threshold: 1,000)".to_string(),
             suggestion: String::new(),
-            kind: AuditFinding::NamingMismatch,
+            kind: AuditFinding::GodFile,
         };
         let f2 = Finding {
-            convention: "duplication".to_string(),
+            description: "File has 1,111 lines (threshold: 1,000)".to_string(),
+            ..f1.clone()
+        };
+        let f3 = Finding {
+            file: "src/items.rs".to_string(),
+            description: "File has 85 items (threshold: 50)".to_string(),
+            kind: AuditFinding::HighItemCount,
+            ..f1.clone()
+        };
+        let f4 = Finding {
+            description: "File has 112 items (threshold: 50)".to_string(),
+            ..f3.clone()
+        };
+
+        assert_eq!(finding_fingerprint(&f1), finding_fingerprint(&f2));
+        assert_eq!(finding_fingerprint(&f3), finding_fingerprint(&f4));
+    }
+
+    #[test]
+    fn finding_fingerprint_different_for_distinct_kind_or_file() {
+        let finding = Finding {
+            convention: "structural".to_string(),
             severity: Severity::Warning,
             file: "src/target.rs".to_string(),
-            description: "Duplicate function `foo`".to_string(),
+            description: "File has 1,024 lines (threshold: 1,000)".to_string(),
             suggestion: String::new(),
-            kind: AuditFinding::DuplicateFunction,
+            kind: AuditFinding::GodFile,
         };
-        assert_ne!(finding_fingerprint(&f1), finding_fingerprint(&f2));
+        let different_kind = Finding {
+            kind: AuditFinding::HighItemCount,
+            ..finding.clone()
+        };
+        let different_file = Finding {
+            file: "src/other.rs".to_string(),
+            ..finding.clone()
+        };
+
+        assert_ne!(
+            finding_fingerprint(&finding),
+            finding_fingerprint(&different_kind)
+        );
+        assert_ne!(
+            finding_fingerprint(&finding),
+            finding_fingerprint(&different_file)
+        );
     }
 
     #[test]
@@ -132,8 +163,16 @@ mod tests {
             description: "Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 275 in behavioral context `detect_patterns`".to_string(),
             ..f1.clone()
         };
+        let distinct_policy = Finding {
+            description: "Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line 275 in behavioral context `detect_patterns`".to_string(),
+            ..f1.clone()
+        };
 
         assert_eq!(finding_fingerprint(&f1), finding_fingerprint(&f2));
+        assert_ne!(
+            finding_fingerprint(&f1),
+            finding_fingerprint(&distinct_policy)
+        );
     }
 
     #[test]

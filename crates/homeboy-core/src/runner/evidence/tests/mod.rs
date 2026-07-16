@@ -122,6 +122,7 @@ fn test_mirror_daemon_evidence_persists_runner_exec_observation() {
             claimed_at_ms: None,
             claim_expires_at_ms: None,
             artifacts: Vec::new(),
+            runner_job_projection: None,
         };
         let lifecycle_event = json!({
             "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
@@ -215,6 +216,7 @@ fn runner_exec_matrix_summary_run_names_come_from_command_domain() {
             claimed_at_ms: None,
             claim_expires_at_ms: None,
             artifacts: Vec::new(),
+            runner_job_projection: None,
         };
         let command = [
             "homeboy".to_string(),
@@ -297,6 +299,7 @@ fn runner_exec_explicit_run_id_overrides_inferred_name() {
             claimed_at_ms: None,
             claim_expires_at_ms: None,
             artifacts: Vec::new(),
+            runner_job_projection: None,
         };
 
         let run = mirror_job_run(
@@ -364,6 +367,7 @@ fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
             claimed_at_ms: None,
             claim_expires_at_ms: None,
             artifacts: Vec::new(),
+            runner_job_projection: None,
         };
 
         mirror_job_run(
@@ -435,6 +439,7 @@ fn test_mirrored_patch_result_reports_accessible_artifact_token() {
             claimed_at_ms: None,
             claim_expires_at_ms: None,
             artifacts: Vec::new(),
+            runner_job_projection: None,
         };
         let run_id = format!("runner-exec-{job_id}");
         let artifact_id = format!("runner-fix-patch-{job_id}");
@@ -513,6 +518,7 @@ fn test_mirrored_patch_result_fails_when_patch_artifact_was_not_mirrored() {
             claimed_at_ms: None,
             claim_expires_at_ms: None,
             artifacts: Vec::new(),
+            runner_job_projection: None,
         };
         let artifact_id = format!("runner-fix-patch-{job_id}");
         let patch = json!({
@@ -585,6 +591,7 @@ fn test_remote_fuzz_run_mirrors_under_requested_run_id_with_lab_links() {
             content_base64: None,
             metadata: None,
         }],
+        runner_job_projection: None,
     };
     let detail = json!({
         "id": "remote-campaign-run",
@@ -722,6 +729,7 @@ fn test_explicit_observation_run_ids_prefers_result_lineage() {
             content_base64: None,
             metadata: None,
         }],
+        runner_job_projection: None,
     };
     let result = json!({
         "mirror_run_id": "run-a",

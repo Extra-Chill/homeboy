@@ -274,6 +274,7 @@ fn detached_lab_run_plan_uses_one_identity_for_status_logs_artifacts_and_cancell
                         claimed_at_ms: None,
                         claim_expires_at_ms: None,
                         artifacts: Vec::new(),
+                        runner_job_projection: None,
                     },
                     Vec::new(),
                 ))
@@ -3261,6 +3262,7 @@ fn terminal_child_snapshot(aggregate: &AgentTaskAggregate) -> crate::runner::Run
             claimed_at_ms: None,
             claim_expires_at_ms: None,
             artifacts: Vec::new(),
+            runner_job_projection: None,
         },
         events: vec![crate::api_jobs::JobEvent {
             sequence: 1,

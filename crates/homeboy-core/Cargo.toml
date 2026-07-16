@@ -50,3 +50,6 @@ tempfile = "3.14"
 clap = { version = "4.5", features = ["derive", "string"] }
 toml = "1.0.3"
 sha2 = "0.10.9"
+
+[features]
+slow-tests = []

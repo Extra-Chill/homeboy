@@ -7,6 +7,7 @@ use crate::code_audit::{self, baseline, AuditTiming, AuditWithAnalysis, CodeAudi
 use crate::git;
 use std::collections::HashSet;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 use super::report::{self, AuditCommandOutput};
 
@@ -202,15 +203,7 @@ fn scope_convention_outliers_to_findings(result: &mut CodeAuditResult) {
 
 /// Run the audit scan (scoped or full). Returns None if changed-since found no files.
 fn run_audit(args: &AuditRunWorkflowArgs) -> crate::Result<Option<AuditWithAnalysis>> {
-    let plan = if args.baseline_flags.baseline || args.conventions {
-        code_audit::AuditExecutionPlan::full()
-    } else {
-        code_audit::AuditExecutionPlan::from_profile_and_filters(
-            args.profile,
-            &args.only_kinds,
-            &args.exclude_kinds,
-        )
-    };
+    let plan = audit_plan(args);
 
     if let Some(ref git_ref) = args.changed_since {
         let changed = changed_files_for_scope(args, git_ref)?;
@@ -235,6 +228,18 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> crate::Result<Option<AuditWithAnaly
             &args.reference_paths,
             &args.extension_overrides,
         )?))
+    }
+}
+
+fn audit_plan(args: &AuditRunWorkflowArgs) -> code_audit::AuditExecutionPlan {
+    if args.baseline_flags.baseline || args.conventions {
+        code_audit::AuditExecutionPlan::full()
+    } else {
+        code_audit::AuditExecutionPlan::from_profile_and_filters(
+            args.profile,
+            &args.only_kinds,
+            &args.exclude_kinds,
+        )
     }
 }
 
@@ -305,17 +310,24 @@ fn run_comparison_workflow(
     args: &AuditRunWorkflowArgs,
     mut timing: AuditTiming,
 ) -> crate::Result<AuditRunWorkflowResult> {
+    if let Some(ref git_ref) = args.changed_since {
+        let persisted = if args.baseline_flags.ignore_baseline {
+            None
+        } else {
+            baseline::load_baseline(Path::new(&result.source_path))
+                .or_else(|| baseline::load_baseline_from_ref(&result.source_path, git_ref))
+        };
+        let reference = timing.time_phase("reference_baseline", || {
+            audit_reference_result(args, git_ref)
+        })?;
+        let baseline = baseline::baseline_with_reference_findings(persisted, &reference);
+        return build_comparison_output(result, analysis, baseline, args, timing);
+    }
+
     // Try file-based baseline
     if !args.baseline_flags.ignore_baseline {
         if let Some(existing_baseline) = baseline::load_baseline(Path::new(&result.source_path)) {
             return build_comparison_output(result, analysis, existing_baseline, args, timing);
-        }
-    }
-
-    // Try git-ref differential
-    if let Some(ref git_ref) = args.changed_since {
-        if let Some(ref_baseline) = baseline::load_baseline_from_ref(&result.source_path, git_ref) {
-            return build_comparison_output(result, analysis, ref_baseline, args, timing);
         }
     }
 
@@ -363,6 +375,80 @@ fn run_comparison_workflow(
             timing,
         })
     }
+}
+
+/// Audit a selected git ref without modifying the caller's checkout.
+///
+/// `git archive` materializes tracked source into an isolated temporary directory;
+/// the candidate's changed-file scope, plan, reference paths, and extension
+/// overrides are applied to produce comparable canonical finding identities.
+fn audit_reference_result(
+    args: &AuditRunWorkflowArgs,
+    git_ref: &str,
+) -> crate::Result<CodeAuditResult> {
+    let source = Path::new(&args.source_path);
+    let archive = Command::new("git")
+        .args(["archive", "--format=tar", git_ref])
+        .current_dir(source)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            crate::Error::git_command_failed(format!("git archive {git_ref}: {error}"))
+        })?;
+    if !archive.status.success() {
+        return Err(crate::Error::git_command_failed(format!(
+            "git archive {git_ref}: {}",
+            String::from_utf8_lossy(&archive.stderr).trim()
+        )));
+    }
+
+    let reference_root = tempfile::tempdir().map_err(|error| {
+        crate::Error::internal_io(
+            format!("create audit reference directory: {error}"),
+            Some("audit.reference_baseline".to_string()),
+        )
+    })?;
+    let extraction = Command::new("tar")
+        .args(["-x", "-C"])
+        .arg(reference_root.path())
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .expect("tar stdin is piped")
+                .write_all(&archive.stdout)?;
+            child.wait()
+        })
+        .map_err(|error| {
+            crate::Error::internal_io(
+                format!("extract audit reference archive: {error}"),
+                Some("audit.reference_baseline".to_string()),
+            )
+        })?;
+    if !extraction.success() {
+        return Err(crate::Error::internal_io(
+            format!("extract audit reference archive exited with {extraction}"),
+            Some("audit.reference_baseline".to_string()),
+        ));
+    }
+
+    let changed = changed_files_for_scope(args, git_ref)?;
+    let reference_path = reference_root.path().to_string_lossy();
+    let mut reference = code_audit::audit_path_scoped_with_plan_and_analysis(
+        &args.component_id,
+        &reference_path,
+        &changed,
+        None,
+        &audit_plan(args),
+        &args.reference_paths,
+        &args.extension_overrides,
+    )?
+    .result;
+    apply_finding_filters(&mut reference, &args.only_kinds, &args.exclude_kinds);
+    Ok(reference)
 }
 
 /// Build comparison output from a result and baseline.
