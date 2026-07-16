@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::component::Component;
 use crate::project::Project;
 
+use super::super::binding::bind_project_payloads;
 use super::super::execution::{prepare_component_deploy, PreparedComponentDeploy};
 use super::super::preparation::{ComponentPayloadPreparationRequest, PreparedPayloadCollection};
 use super::super::types::{ComponentDeployResult, DeployConfig};
@@ -36,6 +37,11 @@ pub(super) fn prepare_component_deployments(
     let mut payloads = PreparedPayloadCollection::default();
     let mut release_artifact_store = ReleaseArtifactStore::default();
 
+    let mut binding_payloads = config
+        .prepared_artifact
+        .as_ref()
+        .map(|artifact| HashMap::from([(artifact.component_id.clone(), artifact.clone())]))
+        .unwrap_or_default();
     for component in components {
         let source_path = component.local_path.clone();
         let mut component = crate::project::apply_component_overrides(component, project);
@@ -66,6 +72,7 @@ pub(super) fn prepare_component_deployments(
                 }
                 match payloads.prepare(request, &mut release_artifact_store) {
                     Ok(payload) => {
+                        binding_payloads.insert(component.id.clone(), payload.artifact.clone());
                         let mut prepared = effective_config;
                         prepared.prepared_artifact = Some(payload.artifact.clone());
                         prepared.skip_build = true;
@@ -102,6 +109,31 @@ pub(super) fn prepare_component_deployments(
         ) {
             Ok(prepared) => prepared_deployments.push(prepared),
             Err(result) => failures.push(result),
+        }
+    }
+
+    // Bind payloads to this project's policy before execution preflight. The
+    // collection above retains the process-local artifact cleanup guards.
+    if !binding_payloads.is_empty() {
+        let binding_components = prepared_deployments
+            .iter()
+            .map(|deployment| deployment.component.clone())
+            .collect::<Vec<_>>();
+        if let Err(error) =
+            bind_project_payloads(project, base_path, &binding_components, &binding_payloads)
+        {
+            return Err(binding_components
+                .iter()
+                .map(|component| {
+                    ComponentDeployResult::failed(
+                        component,
+                        base_path,
+                        local_versions.get(&component.id).cloned(),
+                        remote_versions.get(&component.id).cloned(),
+                        error.to_string(),
+                    )
+                })
+                .collect());
         }
     }
 
