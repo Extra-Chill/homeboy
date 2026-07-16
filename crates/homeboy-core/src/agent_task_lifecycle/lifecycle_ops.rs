@@ -1525,6 +1525,10 @@ fn record_lab_offload_proxy(
     }
     let metadata = record.ensure_metadata_object();
     metadata.insert("kind".to_string(), json!("lab_offload_controller_proxy"));
+    // This record is the controller's durable projection of a runner handoff.
+    // It remains controller-owned until a runner-local record is independently
+    // discovered, so controller-generated commands must keep resolving here.
+    metadata.insert("lifecycle_store_owner".to_string(), json!("controller"));
     metadata.insert("runner_id".to_string(), json!(runner_id));
     if remote_workspace != "pending" {
         metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
