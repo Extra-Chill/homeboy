@@ -631,8 +631,8 @@ mod committed_harvest_tests {
         std::fs::write(workspace.join("candidate.txt"), "candidate\n").expect("candidate");
         std::fs::write(workspace.join("new-candidate.txt"), "new candidate\n")
             .expect("new candidate");
-        let current_diff = git_output_raw(&workspace, &["diff", "HEAD"]).expect("current diff");
         let (patch_artifact, patch_sha256) = candidate_patch(&workspace);
+        let current_diff = std::fs::read_to_string(&patch_artifact).expect("complete current diff");
         let mut request =
             gate_feedback_request(&workspace, current_diff, &patch_artifact, &patch_sha256);
 
@@ -687,8 +687,8 @@ mod committed_harvest_tests {
         git(&workspace, &["add", "file.txt"]);
         git(&workspace, &["commit", "--quiet", "-m", "base"]);
         std::fs::write(workspace.join("file.txt"), "candidate\n").expect("candidate");
-        let recorded = git_output_raw(&workspace, &["diff", "HEAD"]).expect("recorded diff");
         let (patch_artifact, patch_sha256) = candidate_patch(&workspace);
+        let recorded = std::fs::read_to_string(&patch_artifact).expect("complete recorded diff");
         std::fs::write(workspace.join("extra.txt"), "unrelated\n").expect("extra");
         let error = prepare_committed_harvest(
             &gate_feedback_request(&workspace, recorded.clone(), &patch_artifact, &patch_sha256),
