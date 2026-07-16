@@ -27,4 +27,3 @@ pub mod run_dir;
 pub mod symbol_graph;
 pub mod temp;
 pub mod undo;
-pub mod validate_write;
