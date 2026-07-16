@@ -98,7 +98,7 @@ mod tests {
     use super::reference::fingerprint_component_reference_files;
     use super::types::{time_audit_detector, ScopedAuditExecution};
     use super::*;
-    use crate::component::AuditConfig;
+    use homeboy_audit_contract::AuditConfig;
     use std::fs;
 
     #[test]

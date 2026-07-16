@@ -497,8 +497,8 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
     // generic engine. These tests pin the preset's behavior end to end.
     // ------------------------------------------------------------------------
 
-    fn core_boundary_config() -> crate::component::CoreBoundaryLeakConfig {
-        crate::component::CoreBoundaryLeakConfig {
+    fn core_boundary_config() -> homeboy_audit_contract::CoreBoundaryLeakConfig {
+        homeboy_audit_contract::CoreBoundaryLeakConfig {
             terms: vec!["florpstack".to_string(), "florp-run".to_string()],
             scan_path_contains: vec!["src/core/".to_string()],
             allow_path_contains: vec!["src/core/fixtures/allowed".to_string()],
@@ -509,7 +509,7 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
 
     fn run_core_boundary(
         fingerprints: &[&FileFingerprint],
-        config: &crate::component::CoreBoundaryLeakConfig,
+        config: &homeboy_audit_contract::CoreBoundaryLeakConfig,
     ) -> Vec<Finding> {
         run(fingerprints, &config.to_source_policy_rules())
     }
@@ -518,10 +518,11 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
     fn core_boundary_default_config_emits_nothing() {
         let fp = rust_fp("src/core/engine.rs", "fn dispatch() {}");
 
-        assert!(
-            run_core_boundary(&[&fp], &crate::component::CoreBoundaryLeakConfig::default())
-                .is_empty()
-        );
+        assert!(run_core_boundary(
+            &[&fp],
+            &homeboy_audit_contract::CoreBoundaryLeakConfig::default()
+        )
+        .is_empty());
     }
 
     #[test]

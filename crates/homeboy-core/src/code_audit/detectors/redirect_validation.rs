@@ -4,7 +4,7 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-use crate::component::RedirectValidationConfig;
+use homeboy_audit_contract::RedirectValidationConfig;
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};

@@ -1,6 +1,6 @@
 use super::conventions::{AuditFinding, Deviation};
 use super::fingerprint::FileFingerprint;
-use crate::component::AuditConfig;
+use homeboy_audit_contract::AuditConfig;
 
 const GENERIC_UTILITY_SUFFIXES: &[&str] = &[
     "Base",

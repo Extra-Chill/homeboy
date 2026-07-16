@@ -21,8 +21,8 @@ use std::path::Path;
 
 use regex::Regex;
 
-use crate::component::ThinCommandAdapterConfig;
 use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use homeboy_audit_contract::ThinCommandAdapterConfig;
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};

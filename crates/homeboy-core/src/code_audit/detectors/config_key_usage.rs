@@ -248,7 +248,7 @@ fn finding_for(rule: &ConfigKeyUsageRule, key: &str, evidence: &KeyEvidence) -> 
 
 #[cfg(test)]
 mod tests {
-    use crate::component::ConfigKeyUsagePattern;
+    use homeboy_audit_contract::ConfigKeyUsagePattern;
 
     use super::*;
 

@@ -15,7 +15,7 @@ use super::fingerprint::FileFingerprint;
 use super::import_matching::has_import_with_context;
 use super::naming::{detect_naming_suffix, suffix_matches};
 use super::signatures::{compute_signature_skeleton, tokenize_signature};
-use crate::component::AuditConfig;
+use homeboy_audit_contract::AuditConfig;
 
 /// `Language` now lives in `crate::engine::language` — the foundation layer,
 /// since it is a source-file primitive with no audit dependencies. Re-exported

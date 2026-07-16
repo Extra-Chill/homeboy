@@ -12,7 +12,7 @@ use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::import_matching::{blank_comments_and_strings, contains_word_in_code};
 use super::walker::is_test_path;
-use crate::component::AuditConfig;
+use homeboy_audit_contract::AuditConfig;
 
 /// A cross-file caller record: which files call a function and with how many args.
 struct CallerRecord {

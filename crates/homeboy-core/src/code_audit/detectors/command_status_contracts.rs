@@ -391,7 +391,7 @@ fn json_value_label(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::CommandStatusContractScenario;
+    use homeboy_audit_contract::CommandStatusContractScenario;
     use std::collections::BTreeMap;
 
     #[test]

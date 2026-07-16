@@ -2,7 +2,7 @@ use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
-use crate::component::RequestedDetectorRule;
+use homeboy_audit_contract::RequestedDetectorRule;
 
 use super::super::conventions::AuditFinding;
 use super::super::findings::Finding;
