@@ -501,13 +501,27 @@ pub(crate) fn contains_word_in_code(content: &str, word: &str) -> bool {
     contains_word(&blank_comments_and_strings(content), word)
 }
 
-/// Replace the interior of line comments (`//`, `#`) and double-quoted string
-/// literals with spaces, preserving byte offsets and newlines. Language-agnostic
-/// and deliberately conservative: it only needs to stop identifiers inside
-/// comments/strings from reading as code references.
+/// Replace the interior of line comments (`//`, and `#` line comments in
+/// shell/ruby-style sources) and double-quoted string literals with spaces,
+/// preserving byte offsets and newlines.
+///
+/// **Attribute lines are preserved.** In Rust, `#[serde(default = "some_fn")]`
+/// and `#[clap(...)]` call functions *by name from inside the attribute
+/// string* — those are genuine references, not prose. So on any line containing
+/// `#[` we keep the string contents (and never treat `#` as a comment). This
+/// keeps the detector from both (a) mistaking `#[...]` for a `#` comment and
+/// (b) blanking a serde/clap-resolved function reference.
 fn blank_comments_and_strings(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     for line in content.split_inclusive('\n') {
+        // Attribute lines (e.g. `#[serde(default = "default_true")]`) can carry
+        // real, macro-resolved function references inside their strings. Keep
+        // them verbatim so those references still count.
+        if line.contains("#[") {
+            out.push_str(line);
+            continue;
+        }
+
         let bytes = line.as_bytes();
         let mut i = 0;
         let mut in_string = false;
@@ -828,6 +842,30 @@ fn production(values: BTreeMap<String, f64>) {}
         assert!(!contains_word_in_code(
             "# see validate_only\n",
             "validate_only"
+        ));
+    }
+
+    #[test]
+    fn contains_word_in_code_keeps_serde_and_clap_attribute_references() {
+        // serde/clap call functions by name from inside the attribute string —
+        // those ARE real references and must survive string-blanking, or their
+        // targets get falsely flagged as dead code.
+        assert!(contains_word_in_code(
+            "    #[serde(default = \"plan_schema\")]\n    schema: String,",
+            "plan_schema"
+        ));
+        assert!(contains_word_in_code(
+            "    #[serde(deserialize_with = \"builtins::default_deploy\")]\n",
+            "default_deploy"
+        ));
+        assert!(contains_word_in_code(
+            r#"#[clap(value_parser = "parse_target")]"#,
+            "parse_target"
+        ));
+        // But a plain (non-attribute) string mention is still ignored.
+        assert!(!contains_word_in_code(
+            r#"let s = "plan_schema is a name";"#,
+            "plan_schema"
         ));
     }
 
