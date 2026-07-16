@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.288.0] - 2026-07-16
+
+### Added
+- ref-aware changed-since comparison with stable finding identity
+
+### Changed
+- Route fanout child cooks to Lab
+- Prepare Lab runners before pinning cook runtime
+- decompose connection god-file into submodules (rebased)
+- Carry gate-feedback candidates through remediation
+
+### Fixed
+- restore extracted core verification
+- doc-drift only claims anchored or multi-segment dir paths
+- correct core_fingerprint/artifact_portability tests for crate layout
+
 ## [0.287.0] - 2026-07-16
 
 ### Changed
