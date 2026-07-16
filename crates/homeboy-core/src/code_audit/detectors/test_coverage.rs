@@ -29,7 +29,7 @@ use super::test_mapping::{
     build_source_name_index, partition_fingerprints, source_to_test_path, test_to_source_path,
 };
 use super::test_vacuity::{find_vacuous_test_methods, resolve_package_name};
-use crate::extension::TestMappingConfig;
+use homeboy_audit_contract::TestMappingConfig;
 
 pub(in crate::code_audit) fn run(
     root: &Path,
@@ -767,8 +767,8 @@ mod tests {
         }
     }
 
-    fn rust_vacuity_policy() -> crate::extension::TestVacuityPolicy {
-        crate::extension::TestVacuityPolicy {
+    fn rust_vacuity_policy() -> homeboy_audit_contract::TestVacuityPolicy {
+        homeboy_audit_contract::TestVacuityPolicy {
             file_extensions: vec!["rs".to_string()],
             allowed_body_markers: vec![
                 "compile contract".to_string(),

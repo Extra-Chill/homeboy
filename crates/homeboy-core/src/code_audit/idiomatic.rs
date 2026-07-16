@@ -14,7 +14,7 @@
 //! The concrete ecosystem literals are **not** hardcoded here: callers pass the
 //! effective name/prefix sets (extension-config-declared, or the builtin
 //! agnostic fallback resolved via
-//! [`crate::extension::TestMappingConfig`] /
+//! [`homeboy_audit_contract::TestMappingConfig`] /
 //! [`crate::code_audit::conventions::Language`]). This predicate only
 //! implements the generic membership/prefix test, keeping language names out of
 //! the audit detector layer.
