@@ -675,17 +675,71 @@ pub(crate) fn project_terminal_artifacts(
                         )?;
                     }
                     None => {
-                        // Keep the remote reference available for existing Lab
-                        // retrieval flows, but leave an actionable lifecycle
-                        // marker because it cannot satisfy local promotion.
+                        let remote_ref = crate::execution_contract::EXECUTION_CONTRACT
+                            .artifacts
+                            .runner_artifact_ref(runner_id, &record.run_id, &logical_id);
+                        let mirror_result = (|| -> Result<()> {
+                            let mirror = tempfile::NamedTempFile::new().map_err(|error| {
+                                Error::internal_io(
+                                    error.to_string(),
+                                    Some("create controller artifact mirror".to_string()),
+                                )
+                            })?;
+                            let download = crate::runners::download_remote_artifact(
+                                &remote_ref,
+                                Some(mirror.path().to_path_buf()),
+                            )?;
+                            let expected_size = artifact.size_bytes.expect("checked above");
+                            let expected_sha256 =
+                                artifact.sha256.as_deref().expect("checked above");
+                            let actual_size = std::fs::metadata(&download.output_path)
+                                .map_err(|error| {
+                                    Error::internal_io(
+                                        error.to_string(),
+                                        Some("inspect controller artifact mirror".to_string()),
+                                    )
+                                })?
+                                .len();
+                            let actual_sha256 =
+                                crate::artifact_metadata::sha256_file(&download.output_path)?;
+                            if actual_size != expected_size || actual_sha256 != expected_sha256 {
+                                return Err(Error::validation_invalid_argument(
+                                    "artifact_id",
+                                    format!(
+                                        "runner artifact mirror for run '{}', task '{}', and artifact '{}' does not match the aggregate SHA-256 and size",
+                                        record.run_id, outcome.task_id, artifact.id
+                                    ),
+                                    Some(artifact.id.clone()),
+                                    None,
+                                ));
+                            }
+                            let mut controller_hash = sha2::Sha256::new();
+                            sha2::Digest::update(&mut controller_hash, b"controller");
+                            sha2::Digest::update(&mut controller_hash, [0]);
+                            sha2::Digest::update(&mut controller_hash, artifact_id.as_bytes());
+                            let controller_artifact_id =
+                                format!("agent-task-{:x}", controller_hash.finalize());
+                            let mut controller_metadata = metadata.clone();
+                            controller_metadata["agent_task"]["projection"] =
+                                json!("runner_mirrored");
+                            store.record_artifact_with_id(
+                                &record.run_id,
+                                &artifact.kind,
+                                &download.output_path,
+                                &controller_artifact_id,
+                                controller_metadata,
+                            )?;
+                            Ok(())
+                        })();
+
+                        // Preserve the canonical runner retrieval alias even when
+                        // the controller also materializes verified bytes.
                         store.import_artifact(&crate::observation::ArtifactRecord {
                             id: artifact_id,
                             run_id: record.run_id.clone(),
                             kind: artifact.kind.clone(),
                             artifact_type: "remote_file".to_string(),
-                            path: crate::execution_contract::EXECUTION_CONTRACT
-                                .artifacts
-                                .runner_artifact_ref(runner_id, &record.run_id, &logical_id),
+                            path: remote_ref,
                             url: None,
                             public_url: None,
                             viewer_url: None,
@@ -698,17 +752,9 @@ pub(crate) fn project_terminal_artifacts(
                             metadata_json: metadata,
                             created_at: chrono::Utc::now().to_rfc3339(),
                         })?;
-                        projection_error.get_or_insert_with(|| {
-                            Error::validation_invalid_argument(
-                                "artifact.path",
-                                format!(
-                                    "controller-finalized bytes for run '{}', task '{}', and artifact '{}' were not found with the aggregate SHA-256 and size",
-                                    record.run_id, outcome.task_id, logical_id
-                                ),
-                                Some(artifact.id.clone()),
-                                None,
-                            )
-                        });
+                        if let Err(error) = mirror_result {
+                            projection_error.get_or_insert(error);
+                        }
                     }
                 }
             } else {

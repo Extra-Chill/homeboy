@@ -1707,7 +1707,113 @@ fn terminal_executor_artifacts_are_projected_under_logical_ids() {
 }
 
 #[test]
-fn controller_projects_runner_artifact_aliases_with_encoded_retrieval_tokens() {
+fn controller_mirrors_verified_detached_runner_artifact_into_a_local_projection() {
+    with_isolated_home(|_| {
+        use sha2::Digest;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let patch = b"patch bytes";
+        let sha256 = format!("{:x}", sha2::Sha256::digest(patch));
+        let response_sha256 = sha256.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("runner daemon listener");
+        let address = listener.local_addr().expect("runner daemon address");
+        std::thread::spawn(move || {
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().expect("runner daemon request");
+                let mut request = [0; 1024];
+                let read = stream.read(&mut request).expect("read runner request");
+                if read == 0 {
+                    continue;
+                }
+                let request = String::from_utf8_lossy(&request[..read]);
+                if request.starts_with("GET /runs/detached-run/artifacts/patch/content ") {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nX-Homeboy-Artifact-Sha256: {response_sha256}\r\nConnection: close\r\n\r\n{}",
+                        patch.len(),
+                        String::from_utf8_lossy(patch),
+                    )
+                    .expect("write artifact response");
+                } else {
+                    write!(
+                        stream,
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .expect("write jobs response");
+                }
+            }
+        });
+        let session = crate::runner::RunnerSession {
+            runner_id: "local".to_string(),
+            mode: crate::runner::RunnerTunnelMode::DirectSsh,
+            role: crate::runner::RunnerSessionRole::Controller,
+            server_id: None,
+            controller_id: None,
+            broker_url: None,
+            remote_daemon_address: None,
+            local_port: Some(address.port()),
+            local_url: Some(format!("http://{address}")),
+            tunnel_pid: None,
+            remote_daemon_pid: None,
+            remote_daemon_lease_id: None,
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: None,
+            connected_at: now_timestamp(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        };
+        let session_path = crate::paths::runner_session_file("local").expect("session path");
+        std::fs::create_dir_all(session_path.parent().expect("session parent"))
+            .expect("create session parent");
+        std::fs::write(
+            session_path,
+            serde_json::to_string(&session).expect("session JSON"),
+        )
+        .expect("write session");
+
+        let plan = test_plan();
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "patch".to_string(),
+            kind: "patch".to_string(),
+            name: None,
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: Some("/home/runner/.homeboy/executor-finalized/patch.diff".to_string()),
+            url: None,
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some(patch.len() as u64),
+            sha256: Some(sha256),
+            metadata: json!({ "executor_artifact_finalized": true }),
+        });
+        submit_plan(&plan, Some("detached-run")).expect("submit");
+        record_runner_job_identity("detached-run", "local", "job-1").expect("runner identity");
+        record_run_aggregate("detached-run", &plan, &aggregate).expect("reconcile aggregate");
+
+        let record = status("detached-run").expect("status");
+        assert_eq!(record.metadata["artifact_projection"]["status"], "complete");
+        let store = crate::observation::ObservationStore::open_initialized().expect("store");
+        let artifact = crate::observation::runs_service::resolve_artifact_for_run(
+            &store,
+            "detached-run",
+            "patch",
+        )
+        .expect("controller projection");
+        assert_eq!(artifact.artifact_type, "file");
+        assert_eq!(
+            std::fs::read(artifact.path).expect("projection bytes"),
+            patch
+        );
+    });
+}
+
+#[test]
+fn controller_leaves_runner_artifact_projection_pending_when_it_cannot_mirror_bytes() {
     with_isolated_home(|_| {
         let plan = test_plan();
         let mut aggregate = succeeded_aggregate(&plan);
@@ -1748,32 +1854,18 @@ fn controller_projects_runner_artifact_aliases_with_encoded_retrieval_tokens() {
             .expect("runner identity");
         record_run_aggregate(&submitted.run_id, &plan, &aggregate).expect("controller projection");
 
+        let record = status(&submitted.run_id).expect("status");
+        assert_eq!(record.metadata["artifact_projection"]["status"], "pending");
+        assert!(record.metadata["artifact_projection"]["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()));
         let store = crate::observation::ObservationStore::open_initialized().expect("store");
-        let patch = crate::observation::runs_service::resolve_artifact_for_run(
+        assert!(crate::observation::runs_service::resolve_artifact_for_run(
             &store,
             &submitted.run_id,
             "patch",
         )
-        .expect("patch alias");
-        let report = crate::observation::runs_service::resolve_artifact_for_run(
-            &store,
-            &submitted.run_id,
-            "task-a-patch",
-        )
-        .expect("duplicate alias");
-        assert_eq!(patch.artifact_type, "remote_file");
-        assert_eq!(
-            patch.path,
-            crate::execution_contract::EXECUTION_CONTRACT
-                .artifacts
-                .runner_artifact_ref("runner/a:lab", &submitted.run_id, "patch")
-        );
-        assert_eq!(
-            report.path,
-            crate::execution_contract::EXECUTION_CONTRACT
-                .artifacts
-                .runner_artifact_ref("runner/a:lab", &submitted.run_id, "task-a-patch")
-        );
+        .is_err());
     });
 }
 
