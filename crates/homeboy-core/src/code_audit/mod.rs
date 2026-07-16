@@ -29,6 +29,7 @@ mod discovery;
 pub mod docs_audit;
 mod duplication;
 mod execution_plan;
+pub mod extension_manifests;
 mod findings;
 pub mod fingerprint;
 mod idiomatic;

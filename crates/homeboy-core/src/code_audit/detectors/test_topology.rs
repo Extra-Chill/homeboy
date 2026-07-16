@@ -10,7 +10,6 @@ use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use crate::engine::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
-use crate::extension::{self, ExtensionManifest};
 
 #[path = "../test_quality.rs"]
 mod test_quality;
@@ -84,8 +83,8 @@ fn analyze_test_topology(root: &Path) -> Vec<Finding> {
     let severity = parse_severity(rules.severity.as_deref());
     let mut findings = Vec::new();
 
-    for extension in extension::load_all_extensions().unwrap_or_default() {
-        let Some(script_rel) = extension.topology_script() else {
+    for extension in crate::code_audit::extension_manifests::load_all_audit_manifests() {
+        let Some(script_rel) = extension.topology_script.clone() else {
             continue;
         };
 
@@ -119,7 +118,7 @@ fn analyze_test_topology(root: &Path) -> Vec<Finding> {
                 content,
             };
 
-            let artifacts = run_topology_script(&extension, script_rel, &input);
+            let artifacts = run_topology_script(&extension, &script_rel, &input);
             for artifact in artifacts {
                 apply_policy(
                     &artifact,
@@ -175,7 +174,7 @@ fn apply_policy(
 }
 
 fn run_topology_script(
-    extension: &ExtensionManifest,
+    extension: &crate::code_audit::extension_manifests::AuditExtensionManifest,
     script_rel: &str,
     input: &TopologyInput,
 ) -> Vec<TopologyArtifact> {
@@ -358,52 +357,11 @@ JSON
             std::fs::set_permissions(&script_path, perms).expect("script should become executable");
         }
 
-        let extension = ExtensionManifest {
+        let extension = crate::code_audit::extension_manifests::AuditExtensionManifest {
             id: "test-ext".to_string(),
-            name: "Test Extension".to_string(),
-            version: "0.1.0".to_string(),
-            provides: None,
-            scripts: Some(crate::extension::ScriptsConfig {
-                topology: Some(script_rel.to_string()),
-                ..Default::default()
-            }),
-            icon: None,
-            description: None,
-            author: None,
-            homepage: None,
-            source_url: None,
-            deploy: None,
-            audit: None,
-            executable: None,
-            platform: None,
-            component_env: None,
-            env_provider: None,
-            ci: None,
-            source_snapshot: None,
-            diagnostics: Default::default(),
-            notification_transports: Vec::new(),
-            runtime: None,
-            cli: None,
-            build: None,
-            deps: None,
-            lint: None,
-            test: None,
-            bench: None,
-            fuzz: None,
-            trace: None,
-            structured_sidecars: std::collections::BTreeMap::new(),
-            materialization_source: None,
-            contract_producers: vec![],
-            release_preflights: vec![],
-            agent_runtimes: vec![],
-            agent_task: None,
-            actions: vec![],
-            hooks: std::collections::HashMap::new(),
-            settings: vec![],
-            requires: None,
-            autofix_verify: None,
-            extra: std::collections::HashMap::new(),
             extension_path: Some(dir.path().to_string_lossy().to_string()),
+            topology_script: Some(script_rel.to_string()),
+            ..Default::default()
         };
 
         let artifacts = run_topology_script(

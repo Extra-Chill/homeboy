@@ -98,6 +98,11 @@ impl CliRuntime {
         // IDs/aliases participate in cross-entity collision detection. Core owns
         // the collision invariant but must not depend on these optional features.
         homeboy_tunnel::register();
+        // Register the audit manifest provider so code_audit can read extension
+        // manifests (detector rules, test mappings, provided extensions) without
+        // depending on the extension layer's loader — the seam that lets audit
+        // become its own crate.
+        crate::core::extension::audit_manifest_provider::register();
         // Register the runner-evidence provider so observation::runs_service can
         // enrich run/artifact lookups with live runner + daemon evidence without
         // core depending on runner behavior. (Runner is still in-crate today;
