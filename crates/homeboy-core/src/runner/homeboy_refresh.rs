@@ -22,6 +22,9 @@ use super::{
     RunnerFileTransfer, RunnerKind,
 };
 
+#[cfg(test)]
+pub(super) use super::{extension_materialization, Runner};
+
 const DEFAULT_HOMEBOY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
 const DEFAULT_HOMEBOY_REF: &str = "main";
 const DISCONNECTED_SSH_REFRESH_TIMEOUT: Duration = Duration::from_secs(20 * 60);

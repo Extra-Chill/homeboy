@@ -978,3 +978,6 @@ mod tests {
         assert!(request.test.skip_lint);
     }
 }
+#[cfg(test)]
+#[path = "../../../../tests/core/extension/component_script_test.rs"]
+mod component_script_test;

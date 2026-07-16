@@ -24,6 +24,15 @@ pub fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
 
+// Included legacy tests retain their pre-extraction crate paths without exposing
+// a compatibility surface from the production homeboy-core package.
+#[cfg(test)]
+extern crate self as homeboy;
+#[cfg(test)]
+pub use crate as core;
+#[cfg(test)]
+pub use lab_contract as command_contract;
+
 // Stable domain facades for new command/core integrations.
 pub mod agent_tasks;
 pub mod artifacts;

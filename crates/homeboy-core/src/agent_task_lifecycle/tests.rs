@@ -744,11 +744,7 @@ fn terminal_lab_artifact_attachment_skips_missing_controller_plan_and_preserves_
         })
         .expect("running proxy");
         let mut record = status("agent-task-late-artifact").expect("status");
-        apply_runner_job_terminal_state(
-            &mut record,
-            crate::api_jobs::JobStatus::Succeeded,
-            &[],
-        );
+        apply_runner_job_terminal_state(&mut record, crate::api_jobs::JobStatus::Succeeded, &[]);
         store::write_record(&record).expect("terminal record");
         std::fs::remove_file(&record.plan_path).expect("remove controller plan");
 
@@ -780,11 +776,7 @@ fn terminal_lab_artifact_attachment_refuses_runner_provenance_mismatch() {
         })
         .expect("running proxy");
         let mut record = status("agent-task-late-artifact-mismatch").expect("status");
-        apply_runner_job_terminal_state(
-            &mut record,
-            crate::api_jobs::JobStatus::Succeeded,
-            &[],
-        );
+        apply_runner_job_terminal_state(&mut record, crate::api_jobs::JobStatus::Succeeded, &[]);
         store::write_record(&record).expect("terminal record");
 
         let error = record_detached_lab_run(DetachedLabRunRecord {
