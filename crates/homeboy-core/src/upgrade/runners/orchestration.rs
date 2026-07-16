@@ -5,10 +5,10 @@ use super::*;
 use crate::runner;
 use crate::runner::Runner;
 use crate::runner::RunnerExecOptions;
-use crate::runner::RunnerKind;
 use crate::runner::RunnerStatusReport;
 use crate::upgrade::ExtensionUpgradeEntry;
 use crate::Result;
+use homeboy_runner_contract::RunnerKind;
 use std::path::Path;
 
 pub fn upgrade_configured_runners(

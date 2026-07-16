@@ -641,7 +641,10 @@ pub(crate) fn project_terminal_artifacts(
                 }
             });
             if let Some(runner_id) = record.runner_id().filter(|runner_id| {
-                std::env::var(crate::runner::RUNNER_ID_ENV).ok().as_deref() != Some(*runner_id)
+                std::env::var(homeboy_runner_contract::RUNNER_ID_ENV)
+                    .ok()
+                    .as_deref()
+                    != Some(*runner_id)
             }) {
                 if runner_id.trim().is_empty() {
                     return Err(Error::validation_invalid_argument(

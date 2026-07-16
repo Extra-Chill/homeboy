@@ -1,0 +1,16 @@
+[package]
+name = "homeboy-runner-contract"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Shared runner contract types + env-var constants for homeboy. Behavior-free data that both homeboy-core and the optional homeboy-runner feature crate depend on, so core can reference runner concepts without depending on runner behavior."
+repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
+
+[lib]
+name = "homeboy_runner_contract"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }

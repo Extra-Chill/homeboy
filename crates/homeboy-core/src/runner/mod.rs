@@ -182,12 +182,10 @@ pub(crate) use workspace::{
     VerifiedLabWorkspaceProvenance, WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerKind {
-    Local,
-    Ssh,
-}
+// RunnerKind now lives in the shared runner-contract crate so core code can
+// name it without a core -> runner edge. Re-exported here so the many
+// `runner::RunnerKind` call sites (and the CLI) keep resolving unchanged.
+pub use homeboy_runner_contract::RunnerKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Runner {

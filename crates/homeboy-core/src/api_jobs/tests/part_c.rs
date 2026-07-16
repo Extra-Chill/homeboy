@@ -796,7 +796,7 @@ fn remote_runner_request_compiles_canonical_execution_envelope() {
         .env
         .insert("TOKEN_A".to_string(), "secret".to_string());
     request.env.insert(
-        crate::runner::RUNNER_PLACEMENT_RESOLVED_ENV.to_string(),
+        homeboy_runner_contract::RUNNER_PLACEMENT_RESOLVED_ENV.to_string(),
         "1".to_string(),
     );
     request.secret_env_names = vec!["TOKEN_A".to_string()];
@@ -821,7 +821,7 @@ fn remote_runner_request_compiles_canonical_execution_envelope() {
     assert_eq!(dispatch.env["PUBLIC_VALUE"], "visible");
     assert!(!dispatch
         .env
-        .contains_key(crate::runner::RUNNER_PLACEMENT_RESOLVED_ENV));
+        .contains_key(homeboy_runner_contract::RUNNER_PLACEMENT_RESOLVED_ENV));
     assert_eq!(dispatch.require_paths, vec!["/srv/extrachill/cache"]);
     assert!(dispatch.source_snapshot.is_some());
     assert_eq!(
@@ -841,7 +841,7 @@ fn remote_runner_request_compiles_canonical_execution_envelope() {
     assert!(!request
         .public_metadata()
         .env
-        .contains_key(crate::runner::RUNNER_PLACEMENT_RESOLVED_ENV));
+        .contains_key(homeboy_runner_contract::RUNNER_PLACEMENT_RESOLVED_ENV));
 }
 
 #[test]

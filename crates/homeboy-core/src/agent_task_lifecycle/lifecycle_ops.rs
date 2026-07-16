@@ -279,7 +279,7 @@ pub fn submit_plan(
     });
     metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
         admission.runtime.clone();
-    if let Ok(runner_id) = std::env::var(crate::runner::RUNNER_ID_ENV) {
+    if let Ok(runner_id) = std::env::var(homeboy_runner_contract::RUNNER_ID_ENV) {
         if !runner_id.trim().is_empty() {
             metadata["runner_id"] = json!(runner_id);
         }

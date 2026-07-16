@@ -5,11 +5,11 @@ use crate::runner;
 use crate::runner::Runner;
 use crate::runner::RunnerCapabilityPreflight;
 use crate::runner::RunnerExecOptions;
-use crate::runner::RunnerKind;
 use crate::runner::RunnerRequiredTool;
 use crate::runner::RunnerWorkspaceSyncMode;
 use crate::runner::RunnerWorkspaceSyncOptions;
 use crate::Result;
+use homeboy_runner_contract::RunnerKind;
 use std::path::Path;
 use std::process::Command;
 

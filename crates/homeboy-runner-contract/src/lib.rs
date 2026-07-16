@@ -1,0 +1,28 @@
+//! Shared runner contract: behavior-free types and env-var constants that both
+//! `homeboy-core` and the optional `homeboy-runner` feature crate depend on.
+//!
+//! Runner is an optional Lab-offload feature; core must not depend on runner
+//! *behavior*. But some core code legitimately needs to name runner *concepts*
+//! (e.g. the runner kind, or the env-var markers used when an exec crosses a
+//! remote-runner boundary). Those plain-data contracts live here so core can
+//! reference them without a `core -> runner` edge.
+
+use serde::{Deserialize, Serialize};
+
+/// The kind of runner backing a homeboy runner definition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerKind {
+    Local,
+    Ssh,
+}
+
+/// Set while a hosted exec runs inside a runner (as opposed to the local host).
+pub const RUNNER_HOSTED_EXEC_ENV: &str = "HOMEBOY_RUNNER_HOSTED_EXEC";
+
+/// Private process marker added only while a runner exec crosses a remote
+/// runner boundary. Intentionally absent from CLI parsing and argv.
+pub const RUNNER_PLACEMENT_RESOLVED_ENV: &str = "HOMEBOY_RUNNER_PLACEMENT_RESOLVED";
+
+/// Identifies the runner an exec is bound to.
+pub const RUNNER_ID_ENV: &str = "HOMEBOY_RUNNER_ID";
