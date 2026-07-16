@@ -116,6 +116,9 @@ impl CliRuntime {
         // scheduler can verify lab-materialized workspaces without core depending
         // on runner behavior.
         crate::core::runner::register_lab_workspace_provenance_provider();
+        // Register the runner-upgrade provider so the core upgrade flow can
+        // refresh configured runners without depending on runner behavior.
+        crate::core::upgrade::register_runner_upgrade();
         // Register the command-label resolver so core::runner can map dispatched
         // argv to a hot-command label without depending on the full CLI parser.
         crate::core::runner::set_command_label_resolver(|argv| {

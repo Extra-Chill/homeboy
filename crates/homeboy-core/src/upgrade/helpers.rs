@@ -7,7 +7,6 @@ use std::process::Command;
 
 use super::constants::{GITHUB_RELEASES_API, VERSION};
 use super::execution::{execute_upgrade, resolve_source_workspace};
-use super::runners;
 use super::services;
 use super::types::*;
 use super::validation::check_for_updates;
@@ -184,14 +183,16 @@ pub fn run_upgrade_with_method(
             let (runners_updated, runners_skipped) = if skip_runners {
                 (vec![], vec![])
             } else {
-                runners::upgrade_configured_runners_with_explicit_source_path(
-                    force,
-                    runner_method_override,
-                    source_upgrade_path.as_deref(),
-                    source_path.is_some(),
-                    runner_targets,
-                    &extensions_updated,
-                )?
+                super::with_runner_upgrade(|p| {
+                    p.upgrade_configured_runners_with_explicit_source_path(
+                        force,
+                        runner_method_override,
+                        source_upgrade_path.as_deref(),
+                        source_path.is_some(),
+                        runner_targets,
+                        &extensions_updated,
+                    )
+                })?
             };
             let source_drift = same_version_source_checkout_drift(
                 previous_build_identity.as_deref(),
@@ -261,14 +262,16 @@ pub fn run_upgrade_with_method(
     promotion_lease.assert_generation()?;
     let (runners_updated, runners_skipped) = if upgrade_completed && !skip_runners {
         upgrade_phase("refreshing configured runners");
-        runners::upgrade_configured_runners_with_explicit_source_path(
-            force,
-            runner_method_override,
-            source_upgrade_path.as_deref(),
-            source_path.is_some(),
-            runner_targets,
-            &extensions_updated,
-        )?
+        super::with_runner_upgrade(|p| {
+            p.upgrade_configured_runners_with_explicit_source_path(
+                force,
+                runner_method_override,
+                source_upgrade_path.as_deref(),
+                source_path.is_some(),
+                runner_targets,
+                &extensions_updated,
+            )
+        })?
     } else {
         (vec![], vec![])
     };
@@ -699,7 +702,8 @@ fn same_version_source_checkout_drift(
     skip_services: bool,
 ) -> Option<SourceCheckoutDriftWarning> {
     let checkout = resolve_source_workspace(source_path).ok()?;
-    let source_identity = runners::source_checkout_build_identity(&checkout)?;
+    let source_identity =
+        super::with_runner_upgrade(|p| p.source_checkout_build_identity(&checkout))?;
     if active_build_identity == Some(source_identity.as_str()) {
         return None;
     }
@@ -806,6 +810,10 @@ version = "0.0.0"
 
     #[test]
     fn same_version_source_checkout_drift_reports_recovery_command() {
+        // Exercises source_checkout_build_identity, which lives behind the
+        // RunnerUpgradeProvider hook. Register the provider (normally done at CLI
+        // startup) so build-identity detection runs.
+        crate::upgrade::register_runner_upgrade();
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("homeboy.json"), r#"{"id":"homeboy"}"#).unwrap();
         std::fs::write(
