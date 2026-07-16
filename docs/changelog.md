@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.288.5] - 2026-07-16
+
+### Changed
+- Project recovered Lab artifacts during reconciliation
+- move RunnerArtifactRef to runner-contract
+- move edit_op + edit_op_apply into homeboy-engine-primitives (#8425)
+- eliminate 3 core→runner behavioral edges via contract relocation
+- Support transformed archive package coverage
+- move Language primitive into homeboy-engine-primitives (#8425)
+- move remote-runner artifact-path check to execution_contract
+
+### Fixed
+- fix(agent-task): materialize recovered Lab artifacts
+- Fix durable promotion placement
+- Fix recovered Lab artifact promotion paths
+- Fix detached Lab result reconciliation
+
 ## [0.288.4] - 2026-07-16
 
 ### Changed
