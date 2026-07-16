@@ -648,7 +648,11 @@ fn verify_self_identity(path: &Path, expected: &str) -> Result<()> {
 
 fn executable_identity(path: &Path) -> Result<String> {
     #[cfg(test)]
-    if std::env::current_exe().ok().as_deref() == Some(path) {
+    if std::env::current_exe()
+        .ok()
+        .zip(fs::canonicalize(path).ok())
+        .is_some_and(|(current, candidate)| current == candidate)
+    {
         // Unit tests run inside the libtest executable, not the Homeboy CLI.
         // Keep lifecycle fixtures hermetic while artifact tests still execute
         // their explicit fake controller binaries.

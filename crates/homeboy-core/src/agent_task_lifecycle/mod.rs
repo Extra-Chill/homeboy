@@ -40,6 +40,7 @@ mod lifecycle_record_ops;
 mod records;
 pub mod runner_continuation;
 
+pub use crate::controller_runtime::ControllerRuntimePruneResult;
 pub use artifact_materialization::*;
 pub use cancellation::*;
 pub use failure_recording::*;
