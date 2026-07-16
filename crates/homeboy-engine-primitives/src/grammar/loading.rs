@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use crate::engine::local_files;
-use crate::error::{Error, Result};
+use crate::local_files;
+use homeboy_error::{Error, Result};
 
 use super::types::Grammar;
 

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
-use crate::extension::grammar::{self, Grammar};
+use homeboy_engine_primitives::grammar::{self, Grammar};
 
 // ============================================================================
 // Types
@@ -697,7 +697,7 @@ mod tests {
         if !grammar_path.exists() {
             return; // Skip if grammar not installed
         }
-        let grammar = crate::extension::grammar::load_grammar(grammar_path).unwrap();
+        let grammar = homeboy_engine_primitives::grammar::load_grammar(grammar_path).unwrap();
 
         let content = r#"use std::path::Path;
 use crate::fixer::{insertion, Fix};
