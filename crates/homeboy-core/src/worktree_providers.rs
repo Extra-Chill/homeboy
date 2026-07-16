@@ -513,12 +513,6 @@ fn validate_provider_handle(
     Ok(())
 }
 
-pub fn cleanup_worktree_providers(
-    options: WorktreeProviderCleanupOptions,
-) -> Result<WorktreeProviderCleanupOutput> {
-    cleanup_worktree_providers_from_config(options, defaults::load_config())
-}
-
 pub fn cleanup_worktree_providers_from_config(
     options: WorktreeProviderCleanupOptions,
     config: HomeboyConfig,

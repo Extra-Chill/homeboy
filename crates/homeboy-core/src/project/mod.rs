@@ -211,10 +211,6 @@ pub fn init_project_dir(id: &str) -> Result<PathBuf> {
 }
 
 /// Get the project directory path for a given project ID.
-pub fn project_dir_path(id: &str) -> Result<PathBuf> {
-    paths::project_dir(id)
-}
-
 pub fn resolve_path(path: &Path) -> Result<ProjectPathResolutionReport> {
     let requested_path = expand_path(path);
     let requested_canonical = canonical_or_original(&requested_path);
