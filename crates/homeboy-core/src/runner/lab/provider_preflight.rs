@@ -1,6 +1,7 @@
 //! Agent-task provider readiness on a selected Lab runner.
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::agent_task_provider::{resolve_provider_for_backend, ProviderResolution};
 use crate::agent_tasks::provider::{
@@ -12,9 +13,10 @@ use crate::source_snapshot::SourceSnapshot;
 use crate::{Error, ErrorCode, Result};
 
 use super::super::command_path::preflight_remote_argv_path_translation;
+use super::super::connection::disconnect_with_session;
 use super::super::{
-    connect, disconnect, exec, status, RunnerActiveJobState, RunnerCapabilityPreflight,
-    RunnerExecOptions, RunnerStatusReport, RunnerTunnelMode,
+    connect, exec, status, RunnerActiveJobState, RunnerCapabilityPreflight, RunnerExecOptions,
+    RunnerSession, RunnerStatusReport, RunnerTunnelMode,
 };
 use super::offload::runner_homeboy_daemon_display;
 
@@ -23,6 +25,9 @@ struct AgentTaskProviderSelection {
     backend: String,
     selector: Option<String>,
 }
+
+const PROVIDER_SESSION_REFRESH_RETRY_ATTEMPTS: usize = 20;
+const PROVIDER_SESSION_REFRESH_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn preflight_agent_task_provider_on_runner(
@@ -126,8 +131,16 @@ pub(super) fn preflight_agent_task_provider_on_runner(
         && runner_unavailable_reason.is_some()
         && runner_provider_refresh_is_safe(runner_status)
     {
-        refresh_result = Some(refresh_runner_provider_session_if_still_safe(runner_id));
-        if refresh_result.as_ref().is_some_and(|result| result.is_ok()) {
+        let refresh = refresh_runner_provider_session_if_still_safe(
+            runner_id,
+            runner_status.session.as_ref(),
+        );
+        let reprobe_replacement = matches!(
+            refresh.as_ref(),
+            Ok(ProviderSessionRefresh::Refreshed | ProviderSessionRefresh::Superseded)
+        );
+        refresh_result = Some(refresh.map(|_| ()));
+        if reprobe_replacement {
             let probe = probe_agent_task_providers_on_runner(
                 runner_id,
                 remote_cwd,
@@ -262,25 +275,73 @@ fn runner_provider_refresh_is_safe(status: &RunnerStatusReport) -> bool {
             .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderSessionRefresh {
+    Refreshed,
+    Superseded,
+}
+
 fn refresh_runner_provider_session_if_still_safe(
     runner_id: &str,
-) -> std::result::Result<(), String> {
+    expected_session: Option<&RunnerSession>,
+) -> std::result::Result<ProviderSessionRefresh, String> {
+    let expected_session = expected_session.ok_or_else(|| {
+        "runner session is unavailable; refusing an unbound provider refresh".to_string()
+    })?;
+    let promotion_lease = acquire_provider_session_refresh_lease(runner_id)?;
+    promotion_lease
+        .assert_generation()
+        .map_err(|err| err.message)?;
     let current_status = status(runner_id).map_err(|err| err.message)?;
+    if provider_session_was_superseded(expected_session, current_status.session.as_ref()) {
+        // Another controller completed the only safe refresh for this observed
+        // session. Re-probe the replacement instead of stopping it again.
+        return Ok(ProviderSessionRefresh::Superseded);
+    }
     if !runner_provider_refresh_is_safe(&current_status) {
         return Err(
             "runner session is no longer safe to refresh automatically; active jobs may be running or the session is not direct SSH"
                 .to_string(),
         );
     }
-    disconnect(runner_id).map_err(|err| err.message)?;
+    disconnect_with_session(runner_id, Some(expected_session), false).map_err(|err| err.message)?;
     let (report, exit_code) = connect(runner_id).map_err(|err| err.message)?;
     if exit_code == 0 && report.connected {
-        Ok(())
+        Ok(ProviderSessionRefresh::Refreshed)
     } else {
         Err(report.failure_message.unwrap_or_else(|| {
             format!("runner reconnect exited with {exit_code} without establishing a session")
         }))
     }
+}
+
+fn acquire_provider_session_refresh_lease(
+    runner_id: &str,
+) -> std::result::Result<crate::runtime_promotion::RuntimePromotionLease, String> {
+    for attempt in 0..PROVIDER_SESSION_REFRESH_RETRY_ATTEMPTS {
+        match crate::runtime_promotion::acquire(
+            "runner provider readiness refresh",
+            runner_id.to_string(),
+        ) {
+            Ok(lease) => return Ok(lease),
+            Err(error)
+                if error.details.get("field").and_then(|value| value.as_str())
+                    == Some("runtime_promotion_lease")
+                    && attempt + 1 < PROVIDER_SESSION_REFRESH_RETRY_ATTEMPTS =>
+            {
+                std::thread::sleep(PROVIDER_SESSION_REFRESH_RETRY_DELAY);
+            }
+            Err(error) => return Err(error.message),
+        }
+    }
+    unreachable!("bounded provider session refresh lease retries always return")
+}
+
+fn provider_session_was_superseded(
+    expected_session: &RunnerSession,
+    current_session: Option<&RunnerSession>,
+) -> bool {
+    current_session != Some(expected_session)
 }
 
 fn agent_task_provider_selection_from_args(
@@ -504,6 +565,45 @@ fn refresh_command(runner_id: &str, runner_homeboy: &serde_json::Value) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn direct_session(tunnel_pid: u32, lease_id: &str) -> RunnerSession {
+        RunnerSession {
+            runner_id: "homeboy-lab".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: crate::runner::RunnerSessionRole::Controller,
+            server_id: Some("lab".to_string()),
+            controller_id: None,
+            broker_url: None,
+            remote_daemon_address: Some("127.0.0.1:49152".to_string()),
+            local_port: Some(49152),
+            local_url: Some("http://127.0.0.1:49152".to_string()),
+            tunnel_pid: Some(tunnel_pid),
+            remote_daemon_pid: Some(1234),
+            remote_daemon_lease_id: Some(lease_id.to_string()),
+            homeboy_version: "0.0.0-test".to_string(),
+            homeboy_build_identity: Some("homeboy 0.0.0-test".to_string()),
+            connected_at: "2026-07-16T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }
+    }
+
+    #[test]
+    fn concurrent_provider_refresh_reprobes_the_replacement_session() {
+        let observed_by_both_cooks = direct_session(100, "lease-before-refresh");
+        let replacement_after_first_cook = direct_session(200, "lease-after-refresh");
+
+        assert!(provider_session_was_superseded(
+            &observed_by_both_cooks,
+            Some(&replacement_after_first_cook),
+        ));
+        assert!(!provider_session_was_superseded(
+            &observed_by_both_cooks,
+            Some(&observed_by_both_cooks),
+        ));
+    }
 
     #[test]
     fn agent_task_provider_selection_reads_cook_backend_and_selector() {
