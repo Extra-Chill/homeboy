@@ -4,6 +4,25 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.288.7] - 2026-07-16
+
+### Changed
+- route runner_artifact_content through the evidence hook
+- repoint code_audit imports to homeboy-audit-contract + primitives (#8425)
+- remove dead legacy typed-artifact runner fallback
+- move fingerprint output schema into homeboy-audit-contract (#8425)
+- route failure_recording artifact download through evidence hook
+- Stabilize parallel Lab runner handoffs
+- invert agent-task-scheduler->runner lab-workspace verify via hook
+- extract homeboy-audit-contract crate (audit config schema) (#8425)
+- Mirror detached artifacts for promotion
+- Reconcile accepted Lab jobs and portable patch artifacts
+- invert api_jobs->runner job-preparation via provider hook
+
+### Fixed
+- map ErrorCode::RuntimePromotionContended in exit_code_for_error
+- serialize concurrent Lab provider refresh
+
 ## [0.288.6] - 2026-07-16
 
 ### Changed
