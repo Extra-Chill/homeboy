@@ -214,7 +214,9 @@ fn cancel_runner_job(
         return result;
     }
 
-    crate::runners::runner_job_cancel(runner_id, runner_job_id)
+    crate::observation::runs_service::runner_evidence::with_runner_evidence(|p| {
+        p.runner_job_cancel(runner_id, runner_job_id)
+    })
 }
 
 #[cfg(test)]

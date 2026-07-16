@@ -1677,23 +1677,27 @@ fn enqueue_exec_job(
             base_plan = Some(request.secret_env_plan.clone());
         }
     }
-    let secret_env_plan = crate::runner::runner_exec_secret_env_plan(
-        &request.command,
-        None,
-        &request.secret_env_names,
-        &request.env,
-        base_plan,
-    );
+    let secret_env_plan = crate::api_jobs::with_runner_job_preparation(|p| {
+        p.runner_exec_secret_env_plan(
+            &request.command,
+            None,
+            &request.secret_env_names,
+            &request.env,
+            base_plan,
+        )
+    });
     request.secret_env_names = secret_env_plan.secret_env_names();
     request.secret_env_plan = secret_env_plan.clone();
-    crate::runner::workload::validate_runner_workload_dispatch(
-        request.runner_workload.as_ref(),
-        &request.runner_id,
-        request.cwd.as_deref(),
-        &request.command,
-        &secret_env_plan,
-        request.capture_patch,
-    )?;
+    crate::api_jobs::with_runner_job_preparation(|p| {
+        p.validate_runner_workload_dispatch(
+            request.runner_workload.as_ref(),
+            &request.runner_id,
+            request.cwd.as_deref(),
+            &request.command,
+            &secret_env_plan,
+            request.capture_patch,
+        )
+    })?;
     let plan = prepare_daemon_local_process(RunnerProcessRequest {
         runner_id: request.runner_id,
         runner: request.runner,
