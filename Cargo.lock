@@ -729,6 +729,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-audit-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "homeboy-cli"
 version = "0.1.0"
 dependencies = [
@@ -790,6 +798,7 @@ dependencies = [
  "glob",
  "glob-match",
  "heck",
+ "homeboy-audit-contract",
  "homeboy-cli-contract",
  "homeboy-engine-primitives",
  "homeboy-error",

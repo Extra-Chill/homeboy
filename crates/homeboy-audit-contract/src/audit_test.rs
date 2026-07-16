@@ -1,4 +1,4 @@
-use crate::component::{
+use crate::{
     AuditConfig, ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule,
     MutatingResourceAccessConfig, PublicRegistryExposureConfig, RedirectValidationConfig,
 };
