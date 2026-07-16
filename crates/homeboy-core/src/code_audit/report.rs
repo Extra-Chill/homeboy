@@ -4,6 +4,7 @@
 //! produce domain-specific results. This module provides the output types and
 //! builder functions that assemble results into command-ready output.
 
+use crate::code_audit::findings::finding_kind_key;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -327,10 +328,6 @@ pub fn build_changed_since_summary(
 /// This must match the `#[serde(rename_all = "snake_case")]` on the enum so that
 /// `fixability.by_kind` keys align with the finding group keys in JSON output.
 /// Using `format!("{:?}", ...)` would produce Debug PascalCase (e.g. `compilerwarning`)
-/// which doesn't match the serde output (`compiler_warning`).
-pub(crate) fn finding_kind_key(finding: &AuditFinding) -> String {
-    crate::code_audit::findings::finding_kind_key(finding)
-}
 
 /// Compute fixability metadata from an audit result without applying fixes.
 ///
