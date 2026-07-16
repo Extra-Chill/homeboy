@@ -334,6 +334,38 @@ fn release_prepare_uses_prepared_output_to_unlock_publish_jobs() {
 }
 
 #[test]
+fn release_fails_loudly_when_prepared_release_does_not_publish() {
+    let verify = job_section(release_workflow(), "verify-published");
+
+    // The guard must run whenever a release was actually prepared, even if
+    // the publish chain skipped (so it uses always() + the prepared output).
+    assert!(
+        verify.contains("always()"),
+        "verify-published must use always() so a skipped host does not skip the guard"
+    );
+    assert!(verify.contains("needs.prepare.outputs.prepared == 'true'"));
+    assert!(verify.contains("needs.prepare.outputs['release-tag'] != ''"));
+
+    // It must fail the run when host did not succeed.
+    assert!(verify.contains("needs.host.result"));
+    assert!(
+        verify.contains("!= \"success\""),
+        "verify-published must fail unless host succeeded"
+    );
+    assert!(
+        verify.contains("exit 1"),
+        "verify-published must exit non-zero to fail the run"
+    );
+
+    // A failed guard must be treated as a release failure by the bookkeeping
+    // jobs so the broken commit is recorded and not silently retried.
+    let record_failure = job_section(release_workflow(), "record-failure");
+    let clear_failure = job_section(release_workflow(), "clear-failure");
+    assert!(record_failure.contains("- verify-published"));
+    assert!(clear_failure.contains("- verify-published"));
+}
+
+#[test]
 fn release_recovery_bypasses_quality_gates_and_still_prepares() {
     let check = job_section(release_workflow(), "check");
     let gate_audit = job_section(release_workflow(), "gate-audit");

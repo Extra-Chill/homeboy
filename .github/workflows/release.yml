@@ -772,6 +772,31 @@ jobs:
           release-from-artifacts: artifacts
           release-skip-publish: 'true'
 
+  # ── Step 5b: Fail loudly if a prepared release did not publish ──
+  # Skipped jobs do not fail a run, so a broken publish chain (e.g. `plan`
+  # or `host` skipped) would otherwise land a tag with no GitHub Release
+  # while the overall run still reports success — exactly the regression
+  # fixed in #8567. This guard turns that silent gap into a red run: once a
+  # release is actually prepared (`prepared == 'true'`), `host` MUST succeed.
+  verify-published:
+    name: Verify GitHub Release published
+    needs:
+      - prepare
+      - host
+    if: ${{ always() && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce publish completed
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
+          HOST_RESULT: ${{ needs.host.result }}
+        run: |
+          if [ "${HOST_RESULT}" != "success" ]; then
+            echo "::error::Release ${RELEASE_TAG} was prepared and tagged but the Create GitHub Release job did not succeed (result: ${HOST_RESULT}). The tag exists with no GitHub Release. Investigate the plan/build/host publish chain; recover with a workflow_dispatch run using release_tag=${RELEASE_TAG}."
+            exit 1
+          fi
+          echo "::notice::Release ${RELEASE_TAG} published successfully."
+
   announce:
     needs:
       - plan
@@ -800,6 +825,7 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - host
+      - verify-published
       - announce
     if: ${{ always() && github.event_name == 'push' && needs.check.outputs.should-release == 'true' && contains(toJson(needs), '"result":"failure"') }}
     runs-on: ubuntu-latest
@@ -829,6 +855,7 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - host
+      - verify-published
       - announce
     if: ${{ always() && github.event_name == 'push' && needs.check.outputs.should-release == 'true' && !contains(toJson(needs), '"result":"failure"') && !contains(toJson(needs), '"result":"cancelled"') }}
     runs-on: ubuntu-latest
