@@ -306,7 +306,9 @@ fn register_outcome_resources_unlocked(run_id: &str, outcomes: &[AgentTaskOutcom
                 root_bound: root.display().to_string(),
                 owner_pid: std::process::id(),
                 lifecycle_state: "provider_registered".to_string(),
-                lease_id: String::new(),
+                // Provider resources arrive after their materialization, so
+                // assign their lease while adopting them into our index.
+                lease_id: uuid::Uuid::new_v4().to_string(),
                 reconstructable: value
                     .get("reconstructable")
                     .and_then(serde_json::Value::as_bool)
@@ -565,7 +567,6 @@ fn remove_candidate(
     let mut index = read_index_unlocked()?;
     let Some(resource) = index.resources.iter_mut().find(|resource| {
         resource.lease_id == candidate.lease_id
-            && !resource.lease_id.is_empty()
             && resource.path == candidate.path
             && resource.owner_pid == candidate.owner_pid
     }) else {
@@ -1235,6 +1236,9 @@ mod tests {
             run_git(&scratch, &["push", "-u", "origin", "main"]);
             let mut resource = resource(&scratch, root.path());
             resource.lifecycle_state = "released".to_string();
+            // Older provider registrations had no lease. Recovery must still
+            // reconcile that owned resource after the normal safety gates.
+            resource.lease_id.clear();
             write_index(&ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![resource],
@@ -1265,7 +1269,7 @@ mod tests {
                 .expect("index")
                 .resources
                 .into_iter()
-                .find(|resource| resource.lease_id == "test-lease")
+                .find(|resource| resource.path == scratch.display().to_string())
                 .expect("retained lifecycle evidence");
             assert_eq!(retained.lifecycle_state, "released");
             assert_eq!(retained.path, scratch.display().to_string());

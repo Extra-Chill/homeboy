@@ -393,42 +393,6 @@ where
                     .or(harvest_preflight.base_sha.clone());
                 let source_workspace_root = request.workspace.root.clone();
                 let source_provenance = harvest_preflight.source_provenance;
-                let attempt_workspace = match prepare_attempt_workspace(
-                    &mut request,
-                    task_base_sha.as_deref(),
-                    harvest_preflight.candidate_baseline.as_ref(),
-                ) {
-                    Ok(workspace) => workspace,
-                    Err(error) => {
-                        record_harvest_setup_failure(
-                            &task_id,
-                            scheduled.attempt,
-                            error,
-                            &mut completed_by_task,
-                            &mut outcomes,
-                            &mut events,
-                        );
-                        continue;
-                    }
-                };
-                let task_base_sha = attempt_workspace
-                    .as_ref()
-                    .map(|workspace| workspace.base_sha().to_string())
-                    .or(task_base_sha);
-                if let Some(adoption) = scheduled.adoption.as_ref() {
-                    if let Err(mut outcome) = validate_and_apply_candidate_adoption(
-                        &request,
-                        adoption,
-                        task_base_sha.as_deref(),
-                    ) {
-                        outcome.task_id = task_id.clone();
-                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
-                        continue;
-                    }
-                }
-                if let Some(root) = request.workspace.root.as_deref() {
-                    request.executor.remap_workspace_root(root);
-                }
                 #[cfg(test)]
                 let scratch_allocation = crate::controller_scratch::allocate_test_attempt;
                 #[cfg(not(test))]
@@ -453,6 +417,48 @@ where
                         continue;
                     }
                 };
+                let attempt_workspace = match prepare_attempt_workspace(
+                    &mut request,
+                    task_base_sha.as_deref(),
+                    harvest_preflight.candidate_baseline.as_ref(),
+                    &scratch.path,
+                ) {
+                    Ok(workspace) => workspace,
+                    Err(error) => {
+                        let outcome = committed_harvest_failure(
+                            committed_harvest_preflight_outcome(task_id.clone()),
+                            error,
+                        );
+                        release_scratch(&scratch, "attempt_workspace_setup_failed", &outcome);
+                        events.push(event(
+                            &task_id,
+                            AgentTaskState::Failed,
+                            scheduled.attempt,
+                            outcome.summary.clone(),
+                        ));
+                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                        continue;
+                    }
+                };
+                let task_base_sha = attempt_workspace
+                    .as_ref()
+                    .map(|workspace| workspace.base_sha().to_string())
+                    .or(task_base_sha);
+                if let Some(adoption) = scheduled.adoption.as_ref() {
+                    if let Err(mut outcome) = validate_and_apply_candidate_adoption(
+                        &request,
+                        adoption,
+                        task_base_sha.as_deref(),
+                    ) {
+                        outcome.task_id = task_id.clone();
+                        release_scratch(&scratch, "candidate_adoption_failed", &outcome);
+                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                        continue;
+                    }
+                }
+                if let Some(root) = request.workspace.root.as_deref() {
+                    request.executor.remap_workspace_root(root);
+                }
                 request
                     .executor
                     .set_runtime_tmpdir(scratch.path.to_string_lossy().as_ref());
@@ -590,9 +596,6 @@ where
                     if let Err(error) = harvest_uncommitted_patch(&mut outcome, &running_task)
                         .and_then(|_| harvest_committed_patch(&mut outcome, &running_task))
                     {
-                        if let Some(workspace) = &running_task._attempt_workspace {
-                            workspace.retain_for_diagnostics();
-                        }
                         outcome = committed_harvest_failure(outcome, error);
                     }
                     finalize_candidate_artifacts(&mut outcome, &running_task);
@@ -649,6 +652,7 @@ where
                         retry_budget_used,
                         &plan.options.retry.retryable_failure_classifications,
                     ) {
+                        cleanup_attempt_workspace(&mut outcome, &running_task);
                         release_scratch(&result.scratch, "retry", &outcome);
                         retry_budget_used += 1;
                         let retry_evidence = retry_attempt_evidence(&outcome, &running_task);
@@ -695,6 +699,7 @@ where
                             execution_budget.max_provider_executions,
                             execution_budget.max_provider_rotations,
                         ) {
+                            cleanup_attempt_workspace(&mut outcome, &running_task);
                             release_scratch(&result.scratch, "provider_rotation", &outcome);
                             let mut rotation_attempts = running_task.rotation_attempts.clone();
                             rotation_attempts.push(
@@ -784,6 +789,7 @@ where
                         }
                     }
                     let mut outcome = outcome;
+                    cleanup_attempt_workspace(&mut outcome, &running_task);
                     append_unique_artifacts(
                         &mut outcome.artifacts,
                         running_task.candidate_artifacts,
@@ -1067,6 +1073,25 @@ pub(super) fn release_scratch(
         "outcome": outcome,
     });
     let _ = crate::controller_scratch::release_attempt(allocation, reason, evidence);
+}
+
+/// A clean attempt is unregistered from Git before its enclosing scratch lease
+/// is released. Dirty, unpushed, and indeterminate checkouts remain registered
+/// for lifecycle cleanup instead of being force-removed.
+fn cleanup_attempt_workspace(outcome: &mut AgentTaskOutcome, running: &RunningTask) {
+    let Some(workspace) = &running._attempt_workspace else {
+        return;
+    };
+    if let Err(error) = workspace.cleanup() {
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.attempt_workspace_retained".to_string(),
+            message: format!("attempt workspace retained for lifecycle cleanup: {error}"),
+            data: serde_json::json!({
+                "path": running.request.workspace.root,
+                "reason": "dirty_unpushed_or_unknown",
+            }),
+        });
+    }
 }
 
 fn terminal_reason(outcome: &AgentTaskOutcome, cancelled: bool) -> &'static str {

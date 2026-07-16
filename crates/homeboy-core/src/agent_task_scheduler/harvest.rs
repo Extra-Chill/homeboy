@@ -640,10 +640,12 @@ mod committed_harvest_tests {
             prepare_committed_harvest(&request, None, &HarvestExecutionContext::default())
                 .expect("recorded promoted candidate is accepted");
         let source_base = preflight.base_sha.expect("source base");
+        let scratch = tempfile::tempdir().expect("attempt scratch");
         let attempt = prepare_attempt_workspace(
             &mut request,
             Some(&source_base),
             preflight.candidate_baseline.as_ref(),
+            scratch.path(),
         )
         .expect("attempt workspace")
         .expect("isolated attempt");
@@ -964,9 +966,11 @@ mod committed_harvest_tests {
             prepare_committed_harvest(&request, None, &context).expect("snapshot retry preflight");
         assert_eq!(retry_preflight.base_sha.as_deref(), Some(baseline.as_str()));
         assert_eq!(source_provenance["source_revision"], "a".repeat(40));
-        let attempt = prepare_attempt_workspace(&mut request, Some(&baseline), None)
-            .expect("provider-ready attempt")
-            .expect("attempt workspace");
+        let scratch = tempfile::tempdir().expect("attempt scratch");
+        let attempt =
+            prepare_attempt_workspace(&mut request, Some(&baseline), None, scratch.path())
+                .expect("provider-ready attempt")
+                .expect("attempt workspace");
         assert_ne!(
             request.workspace.root.as_deref(),
             Some(workspace.path().to_str().unwrap())
