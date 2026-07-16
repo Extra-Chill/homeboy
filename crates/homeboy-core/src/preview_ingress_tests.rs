@@ -1,7 +1,7 @@
 use super::preview_ingress::*;
-use super::tunnel::native_preview_token_sha256;
 use crate::test_support;
 use base64::Engine;
+use homeboy_tunnel::native_preview_token_sha256;
 use serde_json::json;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};

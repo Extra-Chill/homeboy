@@ -800,6 +800,7 @@ dependencies = [
  "homeboy-process",
  "homeboy-product-identity",
  "homeboy-redaction",
+ "homeboy-tunnel",
  "keyring",
  "libc",
  "regex",

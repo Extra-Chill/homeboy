@@ -56,3 +56,11 @@ tempfile = "3.14"
 clap = { version = "4.5", features = ["derive", "string"] }
 toml = "1.0.3"
 sha2 = "0.10.9"
+
+[dev-dependencies]
+# Tunnel was extracted to homeboy-tunnel (#8488). Two core test targets
+# (tunnel_tests, preview_ingress_tests) still exercise tunnel behavior /
+# consume the native-preview token helper, so the crate is needed for the
+# test build only. Cargo permits this dev-dependency cycle (tunnel depends on
+# core); it never enters the production graph.
+homeboy-tunnel = { version = "0.1.0", path = "../homeboy-tunnel" }

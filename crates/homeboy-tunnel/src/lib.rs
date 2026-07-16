@@ -67,3 +67,11 @@ mod register_tests {
         assert_eq!(count, 1, "ServiceTunnel registered more than once");
     }
 }
+
+// Tunnel lifecycle/expose behavior tests. Relocated here from homeboy-core when
+// tunnel was extracted (#8488) — they exercise this crate's internals
+// (preview_policy_allows, preview_artifact_for) and its public surface, using
+// homeboy-core's public fixtures for isolation.
+#[cfg(test)]
+#[path = "tunnel_tests.rs"]
+mod tunnel_tests;
