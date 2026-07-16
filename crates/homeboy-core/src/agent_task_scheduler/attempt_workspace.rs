@@ -1,9 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -79,7 +76,6 @@ pub(super) struct AttemptWorkspace {
     source_root: PathBuf,
     root: PathBuf,
     base_sha: String,
-    retain: AtomicBool,
 }
 
 impl AttemptWorkspace {
@@ -87,13 +83,25 @@ impl AttemptWorkspace {
         &self.base_sha
     }
 
-    pub(super) fn retain_for_diagnostics(&self) {
-        self.retain.store(true, Ordering::Release);
-    }
-
     pub(super) fn cleanup(&self) -> Result<(), String> {
+        let status = git_output(&self.root, &["status", "--porcelain=v1"])
+            .map_err(|error| format!("cannot inspect attempt workspace state: {error:?}"))?;
+        if !status.trim().is_empty() {
+            return Err("attempt workspace has uncommitted changes".to_string());
+        }
+        let unpushed = git_output(
+            &self.root,
+            &["rev-list", "--count", &format!("{}..HEAD", self.base_sha)],
+        )
+        .map_err(|error| format!("cannot inspect attempt workspace commits: {error:?}"))?;
+        if unpushed.trim() != "0" {
+            return Err(format!(
+                "attempt workspace has {} commit(s) beyond its base",
+                unpushed.trim()
+            ));
+        }
         let remove = Command::new("git")
-            .args(["worktree", "remove", "--force"])
+            .args(["worktree", "remove"])
             .arg(&self.root)
             .current_dir(&self.source_root)
             .status()
@@ -101,23 +109,7 @@ impl AttemptWorkspace {
         if !remove.success() {
             return Err(format!("git worktree remove exited {remove}"));
         }
-        self.retain.store(true, Ordering::Release);
         Ok(())
-    }
-}
-
-impl Drop for AttemptWorkspace {
-    fn drop(&mut self) {
-        if self.retain.load(Ordering::Acquire) {
-            return;
-        }
-        // This is a scheduler-created detached checkout, never the caller's
-        // managed task workspace. Drop runs after the executor thread exits.
-        let _ = Command::new("git")
-            .args(["worktree", "remove", "--force"])
-            .arg(&self.root)
-            .current_dir(&self.source_root)
-            .status();
     }
 }
 
@@ -369,6 +361,7 @@ pub(super) fn prepare_attempt_workspace(
     request: &mut AgentTaskRequest,
     base: Option<&str>,
     candidate_baseline: Option<&CandidateBaseline>,
+    scratch_root: &Path,
 ) -> Result<Option<Arc<AttemptWorkspace>>, HarvestError> {
     let Some(root) = request.workspace.root.as_deref().map(PathBuf::from) else {
         return Ok(None);
@@ -376,13 +369,10 @@ pub(super) fn prepare_attempt_workspace(
     let Some(base) = base else {
         return Ok(None);
     };
-    let parent = std::env::temp_dir().join("homeboy-agent-task-attempts");
-    std::fs::create_dir_all(&parent).map_err(|error| HarvestError::ArtifactDirectory {
-        path: parent.clone(),
-        message: error.to_string(),
-    })?;
     let identity = format!("attempt-{}", uuid::Uuid::new_v4());
-    let attempt_root = parent.join(&identity);
+    // The attempt checkout is a child of the scheduler's durably registered
+    // scratch lease, never an untracked system-temporary worktree.
+    let attempt_root = scratch_root.join("workspace");
     let attempt_root_string = attempt_root.display().to_string();
     git_output(
         &root,
@@ -393,7 +383,6 @@ pub(super) fn prepare_attempt_workspace(
         source_root: root.clone(),
         root: attempt_root.clone(),
         base_sha: base.to_string(),
-        retain: AtomicBool::new(false),
     });
     let adoption = request
         .workspace
