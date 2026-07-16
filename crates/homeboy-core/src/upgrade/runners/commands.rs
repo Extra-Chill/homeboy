@@ -4,9 +4,9 @@ use crate::runner;
 use crate::runner::Runner;
 use crate::runner::RunnerCapabilityPreflight;
 use crate::runner::RunnerExecOptions;
-use crate::runner::RunnerRequiredTool;
 use crate::Error;
 use crate::Result;
+use homeboy_runner_contract::RunnerRequiredTool;
 
 pub fn runner_upgrade_command(
     homeboy_path: &str,

@@ -26,3 +26,36 @@ pub const RUNNER_PLACEMENT_RESOLVED_ENV: &str = "HOMEBOY_RUNNER_PLACEMENT_RESOLV
 
 /// Identifies the runner an exec is bound to.
 pub const RUNNER_ID_ENV: &str = "HOMEBOY_RUNNER_ID";
+
+/// A tool that must be present on a runner for a capability to be satisfied.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RunnerRequiredTool {
+    id: String,
+}
+
+impl RunnerRequiredTool {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self { id: id.into() }
+    }
+
+    pub fn homeboy() -> Self {
+        Self::new("homeboy")
+    }
+
+    pub fn git() -> Self {
+        Self::new("git")
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// A tool + command capability requirement probed on a runner.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunnerToolCapabilityRequirement {
+    pub tool: String,
+    pub command: String,
+    pub env: Vec<String>,
+    pub capabilities: Vec<String>,
+}
