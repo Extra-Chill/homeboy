@@ -10,6 +10,8 @@ pub mod baseline;
 pub mod codebase_scan;
 pub mod command;
 pub mod detail_output;
+pub mod edit_op;
+pub mod edit_op_apply;
 pub mod grammar;
 pub mod identifier;
 pub mod language;
