@@ -1,3 +1,4 @@
+pub(crate) mod binding;
 mod effect;
 mod execution;
 mod generated_artifacts;
@@ -44,7 +45,7 @@ pub fn preflight_exact_ref(
 }
 
 use crate::component;
-use crate::context::resolve_project_ssh_with_base_path;
+use crate::context::{require_project_base_path, resolve_project_ssh_with_base_path};
 use crate::error::{Error, Result};
 use crate::phase_timing::PhaseTimer;
 use crate::project;
@@ -71,8 +72,35 @@ fn run_with_release_artifacts(
     if config.expected_version.is_none() {
         project::validate_deploy_component_local_paths(&project, &config.component_ids)?;
     }
+    preflight_prepared_payload_binding(&project, project_id, config)?;
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
     orchestration::deploy_components(config, &project, &ctx, &base_path, release_artifacts)
+}
+
+/// Bind caller-supplied payloads before SSH context or lifecycle work begins.
+/// Locally prepared payloads follow the same binding primitive after preparation
+/// retains their process-local ownership guards.
+fn preflight_prepared_payload_binding(
+    project: &project::Project,
+    project_id: &str,
+    config: &DeployConfig,
+) -> Result<()> {
+    let Some(artifact) = config.prepared_artifact.as_ref() else {
+        return Ok(());
+    };
+    let base_path = require_project_base_path(project_id, project)?;
+    let components = config
+        .component_ids
+        .iter()
+        .map(|component_id| project::resolve_project_component(project, component_id))
+        .collect::<Result<Vec<_>>>()?;
+    binding::bind_project_payloads(
+        project,
+        &base_path,
+        &components,
+        &std::collections::HashMap::from([(artifact.component_id.clone(), artifact.clone())]),
+    )?;
+    Ok(())
 }
 
 /// Read deployed component versions without running deploy planning or git
@@ -153,6 +181,13 @@ pub fn run_multi(
         for component_id in component_ids {
             prepared_artifact.validate(component_id, config.expected_version.as_deref())?;
         }
+    }
+
+    // Every supplied payload must bind safely before this multi-target run
+    // creates lifecycle state or resolves an SSH context for any project.
+    for project_id in &valid_project_ids {
+        let project = project::load(project_id)?;
+        preflight_prepared_payload_binding(&project, project_id, config)?;
     }
 
     log_status!(
