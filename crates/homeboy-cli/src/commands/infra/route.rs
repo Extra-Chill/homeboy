@@ -441,6 +441,10 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCook
         }))
     }
 
+    fn prepare_for_cook(&self) -> homeboy::core::Result<()> {
+        runners::prepare_explicit_lab_runner_for_offload(&self.runner_id)
+    }
+
     fn dispatch_attempt(
         &self,
         plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,

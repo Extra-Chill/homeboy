@@ -80,7 +80,7 @@ fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
 fn lab_runner_preparation_uses_already_connected_runner() {
     let selection = LabRunnerSelection {
         runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Default,
+        source: LabRunnerSelectionSource::Explicit,
         mode: RunnerTunnelMode::DirectSsh,
     };
 
@@ -391,7 +391,7 @@ fn lab_runner_preparation_errors_for_explicit_direct_session_without_daemon_url(
 fn lab_runner_preparation_connects_disconnected_runner() {
     let selection = LabRunnerSelection {
         runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Default,
+        source: LabRunnerSelectionSource::Explicit,
         mode: RunnerTunnelMode::DirectSsh,
     };
 

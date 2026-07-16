@@ -67,6 +67,23 @@ pub(super) fn prepare_lab_runner_for_offload(
     })
 }
 
+/// Prepare an explicitly selected runner before a controller-owned cook pins
+/// its runtime generation. This reuses the normal Lab readiness policy,
+/// including daemon freshness repair and connection ownership protections.
+pub fn prepare_explicit_lab_runner_for_offload(runner_id: &str) -> Result<()> {
+    let selection = LabRunnerSelection {
+        runner_id: runner_id.to_string(),
+        source: LabRunnerSelectionSource::Explicit,
+        mode: runner_status_tunnel_mode(runner_id),
+    };
+    match prepare_lab_runner_for_offload(&selection)? {
+        LabRunnerPreparation::Ready => Ok(()),
+        LabRunnerPreparation::FallBackLocal { reason } => Err(Error::internal_unexpected(format!(
+            "explicit Lab runner preparation unexpectedly requested local fallback: {reason}"
+        ))),
+    }
+}
+
 pub(super) fn preflight_lab_runner_availability(
     command: &LabOffloadCommand,
     selection: &LabRunnerSelection,

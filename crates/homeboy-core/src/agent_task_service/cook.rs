@@ -43,6 +43,13 @@ pub trait AgentTaskCookAttemptDispatcher: Send + Sync + std::fmt::Debug {
     /// dispatcher in a fresh controller process.
     fn durable_recipe(&self) -> Result<Value>;
 
+    /// Establish transport readiness before the cook pins its runtime
+    /// generation. A reconnect can promote the runner runtime, which must not
+    /// wait on the cook that needs that reconnect.
+    fn prepare_for_cook(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// `derived_cook_baseline` is process-local authority for a gate-fix retry.
     /// Implementations must not serialize it into the provider request.
     fn dispatch_attempt(

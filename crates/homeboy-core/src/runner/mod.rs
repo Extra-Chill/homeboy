@@ -138,6 +138,7 @@ pub use lab::{
 };
 #[cfg(test)]
 pub(crate) use lab_env::build_lab_offload_env;
+pub use lab_selection::prepare_explicit_lab_runner_for_offload;
 pub use offload_changed_since::{
     lab_offload_changed_since_ref, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since,
