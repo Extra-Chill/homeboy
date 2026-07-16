@@ -382,7 +382,7 @@ esac
             false,
         )
         .expect("create local server");
-        super::super::create(
+        crate::runner::create(
             &serde_json::json!({
                 "id": "local-runner",
                 "kind": "ssh",
