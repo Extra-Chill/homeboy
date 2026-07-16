@@ -12,7 +12,7 @@ use crate::code_audit::{
     FindingConfidence, Severity,
 };
 use crate::extension::ExtensionPhaseTiming;
-use crate::finding::HomeboyFinding;
+use homeboy_finding::HomeboyFinding;
 use serde::Serialize;
 use serde_json::Value;
 

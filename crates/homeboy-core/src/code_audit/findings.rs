@@ -2,7 +2,7 @@
 
 use super::checks::{CheckResult, CheckStatus};
 use super::conventions::AuditFinding;
-use crate::finding::{FindingSource, HomeboyFinding};
+use homeboy_finding::{FindingSource, HomeboyFinding};
 use regex::Regex;
 use serde::{Deserializer, Serializer};
 use serde_json::Value;
