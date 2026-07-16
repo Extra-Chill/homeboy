@@ -196,6 +196,8 @@ pub(crate) struct AgentTaskPromotionApplyRequest {
     pub(crate) patch: Option<String>,
     pub(crate) patch_path: String,
     pub(crate) changed_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) gate_feedback_baseline: Option<serde_json::Value>,
     #[serde(default)]
     pub(crate) dry_run: bool,
 }
@@ -310,7 +312,10 @@ impl ExternalPromotionWorkspaceProvider {
         self.invocation.as_ref()
     }
 
-    fn resolve_configured_fallback(&mut self, to_workspace: &str) -> Result<()> {
+    fn resolve_configured_fallback(
+        &mut self,
+        request: &AgentTaskPromotionApplyRequest,
+    ) -> Result<()> {
         let configured_fallback = self.configured_fallback.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "promotion_provider",
@@ -322,8 +327,9 @@ impl ExternalPromotionWorkspaceProvider {
             )
         })?;
         let resolution = worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
-            to_workspace,
+            &request.to_workspace,
             &configured_fallback.config,
+            request.gate_feedback_baseline.as_ref(),
         )?;
         let executable = configured_fallback
             .executable
@@ -383,7 +389,7 @@ impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider 
         request: AgentTaskPromotionApplyRequest,
     ) -> Result<AgentTaskPromotionWorkspace> {
         if self.invocation.is_none() {
-            self.resolve_configured_fallback(&request.to_workspace)?;
+            self.resolve_configured_fallback(&request)?;
         }
         let invocation = self.invocation.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(

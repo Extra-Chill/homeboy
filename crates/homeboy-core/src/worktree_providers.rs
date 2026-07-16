@@ -120,21 +120,23 @@ pub fn resolve_worktree_provider_from_config(
     handle: &str,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderResolution> {
-    resolve_worktree_provider_with_policy_from_config(handle, config, false)
+    resolve_worktree_provider_with_policy_from_config(handle, config, false, None)
 }
 
 /// Resolve a workspace only from providers explicitly authorized for apply operations.
 pub fn resolve_apply_enabled_worktree_provider_from_config(
     handle: &str,
     config: &HomeboyConfig,
+    gate_feedback_baseline: Option<&serde_json::Value>,
 ) -> Result<WorktreeProviderResolution> {
-    resolve_worktree_provider_with_policy_from_config(handle, config, true)
+    resolve_worktree_provider_with_policy_from_config(handle, config, true, gate_feedback_baseline)
 }
 
 fn resolve_worktree_provider_with_policy_from_config(
     handle: &str,
     config: &HomeboyConfig,
     require_apply_enabled: bool,
+    gate_feedback_baseline: Option<&serde_json::Value>,
 ) -> Result<WorktreeProviderResolution> {
     let mut provider_ids = config
         .worktree_providers
@@ -158,7 +160,7 @@ fn resolve_worktree_provider_with_policy_from_config(
             attempted.push(provider_id.clone());
             let worktrees = run_provider_resolve_command(&provider_id, provider, command, handle)?;
             if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
-                validate_provider_handle(&provider_id, &worktree)?;
+                validate_provider_handle(&provider_id, &worktree, gate_feedback_baseline)?;
                 return Ok(WorktreeProviderResolution {
                     provider_id,
                     worktree,
@@ -172,7 +174,7 @@ fn resolve_worktree_provider_with_policy_from_config(
         attempted.push(provider_id.clone());
         let worktrees = run_provider_list_command(&provider_id, provider, command)?;
         if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
-            validate_provider_handle(&provider_id, &worktree)?;
+            validate_provider_handle(&provider_id, &worktree, gate_feedback_baseline)?;
             return Ok(WorktreeProviderResolution {
                 provider_id,
                 worktree,
@@ -434,7 +436,11 @@ fn mapping_error(provider_id: &str, field: &str, path: &str, detail: &str) -> Er
     )
 }
 
-fn validate_provider_handle(provider_id: &str, worktree: &WorktreeProviderHandle) -> Result<()> {
+fn validate_provider_handle(
+    provider_id: &str,
+    worktree: &WorktreeProviderHandle,
+    gate_feedback_baseline: Option<&serde_json::Value>,
+) -> Result<()> {
     let path = std::path::PathBuf::from(&worktree.path);
     if !path.is_dir() {
         return Err(Error::validation_invalid_argument(
@@ -459,8 +465,20 @@ fn validate_provider_handle(provider_id: &str, worktree: &WorktreeProviderHandle
             None,
         ));
     }
+    let verified_gate_feedback_baseline = worktree.safety.dirty
+        && gate_feedback_baseline
+            .map(|baseline| {
+                crate::agent_task_candidate_baseline::validate_gate_feedback_candidate_baseline(
+                    &path, baseline,
+                )
+            })
+            .transpose()?
+            .is_some();
     let blocked = [
-        (worktree.safety.dirty, "dirty"),
+        (
+            worktree.safety.dirty && !verified_gate_feedback_baseline,
+            "dirty",
+        ),
         (worktree.safety.unpushed, "unpushed"),
         (worktree.safety.primary, "primary"),
     ]
@@ -468,9 +486,18 @@ fn validate_provider_handle(provider_id: &str, worktree: &WorktreeProviderHandle
     .filter_map(|(blocked, name)| blocked.then_some(name))
     .collect::<Vec<_>>();
     if !blocked.is_empty() {
+        let baseline_state = if worktree.safety.dirty {
+            if gate_feedback_baseline.is_some() {
+                "gate_feedback_baseline=present"
+            } else {
+                "gate_feedback_baseline=missing"
+            }
+        } else {
+            "gate_feedback_baseline=not_required"
+        };
         return Err(Error::validation_invalid_argument(
             "to_worktree",
-            format!("worktree provider `{provider_id}` marked `{}` as {}; refusing to cook into an unsafe destination", worktree.handle, blocked.join(", ")),
+            format!("worktree provider `{provider_id}` marked `{}` as {}; {baseline_state}; refusing to cook into an unsafe destination", worktree.handle, blocked.join(", ")),
             Some(worktree.handle.clone()),
             Some(vec!["Use a clean, pushed, non-primary provider-managed worktree on the intended branch.".to_string()]),
         ));

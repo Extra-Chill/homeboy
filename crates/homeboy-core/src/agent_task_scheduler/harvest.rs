@@ -155,6 +155,7 @@ fn patch_artifact_metadata(
             ),
         ]));
     }
+    attach_gate_feedback_baseline_metadata(&mut artifact.metadata, running);
 }
 
 fn harvest_committed_patch_with_metadata(
@@ -257,6 +258,12 @@ fn harvest_committed_patch_with_metadata(
         "changed_files": changed_files,
     });
     Ok(())
+}
+
+fn attach_gate_feedback_baseline_metadata(metadata: &mut serde_json::Value, running: &RunningTask) {
+    if running.request.metadata["cook_loop"]["kind"] == "deterministic-gate-feedback" {
+        metadata["gate_feedback_baseline"] = running.request.inputs["cook_loop"].clone();
+    }
 }
 
 fn committed_change_metadata_for_range(
@@ -419,6 +426,7 @@ pub(crate) enum HarvestError {
     ArtifactDirectory { path: PathBuf, message: String },
     ArtifactWrite { path: PathBuf, message: String },
     Adoption { message: String },
+    CandidateBaselineMismatch { message: String },
 }
 
 pub(super) fn committed_harvest_preflight_outcome(task_id: String) -> AgentTaskOutcome {
@@ -480,6 +488,11 @@ pub(super) fn committed_harvest_failure(
             format!("could not materialize explicitly adopted candidate: {message}"),
             serde_json::json!({ "error": message }),
         ),
+        HarvestError::CandidateBaselineMismatch { message } => (
+            "agent_task.gate_feedback_candidate_baseline_mismatch",
+            format!("refusing gate-feedback retry candidate baseline: {message}"),
+            serde_json::json!({ "error": message }),
+        ),
     };
     outcome.status = AgentTaskOutcomeStatus::Failed;
     outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
@@ -533,6 +546,184 @@ mod committed_harvest_tests {
             .expect("git command runs");
         assert!(output.status.success(), "git {args:?} failed");
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn gate_feedback_request(
+        workspace: &Path,
+        current_diff: String,
+        patch_artifact: &Path,
+        patch_sha256: &str,
+    ) -> AgentTaskRequest {
+        AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "source-gate-fix-2".to_string(),
+            group_key: None,
+            parent_plan_id: Some("source-run".to_string()),
+            executor: AgentTaskExecutor {
+                backend: "test".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: serde_json::Value::Null,
+            },
+            instructions:
+                "Continue the Homeboy cook loop from the current candidate worktree state."
+                    .to_string(),
+            inputs: serde_json::json!({ "cook_loop": {
+                "source_run_id": "source-run",
+                "source_task_id": "source",
+                "source_patch_task_id": "source",
+                "patch_artifact": {
+                    "id": "candidate",
+                    "path": patch_artifact,
+                    "sha256": patch_sha256,
+                },
+                "failed_gates": [{ "gate_id": "visible" }],
+                "next_attempt": 2,
+                "to_worktree": workspace.display().to_string(),
+                "current_diff": current_diff,
+            }}),
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace {
+                root: Some(workspace.display().to_string()),
+                ..Default::default()
+            },
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            metadata: serde_json::json!({ "cook_loop": { "kind": "deterministic-gate-feedback" }}),
+        }
+    }
+
+    fn candidate_patch(workspace: &Path) -> (PathBuf, String) {
+        git(workspace, &["add", "--all"]);
+        let patch = git_output_raw(
+            workspace,
+            &["diff", "--cached", "--binary", "--full-index", "HEAD"],
+        )
+        .expect("candidate patch");
+        git(workspace, &["reset", "--quiet"]);
+        let path = workspace
+            .parent()
+            .expect("workspace has test parent")
+            .join("candidate.patch");
+        std::fs::write(&path, &patch).expect("write candidate patch");
+        let sha256 = format!("{:x}", Sha256::digest(patch.as_bytes()));
+        (path, sha256)
+    }
+
+    #[test]
+    fn gate_feedback_baseline_allows_only_the_recorded_candidate_and_harvests_remediation_delta() {
+        let _home = crate::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        git(&workspace, &["init", "--quiet", "-b", "main"]);
+        git(&workspace, &["config", "user.email", "test@example.com"]);
+        git(&workspace, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(workspace.join("candidate.txt"), "base\n").expect("base");
+        git(&workspace, &["add", "candidate.txt"]);
+        git(&workspace, &["commit", "--quiet", "-m", "base"]);
+        std::fs::write(workspace.join("candidate.txt"), "candidate\n").expect("candidate");
+        std::fs::write(workspace.join("new-candidate.txt"), "new candidate\n")
+            .expect("new candidate");
+        let current_diff = git_output_raw(&workspace, &["diff", "HEAD"]).expect("current diff");
+        let (patch_artifact, patch_sha256) = candidate_patch(&workspace);
+        let mut request =
+            gate_feedback_request(&workspace, current_diff, &patch_artifact, &patch_sha256);
+
+        let preflight =
+            prepare_committed_harvest(&request, None, &HarvestExecutionContext::default())
+                .expect("recorded promoted candidate is accepted");
+        let source_base = preflight.base_sha.expect("source base");
+        let attempt = prepare_attempt_workspace(
+            &mut request,
+            Some(&source_base),
+            preflight.candidate_baseline.as_ref(),
+        )
+        .expect("attempt workspace")
+        .expect("isolated attempt");
+        let attempt_root = PathBuf::from(request.workspace.root.as_deref().expect("attempt root"));
+        assert_eq!(
+            std::fs::read_to_string(attempt_root.join("candidate.txt"))
+                .expect("candidate baseline"),
+            "candidate\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(attempt_root.join("new-candidate.txt"))
+                .expect("new candidate baseline"),
+            "new candidate\n"
+        );
+        std::fs::write(attempt_root.join("remediation.txt"), "green\n").expect("remediation");
+        git(&attempt_root, &["add", "remediation.txt"]);
+        git(&attempt_root, &["commit", "--quiet", "-m", "remediation"]);
+        let remediation_base = attempt.base_sha().to_string();
+        let patch = git_output_raw(
+            &attempt_root,
+            &["diff", "--binary", &remediation_base, "HEAD"],
+        )
+        .expect("remediation delta");
+        assert!(patch.contains("remediation.txt"));
+        assert!(!patch.contains("new-candidate.txt"));
+        assert!(
+            !patch.contains("-base"),
+            "candidate is not replayed in remediation"
+        );
+    }
+
+    #[test]
+    fn gate_feedback_baseline_rejects_mismatched_or_extra_dirty_changes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        git(&workspace, &["init", "--quiet", "-b", "main"]);
+        git(&workspace, &["config", "user.email", "test@example.com"]);
+        git(&workspace, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(workspace.join("file.txt"), "base\n").expect("base");
+        git(&workspace, &["add", "file.txt"]);
+        git(&workspace, &["commit", "--quiet", "-m", "base"]);
+        std::fs::write(workspace.join("file.txt"), "candidate\n").expect("candidate");
+        let recorded = git_output_raw(&workspace, &["diff", "HEAD"]).expect("recorded diff");
+        let (patch_artifact, patch_sha256) = candidate_patch(&workspace);
+        std::fs::write(workspace.join("extra.txt"), "unrelated\n").expect("extra");
+        let error = prepare_committed_harvest(
+            &gate_feedback_request(&workspace, recorded.clone(), &patch_artifact, &patch_sha256),
+            None,
+            &HarvestExecutionContext::default(),
+        )
+        .expect_err("untracked unrelated dirt must fail closed");
+        assert!(matches!(
+            error,
+            HarvestError::CandidateBaselineMismatch { .. }
+        ));
+
+        std::fs::remove_file(workspace.join("extra.txt")).expect("remove extra");
+        let error = prepare_committed_harvest(
+            &gate_feedback_request(
+                &workspace,
+                "not a patch".to_string(),
+                &patch_artifact,
+                "bad",
+            ),
+            None,
+            &HarvestExecutionContext::default(),
+        )
+        .expect_err("mismatched recorded diff must fail closed");
+        assert!(matches!(
+            error,
+            HarvestError::CandidateBaselineMismatch { .. }
+        ));
+
+        let mut ordinary =
+            gate_feedback_request(&workspace, String::new(), &patch_artifact, &patch_sha256);
+        ordinary.metadata = serde_json::Value::Null;
+        let error = prepare_committed_harvest(&ordinary, None, &HarvestExecutionContext::default())
+            .expect_err("ordinary dirty worktree remains refused");
+        assert!(matches!(error, HarvestError::DirtyWorkspace { .. }));
     }
 
     #[test]
@@ -769,7 +960,7 @@ mod committed_harvest_tests {
             prepare_committed_harvest(&request, None, &context).expect("snapshot retry preflight");
         assert_eq!(retry_preflight.base_sha.as_deref(), Some(baseline.as_str()));
         assert_eq!(source_provenance["source_revision"], "a".repeat(40));
-        let attempt = prepare_attempt_workspace(&mut request, Some(&baseline))
+        let attempt = prepare_attempt_workspace(&mut request, Some(&baseline), None)
             .expect("provider-ready attempt")
             .expect("attempt workspace");
         assert_ne!(
@@ -818,6 +1009,16 @@ mod committed_harvest_tests {
                 metadata: serde_json::Value::Null,
             },
         ];
+        request.metadata = serde_json::json!({
+            "cook_loop": { "kind": "deterministic-gate-feedback" }
+        });
+        request.inputs = serde_json::json!({
+            "cook_loop": {
+                "source_run_id": "promoted-run",
+                "source_task_id": "snapshot-task",
+                "patch_artifact": { "sha256": "c".repeat(64) }
+            }
+        });
         let running = RunningTask {
             task_id: "snapshot-task".to_string(),
             request: request.clone(),
@@ -864,6 +1065,11 @@ mod committed_harvest_tests {
             );
         }
         assert_eq!(outcome.artifacts[0].metadata["kept"], true);
+        assert_eq!(
+            outcome.artifacts[0].metadata["gate_feedback_baseline"],
+            running.request.inputs["cook_loop"],
+            "provider-supplied patches retain promotion baseline provenance"
+        );
         drop(attempt);
         std::env::remove_var(crate::observation::SOURCE_SNAPSHOT_METADATA_ENV);
         std::env::remove_var(crate::observation::LAB_OFFLOAD_METADATA_ENV);

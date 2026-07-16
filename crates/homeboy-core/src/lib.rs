@@ -43,6 +43,7 @@ pub mod agent_task_aggregate;
 pub mod agent_task_artifacts;
 pub mod agent_task_batch;
 pub use homeboy_lab_contract::agent_task_config;
+pub(crate) mod agent_task_candidate_baseline;
 pub(crate) mod agent_task_config_materialization;
 pub mod agent_task_contract;
 pub mod agent_task_controller_service;

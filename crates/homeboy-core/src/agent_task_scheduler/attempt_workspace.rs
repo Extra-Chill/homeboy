@@ -78,10 +78,15 @@ fn incomplete_transport_error(message: String) -> crate::Error {
 pub(super) struct AttemptWorkspace {
     source_root: PathBuf,
     root: PathBuf,
+    base_sha: String,
     retain: AtomicBool,
 }
 
 impl AttemptWorkspace {
+    pub(super) fn base_sha(&self) -> &str {
+        &self.base_sha
+    }
+
     pub(super) fn retain_for_diagnostics(&self) {
         self.retain.store(true, Ordering::Release);
     }
@@ -119,6 +124,14 @@ impl Drop for AttemptWorkspace {
 pub(super) struct HarvestPreflight {
     pub(super) base_sha: Option<String>,
     pub(super) source_provenance: Option<serde_json::Value>,
+    pub(super) candidate_baseline: Option<CandidateBaseline>,
+}
+
+/// A gate-feedback retry may start from the promoted, uncommitted candidate.
+/// This patch is derived only after its recorded provenance reproduces the
+/// exact worktree tree, so it cannot authorize arbitrary existing dirt.
+pub(super) struct CandidateBaseline {
+    patch: String,
 }
 
 pub(super) fn prepare_committed_harvest(
@@ -130,6 +143,7 @@ pub(super) fn prepare_committed_harvest(
         return Ok(HarvestPreflight {
             base_sha: None,
             source_provenance: None,
+            candidate_baseline: None,
         });
     };
     let snapshot_signaled = context.snapshot_signaled();
@@ -138,6 +152,7 @@ pub(super) fn prepare_committed_harvest(
         return Ok(HarvestPreflight {
             base_sha: None,
             source_provenance: None,
+            candidate_baseline: None,
         });
     }
     let source_provenance = if let Some(capability) = derived_cook_baseline {
@@ -230,13 +245,60 @@ pub(super) fn prepare_committed_harvest(
         });
     }
     let status = git_output(root, &["status", "--porcelain", "--untracked-files=all"])?;
-    if !status.trim().is_empty() {
-        return Err(HarvestError::DirtyWorkspace { status });
-    }
+    let candidate_baseline = if status.trim().is_empty() {
+        None
+    } else {
+        Some(verified_gate_feedback_baseline(root, request, &status)?)
+    };
     Ok(HarvestPreflight {
         base_sha: Some(git_output(root, &["rev-parse", "HEAD"])?),
         source_provenance,
+        candidate_baseline,
     })
+}
+
+fn verified_gate_feedback_baseline(
+    root: &Path,
+    request: &AgentTaskRequest,
+    status: &str,
+) -> Result<CandidateBaseline, HarvestError> {
+    let cook_loop = request
+        .inputs
+        .get("cook_loop")
+        .and_then(serde_json::Value::as_object);
+    let is_gate_feedback = request
+        .metadata
+        .get("cook_loop")
+        .and_then(|value| value.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        == Some("deterministic-gate-feedback");
+    let Some(cook_loop) = cook_loop else {
+        return Err(HarvestError::DirtyWorkspace {
+            status: status.to_string(),
+        });
+    };
+    let required = [
+        "source_run_id",
+        "source_task_id",
+        "source_patch_task_id",
+        "patch_artifact",
+        "failed_gates",
+        "next_attempt",
+        "to_worktree",
+    ];
+    if !is_gate_feedback || required.iter().any(|key| !cook_loop.contains_key(*key)) {
+        return Err(HarvestError::DirtyWorkspace {
+            status: status.to_string(),
+        });
+    }
+    let patch = crate::agent_task_candidate_baseline::validate_gate_feedback_candidate_baseline(
+        root,
+        &serde_json::Value::Object(cook_loop.clone()),
+    )
+    .map_err(|error| HarvestError::CandidateBaselineMismatch {
+        message: error.message,
+    })?;
+    Ok(CandidateBaseline { patch })
 }
 
 fn snapshot_harvest_error(message: String) -> HarvestError {
@@ -295,6 +357,7 @@ fn validate_derived_cook_baseline(
 pub(super) fn prepare_attempt_workspace(
     request: &mut AgentTaskRequest,
     base: Option<&str>,
+    candidate_baseline: Option<&CandidateBaseline>,
 ) -> Result<Option<Arc<AttemptWorkspace>>, HarvestError> {
     let Some(root) = request.workspace.root.as_deref().map(PathBuf::from) else {
         return Ok(None);
@@ -315,12 +378,12 @@ pub(super) fn prepare_attempt_workspace(
         &["worktree", "add", "--detach", &attempt_root_string, base],
     )?;
     // Establish cleanup ownership before anything that can fail below.
-    let workspace = Arc::new(AttemptWorkspace {
+    let mut workspace = Arc::new(AttemptWorkspace {
         source_root: root.clone(),
         root: attempt_root.clone(),
+        base_sha: base.to_string(),
         retain: AtomicBool::new(false),
     });
-    let base_fingerprint = fingerprint(base.as_bytes());
     let adoption = request
         .workspace
         .attempt
@@ -329,15 +392,54 @@ pub(super) fn prepare_attempt_workspace(
     if let Some(adoption) = adoption.as_ref() {
         apply_adopted_candidate(&attempt_root, adoption)?;
     }
+    if let Some(candidate_baseline) = candidate_baseline {
+        apply_gate_feedback_baseline(&attempt_root, candidate_baseline)?;
+    }
+    let attempt_base_sha = git_output(&attempt_root, &["rev-parse", "HEAD"])?;
+    Arc::get_mut(&mut workspace)
+        .expect("attempt workspace has no other owners during setup")
+        .base_sha = attempt_base_sha;
+    let attempt_base = workspace.base_sha().to_string();
+    let base_fingerprint = fingerprint(attempt_base.as_bytes());
     remap_workspace_config(&mut request.executor.config, &root, &attempt_root);
     request.workspace.root = Some(attempt_root.display().to_string());
     request.workspace.attempt = Some(crate::agent_task::AgentTaskAttemptWorkspace {
         identity,
-        base_ref: base.to_string(),
+        base_ref: attempt_base,
         base_fingerprint,
         adoption,
     });
     Ok(Some(workspace))
+}
+
+fn apply_gate_feedback_baseline(
+    root: &Path,
+    baseline: &CandidateBaseline,
+) -> Result<(), HarvestError> {
+    let patch = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
+        command: "create gate-feedback baseline patch".to_string(),
+        message: error.to_string(),
+    })?;
+    std::fs::write(patch.path(), &baseline.patch).map_err(|error| HarvestError::Git {
+        command: "write gate-feedback baseline patch".to_string(),
+        message: error.to_string(),
+    })?;
+    let patch_path = patch.path().display().to_string();
+    git_output(root, &["apply", "--index", "--binary", &patch_path])?;
+    git_output(
+        root,
+        &[
+            "-c",
+            "user.name=Homeboy",
+            "-c",
+            "user.email=homeboy@localhost",
+            "commit",
+            "--no-verify",
+            "-m",
+            "homeboy: gate-feedback candidate baseline",
+        ],
+    )?;
+    Ok(())
 }
 
 pub(super) fn remap_workspace_config(

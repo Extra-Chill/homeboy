@@ -393,21 +393,28 @@ where
                     .or(harvest_preflight.base_sha.clone());
                 let source_workspace_root = request.workspace.root.clone();
                 let source_provenance = harvest_preflight.source_provenance;
-                let attempt_workspace =
-                    match prepare_attempt_workspace(&mut request, task_base_sha.as_deref()) {
-                        Ok(workspace) => workspace,
-                        Err(error) => {
-                            record_harvest_setup_failure(
-                                &task_id,
-                                scheduled.attempt,
-                                error,
-                                &mut completed_by_task,
-                                &mut outcomes,
-                                &mut events,
-                            );
-                            continue;
-                        }
-                    };
+                let attempt_workspace = match prepare_attempt_workspace(
+                    &mut request,
+                    task_base_sha.as_deref(),
+                    harvest_preflight.candidate_baseline.as_ref(),
+                ) {
+                    Ok(workspace) => workspace,
+                    Err(error) => {
+                        record_harvest_setup_failure(
+                            &task_id,
+                            scheduled.attempt,
+                            error,
+                            &mut completed_by_task,
+                            &mut outcomes,
+                            &mut events,
+                        );
+                        continue;
+                    }
+                };
+                let task_base_sha = attempt_workspace
+                    .as_ref()
+                    .map(|workspace| workspace.base_sha().to_string())
+                    .or(task_base_sha);
                 if let Some(adoption) = scheduled.adoption.as_ref() {
                     if let Err(mut outcome) = validate_and_apply_candidate_adoption(
                         &request,
