@@ -12,15 +12,14 @@ use std::fs;
 
 use crate::core::agent_task::AgentTaskEvidenceRef;
 use crate::core::agent_task_lifecycle::{
-    cook_attempt_run_id, record_runner_job_identity, AgentTaskArtifactRef, AgentTaskRunRecord,
-    AgentTaskRunState,
+    cook_attempt_run_id, AgentTaskArtifactRef, AgentTaskRunRecord, AgentTaskRunState,
 };
 use crate::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use crate::core::agent_tasks::provider::{
     dependency_failure_patterns, AgentTaskProviderDependencyFailurePattern,
 };
 use crate::core::agent_tasks::scheduler::{
-    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals, AgentTaskPlan,
+    AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskPlan,
 };
 use crate::core::api_jobs::JobEvent;
 #[cfg(test)]
@@ -28,15 +27,14 @@ use crate::core::api_jobs::JobEventKind;
 use crate::core::artifact_manifest::ArtifactManifest;
 use crate::core::engine::local_files::write_file_owner_only;
 use crate::core::lab_contract::{
-    AgentTaskDispatchIdentity, RunnerWorkloadAgentTask,
-    RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
+    RunnerWorkloadAgentTask, RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
 };
 use crate::core::notification_route::NotificationRoute;
 use crate::core::runner::agent_task_lifecycle_event::{
     agent_task_run_plan_lifecycle_event_from_job_events, is_agent_task_run_plan_envelope,
     parse_offloaded_run_plan_envelope,
 };
-use crate::core::{config, Error, Result};
+use crate::core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -45,6 +43,7 @@ use super::super::lab_args::materialize_inline_agent_task_json_specs_in_args;
 use super::super::lab_args::AgentTaskInlineJsonSpec;
 use super::super::lab_workspaces::{workspace_mapping_entry, LabWorkspaceMappingEntry};
 use super::super::{sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
+use super::agent_task_plan_projection::mirror_agent_task_run_plan_aggregate;
 use super::args_util::{subcommand_index, ArgEditor, CommandInvocation};
 
 #[cfg(test)]
@@ -232,46 +231,6 @@ fn legacy_agent_task_run_plan_aggregate(
             Some("parse legacy offloaded agent-task aggregate".to_string()),
         )
     })
-}
-
-fn mirror_agent_task_run_plan_aggregate(
-    plan_spec: &str,
-    run_id: &str,
-    aggregate: AgentTaskAggregate,
-    notification_route: Option<&NotificationRoute>,
-    dispatch_identity: Option<&AgentTaskDispatchIdentity>,
-) -> Result<()> {
-    // A controller-created run owns its durable plan. The runner's staged path
-    // only transports that plan and may disappear before its result is mirrored.
-    // Re-submitting it here would replace the controller retry input.
-    let controller_owned = agent_task_lifecycle::run_record_exists(run_id)?;
-    let plan = if controller_owned {
-        agent_task_lifecycle::load_plan(run_id)?
-    } else {
-        let raw_plan = config::read_json_spec_to_string(plan_spec)?;
-        serde_json::from_str(&raw_plan).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some(format!("read agent-task plan {plan_spec}")),
-            )
-        })?
-    };
-    if !controller_owned {
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
-    }
-    if let Some(notification_route) = notification_route {
-        crate::core::agent_task_lifecycle::persist_notification_route(run_id, notification_route)?;
-    }
-    if !controller_owned {
-        agent_task_lifecycle::mark_running(run_id)?;
-    }
-    agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
-    if let Some(identity) = dispatch_identity.filter(|identity| {
-        !identity.runner_id.trim().is_empty() && !identity.runner_job_id.trim().is_empty()
-    }) {
-        record_runner_job_identity(run_id, &identity.runner_id, &identity.runner_job_id)?;
-    }
-    Ok(())
 }
 
 fn agent_task_run_plan_lifecycle_output<'a>(
@@ -1150,100 +1109,6 @@ mod tests {
     }
 
     #[test]
-    fn detached_projection_retries_from_controller_plan_after_runner_staging_is_removed() {
-        crate::test_support::with_isolated_home(|_| {
-            let controller_plan = AgentTaskPlan::new("controller-plan", Vec::new());
-            let submitted =
-                agent_task_lifecycle::submit_plan(&controller_plan, Some("detached-run"))
-                    .expect("controller plan submitted");
-            let staged = tempfile::NamedTempFile::new().expect("runner staged plan");
-            let staged_spec = format!("@{}", staged.path().display());
-            drop(staged);
-            let aggregate = AgentTaskAggregate {
-                schema: "homeboy/agent-task-aggregate/v1".to_string(),
-                plan_id: "runner-staged-plan".to_string(),
-                status: AgentTaskAggregateStatus::Failed,
-                totals: AgentTaskAggregateTotals {
-                    failed: 1,
-                    ..Default::default()
-                },
-                outcomes: Vec::new(),
-                events: Vec::new(),
-                artifact_lineage: Vec::new(),
-                child_runs: Vec::new(),
-                artifact_bindings: Vec::new(),
-                queue: Default::default(),
-            };
-
-            mirror_agent_task_run_plan_aggregate(
-                &staged_spec,
-                "detached-run",
-                aggregate,
-                None,
-                None,
-            )
-            .expect("detached projection uses the controller plan");
-
-            let projected = agent_task_lifecycle::status("detached-run").expect("projection");
-            assert_eq!(projected.plan_id, controller_plan.plan_id);
-            assert_eq!(projected.plan_path, submitted.plan_path);
-            let retry = agent_task_lifecycle::retry("detached-run", Some("local-retry"))
-                .expect("local retry rematerializes controller plan");
-            assert_eq!(
-                agent_task_lifecycle::load_plan(&retry.run_id).expect("retry plan"),
-                controller_plan
-            );
-        });
-    }
-
-    #[test]
-    fn detached_projection_fails_closed_when_controller_plan_is_missing() {
-        crate::test_support::with_isolated_home(|_| {
-            let controller_plan = AgentTaskPlan::new("controller-plan", Vec::new());
-            let submitted =
-                agent_task_lifecycle::submit_plan(&controller_plan, Some("detached-run"))
-                    .expect("controller plan submitted");
-            std::fs::remove_file(&submitted.plan_path).expect("remove controller plan");
-            let staged = tempfile::NamedTempFile::new().expect("runner staged plan");
-            std::fs::write(
-                staged.path(),
-                serde_json::to_string(&controller_plan).unwrap(),
-            )
-            .expect("write runner staged plan");
-            let aggregate = AgentTaskAggregate {
-                schema: "homeboy/agent-task-aggregate/v1".to_string(),
-                plan_id: "runner-staged-plan".to_string(),
-                status: AgentTaskAggregateStatus::Failed,
-                totals: Default::default(),
-                outcomes: Vec::new(),
-                events: Vec::new(),
-                artifact_lineage: Vec::new(),
-                child_runs: Vec::new(),
-                artifact_bindings: Vec::new(),
-                queue: Default::default(),
-            };
-
-            let error = mirror_agent_task_run_plan_aggregate(
-                &format!("@{}", staged.path().display()),
-                "detached-run",
-                aggregate,
-                None,
-                None,
-            )
-            .expect_err("missing controller plan must not fall back to runner staging");
-
-            assert_eq!(error.code.as_str(), "internal.io_error");
-            assert_eq!(
-                agent_task_lifecycle::retry("detached-run", Some("local-retry"))
-                    .expect_err("retry also fails closed")
-                    .code
-                    .as_str(),
-                "internal.io_error"
-            );
-        });
-    }
-
-    #[test]
     fn typed_run_plan_lifecycle_preserves_completed_noop_and_remote_evidence() {
         crate::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
@@ -1590,306 +1455,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn agent_task_dispatch_requested_run_id_allows_global_flags_before_agent_task() {
-        assert_eq!(
-            agent_task_dispatch_requested_run_id(&[
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "dispatch".to_string(),
-                "--run-id=dispatch-run".to_string(),
-            ]),
-            Some("dispatch-run".to_string())
-        );
-    }
-
-    #[test]
-    fn ensure_agent_task_dispatch_run_id_preserves_existing_id() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--run-id".to_string(),
-            "cook-run".to_string(),
-            "--repo".to_string(),
-            "homeboy".to_string(),
-        ];
-
-        let (out, run_id) = ensure_agent_task_dispatch_run_id(&args).expect("agent task args");
-
-        assert_eq!(out, args);
-        assert_eq!(run_id, "cook-run");
-    }
-
-    #[test]
-    fn ensure_agent_task_dispatch_run_id_injects_id_before_dispatch_options() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--repo".to_string(),
-            "homeboy".to_string(),
-        ];
-
-        let (out, run_id) = ensure_agent_task_dispatch_run_id(&args).expect("agent task args");
-
-        assert!(run_id.starts_with("agent-task-"));
-        // `--run-id` is injected right after the `agent-task <action>` prefix,
-        // ahead of the dispatch options.
-        assert_eq!(out[0], "homeboy");
-        assert_eq!(out[1], "agent-task");
-        assert_eq!(out[2], "cook");
-        assert_eq!(out[3], "--run-id");
-        assert_eq!(out[4], run_id);
-        assert_eq!(out[5], "--repo");
-        assert_eq!(out[6], "homeboy");
-    }
-
-    #[test]
-    fn ensure_agent_task_dispatch_run_id_with_uses_preferred_id_when_unset() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--repo".to_string(),
-            "homeboy".to_string(),
-        ];
-
-        let (out, run_id) = ensure_agent_task_dispatch_run_id_with(&args, Some("iso-token"))
-            .expect("agent task args");
-
-        assert_eq!(run_id, "iso-token");
-        assert!(out.contains(&"--run-id".to_string()));
-        assert!(out.contains(&"iso-token".to_string()));
-    }
-
-    #[test]
-    fn ensure_agent_task_dispatch_run_id_with_preserves_explicit_run_id() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--run-id".to_string(),
-            "explicit-run".to_string(),
-        ];
-
-        let (out, run_id) = ensure_agent_task_dispatch_run_id_with(&args, Some("iso-token"))
-            .expect("agent task args");
-
-        // An explicit --run-id always wins over the preferred isolation token.
-        assert_eq!(run_id, "explicit-run");
-        assert_eq!(out, args);
-    }
-
-    #[test]
-    fn lab_cook_uses_one_first_attempt_identity_across_the_handoff() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--run-id".to_string(),
-            "cook-7970".to_string(),
-        ];
-
-        let (out, lifecycle_run_id) =
-            ensure_agent_task_lifecycle_identity_with(&args, None, None).expect("cook identity");
-
-        assert_eq!(out[3], "--attempt-run-id");
-        assert_eq!(out[4], lifecycle_run_id);
-        assert_eq!(out[5], "--run-id");
-        assert_eq!(out[6], "cook-7970");
-        assert!(lifecycle_run_id.starts_with("cook-7970-attempt-1-"));
-
-        let (staged_args, staged_lifecycle_run_id) =
-            ensure_agent_task_lifecycle_identity_with(&out, None, None)
-                .expect("staged cook identity");
-
-        assert_eq!(staged_args, out);
-        assert_eq!(staged_lifecycle_run_id, lifecycle_run_id);
-    }
-
-    #[test]
-    fn lab_cook_staging_preserves_generated_durable_lifecycle_identity() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--repo".to_string(),
-            "homeboy".to_string(),
-        ];
-
-        let (pre_acceptance_args, pre_acceptance_run_id) =
-            ensure_agent_task_lifecycle_identity_with(&args, Some("cook-8005"), None)
-                .expect("pre-acceptance cook identity");
-        let (staged_args, staged_run_id) = ensure_agent_task_lifecycle_identity_with(
-            &pre_acceptance_args,
-            Some("other-token"),
-            None,
-        )
-        .expect("staged cook identity");
-
-        assert!(pre_acceptance_run_id.starts_with("cook-8005-attempt-1-"));
-        assert_eq!(staged_run_id, pre_acceptance_run_id);
-        assert_eq!(staged_args, pre_acceptance_args);
-        assert_eq!(
-            agent_task_dispatch_requested_run_id(&staged_args),
-            Some("cook-8005".to_string())
-        );
-    }
-
-    #[test]
-    fn lab_cook_preserves_explicit_attempt_identity_for_drift_detection() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--attempt-run-id".to_string(),
-            "unexpected-attempt".to_string(),
-            "--run-id".to_string(),
-            "cook-8009".to_string(),
-        ];
-
-        let (out, lifecycle_run_id) = ensure_agent_task_lifecycle_identity_with(
-            &args,
-            Some("cook-8009"),
-            Some("cook-8009-attempt-1-canonical"),
-        )
-        .expect("cook identity");
-
-        assert_eq!(out, args);
-        assert_eq!(lifecycle_run_id, "unexpected-attempt");
-    }
-
-    #[test]
-    fn ensure_agent_task_dispatch_run_id_with_uses_materialized_run_plan_id() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "run-plan".to_string(),
-            "--plan".to_string(),
-            "@/runner/retry-plan.json".to_string(),
-            "--record-run-id".to_string(),
-            "retry-run".to_string(),
-        ];
-
-        let (out, run_id) = ensure_agent_task_dispatch_run_id_with(&args, None)
-            .expect("materialized run-plan has a durable run id");
-
-        assert_eq!(run_id, "retry-run");
-        assert_eq!(out, args);
-    }
-
-    #[test]
-    fn lifecycle_identity_preserves_materialized_run_plan_id() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "run-plan".to_string(),
-            "--plan".to_string(),
-            "@/runner/retry-plan.json".to_string(),
-            "--record-run-id".to_string(),
-            "cook-8332-attempt-1".to_string(),
-        ];
-
-        let (out, run_id) = ensure_agent_task_lifecycle_identity_with(&args, None, None)
-            .expect("materialized run-plan has a lifecycle identity");
-
-        assert_eq!(out, args);
-        assert_eq!(run_id, "cook-8332-attempt-1");
-    }
-
-    #[test]
-    fn dispatch_run_isolation_token_reuses_explicit_run_id() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "dispatch".to_string(),
-            "--run-id".to_string(),
-            "explicit-run".to_string(),
-        ];
-
-        assert_eq!(
-            agent_task_dispatch_run_isolation_token(&args),
-            Some("explicit-run".to_string())
-        );
-    }
-
-    #[test]
-    fn dispatch_run_isolation_token_generates_for_unset_run_id() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--repo".to_string(),
-            "homeboy".to_string(),
-        ];
-
-        let token = agent_task_dispatch_run_isolation_token(&args).expect("token");
-        assert!(token.starts_with("agent-task-"));
-    }
-
-    #[test]
-    fn dispatch_run_isolation_token_none_for_non_dispatch_commands() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "status".to_string(),
-            "run-1".to_string(),
-        ];
-
-        assert!(agent_task_dispatch_run_isolation_token(&args).is_none());
-    }
-
-    #[test]
-    fn ensure_agent_task_dispatch_run_id_ignores_other_agent_task_commands() {
-        assert!(ensure_agent_task_dispatch_run_id(&[
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "status".to_string(),
-            "run-1".to_string(),
-        ])
-        .is_none());
-    }
-
-    #[test]
-    fn materializes_inline_agent_task_cook_tasks_json() {
-        let prompt = "Cook sensitive implementation details";
-        let tasks = serde_json::json!([{ "prompt": prompt }]).to_string();
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--tasks".to_string(),
-            tasks.clone(),
-            "--concurrency".to_string(),
-            "4".to_string(),
-        ];
-
-        let (rewritten, entry) = materialize_inline_agent_task_tasks_arg_with(&args, |spec| {
-            assert_eq!(spec, tasks);
-            Ok(Some(fake_synced_file(
-                "@/remote/input/agent-task-tasks.json",
-                "agent_task_tasks_remapped",
-            )))
-        })
-        .expect("rewrite tasks arg");
-
-        assert_eq!(
-            rewritten,
-            vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-                "--tasks".to_string(),
-                "@/remote/input/agent-task-tasks.json".to_string(),
-                "--concurrency".to_string(),
-                "4".to_string(),
-            ]
-        );
-        assert!(!rewritten.join(" ").contains(prompt));
-        assert_eq!(entry.expect("mapping entry").remote_path(), "/remote/input");
-    }
-
     #[cfg(unix)]
     #[test]
     fn remapped_agent_task_plan_is_owner_only_before_snapshot_sync() {
@@ -1911,116 +1476,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn leaves_agent_task_tasks_file_specs_in_argv() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "dispatch".to_string(),
-            "--tasks=@tasks.json".to_string(),
-        ];
-
-        let (rewritten, entry) = materialize_inline_agent_task_tasks_arg_with(&args, |spec| {
-            assert_eq!(spec, "@tasks.json");
-            Ok(None)
-        })
-        .expect("rewrite tasks arg");
-
-        assert_eq!(rewritten, args);
-        assert!(entry.is_none());
-    }
-
-    fn fake_synced_file(remote_spec: &str, role: &str) -> (String, LabWorkspaceMappingEntry) {
-        let synced = crate::core::runner::RunnerWorkspaceSyncOutput {
-            variant: "workspace_sync",
-            command: "runner.workspace.sync",
-            runner_id: "lab".to_string(),
-            local_path: "/local/input".to_string(),
-            remote_path: "/remote/input".to_string(),
-            materialization_plan:
-                crate::core::runner::RunnerWorkspaceMaterializationPlan::from_test_parts(
-                    "/remote",
-                    "/local/input",
-                    "input",
-                    "/remote/input",
-                    RunnerWorkspaceSyncMode::Snapshot,
-                    "snapshot",
-                ),
-            current_workspace: crate::core::runner::RunnerWorkspaceCurrentSummary {
-                local_path: "/local/input".to_string(),
-                remote_path: "/remote/input".to_string(),
-                sync_mode: RunnerWorkspaceSyncMode::Snapshot,
-                materialized: true,
-                source_commit: None,
-                source_ref: None,
-                source_dirty: None,
-                synthetic_checkout_commit: None,
-                synthetic_checkout_ref: None,
-                synthetic_checkout_tree: None,
-            },
-            workspace_lease: crate::core::runner::RunnerWorkspaceLease {
-                runner_id: "lab".to_string(),
-                local_path: "/local/input".to_string(),
-                remote_path: "/remote/input".to_string(),
-                sync_mode: "snapshot".to_string(),
-                materialized: true,
-                lifecycle_owner: crate::core::runner::RunnerLifecycleOwner::Controller,
-                source_commit: None,
-                source_ref: None,
-                source_dirty: None,
-            },
-            resource_lifecycle: crate::core::runner::workspace_resource_lifecycle(
-                "lab",
-                "/remote/input",
-                None,
-                crate::core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnSuccess,
-            ),
-            sync_mode: RunnerWorkspaceSyncMode::Snapshot,
-            snapshot_identity: "snapshot".to_string(),
-            counts: crate::core::runner::ByteFileCounts {
-                files: 1,
-                bytes: 42,
-            },
-            excludes: Vec::new(),
-            includes: Vec::new(),
-            workspace_cleanliness: "clean".to_string(),
-            validation_dependencies: Vec::new(),
-        };
-        (
-            remote_spec.to_string(),
-            workspace_mapping_entry(role, &synced),
-        )
-    }
-
-    #[test]
-    fn pre_dispatch_failure_message_uses_structured_dependency_failure_envelope() {
-        let output = r#"runtime setup log
-{"schema":"homeboy/lab-dependency-failure/v1","dependency":{"id":"runtime-a","kind":"runtime component","path":"/remote/cache/runtime-a"},"message":"path missing","remediation":"refresh runtime cache"}
-trailing log"#;
-
-        let message = lab_pre_dispatch_failure_message(output).expect("message");
-
-        assert!(message.contains("runtime component `/remote/cache/runtime-a`"));
-        assert!(message.contains("path missing"));
-        assert!(message.contains("refresh runtime cache"));
-    }
-
-    #[test]
-    fn pre_dispatch_failure_message_uses_declared_dependency_pattern() {
-        let output = "Error: lstat '/remote/cache/prepared-dependencies/runtime-a': no such file or directory";
-        let patterns = vec![AgentTaskProviderDependencyFailurePattern {
-            id: "fixture.dependency".to_string(),
-            label: "Fixture dependency".to_string(),
-            path_contains: "prepared-dependencies/".to_string(),
-            error_contains_any: vec!["no such file or directory".to_string()],
-            remediation: Some("refresh fixture dependencies".to_string()),
-            extra: Default::default(),
-        }];
-
-        let message =
-            lab_pre_dispatch_dependency_failure_message(output, &patterns).expect("message");
-
-        assert!(message.contains("prepared-dependencies/runtime-a"));
-        assert!(message.contains("refresh fixture dependencies"));
-    }
+    mod tail_tests;
 }
