@@ -683,6 +683,7 @@ fn discovery_runner_backed_run_emits_runner_scoped_commands() {
     });
 }
 
+#[derive(Clone)]
 struct SucceedingExecutor;
 
 impl AgentTaskExecutorAdapter for SucceedingExecutor {

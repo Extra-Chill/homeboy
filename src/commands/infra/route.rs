@@ -323,6 +323,88 @@ struct LabCookAttemptDispatcher {
     job_overrides: runners::LabJobOverrides,
 }
 
+pub(crate) fn reconstruct_cook_attempt_dispatcher(
+    recipe: &serde_json::Value,
+) -> homeboy::core::Result<
+    Option<Arc<dyn crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+> {
+    let kind = recipe
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.promotion_transport.attempt_dispatch",
+                "durable attempt dispatcher recipe is missing its kind",
+                None,
+                None,
+            )
+        })?;
+    if kind == "local" {
+        return Ok(None);
+    }
+    if kind != "lab" {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.promotion_transport.attempt_dispatch.kind",
+            format!("unsupported durable attempt dispatcher kind `{kind}`"),
+            None,
+            None,
+        ));
+    }
+    let value = |name: &str| {
+        recipe.get(name).cloned().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.promotion_transport.attempt_dispatch",
+                format!("Lab attempt dispatcher recipe is missing `{name}`"),
+                None,
+                None,
+            )
+        })
+    };
+    let overrides = value("job_overrides")?;
+    let dispatcher = LabCookAttemptDispatcher {
+        runner_id: decode_cook_dispatch_field("runner_id", value("runner_id")?)?,
+        allow_local_fallback: decode_cook_dispatch_field(
+            "allow_local_fallback",
+            value("allow_local_fallback")?,
+        )?,
+        allow_dirty_lab_workspace: decode_cook_dispatch_field(
+            "allow_dirty_lab_workspace",
+            value("allow_dirty_lab_workspace")?,
+        )?,
+        skip_deps_hydration: decode_cook_dispatch_field(
+            "skip_deps_hydration",
+            value("skip_deps_hydration")?,
+        )?,
+        source_path: decode_cook_dispatch_field("source_path", value("source_path")?)?,
+        job_overrides: runners::LabJobOverrides {
+            env: decode_cook_dispatch_field("job_overrides.env", overrides["env"].clone())?,
+            secret_env_names: decode_cook_dispatch_field(
+                "job_overrides.secret_env_names",
+                overrides["secret_env_names"].clone(),
+            )?,
+            workspace_root: decode_cook_dispatch_field(
+                "job_overrides.workspace_root",
+                overrides["workspace_root"].clone(),
+            )?,
+        },
+    };
+    Ok(Some(Arc::new(dispatcher)))
+}
+
+fn decode_cook_dispatch_field<T: serde::de::DeserializeOwned>(
+    name: &str,
+    value: serde_json::Value,
+) -> homeboy::core::Result<T> {
+    serde_json::from_value(value).map_err(|error| {
+        Error::validation_invalid_argument(
+            "cook_recipe.promotion_transport.attempt_dispatch",
+            format!("malformed Lab attempt dispatcher field `{name}`: {error}"),
+            None,
+            None,
+        )
+    })
+}
+
 fn cook_attempt_source_path<'a>(
     derived_cook_baseline: Option<&'a DerivedCookBaselineCapability>,
     controller_source_path: Option<&'a Path>,
@@ -333,6 +415,22 @@ fn cook_attempt_source_path<'a>(
 }
 
 impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCookAttemptDispatcher {
+    fn durable_recipe(&self) -> homeboy::core::Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "kind": "lab",
+            "runner_id": self.runner_id,
+            "allow_local_fallback": self.allow_local_fallback,
+            "allow_dirty_lab_workspace": self.allow_dirty_lab_workspace,
+            "skip_deps_hydration": self.skip_deps_hydration,
+            "source_path": self.source_path,
+            "job_overrides": {
+                "env": self.job_overrides.env,
+                "secret_env_names": self.job_overrides.secret_env_names,
+                "workspace_root": self.job_overrides.workspace_root,
+            },
+        }))
+    }
+
     fn dispatch_attempt(
         &self,
         plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
@@ -1623,6 +1721,33 @@ mod tests {
     use std::process::Command;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
+
+    #[test]
+    fn lab_cook_dispatcher_recipe_round_trips_exact_transport() {
+        let dispatcher = LabCookAttemptDispatcher {
+            runner_id: "homeboy-lab".to_string(),
+            allow_local_fallback: true,
+            allow_dirty_lab_workspace: false,
+            skip_deps_hydration: true,
+            source_path: Some(PathBuf::from("/controller/source")),
+            job_overrides: runners::LabJobOverrides {
+                env: [("MODE".to_string(), "test".to_string())].into(),
+                secret_env_names: vec!["TOKEN".to_string()],
+                workspace_root: Some("/runner/workspaces".to_string()),
+            },
+        };
+        let recipe =
+            crate::core::agent_task_service::AgentTaskCookAttemptDispatcher::durable_recipe(
+                &dispatcher,
+            )
+            .unwrap();
+
+        let reconstructed = reconstruct_cook_attempt_dispatcher(&recipe)
+            .unwrap()
+            .expect("Lab dispatcher reconstructed");
+
+        assert_eq!(reconstructed.durable_recipe().unwrap(), recipe);
+    }
 
     fn git_init(path: &Path) {
         let output = Command::new("git")

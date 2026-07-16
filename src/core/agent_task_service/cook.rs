@@ -39,6 +39,10 @@ use super::AgentTaskRunResult;
 /// Executes one provider attempt while cook retains ownership of promotion,
 /// gates, retries, and finalization.
 pub trait AgentTaskCookAttemptDispatcher: Send + Sync + std::fmt::Debug {
+    /// Durable, generic transport descriptor used to reconstruct this
+    /// dispatcher in a fresh controller process.
+    fn durable_recipe(&self) -> Result<Value>;
+
     /// `derived_cook_baseline` is process-local authority for a gate-fix retry.
     /// Implementations must not serialize it into the provider request.
     fn dispatch_attempt(
@@ -116,6 +120,9 @@ pub fn run_cook<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    // The durable reconstruction boundary must exist before an external provider
+    // can accept the first attempt.
+    super::persist_initial_recipe(&options)?;
     let max_attempts = options.max_attempts.max(1);
     let mut attempts = Vec::new();
     let mut run_id = options.initial_run_id.clone();
@@ -409,6 +416,7 @@ where
                 follow_up_plan.options = plan.options.clone();
                 follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
                 follow_up_plan.options.retry.max_attempts = 1;
+                super::record_recipe_attempt(&cook_id, attempt + 1, &next_run_id, &follow_up_plan)?;
                 if let Some(dispatcher) = &options.attempt_dispatcher {
                     dispatcher.dispatch_attempt(
                         follow_up_plan,
