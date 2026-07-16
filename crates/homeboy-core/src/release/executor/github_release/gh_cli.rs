@@ -1,8 +1,8 @@
 //! `gh` CLI probes, environment, command construction, and path/quote helpers.
 
 use crate::component::GithubConfig;
-use crate::deploy::release_download::GitHubRepo;
 use crate::engine::shell::quote_arg;
+use crate::git::release_download::GitHubRepo;
 use crate::release::types::ReleaseState;
 use sha2::{Digest, Sha256};
 use std::io::Read;

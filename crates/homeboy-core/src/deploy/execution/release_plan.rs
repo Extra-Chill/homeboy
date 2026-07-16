@@ -2,8 +2,8 @@ use crate::component::Component;
 use crate::release;
 
 use super::super::orchestration_tag_checkout::deploy_tag_for_version;
-use super::super::release_download;
 use super::super::types::DeployConfig;
+use crate::git::release_download;
 
 pub(crate) enum ReleaseArtifactPlan {
     Reuse { url: String, tag: String },

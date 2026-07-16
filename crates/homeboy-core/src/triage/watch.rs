@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
 
-use crate::deploy::release_download::{parse_github_url, GitHubRepo};
 use crate::error::{Error, Result};
 use crate::git::gh_probe_succeeds;
+use crate::git::release_download::{parse_github_url, GitHubRepo};
 
 use super::{non_empty, run_gh, summarize_checks};
 

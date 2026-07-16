@@ -12,7 +12,6 @@ mod policy;
 #[allow(dead_code)] // Internal contract consumed by the follow-up payload integration.
 pub(crate) mod preparation;
 pub(crate) mod provenance;
-pub mod release_download;
 mod safety_and_artifact;
 mod smoke;
 mod transfer;
@@ -56,14 +55,14 @@ use uuid::Uuid;
 /// This is the preferred entry point for callers - it handles project loading
 /// and SSH context resolution, keeping those details encapsulated.
 pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestrationResult> {
-    let mut release_artifacts = release_download::ReleaseArtifactStore::default();
+    let mut release_artifacts = crate::git::release_download::ReleaseArtifactStore::default();
     run_with_release_artifacts(project_id, config, &mut release_artifacts)
 }
 
 fn run_with_release_artifacts(
     project_id: &str,
     config: &DeployConfig,
-    release_artifacts: &mut release_download::ReleaseArtifactStore,
+    release_artifacts: &mut crate::git::release_download::ReleaseArtifactStore,
 ) -> Result<DeployOrchestrationResult> {
     let project = project::load(project_id)?;
     // A version-pinned release asset is resolved remotely before orchestration;
@@ -188,7 +187,7 @@ pub fn run_multi(
     let mut failed: u32 = 0;
     let mut skipped: u32 = unknown_projects.len() as u32;
     let mut planned: u32 = 0;
-    let mut release_artifacts = release_download::ReleaseArtifactStore::default();
+    let mut release_artifacts = crate::git::release_download::ReleaseArtifactStore::default();
     // Record skipped results for unknown projects
     for pid in &unknown_projects {
         project_results.push(ProjectDeployResult {

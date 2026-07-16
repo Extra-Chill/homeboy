@@ -1339,7 +1339,10 @@ mod tests {
             assert_eq!(result.value.attempts.len(), 1);
             assert_eq!(result.value.attempts[0].run_id, run_id);
             let record = agent_task_lifecycle::status(run_id).expect("detached attempt record");
-            assert_eq!(record.state, agent_task_lifecycle::AgentTaskRunState::Running);
+            assert_eq!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Running
+            );
             assert_eq!(record.runner_id(), Some("fixture-lab"));
             assert_eq!(record.runner_job_id(), Some("accepted-daemon-job"));
         });

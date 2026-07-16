@@ -46,7 +46,7 @@ mod test_reexports {
     pub(super) use chrono::{DateTime, Utc};
     pub(super) use serde_json::Value;
 
-    pub(super) use crate::deploy::release_download::GitHubRepo;
+    pub(super) use crate::git::release_download::GitHubRepo;
     pub(super) use crate::observation::TriagePullRequestSignals;
 
     pub(super) use super::landing::{

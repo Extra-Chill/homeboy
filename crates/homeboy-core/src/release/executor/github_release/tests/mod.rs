@@ -3,7 +3,7 @@
 
 use crate::component::Component;
 use crate::component::GithubConfig;
-use crate::deploy::release_download::GitHubRepo;
+use crate::git::release_download::GitHubRepo;
 
 use super::{github_release_repair_commands, GitHubReleaseBody, GitHubReleaseRepairCommands};
 
