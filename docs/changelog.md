@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.288.8] - 2026-07-16
+
+### Changed
+- invert upgrade->runners boundary via provider hook (stage 2)
+- import code_audit's engine primitives direct from the crate (#8425)
+- invert code_audit's extension-manifest loading behind a provider hook (#8425)
+- break core<->runner type cycles ahead of runner extraction
+
 ## [0.288.7] - 2026-07-16
 
 ### Changed
