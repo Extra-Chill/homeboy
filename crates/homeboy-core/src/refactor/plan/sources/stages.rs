@@ -26,8 +26,8 @@ pub(super) struct AuditStageRequest<'a> {
     pub(super) component: &'a Component,
     pub(super) root: &'a Path,
     pub(super) changed_files: Option<&'a [String]>,
-    pub(super) only: &'a [crate::code_audit::AuditFinding],
-    pub(super) exclude: &'a [crate::code_audit::AuditFinding],
+    pub(super) only: &'a [homeboy_audit_contract::AuditFinding],
+    pub(super) exclude: &'a [homeboy_audit_contract::AuditFinding],
     pub(super) write: bool,
     pub(super) settings: &'a [(String, serde_json::Value)],
 }

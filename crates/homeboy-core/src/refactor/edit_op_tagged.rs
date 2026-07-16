@@ -15,9 +15,9 @@
 //! Callers apply tagged ops by passing the inner `&t.op` to
 //! `crate::engine::edit_op_apply::apply_edit_ops`.
 
-use crate::code_audit::AuditFinding;
 use crate::engine::edit_op::{EditOp, InsertAnchor};
 use crate::refactor::auto::{Insertion, InsertionKind, RefactorPrimitive};
+use homeboy_audit_contract::AuditFinding;
 
 /// An `EditOp` with metadata about its origin.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -291,8 +291,8 @@ pub fn rename_file_moves_to_edit_ops(result: &crate::refactor::RenameResult) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::AuditFinding;
     use crate::refactor::auto::{Fix, Insertion, InsertionKind, RefactorPrimitive};
+    use homeboy_audit_contract::AuditFinding;
 
     fn test_insertion(kind: InsertionKind) -> Insertion {
         Insertion {

@@ -1,5 +1,5 @@
-use crate::code_audit::conventions::AuditFinding;
 use crate::refactor::decompose;
+use homeboy_audit_contract::AuditFinding;
 
 /// A planned fix for a single file.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

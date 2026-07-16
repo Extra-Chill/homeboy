@@ -30,7 +30,7 @@ pub mod docs_audit;
 mod duplication;
 mod execution_plan;
 pub mod extension_manifests;
-mod findings;
+pub(crate) mod findings;
 pub mod fingerprint;
 mod idiomatic;
 pub(crate) mod impact;

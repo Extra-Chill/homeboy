@@ -1,5 +1,5 @@
-use crate::code_audit::AuditFinding;
 use crate::refactor::auto::{FixPolicy, FixResult, Insertion, NewFile, PolicySummary};
+use homeboy_audit_contract::AuditFinding;
 
 fn finding_allowed(finding: &AuditFinding, policy: &FixPolicy) -> bool {
     let included = policy
@@ -14,16 +14,18 @@ fn finding_allowed(finding: &AuditFinding, policy: &FixPolicy) -> bool {
 /// Heuristic/graph findings remain visible in dry-run previews, but are not
 /// eligible for unattended writes unless their confidence policy allows it.
 fn should_auto_apply(finding: &AuditFinding, manual_only: bool) -> bool {
-    !manual_only && finding.confidence().allows_automated_refactor()
+    !manual_only
+        && crate::code_audit::findings::finding_confidence(finding).allows_automated_refactor()
 }
 
 fn blocked_reason(finding: &AuditFinding, manual_only: bool) -> String {
     if manual_only {
         "Blocked: manual-only edit, not eligible for --from auto-write".to_string()
-    } else if !finding.confidence().allows_automated_refactor() {
+    } else if !crate::code_audit::findings::finding_confidence(finding).allows_automated_refactor()
+    {
         format!(
             "Blocked: {:?} confidence finding requires human review before automated writes",
-            finding.confidence()
+            crate::code_audit::findings::finding_confidence(finding)
         )
     } else {
         "Blocked by policy".to_string()

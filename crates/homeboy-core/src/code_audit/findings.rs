@@ -95,7 +95,7 @@ impl From<&Finding> for HomeboyFinding {
             .metadata("source_sidecar", "audit-findings")
             .metadata("convention", finding.convention.clone())
             .metadata("suggestion", finding.suggestion.clone())
-            .metadata("confidence", finding.kind.confidence())
+            .metadata("confidence", finding_confidence(&finding.kind))
             .metadata("kind", kind)
             .build()
     }
@@ -173,10 +173,15 @@ impl FindingConfidence {
     }
 }
 
-impl AuditFinding {
-    /// Confidence tier for downstream enforcement and autofix policy.
-    pub fn confidence(&self) -> FindingConfidence {
-        match self {
+/// Confidence tier for downstream enforcement and autofix policy.
+///
+/// A free function rather than an inherent method because `AuditFinding` now
+/// lives in the `homeboy-audit-contract` crate (the orphan rule forbids an
+/// inherent `impl` on a foreign type), while `FindingConfidence` and the audit
+/// policy that consumes it are core-side.
+pub fn finding_confidence(finding: &AuditFinding) -> FindingConfidence {
+    {
+        match finding {
             // Direct facts from parser/compiler/filesystem output.
             AuditFinding::MissingImport
             | AuditFinding::CompilerWarning
@@ -428,37 +433,33 @@ mod tests {
     #[test]
     fn finding_confidence_tiers_classify_known_risk_levels() {
         assert_eq!(
-            AuditFinding::CompilerWarning.confidence(),
+            finding_confidence(&AuditFinding::CompilerWarning),
             FindingConfidence::Structural
         );
         assert_eq!(
-            AuditFinding::UnreferencedExport.confidence(),
+            finding_confidence(&AuditFinding::UnreferencedExport),
             FindingConfidence::Graph
         );
         assert_eq!(
-            AuditFinding::OrphanedTest.confidence(),
+            finding_confidence(&AuditFinding::OrphanedTest),
             FindingConfidence::Heuristic
         );
         assert_eq!(
-            AuditFinding::RedirectValidation.confidence(),
+            finding_confidence(&AuditFinding::RedirectValidation),
             FindingConfidence::Heuristic
         );
-        assert!(AuditFinding::CompilerWarning
-            .confidence()
-            .allows_automated_refactor());
-        assert!(!AuditFinding::OrphanedTest
-            .confidence()
-            .allows_automated_refactor());
+        assert!(finding_confidence(&AuditFinding::CompilerWarning).allows_automated_refactor());
+        assert!(!finding_confidence(&AuditFinding::OrphanedTest).allows_automated_refactor());
     }
 
     #[test]
     fn test_confidence() {
         assert_eq!(
-            AuditFinding::CompilerWarning.confidence(),
+            finding_confidence(&AuditFinding::CompilerWarning),
             FindingConfidence::Structural
         );
         assert_eq!(
-            AuditFinding::OrphanedTest.confidence(),
+            finding_confidence(&AuditFinding::OrphanedTest),
             FindingConfidence::Heuristic
         );
     }
