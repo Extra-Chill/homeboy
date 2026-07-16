@@ -169,8 +169,8 @@ pub use persisted_cleanup::*;
 pub use run_lookup::*;
 pub use runner_downloads::*;
 pub use runner_evidence::{
-    register_runner_evidence_provider, RemoteArtifactDownloadInfo, RunnerConnectionInfo,
-    RunnerEvidenceProvider, StaleRunnerJobInfo,
+    mirrored_runner_job_identities, register_runner_evidence_provider, RemoteArtifactDownloadInfo,
+    RunnerConnectionInfo, RunnerEvidenceProvider, StaleRunnerJobInfo,
 };
 
 /// Safe, bounded retention of terminal observation rows. Artifact byte cleanup

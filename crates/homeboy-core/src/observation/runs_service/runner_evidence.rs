@@ -157,6 +157,22 @@ pub fn register_runner_evidence_provider(provider: Box<dyn RunnerEvidenceProvide
     *guard = Some(provider);
 }
 
+/// Refresh runner-owned evidence and return its authenticated runner/job
+/// identities without exposing runner-specific metadata to consumers.
+pub fn mirrored_runner_job_identities(run_id: &str) -> Result<Vec<(String, String)>> {
+    let mut identities = with_runner_evidence(|provider| -> Result<Vec<(String, String)>> {
+        Ok(provider
+            .refresh_mirrored_daemon_evidence(run_id)?
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|run| provider.mirrored_runner_job_identity(run))
+            .collect())
+    })?;
+    identities.sort();
+    identities.dedup();
+    Ok(identities)
+}
+
 /// Whether a runner-evidence provider is currently registered.
 pub fn has_runner_evidence_provider() -> bool {
     PROVIDER
@@ -180,6 +196,29 @@ pub(crate) fn with_runner_evidence<T>(f: impl FnOnce(&dyn RunnerEvidenceProvider
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
+
+    fn provider_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn run(id: &str) -> RunRecord {
+        RunRecord {
+            id: id.to_string(),
+            kind: "agent-task".to_string(),
+            component_id: None,
+            started_at: "2026-07-16T00:00:00Z".to_string(),
+            finished_at: None,
+            status: "running".to_string(),
+            command: None,
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: Value::Null,
+        }
+    }
 
     /// Guards graceful degradation: the best-effort evidence methods must return
     /// empty (not error, not panic) when no provider is registered. runs_service
@@ -211,6 +250,7 @@ mod tests {
     /// A registered provider is used in place of the no-op default.
     #[test]
     fn registered_provider_is_used() {
+        let _lock = provider_lock().lock().expect("provider lock");
         struct FakeProvider;
         impl RunnerEvidenceProvider for FakeProvider {
             fn mirror_connected_runner_run(&self, _: &str) -> Result<Option<RunRecord>> {
@@ -251,6 +291,74 @@ mod tests {
 
         // Reset so the registered fake doesn't leak into other tests sharing the
         // process-global provider.
+        PROVIDER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+
+    #[test]
+    fn mirrored_runner_job_identities_deduplicates_and_preserves_ambiguity() {
+        let _lock = provider_lock().lock().expect("provider lock");
+        struct FakeProvider;
+
+        impl RunnerEvidenceProvider for FakeProvider {
+            fn mirror_connected_runner_run(&self, _: &str) -> Result<Option<RunRecord>> {
+                Ok(None)
+            }
+            fn statuses(&self) -> Vec<RunnerConnectionInfo> {
+                Vec::new()
+            }
+            fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
+                Ok(Value::Null)
+            }
+            fn runner_artifact_content(&self, _: &str, _: &str, _: &str) -> Result<Value> {
+                Ok(Value::Null)
+            }
+            fn refresh_mirrored_daemon_evidence(
+                &self,
+                run_id: &str,
+            ) -> Result<Option<Vec<RunRecord>>> {
+                Ok(Some(match run_id {
+                    "duplicates" => vec![run("same"), run("same")],
+                    "none" => vec![run("no-identity")],
+                    "distinct" => vec![run("first"), run("second")],
+                    _ => Vec::new(),
+                }))
+            }
+            fn mirrored_runner_job_identity(&self, run: &RunRecord) -> Option<(String, String)> {
+                match run.id.as_str() {
+                    "same" => Some(("runner".to_string(), "job".to_string())),
+                    "first" => Some(("runner-a".to_string(), "job-a".to_string())),
+                    "second" => Some(("runner-b".to_string(), "job-b".to_string())),
+                    _ => None,
+                }
+            }
+            fn download_remote_artifact(
+                &self,
+                _: &str,
+                _: Option<PathBuf>,
+            ) -> Result<RemoteArtifactDownloadInfo> {
+                unreachable!()
+            }
+        }
+
+        register_runner_evidence_provider(Box::new(FakeProvider));
+        assert_eq!(
+            mirrored_runner_job_identities("duplicates").expect("duplicate identities"),
+            vec![("runner".to_string(), "job".to_string())]
+        );
+        assert!(mirrored_runner_job_identities("none")
+            .expect("no identity")
+            .is_empty());
+        assert_eq!(
+            mirrored_runner_job_identities("distinct").expect("distinct identities"),
+            vec![
+                ("runner-a".to_string(), "job-a".to_string()),
+                ("runner-b".to_string(), "job-b".to_string()),
+            ]
+        );
+
         PROVIDER
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
