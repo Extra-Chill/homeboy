@@ -19,5 +19,6 @@ pub mod local_files;
 pub mod output_parse;
 pub mod shell;
 pub mod template;
+pub mod test_path;
 pub mod text;
 pub mod validation;

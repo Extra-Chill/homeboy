@@ -13,10 +13,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::code_audit::walker::is_test_path;
 use crate::error::{Error, Result};
 use crate::extension::TestDriftConfig;
 use crate::git;
+use homeboy_engine_primitives::test_path::is_test_path;
 
 // ============================================================================
 // Models
@@ -571,7 +571,7 @@ fn matches_any_pattern(path: &str, patterns: &[String]) -> bool {
 pub fn is_source_relevant_change(opts: &DriftOptions, path: &str) -> bool {
     matches_any_pattern(path, &opts.source_patterns)
         || matches_any_pattern(path, &opts.test_patterns)
-        || crate::code_audit::walker::is_test_path(path)
+        || is_test_path(path)
 }
 
 /// Collect test files in the repo using extension-declared glob patterns.
