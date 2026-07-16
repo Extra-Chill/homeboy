@@ -379,7 +379,10 @@ pub(crate) fn reconstruct_cook_attempt_dispatcher(
         )?,
         detach_after_handoff: decode_cook_dispatch_field(
             "detach_after_handoff",
-            value("detach_after_handoff")?,
+            recipe
+                .get("detach_after_handoff")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!(false)),
         )?,
         source_path: decode_cook_dispatch_field("source_path", value("source_path")?)?,
         job_overrides: runners::LabJobOverrides {
