@@ -11,51 +11,21 @@ use crate::server::{
 
 use super::{remote_runner_homeboy_path, Runner, RunnerKind, RunnerToolRegistry};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RunnerCapabilityPreflight {
-    pub command: String,
-    pub required_tools: Vec<RunnerRequiredTool>,
-    pub required_commands: Vec<String>,
-    pub required_tool_capabilities: Vec<RunnerToolCapabilityRequirement>,
-    pub required_components: Vec<String>,
-    pub required_env: Vec<String>,
-    pub timeout: Option<Duration>,
-}
+// The lab-runner capability cluster (preflight, prepared/contract types, gate
+// mode/decision) now lives in the shared runner-contract crate as behavior-free
+// data. Re-exported so internal/CLI call sites resolve unchanged. The
+// `From<LabRunnerGateDecision> for HomeboyGateResult` impl stays in core below
+// (orphan rule: HomeboyGateResult is core-owned).
+pub use homeboy_runner_contract::RunnerCapabilityPreflight;
 
 // RunnerToolCapabilityRequirement now lives in the shared runner-contract crate
 // (behavior-free data). Re-exported so existing call sites resolve unchanged.
 pub use homeboy_runner_contract::RunnerToolCapabilityRequirement;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreparedLabRunnerCapability {
-    pub command: &'static str,
-    pub required_tools: Vec<RunnerRequiredTool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LabRunnerCapabilityContract {
-    pub command: &'static str,
-    pub required_tools: Vec<RunnerRequiredTool>,
-    pub required_capabilities: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LabRunnerGateMode {
-    Automatic,
-    Explicit,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LabRunnerGateDecision {
-    Eligible,
-    Missing {
-        runner_id: String,
-        command: &'static str,
-        missing_tools: Vec<RunnerRequiredTool>,
-        reason: String,
-        remediation: Vec<String>,
-    },
-}
+pub use homeboy_runner_contract::{
+    LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
+    PreparedLabRunnerCapability,
+};
 
 // RunnerRequiredTool (data + pure constructors) now lives in the shared
 // runner-contract crate. Re-exported so existing call sites resolve unchanged.
@@ -621,30 +591,6 @@ fn tool_list(tools: &[RunnerRequiredTool]) -> String {
         .map(|tool| tool.id())
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-impl From<PreparedLabRunnerCapability> for RunnerCapabilityPreflight {
-    fn from(plan: PreparedLabRunnerCapability) -> Self {
-        Self {
-            command: plan.command.to_string(),
-            required_tools: plan.required_tools,
-            required_commands: Vec::new(),
-            required_tool_capabilities: Vec::new(),
-            required_components: Vec::new(),
-            required_env: Vec::new(),
-            timeout: None,
-        }
-    }
-}
-
-impl RunnerCapabilityPreflight {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.required_tools.is_empty()
-            && self.required_commands.is_empty()
-            && self.required_tool_capabilities.is_empty()
-            && self.required_components.is_empty()
-            && self.required_env.is_empty()
-    }
 }
 
 impl From<LabRunnerGateDecision> for HomeboyGateResult {

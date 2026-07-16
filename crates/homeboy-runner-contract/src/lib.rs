@@ -59,3 +59,75 @@ pub struct RunnerToolCapabilityRequirement {
     pub env: Vec<String>,
     pub capabilities: Vec<String>,
 }
+
+/// A resolved set of capability requirements to preflight before running a
+/// command on a runner.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunnerCapabilityPreflight {
+    pub command: String,
+    pub required_tools: Vec<RunnerRequiredTool>,
+    pub required_commands: Vec<String>,
+    pub required_tool_capabilities: Vec<RunnerToolCapabilityRequirement>,
+    pub required_components: Vec<String>,
+    pub required_env: Vec<String>,
+    pub timeout: Option<std::time::Duration>,
+}
+
+impl RunnerCapabilityPreflight {
+    pub fn is_empty(&self) -> bool {
+        self.required_tools.is_empty()
+            && self.required_commands.is_empty()
+            && self.required_tool_capabilities.is_empty()
+            && self.required_components.is_empty()
+            && self.required_env.is_empty()
+    }
+}
+
+/// A lab runner capability prepared from a contract, ready to preflight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedLabRunnerCapability {
+    pub command: &'static str,
+    pub required_tools: Vec<RunnerRequiredTool>,
+}
+
+impl From<PreparedLabRunnerCapability> for RunnerCapabilityPreflight {
+    fn from(plan: PreparedLabRunnerCapability) -> Self {
+        Self {
+            command: plan.command.to_string(),
+            required_tools: plan.required_tools,
+            required_commands: Vec::new(),
+            required_tool_capabilities: Vec::new(),
+            required_components: Vec::new(),
+            required_env: Vec::new(),
+            timeout: None,
+        }
+    }
+}
+
+/// The capability contract a lab runner must satisfy for a command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabRunnerCapabilityContract {
+    pub command: &'static str,
+    pub required_tools: Vec<RunnerRequiredTool>,
+    pub required_capabilities: Vec<String>,
+}
+
+/// How a lab runner capability gate is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabRunnerGateMode {
+    Automatic,
+    Explicit,
+}
+
+/// The outcome of evaluating a lab runner capability gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LabRunnerGateDecision {
+    Eligible,
+    Missing {
+        runner_id: String,
+        command: &'static str,
+        missing_tools: Vec<RunnerRequiredTool>,
+        reason: String,
+        remediation: Vec<String>,
+    },
+}

@@ -7,7 +7,7 @@ use serde::Serialize;
 use super::expand::expand_vars;
 use super::pipeline::{PipelineOutcome, PipelineStepOutcome};
 use super::spec::{ExecutableRequirementSpec, FilesystemAssertionSpec, RigSpec};
-use crate::runner::RunnerCapabilityPreflight;
+use homeboy_runner_contract::RunnerCapabilityPreflight;
 use homeboy_runner_contract::RunnerToolCapabilityRequirement;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
