@@ -4,7 +4,9 @@
 //!
 //! Split out of `executor.rs` to keep packaging/payload logic together.
 
+use crate::component::Component;
 use crate::error::{Error, Result};
+use crate::extension::ExtensionCapability;
 use crate::extension::{self, ExtensionManifest};
 use std::path::{Path, PathBuf};
 
@@ -25,6 +27,7 @@ const PACKAGE_ACTION_MAX_ATTEMPTS: usize = 2;
 pub(crate) fn run_package(
     extensions: &[ExtensionManifest],
     state: &mut ReleaseState,
+    component: &Component,
     component_id: &str,
     component_local_path: &str,
     component_source_path: Option<&str>,
@@ -46,6 +49,8 @@ pub(crate) fn run_package(
             ]),
         ));
     }
+
+    build_declared_component_artifact(component, declared_build_artifact)?;
 
     let extra_config = package_build_config(skip_build_validation);
     let mut responses = Vec::new();
@@ -96,6 +101,35 @@ pub(crate) fn run_package(
     Ok(step_success("package", "package", Some(data), Vec::new()))
 }
 
+/// Run the component-owned build contract before package providers when it is
+/// responsible for the declared deploy artifact. Providers may emit other
+/// release assets without knowing how to build that artifact.
+fn build_declared_component_artifact(
+    component: &Component,
+    declared_build_artifact: Option<&str>,
+) -> Result<()> {
+    if declared_build_artifact.is_none_or(|path| path.trim().is_empty())
+        || !component.has_script(ExtensionCapability::Build)
+    {
+        return Ok(());
+    }
+
+    let (exit_code, build_error) = crate::build::build_component(component);
+    if let Some(error) = build_error {
+        return Err(Error::validation_invalid_argument(
+            "scripts.build",
+            format!(
+                "Failed to build declared build_artifact for component '{}' (exit {:?}): {}",
+                component.id, exit_code, error
+            ),
+            Some(component.id.clone()),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
 /// Add a component-owned deploy artifact even when its packaging provider also
 /// emits unrelated release artifacts (for example, a registry tarball).
 fn collect_declared_build_artifact(
@@ -115,12 +149,13 @@ fn collect_declared_build_artifact(
         return Err(Error::validation_invalid_argument(
             "build_artifact",
             format!(
-                "Configured build_artifact '{}' was not produced by release.package",
+                "Configured build_artifact '{}' was not produced by the component build or release.package",
                 declared_build_artifact
             ),
             Some(declared_path.display().to_string()),
             Some(vec![
-                "Update the component-owned release.package command to produce the configured build_artifact.".to_string(),
+                "Ensure scripts.build or release.package produces the configured build_artifact."
+                    .to_string(),
             ]),
         ));
     }

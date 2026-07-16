@@ -107,6 +107,7 @@ pub(super) fn execute_release_plan_step(
             executor::run_package(
                 context.extensions,
                 &mut context.state,
+                context.component,
                 context.component_id,
                 &context.component.local_path,
                 None,

@@ -49,6 +49,7 @@ pub fn package_existing_tag(
     let package_step = run_package(
         &extensions,
         &mut state,
+        &component,
         component_id,
         &component.local_path,
         None,
