@@ -419,9 +419,9 @@ mod tests {
             .expect("create runner");
             let (sync, exit_code) = crate::runner::sync_workspace(
                 "patch-baseline",
-                crate::runner::RunnerWorkspaceSyncOptions {
+                homeboy_runner_contract::RunnerWorkspaceSyncOptions {
                     path: source.display().to_string(),
-                    mode: crate::runner::RunnerWorkspaceSyncMode::Git,
+                    mode: homeboy_runner_contract::RunnerWorkspaceSyncMode::Git,
                     controller_routed_git: false,
                     ..Default::default()
                 },
