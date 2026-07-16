@@ -103,6 +103,10 @@ impl CliRuntime {
         // core depending on runner behavior. (Runner is still in-crate today;
         // this registration is the seam that lets it become its own crate.)
         crate::core::runner::register_runner_evidence_provider();
+        // Register the runner job-preparation provider so api_jobs can compute
+        // the secret-env plan and validate workload dispatch for remote-runner
+        // jobs without core depending on runner behavior.
+        crate::core::runner::register_runner_job_preparation_provider();
         // Register the command-label resolver so core::runner can map dispatched
         // argv to a hot-command label without depending on the full CLI parser.
         crate::core::runner::set_command_label_resolver(|argv| {

@@ -36,6 +36,7 @@ mod execution;
 mod extension_materialization;
 mod git_dependency_materialization;
 mod homeboy_refresh;
+mod job_preparation;
 mod lab;
 #[cfg(test)]
 pub(crate) use lab::mirror_agent_task_run_plan_aggregate;
@@ -135,6 +136,7 @@ pub use homeboy_refresh::{
     HomeboyBinaryRefreshOptions, HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan,
     RunnerDevSyncExtensionProvenance, RunnerDevSyncOptions, RunnerDevSyncOutput, RunnerDevSyncPlan,
 };
+pub use job_preparation::register as register_runner_job_preparation_provider;
 pub use lab::{
     execute_lab_offload, LabJobOverrides, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
     LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy, LabRunnerSelectionSource,
