@@ -1283,7 +1283,7 @@ fn dev_sync_next_actions(runner_id: &str, options: &RunnerDevSyncOptions) -> Vec
     actions.push(format!(
         "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
         shell_arg(runner_id),
-        env!("CARGO_PKG_VERSION")
+        homeboy_product_identity::product_version()
     ));
     actions
 }

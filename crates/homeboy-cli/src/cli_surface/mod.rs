@@ -10,7 +10,7 @@ use crate::commands::{
     upgrade, worktree,
 };
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = homeboy_product_identity::product_version();
 const DEFAULT_COMMAND_SURFACE_DEPTH: usize = 8;
 
 // Placement moved to the internal `homeboy-cli-contract` crate so `core` routing

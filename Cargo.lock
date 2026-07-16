@@ -884,6 +884,9 @@ dependencies = [
 [[package]]
 name = "homeboy-product-identity"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "homeboy-redaction"
