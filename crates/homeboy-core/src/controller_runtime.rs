@@ -119,9 +119,12 @@ pub(crate) fn activate_current_generation() -> Result<Value> {
     result
 }
 
-pub(crate) fn validate_for_mutation(metadata: &Value, current_identity: &str) -> Result<()> {
+pub(crate) fn pinned_executable_for_mutation(
+    metadata: &Value,
+    current_identity: &str,
+) -> Result<Option<PathBuf>> {
     let Some(runtime) = metadata.get(CONTROLLER_RUNTIME_METADATA_KEY) else {
-        return Ok(());
+        return Ok(None);
     };
     validate_pin(runtime)?;
     let originating = runtime
@@ -129,12 +132,24 @@ pub(crate) fn validate_for_mutation(metadata: &Value, current_identity: &str) ->
         .and_then(Value::as_str)
         .unwrap_or_default();
     if originating.is_empty() || originating == current_identity {
-        return Ok(());
+        return Ok(None);
     }
     let pinned = runtime
         .pointer("/originating/pinned_executable")
         .and_then(Value::as_str)
         .unwrap_or("<pinned-controller-runtime>");
+    Ok(Some(PathBuf::from(pinned)))
+}
+
+pub(crate) fn validate_for_mutation(metadata: &Value, current_identity: &str) -> Result<()> {
+    let Some(pinned) = pinned_executable_for_mutation(metadata, current_identity)? else {
+        return Ok(());
+    };
+    let originating = metadata
+        .get(CONTROLLER_RUNTIME_METADATA_KEY)
+        .and_then(|runtime| runtime.pointer("/originating/build_identity"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     Err(Error::validation_invalid_argument(
         "controller_runtime",
         format!(
@@ -142,7 +157,8 @@ pub(crate) fn validate_for_mutation(metadata: &Value, current_identity: &str) ->
         ),
         Some(current_identity.to_string()),
         Some(vec![format!(
-            "Run the lifecycle mutation through the pinned compatible runtime: {pinned} <original homeboy arguments>"
+            "Run the lifecycle mutation through the pinned compatible runtime: {} <original homeboy arguments>",
+            pinned.display()
         )]),
     ))
 }
@@ -316,6 +332,35 @@ mod tests {
         assert!(error.details["tried"][0]
             .as_str()
             .is_some_and(|command| command.contains("homeboy-origin")));
+    }
+
+    #[test]
+    fn identity_mismatch_resolves_the_verified_pinned_executable() {
+        let temporary = tempfile::tempdir().expect("temporary runtime directory");
+        let pinned = temporary.path().join("homeboy-origin");
+        fs::write(&pinned, b"origin").expect("write pinned executable");
+        make_executable_read_only(&pinned).expect("seal executable");
+        let metadata = json!({
+            "controller_runtime": {
+                "originating": {
+                    "build_identity": "homeboy 1.0.0+origin",
+                    "pinned_executable": pinned,
+                    "sha256": executable_digest(&pinned).expect("hash executable"),
+                }
+            }
+        });
+
+        assert_eq!(
+            pinned_executable_for_mutation(&metadata, "homeboy 1.0.0+replacement")
+                .expect("verified pin")
+                .as_deref(),
+            Some(pinned.as_path())
+        );
+        assert!(
+            pinned_executable_for_mutation(&metadata, "homeboy 1.0.0+origin")
+                .expect("origin runtime")
+                .is_none()
+        );
     }
 
     #[test]

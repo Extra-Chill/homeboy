@@ -340,6 +340,17 @@ pub fn load_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
     store::read_controller_plan(&run_id)
 }
 
+/// Return the immutable controller executable that owns a lifecycle mutation
+/// when this process is not the originating runtime. The pin is verified before
+/// it is returned so callers fail closed rather than launching an untrusted path.
+pub fn pinned_runtime_for_mutation(run_id: &str) -> Result<Option<std::path::PathBuf>> {
+    let record = store::read_record(&resolve_run_id(run_id)?)?;
+    crate::controller_runtime::pinned_executable_for_mutation(
+        &record.metadata,
+        &crate::build_identity::current().display,
+    )
+}
+
 /// Load a durable plan for a scheduler or provider execution. This is the only
 /// read path allowed to upgrade a legacy execution-budget envelope.
 pub fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {

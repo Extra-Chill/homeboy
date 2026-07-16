@@ -176,6 +176,40 @@ fn active_pinned_run_does_not_block_controller_promotion() {
 }
 
 #[test]
+fn pinned_runtime_recovery_retains_the_existing_lab_proxy_identity() {
+    with_isolated_home(|_| {
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "runtime-a-lab-proxy",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace",
+            remote_command: &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "run".to_string(),
+            ],
+            durable_plan: None,
+        })
+        .expect("runtime A created proxy");
+        rewrite_record_for_test("runtime-a-lab-proxy", |record| {
+            record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+                ["originating"]["build_identity"] = json!("homeboy runtime-a");
+        })
+        .expect("record runtime A provenance");
+
+        let pinned = pinned_runtime_for_mutation("runtime-a-lab-proxy")
+            .expect("runtime B resolves the verified runtime A pin")
+            .expect("runtime B delegates to runtime A");
+        let record = status("runtime-a-lab-proxy").expect("same durable proxy remains");
+
+        assert!(pinned.is_file());
+        assert_eq!(record.run_id, "runtime-a-lab-proxy");
+        assert_eq!(record.state, AgentTaskRunState::Queued);
+        assert_eq!(list_records().expect("one durable record").len(), 1);
+        assert!(record.provider_handles.is_empty());
+    });
+}
+
+#[test]
 fn detached_lab_handoff_persists_inspectable_running_record() {
     with_isolated_home(|_| {
         for (run_id, handoff) in [
