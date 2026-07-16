@@ -1,5 +1,3 @@
-use std::fs;
-
 use base64::Engine;
 
 use crate::error::{Error, Result};
@@ -31,19 +29,12 @@ pub fn is_retrievable_runner_artifact(path: &str) -> bool {
     RemoteArtifactToken::parse(path).is_ok()
 }
 
-pub fn is_reportable_artifact_evidence_path(path: &str) -> bool {
-    is_retrievable_runner_artifact(path)
-        || EXECUTION_CONTRACT.artifacts.is_metadata_only_ref(path)
-        || !std::path::Path::new(path).is_absolute()
-        || fs::metadata(path)
-            .map(|metadata| metadata.is_file() || metadata.is_dir())
-            .unwrap_or(false)
-}
-
-pub fn reportable_artifact_evidence_path(path: Option<&String>) -> Option<String> {
-    path.filter(|path| is_reportable_artifact_evidence_path(path))
-        .cloned()
-}
+// Moved to core's execution_contract module (contract-driven classification,
+// not runner behavior) so core code can use them without a core -> runner edge.
+// Re-exported so runner-internal call sites resolve unchanged.
+pub use crate::execution_contract::{
+    is_reportable_artifact_evidence_path, reportable_artifact_evidence_path,
+};
 
 pub(crate) fn runner_artifact_token(runner_id: &str, run_id: &str, artifact_id: &str) -> String {
     EXECUTION_CONTRACT
