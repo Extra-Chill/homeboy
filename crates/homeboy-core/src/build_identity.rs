@@ -12,7 +12,7 @@ pub struct BuildIdentity {
 
 pub fn current() -> BuildIdentity {
     identity_from_parts(
-        env!("CARGO_PKG_VERSION"),
+        env!("HOMEBOY_BUILD_VERSION"),
         option_env!("HOMEBOY_BUILD_GIT_COMMIT"),
         option_env!("HOMEBOY_BUILD_GIT_DIRTY"),
     )
