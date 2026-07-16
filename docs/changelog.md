@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.288.1] - 2026-07-16
+
+### Changed
+- bind prepared payloads to projects
+- Support layered local gate-feedback remediation
+- move detail_output + validation into homeboy-engine-primitives (#8425)
+- Add lease-safe forced daemon stop
+- move local_files + codebase_scan into homeboy-engine-primitives (#8425)
+
+### Fixed
+- fix(agent-task): resolve retries from controller plans
+- restore core test compilation
+- correct create() path in decomposed connection test
+- fix(agent-task): project verified timeout patches
+
 ## [0.288.0] - 2026-07-16
 
 ### Added
