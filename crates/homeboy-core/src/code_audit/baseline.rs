@@ -260,6 +260,42 @@ pub fn finding_baseline_fingerprint(finding: &Finding) -> String {
     AuditFinding(finding).fingerprint()
 }
 
+/// Build an in-memory comparison baseline from persisted and reference findings.
+///
+/// Changed-since audit must recognize debt present in the selected git ref even
+/// when its `homeboy.json` baseline has not yet recorded that finding.
+pub fn baseline_with_reference_findings(
+    persisted: Option<AuditBaseline>,
+    reference: &CodeAuditResult,
+) -> AuditBaseline {
+    let mut baseline = persisted.unwrap_or(AuditBaseline {
+        created_at: "reference".to_string(),
+        context_id: reference.component_id.clone(),
+        item_count: 0,
+        known_fingerprints: Vec::new(),
+        metadata: AuditBaselineMetadata {
+            outliers_count: 0,
+            alignment_score: None,
+            known_outliers: Vec::new(),
+            policy_sections: Vec::new(),
+        },
+    });
+    let mut fingerprints = baseline
+        .known_fingerprints
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    for section in &baseline.metadata.policy_sections {
+        fingerprints.extend(section.known_fingerprints.iter().cloned());
+    }
+    fingerprints.extend(reference.findings.iter().map(finding_baseline_fingerprint));
+
+    baseline.known_fingerprints = fingerprints.into_iter().collect();
+    baseline.item_count = baseline.known_fingerprints.len();
+    baseline
+}
+
 /// Load an audit baseline from a git ref (e.g., `origin/main`).
 ///
 /// Uses `git show` to read the persisted baseline without checkout.
@@ -840,6 +876,94 @@ mod tests {
             AuditFinding(&f2).fingerprint(),
             "fingerprint should not change when line count changes"
         );
+    }
+
+    #[test]
+    fn reference_findings_make_changed_structural_metrics_contextual() {
+        let reference = make_result(
+            vec![make_finding_with_kind(
+                "structural",
+                "src/extracted.rs",
+                "File has 1,024 lines (threshold: 1,000)",
+                AuditFinding::GodFile,
+            )],
+            "reference_structural",
+        );
+        let candidate = make_result(
+            vec![make_finding_with_kind(
+                "structural",
+                "src/extracted.rs",
+                "File has 1,111 lines (threshold: 1,000)",
+                AuditFinding::GodFile,
+            )],
+            "candidate_structural",
+        );
+
+        let comparison = compare(
+            &candidate,
+            &baseline_with_reference_findings(None, &reference),
+        );
+
+        assert!(comparison.new_items.is_empty());
+    }
+
+    #[test]
+    fn reference_baseline_keeps_new_structural_threshold_crossing_introduced() {
+        let reference = make_result(Vec::new(), "reference_no_structural_finding");
+        let candidate = make_result(
+            vec![make_finding_with_kind(
+                "structural",
+                "src/newly-large.rs",
+                "File has 1,001 lines (threshold: 1,000)",
+                AuditFinding::GodFile,
+            )],
+            "candidate_new_structural_finding",
+        );
+
+        let comparison = compare(
+            &candidate,
+            &baseline_with_reference_findings(None, &reference),
+        );
+
+        assert_eq!(comparison.new_items.len(), 1);
+    }
+
+    #[test]
+    fn reference_baseline_preserves_core_boundary_policy_identity() {
+        let reference = make_result(
+            vec![make_finding_with_kind(
+                SOURCE_POLICY_CORE_BOUNDARY_POLICY,
+                "src/core/tool.rs",
+                "Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 7 in behavioral context `run`",
+                AuditFinding::CoreBoundaryLeak,
+            )],
+            "reference_core_boundary",
+        );
+        let candidate = make_result(
+            vec![
+                make_finding_with_kind(
+                    SOURCE_POLICY_CORE_BOUNDARY_POLICY,
+                    "src/core/tool.rs",
+                    "Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line 19 in behavioral context `run`",
+                    AuditFinding::CoreBoundaryLeak,
+                ),
+                make_finding_with_kind(
+                    SOURCE_POLICY_CORE_BOUNDARY_POLICY,
+                    "src/core/tool.rs",
+                    "Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line 19 in behavioral context `run`",
+                    AuditFinding::CoreBoundaryLeak,
+                ),
+            ],
+            "candidate_core_boundary",
+        );
+
+        let comparison = compare(
+            &candidate,
+            &baseline_with_reference_findings(None, &reference),
+        );
+
+        assert_eq!(comparison.new_items.len(), 1);
+        assert!(comparison.new_items[0].description.contains("`wordpress`"));
     }
 
     #[test]
