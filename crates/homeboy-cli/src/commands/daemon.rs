@@ -109,6 +109,9 @@ enum DaemonCommand {
         /// Require this exact live daemon lease before stopping
         #[arg(long)]
         lease_id: Option<String>,
+        /// Directly SIGTERM a matching stale or unreachable daemon lease. Requires --lease-id.
+        #[arg(long, requires = "lease_id")]
+        force: bool,
     },
     /// Show daemon state and selected local address
     Status,
@@ -225,10 +228,12 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             daemon::supervise(&addr, &startup_token)?;
             Ok((DaemonOutput::Serve(DaemonStartResult { pid: std::process::id(), address: addr, state_path: String::new(), lease_id: String::new() }), 0))
         }
-        DaemonCommand::Stop { lease_id } => Ok((
-            DaemonOutput::Stop(match lease_id {
-                Some(lease_id) => daemon::stop_for_lease(&lease_id)?,
-                None => daemon::stop()?,
+        DaemonCommand::Stop { lease_id, force } => Ok((
+            DaemonOutput::Stop(match (force, lease_id) {
+                (true, Some(lease_id)) => daemon::force_stop_for_lease(&lease_id)?,
+                (true, None) => unreachable!("clap requires --lease-id with --force"),
+                (false, Some(lease_id)) => daemon::stop_for_lease(&lease_id)?,
+                (false, None) => daemon::stop()?,
             }),
             0,
         )),
@@ -376,6 +381,20 @@ mod tests {
             "homeboy",
             "daemon",
             "stop",
+            "--lease-id",
+            "lease-live",
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn force_stop_requires_lease_id() {
+        assert!(Cli::try_parse_from(["homeboy", "daemon", "stop", "--force"]).is_err());
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "daemon",
+            "stop",
+            "--force",
             "--lease-id",
             "lease-live",
         ])

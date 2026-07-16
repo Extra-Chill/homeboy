@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Generic process step shape shared by command/runner adapters.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +52,134 @@ pub fn pid_is_running(pid: u32) -> bool {
     {
         pid == std::process::id()
     }
+}
+
+/// Prove a live process owns one exact environment value.
+///
+/// This is intended for persisted random ownership tokens. Callers should
+/// re-check immediately before signaling because PIDs can be reused.
+pub fn pid_has_environment_value(pid: u32, key: &str, value: &str) -> Result<bool> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(Error::validation_invalid_argument(
+            "pid",
+            "recorded process PID is invalid",
+            Some(pid.to_string()),
+            None,
+        ));
+    }
+    if key.is_empty()
+        || key.contains('=')
+        || key.chars().any(char::is_whitespace)
+        || value.chars().any(char::is_whitespace)
+    {
+        return Err(Error::validation_invalid_argument(
+            "process_environment",
+            "process environment ownership checks require a non-empty key and whitespace-free value",
+            Some(key.to_string()),
+            None,
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let expected = format!("{key}={value}");
+        match std::fs::read(format!("/proc/{pid}/environ")) {
+            Ok(environment) => {
+                return Ok(environment_contains_assignment(
+                    &environment,
+                    expected.as_bytes(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(format!("inspect process {pid} environment")),
+                ));
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(Error::validation_invalid_argument(
+            "pid",
+            "exact process environment ownership checks require Linux /proc evidence",
+            Some(pid.to_string()),
+            None,
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn environment_contains_assignment(environment: &[u8], expected: &[u8]) -> bool {
+    environment
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == expected)
+}
+
+/// Send SIGTERM to a recorded PID and prove it exited within `timeout`.
+/// Platform-specific signaling stays in this process abstraction so lifecycle
+/// callers do not need to issue ad hoc shell commands.
+pub fn terminate_pid_with_sigterm_and_wait(pid: u32, timeout: Duration) -> Result<()> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(Error::validation_invalid_argument(
+            "pid",
+            "recorded process PID is invalid",
+            Some(pid.to_string()),
+            None,
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        unsafe {
+            if libc::kill(pid as libc::pid_t, libc::SIGTERM) != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ESRCH) {
+                    return Ok(());
+                }
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(format!("send SIGTERM to process {pid}")),
+                ));
+            }
+        }
+        let deadline = Instant::now() + timeout;
+        while process_is_running_after_sigterm(pid) {
+            if Instant::now() >= deadline {
+                return Err(Error::internal_unexpected(format!(
+                    "process {pid} remained alive for {}ms after SIGTERM",
+                    timeout.as_millis()
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = timeout;
+        Err(Error::validation_invalid_argument(
+            "pid",
+            "SIGTERM process termination is unsupported on this platform",
+            Some(pid.to_string()),
+            None,
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn process_is_running_after_sigterm(pid: u32) -> bool {
+    // A directly owned child can remain a zombie after SIGTERM. Reap it before
+    // falling back to PID liveness so bounded termination works on macOS too.
+    let mut status = 0;
+    let reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+    if reaped == pid as libc::pid_t {
+        return false;
+    }
+    pid_is_running(pid)
 }
 
 /// Read Linux `/proc/<pid>/stat` field 22, the kernel tick at which this
@@ -535,6 +664,20 @@ mod tests {
 
         assert_eq!(process.state, 'Z');
         assert_eq!(process.process_group_id, 456);
+    }
+
+    #[test]
+    fn force_stop_environment_ownership_requires_an_exact_assignment() {
+        let environment = b"HOME=/tmp\0HOMEBOY_DAEMON_STARTUP_TOKEN=lease-token\0";
+
+        assert!(environment_contains_assignment(
+            environment,
+            b"HOMEBOY_DAEMON_STARTUP_TOKEN=lease-token"
+        ));
+        assert!(!environment_contains_assignment(
+            environment,
+            b"HOMEBOY_DAEMON_STARTUP_TOKEN=lease"
+        ));
     }
 }
 

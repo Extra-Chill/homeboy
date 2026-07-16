@@ -20,7 +20,9 @@ use crate::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
 use crate::lab_contract::RunnerWorkload;
 use crate::paths;
-use crate::process::pid_is_running;
+use crate::process::{
+    pid_has_environment_value, pid_is_running, terminate_pid_with_sigterm_and_wait,
+};
 use crate::runner::{
     execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process,
     BrokerScope, Runner, RunnerProcessRequest,
@@ -54,6 +56,7 @@ const DAEMON_LEASE_SCHEMA: &str = "homeboy.daemon.session_lease.v1";
 const DAEMON_STARTUP_TOKEN_ENV: &str = "HOMEBOY_DAEMON_STARTUP_TOKEN";
 const RUNTIME_PATH_FILE_LIMIT: usize = 2_000;
 const RUNTIME_PATH_SUFFIXES: &[&str] = &["_COMPONENT_PATH", "_PROVIDER_PATH", "_RUNTIME_PATH"];
+const FORCE_STOP_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonState {
@@ -282,6 +285,8 @@ pub struct DaemonStopResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub state_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub termination_evidence: Option<DaemonTerminationEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -819,6 +824,114 @@ pub fn stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult> {
     stop_with_force_for_lease(expected_lease_id, false)
 }
 
+/// Terminate a stale or unreachable daemon directly from its persisted lease.
+/// This deliberately does not use the daemon HTTP lifecycle endpoint.
+pub fn force_stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult> {
+    let _lock = acquire_daemon_operation_lock()?;
+    let path = state_path()?;
+    let state_path_display = path.display().to_string();
+    let validation = validate_lease_file(&path)?;
+    if validation.invalid_pid.is_some()
+        || (validation.state.is_none() && validation.stale_reason.is_some() && path.exists())
+    {
+        return Err(corrupt_daemon_lease_error(&path, validation.stale_reason));
+    }
+    let state = validation.state.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "lease_id",
+            "forced daemon stop requires a persisted live daemon lease",
+            Some(expected_lease_id.to_string()),
+            None,
+        )
+    })?;
+    if state.lease_id != expected_lease_id {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!(
+                "forced daemon stop expected lease `{expected_lease_id}` but persisted live lease is `{}`; refusing to signal",
+                state.lease_id
+            ),
+            Some(expected_lease_id.to_string()),
+            None,
+        ));
+    }
+    if state.startup_token.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "daemon_lease",
+            format!(
+                "daemon lease at {} does not contain a startup token; refusing to signal pid {}",
+                path.display(),
+                state.pid
+            ),
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    let active_job_ids = active_daemon_job_ids()?;
+    if !active_job_ids.is_empty() {
+        return Err(active_jobs_block_daemon_stop_error(&state, &active_job_ids));
+    }
+
+    let identity = DaemonLeaseIdentity::from_state(&state);
+    let current_state = read_lease_if_identity_matches(&path, &identity)?;
+    if current_state.pid != state.pid {
+        return Err(Error::internal_unexpected(format!(
+            "daemon lease changed pid from {} to {}; refusing to signal",
+            state.pid, current_state.pid
+        )));
+    }
+    if !pid_is_running(state.pid) {
+        remove_lease_if_identity_matches(&path, &identity)?;
+        return Ok(DaemonStopResult {
+            stopped: false,
+            pid: Some(state.pid),
+            state_path: state_path_display,
+            termination_evidence: None,
+        });
+    }
+    if !pid_has_environment_value(state.pid, DAEMON_STARTUP_TOKEN_ENV, &state.startup_token)? {
+        return Err(Error::validation_invalid_argument(
+            "daemon_lease",
+            format!(
+                "process {} does not own the persisted daemon startup token; refusing to signal a potentially reused PID",
+                state.pid
+            ),
+            Some(state.pid.to_string()),
+            None,
+        ));
+    }
+
+    let _ = read_lease_if_identity_matches(&path, &identity)?;
+    terminate_pid_with_sigterm_and_wait(state.pid, FORCE_STOP_WAIT)?;
+    let evidence = DaemonTerminationEvidence {
+        classification: DaemonTerminationClassification::CleanStop,
+        observed_at: chrono::Utc::now().to_rfc3339(),
+        lease_id: Some(state.lease_id.clone()),
+        pid: Some(state.pid),
+        binary_identity: Some(state.build_identity.display.clone()),
+        active_jobs: 0,
+        resource_evidence: "unavailable: forced stop does not collect OS resource snapshots"
+            .to_string(),
+        os_evidence: format!(
+            "SIGTERM sent to recorded daemon PID and process death verified within {}ms",
+            FORCE_STOP_WAIT.as_millis()
+        ),
+        exit_code: None,
+        signal: Some(libc::SIGTERM),
+        stdout: None,
+        stderr: None,
+        stop_requested: true,
+    };
+    write_termination_evidence(&evidence)?;
+    remove_lease_if_identity_matches(&path, &identity)?;
+    Ok(DaemonStopResult {
+        stopped: true,
+        pid: Some(state.pid),
+        state_path: state_path_display,
+        termination_evidence: Some(evidence),
+    })
+}
+
 fn stop_with_force_for_lease(expected_lease_id: &str, force: bool) -> Result<DaemonStopResult> {
     let _lock = acquire_daemon_operation_lock()?;
     let path = state_path()?;
@@ -864,6 +977,7 @@ fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> {
             stopped: false,
             pid: None,
             state_path: state_path_display,
+            termination_evidence: None,
         });
     };
 
@@ -875,6 +989,7 @@ fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> {
             stopped: false,
             pid: Some(state.pid),
             state_path: state_path_display,
+            termination_evidence: None,
         });
     }
 
@@ -945,6 +1060,7 @@ fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> {
         stopped,
         pid: Some(pid),
         state_path: state_path_display,
+        termination_evidence: None,
     })
 }
 
@@ -965,7 +1081,7 @@ fn active_jobs_block_daemon_stop_error(state: &DaemonState, active_job_ids: &[Uu
     let mut error = Error::validation_invalid_argument(
         "daemon_stop",
         format!(
-            "refusing routine daemon stop for lease `{}` ({current_identity}) while active durable jobs exist: {}. Requested Homeboy identity is `{requested_identity}`; wait for those jobs to finish or use the owning command's explicit --force option",
+            "refusing daemon stop for lease `{}` ({current_identity}) while active durable jobs exist: {}. Requested Homeboy identity is `{requested_identity}`; wait for those jobs to finish before stopping the daemon",
             state.lease_id,
             active_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
         ),
