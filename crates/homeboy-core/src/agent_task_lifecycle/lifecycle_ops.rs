@@ -329,8 +329,8 @@ pub fn record_completed_run(
 }
 
 pub fn load_plan(run_id: &str) -> Result<AgentTaskPlan> {
-    let record = store::read_record(&resolve_run_id(run_id)?)?;
-    store::read_plan_path(&record.plan_path)
+    let run_id = resolve_run_id(run_id)?;
+    store::read_controller_plan(&run_id)
 }
 
 /// Load the plan owned by this controller's durable run identity. Runner paths
@@ -343,8 +343,8 @@ pub fn load_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
 /// Load a durable plan for a scheduler or provider execution. This is the only
 /// read path allowed to upgrade a legacy execution-budget envelope.
 pub fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
-    let record = store::read_record(&resolve_run_id(run_id)?)?;
-    store::read_plan_path_for_execution(&record.plan_path)
+    let run_id = resolve_run_id(run_id)?;
+    store::read_controller_plan_for_execution(&run_id)
 }
 
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
@@ -461,10 +461,8 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let _ = reconcile_deferred_candidate(&resolved_run_id)?;
     let mut record = store::read_record(&resolved_run_id)?;
     if !is_terminal_run_state(record.state) {
-        if let (Ok(aggregate), Ok(plan)) = (
-            store::read_aggregate(&record.run_id),
-            store::read_controller_plan(&record.run_id),
-        ) {
+        if let Ok(aggregate) = store::read_aggregate(&record.run_id) {
+            let plan = store::read_controller_plan(&record.run_id)?;
             let aggregate_path = store::aggregate_path(&record.run_id)
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|_| "aggregate.json".to_string());
@@ -1474,14 +1472,14 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
             None,
         ));
     }
-    if let Err(error) = store::read_plan_path(&record.plan_path) {
+    if let Err(error) = store::read_controller_plan(&run_id) {
         fail_missing_lab_attempt_plan(&mut record, &error)?;
         return Err(Error::internal_io(
             format!(
                 "cannot bind Lab runner job because durable attempt plan is unavailable: {}",
                 error.message
             ),
-            Some(record.plan_path),
+            Some(run_id),
         ));
     }
     record.updated_at = Some(now_timestamp());
@@ -1606,7 +1604,7 @@ fn record_lab_offload_proxy(
     // A previous interruption may have committed the record but not its plan.
     // Repair from the controller-compiled plan before exposing another handoff
     // phase; without it the runner would later create a fake running attempt.
-    if store::read_plan_path(&record.plan_path).is_err() {
+    if store::read_controller_plan(&run_id).is_err() {
         if let Some(durable_plan) = durable_plan {
             let plan_path = store::write_plan(&run_id, durable_plan)?;
             record.plan_path = plan_path.display().to_string();

@@ -369,7 +369,7 @@ fn discovery_run(
     classify: bool,
     now: chrono::DateTime<chrono::Utc>,
 ) -> AgentTaskDiscoveryRun {
-    let plan = agent_task_lifecycle::load_plan(&record.run_id).ok();
+    let plan = agent_task_lifecycle::load_controller_plan(&record.run_id).ok();
     let first_task = plan.as_ref().and_then(|plan| plan.tasks.first());
     let repo = plan
         .as_ref()
