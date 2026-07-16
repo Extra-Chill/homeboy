@@ -318,7 +318,7 @@ fn json_manifest_version(root: &Path, file: &str, key: &str) -> Option<Version> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::CallSite;
+    use homeboy_audit_contract::CallSite;
 
     fn make_fp(path: &str, content: &str) -> FileFingerprint {
         FileFingerprint {

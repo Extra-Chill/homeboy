@@ -20,8 +20,10 @@ pub(in crate::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Findi
 
 fn detect_direct_aggregate_construction(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     let mut seams_by_type: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut literals_by_type: BTreeMap<String, Vec<(&str, &crate::extension::AggregateLiteral)>> =
-        BTreeMap::new();
+    let mut literals_by_type: BTreeMap<
+        String,
+        Vec<(&str, &homeboy_audit_contract::AggregateLiteral)>,
+    > = BTreeMap::new();
 
     for fp in fingerprints {
         if super::walker::is_test_path(&fp.relative_path) {
