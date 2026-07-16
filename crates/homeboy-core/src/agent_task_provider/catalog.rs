@@ -10,6 +10,7 @@ use super::secrets::{
     provider_secret_sources_for_plan_with_providers,
 };
 use super::*;
+use sha2::{Digest, Sha256};
 
 #[cfg(not(test))]
 static PROVIDER_CATALOG: OnceLock<RwLock<AgentTaskProviderCatalog>> = OnceLock::new();
@@ -93,13 +94,48 @@ impl AgentTaskProviderCatalog {
 
 fn discover_provider_catalog() -> AgentTaskProviderCatalog {
     let catalog = agent_runtime_manifest::discover_agent_task_executor_provider_catalog();
+    let version = provider_catalog_version(&catalog.providers, &catalog.diagnostics);
     AgentTaskProviderCatalog {
         providers: catalog.providers,
         diagnostics: catalog.diagnostics,
-        version: Some(format!(
-            "discovered:{}",
-            chrono::Utc::now().timestamp_millis()
-        )),
+        version: Some(version),
+    }
+}
+
+fn provider_catalog_version(
+    providers: &[AgentTaskExecutorProvider],
+    diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
+) -> String {
+    // The handoff version represents the selected catalog content, not the
+    // instant discovery happened. That makes stale controller/Lab catalogs
+    // detectable without treating an unchanged rediscovery as drift.
+    let content = serde_json::to_vec(&(providers, diagnostics))
+        .expect("agent-task provider catalog must serialize");
+    format!("resolved:{:x}", Sha256::digest(content))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_version_is_deterministic_and_detects_stale_content() {
+        let empty = provider_catalog_version(&[], &[]);
+        assert_eq!(empty, provider_catalog_version(&[], &[]));
+
+        let changed = provider_catalog_version(
+            &[],
+            &[AgentRuntimeDiscoveryDiagnostic {
+                class: "agent_runtime_catalog.conflict".to_string(),
+                message: "runtime collision".to_string(),
+                runtime_id: Some("example".to_string()),
+                extension_id: None,
+                path: None,
+            }],
+        );
+
+        assert_ne!(empty, changed);
+        assert!(empty.starts_with("resolved:"));
     }
 }
 
