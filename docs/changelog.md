@@ -4,6 +4,29 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.288.4] - 2026-07-16
+
+### Changed
+- compile all workspace test targets to catch crate-extraction orphans
+- move runner workspace sync types to runner-contract (stage 4)
+- move lab-capability cluster to runner-contract (stage 3)
+- move runner capability tool types to runner-contract (stage 2)
+- introduce homeboy-runner-contract crate (first runner-decouple cut)
+- extract homeboy-tunnel feature crate from core
+- remove 5 verified-dead public functions (#8425)
+
+### Fixed
+- fix(agent-task): preserve controller plan ownership
+- Fix recovered Lab artifact status reporting
+- restore core test compilation broken by tunnel extraction (#8488)
+- fix(agent-task): reconcile malformed lifecycle records
+- fix(agent-task): hydrate Lab terminal aggregates
+- fix(agent-task): resume reconciled cook lifecycle
+- OrphanedInternal check must ignore comment/string call mentions
+- dead-code scan must keep serde/clap attribute-string fn references
+- reconnect dead daemon leases
+- switch controller generations without draining work
+
 ## [0.288.3] - 2026-07-16
 
 ### Changed
