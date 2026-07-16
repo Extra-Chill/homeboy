@@ -19,7 +19,7 @@ use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::idiomatic::is_trivial_method;
 use super::walker::is_test_path;
-use crate::component::DuplicationDetectorConfig;
+use homeboy_audit_contract::DuplicationDetectorConfig;
 
 mod intra_method;
 

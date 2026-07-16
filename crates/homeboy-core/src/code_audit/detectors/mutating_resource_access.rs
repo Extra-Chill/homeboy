@@ -1,6 +1,6 @@
 use regex::Regex;
 
-use crate::component::MutatingResourceAccessConfig;
+use homeboy_audit_contract::MutatingResourceAccessConfig;
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
