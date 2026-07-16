@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
-use super::import_matching::contains_word_in_code;
+use super::import_matching::{blank_comments_and_strings, contains_word_in_code};
 use super::walker::is_test_path;
 use crate::component::AuditConfig;
 
@@ -221,9 +221,15 @@ pub(crate) fn analyze_dead_code_with_config(
                 // file content. internal_calls may miss names in the skip list
                 // (e.g., "write" is skipped to avoid matching the write! macro,
                 // but it could also be a real function name in this file).
+                //
+                // Match against a code-only view so a mention inside a comment
+                // or string literal (`// TODO call foo()`, `"foo() example"`)
+                // does not falsely count as a call and mask the dead function —
+                // the same correctness rule the UnreferencedExport scan uses.
+                let code = blank_comments_and_strings(&fp.content);
                 let call_pattern = format!("{}(", method);
                 let method_pattern = format!(".{}(", method);
-                if fp.content.contains(&call_pattern) || fp.content.contains(&method_pattern) {
+                if code.contains(&call_pattern) || code.contains(&method_pattern) {
                     continue;
                 }
 
@@ -686,6 +692,43 @@ mod tests {
     }
 
     #[test]
+    fn test_file_caller_suppresses_unreferenced_export() {
+        // A public function whose only caller lives in a test file must NOT be
+        // flagged as dead — the tests exercise it, so it's live code. This is
+        // load-bearing: an early manual dead-code sweep produced a false
+        // positive precisely because it forgot to scan test files as reference
+        // sources (e.g. `compute_fixability`, used only by `report_test.rs`).
+        let owner = make_fingerprint(
+            "src/report.rs",
+            vec!["compute_fixability"],
+            vec!["compute_fixability"],
+            vec![],
+            vec![],
+        );
+        let mut test_caller = make_fingerprint(
+            "src/report_test.rs",
+            vec!["exercises_fixability"],
+            vec![],
+            vec![],
+            vec![],
+        );
+        test_caller
+            .internal_calls
+            .push("compute_fixability".to_string());
+        test_caller.content =
+            "fn exercises_fixability() { let f = compute_fixability(&result); }".to_string();
+
+        let findings = analyze_dead_code(&[&owner, &test_caller], &[]);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == AuditFinding::UnreferencedExport
+                    && f.description.contains("compute_fixability")),
+            "a function called only from a test file must not be flagged as unreferenced"
+        );
+    }
+
+    #[test]
     fn function_pointer_reference_suppresses_unreferenced_export() {
         let exported = make_fingerprint(
             "src/foo.rs",
@@ -818,6 +861,32 @@ mod tests {
             .collect();
         assert_eq!(orphaned.len(), 1);
         assert!(orphaned[0].description.contains("dead_helper"));
+    }
+
+    #[test]
+    fn orphaned_internal_content_fallback_ignores_comment_and_string_calls() {
+        // The same-file "is it called?" fallback scans raw content for
+        // `name(` / `.name(`. A mention inside a comment or string literal must
+        // NOT count as a call, or a genuinely-dead private fn stays hidden —
+        // the mirror of the UnreferencedExport comment/string fix.
+        let mut fp = make_fingerprint(
+            "src/foo.rs",
+            vec!["public_fn", "dead_helper"],
+            vec!["public_fn"],
+            vec!["public_fn"], // dead_helper NOT in internal_calls
+            vec![("dead_helper", "private")],
+        );
+        // dead_helper appears only in a comment and a string — not real calls.
+        fp.content = "// remember to wire dead_helper() up later\n\
+             fn public_fn() { let doc = \"call dead_helper() from here\"; }"
+            .to_string();
+
+        let findings = analyze_dead_code(&[&fp], &[]);
+        assert!(
+            findings.iter().any(|f| f.kind == AuditFinding::OrphanedInternal
+                && f.description.contains("dead_helper")),
+            "dead_helper is only mentioned in a comment/string, so it must still be flagged as orphaned"
+        );
     }
 
     #[test]
