@@ -307,6 +307,29 @@ pub fn resolve_dispatch_request(
     resolve_dispatch_request_with_default(command, default_backend_for_component)
 }
 
+/// Resolve the provider policy the controller passes to an execution boundary.
+/// The first configured rotation entry is the initial attempt; remaining
+/// entries are failover attempts.
+pub fn controller_resolved_execution_policy(
+    request: &AgentTaskDispatchRequest,
+) -> ResolvedAgentTaskProviderPolicy {
+    let rotation = crate::defaults::load_config().agent_task.rotation;
+    ResolvedAgentTaskProviderPolicy {
+        backend: request.backend.clone(),
+        selector: request.selector.clone(),
+        model: request.model.clone(),
+        retry: AgentTaskRetryPolicy {
+            max_attempts: request.core.attempts.max(1),
+            ..AgentTaskRetryPolicy::default()
+        },
+        liveness_timeout_ms: rotation
+            .as_ref()
+            .and_then(|policy| policy.liveness_timeout_ms),
+        rotation,
+        rotation_starts_with_first_entry: true,
+    }
+}
+
 /// Resolve a typed dispatch request, using the supplied default-backend resolver
 /// so tests can inject a deterministic policy.
 pub fn resolve_dispatch_request_with_default(
