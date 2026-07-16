@@ -1,6 +1,8 @@
 use serde::{ser::SerializeMap, Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 
+use crate::error::{Error, Result as HomeboyResult};
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 
 pub struct VersionTarget {
@@ -231,12 +233,160 @@ pub struct GithubHostConfig {
 pub struct ComponentReleaseConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_release: Option<ComponentGithubReleaseConfig>,
+    /// Per-ZIP source-to-archive coverage declarations for transformed packages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_coverage: Vec<PackageCoverageConfig>,
 }
 
 impl ComponentReleaseConfig {
     pub fn is_default(value: &Self) -> bool {
         value == &Self::default()
     }
+
+    pub fn validate_package_coverage(&self) -> HomeboyResult<()> {
+        let mut selectors = Vec::new();
+        for coverage in &self.package_coverage {
+            validate_canonical_coverage_path(&coverage.artifact, "artifact")?;
+            validate_canonical_coverage_path(&coverage.archive_root, "archive_root")?;
+            let selector = (coverage.artifact_match, &coverage.artifact);
+            if selectors.contains(&selector) {
+                return Err(package_coverage_error(
+                    "artifact selectors must be unique across package coverage declarations",
+                ));
+            }
+            selectors.push(selector);
+            if coverage.source_roots.is_empty() {
+                return Err(package_coverage_error(
+                    "source_roots must contain at least one repository-relative directory",
+                ));
+            }
+
+            let mut roots = Vec::new();
+            for root in &coverage.source_roots {
+                validate_canonical_coverage_path(root, "source_roots")?;
+                if roots.iter().any(|existing: &String| {
+                    root == "."
+                        || existing == "."
+                        || root == existing
+                        || root
+                            .strip_prefix(existing)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                        || existing
+                            .strip_prefix(root)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                }) {
+                    return Err(package_coverage_error(
+                        "source_roots must not overlap within one package coverage declaration",
+                    ));
+                }
+                roots.push(root.clone());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PackageCoverageConfig {
+    /// Artifact path or glob selector for one emitted ZIP artifact.
+    pub artifact: String,
+    /// Whether `artifact` is an exact path (the default) or a glob pattern.
+    pub artifact_match: PackageCoverageArtifactMatch,
+    /// Repository-relative source directories whose runtime files must be covered.
+    pub source_roots: Vec<String>,
+    /// Archive-relative directory containing the mapped source-root contents.
+    pub archive_root: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageCoverageArtifactMatch {
+    #[default]
+    Exact,
+    Glob,
+}
+
+#[derive(Deserialize)]
+struct RawPackageCoverageConfig {
+    artifact: String,
+    #[serde(default)]
+    artifact_match: PackageCoverageArtifactMatch,
+    source_roots: Vec<String>,
+    archive_root: String,
+}
+
+impl<'de> Deserialize<'de> for PackageCoverageConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawPackageCoverageConfig::deserialize(deserializer)?;
+        let artifact =
+            normalize_coverage_path(&raw.artifact, "artifact").map_err(serde::de::Error::custom)?;
+        let source_roots = raw
+            .source_roots
+            .iter()
+            .map(|root| normalize_coverage_path(root, "source_roots"))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(serde::de::Error::custom)?;
+        let archive_root = normalize_coverage_path(&raw.archive_root, "archive_root")
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            artifact,
+            artifact_match: raw.artifact_match,
+            source_roots,
+            archive_root,
+        })
+    }
+}
+
+fn normalize_coverage_path(value: &str, field: &str) -> std::result::Result<String, String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.starts_with('/')
+        || value.starts_with('\\')
+        || value.as_bytes().get(1).is_some_and(|byte| *byte == b':')
+    {
+        return Err(format!("{} must be a non-empty relative path", field));
+    }
+
+    let normalized = value.replace('\\', "/");
+    let mut segments = Vec::new();
+    for segment in normalized.split('/') {
+        match segment {
+            "" | "." => continue,
+            ".." => return Err(format!("{} must not contain parent traversal", field)),
+            _ => segments.push(segment),
+        }
+    }
+    if segments.is_empty() {
+        Ok(".".to_string())
+    } else {
+        Ok(segments.join("/"))
+    }
+}
+
+fn validate_canonical_coverage_path(value: &str, field: &str) -> HomeboyResult<()> {
+    let normalized = normalize_coverage_path(value, field)
+        .map_err(|message| package_coverage_error(&message))?;
+    if value != normalized {
+        return Err(package_coverage_error(&format!(
+            "{} must use canonical slash-separated form '{}'",
+            field, normalized
+        )));
+    }
+    Ok(())
+}
+
+fn package_coverage_error(message: &str) -> Error {
+    Error::validation_invalid_argument(
+        "release.package_coverage",
+        message,
+        None,
+        Some(vec![
+            "Declare one artifact selector, one or more non-overlapping source_roots, and an archive_root.".to_string(),
+        ]),
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

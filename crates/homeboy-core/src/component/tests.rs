@@ -133,6 +133,142 @@ fn component_priority_labels_serialization_roundtrip() {
 }
 
 #[test]
+fn package_coverage_normalizes_paths_and_rejects_malformed_declarations() {
+    let component: Component = serde_json::from_value(serde_json::json!({
+        "id": "fixture",
+        "release": {
+            "package_coverage": [{
+                "artifact": " ./dist//archive.zip/ ",
+                "source_roots": [" ./source//runtime/ "],
+                "archive_root": " ./bundle// "
+            }]
+        }
+    }))
+    .expect("valid package coverage should parse");
+    component
+        .release
+        .validate_package_coverage()
+        .expect("valid package coverage should validate");
+    let coverage = &component.release.package_coverage[0];
+    assert_eq!(coverage.artifact, "dist/archive.zip");
+    assert_eq!(coverage.source_roots, ["source/runtime"]);
+    assert_eq!(coverage.archive_root, "bundle");
+
+    let malformed: Component = serde_json::from_value(serde_json::json!({
+        "id": "fixture",
+        "release": {
+            "package_coverage": [{
+                "artifact": "dist/archive.zip",
+                "source_roots": [],
+                "archive_root": "bundle"
+            }]
+        }
+    }))
+    .expect("shape remains parseable for actionable validation");
+    assert!(malformed.release.validate_package_coverage().is_err());
+
+    let backslash_traversal: std::result::Result<Component, _> =
+        serde_json::from_value(serde_json::json!({
+            "id": "fixture",
+            "release": {
+                "package_coverage": [{
+                    "artifact": "dist/archive.zip",
+                    "source_roots": ["source\\..\\outside"],
+                    "archive_root": "bundle"
+                }]
+            }
+        }));
+    assert!(backslash_traversal.is_err());
+
+    let windows_absolute: std::result::Result<Component, _> =
+        serde_json::from_value(serde_json::json!({
+            "id": "fixture",
+            "release": {
+                "package_coverage": [{
+                    "artifact": "C:\\build\\archive.zip",
+                    "source_roots": ["source"],
+                    "archive_root": "bundle"
+                }]
+            }
+        }));
+    assert!(windows_absolute.is_err());
+
+    let unc_absolute: std::result::Result<Component, _> =
+        serde_json::from_value(serde_json::json!({
+            "id": "fixture",
+            "release": {
+                "package_coverage": [{
+                    "artifact": "\\\\server\\share\\archive.zip",
+                    "source_roots": ["source"],
+                    "archive_root": "bundle"
+                }]
+            }
+        }));
+    assert!(unc_absolute.is_err());
+
+    let dot_overlap: Component = serde_json::from_value(serde_json::json!({
+        "id": "fixture",
+        "release": {
+            "package_coverage": [{
+                "artifact": "dist/archive.zip",
+                "source_roots": [".", "source"],
+                "archive_root": "bundle"
+            }]
+        }
+    }))
+    .expect("canonical paths should parse");
+    assert!(dot_overlap.release.validate_package_coverage().is_err());
+
+    let direct_valid = ComponentReleaseConfig {
+        package_coverage: vec![PackageCoverageConfig {
+            artifact: "dist/archive.zip".to_string(),
+            artifact_match: PackageCoverageArtifactMatch::Exact,
+            source_roots: vec!["source/runtime".to_string()],
+            archive_root: "bundle".to_string(),
+        }],
+        ..Default::default()
+    };
+    direct_valid
+        .validate_package_coverage()
+        .expect("canonical direct configuration should validate");
+
+    for (artifact, source_root, archive_root) in [
+        ("../archive.zip", "source", "bundle"),
+        ("/archive.zip", "source", "bundle"),
+        ("C:\\archive.zip", "source", "bundle"),
+        ("\\\\server\\share\\archive.zip", "source", "bundle"),
+        ("dist/archive.zip", "source\\..\\outside", "bundle"),
+        ("dist/archive.zip", "source", "\\bundle"),
+    ] {
+        let direct = ComponentReleaseConfig {
+            package_coverage: vec![PackageCoverageConfig {
+                artifact: artifact.to_string(),
+                artifact_match: PackageCoverageArtifactMatch::Exact,
+                source_roots: vec![source_root.to_string()],
+                archive_root: archive_root.to_string(),
+            }],
+            ..Default::default()
+        };
+        assert!(direct.validate_package_coverage().is_err());
+    }
+
+    let noncanonical_direct = ComponentReleaseConfig {
+        package_coverage: vec![PackageCoverageConfig {
+            artifact: " ./dist//archive.zip/ ".to_string(),
+            artifact_match: PackageCoverageArtifactMatch::Exact,
+            source_roots: vec![" ./source//runtime/ ".to_string()],
+            archive_root: " ./bundle// ".to_string(),
+        }],
+        ..Default::default()
+    };
+    let error = noncanonical_direct
+        .validate_package_coverage()
+        .expect_err("direct values must already be canonical");
+    assert_eq!(error.code.as_str(), "validation.invalid_argument");
+    assert!(error.message.contains("canonical slash-separated form"));
+}
+
+#[test]
 fn component_env_serialization_roundtrip() {
     let component: Component = serde_json::from_value(serde_json::json!({
         "id": "fixture",
