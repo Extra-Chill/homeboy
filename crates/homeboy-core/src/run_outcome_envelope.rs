@@ -3,7 +3,6 @@ use serde_json::Value;
 
 use crate::api_jobs::JobArtifactMetadata;
 use crate::artifact_ref::{artifact_uri, ArtifactRef, EvidenceRef, ARTIFACT_REF_SCHEMA};
-use crate::runner::RunnerHandoff;
 use crate::runner_execution_envelope::{RunnerExecutionArtifactRef, RunnerExecutionRecord};
 use homeboy_runner_contract::RunnerArtifactRef;
 
@@ -123,15 +122,21 @@ impl RunOutcomeEnvelope {
         }
     }
 
-    pub fn add_handoff(&mut self, handoff: &RunnerHandoff) {
+    /// Record a runner handoff. Takes the already-extracted primitive fields
+    /// (rather than the runner-owned `RunnerHandoff` type) so this core envelope
+    /// does not depend on runner.
+    pub fn add_handoff(
+        &mut self,
+        runner_id: String,
+        transport: String,
+        lifecycle_owner: String,
+        job_id: Option<String>,
+    ) {
         self.handoffs.push(RunOutcomeHandoffRef {
-            runner_id: handoff.runner_id.clone(),
-            transport: handoff.transport.clone(),
-            lifecycle_owner: serde_json::to_value(&handoff.lifecycle_owner)
-                .ok()
-                .and_then(|value| value.as_str().map(ToString::to_string))
-                .unwrap_or_else(|| "unknown".to_string()),
-            job_id: handoff.job.as_ref().map(|job| job.job_id.clone()),
+            runner_id,
+            transport,
+            lifecycle_owner,
+            job_id,
         });
     }
 

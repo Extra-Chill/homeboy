@@ -11,13 +11,13 @@ use crate::lab_contract::{
     RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
 };
 use crate::resource_lifecycle_index::ResourceCleanupPolicy;
-use crate::runner::RunnerWorkspaceLease;
 use crate::runner_execution_envelope::RunnerExecutionProjection;
 use crate::runners::{
     self, RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 use crate::source_snapshot::SourceSnapshot;
+use homeboy_runner_contract::RunnerWorkspaceLease;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExtensionDevRunPlan {
@@ -661,10 +661,10 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::runner::{
+    use crate::runner_execution_envelope::RunnerExecutionRecord;
+    use homeboy_runner_contract::{
         ByteFileCounts, RunnerLifecycleOwner, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease,
     };
-    use crate::runner_execution_envelope::RunnerExecutionRecord;
     use tempfile::TempDir;
 
     #[test]
