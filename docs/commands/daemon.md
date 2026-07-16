@@ -12,7 +12,7 @@ homeboy daemon <COMMAND>
 
 - `start` — start the local daemon in the background
 - `serve` — run the daemon in the foreground
-- `stop` — stop the background daemon recorded in the state file
+- `stop` — gracefully stop the background daemon recorded in the state file
 - `status` — show daemon state, active-job recovery evidence, and selected local address
 - `broker-config` — render a deployable reverse-runner broker service recipe
 
@@ -26,6 +26,17 @@ Always treat the API as a local UI contract. It is not a hosted or remote
 multi-user service.
 
 ## Dead-Lease Recovery
+
+When a recorded daemon is stale or unreachable but its PID is still live, an
+operator can use a lease-bound local force stop. It never uses the daemon HTTP
+endpoint, sends SIGTERM only after the persisted lease matches exactly, waits
+for process death, and refuses while durable jobs are active. Forced process
+termination currently requires Linux `/proc` evidence that the target owns the
+persisted daemon startup token:
+
+```sh
+homeboy daemon stop --force --lease-id <exact-live-lease>
+```
 
 When `status` reports a dead lease, `active_job_recovery_evidence` lists each
 active job's exact ID, lease, timestamps, terminal evidence, child identity,

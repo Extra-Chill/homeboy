@@ -736,6 +736,114 @@ fn stop_refuses_stale_lease_that_points_at_reused_pid() {
     );
 }
 
+#[cfg(unix)]
+fn spawn_force_stop_test_process(startup_token: Option<&str>) -> std::process::Child {
+    let mut command = Command::new("sleep");
+    command.arg("30").env_clear();
+    if let Some(startup_token) = startup_token {
+        command.env(DAEMON_STARTUP_TOKEN_ENV, startup_token);
+    }
+    command.spawn().expect("start force-stop test process")
+}
+
+#[cfg(unix)]
+#[test]
+fn force_stop_lease_mismatch_cannot_signal_a_process() {
+    let _home = HomeGuard::new();
+    let mut child = spawn_force_stop_test_process(None);
+    let mut state = daemon_state_for_test(child.id(), "127.0.0.1:1");
+    state.binary_sha256 = Some("stale-binary-hash".to_string());
+    write_daemon_state_for_test(&state);
+
+    let error = force_stop_for_lease("other-lease").expect_err("mismatched lease is rejected");
+
+    assert!(error.message.contains("refusing to signal"));
+    assert!(pid_is_running(child.id()));
+    child.kill().expect("cleanup test process");
+    child.wait().expect("reap test process");
+}
+
+#[cfg(unix)]
+#[test]
+fn force_stop_active_jobs_block_signaling() {
+    let _home = HomeGuard::new();
+    let mut child = spawn_force_stop_test_process(None);
+    let mut state = daemon_state_for_test(child.id(), "127.0.0.1:1");
+    state.binary_sha256 = Some("stale-binary-hash".to_string());
+    write_daemon_state_for_test(&state);
+    let store = JobStore::open_without_reconciliation(
+        &crate::paths::daemon_jobs_file().expect("jobs path"),
+    )
+    .expect("store")
+    .with_daemon_lease(state.lease_id.clone());
+    let job = store.create("runner.exec");
+    store.start(job.id).expect("start job");
+
+    let error = force_stop_for_lease(&state.lease_id).expect_err("active job blocks force stop");
+
+    assert_eq!(error.details["active_job_ids"], serde_json::json!([job.id]));
+    assert!(pid_is_running(child.id()));
+    child.kill().expect("cleanup test process");
+    child.wait().expect("reap test process");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn force_stop_matching_zero_job_stale_daemon_is_terminated_and_verified() {
+    let _home = HomeGuard::new();
+    let startup_token = "force-stop-owned-process";
+    let child = spawn_force_stop_test_process(Some(startup_token));
+    let pid = child.id();
+    let mut state = daemon_state_for_test(pid, "127.0.0.1:1");
+    state.binary_sha256 = Some("stale-binary-hash".to_string());
+    state.startup_token = startup_token.to_string();
+    write_daemon_state_for_test(&state);
+
+    let result = force_stop_for_lease(&state.lease_id).expect("force stop stale daemon");
+
+    assert!(result.stopped);
+    assert_eq!(result.pid, Some(pid));
+    let evidence = result.termination_evidence.expect("termination evidence");
+    assert_eq!(evidence.lease_id.as_deref(), Some(state.lease_id.as_str()));
+    assert_eq!(evidence.pid, Some(pid));
+    assert_eq!(evidence.signal, Some(libc::SIGTERM));
+    assert!(evidence.os_evidence.contains("process death verified"));
+    assert!(!pid_is_running(pid));
+    assert!(!state_path().expect("state path").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn force_stop_matching_lease_cannot_signal_a_reused_pid() {
+    let _home = HomeGuard::new();
+    let mut child = spawn_force_stop_test_process(None);
+    let mut state = daemon_state_for_test(child.id(), "127.0.0.1:1");
+    state.binary_sha256 = Some("stale-binary-hash".to_string());
+    write_daemon_state_for_test(&state);
+
+    force_stop_for_lease(&state.lease_id)
+        .expect_err("unowned matching lease cannot signal reused pid");
+
+    assert!(pid_is_running(child.id()));
+    child.kill().expect("cleanup test process");
+    child.wait().expect("reap test process");
+}
+
+#[test]
+fn force_stop_default_non_force_behavior_remains_unchanged() {
+    let _home = HomeGuard::new();
+    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    state.binary_sha256 = Some("stale-binary-hash".to_string());
+    write_daemon_state_for_test(&state);
+
+    let result = stop().expect("routine stop stale lease");
+
+    assert!(!result.stopped);
+    assert_eq!(result.pid, Some(std::process::id()));
+    assert!(result.termination_evidence.is_none());
+    assert!(state_path().expect("state path").exists());
+}
+
 #[test]
 fn stop_reports_corrupt_lease_without_signalling_pid() {
     let _home = HomeGuard::new();
