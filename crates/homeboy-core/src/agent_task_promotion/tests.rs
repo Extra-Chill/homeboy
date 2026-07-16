@@ -7,10 +7,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::apply::{
-    run_provider_command, AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
+    preflight_configured_workspace_provider_with_config, run_provider_command,
+    AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
     AgentTaskPromotionWorkspaceProvider, ExternalPromotionWorkspaceProvider,
     AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
+
 use super::promote::{
     normalize_promotion_patch, promote, promote_with_provider,
     promote_with_provider_and_checkpoint, resume_promoted_patch, select_patch_artifact,
@@ -37,6 +39,20 @@ use crate::defaults::{
 };
 use crate::lab_contract::AgentTaskDispatchIdentity;
 use crate::{Error, Result};
+
+#[test]
+fn configured_promotion_preflight_rejects_missing_provider_before_dispatch() {
+    let error = preflight_configured_workspace_provider_with_config(
+        "fixture@missing",
+        &HomeboyConfig::default(),
+    )
+    .expect_err("missing managed provider must fail preflight");
+
+    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
+    assert!(error
+        .message
+        .contains("no worktree providers are configured"));
+}
 
 const VALID_PATCH: &str = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
 

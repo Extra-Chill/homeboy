@@ -127,6 +127,12 @@ pub fn run_cook<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    // A configured provider is controller authority. Resolve it before an
+    // external runner can spend a provider attempt; explicit transports are
+    // caller-owned overrides and retain their existing behavior.
+    if options.provider_command.is_none() && options.provider_invocation.is_none() {
+        crate::agent_task_promotion::preflight_configured_workspace_provider(&options.to_worktree)?;
+    }
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
     super::persist_initial_recipe(&options)?;
@@ -335,7 +341,7 @@ where
                         0,
                     ));
                 }
-                let finalization = finalize_cook_pr(&options, &run_id, &promotion)?;
+                let finalization = finalize_or_load_cook_pr(&options, &run_id, &promotion)?;
                 let final_status = finalization["status"]
                     .as_str()
                     .unwrap_or("unknown")
@@ -1126,17 +1132,35 @@ fn attempt_needs_execution(run_id: &str) -> bool {
         .unwrap_or(true)
 }
 
-fn finalize_cook_pr(
+/// Finalization publishes controller-owned state. Persist its completed report
+/// on the attempt so a restarted continuation cannot open a second PR.
+fn finalize_or_load_cook_pr(
     options: &AgentTaskCookServiceOptions,
     successful_run_id: &str,
     promotion: &AgentTaskPromotionReport,
 ) -> Result<Value> {
-    finalize_cook_pr_with_backend(
+    finalize_or_load_cook_pr_with_backend(
         options,
         successful_run_id,
         promotion,
         &mut RealAgentTaskPrFinalizationBackend,
     )
+}
+
+fn finalize_or_load_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
+    options: &AgentTaskCookServiceOptions,
+    successful_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    backend: &mut B,
+) -> Result<Value> {
+    let record = agent_task_lifecycle::status(successful_run_id)?;
+    if let Some(finalization) = record.metadata.get("cook_finalization") {
+        return Ok(finalization.clone());
+    }
+    let finalization =
+        finalize_cook_pr_with_backend(options, successful_run_id, promotion, backend)?;
+    agent_task_lifecycle::record_cook_finalization(successful_run_id, finalization.clone())?;
+    Ok(finalization)
 }
 
 fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
@@ -1412,7 +1436,9 @@ mod tests {
                     initial_plan: plan,
                     to_worktree: "fixture@detached".to_string(),
                     source_worktree_path: None,
-                    provider_command: None,
+                    // This test covers handoff only; an explicit transport
+                    // intentionally bypasses configured-provider preflight.
+                    provider_command: Some("fixture-promotion-provider".to_string()),
                     provider_invocation: None,
                     gates: VerifyGateOptions::default(),
                     max_attempts: 1,
