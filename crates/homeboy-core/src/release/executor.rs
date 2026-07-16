@@ -762,6 +762,7 @@ mod tests {
             let result = run_package(
                 &[package],
                 &mut state,
+                &Component::default(),
                 "fixture",
                 &component.path().to_string_lossy(),
                 None,
@@ -806,15 +807,25 @@ mod tests {
     #[test]
     fn run_package_collects_declared_component_artifact_alongside_provider_artifacts() {
         crate::test_support::with_isolated_home(|_| {
-            let component = tempfile::tempdir().expect("component tempdir");
+            let component_dir = tempfile::tempdir().expect("component tempdir");
             let package = release_package_extension(
                 "nodejs",
-                "mkdir -p packages/plugin/dist target; \
-                 printf plugin > packages/plugin/dist/plugin.zip; \
-                 printf npm > target/plugin-1.2.3.tgz; \
+                "mkdir -p target; printf npm > target/plugin-1.2.3.tgz; \
                  printf '[{\"path\":\"target/plugin-1.2.3.tgz\",\"type\":\"npm\"}]'",
             );
             crate::extension::save_manifest(&package).expect("save package extension");
+            let component = Component {
+                id: "plugin".to_string(),
+                local_path: component_dir.path().to_string_lossy().to_string(),
+                build_artifact: Some("packages/plugin/dist/plugin.zip".to_string()),
+                scripts: Some(crate::component::ComponentScriptsConfig {
+                    build: vec![
+                        "test ! -e .homeboy-build-count; printf built > .homeboy-build-count; mkdir -p packages/plugin/dist; printf plugin > packages/plugin/dist/plugin.zip".to_string(),
+                    ],
+                    ..Default::default()
+                }),
+                ..Component::default()
+            };
 
             let mut state = ReleaseState {
                 version: Some("1.2.3".to_string()),
@@ -823,8 +834,9 @@ mod tests {
             run_package(
                 &[package],
                 &mut state,
+                &component,
                 "plugin",
-                &component.path().to_string_lossy(),
+                &component.local_path,
                 None,
                 Some("packages/plugin/dist/plugin.zip"),
                 false,
@@ -838,6 +850,11 @@ mod tests {
                 .durable_path
                 .as_deref()
                 .is_some_and(|path| std::path::Path::new(path).is_file()));
+            assert_eq!(
+                std::fs::read_to_string(component_dir.path().join(".homeboy-build-count"))
+                    .expect("component build marker"),
+                "built"
+            );
         });
     }
 
@@ -855,6 +872,7 @@ mod tests {
             let error = run_package(
                 &[package],
                 &mut ReleaseState::default(),
+                &Component::default(),
                 "plugin",
                 &component.path().to_string_lossy(),
                 None,
@@ -865,7 +883,7 @@ mod tests {
 
             assert!(error
                 .message
-                .contains("was not produced by release.package"));
+                .contains("was not produced by the component build or release.package"));
             assert_eq!(error.details["field"], "build_artifact");
         });
     }
@@ -953,6 +971,7 @@ mod tests {
             let result = run_package(
                 &[package_a, non_package_extension("docs"), package_b],
                 &mut state,
+                &Component::default(),
                 "fixture",
                 &component.path().to_string_lossy(),
                 None,
@@ -988,6 +1007,7 @@ mod tests {
             let result = run_package(
                 &[package],
                 &mut state,
+                &Component::default(),
                 "intelligence-horse-theme",
                 &component.path().to_string_lossy(),
                 None,
@@ -1089,6 +1109,7 @@ mod tests {
             let err = run_package(
                 &[package],
                 &mut state,
+                &Component::default(),
                 "fixture",
                 &component.path().to_string_lossy(),
                 None,
@@ -1121,6 +1142,7 @@ mod tests {
             let err = run_package(
                 &[package_a, package_b],
                 &mut state,
+                &Component::default(),
                 "fixture",
                 &component.path().to_string_lossy(),
                 None,
@@ -1159,6 +1181,7 @@ mod tests {
             let err = run_package(
                 &[package],
                 &mut state,
+                &Component::default(),
                 "fixture",
                 &component.path().to_string_lossy(),
                 None,
@@ -1211,6 +1234,7 @@ mod tests {
             let result = run_package(
                 &[package],
                 &mut state,
+                &Component::default(),
                 "fixture",
                 &component.path().to_string_lossy(),
                 None,
