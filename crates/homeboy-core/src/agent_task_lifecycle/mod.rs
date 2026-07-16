@@ -29,6 +29,7 @@ mod lifecycle_store;
 
 use lifecycle_store as store;
 
+pub(crate) mod agent_task_lifecycle_event;
 mod artifact_materialization;
 mod cancellation;
 mod conversion;
