@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn compiles_repo_loop_entity_fanout_into_concrete_agent_tasks() {
         let spec: Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/agent_task_loop/wpsg_controller_fanout.json"
+            "../../../tests/fixtures/agent_task_loop/wpsg_controller_fanout.json"
         ))
         .expect("fixture parses");
 

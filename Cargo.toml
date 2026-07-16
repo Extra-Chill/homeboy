@@ -86,9 +86,17 @@ sha2 = "0.10.9"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
+[dev-dependencies]
+# Enable homeboy-core's shared hermetic test fixtures for this crate's test build
+# (integration tests reach them via `homeboy::test_support`).
+homeboy-core = { version = "0.1.0", path = "crates/homeboy-core", features = ["test-support"] }
+
 [features]
 default = []
 slow-tests = []
+# Enables the shared hermetic test fixtures (homeboy-core's test_support), used by
+# this crate's integration tests.
+test-support = ["homeboy-core/test-support"]
 
 [profile.dist]
 inherits = "release"

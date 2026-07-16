@@ -1,6 +1,6 @@
 use super::*;
-use crate::core::observation::ArtifactRecord;
-use crate::core::observation::NewRunRecord;
+use crate::observation::ArtifactRecord;
+use crate::observation::NewRunRecord;
 use crate::test_support::HomeGuard;
 
 #[test]
@@ -49,7 +49,7 @@ fn route_serves_run_scoped_artifact_store_tokens() {
     let path = artifact_root.join(locator);
     fs::create_dir_all(path.parent().expect("artifact parent")).expect("artifact parent");
     fs::write(&path, br#"{"ok":true}"#).expect("artifact-store file");
-    let token = crate::core::runner::runner_artifact_store_token("lab", &run.id, locator)
+    let token = crate::runner::runner_artifact_store_token("lab", &run.id, locator)
         .rsplit('/')
         .next()
         .expect("artifact token")

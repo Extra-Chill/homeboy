@@ -1,4 +1,4 @@
-use homeboy::core::refactor::auto::{
+use crate::refactor::auto::{
     parse_fix_results_file, standard_outcome, summarize_optional_fix_results, AutofixMode,
 };
 

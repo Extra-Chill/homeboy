@@ -1,5 +1,5 @@
 use super::*;
-use crate::core::engine::run_dir::RunDir;
+use crate::engine::run_dir::RunDir;
 use crate::test_support::{home_env_guard, with_isolated_home};
 
 #[test]
@@ -226,7 +226,7 @@ fn write_test_child_record(invocation_id: &str, owner_pid: u32, root_pid: u32, p
         invocation_id: invocation_id.to_string(),
         owner_pid,
         owner_started_at: None,
-        child: crate::core::engine::resource::ChildProcessIdentity {
+        child: crate::engine::resource::ChildProcessIdentity {
             root_pid,
             command_label: "sleep".to_string(),
         },
@@ -449,8 +449,8 @@ fn preserve_artifacts_emits_manifest_for_invocation_files() {
             .preserve_artifacts(&run_dir)
             .expect("preserve artifacts")
             .expect("artifact path");
-        let manifest = homeboy::core::artifact_manifest::read_manifest_from_root(&preserved)
-            .expect("read manifest");
+        let manifest =
+            crate::artifact_manifest::read_manifest_from_root(&preserved).expect("read manifest");
 
         assert_eq!(manifest.artifacts.len(), 1);
         assert_eq!(manifest.artifacts[0].path, "nested/result.json");
@@ -475,8 +475,8 @@ fn preserve_artifacts_normalizes_existing_manifest() {
             "HOMEBOY_INVOCATION_ARTIFACT_DIR",
         ));
         std::fs::write(artifact.join("declared.log"), "hello").expect("write artifact");
-        let manifest = homeboy::core::artifact_manifest::ArtifactManifest::new(vec![
-            homeboy::core::artifact_manifest::ArtifactManifestEntry {
+        let manifest = crate::artifact_manifest::ArtifactManifest::new(vec![
+            crate::artifact_manifest::ArtifactManifestEntry {
                 id: None,
                 path: "declared.log".to_string(),
                 kind: "runner-log".to_string(),
@@ -490,19 +490,19 @@ fn preserve_artifacts_normalizes_existing_manifest() {
                 public_url_state: None,
                 size_bytes: None,
                 sha256: None,
-                redaction: Some(homeboy::core::artifact_manifest::ArtifactRedactionState::Raw),
+                redaction: Some(crate::artifact_manifest::ArtifactRedactionState::Raw),
                 metadata: serde_json::json!({ "source": "test" }),
             },
         ]);
-        homeboy::core::artifact_manifest::write_manifest_to_root(&artifact, &manifest)
+        crate::artifact_manifest::write_manifest_to_root(&artifact, &manifest)
             .expect("write source manifest");
 
         let preserved = guard
             .preserve_artifacts(&run_dir)
             .expect("preserve artifacts")
             .expect("artifact path");
-        let manifest = homeboy::core::artifact_manifest::read_manifest_from_root(&preserved)
-            .expect("read manifest");
+        let manifest =
+            crate::artifact_manifest::read_manifest_from_root(&preserved).expect("read manifest");
 
         assert_eq!(manifest.artifacts.len(), 1);
         assert_eq!(manifest.artifacts[0].path, "declared.log");

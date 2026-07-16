@@ -1361,7 +1361,7 @@ mod tests {
     #[test]
     fn sample_runtime_materialization_fixture_is_plain_data() {
         let manifest: AgentRuntimeManifest = serde_json::from_str(include_str!(
-            "../../tests/fixtures/sample_runtime_materialization_manifest.json"
+            "../../../tests/fixtures/sample_runtime_materialization_manifest.json"
         ))
         .expect("sample runtime fixture parses");
 

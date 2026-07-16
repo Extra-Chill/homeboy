@@ -1,4 +1,4 @@
-use homeboy::core::component::{
+use crate::component::{
     AuditConfig, ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule,
     MutatingResourceAccessConfig, PublicRegistryExposureConfig, RedirectValidationConfig,
 };

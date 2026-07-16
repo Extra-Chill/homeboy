@@ -5,17 +5,17 @@ use super::{
     aggregate_comparison, aggregate_comparison_with_axes, BenchComparisonDiff, BenchPhaseGroups,
     RigBenchEntry,
 };
-use crate::core::extension::bench::artifact::{
+use crate::extension::bench::artifact::{
     BenchArtifact, BenchArtifactViewer, BenchPreviewLifecycleMetadata,
 };
-use crate::core::extension::bench::diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
-use crate::core::extension::bench::distribution::BenchRunDistribution;
-use crate::core::extension::bench::parsing::{
+use crate::extension::bench::diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
+use crate::extension::bench::distribution::BenchRunDistribution;
+use crate::extension::bench::parsing::{
     BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy, BenchMetrics, BenchResults,
     BenchRunSnapshot, BenchScenario,
 };
-use crate::core::extension::bench::run::{BenchRunFailure, BenchRunWorkflowResult};
-use crate::core::extension::bench::side_by_side::BenchSideBySideMetric;
+use crate::extension::bench::run::{BenchRunFailure, BenchRunWorkflowResult};
+use crate::extension::bench::side_by_side::BenchSideBySideMetric;
 
 mod fixtures {
     use super::*;
@@ -567,7 +567,7 @@ fn axis_diffs_cover_two_by_two_rig_matrix() {
     assert_eq!(agent_task_aggregate.cells.len(), 4);
     assert_eq!(
         agent_task_aggregate.cells[0].status,
-        Some(crate::core::agent_task::AgentTaskOutcomeStatus::Succeeded)
+        Some(crate::agent_task::AgentTaskOutcomeStatus::Succeeded)
     );
     let sdk_substrate = out
         .axis_diffs

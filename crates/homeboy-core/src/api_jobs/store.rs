@@ -168,7 +168,7 @@ impl JobStore {
 
     /// Open durable jobs without treating active records as an implicit daemon
     /// restart. Daemon lifecycle recovery must select ownership explicitly.
-    pub(crate) fn open_without_reconciliation(path: impl Into<PathBuf>) -> Result<Self> {
+    pub fn open_without_reconciliation(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let raw = fs::read(&path).unwrap_or_else(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -186,7 +186,7 @@ impl JobStore {
         Self::open_without_reconciliation_from_bytes(path, &raw)
     }
 
-    pub(crate) fn open_without_reconciliation_from_bytes(
+    pub fn open_without_reconciliation_from_bytes(
         path: impl Into<PathBuf>,
         raw: &[u8],
     ) -> Result<Self> {
@@ -225,12 +225,12 @@ impl JobStore {
     /// [`JobStore::run_background_with_source_snapshot`] →
     /// [`JobStore::create_with_source_snapshot`]; this shorthand is only used by
     /// the store's unit tests.
-    #[cfg(test)]
-    pub(crate) fn create(&self, operation: impl Into<String>) -> Job {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn create(&self, operation: impl Into<String>) -> Job {
         self.create_with_source_snapshot(operation, None)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn create_with_source_snapshot(
         &self,
         operation: impl Into<String>,
@@ -1068,7 +1068,7 @@ impl JobStore {
         Ok(stored.events.clone())
     }
 
-    pub(crate) fn start(&self, job_id: Uuid) -> Result<Job> {
+    pub fn start(&self, job_id: Uuid) -> Result<Job> {
         self.transition(job_id, JobStatus::Running, "job started")
     }
 

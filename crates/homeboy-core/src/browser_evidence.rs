@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn validates_synthetic_browser_origin_fixture() {
         let payload: Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/browser_origin_evidence/synthetic-origin.json"
+            "../../../tests/fixtures/browser_origin_evidence/synthetic-origin.json"
         ))
         .expect("synthetic browser origin fixture should be valid JSON");
 

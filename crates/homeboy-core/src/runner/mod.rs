@@ -113,9 +113,9 @@ pub use execution::{
 };
 pub(crate) use execution::{
     execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process,
-    runner_exec_secret_env_plan, RunnerProcessRequest, RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV,
-    RUNNER_PLACEMENT_RESOLVED_ENV,
+    runner_exec_secret_env_plan, RunnerProcessRequest,
 };
+pub use execution::{RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV};
 pub(crate) use extension_materialization::extension_source_content_hash;
 pub(crate) use extension_materialization::{
     materialize_runner_extension, materialize_runner_extension_with_env,

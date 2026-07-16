@@ -1024,7 +1024,7 @@ fn preview_artifact_serializes_structured_reviewer_contract() {
     let artifact = preview_artifact_for(&tunnel, &state, &context).expect("artifact");
     let serialized = serde_json::to_value(&artifact).expect("serialize artifact");
     let expected: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/output_contracts/tunnel/preview-artifact.json"
+        "../../../tests/fixtures/output_contracts/tunnel/preview-artifact.json"
     ))
     .expect("fixture");
 

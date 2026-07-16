@@ -110,7 +110,7 @@ pub fn captured_context() -> Option<ResourcePolicyContext> {
 /// Clear the captured context. Test-only: production code never resets the
 /// preflight decision so that the persisted observation matches the warning
 /// the user actually saw on stderr.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn reset_captured_context_for_test() {
     if let Ok(mut slot) = captured_storage().write() {
         *slot = None;

@@ -13,6 +13,12 @@ build = "build.rs"
 name = "homeboy_core"
 path = "src/lib.rs"
 
+[features]
+# Exposes the shared hermetic test-support fixtures (test_support module and the
+# cache-reset helpers it needs) to other crates' test builds. Enabled as a
+# dev-dependency feature by the CLI and feature crates; never in production.
+test-support = []
+
 [dependencies]
 homeboy-cli-contract = { version = "0.1.0", path = "../homeboy-cli-contract" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }

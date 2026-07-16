@@ -39,7 +39,15 @@ struct EntityIdList {
 static ENTITY_SUGGESTION_SNAPSHOT: OnceLock<RwLock<Option<Vec<EntityIdList>>>> = OnceLock::new();
 
 fn entity_suggestion_cache() -> &'static RwLock<Option<Vec<EntityIdList>>> {
-    ENTITY_SUGGESTION_SNAPSHOT.get_or_init(|| RwLock::new(None))
+    ENTITY_SUGGESTION_SNAPSHOT.get_or_init(|| {
+        // Ensure hermetic test setup (in homeboy-core's shared test_support) also
+        // clears this CLI-layer cache; core has no knowledge of it otherwise.
+        #[cfg(test)]
+        homeboy_core::test_support::register_test_cache_reset_hook(
+            reset_entity_suggestion_cache_for_test,
+        );
+        RwLock::new(None)
+    })
 }
 
 fn load_entity_suggestion_snapshot() -> Vec<EntityIdList> {

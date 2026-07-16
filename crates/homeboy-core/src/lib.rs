@@ -33,7 +33,7 @@ pub mod runners;
 #[macro_use]
 pub mod config;
 
-// Compatibility exports for existing `crate::core::<module>` consumers. Prefer the
+// Compatibility exports for existing `crate::<module>` consumers. Prefer the
 // facade modules above for new code so implementation files can move without
 // becoming accidental public API.
 pub mod activity;
@@ -109,7 +109,7 @@ pub mod deterministic_loop;
 pub mod engine;
 pub use homeboy_lab_contract::env_materialization_plan;
 // error moved to the internal `homeboy-error` crate. Re-exported here so existing
-// `crate::core::error::*` call sites keep working unchanged.
+// `crate::error::*` call sites keep working unchanged.
 pub use homeboy_error as error;
 pub mod evidence_manifest;
 pub mod execution;
@@ -117,7 +117,7 @@ pub mod execution_contract;
 pub(crate) mod expand;
 pub mod extension;
 // finding moved to the internal `homeboy-finding` crate. Re-exported so existing
-// `crate::core::finding::*` call sites keep working unchanged.
+// `crate::finding::*` call sites keep working unchanged.
 pub use homeboy_finding as finding;
 pub mod fleet;
 pub mod fuzz;
@@ -141,7 +141,7 @@ pub use homeboy_lab_contract::notification_route;
 pub mod notify;
 pub mod observation;
 // output moved to the internal `homeboy-output` crate. Re-exported so existing
-// `crate::core::output::*` call sites keep working unchanged.
+// `crate::output::*` call sites keep working unchanged.
 pub use homeboy_output as output;
 pub(crate) mod ownership;
 pub use homeboy_lab_contract::path_materialization;
@@ -154,17 +154,17 @@ pub mod preview_ingress;
 #[cfg(test)]
 mod preview_ingress_tests;
 // process moved to the internal `homeboy-process` crate. Re-exported so existing
-// `crate::core::process::*` call sites keep working unchanged.
+// `crate::process::*` call sites keep working unchanged.
 pub use homeboy_process as process;
 // product_identity moved to the internal `homeboy-product-identity` crate.
-// Re-exported so `crate::core::product_identity::*` call sites keep working.
+// Re-exported so `crate::product_identity::*` call sites keep working.
 pub use homeboy_product_identity as product_identity;
 pub mod project;
 pub mod proof;
 pub mod publication_artifacts;
 pub mod quality;
 // redaction moved to the internal `homeboy-redaction` crate. Re-exported here so
-// existing `crate::core::redaction::*` call sites keep working unchanged.
+// existing `crate::redaction::*` call sites keep working unchanged.
 pub use homeboy_redaction as redaction;
 pub mod refactor;
 pub mod release;
@@ -209,6 +209,15 @@ pub mod trace_compare;
 pub mod trace_experiment;
 pub mod trace_secrets;
 pub(crate) mod transient_workspace_policy;
+
+/// Test-only fixtures and hermetic process contexts, shared across the workspace
+/// (core, cli, and feature crates all rely on the same isolation contract).
+/// Compiled for core's own tests and, via the `test-support` feature, for the
+/// test builds of crates that depend on core.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[allow(dead_code)]
+pub mod test_support;
 pub mod triage;
 pub mod tunnel;
 #[cfg(test)]
@@ -221,7 +230,7 @@ pub mod worktree_providers;
 
 // Internal path resolution helpers.
 // paths moved to the internal `homeboy-paths` crate. Re-exported so existing
-// `crate::core::paths::*` call sites keep working unchanged.
+// `crate::paths::*` call sites keep working unchanged.
 pub use homeboy_paths as paths;
 #[cfg(test)]
 mod paths_tests;
