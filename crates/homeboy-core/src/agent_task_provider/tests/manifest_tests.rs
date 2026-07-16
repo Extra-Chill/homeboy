@@ -289,6 +289,83 @@ process.stdin.on('end', () => {
 }
 
 #[test]
+fn executor_git_boundary_blocks_commit_and_push_but_allows_diff_and_status() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&workspace)
+            .status()
+            .expect("git setup")
+            .success());
+    }
+    std::fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
+    assert!(std::process::Command::new("git")
+        .args(["add", "tracked.txt"])
+        .current_dir(&workspace)
+        .status()
+        .expect("stage base")
+        .success());
+    assert!(std::process::Command::new("git")
+        .args(["commit", "-m", "base"])
+        .current_dir(&workspace)
+        .status()
+        .expect("commit base")
+        .success());
+    std::fs::write(workspace.join("tracked.txt"), "candidate\n").expect("candidate file");
+
+    let script = script(
+        r#"const { spawnSync } = require('child_process');
+const run = (args) => spawnSync('git', args, { encoding: 'utf8' });
+const status = run(['status', '--short']);
+const diff = run(['diff', '--', 'tracked.txt']);
+const commit = run(['commit', '-am', 'executor commit']);
+const push = run(['push', 'origin', 'HEAD']);
+process.stdout.write(JSON.stringify({
+  schema: 'homeboy/agent-task-outcome/v1',
+  task_id: 'git-boundary',
+  status: 'succeeded',
+  artifacts: [],
+  typed_artifacts: [],
+  evidence_refs: [],
+  diagnostics: [],
+  outputs: { status: status.stdout, diff: diff.stdout, commit: commit.status, push: push.status }
+}));"#,
+    );
+    let (mut request, provider) = request("git-boundary", format!("node {script}"));
+    request.workspace.root = Some(workspace.display().to_string());
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    assert!(outcome.outputs["status"]
+        .as_str()
+        .expect("status output")
+        .contains("tracked.txt"));
+    assert!(outcome.outputs["diff"]
+        .as_str()
+        .expect("diff output")
+        .contains("-base"));
+    assert_eq!(outcome.outputs["commit"], 126);
+    assert_eq!(outcome.outputs["push"], 126);
+    assert_eq!(
+        std::process::Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(&workspace)
+            .output()
+            .expect("count commits")
+            .stdout,
+        b"1\n"
+    );
+}
+
+#[test]
 fn provider_manifest_rejects_deprecated_string_command() {
     let error = serde_json::from_value::<AgentTaskExecutorProvider>(json!({
         "id": "legacy.provider",

@@ -10,6 +10,7 @@ use super::secrets::{provider_secret_env_plan_with_status, provider_secret_sourc
 use super::*;
 use crate::agent_task_executor_evidence::link_latest_executor_evidence;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -280,7 +281,7 @@ pub(super) fn run_materialized_provider_command_once(
             )
         }
     };
-    let env = match provider_command_env(request, provider) {
+    let mut env = match provider_command_env(request, provider) {
         Ok(env) => env,
         Err(ProviderCommandEnvError::Secret(error)) => {
             return failure_outcome(
@@ -309,6 +310,20 @@ pub(super) fn run_materialized_provider_command_once(
             )
         }
     };
+    let git_boundary = match ExecutorGitBoundary::new() {
+        Ok(boundary) => boundary,
+        Err(error) => {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::Provider,
+                "agent_task.executor_git_boundary_failed",
+                error,
+                json!({ "provider": provider.id }),
+            )
+        }
+    };
+    git_boundary.apply(&mut env);
 
     let mut command_builder = Command::new(&program);
     command_builder.args(&args).envs(
@@ -532,6 +547,64 @@ pub(super) fn run_materialized_provider_command_once(
             ),
         ),
     }
+}
+
+/// A process-local Git command boundary for an executor attempt. The shim keeps
+/// patch production and inspection available while reserving commits and remote
+/// publication for the controller's promotion and finalization phases.
+struct ExecutorGitBoundary {
+    _directory: tempfile::TempDir,
+}
+
+impl ExecutorGitBoundary {
+    fn new() -> std::result::Result<Self, String> {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let git = resolve_git_executable()
+            .ok_or_else(|| "could not resolve Git executable".to_string())?;
+        let shim = directory.path().join("git");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nfor argument in \"$@\"; do\n  case \"$argument\" in\n    commit|commit-tree|push)\n      printf '%s\\n' 'Homeboy executor boundary: git commit and git push are controller-owned operations.' >&2\n      exit 126\n      ;;\n  esac\ndone\nexec {} \"$@\"\n",
+                shell_quote_path(&git),
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&shim)
+                .map_err(|error| error.to_string())?
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&shim, permissions).map_err(|error| error.to_string())?;
+        }
+        Ok(Self {
+            _directory: directory,
+        })
+    }
+
+    fn apply(&self, env: &mut Vec<(String, String)>) {
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(self._directory.path().to_path_buf())
+                .chain(std::env::split_paths(&inherited)),
+        )
+        .expect("executor Git boundary path is valid");
+        env.push(("PATH".to_string(), path.to_string_lossy().to_string()));
+    }
+}
+
+fn resolve_git_executable() -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|directory| directory.join("git"))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
