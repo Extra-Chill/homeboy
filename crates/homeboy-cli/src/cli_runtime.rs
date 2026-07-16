@@ -1,5 +1,6 @@
 use clap::{ArgMatches, Command};
 use std::io::IsTerminal;
+use std::process::Command as ProcessCommand;
 use std::sync::OnceLock;
 
 use crate::cli_surface::{
@@ -266,6 +267,15 @@ impl CliRuntime {
             }
         }
 
+        match delegate_agent_task_lifecycle_to_pinned_runtime(&cli, &normalized) {
+            Ok(Some(exit_code)) => return std::process::ExitCode::from(exit_code_to_u8(exit_code)),
+            Ok(None) => {}
+            Err(err) => {
+                output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
+                return std::process::ExitCode::from(2);
+            }
+        }
+
         // Capture controller pressure once before placement routing. The route
         // and persisted evidence reuse this preflight decision rather than
         // probing the host a second time.
@@ -334,6 +344,44 @@ impl CliRuntime {
         self.extension_discovery
             .get_or_init(collect_extension_cli_info)
     }
+}
+
+/// Durable lifecycle mutations remain owned by the runtime that admitted the
+/// record. Re-exec before Lab routing so recovery cannot create a replacement
+/// handoff under the promoted controller.
+fn delegate_agent_task_lifecycle_to_pinned_runtime(
+    cli: &Cli,
+    normalized_args: &[String],
+) -> homeboy::core::Result<Option<i32>> {
+    let run_id = match &cli.command {
+        Commands::AgentTask(agent_task) => match &agent_task.command {
+            crate::commands::agent_task::AgentTaskCommand::Run(args) => Some(&args.run_id),
+            crate::commands::agent_task::AgentTaskCommand::Resume(args) => Some(&args.run_id),
+            crate::commands::agent_task::AgentTaskCommand::Retry(args) => Some(&args.run_id),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(run_id) = run_id else {
+        return Ok(None);
+    };
+    let Some(pinned) = crate::core::agent_tasks::lifecycle::pinned_runtime_for_mutation(run_id)?
+    else {
+        return Ok(None);
+    };
+    let status = ProcessCommand::new(&pinned)
+        .args(&normalized_args[1..])
+        .status()
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "execute pinned controller runtime {}",
+                    pinned.display()
+                )),
+            )
+        })?;
+    Ok(Some(status.code().unwrap_or(1)))
 }
 
 fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {
