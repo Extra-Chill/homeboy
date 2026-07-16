@@ -140,6 +140,14 @@ pub fn decode_uri_component_strict(value: &str) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
+/// Whether an artifact path is a remote-runner artifact reference, per the
+/// execution contract's artifact rules. Lives here (not in the runner module)
+/// so core code can classify artifact paths without a core -> runner edge — the
+/// classification is a contract concern, not runner behavior.
+pub fn is_remote_runner_artifact_path(path: &str) -> bool {
+    EXECUTION_CONTRACT.artifacts.is_runner_artifact_ref(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

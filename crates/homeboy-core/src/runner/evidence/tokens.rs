@@ -5,9 +5,10 @@ use base64::Engine;
 use crate::error::{Error, Result};
 use crate::execution_contract::{decode_uri_component, EXECUTION_CONTRACT};
 
-pub fn is_remote_runner_artifact_path(path: &str) -> bool {
-    EXECUTION_CONTRACT.artifacts.is_runner_artifact_ref(path)
-}
+// Moved to core's execution_contract module (it's a contract concern, not
+// runner behavior) so core code can classify artifact paths without a
+// core -> runner edge. Re-exported so runner-internal call sites resolve.
+pub use crate::execution_contract::is_remote_runner_artifact_path;
 
 pub fn runner_artifact_store_token(runner_id: &str, run_id: &str, locator: &str) -> String {
     let encoded_locator = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(locator);

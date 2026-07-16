@@ -37,7 +37,7 @@ impl ArtifactAddress {
             return Self::public_url(public_url);
         }
 
-        if crate::runners::is_remote_runner_artifact_path(&artifact.path) {
+        if crate::execution_contract::is_remote_runner_artifact_path(&artifact.path) {
             return Self::remote_runner_ref(artifact.path.clone());
         }
 
