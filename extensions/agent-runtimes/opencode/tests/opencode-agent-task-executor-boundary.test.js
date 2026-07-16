@@ -336,6 +336,31 @@ process.exit(${attempt.status});
 	assert.equal(agentResult.opencode_session.status, 'not_discovered');
 	assert.equal(artifactResult.metadata.missing_declared_artifacts, undefined);
 
+	const largePatchCliPath = path.join(root, 'mock-opencode-large-patch.cjs');
+	fs.writeFileSync(largePatchCliPath, `#!/usr/bin/env node
+const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
+fs.writeFileSync('LARGE.md', 'x'.repeat(2 * 1024 * 1024) + '\\n');
+spawnSync('git', ['add', 'LARGE.md']);
+process.exit(0);
+`);
+	const largePatchResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-large-patch-artifact',
+		workspace_path: workspace,
+		artifacts_path: path.join(root, 'large-patch-artifacts'),
+		expected_artifacts: ['patch'],
+		executor: {
+			...request.executor,
+			config: { ...request.executor.config, command_args: [largePatchCliPath] },
+		},
+	}, { env: fixtureEnv });
+	assert.equal(largePatchResult.status, 'succeeded');
+	const largePatch = fs.readFileSync(largePatchResult.artifacts.find((artifact) => artifact.name === 'patch').path, 'utf8');
+	const largePatchContent = 'x'.repeat(2 * 1024 * 1024);
+	assert.ok(Buffer.byteLength(largePatch) > 1024 * 1024);
+	assert.equal(largePatch.includes(`+${largePatchContent}`), true);
+
 	const committedWorkspace = path.join(root, 'committed-workspace');
 	fs.mkdirSync(committedWorkspace, { recursive: true });
 	spawnSync('git', ['init'], { cwd: committedWorkspace, encoding: 'utf8' });

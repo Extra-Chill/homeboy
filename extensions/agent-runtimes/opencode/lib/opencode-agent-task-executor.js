@@ -37,6 +37,10 @@ const OPENCODE_FATAL_LOG_PATTERNS = [
 	},
 ];
 const OPENCODE_PERMISSION_DENIED_PATTERN = /user rejected permission|permission policy rejected|policy denied|permission request denied/i;
+const OPENCODE_GIT_CAPTURE_OPTIONS = {
+	encoding: 'utf8',
+	maxBuffer: 16 * 1024 * 1024,
+};
 
 const OPENCODE_CAPABILITIES = [
 	'cli_runtime',
@@ -605,7 +609,7 @@ function gitRevision(cwd) {
 	if (!cwd) {
 		return { revision: '', error: 'OpenCode workspace path was not available for patch capture.' };
 	}
-	const result = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd, encoding: 'utf8' });
+	const result = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd, ...OPENCODE_GIT_CAPTURE_OPTIONS });
 	if (result.status !== 0 || result.error) {
 		return { revision: '', error: result.error?.message || String(result.stderr || 'git rev-parse failed').trim() };
 	}
@@ -619,17 +623,17 @@ function gitDiff(cwd, initialRevision = {}) {
 	if (!initialRevision.revision) {
 		return { content: '', error: initialRevision.error || 'OpenCode workspace initial revision was not available for patch capture.' };
 	}
-	const result = spawnSync('git', ['diff', '--no-ext-diff', '--binary', initialRevision.revision], { cwd, encoding: 'utf8' });
+	const result = spawnSync('git', ['diff', '--no-ext-diff', '--binary', initialRevision.revision], { cwd, ...OPENCODE_GIT_CAPTURE_OPTIONS });
 	if (result.status !== 0 || result.error) {
 		return { content: '', error: result.error?.message || String(result.stderr || 'git diff failed').trim() };
 	}
 	let content = String(result.stdout || '');
-	const untracked = spawnSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd, encoding: 'utf8' });
+	const untracked = spawnSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd, ...OPENCODE_GIT_CAPTURE_OPTIONS });
 	if (untracked.status !== 0 || untracked.error) {
 		return { content, error: untracked.error?.message || String(untracked.stderr || 'git ls-files failed').trim() };
 	}
 	for (const relativePath of String(untracked.stdout || '').split('\0').filter(Boolean)) {
-		const untrackedDiff = spawnSync('git', ['diff', '--no-ext-diff', '--binary', '--no-index', '--', '/dev/null', relativePath], { cwd, encoding: 'utf8' });
+		const untrackedDiff = spawnSync('git', ['diff', '--no-ext-diff', '--binary', '--no-index', '--', '/dev/null', relativePath], { cwd, ...OPENCODE_GIT_CAPTURE_OPTIONS });
 		if (![0, 1].includes(untrackedDiff.status) || untrackedDiff.error) {
 			return { content, error: untrackedDiff.error?.message || String(untrackedDiff.stderr || `failed to capture untracked file ${relativePath}`).trim() };
 		}
