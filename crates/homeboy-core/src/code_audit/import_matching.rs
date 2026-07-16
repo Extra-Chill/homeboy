@@ -488,6 +488,84 @@ pub(crate) fn contains_word(text: &str, word: &str) -> bool {
     false
 }
 
+/// Like [`contains_word`], but ignores matches that occur only inside line
+/// comments or double-quoted string literals.
+///
+/// A raw whole-word scan counts an identifier as "used" even when it appears
+/// solely as prose in a comment or as test/fixture string data. That produces
+/// false negatives in reference analysis — e.g. a dead `pub fn validate_only`
+/// looked "referenced" because another file contained the string literal
+/// `"validate_only"` as similarity-test data. Blanking comments and string
+/// contents first keeps only genuine code references.
+pub(crate) fn contains_word_in_code(content: &str, word: &str) -> bool {
+    contains_word(&blank_comments_and_strings(content), word)
+}
+
+/// Replace the interior of line comments (`//`, `#`) and double-quoted string
+/// literals with spaces, preserving byte offsets and newlines. Language-agnostic
+/// and deliberately conservative: it only needs to stop identifiers inside
+/// comments/strings from reading as code references.
+fn blank_comments_and_strings(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    for line in content.split_inclusive('\n') {
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut in_comment = false;
+        while i < bytes.len() {
+            let ch = bytes[i] as char;
+            if in_comment {
+                out.push(if ch == '\n' { '\n' } else { ' ' });
+                i += 1;
+                continue;
+            }
+            if in_string {
+                match ch {
+                    _ if escaped => {
+                        escaped = false;
+                        out.push(' ');
+                    }
+                    '\\' => {
+                        escaped = true;
+                        out.push(' ');
+                    }
+                    '"' => {
+                        in_string = false;
+                        out.push('"');
+                    }
+                    '\n' => out.push('\n'),
+                    _ => out.push(' '),
+                }
+                i += 1;
+                continue;
+            }
+            // Not in string/comment.
+            if ch == '"' {
+                in_string = true;
+                out.push('"');
+                i += 1;
+                continue;
+            }
+            if ch == '/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                in_comment = true;
+                out.push(' ');
+                i += 1;
+                continue;
+            }
+            if ch == '#' {
+                in_comment = true;
+                out.push(' ');
+                i += 1;
+                continue;
+            }
+            out.push(ch);
+            i += 1;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,6 +800,35 @@ fn production(values: BTreeMap<String, f64>) {}
         assert!(!contains_word("SerializeMe", "Serialize"));
         assert!(!contains_word("MySerialize", "Serialize"));
         assert!(!contains_word("_Serialize_ext", "Serialize"));
+    }
+
+    #[test]
+    fn contains_word_in_code_ignores_comments_and_strings() {
+        // Real code reference — counts.
+        assert!(contains_word_in_code(
+            "let x = validate_only(root);",
+            "validate_only"
+        ));
+        // Only inside a line comment — does not count.
+        assert!(!contains_word_in_code(
+            "// rename validate_write -> validate_only\nfn score() {}",
+            "validate_only"
+        ));
+        // Only inside a string literal (similarity test data) — does not count.
+        assert!(!contains_word_in_code(
+            r#"let s = normalized_similarity("validate_write", "validate_only");"#,
+            "validate_only"
+        ));
+        // A real call on the same line as an unrelated string still counts.
+        assert!(contains_word_in_code(
+            r#"log("running"); validate_only(root);"#,
+            "validate_only"
+        ));
+        // `#` line comment (e.g. shell/ruby-style) is also ignored.
+        assert!(!contains_word_in_code(
+            "# see validate_only\n",
+            "validate_only"
+        ));
     }
 
     #[test]

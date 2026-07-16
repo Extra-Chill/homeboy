@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
-use super::import_matching::contains_word;
+use super::import_matching::contains_word_in_code;
 use super::walker::is_test_path;
 use crate::component::AuditConfig;
 
@@ -157,7 +157,10 @@ pub(crate) fn analyze_dead_code_with_config(
                     if other.internal_calls.contains(export) {
                         return true;
                     }
-                    if contains_word(&other.content, export) {
+                    // Match against code only — an identifier that appears solely
+                    // in a comment or string literal (e.g. similarity-test data)
+                    // is not a real reference and must not mask dead code.
+                    if contains_word_in_code(&other.content, export) {
                         return true;
                     }
                     // Check if the other file imports something that matches
@@ -617,6 +620,42 @@ mod tests {
             .filter(|f| f.kind == AuditFinding::UnreferencedExport)
             .collect();
         assert_eq!(unreferenced.len(), 2); // compute and transform both unreferenced
+    }
+
+    #[test]
+    fn string_literal_mention_does_not_mask_unreferenced_export() {
+        // Regression: a dead `pub fn validate_only` survived because another
+        // file contained the identifier only as string-similarity TEST DATA
+        // (e.g. `normalized_similarity("validate_write", "validate_only")`).
+        // A raw whole-word content scan counted that as a reference. The
+        // code-only match must ignore identifiers inside string literals.
+        let mut owner = make_fingerprint(
+            "src/validate_write.rs",
+            vec!["validate_only"],
+            vec!["validate_only"],
+            vec![],
+            vec![],
+        );
+        owner.content = "pub fn validate_only(root: &Path) -> Result<()> { Ok(()) }".to_string();
+
+        let mut other = make_fingerprint("src/fixes.rs", vec!["score"], vec![], vec![], vec![]);
+        // `validate_only` appears ONLY inside a string literal and a comment.
+        other.content = r#"
+            // Typical renames: validate_write -> validate_only
+            fn score() -> f64 {
+                normalized_similarity("validate_write", "validate_only")
+            }
+        "#
+        .to_string();
+
+        let findings = analyze_dead_code(&[&owner, &other], &[]);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == AuditFinding::UnreferencedExport
+                    && f.description.contains("validate_only")),
+            "validate_only should be flagged as unreferenced despite string/comment mentions"
+        );
     }
 
     #[test]
