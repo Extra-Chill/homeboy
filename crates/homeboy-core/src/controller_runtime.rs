@@ -214,11 +214,17 @@ pub(crate) fn pin_current() -> Result<Value> {
 }
 
 fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
-    let digest = executable_digest(&executable)?;
+    let digest = executable_digest(executable)?;
     let pinned_path = pinned_path(identity, &digest)?;
     publish_pin(executable, &pinned_path, &digest)?;
 
-    Ok(json!({
+    let runtime = runtime_pin(&identity, executable, &pinned_path, &digest);
+    validate_pin(&runtime)?;
+    Ok(runtime)
+}
+
+fn runtime_pin(identity: &str, executable: &Path, pinned_path: &Path, digest: &str) -> Value {
+    json!({
         "schema": "homeboy/controller-runtime-pin/v2",
         "requested": identity,
         "originating": {
@@ -230,7 +236,7 @@ fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
         },
         "current": identity,
         "executed": identity,
-    }))
+    })
 }
 
 /// Pin the process submitting a durable run while serializing admission. The
@@ -253,17 +259,24 @@ pub(crate) fn admit_current() -> Result<RuntimeAdmission> {
 /// Publish the current executable as the generation selected for future
 /// admissions. Existing records retain their own pinned runtime metadata.
 pub(crate) fn activate_current_generation() -> Result<Value> {
+    let executable = std::env::current_exe().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve controller executable".to_string()),
+        )
+    })?;
+    activate_installed_generation(&executable)
+}
+
+/// Publish the executable that installation just verified. This intentionally
+/// does not use the upgrading process's executable: after an on-disk swap that
+/// process can still be running the previous generation.
+pub(crate) fn activate_installed_generation(executable: &Path) -> Result<Value> {
     let root = runtime_root()?;
     let lock_path = root.join(ADMISSION_LOCK_DIR);
     acquire_admission_lock(&lock_path)?;
     let result = (|| {
-        let executable = std::env::current_exe().map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("resolve activated controller executable".to_string()),
-            )
-        })?;
-        let runtime = pin_executable(&executable, &activated_executable_identity(&executable)?)?;
+        let runtime = pin_executable(executable, &activated_executable_identity(executable)?)?;
         validate_pin(&runtime)?;
         write_active_generation(&root.join(ACTIVE_GENERATION_FILE), &runtime)?;
         Ok(runtime)
@@ -648,14 +661,15 @@ fn verify_self_identity(path: &Path, expected: &str) -> Result<()> {
 
 fn executable_identity(path: &Path) -> Result<String> {
     #[cfg(test)]
-    if std::env::current_exe()
-        .ok()
-        .zip(fs::canonicalize(path).ok())
-        .is_some_and(|(current, candidate)| current == candidate)
-    {
+    if std::env::current_exe().ok().is_some_and(|current| {
+        executable_digest(&current)
+            .ok()
+            .zip(executable_digest(path).ok())
+            .is_some_and(|(current, candidate)| current == candidate)
+    }) {
         // Unit tests run inside the libtest executable, not the Homeboy CLI.
-        // Keep lifecycle fixtures hermetic while artifact tests still execute
-        // their explicit fake controller binaries.
+        // Pins are byte-identical copies, so accept them without recursively
+        // launching the test harness. Explicit fake controllers still execute.
         return Ok(build_identity::current().display);
     }
     let output = Command::new(path)
@@ -692,14 +706,6 @@ fn executable_identity(path: &Path) -> Result<String> {
 }
 
 fn activated_executable_identity(path: &Path) -> Result<String> {
-    #[cfg(test)]
-    {
-        // Core unit tests run a Rust test harness rather than the Homeboy CLI.
-        // Production activation always reads the freshly installed executable.
-        let _ = path;
-        return Ok(build_identity::current().display);
-    }
-    #[cfg(not(test))]
     executable_identity(path)
 }
 

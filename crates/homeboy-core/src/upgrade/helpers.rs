@@ -246,7 +246,8 @@ pub fn run_upgrade_with_method(
     if upgrade_completed {
         // This is deliberately a short switch, not a drain: records admitted
         // before it retain their immutable runtime pin and remain executable.
-        crate::controller_runtime::activate_current_generation()?;
+        let installed_executable = super::execution::active_binary_path()?;
+        crate::controller_runtime::activate_installed_generation(&installed_executable)?;
     }
 
     // Auto-update all installed extensions after the upgrade command completes.
