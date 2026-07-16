@@ -5,9 +5,10 @@
 // Leaf execution primitives moved to the internal `homeboy-engine-primitives`
 // crate. Re-exported here so existing `crate::engine::{shell,command,...}`
 // call sites keep working unchanged.
-pub use homeboy_engine_primitives::{command, identifier, output_parse, shell, template, text};
+pub use homeboy_engine_primitives::{
+    baseline, command, identifier, output_parse, shell, template, text,
+};
 
-pub mod baseline;
 pub mod cli_tool;
 pub mod codebase_scan;
 pub mod detail_output;
