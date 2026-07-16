@@ -742,11 +742,12 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             None,
             Vec::new(),
             Some("agent-task-run-6454".to_string()),
+            Some("mirrored-run-6454".to_string()),
         );
 
         assert_eq!(exit_code, 0);
         assert_eq!(output.job_id.as_deref(), Some(job_id.as_str()));
-        assert_eq!(output.mirror_run_id.as_deref(), Some("agent-task-run-6454"));
+        assert_eq!(output.mirror_run_id.as_deref(), Some("mirrored-run-6454"));
         assert_eq!(
             output
                 .execution_record
@@ -825,7 +826,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             envelope.run_location_index.follow_commands.job_logs,
             format!("homeboy runner job logs lab {job_id} --follow")
         );
-        assert_eq!(envelope.evidence.status, "running");
+        assert_eq!(envelope.evidence.status, "accepted");
         assert_eq!(envelope.evidence.runner_id, "lab");
         assert_eq!(envelope.evidence.runner_job_id, job_id);
         assert_eq!(
@@ -859,10 +860,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             envelope.persisted_run_id.as_deref(),
             Some("agent-task-run-6454")
         );
-        assert_eq!(
-            envelope.mirror_run_id.as_deref(),
-            Some("agent-task-run-6454")
-        );
+        assert_eq!(envelope.mirror_run_id.as_deref(), Some("mirrored-run-6454"));
         assert_eq!(json["status"], "running");
         assert_eq!(json["identity"]["runner_id"], "lab");
         assert_eq!(json["identity"]["runner_job_id"], job_id);
@@ -924,6 +922,7 @@ fn runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
         "lab",
         "job-123",
         "/srv/homeboy/project".to_string(),
+        None,
         None,
         None,
         "2026-06-30T15:58:00Z".to_string(),

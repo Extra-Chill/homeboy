@@ -169,6 +169,7 @@ pub(super) fn exec_via_daemon(
             job,
             path_materialization_plan,
             require_paths,
+            run_id,
             persisted_run_id,
         ));
     }
@@ -398,6 +399,7 @@ pub(super) fn detached_handoff_output(
     job: Job,
     path_materialization_plan: Option<PathMaterializationPlan>,
     require_paths: Vec<String>,
+    accepted_run_id: Option<String>,
     mirror_run_id: Option<String>,
 ) -> (RunnerExecOutput, i32) {
     let job_id = job.id.to_string();
@@ -416,6 +418,7 @@ pub(super) fn detached_handoff_output(
         &job_id,
         cwd.clone(),
         record_path_materialization_plan.clone(),
+        accepted_run_id,
         mirror_run_id.clone(),
         job_timestamp_ms_to_rfc3339(job.updated_at_ms),
     );

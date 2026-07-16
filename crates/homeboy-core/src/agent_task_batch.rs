@@ -18,6 +18,19 @@ pub fn submit_plan_batch(
     plan: &AgentTaskPlan,
     requested_batch_id: Option<&str>,
 ) -> Result<AgentTaskBatchRecord> {
+    submit_plan_batch_with(plan, requested_batch_id, |child_plan, run_id| {
+        agent_task_lifecycle::submit_plan(child_plan, Some(run_id))
+    })
+}
+
+fn submit_plan_batch_with<F>(
+    plan: &AgentTaskPlan,
+    requested_batch_id: Option<&str>,
+    mut submit_child: F,
+) -> Result<AgentTaskBatchRecord>
+where
+    F: FnMut(&AgentTaskPlan, &str) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord>,
+{
     if plan.tasks.is_empty() {
         return Err(Error::validation_invalid_argument(
             "input",
@@ -70,19 +83,9 @@ pub fn submit_plan_batch(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let mut child_runs = Vec::with_capacity(plan.tasks.len());
-    for task in &plan.tasks {
-        let child_run_id = child_run_ids[child_runs.len()].clone();
-        let child_plan = child_plan(plan, task.clone(), &batch_id);
-        let record = agent_task_lifecycle::submit_plan(&child_plan, Some(&child_run_id))?;
-        child_runs.push(AgentTaskBatchChildRun {
-            task_id: task.task_id.clone(),
-            run_id: record.run_id,
-            state: record.state,
-        });
-    }
-
-    let record = AgentTaskBatchRecord {
+    // Persist the batch boundary before creating children. A later submission
+    // failure must still leave an inspectable batch identity for recovery.
+    let mut record = AgentTaskBatchRecord {
         schema: AGENT_TASK_BATCH_SCHEMA.to_string(),
         batch_id,
         plan_id: plan.plan_id.clone(),
@@ -90,10 +93,31 @@ pub fn submit_plan_batch(
         submitted_at: now_timestamp(),
         updated_at: None,
         task_count: plan.tasks.len(),
-        child_runs,
+        child_runs: plan
+            .tasks
+            .iter()
+            .zip(&child_run_ids)
+            .map(|(task, run_id)| AgentTaskBatchChildRun {
+                task_id: task.task_id.clone(),
+                run_id: run_id.clone(),
+                state: AgentTaskRunState::Queued,
+            })
+            .collect(),
         metadata: batch_metadata(plan),
     };
     write_batch(&record)?;
+
+    for (index, task) in plan.tasks.iter().enumerate() {
+        let child_run_id = child_run_ids[index].clone();
+        let child_plan = child_plan(plan, task.clone(), &record.batch_id);
+        let child_record = submit_child(&child_plan, &child_run_id)?;
+        let child = &mut record.child_runs[index];
+        child.run_id = child_record.run_id;
+        child.state = child_record.state;
+        record.updated_at = Some(now_timestamp());
+        write_batch(&record)?;
+    }
+
     Ok(record)
 }
 
@@ -416,6 +440,29 @@ mod tests {
         let status = status("batch/audit").expect("batch status");
         assert_eq!(status.totals.queued, 2);
         assert_eq!(status.commands.run_next, "homeboy agent-task run-next");
+    }
+
+    #[test]
+    fn batch_identity_is_persisted_before_the_first_child_submission() {
+        let _home = crate::test_support::HomeGuard::new();
+        let plan = AgentTaskPlan::new("fanout/pre-submit", vec![request("a"), request("b")]);
+        let mut observed = false;
+
+        let batch = submit_plan_batch_with(&plan, Some("batch/pre-submit"), |child, run_id| {
+            let persisted = read_batch("batch/pre-submit").expect("persisted batch identity");
+            assert_eq!(persisted.batch_id, "batch_pre-submit");
+            assert_eq!(persisted.child_runs.len(), 2);
+            assert!(persisted
+                .child_runs
+                .iter()
+                .all(|child| child.state == AgentTaskRunState::Queued));
+            observed = true;
+            agent_task_lifecycle::submit_plan(child, Some(run_id))
+        })
+        .expect("batch submitted");
+
+        assert!(observed);
+        assert_eq!(batch.child_runs.len(), 2);
     }
 
     #[test]
