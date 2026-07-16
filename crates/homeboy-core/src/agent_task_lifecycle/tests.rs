@@ -14,6 +14,7 @@ use crate::agent_task_scheduler::{
 };
 use crate::api_jobs::{JobEvent, JobEventKind};
 use crate::test_support::with_isolated_home;
+use sha2::Digest;
 
 #[test]
 fn provider_run_result_reads_declared_output_alias() {
@@ -1568,6 +1569,95 @@ fn transport_proxy_snapshot_reconciliation_advances_queued_lifecycle() {
         assert_eq!(
             record.metadata["runner_execution_record"]["status"],
             "succeeded"
+        );
+    });
+}
+
+#[test]
+fn recovery_preserves_terminal_runner_identity_before_projecting_runner_artifacts() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let run_id = "agent-task-recovered-runner-artifact";
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "runner/a:lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("detached handoff");
+        record.ensure_metadata_object().remove("runner_id");
+        record.ensure_metadata_object().remove("runner_job_id");
+
+        let patch = "runner patch";
+        let finalized = crate::paths::artifact_root()
+            .expect("artifact root")
+            .join("executor-finalized")
+            .join(run_id)
+            .join("patch.diff");
+        std::fs::create_dir_all(finalized.parent().expect("finalized parent"))
+            .expect("create finalized parent");
+        std::fs::write(&finalized, patch).expect("write finalized patch");
+        let mut aggregate = succeeded_aggregate(&test_plan());
+        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "patch".to_string(),
+            kind: "patch".to_string(),
+            name: None,
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: Some("/home/runner/.homeboy/executor-finalized/patch.diff".to_string()),
+            url: None,
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some(patch.len() as u64),
+            sha256: Some(format!("{:x}", sha2::Sha256::digest(patch.as_bytes()))),
+            metadata: json!({ "executor_artifact_finalized": true }),
+        });
+        let mut snapshot = terminal_child_snapshot(&aggregate);
+        snapshot.events[0].data.as_mut().expect("event data")["identity"]["runner_id"] =
+            json!("runner/a:lab");
+        snapshot.events[0].data.as_mut().expect("event data")["identity"]["run_id"] = json!(run_id);
+        snapshot.events[0].data.as_mut().expect("event data")["identity"]["persisted_run_id"] =
+            json!(run_id);
+        let event = crate::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(
+            Some(&snapshot.events),
+        )
+        .expect("terminal lifecycle event");
+        assert_eq!(event.identity.runner_id, "runner/a:lab");
+        assert_eq!(
+            event.identity.runner_job_id,
+            "00000000-0000-0000-0000-000000000123"
+        );
+        assert_eq!(event.identity.run_id.as_deref(), Some(run_id));
+        assert_eq!(event.identity.persisted_run_id.as_deref(), Some(run_id));
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("terminal recovery");
+
+        assert_eq!(record.metadata["runner_id"], "runner/a:lab");
+        assert_eq!(
+            record.metadata["runner_job_id"],
+            "00000000-0000-0000-0000-000000000123"
+        );
+        assert_eq!(record.metadata["artifact_projection"]["status"], "complete");
+        let artifacts = crate::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .list_artifacts(run_id)
+            .expect("artifact projections");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].artifact_type, "file");
+        let projected = verified_controller_artifact_projection_path(
+            run_id,
+            &aggregate.outcomes[0].task_id,
+            &aggregate.outcomes[0].artifacts[0],
+        );
+        assert_eq!(
+            projected.expect("verify projection"),
+            Some(std::path::PathBuf::from(&artifacts[0].path))
+        );
+        assert_ne!(
+            artifacts[0].path,
+            "/home/runner/.homeboy/executor-finalized/patch.diff"
         );
     });
 }
