@@ -552,6 +552,11 @@ fn runner_exec_promotes_offloaded_artifacts_from_runner_path() {
             std::fs::read_to_string(&artifacts[0].path).unwrap(),
             "runner output"
         );
+        assert_eq!(artifacts[0].size_bytes, Some(13));
+        assert_eq!(
+            artifacts[0].sha256.as_deref(),
+            Some("c147fa5423d1086ceaa8443d0485bd39777952ce61b68696c1fd15be622421a9")
+        );
     });
 }
 

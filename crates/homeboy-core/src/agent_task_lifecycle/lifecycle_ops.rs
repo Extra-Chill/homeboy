@@ -1323,16 +1323,6 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
         }
         Err(error) => return Err(error),
     };
-    if let Err(error) = store::read_plan_path(&record.plan_path) {
-        fail_missing_lab_attempt_plan(&mut record, &error)?;
-        return Err(Error::internal_io(
-            format!(
-                "cannot bind Lab runner job because durable attempt plan is unavailable: {}",
-                error.message
-            ),
-            Some(record.plan_path),
-        ));
-    }
     if matches!(
         record.state,
         AgentTaskRunState::Succeeded
@@ -1341,11 +1331,9 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
             | AgentTaskRunState::Failed
             | AgentTaskRunState::Cancelled
     ) {
-        // A retry of the controller-side handoff must not resurrect a terminal
-        // proxy. Its child identity is immutable once terminal state is known.
-        if record.runner_id() == Some(input.runner_id)
-            && record.runner_job_id() == Some(input.runner_job_id)
-        {
+        // A terminal proxy must not be resurrected. A later runner job may
+        // attach finalized evidence, but only from the original Lab runner.
+        if record.runner_id() == Some(input.runner_id) {
             return Ok(record);
         }
         return Err(Error::validation_invalid_argument(
@@ -1353,6 +1341,16 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
             format!("agent-task run '{}' is already terminal", record.run_id),
             Some(record.run_id),
             None,
+        ));
+    }
+    if let Err(error) = store::read_plan_path(&record.plan_path) {
+        fail_missing_lab_attempt_plan(&mut record, &error)?;
+        return Err(Error::internal_io(
+            format!(
+                "cannot bind Lab runner job because durable attempt plan is unavailable: {}",
+                error.message
+            ),
+            Some(record.plan_path),
         ));
     }
     record.updated_at = Some(now_timestamp());

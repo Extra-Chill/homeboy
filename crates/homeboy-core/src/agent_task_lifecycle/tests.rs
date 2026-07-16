@@ -727,6 +727,75 @@ fn runner_terminal_reconciliation_is_idempotent_and_preserves_execution_owner() 
 }
 
 #[test]
+fn terminal_lab_artifact_attachment_skips_missing_controller_plan_and_preserves_runner_identity() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-late-artifact",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-original",
+            remote_workspace: "/home/lab/agent-task-runs/agent-task-late-artifact",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        let mut record = status("agent-task-late-artifact").expect("status");
+        apply_runner_job_terminal_state(
+            &mut record,
+            crate::core::api_jobs::JobStatus::Succeeded,
+            &[],
+        );
+        store::write_record(&record).expect("terminal record");
+        std::fs::remove_file(&record.plan_path).expect("remove controller plan");
+
+        let attached = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-late-artifact",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-artifact-attach",
+            remote_workspace: "/home/lab/agent-task-runs/agent-task-late-artifact",
+            remote_command: &command,
+        })
+        .expect("late attachment leaves terminal proxy intact");
+
+        assert_eq!(attached.state, AgentTaskRunState::Succeeded);
+        assert_eq!(attached.runner_id(), Some("homeboy-lab"));
+        assert_eq!(attached.runner_job_id(), Some("job-original"));
+    });
+}
+
+#[test]
+fn terminal_lab_artifact_attachment_refuses_runner_provenance_mismatch() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-late-artifact-mismatch",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-original",
+            remote_workspace: "/home/lab/agent-task-runs/agent-task-late-artifact-mismatch",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        let mut record = status("agent-task-late-artifact-mismatch").expect("status");
+        apply_runner_job_terminal_state(
+            &mut record,
+            crate::core::api_jobs::JobStatus::Succeeded,
+            &[],
+        );
+        store::write_record(&record).expect("terminal record");
+
+        let error = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-late-artifact-mismatch",
+            runner_id: "different-lab",
+            runner_job_id: "job-artifact-attach",
+            remote_workspace: "/home/lab/agent-task-runs/agent-task-late-artifact-mismatch",
+            remote_command: &command,
+        })
+        .expect_err("artifact provenance must retain its original runner");
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert_eq!(error.details["field"], "run_id");
+    });
+}
+
+#[test]
 fn disconnected_proxy_projects_terminal_child_aggregate_once_reachable() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
