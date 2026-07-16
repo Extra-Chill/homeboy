@@ -114,6 +114,16 @@ where
             None,
         ));
     }
+    if args.dispatch.core.queue_only {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "queue-only",
+            "agent-task cook cannot queue its controller-owned lifecycle; it must retain provider completion to ingest artifacts, promote candidates, run gates, and finalize",
+            None,
+            Some(vec![
+                "Use `homeboy agent-task run-plan --plan <materialized-plan> --record-run-id <run-id> --queue-only` only when a controller owns the corresponding continuation.".to_string(),
+            ]),
+        ));
+    }
 
     let mut dispatch_args = args.dispatch.clone();
     if dispatch_args.prompt.is_none() {
@@ -130,7 +140,6 @@ where
                 .unwrap_or_else(|| agent_task_lifecycle::cook_attempt_run_id(cook_id, 1)),
         );
     }
-    dispatch_args.core.queue_only = false;
     let (run_id, initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
         let run_id = dispatch_args.run_id.clone().ok_or_else(|| {
             homeboy::core::Error::internal_unexpected(

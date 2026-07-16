@@ -8,6 +8,43 @@ use crate::cli_surface::{Cli, Commands};
 use super::super::AgentTaskCommand;
 
 #[test]
+fn cook_rejects_queue_only_before_creating_a_durable_recipe() {
+    with_isolated_home(|_| {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "missing@worktree",
+            "--verify",
+            "true",
+            "--queue-only",
+            "--run-id",
+            "cook-queue-only",
+        ]);
+        let Commands::AgentTask(args) = cli.command else {
+            panic!("agent-task cook command");
+        };
+        let AgentTaskCommand::Cook(cook) = args.command else {
+            panic!("cook command");
+        };
+
+        let error = super::super::run::run_cook_with_executor(
+            cook,
+            ExtensionProviderAgentTaskExecutor::default(),
+        )
+        .expect_err("queue-only cook must fail before resolving its worktree");
+
+        assert!(error
+            .message
+            .contains("cannot queue its controller-owned lifecycle"));
+        assert!(!homeboy::core::agent_task_service::recipe_exists("cook-queue-only").unwrap());
+    });
+}
+
+#[test]
 fn from_spec_dispatch_defaults_use_spec_git_checkout() {
     let repo = tempfile::tempdir().expect("repo dir");
     let git_status = Command::new("git")
