@@ -1716,7 +1716,7 @@ mod materialize_specs_tests {
             "tasks": [{
                 "task_id": "task-1",
                 "workspace": { "root": controller },
-                "executor": { "config": {
+                "executor": { "backend": "opencode", "model": "openai/gpt-5.6-terra", "config": {
                     "workspace": controller,
                     "workspace_root": controller,
                     "provider_plugin_paths": [controller_plugin],
@@ -1756,6 +1756,11 @@ mod materialize_specs_tests {
         assert_eq!(
             staged["tasks"][0]["workspace"]["root"],
             runner.display().to_string()
+        );
+        assert_eq!(staged["tasks"][0]["executor"]["backend"], "opencode");
+        assert_eq!(
+            staged["tasks"][0]["executor"]["model"],
+            "openai/gpt-5.6-terra"
         );
         assert_eq!(
             staged["tasks"][0]["metadata"]["workspace_source_provenance"]["controller_root"],

@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agent_task_dispatch_plan::{
-    build_dispatch_plan_with_provider_requirements, preflight_dispatch_provider_secrets,
+    build_dispatch_plan, build_dispatch_plan_with_provider_requirements,
+    preflight_dispatch_provider_secrets,
 };
 use crate::agent_task_lifecycle as lifecycle;
 use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
@@ -328,6 +329,17 @@ pub fn controller_resolved_execution_policy(
         rotation,
         rotation_starts_with_first_entry: true,
     }
+}
+
+/// Build a controller-owned plan with a durable execution policy when the
+/// caller did not submit one explicitly.
+pub fn build_controller_dispatch_plan(
+    request: &mut AgentTaskDispatchRequest,
+) -> Result<AgentTaskPlan> {
+    if request.core.resolved_provider_policy.is_none() {
+        request.core.resolved_provider_policy = Some(controller_resolved_execution_policy(request));
+    }
+    build_dispatch_plan(request)
 }
 
 /// Resolve a typed dispatch request, using the supplied default-backend resolver
