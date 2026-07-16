@@ -64,6 +64,14 @@ pub trait RunnerEvidenceProvider: Send + Sync {
     /// Raw GET against a runner's daemon API.
     fn daemon_api_get(&self, runner_id: &str, path: &str) -> Result<Value>;
 
+    /// Fetch the content of an artifact from a connected runner's job.
+    fn runner_artifact_content(
+        &self,
+        runner_id: &str,
+        job_id: &str,
+        artifact_id: &str,
+    ) -> Result<Value>;
+
     /// Refresh mirrored daemon evidence for a run, returning any mirrored runs.
     fn refresh_mirrored_daemon_evidence(&self, run_id: &str) -> Result<Option<Vec<RunRecord>>>;
 
@@ -94,6 +102,20 @@ impl RunnerEvidenceProvider for NoopRunnerEvidenceProvider {
     }
 
     fn daemon_api_get(&self, _runner_id: &str, _path: &str) -> Result<Value> {
+        Err(Error::validation_invalid_argument(
+            "runner",
+            "no runner evidence provider is registered",
+            None,
+            None,
+        ))
+    }
+
+    fn runner_artifact_content(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+        _artifact_id: &str,
+    ) -> Result<Value> {
         Err(Error::validation_invalid_argument(
             "runner",
             "no runner evidence provider is registered",
@@ -202,6 +224,9 @@ mod tests {
                 }]
             }
             fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
+                Ok(Value::Null)
+            }
+            fn runner_artifact_content(&self, _: &str, _: &str, _: &str) -> Result<Value> {
                 Ok(Value::Null)
             }
             fn refresh_mirrored_daemon_evidence(&self, _: &str) -> Result<Option<Vec<RunRecord>>> {

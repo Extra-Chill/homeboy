@@ -46,7 +46,11 @@ pub fn materialize_recovered_patch_artifact(
                 &job_id,
                 &record.run_id,
                 &outcome.task_id,
-                |id| crate::runner::runner_artifact_content(&runner_id, &job_id, id),
+                |id| {
+                    crate::observation::runs_service::runner_evidence::with_runner_evidence(|p| {
+                        p.runner_artifact_content(&runner_id, &job_id, id)
+                    })
+                },
             )?;
         }
         let finalized = outcome.artifacts.clone();
