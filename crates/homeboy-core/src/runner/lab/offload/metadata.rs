@@ -588,13 +588,26 @@ pub(crate) fn attach_lab_workspace_metadata(
 ) -> Result<()> {
     let source_snapshot = inputs.source_snapshot;
     let primary_workspace_plan = &inputs.primary_synced_workspace.materialization_plan;
+    let source_path = source_snapshot.local_path.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "source_snapshot.local_path",
+            "Lab workspace verification requires a controller source path",
+            None,
+            None,
+        )
+    })?;
     let permission_policy = crate::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY;
     let content_hash = crate::runner::workspace_content_hash(
-        Path::new(&source_snapshot.local_path.clone().unwrap_or_default()),
+        Path::new(source_path),
         &source_snapshot.sync_excludes,
     )?;
     let content_hash_algorithm = crate::runner::workspace_content_hash_algorithm(permission_policy)
         .expect("default workspace content permission policy is supported");
+    let content_manifest = crate::runner::workspace_content_manifest_for_policy(
+        Path::new(source_path),
+        &source_snapshot.sync_excludes,
+        permission_policy,
+    )?;
     lab_metadata["source_snapshot"] =
         serde_json::to_value(source_snapshot).unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_content_hash"] = serde_json::json!(content_hash);
@@ -607,6 +620,7 @@ pub(crate) fn attach_lab_workspace_metadata(
         "content_hash_algorithm": content_hash_algorithm,
         "permission_policy": permission_policy,
         "content_hash": content_hash,
+        "content_manifest": content_manifest,
         "sync_excludes": source_snapshot.sync_excludes,
         "source_snapshot": source_snapshot,
         "primary_workspace": primary_workspace_plan,

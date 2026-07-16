@@ -6,8 +6,10 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::runner::workspace::snapshot::{
     copy_snapshot_to_directory, snapshot_archive_command, snapshot_install_command,
-    synthetic_checkout_value, workspace_content_hash, workspace_content_hash_for_policy,
+    synthetic_checkout_value, workspace_content_hash, workspace_content_hash_algorithm,
+    workspace_content_hash_for_policy, workspace_content_manifest_for_policy,
     WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
 #[test]
@@ -902,6 +904,144 @@ fn workspace_content_hash_unix_policy_binds_executable_bit_without_umask_bits() 
         .expect("executable hash"),
         non_executable
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn workspace_content_hash_owner_executable_policy_normalizes_non_owner_execute_bits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let controller = tempfile::tempdir().expect("controller workspace");
+    let runner = tempfile::tempdir().expect("runner workspace");
+    for workspace in [controller.path(), runner.path()] {
+        fs::write(workspace.join("tool"), "#!/bin/sh\n").expect("tool");
+    }
+
+    // A non-owner execute bit can be removed when tar extraction applies the
+    // Linux runner's umask. It must not alter the cross-platform identity.
+    fs::set_permissions(
+        controller.path().join("tool"),
+        fs::Permissions::from_mode(0o641),
+    )
+    .expect("controller permissions");
+    fs::set_permissions(
+        runner.path().join("tool"),
+        fs::Permissions::from_mode(0o640),
+    )
+    .expect("runner permissions");
+    assert_eq!(
+        workspace_content_hash_for_policy(
+            controller.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+        )
+        .expect("controller hash"),
+        workspace_content_hash_for_policy(
+            runner.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+        )
+        .expect("runner hash"),
+        "non-owner execute bits are host metadata, not portable executable capability"
+    );
+
+    fs::set_permissions(
+        runner.path().join("tool"),
+        fs::Permissions::from_mode(0o740),
+    )
+    .expect("runner owner-executable permissions");
+    assert_ne!(
+        workspace_content_hash_for_policy(
+            controller.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+        )
+        .expect("controller hash"),
+        workspace_content_hash_for_policy(
+            runner.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+        )
+        .expect("runner hash"),
+        "owner execute changes remain fail-closed"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn workspace_content_hash_versions_legacy_any_execute_separately_from_owner_execute() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let controller = tempfile::tempdir().expect("controller workspace");
+    let runner = tempfile::tempdir().expect("runner workspace");
+    for workspace in [controller.path(), runner.path()] {
+        fs::write(workspace.join("tool"), "#!/bin/sh\n").expect("tool");
+    }
+    fs::set_permissions(
+        controller.path().join("tool"),
+        fs::Permissions::from_mode(0o641),
+    )
+    .expect("controller permissions");
+    fs::set_permissions(
+        runner.path().join("tool"),
+        fs::Permissions::from_mode(0o640),
+    )
+    .expect("runner permissions");
+
+    assert_ne!(
+        workspace_content_hash_for_policy(
+            controller.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE
+        )
+        .expect("legacy controller hash"),
+        workspace_content_hash_for_policy(
+            runner.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE
+        )
+        .expect("legacy runner hash"),
+        "v2 unix-executable preserves its historical any-execute semantics"
+    );
+    assert_eq!(
+        workspace_content_hash_for_policy(
+            controller.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE
+        )
+        .expect("v3 controller hash"),
+        workspace_content_hash_for_policy(
+            runner.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE
+        )
+        .expect("v3 runner hash"),
+        "v3 owner-only executable capability normalizes non-owner execute bits"
+    );
+    assert_eq!(
+        workspace_content_hash_algorithm(WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE).as_deref(),
+        Some("homeboy-workspace-content-v2+unix-executable")
+    );
+    assert_eq!(
+        workspace_content_hash_algorithm(WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE)
+            .as_deref(),
+        Some("homeboy-workspace-content-v3+unix-owner-executable")
+    );
+}
+
+#[test]
+fn workspace_content_manifest_omits_long_paths_but_counts_them() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    fs::write(workspace.path().join("a".repeat(193)), "contents\n").expect("long path file");
+
+    let manifest = workspace_content_manifest_for_policy(
+        workspace.path(),
+        &[],
+        crate::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+    )
+    .expect("content manifest");
+    assert_eq!(manifest.entry_count, 1);
+    assert!(manifest.entries.is_empty());
 }
 
 #[test]
