@@ -297,6 +297,31 @@ fn materializes_inline_agent_task_cook_tasks_json() {
 }
 
 #[test]
+fn materializes_inline_cook_attempt_plan_only_for_runner_execution() {
+    let plan = r#"{"schema":"homeboy/agent-task-plan/v1","plan_id":"controller-plan","tasks":[]}"#;
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--attempt-plan".to_string(),
+        plan.to_string(),
+    ];
+
+    let (rewritten, entry) = materialize_inline_agent_task_tasks_arg_with(&args, |spec| {
+        assert_eq!(spec, plan);
+        Ok(Some(fake_synced_file(
+            "@/remote/input/agent-task-attempt-plan.json",
+            "agent_task_attempt_plan_remapped",
+        )))
+    })
+    .expect("rewrite attempt plan");
+
+    assert_eq!(rewritten[4], "@/remote/input/agent-task-attempt-plan.json");
+    assert!(!rewritten.contains(&plan.to_string()));
+    assert_eq!(entry.expect("mapping entry").remote_path(), "/remote/input");
+}
+
+#[test]
 fn leaves_agent_task_tasks_file_specs_in_argv() {
     let args = vec![
         "homeboy".to_string(),

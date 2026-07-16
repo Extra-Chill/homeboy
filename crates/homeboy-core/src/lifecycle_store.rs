@@ -39,22 +39,23 @@ pub(super) fn read_plan_path(path: &str) -> Result<AgentTaskPlan> {
 }
 
 pub(super) fn read_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
-    let path = run_dir(run_id)?.join("plan.json");
+    let path = controller_plan_path(run_id)?;
     let plan = read_json(&path).map_err(|error| {
-        if error.code == ErrorCode::InternalIoError {
-            Error::internal_io(
-                format!(
-                    "controller-owned durable plan is unavailable for run `{run_id}`: {}",
-                    error.message
-                ),
-                Some(path.display().to_string()),
-            )
-        } else {
-            error
-        }
+        Error::internal_io(
+            format!(
+                "authoritative controller-owned plan for agent-task run `{run_id}` is unavailable at {}; lifecycle record plan_path is runner execution transport and cannot be used for controller readback: {}",
+                path.display(),
+                error.message
+            ),
+            Some(path.display().to_string()),
+        )
     })?;
     validate_execution_budget(&plan)?;
     Ok(plan)
+}
+
+pub(super) fn controller_plan_path(run_id: &str) -> Result<PathBuf> {
+    Ok(run_dir(run_id)?.join("plan.json"))
 }
 
 /// Controller lifecycle operations resolve the plan from their durable run
@@ -62,7 +63,7 @@ pub(super) fn read_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
 /// evidence after a Lab projection and is never controller execution authority.
 pub(super) fn read_controller_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
     crate::config::with_config_lock(|| {
-        let path = run_dir(run_id)?.join("plan.json");
+        let path = controller_plan_path(run_id)?;
         let mut plan = read_controller_plan(run_id)?;
         if migrate_execution_budget(&mut plan)? {
             write_private_json(&path, &plan)?;
