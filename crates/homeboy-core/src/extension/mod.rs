@@ -1,3 +1,4 @@
+pub mod audit_manifest_provider;
 pub mod bench;
 pub mod build;
 mod capability;

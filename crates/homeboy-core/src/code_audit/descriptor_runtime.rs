@@ -184,8 +184,8 @@ fn run_test_coverage(context: &DetectorRunContext<'_>) -> Vec<Finding> {
         return Vec::new();
     };
     for ext_id in extensions.keys() {
-        if let Ok(ext_manifest) = crate::extension::load_extension(ext_id) {
-            if let Some(test_mapping) = ext_manifest.test_mapping() {
+        if let Some(ext_manifest) = super::extension_manifests::load_audit_manifest(ext_id) {
+            if let Some(test_mapping) = &ext_manifest.test_mapping {
                 return test_coverage::run(context.root, context.all_fingerprints, test_mapping);
             }
         }

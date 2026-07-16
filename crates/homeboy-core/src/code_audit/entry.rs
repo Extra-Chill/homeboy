@@ -182,8 +182,10 @@ pub(super) fn audit_config_for(
     if let Some(component) = &component {
         if let Some(extensions) = &component.extensions {
             for extension_id in extensions.keys() {
-                if let Ok(manifest) = crate::extension::load_extension(extension_id) {
-                    if let Some(rules) = manifest.audit_detector_rules() {
+                if let Some(manifest) =
+                    super::extension_manifests::load_audit_manifest(extension_id)
+                {
+                    if let Some(rules) = &manifest.audit_detector_rules {
                         audit_config.merge(rules);
                     }
                 }
@@ -196,8 +198,8 @@ pub(super) fn audit_config_for(
     }
 
     for extension_id in extension_overrides {
-        if let Ok(manifest) = crate::extension::load_extension(extension_id) {
-            if let Some(rules) = manifest.audit_detector_rules() {
+        if let Some(manifest) = super::extension_manifests::load_audit_manifest(extension_id) {
+            if let Some(rules) = &manifest.audit_detector_rules {
                 audit_config.merge(rules);
             }
         }

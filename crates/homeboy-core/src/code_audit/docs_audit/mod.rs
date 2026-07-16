@@ -16,8 +16,8 @@ use std::path::Path;
 pub use claims::{Claim, ClaimConfidence, ClaimType};
 pub use verify::VerifyResult;
 
+use crate::component;
 use crate::is_zero;
-use crate::{component, extension};
 
 /// A doc that needs content review due to referenced files changing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -160,8 +160,10 @@ pub(crate) fn collect_extension_ignore_patterns(comp: &component::Component) -> 
     let mut patterns = Vec::new();
     if let Some(ref extensions) = comp.extensions {
         for extension_id in extensions.keys() {
-            if let Ok(manifest) = extension::load_extension(extension_id) {
-                patterns.extend(manifest.audit_ignore_claim_patterns().to_vec());
+            if let Some(manifest) =
+                crate::code_audit::extension_manifests::load_audit_manifest(extension_id)
+            {
+                patterns.extend(manifest.audit_ignore_claim_patterns);
             }
         }
     }

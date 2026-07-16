@@ -37,10 +37,9 @@ pub(crate) fn is_index_file(path: &Path) -> bool {
 
 /// Collect all file extensions that installed extensions can handle.
 pub(crate) fn extension_provided_file_extensions() -> Vec<String> {
-    crate::extension::load_all_extensions()
-        .unwrap_or_default()
+    super::extension_manifests::load_all_audit_manifests()
         .into_iter()
-        .flat_map(|m| m.provided_file_extensions().to_vec())
+        .flat_map(|m| m.provided_file_extensions)
         .collect()
 }
 
