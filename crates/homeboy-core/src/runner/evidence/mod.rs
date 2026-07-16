@@ -1,8 +1,11 @@
 mod detail;
 mod download;
 mod mirror;
+mod provider;
 mod tokens;
 mod util;
+
+pub use provider::register as register_runner_evidence_provider;
 
 #[cfg(test)]
 mod tests;

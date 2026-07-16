@@ -6,7 +6,9 @@ pub fn require_run(store: &ObservationStore, run_id: &str) -> Result<RunRecord> 
     if let Some(run) = store.get_run(run_id)? {
         return Ok(run);
     }
-    if let Ok(Some(run)) = crate::runners::mirror_connected_runner_run(run_id) {
+    if let Ok(Some(run)) =
+        runner_evidence::with_runner_evidence(|p| p.mirror_connected_runner_run(run_id))
+    {
         return Ok(run);
     }
     if let Some(run) = resolve_run_label(store, run_id)? {
@@ -21,12 +23,13 @@ fn resolve_run_label(store: &ObservationStore, label: &str) -> Result<Option<Run
         ..Default::default()
     })?;
     let mut matches = matching_run_labels(&runs, label);
-    for report in crate::runners::statuses()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|report| report.connected)
-    {
-        let Ok(data) = crate::runners::daemon_api_get(&report.runner_id, "/runs?limit=200") else {
+    let connected_runners: Vec<RunnerConnectionInfo> = runner_evidence::with_runner_evidence(|p| {
+        p.statuses().into_iter().filter(|r| r.connected).collect()
+    });
+    for report in connected_runners {
+        let Ok(data) = runner_evidence::with_runner_evidence(|p| {
+            p.daemon_api_get(&report.runner_id, "/runs?limit=200")
+        }) else {
             continue;
         };
         let runs: Vec<RunRecord> =
@@ -128,12 +131,13 @@ fn missing_run_error(run_id: &str) -> Error {
 
 fn missing_run_guidance(run_id: &str) -> Vec<String> {
     let mut hints = Vec::new();
-    let connected = crate::runners::statuses()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|report| report.connected)
-        .map(|report| report.runner_id)
-        .collect::<Vec<_>>();
+    let connected = runner_evidence::with_runner_evidence(|p| {
+        p.statuses()
+            .into_iter()
+            .filter(|report| report.connected)
+            .map(|report| report.runner_id)
+            .collect::<Vec<_>>()
+    });
 
     if connected.is_empty() {
         hints.push(
@@ -175,7 +179,9 @@ pub(crate) fn missing_run_guidance_for_runner_ids(
 /// historical CLI behavior so the `runs show` / `runs artifacts` commands
 /// keep emitting the same stderr text on failures.
 pub fn refresh_mirrored_daemon_evidence_best_effort(run_id: &str) {
-    if let Err(err) = crate::runners::refresh_mirrored_daemon_evidence(run_id) {
+    if let Err(err) =
+        runner_evidence::with_runner_evidence(|p| p.refresh_mirrored_daemon_evidence(run_id))
+    {
         eprintln!(
             "Warning: could not refresh mirrored Lab runner evidence for `{run_id}`: {}",
             err.message
@@ -190,7 +196,8 @@ pub fn refresh_mirrored_daemon_evidence_best_effort(run_id: &str) {
 /// observation store converge on the daemon's terminal state without requiring
 /// operators to know and run `runs show <mirror-run-id>` first.
 pub fn refresh_running_mirrored_daemon_evidence_best_effort(store: &ObservationStore) {
-    for report in crate::runners::statuses().unwrap_or_default() {
+    let statuses = runner_evidence::with_runner_evidence(|p| p.statuses());
+    for report in statuses {
         for job in report.stale_runner_jobs {
             finish_stale_runner_child_run(store, &job);
         }
@@ -205,13 +212,14 @@ pub fn refresh_running_mirrored_daemon_evidence_best_effort(store: &ObservationS
         .unwrap_or_default();
 
     for run in runs {
-        if crate::runners::mirrored_runner_job_identity(&run).is_some() {
+        if runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(&run)).is_some()
+        {
             refresh_mirrored_daemon_evidence_best_effort(&run.id);
         }
     }
 }
 
-fn finish_stale_runner_child_run(store: &ObservationStore, job: &crate::runners::RunnerJob) {
+fn finish_stale_runner_child_run(store: &ObservationStore, job: &StaleRunnerJobInfo) {
     let Some(run_id) = job.durable_run_id.as_deref() else {
         return;
     };
@@ -245,9 +253,7 @@ fn finish_stale_runner_child_run(store: &ObservationStore, job: &crate::runners:
 #[cfg(test)]
 mod stale_runner_tests {
     use super::*;
-    use crate::api_jobs::{JobClaimMetadata, JobStatus};
     use crate::observation::{NewRunRecord, ObservationStore};
-    use crate::runners::{RunnerJob, RunnerLifecycleOwner};
 
     #[test]
     fn stale_runner_child_finalizes_matching_running_observation() {
@@ -257,27 +263,14 @@ mod stale_runner_tests {
                 .start_run(NewRunRecord::builder("bench").build())
                 .expect("run");
             let run_id = started.id;
-            let job = RunnerJob {
+            let job = StaleRunnerJobInfo {
+                durable_run_id: Some(run_id.clone()),
                 runner_id: "homeboy-lab".to_string(),
                 job_id: "orphaned-child-run-run-1".to_string(),
-                operation: "child-run".to_string(),
-                status: JobStatus::Failed,
-                command: "homeboy bench".to_string(),
-                cwd: None,
-                source: "runner-observation".to_string(),
-                lifecycle_owner: RunnerLifecycleOwner::Controller,
-                lifecycle: None,
-                started_at_ms: None,
-                updated_at_ms: None,
-                elapsed_ms: None,
-                heartbeat_age_ms: None,
-                claim: JobClaimMetadata::default(),
-                claim_expires_in_ms: None,
-                durable_run_id: Some(run_id.clone()),
-                stale_reason: Some("child_run_running_without_active_runner_job".to_string()),
+                status: "failed".to_string(),
                 lifecycle_state: Some("stale".to_string()),
+                stale_reason: Some("child_run_running_without_active_runner_job".to_string()),
                 retryable: Some(true),
-                artifact_refs: Vec::new(),
             };
 
             finish_stale_runner_child_run(&store, &job);
