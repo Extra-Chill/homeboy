@@ -1,4 +1,4 @@
-use crate::code_audit::conventions::Language;
+use crate::engine::language::Language;
 
 /// Check if an import should be skipped (already present or alias collision).
 pub(super) fn should_skip_import(content: &str, import_line: &str, language: &Language) -> bool {
