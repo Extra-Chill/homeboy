@@ -113,6 +113,38 @@ fn run_batch_cook_fanout(args: AgentTaskFanoutRunPlanArgs) -> CmdResult<Value> {
     run_batch_cook_fanout_plan(plan)
 }
 
+/// Keeps durable batch coordination on the controller while routing each
+/// independent provider attempt through the selected transport.
+pub(crate) fn run_batch_cook_fanout_with_attempt_dispatcher<F>(
+    args: AgentTaskFanoutRunPlanArgs,
+    attempt_dispatcher: F,
+) -> CmdResult<Value>
+where
+    F: Fn(
+            &AgentTaskCookServiceOptions,
+        )
+            -> std::sync::Arc<dyn crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>
+        + Clone
+        + Send
+        + Sync,
+{
+    let mut plan = load_batch_cook_fanout_plan(&args.input)?;
+    if let Some(record_run_id) = args.record_run_id {
+        plan.fanout_id = record_run_id;
+    }
+    run_batch_cook_fanout_plan_with_terminal(plan, None, move |mut options| {
+        options.attempt_dispatcher = Some(attempt_dispatcher(&options));
+        let result = agent_task_service::run_cook(
+            options,
+            provider::ExtensionProviderAgentTaskExecutor::discover(),
+        )?;
+        Ok(serde_json::json!({
+            "exit_code": result.exit_code,
+            "result": serde_json::to_value(result.value).unwrap_or(Value::Null),
+        }))
+    })
+}
+
 fn run_batch_cook_fanout_plan(plan: BatchCookFanoutPlan) -> CmdResult<Value> {
     run_batch_cook_fanout_plan_with_executor(
         plan,
