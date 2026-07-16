@@ -31,7 +31,6 @@ pub use test_wiring::{TestWiringConfig, TestWiringPolicy};
 pub use thin_command_adapter::{ThinCommandAdapterConfig, ThinCommandAdapterMarkerGroup};
 
 #[cfg(test)]
-#[path = "../../../../../tests/core/component/audit_test.rs"]
 mod audit_test;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
