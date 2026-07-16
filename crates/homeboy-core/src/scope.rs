@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::component;
-use crate::deploy::release_download::detect_remote_url;
 use crate::error::{Error, Result};
+use crate::git::release_download::detect_remote_url;
 use crate::{fleet, project, rig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

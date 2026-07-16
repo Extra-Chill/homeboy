@@ -16,6 +16,7 @@ mod pr_policy;
 mod pr_refresh;
 mod primitives;
 mod primitives_query;
+pub mod release_download;
 
 #[cfg(test)]
 mod operation_tests;

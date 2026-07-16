@@ -2,8 +2,8 @@
 
 use crate::component::Component;
 use crate::component::GithubConfig;
-use crate::deploy::release_download::GitHubRepo;
 use crate::error::{Error, Result};
+use crate::git::release_download::GitHubRepo;
 use crate::release::changelog;
 use crate::release::scope::ReleaseScope;
 use crate::release::types::ReleaseState;

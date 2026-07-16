@@ -5,8 +5,8 @@ use crate::project::Project;
 
 use super::super::execution::{prepare_component_deploy, PreparedComponentDeploy};
 use super::super::preparation::{ComponentPayloadPreparationRequest, PreparedPayloadCollection};
-use super::super::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
 use super::super::types::{ComponentDeployResult, DeployConfig};
+use crate::git::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
 
 pub(super) struct PreparedDeployments {
     deployments: Vec<PreparedComponentDeploy>,

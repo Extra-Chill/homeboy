@@ -1,8 +1,8 @@
 //! Manual-recovery command builders, hints, and logging for failed releases.
 
 use crate::component::GithubConfig;
-use crate::deploy::release_download::GitHubRepo;
 use crate::engine::shell::quote_arg;
+use crate::git::release_download::GitHubRepo;
 
 use super::gh_cli::{gh_env_hint, gh_env_prefix, github_cli_env, safe_filename};
 

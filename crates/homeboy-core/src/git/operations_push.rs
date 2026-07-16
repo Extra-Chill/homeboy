@@ -96,7 +96,7 @@ fn github_https_host(url: &str) -> Option<String> {
     if !url.starts_with("https://") {
         return None;
     }
-    crate::deploy::release_download::parse_github_url(url).map(|repo| repo.host)
+    crate::git::release_download::parse_github_url(url).map(|repo| repo.host)
 }
 
 fn resolve_push_remote_url(

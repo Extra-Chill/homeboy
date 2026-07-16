@@ -204,11 +204,11 @@ fn inspect_release_tag_state(component: &Component, tag_name: &str) -> Result<Re
         .remote_url
         .clone()
         .or_else(|| {
-            crate::deploy::release_download::detect_remote_url(std::path::Path::new(
+            crate::git::release_download::detect_remote_url(std::path::Path::new(
                 &component.local_path,
             ))
         })
-        .and_then(|remote_url| crate::deploy::release_download::parse_github_url(&remote_url))
+        .and_then(|remote_url| crate::git::release_download::parse_github_url(&remote_url))
         .and_then(|github| {
             if !github_release::gh_is_available()
                 || !github_release::gh_is_authenticated(&github, &component.github)
@@ -244,11 +244,11 @@ pub(crate) fn github_release_exists_for_tag(component: &Component, tag_name: &st
         .remote_url
         .clone()
         .or_else(|| {
-            crate::deploy::release_download::detect_remote_url(std::path::Path::new(
+            crate::git::release_download::detect_remote_url(std::path::Path::new(
                 &component.local_path,
             ))
         })
-        .and_then(|remote_url| crate::deploy::release_download::parse_github_url(&remote_url))
+        .and_then(|remote_url| crate::git::release_download::parse_github_url(&remote_url))
         .and_then(|github| {
             if !github_release::gh_is_available()
                 || !github_release::gh_is_authenticated(&github, &component.github)

@@ -14,9 +14,9 @@ use super::orchestration_ref_checkout::{ExactRefCheckout, ExactRefIdentity};
 use super::orchestration_tag_checkout::{checkout_deploy_tags, restore_branches};
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{load_project_components, plan_components};
-use super::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
 use super::types::{ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary};
 use super::version_overrides::fetch_remote_versions_for_project;
+use crate::git::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
 
 mod modes;
 mod preflight;
