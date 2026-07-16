@@ -116,7 +116,7 @@ pub fn undo() -> Result<()> {
     Ok(())
 }
 "#;
-    let nested_fp = fingerprint_from_grammar(nested_content, &grammar, "src/core/engine/undo.rs")
+    let nested_fp = fingerprint_from_grammar(nested_content, &grammar, "src/engine/undo.rs")
         .expect("fingerprint should succeed");
 
     assert_eq!(nested_fp.namespace.as_deref(), Some("crate::engine"));

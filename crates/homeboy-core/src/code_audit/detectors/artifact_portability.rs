@@ -723,7 +723,12 @@ mod tests {
 
     #[test]
     fn homeboy_config_declares_homeboy_run_marker() {
-        let raw = std::fs::read_to_string("homeboy.json").expect("homeboy config");
+        // homeboy.json lives at the repository root; this crate builds two levels
+        // down (crates/homeboy-core), so resolve it relative to the manifest dir
+        // rather than the (per-crate) test working directory.
+        let config_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../homeboy.json");
+        let raw = std::fs::read_to_string(&config_path).expect("homeboy config");
         let component: crate::component::Component =
             serde_json::from_str(&raw).expect("component config");
         let audit = component.audit.expect("audit config");
