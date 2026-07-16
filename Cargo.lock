@@ -751,6 +751,7 @@ dependencies = [
  "homeboy-product-identity",
  "homeboy-redaction",
  "homeboy-triage",
+ "homeboy-tunnel",
  "libc",
  "regex",
  "reqwest",
@@ -908,6 +909,21 @@ dependencies = [
  "homeboy-core",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "homeboy-tunnel"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "glob-match",
+ "homeboy-core",
+ "libc",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

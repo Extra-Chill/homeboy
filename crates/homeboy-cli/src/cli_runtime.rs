@@ -94,6 +94,10 @@ impl CliRuntime {
         crate::core::paths::set_config_artifact_root_resolver(|| {
             crate::core::defaults::load_config().artifact_root
         });
+        // Register optional feature crates' config entities with core so their
+        // IDs/aliases participate in cross-entity collision detection. Core owns
+        // the collision invariant but must not depend on these optional features.
+        homeboy_tunnel::register();
         // Register the command-label resolver so core::runner can map dispatched
         // argv to a hot-command label without depending on the full CLI parser.
         crate::core::runner::set_command_label_resolver(|argv| {

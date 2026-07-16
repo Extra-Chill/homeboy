@@ -1,9 +1,9 @@
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
-use crate::config::ConfigEntity;
-use crate::error::{Error, Result};
-use crate::paths;
+use homeboy_core::config::ConfigEntity;
+use homeboy_core::error::{Error, Result};
+use homeboy_core::paths;
 
 use super::types::*;
 use super::validation::validate_service_tunnel;

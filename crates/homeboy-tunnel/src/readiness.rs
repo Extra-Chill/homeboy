@@ -2,7 +2,7 @@ use std::fs;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
-use crate::error::{Error, Result};
+use homeboy_core::error::{Error, Result};
 
 use super::runtime::runtime_state_is_running;
 use super::types::*;

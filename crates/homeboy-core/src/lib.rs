@@ -159,7 +159,6 @@ pub mod performance_hotspots;
 pub mod phase_timing;
 pub mod plan;
 pub mod preview_client;
-pub mod preview_consumer;
 pub mod preview_ingress;
 #[cfg(test)]
 mod preview_ingress_tests;
@@ -228,7 +227,6 @@ pub(crate) mod transient_workspace_policy;
 #[doc(hidden)]
 #[allow(dead_code)]
 pub mod test_support;
-pub mod tunnel;
 #[cfg(test)]
 mod tunnel_tests;
 pub mod update_check_cache;

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::tunnel;
+use crate::status as tunnel_status;
 
 /// Execution mode for a preview consumer run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +140,9 @@ const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// supervision with stdout/stderr streamed to log files, and the function
 /// returns as soon as a ready preview URL is detected (or the readiness wait
 /// elapses) while leaving the command running for held preview workflows.
-pub fn run(request: PreviewConsumerRunRequest) -> crate::Result<(PreviewConsumerRunResult, i32)> {
+pub fn run(
+    request: PreviewConsumerRunRequest,
+) -> homeboy_core::Result<(PreviewConsumerRunResult, i32)> {
     let config = read_config(&request.config_path)?;
     let public_url = resolve_public_url(
         request.service_id.as_deref(),
@@ -151,13 +153,13 @@ pub fn run(request: PreviewConsumerRunRequest) -> crate::Result<(PreviewConsumer
         .clone()
         .or_else(|| config.command.artifacts_dir.clone())
         .unwrap_or_else(|| {
-            crate::artifacts::root()
+            homeboy_core::artifacts::root()
                 .unwrap_or_else(|_| std::env::temp_dir().join("homeboy-artifacts"))
                 .join("preview-consumer")
                 .join(safe_artifact_slug(&config.id))
         });
     std::fs::create_dir_all(&artifacts_dir).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy_core::Error::internal_io(
             err.to_string(),
             Some(format!("create artifacts dir {}", artifacts_dir.display())),
         )
@@ -194,9 +196,9 @@ fn run_blocking(
     mut command: Command,
     public_url: String,
     artifacts_dir: PathBuf,
-) -> crate::Result<(PreviewConsumerRunResult, i32)> {
+) -> homeboy_core::Result<(PreviewConsumerRunResult, i32)> {
     let output = command.output().map_err(|err| {
-        crate::Error::internal_io(
+        homeboy_core::Error::internal_io(
             err.to_string(),
             Some(format!("run preview consumer {}", config.id)),
         )
@@ -234,14 +236,14 @@ fn run_non_blocking(
     mut command: Command,
     public_url: String,
     artifacts_dir: PathBuf,
-) -> crate::Result<(PreviewConsumerRunResult, i32)> {
+) -> homeboy_core::Result<(PreviewConsumerRunResult, i32)> {
     let stdout_log_path = artifacts_dir.join("homeboy-preview-consumer.stdout.log");
     let stderr_log_path = artifacts_dir.join("homeboy-preview-consumer.stderr.log");
 
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|err| {
-        crate::Error::internal_io(
+        homeboy_core::Error::internal_io(
             err.to_string(),
             Some(format!("spawn preview consumer {}", config.id)),
         )
@@ -327,15 +329,15 @@ fn artifact_path(config: &PreviewConsumerConfig, artifacts_dir: &Path) -> String
     artifacts_dir.join(artifact_file).display().to_string()
 }
 
-fn write_artifact(result: &PreviewConsumerRunResult) -> crate::Result<()> {
+fn write_artifact(result: &PreviewConsumerRunResult) -> homeboy_core::Result<()> {
     let artifact_json = serde_json::to_string_pretty(result).map_err(|err| {
-        crate::Error::internal_json(
+        homeboy_core::Error::internal_json(
             err.to_string(),
             Some("serialize preview consumer run artifact".to_string()),
         )
     })?;
     std::fs::write(&result.artifact_path, format!("{artifact_json}\n")).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy_core::Error::internal_io(
             err.to_string(),
             Some(format!("write {}", result.artifact_path)),
         )
@@ -369,15 +371,15 @@ fn detect_ready_url(config: &PreviewConsumerOutputConfig, line: &str) -> Option<
         .and_then(|prefix| parse_prefixed_line(line, prefix))
 }
 
-fn read_config(path: &Path) -> crate::Result<PreviewConsumerConfig> {
+fn read_config(path: &Path) -> homeboy_core::Result<PreviewConsumerConfig> {
     let raw = std::fs::read_to_string(path).map_err(|err| {
-        crate::Error::internal_io(
+        homeboy_core::Error::internal_io(
             err.to_string(),
             Some(format!("read preview consumer config {}", path.display())),
         )
     })?;
     serde_json::from_str(&raw).map_err(|err| {
-        crate::Error::validation_invalid_json(
+        homeboy_core::Error::validation_invalid_json(
             err,
             Some(format!("parse preview consumer config {}", path.display())),
             Some(raw),
@@ -388,22 +390,22 @@ fn read_config(path: &Path) -> crate::Result<PreviewConsumerConfig> {
 fn resolve_public_url(
     service_id: Option<&str>,
     preview_public_url: Option<&str>,
-) -> crate::Result<String> {
+) -> homeboy_core::Result<String> {
     if let Some(public_url) = preview_public_url {
         return Ok(public_url.to_string());
     }
     let Some(service_id) = service_id else {
-        return Err(crate::Error::validation_missing_argument(vec![
+        return Err(homeboy_core::Error::validation_missing_argument(vec![
             "--service-id or --preview-public-url".to_string(),
         ]));
     };
-    let status = tunnel::status(service_id)?;
+    let status = tunnel_status(service_id)?;
     status
         .preview_identity
         .public_url
         .or_else(|| status.preview.and_then(|preview| preview.preview_identity.public_url))
         .ok_or_else(|| {
-            crate::Error::validation_invalid_argument(
+            homeboy_core::Error::validation_invalid_argument(
                 "service-id",
                 "service status does not contain a public preview URL; start the service with a public tunnel backend first",
                 Some(service_id.to_string()),

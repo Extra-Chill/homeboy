@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use homeboy_core::error::{Error, Result};
 
 use super::entity::native_preview_token_sha256;
 use super::types::*;

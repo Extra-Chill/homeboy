@@ -91,7 +91,7 @@ impl Drop for ConfigLockGuard {
 // Config Entity Trait
 // ============================================================================
 
-pub(crate) trait ConfigEntity: Serialize + DeserializeOwned {
+pub trait ConfigEntity: Serialize + DeserializeOwned {
     /// The entity type name (e.g., "project", "server", "component", "extension").
     const ENTITY_TYPE: &'static str;
 
@@ -160,6 +160,7 @@ pub(crate) trait ConfigEntity: Serialize + DeserializeOwned {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct ConfigEntityMetadata {
     entity_type: &'static str,
     exists: fn(&str) -> bool,
@@ -174,15 +175,58 @@ fn entity_metadata<T: ConfigEntity>() -> ConfigEntityMetadata {
     }
 }
 
-fn config_entity_registry() -> [ConfigEntityMetadata; 6] {
-    [
+/// Config-entity types registered by feature layers above core (e.g. the tunnel
+/// crate registers `ServiceTunnel`, the runner crate registers `Runner`). Core
+/// owns the entity types it defines itself; optional feature crates register
+/// theirs at startup so core's cross-entity ID/alias collision checks stay
+/// complete without core having to depend on those feature crates.
+static EXTERNAL_CONFIG_ENTITIES: std::sync::Mutex<Vec<ConfigEntityMetadata>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Register a config-entity type from a layer above core. Called once at startup
+/// by feature crates so their entities participate in ID/alias collision
+/// detection. Idempotent per entity type.
+pub fn register_config_entity<T: ConfigEntity>() {
+    let metadata = entity_metadata::<T>();
+    let mut entities = EXTERNAL_CONFIG_ENTITIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !entities
+        .iter()
+        .any(|existing| existing.entity_type == metadata.entity_type)
+    {
+        entities.push(metadata);
+    }
+}
+
+/// The full set of config-entity metadata: core's own entities plus any
+/// registered by feature layers above core.
+fn config_entity_registry() -> Vec<ConfigEntityMetadata> {
+    let mut registry = vec![
         entity_metadata::<crate::project::Project>(),
         entity_metadata::<crate::server::Server>(),
+        // Runner is still core-owned (not yet extracted); when the runner crate
+        // lands it should register itself via `register_config_entity` instead.
         entity_metadata::<crate::runner::Runner>(),
-        entity_metadata::<crate::tunnel::ServiceTunnel>(),
         entity_metadata::<crate::extension::ExtensionManifest>(),
         entity_metadata::<crate::fleet::Fleet>(),
-    ]
+    ];
+    let external = EXTERNAL_CONFIG_ENTITIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry.extend(external.iter().copied());
+    registry
+}
+
+/// The entity-type names currently participating in ID/alias collision
+/// detection: core's own entities plus any registered by feature layers. Useful
+/// for diagnostics and for tests that guard the collision invariant against a
+/// feature crate forgetting to register its entity at startup.
+pub fn registered_config_entity_types() -> Vec<&'static str> {
+    config_entity_registry()
+        .into_iter()
+        .map(|metadata| metadata.entity_type)
+        .collect()
 }
 
 fn alias_entries<T: ConfigEntity>() -> Vec<(String, String)> {
@@ -199,7 +243,7 @@ fn alias_entries<T: ConfigEntity>() -> Vec<(String, String)> {
         .collect()
 }
 
-pub(crate) fn load<T: ConfigEntity>(id: &str) -> Result<T> {
+pub fn load<T: ConfigEntity>(id: &str) -> Result<T> {
     let path = T::config_path(id)?;
     if !path.exists() {
         let entities = list::<T>().unwrap_or_default();
@@ -258,7 +302,7 @@ fn entry_path_and_id<T: ConfigEntity>(entry: &local_files::Entry) -> Option<(Pat
     }
 }
 
-pub(crate) fn list<T: ConfigEntity>() -> Result<Vec<T>> {
+pub fn list<T: ConfigEntity>() -> Result<Vec<T>> {
     let dir = T::config_dir()?;
     let entries = local_files::local().list(&dir)?;
 
@@ -361,7 +405,7 @@ fn write_entity<T: ConfigEntity>(entity: &T) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn save<T: ConfigEntity>(entity: &T) -> Result<()> {
+pub fn save<T: ConfigEntity>(entity: &T) -> Result<()> {
     identifier::validate_component_id(entity.id())?;
     check_id_collision(entity.id(), T::entity_type())?;
 
@@ -414,10 +458,7 @@ fn create_single_from_json<T: ConfigEntity>(json_spec: &str) -> Result<CreateRes
 
 /// Unified create that auto-detects single vs bulk operations.
 /// Array input triggers batch create, object input triggers single create.
-pub(crate) fn create<T: ConfigEntity>(
-    json_spec: &str,
-    skip_existing: bool,
-) -> Result<CreateOutput<T>> {
+pub fn create<T: ConfigEntity>(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<T>> {
     let raw = read_json_spec_to_string(json_spec)?;
 
     if is_json_array(&raw) {
@@ -427,7 +468,7 @@ pub(crate) fn create<T: ConfigEntity>(
     Ok(CreateOutput::Single(create_single_from_json::<T>(&raw)?))
 }
 
-pub(crate) fn delete<T: ConfigEntity>(id: &str) -> Result<()> {
+pub fn delete<T: ConfigEntity>(id: &str) -> Result<()> {
     let path = T::config_path(id)?;
     if !path.exists() {
         let suggestions = find_similar_ids::<T>(id);
@@ -453,11 +494,11 @@ pub(crate) fn delete<T: ConfigEntity>(id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn exists<T: ConfigEntity>(id: &str) -> bool {
+pub fn exists<T: ConfigEntity>(id: &str) -> bool {
     T::config_path(id).map(|p| p.exists()).unwrap_or(false)
 }
 
-pub(crate) fn list_ids<T: ConfigEntity>() -> Result<Vec<String>> {
+pub fn list_ids<T: ConfigEntity>() -> Result<Vec<String>> {
     let dir = T::config_dir()?;
     if !dir.exists() {
         return Ok(Vec::new());
@@ -478,7 +519,7 @@ pub(crate) fn list_ids<T: ConfigEntity>() -> Result<Vec<String>> {
 
 /// Unified merge that auto-detects single vs bulk operations.
 /// Array input triggers batch merge, object input triggers single merge.
-pub(crate) fn merge<T: ConfigEntity>(
+pub fn merge<T: ConfigEntity>(
     id: Option<&str>,
     json_spec: &str,
     replace_fields: &[String],
@@ -660,7 +701,7 @@ pub(crate) fn merge_batch_from_json<T: ConfigEntity>(raw_json: &str) -> Result<B
     Ok(result)
 }
 
-pub(crate) fn remove_from_json<T: ConfigEntity>(
+pub fn remove_from_json<T: ConfigEntity>(
     id: Option<&str>,
     json_spec: &str,
 ) -> Result<RemoveResult> {
@@ -696,7 +737,7 @@ pub(crate) fn remove_from_json<T: ConfigEntity>(
     })
 }
 
-pub(crate) fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
+pub fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
     let new_id = new_id.to_lowercase();
     identifier::validate_component_id(&new_id)?;
 
@@ -783,7 +824,7 @@ pub(crate) fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
 ///
 /// Verifies the entity exists, checks for dependents via the trait hook,
 /// and only deletes if nothing references it.
-pub(crate) fn delete_safe<T: ConfigEntity>(id: &str) -> Result<()> {
+pub fn delete_safe<T: ConfigEntity>(id: &str) -> Result<()> {
     if !exists::<T>(id) {
         let suggestions = find_similar_ids::<T>(id);
         return Err(T::not_found_error(id.to_string(), suggestions));
@@ -810,7 +851,7 @@ pub(crate) fn delete_safe<T: ConfigEntity>(id: &str) -> Result<()> {
 /// Find entity IDs similar to the given target.
 /// Uses prefix matching, suffix matching, and Levenshtein distance.
 /// Returns up to 3 matches prioritized by match quality.
-pub(crate) fn find_similar_ids<T: ConfigEntity>(target: &str) -> Vec<String> {
+pub fn find_similar_ids<T: ConfigEntity>(target: &str) -> Vec<String> {
     let entities = match list::<T>() {
         Ok(e) => e,
         Err(_) => return vec![],
@@ -960,58 +1001,65 @@ mod tests {
 /// // Base only (entity has custom merge):
 /// entity_crud!(Component; list_ids);
 /// ```
+#[macro_export]
 macro_rules! entity_crud {
     // Entry point: split base from optional features
     ($Entity:ty $(; $($feature:ident),+ )?) => {
         // --- Universal wrappers (always generated) ---
 
-        pub fn load(id: &str) -> Result<$Entity> {
-            config::load::<$Entity>(id)
+        pub fn load(id: &str) -> $crate::Result<$Entity> {
+            $crate::config::load::<$Entity>(id)
         }
 
-        pub fn list() -> Result<Vec<$Entity>> {
-            config::list::<$Entity>()
+        pub fn list() -> $crate::Result<Vec<$Entity>> {
+            $crate::config::list::<$Entity>()
         }
 
-        pub fn save(entity: &$Entity) -> Result<()> {
-            config::save(entity)
+        pub fn save(entity: &$Entity) -> $crate::Result<()> {
+            $crate::config::save(entity)
         }
 
-        pub fn delete(id: &str) -> Result<()> {
-            config::delete::<$Entity>(id)
+        pub fn delete(id: &str) -> $crate::Result<()> {
+            $crate::config::delete::<$Entity>(id)
         }
 
         pub fn exists(id: &str) -> bool {
-            config::exists::<$Entity>(id)
+            $crate::config::exists::<$Entity>(id)
         }
 
-        pub fn remove_from_json(id: Option<&str>, json_spec: &str) -> Result<RemoveResult> {
-            config::remove_from_json::<$Entity>(id, json_spec)
+        pub fn remove_from_json(
+            id: Option<&str>,
+            json_spec: &str,
+        ) -> $crate::Result<$crate::RemoveResult> {
+            $crate::config::remove_from_json::<$Entity>(id, json_spec)
         }
 
-        pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<$Entity>> {
-            config::create::<$Entity>(json_spec, skip_existing)
+        pub fn create(
+            json_spec: &str,
+            skip_existing: bool,
+        ) -> $crate::Result<$crate::CreateOutput<$Entity>> {
+            $crate::config::create::<$Entity>(json_spec, skip_existing)
         }
 
-        pub fn rename(id: &str, new_id: &str) -> Result<$Entity> {
-            config::rename::<$Entity>(id, new_id)?;
+        pub fn rename(id: &str, new_id: &str) -> $crate::Result<$Entity> {
+            $crate::config::rename::<$Entity>(id, new_id)?;
             let resolved_id = new_id.to_lowercase();
-            <$Entity as config::ConfigEntity>::on_rename(id, &resolved_id)?;
+            <$Entity as $crate::config::ConfigEntity>::on_rename(id, &resolved_id)?;
             load(&resolved_id)
         }
 
-        pub fn delete_safe(id: &str) -> Result<()> {
-            config::delete_safe::<$Entity>(id)
+        pub fn delete_safe(id: &str) -> $crate::Result<()> {
+            $crate::config::delete_safe::<$Entity>(id)
         }
 
         // --- Optional features ---
-        $( $(entity_crud!(@feature $Entity, $feature);)+ )?
+        $( $($crate::entity_crud!(@feature $Entity, $feature);)+ )?
     };
 
     // Feature: list_ids
     (@feature $Entity:ty, list_ids) => {
-        pub fn list_ids() -> Result<Vec<String>> {
-            config::list_ids::<$Entity>()
+        pub fn list_ids() -> $crate::Result<Vec<String>> {
+            $crate::config::list_ids::<$Entity>()
         }
     };
 
@@ -1021,15 +1069,15 @@ macro_rules! entity_crud {
             id: Option<&str>,
             json_spec: &str,
             replace_fields: &[String],
-        ) -> Result<MergeOutput> {
-            config::merge::<$Entity>(id, json_spec, replace_fields)
+        ) -> $crate::Result<$crate::MergeOutput> {
+            $crate::config::merge::<$Entity>(id, json_spec, replace_fields)
         }
     };
 
     // Feature: slugify_id
     (@feature $Entity:ty, slugify_id) => {
-        pub fn slugify_id(name: &str) -> Result<String> {
-            crate::engine::identifier::slugify_id(name, "name")
+        pub fn slugify_id(name: &str) -> $crate::Result<String> {
+            $crate::engine::identifier::slugify_id(name, "name")
         }
     };
 }
