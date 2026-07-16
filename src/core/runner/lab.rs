@@ -24,6 +24,7 @@
 //! everything else is internal to the runner module.
 
 mod agent_task_bridge;
+mod agent_task_plan_projection;
 mod args_util;
 mod evidence;
 mod fallback;
