@@ -12,6 +12,7 @@ pub mod command;
 pub mod detail_output;
 pub mod grammar;
 pub mod identifier;
+pub mod language;
 pub mod local_files;
 pub mod output_parse;
 pub mod shell;
