@@ -9,7 +9,7 @@
 //! - `apply_edit_ops()` — filesystem entry point (read → transform → write)
 //! - `ApplyReport` / `ApplyError` — result types
 
-use crate::code_audit::conventions::Language;
+use crate::engine::language::Language;
 use crate::error::Result;
 use std::collections::HashMap;
 use std::path::Path;
@@ -795,7 +795,7 @@ pub fn apply_edit_ops(ops: &[TaggedEditOp], root: &Path) -> Result<ApplyReport> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::conventions::Language;
+    use crate::engine::language::Language;
 
     #[test]
     fn resolve_anchor_at_line() {
