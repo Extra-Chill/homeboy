@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 use super::agent_task::{
@@ -313,6 +314,22 @@ fn reconcile_outcome(
         );
     }
 
+    if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable {
+        let artifact_ids = outcome
+            .artifacts
+            .iter()
+            .filter(|artifact| is_verified_recoverable_patch(outcome, artifact))
+            .map(|artifact| artifact.id.clone())
+            .collect::<Vec<_>>();
+        if artifact_ids.len() == 1 {
+            return (
+                AgentTaskReconciliationDecision::ApplyCandidate,
+                "timed-out provider produced a verified recoverable patch candidate".to_string(),
+                artifact_ids,
+            );
+        }
+    }
+
     if matches!(
         outcome.status,
         AgentTaskOutcomeStatus::ProviderError | AgentTaskOutcomeStatus::Timeout
@@ -352,10 +369,7 @@ fn reconcile_outcome(
         .filter(|artifact| is_apply_artifact(artifact))
         .map(|artifact| artifact.id.clone())
         .collect::<Vec<_>>();
-    if matches!(
-        outcome.status,
-        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::CandidateRecoverable
-    ) && !apply_artifact_ids.is_empty()
+    if matches!(outcome.status, AgentTaskOutcomeStatus::Succeeded) && !apply_artifact_ids.is_empty()
     {
         return (
             AgentTaskReconciliationDecision::ApplyCandidate,
@@ -384,6 +398,43 @@ fn reconcile_outcome(
         },
         artifact_ids(outcome),
     )
+}
+
+/// Timeout recovery is promotable only from an immutable, fully bound artifact.
+/// Promotion repeats the content validation before applying the patch.
+fn is_verified_recoverable_patch(outcome: &AgentTaskOutcome, artifact: &AgentTaskArtifact) -> bool {
+    if !is_apply_artifact(artifact)
+        || artifact.kind != "patch"
+        || artifact.metadata.get("task_id").and_then(Value::as_str) != Some(&outcome.task_id)
+        || !non_empty_metadata_string(artifact, "run_id")
+        || !non_empty_metadata_string(artifact, "base_ref")
+        || !non_empty_metadata_string(artifact, "repository_identity")
+        || !non_empty_metadata_string(artifact, "workspace_identity")
+    {
+        return false;
+    }
+    let Some(expected_sha256) = artifact.sha256.as_deref() else {
+        return false;
+    };
+    if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return false;
+    }
+    let Some(path) = artifact.path.as_deref() else {
+        return false;
+    };
+    let Ok(content) = std::fs::read(path) else {
+        return false;
+    };
+    !content.is_empty() && expected_sha256 == format!("{:x}", Sha256::digest(&content))
+}
+
+fn non_empty_metadata_string(artifact: &AgentTaskArtifact, key: &str) -> bool {
+    artifact
+        .metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.is_empty())
 }
 
 fn has_known_empty_change_set(outcome: &AgentTaskOutcome) -> bool {
@@ -555,6 +606,95 @@ mod tests {
         assert_eq!(report.retry_plan[0].task_id, "retry");
         assert_eq!(report.issue_report_candidates[0].task_id, "issue");
         assert_eq!(report.review_candidates[0].task_id, "review");
+    }
+
+    #[test]
+    fn aggregate_projects_only_verified_recoverable_timeout_patches_for_promotion() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let patch = b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+        let patch_path = temp.path().join("uncommitted-changes.patch");
+        std::fs::write(&patch_path, patch).expect("write patch");
+        let sha256 = format!("{:x}", Sha256::digest(patch));
+        let recoverable = AgentTaskOutcome {
+            failure_classification: Some(AgentTaskFailureClassification::Timeout),
+            ..outcome(
+                "timed-out",
+                AgentTaskOutcomeStatus::CandidateRecoverable,
+                vec![AgentTaskArtifact {
+                    schema: "homeboy/agent-task-artifact/v1".to_string(),
+                    id: "uncommitted-changes".to_string(),
+                    kind: "patch".to_string(),
+                    name: None,
+                    label: None,
+                    role: Some("patch".to_string()),
+                    semantic_key: None,
+                    path: Some(patch_path.display().to_string()),
+                    url: None,
+                    mime: Some("text/x-patch".to_string()),
+                    size_bytes: Some(patch.len() as u64),
+                    sha256: Some(sha256),
+                    metadata: json!({
+                        "run_id": "run-1",
+                        "task_id": "timed-out",
+                        "base_ref": "base-fingerprint",
+                        "repository_identity": "repository-identity",
+                        "workspace_identity": "workspace-identity"
+                    }),
+                }],
+            )
+        };
+
+        let report = aggregate_agent_task_outcomes(&[recoverable]);
+
+        assert_eq!(report.summary.apply_candidates, 1);
+        assert_eq!(report.summary.retry_candidates, 0);
+        assert_eq!(
+            report.apply_candidates[0].artifact_ids,
+            vec!["uncommitted-changes"]
+        );
+    }
+
+    #[test]
+    fn aggregate_rejects_empty_or_fingerprint_mismatched_recoverable_patches() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let patch_path = temp.path().join("candidate.patch");
+        std::fs::write(&patch_path, b"changed").expect("write patch");
+        let candidate = |id: &str, size_bytes: u64, sha256: &str| AgentTaskOutcome {
+            failure_classification: Some(AgentTaskFailureClassification::Timeout),
+            ..outcome(
+                id,
+                AgentTaskOutcomeStatus::CandidateRecoverable,
+                vec![AgentTaskArtifact {
+                    schema: "homeboy/agent-task-artifact/v1".to_string(),
+                    id: format!("{id}-patch"),
+                    kind: "patch".to_string(),
+                    name: None,
+                    label: None,
+                    role: Some("patch".to_string()),
+                    semantic_key: None,
+                    path: Some(patch_path.display().to_string()),
+                    url: None,
+                    mime: Some("text/x-patch".to_string()),
+                    size_bytes: Some(size_bytes),
+                    sha256: Some(sha256.to_string()),
+                    metadata: json!({
+                        "run_id": "run-1", "task_id": id, "base_ref": "base-fingerprint",
+                        "repository_identity": "repository-identity", "workspace_identity": "workspace-identity"
+                    }),
+                }],
+            )
+        };
+        let report = aggregate_agent_task_outcomes(&[
+            candidate(
+                "empty",
+                0,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            candidate("mismatched", 7, &"0".repeat(64)),
+        ]);
+
+        assert_eq!(report.summary.apply_candidates, 0);
+        assert_eq!(report.summary.retry_candidates, 2);
     }
 
     #[test]

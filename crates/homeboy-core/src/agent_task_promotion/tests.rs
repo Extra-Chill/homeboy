@@ -243,7 +243,14 @@ fn recoverable_patch_source(temp: &tempfile::TempDir, patch_count: usize) -> (Pa
                 "path": name,
                 "size_bytes": VALID_PATCH.len(),
                 "sha256": sha256_hex(VALID_PATCH),
-                "metadata": { "role": "patch" }
+                "metadata": {
+                    "role": "patch",
+                    "run_id": "recoverable-run",
+                    "task_id": "task-1",
+                    "base_ref": "base-fingerprint",
+                    "repository_identity": "repository-identity",
+                    "workspace_identity": "workspace-identity"
+                }
             })
         })
         .collect::<Vec<_>>();
