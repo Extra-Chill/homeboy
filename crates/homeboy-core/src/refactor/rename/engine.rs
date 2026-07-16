@@ -462,8 +462,8 @@ fn target_files(files: Vec<PathBuf>, root: &Path, targeting: &RenameTargeting) -
 /// renames are routed through `apply_edit_ops()` so they share the same
 /// execution path as the fixer pipeline and other manual commands.
 pub fn apply_renames(result: &mut RenameResult, root: &Path) -> Result<()> {
-    use crate::engine::edit_op::rename_file_moves_to_edit_ops;
     use crate::engine::edit_op_apply::apply_edit_ops;
+    use crate::refactor::edit_op_tagged::rename_file_moves_to_edit_ops;
 
     // Apply content edits first (whole-file replacement — rename operates at
     // full-content granularity, not line-level, so these bypass EditOp).
@@ -491,7 +491,8 @@ pub fn apply_renames(result: &mut RenameResult, root: &Path) -> Result<()> {
         let ops = rename_file_moves_to_edit_ops(result);
         result.file_renames = original_renames;
 
-        let report = apply_edit_ops(&ops, root).map_err(|e| {
+        let plain_ops: Vec<_> = ops.iter().map(|t| t.op.clone()).collect();
+        let report = apply_edit_ops(&plain_ops, root).map_err(|e| {
             Error::internal_io(
                 format!("apply_edit_ops failed for file renames: {}", e),
                 Some("rename.apply".to_string()),
