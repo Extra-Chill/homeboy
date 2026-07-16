@@ -421,6 +421,20 @@ pub(crate) fn exec_lab_context(
             if let Some(workspace) = context.materialized_workspace.as_mut() {
                 workspace.preserve();
             }
+            if let Some(run_id) = context.agent_task_run_id.as_deref() {
+                if let Some(job_id) = accepted_runner_job_id(runner_id, run_id) {
+                    return in_flight_daemon_disconnect_outcome(
+                        context.plan,
+                        runner_id,
+                        &job_id,
+                        run_id,
+                        &remote_cwd,
+                        &context.remote_command,
+                        "daemon accepted the durable job before the exec response was lost",
+                        &err,
+                    );
+                }
+            }
             let health = runner_daemon_health_failure(&err);
             let in_flight_job_id = health
                 .as_ref()
@@ -733,6 +747,35 @@ pub(crate) fn exec_lab_context(
         exit_code,
         output_file_content,
     })
+}
+
+/// `/exec` is not an idempotent operation. When its response is lost, query the
+/// daemon's durable active-job projection by the preassigned run ID rather than
+/// submitting the workload again.
+fn accepted_runner_job_id(runner_id: &str, run_id: &str) -> Option<String> {
+    accepted_runner_job_id_with(runner_id, run_id, || crate::runner::status(runner_id))
+}
+
+pub(crate) fn accepted_runner_job_id_with<F>(
+    runner_id: &str,
+    run_id: &str,
+    status: F,
+) -> Option<String>
+where
+    F: FnOnce() -> Result<crate::runner::RunnerStatusReport>,
+{
+    let status = status().ok()?;
+    if status.runner_id != runner_id {
+        return None;
+    }
+    let mut matching = status
+        .active_runner_jobs
+        .into_iter()
+        .filter(|job| job.durable_run_id.as_deref() == Some(run_id))
+        .map(|job| job.job_id)
+        .collect::<Vec<_>>();
+    matching.sort();
+    (matching.len() == 1).then(|| matching.remove(0))
 }
 
 fn promotion_handoff_intent(args: &[String], stdout: &str) -> Result<Option<PromotionPatchIntent>> {

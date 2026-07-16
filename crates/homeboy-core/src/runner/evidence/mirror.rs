@@ -1,5 +1,3 @@
-use std::fs;
-
 use serde_json::{json, Value};
 
 use crate::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
@@ -19,7 +17,7 @@ use super::detail::{
     explicit_observation_run_ids, remote_detail_artifacts, remote_detail_to_run_record,
     remote_run_matches_job_window,
 };
-use super::tokens::is_retrievable_runner_artifact;
+use super::tokens::{is_retrievable_runner_artifact, runner_artifact_token};
 use super::util::{
     job_status_as_run_status, local_job_run_id, ms_to_rfc3339, result_summary,
     runner_exec_run_label, runner_metadata, source_snapshot_from_result,
@@ -292,23 +290,16 @@ pub(super) fn mirrored_patch_result(
             ))
         })?;
 
-    let accessible = is_retrievable_runner_artifact(&artifact.path)
-        || fs::metadata(&artifact.path)
-            .map(|metadata| metadata.is_file())
-            .unwrap_or(false);
-    if !accessible {
-        return Err(Error::internal_unexpected(format!(
-            "runner capture-patch artifact {artifact_id} was mirrored for runner {}, but its mirrored path is not accessible: {}",
-            runner.id, artifact.path
-        )));
-    }
-
     let mut patched = patch.clone();
     if let Some(object) = patched.as_object_mut() {
-        object.insert(
-            "patch_artifact_path".to_string(),
-            Value::String(artifact.path),
-        );
+        // The controller cannot rely on the runner-local artifact path. Keep
+        // the patch on the daemon artifact route so promotion can fetch it.
+        let path = if is_retrievable_runner_artifact(&artifact.path) {
+            artifact.path
+        } else {
+            runner_artifact_token(&runner.id, &expected_run_id, artifact_id)
+        };
+        object.insert("patch_artifact_path".to_string(), Value::String(path));
     }
     Ok(Some(patched))
 }

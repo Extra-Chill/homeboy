@@ -1778,7 +1778,7 @@ fn enqueue_exec_job(
                     job.local_child_reservation_id()?,
                 );
                 let baseline = if request.capture_patch {
-                    Some(capture_baseline(&plan.cwd)?)
+                    Some(capture_baseline(&plan.cwd, source_snapshot.as_ref())?)
                 } else {
                     None
                 };
