@@ -240,24 +240,12 @@ impl RunnerSession {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerArtifactRef {
-    pub artifact_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mime: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transport: Option<String>,
-}
+// RunnerArtifactRef is behavior-free data; it now lives in the shared
+// runner-contract crate so core can name it without a core -> runner edge.
+// Re-exported so internal/CLI call sites resolve unchanged. The
+// From<&JobArtifactMetadata> impl stays below (orphan rule: JobArtifactMetadata
+// is core-owned).
+pub use homeboy_runner_contract::RunnerArtifactRef;
 
 impl From<&JobArtifactMetadata> for RunnerArtifactRef {
     fn from(artifact: &JobArtifactMetadata) -> Self {

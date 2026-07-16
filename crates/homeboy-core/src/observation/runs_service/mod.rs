@@ -31,9 +31,9 @@ use super::{
 use crate::artifact_links::{cached_validated_viewer_links, public_artifact_url};
 use crate::engine::temp::CleanupSizeTotals;
 use crate::execution_contract::EXECUTION_CONTRACT;
-use crate::runners::RunnerArtifactRef;
 use crate::Error;
 use crate::Result;
+use homeboy_runner_contract::RunnerArtifactRef;
 
 /// Output of a successful artifact byte retrieval (whether the bytes came
 /// from a locally-recorded file or from a remote runner).
