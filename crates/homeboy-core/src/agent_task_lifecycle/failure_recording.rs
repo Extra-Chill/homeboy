@@ -685,10 +685,15 @@ pub(crate) fn project_terminal_artifacts(
                                     Some("create controller artifact mirror".to_string()),
                                 )
                             })?;
-                            let download = crate::runners::download_remote_artifact(
-                                &remote_ref,
-                                Some(mirror.path().to_path_buf()),
-                            )?;
+                            let download =
+                                crate::observation::runs_service::runner_evidence::with_runner_evidence(
+                                    |p| {
+                                        p.download_remote_artifact(
+                                            &remote_ref,
+                                            Some(mirror.path().to_path_buf()),
+                                        )
+                                    },
+                                )?;
                             let expected_size = artifact.size_bytes.expect("checked above");
                             let expected_sha256 =
                                 artifact.sha256.as_deref().expect("checked above");
