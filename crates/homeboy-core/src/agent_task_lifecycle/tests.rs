@@ -1860,12 +1860,25 @@ fn controller_leaves_runner_artifact_projection_pending_when_it_cannot_mirror_by
             .as_str()
             .is_some_and(|error| !error.is_empty()));
         let store = crate::observation::ObservationStore::open_initialized().expect("store");
-        assert!(crate::observation::runs_service::resolve_artifact_for_run(
+        let remote_alias = crate::observation::runs_service::resolve_artifact_for_run(
             &store,
             &submitted.run_id,
             "patch",
         )
-        .is_err());
+        .expect("runner artifact alias remains available");
+        assert_eq!(remote_alias.artifact_type, "remote_file");
+        assert!(crate::execution_contract::is_remote_runner_artifact_path(
+            &remote_alias.path
+        ));
+        assert_eq!(
+            verified_controller_artifact_projection_path(
+                &submitted.run_id,
+                &aggregate.outcomes[0].task_id,
+                &aggregate.outcomes[0].artifacts[0],
+            )
+            .expect("verify controller projection"),
+            None,
+        );
     });
 }
 
