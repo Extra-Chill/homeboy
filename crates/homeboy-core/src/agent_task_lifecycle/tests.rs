@@ -565,6 +565,40 @@ fn retry_uses_controller_plan_when_runner_projection_replaces_plan_path() {
 }
 
 #[test]
+fn status_repairs_runner_plan_projection_and_missing_controller_plan_fails_closed() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let record =
+            submit_plan(&plan, Some("runner-projected-status")).expect("controller plan submitted");
+        rewrite_record_for_test(&record.run_id, |projected| {
+            projected.plan_path =
+                "/runner/agent-task-runs/runner-projected-status/plan.json".to_string();
+        })
+        .expect("runner transport path projected");
+
+        assert_eq!(
+            status(&record.run_id).expect("controller status").plan_path,
+            record.plan_path
+        );
+        assert_eq!(
+            store::read_record(&record.run_id)
+                .expect("repaired record")
+                .plan_path,
+            record.plan_path
+        );
+
+        std::fs::remove_file(&record.plan_path).expect("remove controller plan");
+        let error = status(&record.run_id).expect_err("missing controller plan fails closed");
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+        let diagnostic = error.details["error"]
+            .as_str()
+            .expect("structured ownership diagnostic");
+        assert!(diagnostic.contains("authoritative controller-owned plan"));
+        assert!(diagnostic.contains("runner execution transport"));
+    });
+}
+
+#[test]
 fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
     with_isolated_home(|_| {
         let plan = test_plan();

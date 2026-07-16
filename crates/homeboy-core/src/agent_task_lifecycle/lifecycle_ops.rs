@@ -460,14 +460,21 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let resolved_run_id = resolve_run_id(run_id)?;
     let _ = reconcile_deferred_candidate(&resolved_run_id)?;
     let mut record = store::read_record(&resolved_run_id)?;
+    let controller_plan = store::read_controller_plan(&record.run_id)?;
+    let controller_plan_path = store::controller_plan_path(&record.run_id)?
+        .display()
+        .to_string();
+    if record.plan_path != controller_plan_path {
+        record.plan_path = controller_plan_path;
+        store::write_record(&record)?;
+    }
     if !is_terminal_run_state(record.state) {
         if let Ok(aggregate) = store::read_aggregate(&record.run_id) {
-            let plan = store::read_controller_plan(&record.run_id)?;
             let aggregate_path = store::aggregate_path(&record.run_id)
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|_| "aggregate.json".to_string());
             let mut reconciled = record.clone();
-            let projection_plan = aggregate_projection_plan(&plan, &aggregate);
+            let projection_plan = aggregate_projection_plan(&controller_plan, &aggregate);
             apply_aggregate_to_record(
                 &mut reconciled,
                 &projection_plan,
@@ -1617,6 +1624,7 @@ fn record_lab_offload_proxy(
             return Err(error);
         }
     }
+    record.plan_path = store::controller_plan_path(&run_id)?.display().to_string();
     let metadata = record.ensure_metadata_object();
     metadata.insert("kind".to_string(), json!("lab_offload_controller_proxy"));
     // This record is the controller's durable projection of a runner handoff.
