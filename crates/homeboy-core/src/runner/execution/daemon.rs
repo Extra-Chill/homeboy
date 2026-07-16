@@ -174,12 +174,13 @@ pub(super) fn exec_via_daemon(
     }
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
+    let mut daemon_endpoint = local_url.to_string();
     while !matches!(
         job.status,
         JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
     ) {
         if Instant::now() >= deadline {
-            let events = fetch_daemon_events(&client, local_url, &job.id.to_string())
+            let events = fetch_daemon_events(&client, &daemon_endpoint, &job.id.to_string())
                 .map(|events| redact_runner_job_events(&events, &env, &secret_env_names))
                 .unwrap_or_default();
             return Err(daemon_job_wait_timeout(
@@ -194,7 +195,13 @@ pub(super) fn exec_via_daemon(
         }
         std::thread::sleep(Duration::from_millis(200));
         let job_id = job.id.to_string();
-        job = fetch_daemon_job_resilient(&client, local_url, &job_id).map_err(|err| {
+        let (refreshed_job, refreshed_endpoint) = fetch_daemon_job_resilient_with_endpoint_reload(
+            &client,
+            &daemon_endpoint,
+            &job_id,
+            || refreshed_daemon_endpoint(&runner.id, accepted_daemon_identity.as_deref()),
+        )
+        .map_err(|err| {
             terminal_runner_poll_failure(
                 runner,
                 &cwd,
@@ -209,9 +216,11 @@ pub(super) fn exec_via_daemon(
                 err,
             )
         })?;
+        daemon_endpoint = refreshed_endpoint;
+        job = refreshed_job;
     }
     let job_id = job.id.to_string();
-    let mut events = match fetch_daemon_events(&client, local_url, &job_id) {
+    let mut events = match fetch_daemon_events(&client, &daemon_endpoint, &job_id) {
         Ok(events) => redact_runner_job_events(&events, &env, &secret_env_names),
         Err(err) => {
             return Err(lab_terminal_result_transport_error(
@@ -517,11 +526,31 @@ pub(super) fn fetch_daemon_job_resilient(
     local_url: &str,
     job_id: &str,
 ) -> Result<Job> {
+    fetch_daemon_job_resilient_with_endpoint_reload(client, local_url, job_id, || Ok(None))
+        .map(|(job, _)| job)
+}
+
+pub(super) fn fetch_daemon_job_resilient_with_endpoint_reload<Reload>(
+    client: &Client,
+    local_url: &str,
+    job_id: &str,
+    reload_endpoint: Reload,
+) -> Result<(Job, String)>
+where
+    Reload: Fn() -> Result<Option<String>>,
+{
     let transient_deadline = Instant::now() + DAEMON_POLL_TRANSIENT_GRACE;
+    let mut endpoint = local_url.to_string();
     loop {
-        match fetch_daemon_job(client, local_url, job_id) {
-            Ok(job) => return Ok(job),
+        match fetch_daemon_job(client, &endpoint, job_id) {
+            Ok(job) => return Ok((job, endpoint)),
             Err(err) => {
+                if let Some(refreshed_endpoint) = reload_endpoint()? {
+                    if refreshed_endpoint != endpoint {
+                        endpoint = refreshed_endpoint;
+                        continue;
+                    }
+                }
                 if Instant::now() >= transient_deadline {
                     let mut surfaced = err;
                     surfaced.retryable = surfaced.retryable.or(Some(true));
@@ -534,6 +563,41 @@ pub(super) fn fetch_daemon_job_resilient(
             }
         }
     }
+}
+
+fn refreshed_daemon_endpoint(
+    runner_id: &str,
+    expected_identity: Option<&str>,
+) -> Result<Option<String>> {
+    let report = super::super::status(runner_id)?;
+    let Some(session) = report.session.filter(|_| report.connected) else {
+        return Ok(None);
+    };
+    if session.mode != crate::runner::RunnerTunnelMode::DirectSsh {
+        return Ok(None);
+    }
+    let Some(local_url) = session.local_url else {
+        return Ok(None);
+    };
+    if let Some(expected_identity) = expected_identity.filter(|identity| !identity.is_empty()) {
+        let actual_identity =
+            super::super::daemon_endpoint_identity(&local_url).map_err(|error| {
+                Error::internal_unexpected(format!(
+                    "verify refreshed runner daemon identity: {error}"
+                ))
+            })?;
+        if actual_identity.trim() != expected_identity.trim() {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                format!(
+                    "refreshed runner `{runner_id}` daemon identity `{actual_identity}` does not match the accepted daemon `{expected_identity}`"
+                ),
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
+    }
+    Ok(Some(local_url))
 }
 
 pub(super) fn fetch_daemon_events(

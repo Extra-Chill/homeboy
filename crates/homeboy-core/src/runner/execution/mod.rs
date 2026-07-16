@@ -28,8 +28,8 @@ use crate::source_snapshot::SourceSnapshot;
 
 use super::resource_metrics::RunnerResourceMetrics;
 use super::{
-    connect, select_runner_transport, status, Runner, RunnerCapabilityPreflight, RunnerHandoff,
-    RunnerJob, RunnerKind, RunnerMutationArtifacts, RunnerResult, RunnerSession, RunnerTransport,
+    select_runner_transport, status, Runner, RunnerCapabilityPreflight, RunnerHandoff, RunnerJob,
+    RunnerKind, RunnerMutationArtifacts, RunnerResult, RunnerSession, RunnerTransport,
 };
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
@@ -796,24 +796,18 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         );
     }
 
-    let mut connected = status(runner_id)?;
+    let connected = status(runner_id)?;
     if connected.connected && connected.stale_daemon.is_some() {
-        let (refresh, refresh_exit_code) = connect(runner_id)?;
-        if refresh_exit_code != 0 || !refresh.connected {
-            return Err(Error::internal_unexpected(
-                format!(
-                    "runner `{runner_id}` has a stale daemon session and automatic refresh failed: {}",
-                    refresh
-                        .failure_message
-                        .as_deref()
-                        .unwrap_or("runner connect did not establish a fresh daemon session")
-                )
-            )
-            .with_hint(format!(
-                "Refresh the runner session with `homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}`."
-            )));
-        }
-        connected = status(runner_id)?;
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            format!(
+                "runner `{runner_id}` has a stale daemon session; refusing to rotate its shared tunnel during execution"
+            ),
+            Some(runner_id.to_string()),
+            Some(vec![format!(
+                "Drain or recover known jobs, then refresh explicitly with `homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}`."
+            )]),
+        ));
     }
     let result = match select_runner_transport(&runner, Some(&connected), false) {
         RunnerTransport::DirectDaemon(handle) => {

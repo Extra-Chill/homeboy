@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::build_identity;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::paths;
 
 const LEASE_DIR: &str = "promotion.lock";
@@ -309,18 +309,24 @@ fn blocked_error(held: &RuntimePromotionLeaseRecord, reclaimable: bool) -> Error
     } else {
         "Wait for the owner to finish, then follow with `homeboy self status`."
     };
-    Error::validation_invalid_argument(
-        "runtime_promotion_lease",
+    Error::new(
+        ErrorCode::RuntimePromotionContended,
         format!(
             "runtime promotion is held by pid {} operation `{}` target `{}` for {}s",
             held.pid, held.operation, held.target, age
         ),
-        Some(held.target.clone()),
-        Some(vec![
-            action.to_string(),
-            "Follow: `homeboy self doctor`".to_string(),
-        ]),
+        serde_json::json!({
+            "target": held.target,
+            "holder_pid": held.pid,
+            "holder_operation": held.operation,
+            "reclaimable": reclaimable,
+            "tried": [action, "Follow: `homeboy self doctor`"],
+        }),
     )
+}
+
+pub fn is_contention_error(error: &Error) -> bool {
+    error.code == ErrorCode::RuntimePromotionContended
 }
 
 fn reclaimable(record: &RuntimePromotionLeaseRecord) -> bool {
@@ -390,6 +396,7 @@ mod tests {
             capability: "capability".to_string(),
         };
         let error = blocked_error(&held, false);
+        assert_eq!(error.code, ErrorCode::RuntimePromotionContended);
         assert!(error.message.contains("pid 42"));
         assert!(error.message.contains("runner refresh"));
         assert!(error.message.contains("lab"));

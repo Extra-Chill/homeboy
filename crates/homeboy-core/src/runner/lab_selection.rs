@@ -1,12 +1,12 @@
 use std::io::Read;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::lab_contract::LabCommandPortability;
 use crate::runner::resolve_lab_runner_hint;
 use crate::{Error, ErrorCode, Result};
 
-use super::daemon_freshness::repair_or_fail;
 use super::{
     default_lab_runner_availability, load, status, LabOffloadCommand, LabRunnerGateMode,
     RunnerAvailability, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode,
@@ -46,6 +46,10 @@ pub(super) enum LabRunnerPreparation {
     Ready,
     FallBackLocal { reason: String },
 }
+
+static HANDOFF_CONNECT_LOCKS: OnceLock<Mutex<std::collections::BTreeMap<String, Arc<Mutex<()>>>>> =
+    OnceLock::new();
+const HANDOFF_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub(super) fn prepare_lab_runner_for_offload(
     selection: &LabRunnerSelection,
@@ -203,38 +207,55 @@ fn connect_runner_for_offload(
     runner_id: &str,
     source: LabRunnerSelectionSource,
 ) -> Result<(RunnerConnectReport, i32)> {
+    // Serialize with other controller processes before replacing a direct-SSH
+    // session. The child `runner connect` receives this lease capability.
     let timeout = lab_connect_timeout(source);
-    let (stdout, stderr, exit_code, timed_out) = run_runner_connect_command(runner_id, timeout)?;
+    let lease = match crate::runtime_promotion::acquire("Lab runner handoff", runner_id.to_string())
+    {
+        Ok(lease) => lease,
+        Err(lease_error) => {
+            if let Some(session) =
+                wait_for_contended_runner(lease_error.clone(), timeout, |remaining| {
+                    crate::runner::local_live_session(runner_id, remaining)
+                })?
+            {
+                return connected_runner_connect_report_from_session(
+                    runner_id,
+                    session,
+                    crate::paths::runner_session_file(runner_id)?
+                        .display()
+                        .to_string(),
+                );
+            }
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                format!(
+                    "Lab runner `{runner_id}` remained unavailable while another controller owned its reconnect lease: {}",
+                    lease_error.message
+                ),
+                Some(runner_id.to_string()),
+                Some(vec![
+                    format!(
+                        "Waited {}s for the reconnect owner to publish a healthy session; it did not complete.",
+                        timeout.as_secs()
+                    ),
+                    format!("Inspect `homeboy runner status {runner_id} --json` before retrying."),
+                    format!("Inspect `homeboy runner doctor {runner_id}` if the daemon remains unreachable."),
+                ]),
+            ));
+        }
+    };
+    if let Ok(report) = status(runner_id) {
+        if report.connected {
+            return connected_runner_connect_report(runner_id, report);
+        }
+    }
+    let (stdout, stderr, exit_code, timed_out) =
+        run_runner_connect_command(runner_id, timeout, &lease)?;
     let status = status(runner_id)?;
 
     if status.connected {
-        if let Some(session) = status.session {
-            return Ok((
-                RunnerConnectReport {
-                    runner_id: runner_id.to_string(),
-                    mode: Some(session.mode),
-                    role: Some(session.role),
-                    connected: true,
-                    recorded: None,
-                    local_url: session.local_url,
-                    broker_url: session.broker_url,
-                    controller_id: session.controller_id,
-                    remote_daemon_address: session.remote_daemon_address,
-                    tunnel_pid: session.tunnel_pid,
-                    remote_daemon_pid: session.remote_daemon_pid,
-                    connection_warning: None,
-                    homeboy_version: Some(session.homeboy_version),
-                    homeboy_build_identity: session.homeboy_build_identity,
-                    session_path: Some(status.session_path),
-                    leaseless_recovery: None,
-                    state_loss_recovery: None,
-                    leaseless_recovery_evidence: session.leaseless_recovery_evidence,
-                    failure_kind: None,
-                    failure_message: None,
-                },
-                0,
-            ));
-        }
+        return connected_runner_connect_report(runner_id, status);
     }
 
     let reason = if timed_out {
@@ -279,6 +300,76 @@ fn connect_runner_for_offload(
     ))
 }
 
+pub(super) fn wait_for_contended_runner<Session>(
+    lease_error: Error,
+    timeout: Duration,
+    session: Session,
+) -> Result<Option<super::RunnerSession>>
+where
+    Session: Fn(Duration) -> Result<Option<super::RunnerSession>>,
+{
+    if !crate::runtime_promotion::is_contention_error(&lease_error) {
+        return Err(lease_error);
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        if let Some(session) = session(remaining.min(HANDOFF_CONNECT_POLL_INTERVAL))? {
+            return Ok(Some(session));
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        std::thread::sleep(remaining.min(HANDOFF_CONNECT_POLL_INTERVAL));
+    }
+}
+
+fn connected_runner_connect_report(
+    runner_id: &str,
+    status: RunnerStatusReport,
+) -> Result<(RunnerConnectReport, i32)> {
+    let session = status.session.ok_or_else(|| {
+        Error::internal_unexpected("connected runner status did not include a session")
+    })?;
+    connected_runner_connect_report_from_session(runner_id, session, status.session_path)
+}
+
+fn connected_runner_connect_report_from_session(
+    runner_id: &str,
+    session: super::RunnerSession,
+    session_path: String,
+) -> Result<(RunnerConnectReport, i32)> {
+    Ok((
+        RunnerConnectReport {
+            runner_id: runner_id.to_string(),
+            mode: Some(session.mode),
+            role: Some(session.role),
+            connected: true,
+            recorded: None,
+            local_url: session.local_url,
+            broker_url: session.broker_url,
+            controller_id: session.controller_id,
+            remote_daemon_address: session.remote_daemon_address,
+            tunnel_pid: session.tunnel_pid,
+            remote_daemon_pid: session.remote_daemon_pid,
+            connection_warning: None,
+            homeboy_version: Some(session.homeboy_version),
+            homeboy_build_identity: session.homeboy_build_identity,
+            session_path: Some(session_path),
+            leaseless_recovery: None,
+            state_loss_recovery: None,
+            leaseless_recovery_evidence: session.leaseless_recovery_evidence,
+            failure_kind: None,
+            failure_message: None,
+        },
+        0,
+    ))
+}
+
 fn lab_connect_timeout(source: LabRunnerSelectionSource) -> Duration {
     match source {
         LabRunnerSelectionSource::Explicit => Duration::from_secs(30),
@@ -289,15 +380,19 @@ fn lab_connect_timeout(source: LabRunnerSelectionSource) -> Duration {
 fn run_runner_connect_command(
     runner_id: &str,
     timeout: Duration,
+    lease: &crate::runtime_promotion::RuntimePromotionLease,
 ) -> Result<(String, String, i32, bool)> {
     let exe = std::env::current_exe().map_err(|err| {
         Error::internal_io(err.to_string(), Some("resolve homeboy executable".into()))
     })?;
-    let mut child = std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .args(["runner", "connect", runner_id])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    lease.authorize_subprocess(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|err| Error::internal_io(err.to_string(), Some("start runner connect".into())))?;
     let deadline = std::time::Instant::now() + timeout;
@@ -335,36 +430,6 @@ pub(super) fn prepare_lab_runner_for_offload_with(
     let status = status_fn(&selection.runner_id)?;
     if status.connected {
         if let Some(reason) = connected_runner_not_ready_reason(&selection.runner_id, &status) {
-            if status
-                .daemon_freshness
-                .as_ref()
-                .is_some_and(|report| repair_or_fail(report).is_ok())
-            {
-                eprintln!(
-                    "Lab offload: connected runner `{}` daemon is stale; attempting automatic refresh.",
-                    selection.runner_id
-                );
-                let (report, _) = connect_fn(&selection.runner_id)?;
-                if report.connected {
-                    eprintln!(
-                        "Lab offload: refreshed runner `{}` daemon session before dispatch.",
-                        selection.runner_id
-                    );
-                    return Ok(LabRunnerPreparation::Ready);
-                }
-                let refresh_reason = report.failure_message.unwrap_or_else(|| {
-                    "runner connect did not establish a fresh daemon session".to_string()
-                });
-                return automatic_fallback_or_explicit_error(
-                    selection,
-                    format!("{reason}; automatic refresh failed: {refresh_reason}"),
-                    format!(
-                        "Lab offload runner `{}` has a stale daemon and automatic refresh failed",
-                        selection.runner_id
-                    ),
-                    daemon_repair_command(&selection.runner_id, &status),
-                );
-            }
             return automatic_fallback_or_explicit_error(
                 selection,
                 reason,
@@ -404,6 +469,15 @@ pub(super) fn prepare_lab_runner_for_offload_with(
         "Lab offload: direct SSH runner `{}` is not connected; attempting connection.",
         selection.runner_id
     );
+    let lock = handoff_connect_lock(&selection.runner_id)?;
+    let _lock = lock.lock().map_err(|_| {
+        Error::internal_unexpected("Lab runner handoff connection lock was poisoned")
+    })?;
+    // Another concurrent handoff may have connected the runner while this one
+    // waited; always re-check before creating another tunnel/session.
+    if status_fn(&selection.runner_id)?.connected {
+        return Ok(LabRunnerPreparation::Ready);
+    }
     let (report, _) = connect_fn(&selection.runner_id)?;
     if report.connected {
         return Ok(LabRunnerPreparation::Ready);
@@ -425,6 +499,17 @@ pub(super) fn prepare_lab_runner_for_offload_with(
             selection.runner_id
         ),
     )
+}
+
+fn handoff_connect_lock(runner_id: &str) -> Result<Arc<Mutex<()>>> {
+    let locks = HANDOFF_CONNECT_LOCKS.get_or_init(|| Mutex::new(Default::default()));
+    let mut locks = locks.lock().map_err(|_| {
+        Error::internal_unexpected("Lab runner handoff connection lock registry was poisoned")
+    })?;
+    Ok(locks
+        .entry(runner_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
 }
 
 fn automatic_fallback_or_explicit_error(

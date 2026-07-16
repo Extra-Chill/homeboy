@@ -1,6 +1,10 @@
 use super::*;
 
 pub(super) fn session_is_live(session: &RunnerSession) -> bool {
+    session_is_live_with_timeout(session, Duration::from_millis(200))
+}
+
+pub(super) fn session_is_live_with_timeout(session: &RunnerSession, timeout: Duration) -> bool {
     if session.mode != RunnerTunnelMode::DirectSsh {
         return false;
     }
@@ -9,9 +13,19 @@ pub(super) fn session_is_live(session: &RunnerSession) -> bool {
             return false;
         }
     }
-    session
-        .local_port
-        .is_some_and(|port| wait_for_tcp(port, Duration::from_millis(200)))
+    let Some(local_url) = session.local_url.as_deref() else {
+        return false;
+    };
+    let probe_timeout = timeout / 2;
+    session.local_port.is_some_and(|port| {
+        wait_for_tcp(port, probe_timeout)
+            && super::connection_daemon::daemon_http_health_matches_with_timeout(
+                local_url,
+                session.remote_daemon_lease_id.as_deref(),
+                session.remote_daemon_pid,
+                probe_timeout,
+            )
+    })
 }
 
 pub(super) fn reverse_controller_session_is_live(session: &RunnerSession) -> bool {

@@ -209,12 +209,44 @@ pub(super) fn daemon_http_freshness(
     daemon_freshness_report(local_url, expected_version, expected_identity)
 }
 
+/// A direct-SSH session is live only when its loopback endpoint still serves
+/// the daemon lease recorded in the session. A listening TCP port alone can
+/// belong to a replaced tunnel or an unrelated local process.
+pub(super) fn daemon_http_health_matches_with_timeout(
+    local_url: &str,
+    expected_lease_id: Option<&str>,
+    expected_pid: Option<u32>,
+    timeout: Duration,
+) -> bool {
+    let Ok(report) = daemon_health_report_with_timeout(local_url, timeout) else {
+        return false;
+    };
+    match expected_lease_id.filter(|lease_id| !lease_id.is_empty()) {
+        Some(expected_lease_id) => {
+            report.freshness.lease_id.as_deref() == Some(expected_lease_id)
+                && report.pid.is_none_or(|pid| Some(pid) == expected_pid)
+        }
+        // Older sessions did not persist a lease. Preserve their existing
+        // PID/address reattach contract rather than treating them as dead.
+        None => expected_pid.is_some_and(|pid| report.pid == Some(pid)),
+    }
+}
+
 fn daemon_http_body_at(
     local_url: &str,
     endpoint: &str,
 ) -> std::result::Result<DaemonVersionResponse, String> {
+    daemon_http_body_at_with_timeout(local_url, endpoint, Duration::from_secs(2))
+}
+
+fn daemon_http_body_at_with_timeout(
+    local_url: &str,
+    endpoint: &str,
+    timeout: Duration,
+) -> std::result::Result<DaemonVersionResponse, String> {
     let client = Client::builder()
-        .timeout(Duration::from_secs(2))
+        .no_proxy()
+        .timeout(timeout)
         .build()
         .map_err(|err| format!("build daemon HTTP client: {err}"))?;
     let response = client
@@ -248,7 +280,14 @@ fn daemon_http_body(local_url: &str) -> std::result::Result<DaemonVersionRespons
 }
 
 fn daemon_health_report(local_url: &str) -> std::result::Result<DaemonHealthReport, String> {
-    let response = daemon_http_body_at(local_url, "health")?;
+    daemon_health_report_with_timeout(local_url, Duration::from_secs(2))
+}
+
+fn daemon_health_report_with_timeout(
+    local_url: &str,
+    timeout: Duration,
+) -> std::result::Result<DaemonHealthReport, String> {
+    let response = daemon_http_body_at_with_timeout(local_url, "health", timeout)?;
     let freshness = daemon_freshness_from_body(&response.body).ok_or_else(|| {
         format!(
             "remote daemon health response did not include freshness; raw body: {}",
@@ -445,6 +484,8 @@ fn daemon_pid_from_body(body: &Value) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     fn report(lease_id: &str, pid: u32) -> DaemonHealthReport {
         DaemonHealthReport {
@@ -494,6 +535,76 @@ mod tests {
             &report("lease-live", 7332),
             &daemon()
         ));
+    }
+
+    #[test]
+    fn loopback_liveness_requires_the_recorded_daemon_identity() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let body = serde_json::json!({
+            "freshness": report("lease-live", 7331).freshness,
+            "pid": 7331,
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("health request");
+            let mut request = [0; 1024];
+            let read = stream.read(&mut request).expect("read request");
+            assert!(std::str::from_utf8(&request[..read])
+                .expect("request text")
+                .starts_with("GET /health HTTP/1.1"));
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    )
+                    .as_bytes(),
+                )
+                .expect("health response");
+        });
+
+        let endpoint = format!("http://{address}");
+        assert!(daemon_http_health_matches_with_timeout(
+            &endpoint,
+            Some("lease-live"),
+            Some(7331),
+            Duration::from_secs(2),
+        ));
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn loopback_liveness_preserves_legacy_pid_only_sessions() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let body = serde_json::json!({
+            "freshness": report("lease-live", 7331).freshness,
+            "pid": 7331,
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("health request");
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).expect("read request");
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    )
+                    .as_bytes(),
+                )
+                .expect("health response");
+        });
+
+        assert!(daemon_http_health_matches_with_timeout(
+            &format!("http://{address}"),
+            None,
+            Some(7331),
+            Duration::from_secs(2),
+        ));
+        server.join().expect("server");
     }
 
     #[test]

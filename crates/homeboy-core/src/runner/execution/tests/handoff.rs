@@ -1413,6 +1413,55 @@ fn daemon_polling_rejects_a_response_for_a_different_job() {
 }
 
 #[test]
+fn daemon_polling_reloads_a_refreshed_session_endpoint() {
+    let unavailable = std::net::TcpListener::bind("127.0.0.1:0").expect("unavailable listener");
+    let stale_endpoint = format!("http://{}", unavailable.local_addr().expect("address"));
+    drop(unavailable);
+
+    let job = running_job();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("refreshed listener");
+    let refreshed_endpoint = format!("http://{}", listener.local_addr().expect("address"));
+    let job_id = job.id.to_string();
+    let server_job = job.clone();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("poll request");
+        let mut request = [0; 4096];
+        let read = std::io::Read::read(&mut stream, &mut request).expect("read request");
+        assert!(std::str::from_utf8(&request[..read])
+            .expect("request text")
+            .starts_with(&format!("GET /jobs/{} HTTP/1.1", server_job.id)));
+        let body = serde_json::json!({
+            "success": true,
+            "data": { "body": { "job": server_job } },
+        })
+        .to_string();
+        std::io::Write::write_all(
+            &mut stream,
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            )
+            .as_bytes(),
+        )
+        .expect("write response");
+    });
+    let client = Client::builder().no_proxy().build().expect("client");
+    let reloads = std::sync::atomic::AtomicUsize::new(0);
+
+    let (fetched, endpoint) =
+        fetch_daemon_job_resilient_with_endpoint_reload(&client, &stale_endpoint, &job_id, || {
+            reloads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(refreshed_endpoint.clone()))
+        })
+        .expect("poll through refreshed endpoint");
+
+    assert_eq!(fetched.id, job.id);
+    assert_eq!(endpoint, refreshed_endpoint);
+    assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    server.join().expect("server");
+}
+
+#[test]
 fn daemon_exec_request_failed_error_handles_null_payload_with_reconnect_hint() {
     // The historical #3631/#3624 symptom: a stale/restarting daemon answers
     // with an empty/null error payload. We must never surface a bare `null`,
