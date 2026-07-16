@@ -42,7 +42,7 @@ pub fn report(
     });
 
     let homeboy_command = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
-    let local_homeboy_version = env!("CARGO_PKG_VERSION");
+    let local_homeboy_version = homeboy_product_identity::product_version();
     let homeboy = HomeboyProbe {
         version: common::remote_line(
             client,

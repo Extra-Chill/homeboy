@@ -47,7 +47,7 @@ impl NewRunRecordBuilder {
     }
 
     pub fn current_homeboy_version(mut self) -> Self {
-        self.record.homeboy_version = Some(env!("CARGO_PKG_VERSION").to_string());
+        self.record.homeboy_version = Some(crate::build_identity::current().version);
         self
     }
 
@@ -137,7 +137,7 @@ mod tests {
 
         assert_eq!(
             record.homeboy_version.as_deref(),
-            Some(env!("CARGO_PKG_VERSION"))
+            Some(homeboy_product_identity::product_version())
         );
     }
 
@@ -199,7 +199,7 @@ mod tests {
         assert_eq!(record.cwd.as_deref(), Some("/tmp/homeboy"));
         assert_eq!(
             record.homeboy_version.as_deref(),
-            Some(env!("CARGO_PKG_VERSION"))
+            Some(homeboy_product_identity::product_version())
         );
     }
 }

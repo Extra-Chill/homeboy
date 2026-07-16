@@ -496,7 +496,7 @@ fn refresh_command(runner_id: &str, runner_homeboy: &serde_json::Value) -> Strin
             format!(
                 "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
                 shell::quote_arg(runner_id),
-                env!("CARGO_PKG_VERSION")
+                homeboy_product_identity::product_version()
             )
         })
 }

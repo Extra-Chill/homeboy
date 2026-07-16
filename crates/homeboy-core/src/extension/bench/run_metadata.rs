@@ -21,7 +21,7 @@ pub(crate) fn stamp_run_metadata(
     workloads.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.path.cmp(&b.path)));
 
     results.run_metadata = Some(BenchRunMetadata {
-        homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        homeboy_version: Some(crate::build_identity::current().version),
         started_at: started_at.to_string(),
         shared_state: args
             .shared_state
@@ -294,7 +294,7 @@ mod tests {
         let metadata = results.run_metadata.expect("metadata stamped");
         assert_eq!(
             metadata.homeboy_version.as_deref(),
-            Some(env!("CARGO_PKG_VERSION"))
+            Some(homeboy_product_identity::product_version())
         );
         assert_eq!(metadata.started_at, "2026-04-28T00:00:00Z");
         assert_eq!(metadata.iterations, 7);

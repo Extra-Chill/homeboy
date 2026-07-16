@@ -16,7 +16,7 @@ pub fn report(
     let mut tools = BTreeMap::new();
 
     let homeboy = HomeboyProbe {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: homeboy_product_identity::product_version().to_string(),
         path: runner
             .and_then(|runner| runner.settings.homeboy_path.clone())
             .or_else(|| env::current_exe().ok().map(common::display_path)),

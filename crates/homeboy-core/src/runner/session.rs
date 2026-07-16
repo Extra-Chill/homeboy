@@ -599,7 +599,7 @@ impl RunnerStaleDaemonWarning {
             format!(
                 "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
                 shell::quote_arg(runner_id),
-                env!("CARGO_PKG_VERSION")
+                homeboy_product_identity::product_version()
             ),
             format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
             format!("homeboy runner connect {}", shell::quote_arg(runner_id)),

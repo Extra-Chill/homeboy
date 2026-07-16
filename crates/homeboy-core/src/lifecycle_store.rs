@@ -15,7 +15,7 @@ use crate::engine::local_files::{
     write_json_file as write_json, write_json_file_owner_only as write_private_json,
 };
 use crate::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
-use crate::{paths, Error, ErrorCode, Result};
+use crate::{build_identity, paths, Error, ErrorCode, Result};
 
 #[cfg(test)]
 static FAIL_NEXT_RECORD_WRITE: AtomicBool = AtomicBool::new(false);
@@ -173,7 +173,7 @@ fn write_record_with_aggregate(
         status: run_status(record.state).to_string(),
         command: Some("homeboy agent-task".to_string()),
         cwd: None,
-        homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        homeboy_version: Some(build_identity::current().version),
         git_sha: None,
         rig_id: None,
         metadata_json,

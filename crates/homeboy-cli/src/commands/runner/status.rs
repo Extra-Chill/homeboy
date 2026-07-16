@@ -707,7 +707,7 @@ fn lab_runner_homeboy_refresh_commands(runner_id: &str) -> Vec<String> {
     vec![
         format!(
             "homeboy runner refresh-homeboy {runner_arg} --ref v{} --reconnect",
-            env!("CARGO_PKG_VERSION")
+            homeboy_product_identity::product_version()
         ),
         format!("homeboy runner disconnect {runner_arg}"),
         format!("homeboy runner connect {runner_arg}"),
@@ -730,7 +730,7 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
             label: "refresh_homeboy".to_string(),
             command: format!(
                 "homeboy runner refresh-homeboy {runner_arg} --ref v{} --reconnect",
-                env!("CARGO_PKG_VERSION")
+                homeboy_product_identity::product_version()
             ),
             purpose: "Materialize a clean runner-side Homeboy binary, select it for Lab jobs, and refresh the daemon session.".to_string(),
         },
@@ -1133,7 +1133,7 @@ mod tests {
         assert!(hint.contains("homeboy 0.262.0+binary"));
         let job_binary_refresh = format!(
             "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-            env!("CARGO_PKG_VERSION")
+            homeboy_product_identity::product_version()
         );
         assert!(hint.contains(&job_binary_refresh));
         assert!(hint.contains(

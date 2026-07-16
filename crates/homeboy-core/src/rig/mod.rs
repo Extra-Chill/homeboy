@@ -295,7 +295,7 @@ fn rig_spec_parse_error(
             err.to_string(),
             context,
             component,
-            env!("CARGO_PKG_VERSION"),
+            homeboy_product_identity::product_version(),
         );
     }
     Error::validation_invalid_json(err, Some(context), received)
@@ -747,7 +747,9 @@ mod schema_error_tests {
             error.message
         );
         assert!(
-            error.message.contains(env!("CARGO_PKG_VERSION")),
+            error
+                .message
+                .contains(homeboy_product_identity::product_version()),
             "message should report the active version: {}",
             error.message
         );

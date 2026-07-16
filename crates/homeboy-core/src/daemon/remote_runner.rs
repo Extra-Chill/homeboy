@@ -341,7 +341,7 @@ fn register_session(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Val
         homeboy_version: request
             .homeboy_version
             .clone()
-            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+            .unwrap_or_else(|| crate::build_identity::current().version),
         homeboy_build_identity: request.homeboy_build_identity.clone(),
         connected_at: now.clone(),
         worker_identity: request.worker_identity.clone(),

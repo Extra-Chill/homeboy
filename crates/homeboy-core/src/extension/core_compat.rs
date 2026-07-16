@@ -32,7 +32,7 @@ impl CoreCompatibilityReport {
 }
 
 pub fn installed_homeboy_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    homeboy_product_identity::product_version().to_string()
 }
 
 pub fn evaluate_core_compatibility(
