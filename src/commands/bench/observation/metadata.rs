@@ -40,7 +40,7 @@ pub(super) fn bench_observation_initial_metadata(
 ) -> serde_json::Value {
     let resource_policy = resource_policy::captured_context()
         .as_ref()
-        .map(resource_policy::ResourcePolicyContext::to_json)
+        .map(resource_policy::resource_policy_context_to_json)
         .unwrap_or(serde_json::Value::Null);
     serde_json::json!({
         "component_label": component_label,

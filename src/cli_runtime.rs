@@ -643,7 +643,7 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
             // runs (bench, lint, test, etc.) can record it in their metadata
             // for later interpretation. This stays generic to Homeboy core.
             let mut resource_policy_context =
-                resource_policy::ResourcePolicyContext::from_evaluation(
+                resource_policy::resource_policy_context_from_evaluation(
                     hot_command,
                     &resources,
                     if runner_hosted {

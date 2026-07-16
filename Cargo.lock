@@ -696,6 +696,7 @@ dependencies = [
  "glob-match",
  "heck",
  "homeboy-cli-contract",
+ "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-error",
  "homeboy-finding",
@@ -732,6 +733,48 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "serde",
+]
+
+[[package]]
+name = "homeboy-core"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "clap",
+ "core-foundation-sys",
+ "ctrlc",
+ "glob",
+ "glob-match",
+ "heck",
+ "homeboy-cli-contract",
+ "homeboy-engine-primitives",
+ "homeboy-error",
+ "homeboy-finding",
+ "homeboy-lab-contract",
+ "homeboy-output",
+ "homeboy-paths",
+ "homeboy-process",
+ "homeboy-product-identity",
+ "homeboy-redaction",
+ "keyring",
+ "libc",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "security-framework-sys",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_json_path",
+ "serde_path_to_error",
+ "serde_yml",
+ "sha2",
+ "shellexpand",
+ "tempfile",
+ "toml",
+ "uuid",
+ "zip",
 ]
 
 [[package]]

@@ -1,0 +1,586 @@
+use crate::component::Component;
+use crate::engine::run_dir::RunDir;
+use crate::error::{Error, ErrorCode, Result};
+use std::path::{Path, PathBuf};
+
+use super::manifest::ExtensionManifest;
+use super::registry::{extension_path, load_extension};
+use super::runner::ExtensionRunner;
+
+pub(crate) fn stderr_tail(stderr: &str) -> String {
+    const MAX_LINES: usize = 20;
+    let lines: Vec<&str> = stderr.lines().collect();
+    let start = lines.len().saturating_sub(MAX_LINES);
+    lines[start..].join("\n")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionCapability {
+    Lint,
+    Test,
+    Build,
+    Bench,
+    Fuzz,
+    Trace,
+    Deps,
+}
+
+/// Static metadata for an [`ExtensionCapability`] variant.
+///
+/// Centralizing label, manifest-support probe, and script accessor in one
+/// descriptor keeps variant additions localized: a new capability only
+/// needs one new arm in [`ExtensionCapability::descriptor`] instead of
+/// parallel arms scattered across each getter / policy method.
+struct ExtensionCapabilityDescriptor {
+    label: &'static str,
+    has_manifest_support: fn(&ExtensionManifest) -> bool,
+    script_path: fn(&ExtensionManifest) -> Option<&str>,
+}
+
+impl ExtensionCapability {
+    fn descriptor(self) -> ExtensionCapabilityDescriptor {
+        match self {
+            ExtensionCapability::Lint => ExtensionCapabilityDescriptor {
+                label: "lint",
+                has_manifest_support: ExtensionManifest::has_lint,
+                script_path: ExtensionManifest::lint_script,
+            },
+            ExtensionCapability::Test => ExtensionCapabilityDescriptor {
+                label: "test",
+                has_manifest_support: ExtensionManifest::has_test,
+                script_path: ExtensionManifest::test_script,
+            },
+            ExtensionCapability::Build => ExtensionCapabilityDescriptor {
+                label: "build",
+                has_manifest_support: ExtensionManifest::has_build,
+                script_path: ExtensionManifest::build_script,
+            },
+            ExtensionCapability::Bench => ExtensionCapabilityDescriptor {
+                label: "bench",
+                has_manifest_support: ExtensionManifest::has_bench,
+                script_path: ExtensionManifest::bench_script,
+            },
+            ExtensionCapability::Fuzz => ExtensionCapabilityDescriptor {
+                label: "fuzz",
+                has_manifest_support: ExtensionManifest::has_fuzz,
+                script_path: ExtensionManifest::fuzz_script,
+            },
+            ExtensionCapability::Trace => ExtensionCapabilityDescriptor {
+                label: "trace",
+                has_manifest_support: ExtensionManifest::has_trace,
+                script_path: ExtensionManifest::trace_script,
+            },
+            ExtensionCapability::Deps => ExtensionCapabilityDescriptor {
+                label: "deps",
+                has_manifest_support: ExtensionManifest::has_deps,
+                script_path: ExtensionManifest::deps_script,
+            },
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        self.descriptor().label
+    }
+
+    pub(crate) fn has_manifest_support(self, manifest: &ExtensionManifest) -> bool {
+        (self.descriptor().has_manifest_support)(manifest)
+    }
+
+    pub(crate) fn script_path(self, manifest: &ExtensionManifest) -> Option<&str> {
+        (self.descriptor().script_path)(manifest)
+    }
+
+    pub(crate) fn requires_script(self) -> bool {
+        // Fuzz supports manifest-only workload discovery; `fuzz run` validates
+        // its runner script before execution.
+        !matches!(self, ExtensionCapability::Build | ExtensionCapability::Fuzz)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExtensionExecutionContext {
+    pub component: Component,
+    pub capability: ExtensionCapability,
+    pub extension_id: String,
+    pub extension_path: PathBuf,
+    pub script_path: String,
+    pub settings: Vec<(String, serde_json::Value)>,
+    /// Setting keys the resolved extension declares it understands (from
+    /// the manifest `settings` block). Used to validate `--setting` /
+    /// `--setting-json` overrides before a run. Empty means the extension
+    /// declares no settings, in which case validation is skipped.
+    pub accepted_setting_keys: Vec<String>,
+}
+
+pub struct ScenarioRunnerOptions<'a> {
+    pub execution_context: &'a ExtensionExecutionContext,
+    pub component: &'a Component,
+    pub path_override: Option<String>,
+    pub settings: &'a [(String, String)],
+    pub settings_json: &'a [(String, serde_json::Value)],
+    pub run_dir: &'a RunDir,
+    pub results_env: Option<(&'a str, PathBuf)>,
+    pub scenario_env: Option<(&'a str, &'a str)>,
+    pub artifact_env: Option<(&'a str, &'a Path)>,
+    pub list_only_env: Option<(&'a str, bool)>,
+    pub extra_workloads_env: Option<(&'a str, &'a [PathBuf], &'a str)>,
+    pub env_provider_extensions: &'a [String],
+    pub invocation_requirements: crate::engine::invocation::InvocationRequirements,
+}
+
+pub fn build_scenario_runner(options: ScenarioRunnerOptions<'_>) -> Result<ExtensionRunner> {
+    let mut runner = ExtensionRunner::for_context(options.execution_context.clone())
+        .component(options.component.clone())
+        .path_override(options.path_override)
+        .settings(options.settings)
+        .settings_json(options.settings_json)
+        .with_run_dir(options.run_dir)
+        .env_provider_extensions(options.env_provider_extensions)
+        .invocation_requirements(options.invocation_requirements);
+
+    if let Some((key, path)) = options.results_env {
+        runner = runner.env(key, &path.to_string_lossy());
+    }
+    if let Some((key, value)) = options.scenario_env {
+        runner = runner.env(key, value);
+    }
+    if let Some((key, path)) = options.artifact_env {
+        runner = runner.env(key, &path.to_string_lossy());
+    }
+    if let Some((key, list_only)) = options.list_only_env {
+        runner = runner.env(key, if list_only { "1" } else { "0" });
+    }
+    if let Some((key, paths, error_field)) = options.extra_workloads_env {
+        if !paths.is_empty() {
+            runner = runner.env(key, &path_list_env_value(error_field, paths)?);
+        }
+    }
+
+    Ok(runner)
+}
+
+pub fn path_list_env_value(error_field: &str, paths: &[PathBuf]) -> Result<String> {
+    let path_description = error_field
+        .strip_suffix("_workloads")
+        .map(|prefix| format!("{prefix} workload path"))
+        .unwrap_or_else(|| "workload path".to_string());
+
+    std::env::join_paths(paths)
+        .map_err(|e| {
+            Error::validation_invalid_argument(
+                error_field,
+                format!("{path_description} cannot be exported: {e}"),
+                None,
+                None,
+            )
+        })
+        .map(|joined| joined.to_string_lossy().to_string())
+}
+
+fn no_extensions_error(component: &Component) -> Error {
+    let mut err = Error::new(
+        ErrorCode::ExtensionUnsupported,
+        format!(
+            "No extension provider configured for component '{}'",
+            component.id
+        ),
+        serde_json::json!({
+            "component_id": component.id,
+            "problem": "no extensions configured",
+        }),
+    );
+
+    for hint in extension_guidance_hints(component, None) {
+        err = err.with_hint(hint);
+    }
+
+    err
+}
+
+fn capability_missing_error(component: &Component, capability: ExtensionCapability) -> Error {
+    let capability_name = capability.label();
+    let mut err = Error::validation_invalid_argument(
+        "extension",
+        format!(
+            "Component '{}' has no linked extensions that provide {} support",
+            component.id, capability_name
+        ),
+        None,
+        None,
+    );
+
+    for hint in extension_guidance_hints(component, Some(capability)) {
+        err = err.with_hint(hint);
+    }
+
+    err
+}
+
+pub(crate) fn extension_guidance_hints(
+    component: &Component,
+    capability: Option<ExtensionCapability>,
+) -> Vec<String> {
+    let link_hint = match capability {
+        Some(capability) => format!(
+            "Link an extension with {} support: homeboy component set {} --extension <extension_id>",
+            capability.label(),
+            component.id
+        ),
+        None => format!(
+            "Link an extension that provides the needed command support: homeboy component set {} --extension <extension_id>",
+            component.id
+        ),
+    };
+
+    // Point at the component-owned escape hatch too: a component can supply its
+    // own command via a `scripts.<capability>` entry without linking an
+    // extension at all. Named after the capability so the hint is actionable
+    // (e.g. `scripts.build`) and independently regression-covered.
+    let scripts_hint = match capability {
+        Some(capability) => format!(
+            "Use `scripts.{}` for component-owned {} commands (no extension required): set it in the component config.",
+            capability.label().to_lowercase(),
+            capability.label().to_lowercase()
+        ),
+        None => "Use `scripts.<command>` for component-owned commands (no extension required): set it in the component config."
+            .to_string(),
+    };
+
+    vec![
+        link_hint,
+        scripts_hint,
+        "List installed extensions: homeboy extension list".to_string(),
+        format!(
+            "Component config lives at ~/.config/homeboy/components/{}.json or in a portable homeboy.json discovered from the component path.",
+            component.id
+        ),
+        "The component path resolved correctly; the requested command needs an extension provider.".to_string(),
+    ]
+}
+
+fn capability_ambiguous_error(
+    component: &Component,
+    capability: ExtensionCapability,
+    matching: &[String],
+) -> Error {
+    let capability_name = capability.label();
+    Error::validation_invalid_argument(
+        "extension",
+        format!(
+            "Component '{}' has multiple linked extensions with {} support: {}",
+            component.id,
+            capability_name,
+            matching.join(", ")
+        ),
+        None,
+        None,
+    )
+    .with_hint(format!(
+        "Configure explicit {} extension ownership before running this command",
+        capability_name
+    ))
+}
+
+fn explicit_capability_extension(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Option<&str> {
+    component
+        .capability_extensions
+        .get(capability.label())
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|extension_id| !extension_id.is_empty())
+}
+
+pub fn extract_component_extension_settings(
+    component: &Component,
+    extension_id: &str,
+) -> Vec<(String, serde_json::Value)> {
+    component
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.get(extension_id))
+        .map(|extension_config| {
+            extension_config
+                .settings
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn resolve_extension_for_capability(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Result<String> {
+    match resolve_extension_for_capability_if_available(component, capability)? {
+        Some(extension_id) => Ok(extension_id),
+        None if component
+            .extensions
+            .as_ref()
+            .is_none_or(|extensions| extensions.is_empty()) =>
+        {
+            Err(no_extensions_error(component))
+        }
+        None => Err(capability_missing_error(component, capability)),
+    }
+}
+
+/// Resolve a capability only when one of the component's linked extensions
+/// advertises it. This lets optional consumers skip a capability that the
+/// component has not opted into without weakening validation of explicit or
+/// ambiguous capability ownership.
+fn resolve_extension_for_capability_if_available(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Result<Option<String>> {
+    let Some(extensions) = component.extensions.as_ref() else {
+        return Ok(None);
+    };
+    if extensions.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(extension_id) = explicit_capability_extension(component, capability) {
+        if !extensions.contains_key(extension_id) {
+            return Err(Error::validation_invalid_argument(
+                format!("capability_extensions.{}", capability.label()),
+                format!(
+                    "Component '{}' selects extension '{}' for {} support, but it is not linked",
+                    component.id,
+                    extension_id,
+                    capability.label()
+                ),
+                Some(extension_id.to_string()),
+                Some(vec![format!(
+                    "Add '{}' to extensions or choose one of: {}",
+                    extension_id,
+                    extensions.keys().cloned().collect::<Vec<_>>().join(", ")
+                )]),
+            ));
+        }
+
+        let manifest = load_extension(extension_id)?;
+        if !capability.has_manifest_support(&manifest) {
+            return Err(Error::validation_invalid_argument(
+                format!("capability_extensions.{}", capability.label()),
+                format!(
+                    "Component '{}' selects extension '{}' for {} support, but that extension does not provide it",
+                    component.id,
+                    extension_id,
+                    capability.label()
+                ),
+                Some(extension_id.to_string()),
+                None,
+            ));
+        }
+
+        return Ok(Some(extension_id.to_string()));
+    }
+
+    let mut matching = Vec::new();
+
+    for extension_id in extensions.keys() {
+        let manifest = load_extension(extension_id)?;
+        if capability.has_manifest_support(&manifest) {
+            matching.push(extension_id.clone());
+        }
+    }
+
+    match matching.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matching.remove(0))),
+        _ => Err(capability_ambiguous_error(component, capability, &matching)),
+    }
+}
+
+/// Whether a linked extension can provide a capability without requiring one.
+///
+/// Callers that can safely skip an optional capability use this to distinguish
+/// an absent provider from invalid explicit capability ownership.
+pub(crate) fn has_linked_extension_for_capability(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Result<bool> {
+    let Some(extensions) = component.extensions.as_ref() else {
+        return Ok(false);
+    };
+    if extensions.is_empty() {
+        return Ok(false);
+    }
+    if explicit_capability_extension(component, capability).is_some() {
+        resolve_extension_for_capability(component, capability)?;
+        return Ok(true);
+    }
+
+    for extension_id in extensions.keys() {
+        if capability.has_manifest_support(&load_extension(extension_id)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub fn resolve_execution_context(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Result<ExtensionExecutionContext> {
+    let extension_id = resolve_extension_for_capability(component, capability)?;
+    execution_context_for_extension(component, capability, extension_id)
+}
+
+/// Resolve an execution context when a linked extension provides `capability`.
+/// A missing optional capability is represented as `Ok(None)`; malformed
+/// explicit ownership and ambiguous providers remain validation errors.
+pub(crate) fn resolve_execution_context_if_available(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Result<Option<ExtensionExecutionContext>> {
+    let Some(extension_id) = resolve_extension_for_capability_if_available(component, capability)?
+    else {
+        return Ok(None);
+    };
+    execution_context_for_extension(component, capability, extension_id).map(Some)
+}
+
+fn execution_context_for_extension(
+    component: &Component,
+    capability: ExtensionCapability,
+    extension_id: String,
+) -> Result<ExtensionExecutionContext> {
+    let manifest = load_extension(&extension_id)?;
+    let script_path = capability
+        .script_path(&manifest)
+        .map(|s| s.to_string())
+        // Build's extension_script is optional (builds can use local scripts or command templates),
+        // so we allow an empty script_path for Build. Lint/Test/Bench require it.
+        .or_else(|| {
+            if capability.requires_script() {
+                None
+            } else {
+                Some(String::new())
+            }
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "extension",
+                format!(
+                    "Extension '{}' does not have {} infrastructure configured",
+                    extension_id,
+                    capability.label()
+                ),
+                None,
+                None,
+            )
+        })?;
+
+    let extension_path = extension_path(&extension_id);
+
+    if !extension_path.exists() {
+        return Err(Error::validation_invalid_argument(
+            "extension",
+            format!(
+                "Extension '{}' not found in ~/.config/homeboy/extensions/",
+                extension_id
+            ),
+            None,
+            None,
+        ));
+    }
+
+    Ok(ExtensionExecutionContext {
+        component: component.clone(),
+        capability,
+        extension_id: extension_id.clone(),
+        extension_path,
+        script_path,
+        settings: extract_component_extension_settings(component, &extension_id),
+        accepted_setting_keys: manifest.accepted_setting_keys(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::component::ScopedExtensionConfig;
+
+    fn write_extension_manifest(home: &Path, extension_id: &str, capability: &str) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(extension_id);
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        std::fs::write(
+            extension_dir.join(format!("{extension_id}.json")),
+            format!(
+                r#"{{"name":"{extension_id}","version":"1.0.0","{capability}":{{"extension_script":"{capability}.sh"}}}}"#
+            ),
+        )
+        .expect("extension manifest");
+    }
+
+    fn component_with_extensions(extension_ids: &[&str]) -> Component {
+        let extensions = extension_ids
+            .iter()
+            .map(|extension_id| {
+                (
+                    (*extension_id).to_string(),
+                    ScopedExtensionConfig::default(),
+                )
+            })
+            .collect();
+
+        Component {
+            id: "consumer".to_string(),
+            extensions: Some(extensions),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn explicit_capability_extension_resolves_ambiguous_deps_owner() {
+        crate::test_support::with_isolated_home(|home| {
+            write_extension_manifest(home.path(), "wordpress", "deps");
+            write_extension_manifest(home.path(), "nodejs", "deps");
+
+            let mut component = component_with_extensions(&["wordpress", "nodejs"]);
+            let err = resolve_extension_for_capability(&component, ExtensionCapability::Deps)
+                .expect_err("multiple deps providers should be ambiguous without ownership");
+            assert!(err
+                .message
+                .contains("multiple linked extensions with deps support"));
+
+            component
+                .capability_extensions
+                .insert("deps".to_string(), "nodejs".to_string());
+
+            assert_eq!(
+                resolve_extension_for_capability(&component, ExtensionCapability::Deps).unwrap(),
+                "nodejs"
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_capability_extension_must_be_linked_and_supported() {
+        crate::test_support::with_isolated_home(|home| {
+            write_extension_manifest(home.path(), "nodejs", "deps");
+            write_extension_manifest(home.path(), "wordpress", "bench");
+
+            let mut component = component_with_extensions(&["nodejs"]);
+            component
+                .capability_extensions
+                .insert("deps".to_string(), "wordpress".to_string());
+            let err = resolve_extension_for_capability(&component, ExtensionCapability::Deps)
+                .expect_err("selected extension must be linked");
+            assert!(err.message.contains("but it is not linked"));
+
+            component = component_with_extensions(&["wordpress"]);
+            component
+                .capability_extensions
+                .insert("deps".to_string(), "wordpress".to_string());
+            let err = resolve_extension_for_capability(&component, ExtensionCapability::Deps)
+                .expect_err("selected extension must provide selected capability");
+            assert!(err.message.contains("does not provide it"));
+        });
+    }
+}

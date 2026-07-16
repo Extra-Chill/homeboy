@@ -49,51 +49,53 @@ pub struct ResourcePolicyWarning {
     pub message: String,
 }
 
-impl ResourcePolicyContext {
-    /// Build a structured context from a `DoctorOutput`, the matched hot
-    /// command, an optional warning, and whether local placement was explicit.
-    pub fn from_evaluation(
-        command: HotCommand,
-        resources: &DoctorOutput,
-        warning: Option<&ResourcePolicyWarning>,
-        local_override: bool,
-        default_runner: Option<&str>,
-        runner_hosted: bool,
-    ) -> Self {
-        let runner_selection =
-            runner_selection_context(command, local_override, default_runner, runner_hosted);
-        Self {
-            command: command.label.to_string(),
-            severity: severity_str(resources.recommendation).to_string(),
-            local_override,
-            warned: warning.is_some(),
-            message: warning.map(|warning| warning.message.clone()),
-            runner_selection,
-            host: ResourcePolicyHostSnapshot {
-                load_severity: severity_str(resources.load.recommendation).to_string(),
-                load_one: resources.load.one,
-                load_five: resources.load.five,
-                load_fifteen: resources.load.fifteen,
-                cpu_count: resources.load.cpu_count,
-                memory_severity: resources
-                    .memory
-                    .as_ref()
-                    .map(|memory| severity_str(memory.recommendation).to_string()),
-                memory_used_percent: resources.memory.as_ref().map(|memory| memory.used_percent),
-                memory_available_mb: resources.memory.as_ref().map(|memory| memory.available_mb),
-                relevant_process_count: resources.processes.relevant_count,
-                process_severity: severity_str(resources.processes.recommendation).to_string(),
-                active_rig_lease_count: resources.rig_leases.active_count,
-                rig_lease_severity: severity_str(resources.rig_leases.recommendation).to_string(),
-            },
-        }
+/// Build a structured `ResourcePolicyContext` from a `DoctorOutput`, the matched
+/// hot command, an optional warning, and whether local placement was explicit.
+///
+/// A free function (rather than an inherent method) because `ResourcePolicyContext`
+/// is defined in the `homeboy-core` crate and this construction depends on
+/// CLI-layer types.
+pub fn resource_policy_context_from_evaluation(
+    command: HotCommand,
+    resources: &DoctorOutput,
+    warning: Option<&ResourcePolicyWarning>,
+    local_override: bool,
+    default_runner: Option<&str>,
+    runner_hosted: bool,
+) -> ResourcePolicyContext {
+    let runner_selection =
+        runner_selection_context(command, local_override, default_runner, runner_hosted);
+    ResourcePolicyContext {
+        command: command.label.to_string(),
+        severity: severity_str(resources.recommendation).to_string(),
+        local_override,
+        warned: warning.is_some(),
+        message: warning.map(|warning| warning.message.clone()),
+        runner_selection,
+        host: ResourcePolicyHostSnapshot {
+            load_severity: severity_str(resources.load.recommendation).to_string(),
+            load_one: resources.load.one,
+            load_five: resources.load.five,
+            load_fifteen: resources.load.fifteen,
+            cpu_count: resources.load.cpu_count,
+            memory_severity: resources
+                .memory
+                .as_ref()
+                .map(|memory| severity_str(memory.recommendation).to_string()),
+            memory_used_percent: resources.memory.as_ref().map(|memory| memory.used_percent),
+            memory_available_mb: resources.memory.as_ref().map(|memory| memory.available_mb),
+            relevant_process_count: resources.processes.relevant_count,
+            process_severity: severity_str(resources.processes.recommendation).to_string(),
+            active_rig_lease_count: resources.rig_leases.active_count,
+            rig_lease_severity: severity_str(resources.rig_leases.recommendation).to_string(),
+        },
     }
+}
 
-    /// Serialize as the JSON value that lands inside observation
-    /// `metadata_json["resource_policy"]`.
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
-    }
+/// Serialize a `ResourcePolicyContext` as the JSON value that lands inside
+/// observation `metadata_json["resource_policy"]`.
+pub fn resource_policy_context_to_json(context: &ResourcePolicyContext) -> serde_json::Value {
+    serde_json::to_value(context).unwrap_or(serde_json::Value::Null)
 }
 
 fn runner_selection_context(
@@ -703,7 +705,7 @@ mod tests {
     fn context_records_severity_warning_and_host_snapshot_when_hot() {
         let resources = resources(ResourceRecommendation::Hot);
         let warning = evaluate(lab_supported_hot("bench"), &resources).expect("warning");
-        let context = ResourcePolicyContext::from_evaluation(
+        let context = resource_policy_context_from_evaluation(
             lab_supported_hot("bench"),
             &resources,
             Some(&warning),
@@ -742,7 +744,7 @@ mod tests {
     fn context_records_local_placement_for_hot_machine() {
         let resources = resources(ResourceRecommendation::Hot);
         let warning = evaluate(lab_supported_hot("bench"), &resources).expect("warning");
-        let context = ResourcePolicyContext::from_evaluation(
+        let context = resource_policy_context_from_evaluation(
             lab_supported_hot("bench"),
             &resources,
             Some(&warning),
@@ -763,7 +765,7 @@ mod tests {
     fn context_records_ok_machine_with_no_warning() {
         let resources = resources(ResourceRecommendation::Ok);
         assert!(evaluate(lab_supported_hot("bench"), &resources).is_none());
-        let context = ResourcePolicyContext::from_evaluation(
+        let context = resource_policy_context_from_evaluation(
             lab_supported_hot("bench"),
             &resources,
             None,
@@ -788,7 +790,7 @@ mod tests {
             used_percent: 95.3,
             recommendation: ResourceRecommendation::Warm,
         });
-        let context = ResourcePolicyContext::from_evaluation(
+        let context = resource_policy_context_from_evaluation(
             lab_supported_hot("bench"),
             &resources,
             None,
@@ -806,7 +808,7 @@ mod tests {
     fn context_serializes_to_json_with_expected_keys() {
         let resources = resources(ResourceRecommendation::Hot);
         let warning = evaluate(lab_supported_hot("bench"), &resources).expect("warning");
-        let context = ResourcePolicyContext::from_evaluation(
+        let context = resource_policy_context_from_evaluation(
             lab_supported_hot("bench"),
             &resources,
             Some(&warning),
@@ -814,7 +816,7 @@ mod tests {
             Some("homeboy-lab"),
             false,
         );
-        let value = context.to_json();
+        let value = resource_policy_context_to_json(&context);
 
         assert_eq!(value["command"], "bench");
         assert_eq!(value["severity"], "hot");

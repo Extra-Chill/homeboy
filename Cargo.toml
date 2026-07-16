@@ -46,6 +46,7 @@ homeboy-paths = { version = "0.1.0", path = "crates/homeboy-paths" }
 homeboy-process = { version = "0.1.0", path = "crates/homeboy-process" }
 homeboy-product-identity = { version = "0.1.0", path = "crates/homeboy-product-identity" }
 homeboy-engine-primitives = { version = "0.1.0", path = "crates/homeboy-engine-primitives" }
+homeboy-core = { version = "0.1.0", path = "crates/homeboy-core" }
 homeboy-lab-contract = { version = "0.1.0", path = "crates/homeboy-lab-contract" }
 homeboy-redaction = { version = "0.1.0", path = "crates/homeboy-redaction" }
 

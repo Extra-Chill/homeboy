@@ -1,0 +1,469 @@
+use std::io::{Read, Write};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::engine::invocation;
+
+use super::super::process_cleanup::{
+    active_cleanup_signal, configure_process_group_cleanup, interrupted_exit_code,
+    stderr_with_interruption, ProcessGroupCleanupGuard,
+};
+use super::delegated::{
+    stderr_with_delegated_failure, DelegatedRunFailureMonitor, DelegatedRunTerminalFailure,
+};
+use super::resource_monitor::ChildResourceMonitor;
+use super::CommandOutput;
+
+pub fn execute_local_command(command: &str) -> CommandOutput {
+    execute_local_command_in_dir(command, None, None)
+}
+
+/// Run a local command, streaming `stdin` bytes to the child's standard input.
+///
+/// Used by the SSH transport's localhost fast path to feed a secret-env block
+/// to the command over stdin instead of interpolating secret values into the
+/// `sh -c` argv (where they would be visible in `ps`). The bytes are written on
+/// a dedicated thread and stdin is closed (EOF) once they are flushed.
+pub(crate) fn execute_local_command_with_stdin(command: &str, stdin: &[u8]) -> CommandOutput {
+    execute_local_command_in_dir_impl(command, None, None, None, Some(stdin.to_vec()))
+}
+
+pub(crate) fn execute_local_command_with_stdin_and_timeout(
+    command: &str,
+    stdin: &[u8],
+    timeout: Duration,
+) -> CommandOutput {
+    execute_local_command_in_dir_impl(command, None, None, Some(timeout), Some(stdin.to_vec()))
+}
+
+/// Run a local command, capturing stdout/stderr.
+///
+/// All locally-spawned commands run in their own process group with guaranteed
+/// descendant teardown on exit, panic, or signal. Verbs that genuinely need a
+/// background process use `std::process::Command` directly and manage the pid.
+pub fn execute_local_command_in_dir(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+) -> CommandOutput {
+    execute_local_command_in_dir_impl(command, current_dir, env, None, None)
+}
+
+pub(crate) fn execute_local_command_in_dir_with_timeout(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+    timeout: Duration,
+) -> CommandOutput {
+    execute_local_command_in_dir_impl(command, current_dir, env, Some(timeout), None)
+}
+
+#[derive(Clone, Copy)]
+enum StreamMode {
+    Capture,
+    Passthrough,
+    StderrPassthrough,
+}
+
+fn execute_local_command_in_dir_impl(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+    timeout: Option<Duration>,
+    stdin: Option<Vec<u8>>,
+) -> CommandOutput {
+    run_local_command(
+        command,
+        current_dir,
+        env,
+        timeout,
+        stdin,
+        StreamMode::Capture,
+    )
+}
+
+fn run_local_command(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+    timeout: Option<Duration>,
+    stdin: Option<Vec<u8>>,
+    stream_mode: StreamMode,
+) -> CommandOutput {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", command]);
+        cmd
+    };
+
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", command]);
+        cmd
+    };
+
+    if let Some(dir) = current_dir {
+        cmd.current_dir(dir);
+    }
+
+    if let Some(env_pairs) = env {
+        cmd.envs(env_pairs.iter().copied());
+    }
+
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    if stdin.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
+    configure_process_group_cleanup(&mut cmd);
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return CommandOutput {
+                stdout: String::new(),
+                stderr: format!("Command error: {}", e),
+                success: false,
+                exit_code: -1,
+                timed_out: false,
+                child_resource: None,
+            };
+        }
+    };
+    let mut cleanup_guard = Some(ProcessGroupCleanupGuard::new(child.id()));
+    let _invocation_child_guard = invocation_child_guard(
+        env,
+        child.id(),
+        cleanup_guard.as_ref().and_then(|guard| guard.pgid()),
+        command,
+    );
+    let monitor = ChildResourceMonitor::start(child.id(), command.to_string());
+
+    // Stream the provided stdin bytes on a dedicated thread, then close the pipe
+    // (EOF). The command's own stdin is empty for this path, so the buffer is
+    // small and never deadlocks against the captured stdout/stderr pipes.
+    let stdin_handle = stdin.and_then(|bytes| {
+        child.stdin.take().map(|mut pipe| {
+            thread::spawn(move || {
+                let _ = pipe.write_all(&bytes);
+            })
+        })
+    });
+
+    let stdout_handle = child.stdout.take().map(|pipe| {
+        thread::spawn(move || match stream_mode {
+            StreamMode::Passthrough => tee_to(pipe, std::io::stdout()),
+            StreamMode::Capture | StreamMode::StderrPassthrough => read_all(pipe),
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|pipe| {
+        thread::spawn(move || match stream_mode {
+            StreamMode::Capture => read_all(pipe),
+            StreamMode::Passthrough | StreamMode::StderrPassthrough => {
+                tee_to(pipe, std::io::stderr())
+            }
+        })
+    });
+
+    let (status, delegated_failure, timed_out) =
+        wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard, timeout);
+    let interrupted_signal = active_cleanup_signal();
+
+    if let Some(handle) = stdin_handle {
+        let _ = handle.join();
+    }
+    let stdout = stdout_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+
+    let output = match status {
+        Ok(status) => CommandOutput {
+            stdout,
+            stderr: stderr_with_delegated_failure(
+                stderr_with_timeout(
+                    stderr_with_interruption(stderr, interrupted_signal),
+                    timed_out,
+                    timeout,
+                ),
+                delegated_failure.as_ref(),
+            ),
+            success: status.success()
+                && interrupted_signal.is_none()
+                && delegated_failure.is_none()
+                && !timed_out,
+            exit_code: timed_out_exit_code(
+                timed_out,
+                interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
+            ),
+            timed_out,
+            child_resource: Some(monitor.finish()),
+        },
+        Err(e) => CommandOutput {
+            stdout,
+            stderr: stderr_with_delegated_failure(
+                stderr_with_interruption(
+                    stderr_with_timeout(
+                        format!("{stderr}\nCommand error: {}", e),
+                        timed_out,
+                        timeout,
+                    ),
+                    interrupted_signal,
+                ),
+                delegated_failure.as_ref(),
+            ),
+            success: false,
+            exit_code: timed_out_exit_code(
+                timed_out,
+                interrupted_exit_code(interrupted_signal, -1),
+            ),
+            timed_out,
+            child_resource: Some(monitor.finish()),
+        },
+    };
+    if let Some(cleanup_guard) = cleanup_guard.take() {
+        cleanup_guard.cleanup();
+    }
+    output
+}
+
+fn read_all<R: Read>(mut src: R) -> String {
+    let mut captured = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => captured.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&captured).to_string()
+}
+
+fn tee_to<R, W>(mut src: R, mut sink: W) -> String
+where
+    R: Read,
+    W: Write,
+{
+    let mut captured = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let _ = sink.write_all(&buf[..n]);
+                let _ = sink.flush();
+                captured.extend_from_slice(&buf[..n]);
+            }
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&captured).to_string()
+}
+
+pub fn execute_local_command_interactive(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+) -> i32 {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", command]);
+        cmd
+    };
+
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", command]);
+        cmd
+    };
+
+    if let Some(dir) = current_dir {
+        cmd.current_dir(dir);
+    }
+
+    if let Some(env_pairs) = env {
+        cmd.envs(env_pairs.iter().copied());
+    }
+
+    let status = cmd
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status();
+
+    match status {
+        Ok(s) => s.code().unwrap_or(-1),
+        Err(_) => -1,
+    }
+}
+
+/// Execute local command with stdout/stderr tee'd to terminal *and* captured.
+///
+/// Originally this function just inherited stdout/stderr and returned empty
+/// strings — which meant callers like the test runner had no way to surface
+/// PHPUnit output when tests failed (#1143). We now pipe both streams, copy
+/// each chunk to the parent's stdout/stderr as it arrives (so the user still
+/// sees live progress), and retain the full text in `CommandOutput` for
+/// downstream processing.
+pub fn execute_local_command_passthrough(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+) -> CommandOutput {
+    execute_local_command_passthrough_impl(command, current_dir, env, None)
+}
+
+pub(crate) fn execute_local_command_passthrough_with_timeout(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+    timeout: Duration,
+) -> CommandOutput {
+    execute_local_command_passthrough_impl(command, current_dir, env, Some(timeout))
+}
+
+fn execute_local_command_passthrough_impl(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+    timeout: Option<Duration>,
+) -> CommandOutput {
+    run_local_command(
+        command,
+        current_dir,
+        env,
+        timeout,
+        None,
+        StreamMode::Passthrough,
+    )
+}
+
+pub(crate) fn execute_local_command_stderr_passthrough(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+) -> CommandOutput {
+    execute_local_command_stderr_passthrough_impl(command, current_dir, env, None)
+}
+
+pub(crate) fn execute_local_command_stderr_passthrough_with_timeout(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+    timeout: Duration,
+) -> CommandOutput {
+    execute_local_command_stderr_passthrough_impl(command, current_dir, env, Some(timeout))
+}
+
+fn execute_local_command_stderr_passthrough_impl(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+    timeout: Option<Duration>,
+) -> CommandOutput {
+    run_local_command(
+        command,
+        current_dir,
+        env,
+        timeout,
+        None,
+        StreamMode::StderrPassthrough,
+    )
+}
+
+fn timed_out_exit_code(timed_out: bool, fallback: i32) -> i32 {
+    if timed_out {
+        124
+    } else {
+        fallback
+    }
+}
+
+fn stderr_with_timeout(mut stderr: String, timed_out: bool, timeout: Option<Duration>) -> String {
+    if timed_out {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        match timeout {
+            Some(timeout) => stderr.push_str(&format!(
+                "Homeboy command timed out after {}ms; terminated child process group before returning failure evidence.",
+                timeout.as_millis()
+            )),
+            None => stderr.push_str(
+                "Homeboy command timed out; terminated child process group before returning failure evidence.",
+            ),
+        }
+    }
+    stderr
+}
+
+fn invocation_child_guard(
+    env: Option<&[(&str, &str)]>,
+    root_pid: u32,
+    pgid: Option<i32>,
+    command_label: &str,
+) -> Option<invocation::InvocationChildGuard> {
+    let invocation_id = env.and_then(|pairs| {
+        pairs
+            .iter()
+            .find_map(|(key, value)| (*key == "HOMEBOY_INVOCATION_ID").then_some(*value))
+    })?;
+
+    invocation::register_child_process(invocation_id, root_pid, pgid, command_label.to_string())
+        .ok()
+}
+
+fn wait_for_child_or_delegated_failure(
+    child: &mut std::process::Child,
+    env: Option<&[(&str, &str)]>,
+    cleanup_guard: &mut Option<ProcessGroupCleanupGuard>,
+    timeout: Option<Duration>,
+) -> (
+    std::io::Result<std::process::ExitStatus>,
+    Option<DelegatedRunTerminalFailure>,
+    bool,
+) {
+    let monitor = DelegatedRunFailureMonitor::from_env(env);
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return (Ok(status), None, false),
+            Ok(None) => {}
+            Err(error) => return (Err(error), None, false),
+        }
+
+        if let Some(failure) = monitor
+            .as_ref()
+            .and_then(|monitor| monitor.terminal_failure())
+        {
+            if let Some(cleanup_guard) = cleanup_guard.take() {
+                cleanup_guard.cleanup();
+            }
+            return (child.wait(), Some(failure), false);
+        }
+
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            if let Some(cleanup_guard) = cleanup_guard.take() {
+                cleanup_guard.cleanup();
+            } else {
+                let _ = child.kill();
+            }
+            return (child.wait(), None, true);
+        }
+
+        let poll_interval = monitor
+            .as_ref()
+            .map(|monitor| monitor.poll_interval)
+            .unwrap_or_else(|| Duration::from_millis(50));
+        std::thread::sleep(poll_interval);
+    }
+}

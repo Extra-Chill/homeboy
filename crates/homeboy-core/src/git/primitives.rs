@@ -1,0 +1,632 @@
+use std::path::Path;
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+use crate::engine::command;
+use crate::error::{Error, GitCommandFailedDetails, Result};
+
+use super::primitives_query::current_branch;
+
+fn git_command_display(args: &[&str]) -> String {
+    if args.is_empty() {
+        "git".to_string()
+    } else {
+        format!("git {}", args.join(" "))
+    }
+}
+
+fn git_cwd_display(git_root: &Path) -> String {
+    git_root.to_string_lossy().to_string()
+}
+
+fn git_failure_message(context: &str, detail: &str) -> String {
+    if detail.trim().is_empty() {
+        context.to_string()
+    } else {
+        format!("{} failed: {}", context, detail.trim())
+    }
+}
+
+/// Clone a git repository to a target directory.
+pub fn clone_repo(url: &str, target_dir: &Path) -> Result<()> {
+    run_git(
+        Path::new("."),
+        &["clone", url, &target_dir.to_string_lossy()],
+        "git clone",
+    )?;
+    Ok(())
+}
+
+/// Clone a git repository to a target directory and check out a requested ref.
+pub fn clone_repo_at_ref(url: &str, target_dir: &Path, revision: Option<&str>) -> Result<()> {
+    clone_repo(url, target_dir)?;
+
+    if let Some(revision) = revision {
+        run_git(
+            target_dir,
+            &["checkout", "--quiet", revision],
+            "git checkout",
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Pull latest changes in a git repository.
+pub fn pull_repo(repo_dir: &Path) -> Result<()> {
+    run_git(repo_dir, &["pull"], "git pull")?;
+    Ok(())
+}
+
+/// Check if a git working directory has no uncommitted changes.
+///
+/// Uses direct Command execution to properly handle empty output (clean repo).
+/// `run_in_optional` returns None for empty stdout, which would incorrectly
+/// indicate a dirty repo when used with `.unwrap_or(false)`.
+fn is_workdir_clean(path: &Path) -> bool {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => o.stdout.is_empty(),
+        _ => false, // Command failed = assume not clean (conservative)
+    }
+}
+
+/// Check if a path is either not a git worktree or is a clean git worktree.
+pub fn is_workdir_clean_or_not_git(path: &Path) -> bool {
+    let inside_tree = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(path)
+        .output();
+
+    match inside_tree {
+        Ok(output) if output.status.success() => is_workdir_clean(path),
+        _ => true,
+    }
+}
+
+/// Run a git command in a repository and return stdout.
+pub fn run_git(git_root: &Path, args: &[&str], context: &str) -> Result<String> {
+    run_git_with_env(git_root, args, context, &[])
+}
+
+/// Run Git with an explicit transport environment.
+///
+/// The inherited process environment remains available, so repository-level
+/// credential helpers, URL rewrites, and SSH configuration keep working.
+pub fn run_git_with_env(
+    git_root: &Path,
+    args: &[&str],
+    context: &str,
+    env: &[(String, String)],
+) -> Result<String> {
+    let output = run_git_output_with_env(git_root, args, context, env)?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(Error::git_command_failed_with_details(
+            git_failure_message(context, &detail),
+            GitCommandFailedDetails {
+                command: git_command_display(args),
+                cwd: git_cwd_display(git_root),
+                exit_code: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                io_error: None,
+            },
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Run Git with a deadline, terminating its isolated process group on expiry.
+///
+/// Remote Git operations can wait indefinitely for a transport or credential
+/// helper. Callers use this only for bounded interactive command phases.
+pub fn run_git_with_env_timeout(
+    git_root: &Path,
+    args: &[&str],
+    context: &str,
+    env: &[(String, String)],
+    timeout: Duration,
+) -> Result<String> {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(git_root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command::isolate_process_tree(&mut command);
+    let mut child = command.spawn().map_err(|error| {
+        Error::git_command_failed_with_details(
+            git_failure_message(context, &error.to_string()),
+            GitCommandFailedDetails {
+                command: git_command_display(args),
+                cwd: git_cwd_display(git_root),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                io_error: Some(error.to_string()),
+            },
+        )
+    })?;
+    let started = Instant::now();
+    let mut timed_out = false;
+    let output = command::wait_with_bounded_output_until_cancelled(
+        &mut child,
+        command::DEFAULT_CAPTURE_LIMIT_BYTES,
+        || {
+            timed_out = started.elapsed() >= timeout;
+            timed_out
+        },
+    )
+    .map_err(|error| {
+        Error::git_command_failed_with_details(
+            git_failure_message(context, &error.to_string()),
+            GitCommandFailedDetails {
+                command: git_command_display(args),
+                cwd: git_cwd_display(git_root),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                io_error: Some(error.to_string()),
+            },
+        )
+    })?
+    .into_output();
+    if !output.status.success() {
+        let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if timed_out {
+            if !stderr.is_empty() {
+                stderr.push('\n');
+            }
+            stderr.push_str(&format!(
+                "Git phase timed out after {}s; terminated child process group.",
+                timeout.as_secs()
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Err(Error::git_command_failed_with_details(
+            git_failure_message(context, if stderr.is_empty() { &stdout } else { &stderr }),
+            GitCommandFailedDetails {
+                command: git_command_display(args),
+                cwd: git_cwd_display(git_root),
+                exit_code: output.status.code(),
+                stdout,
+                stderr,
+                io_error: None,
+            },
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Run a git command in a repository and return raw output without treating
+/// non-zero exit status as an error.
+pub fn run_git_output(
+    git_root: &Path,
+    args: &[&str],
+    context: &str,
+) -> Result<std::process::Output> {
+    run_git_output_with_env(git_root, args, context, &[])
+}
+
+/// Execute Git with component-scoped transport settings without including
+/// environment values in the resulting command diagnostics.
+pub fn run_git_output_with_env(
+    git_root: &Path,
+    args: &[&str],
+    context: &str,
+    env: &[(String, String)],
+) -> Result<std::process::Output> {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(git_root)
+        .stdin(std::process::Stdio::null());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().map_err(|e| {
+        Error::git_command_failed_with_details(
+            git_failure_message(context, &e.to_string()),
+            GitCommandFailedDetails {
+                command: git_command_display(args),
+                cwd: git_cwd_display(git_root),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                io_error: Some(e.to_string()),
+            },
+        )
+    })
+}
+
+/// Stage all changes in a repository.
+pub fn stage_all(git_root: &Path) -> Result<()> {
+    run_git(git_root, &["add", "-A"], "git add -A")?;
+    Ok(())
+}
+
+/// Return true when the index contains staged changes.
+pub fn has_staged_changes(git_root: &Path) -> Result<bool> {
+    let output = run_git_output(git_root, &["diff", "--cached", "--quiet"], "git diff")?;
+    Ok(!output.status.success())
+}
+
+/// Commit staged changes with an explicit author string.
+pub fn commit_staged_with_author(git_root: &Path, message: &str, author: &str) -> Result<()> {
+    run_git(
+        git_root,
+        &["commit", "-m", message, "--author", author],
+        "git commit",
+    )?;
+    Ok(())
+}
+
+/// Resolve the git remote name to use for release/deploy operations on a repo.
+///
+/// Homeboy core is framework-agnostic and must operate on repositories whose
+/// remote is not named `origin` (forks, renamed remotes, Enterprise mirrors).
+/// Resolution prefers `origin` when it exists (the overwhelmingly common case),
+/// then falls back to the repository's sole configured remote, and finally to
+/// the literal `"origin"` when nothing can be determined.
+pub fn resolve_default_remote(path: &Path) -> String {
+    let remotes: Vec<String> = run_git(path, &["remote"], "git remote")
+        .ok()
+        .map(|out| {
+            out.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if remotes.iter().any(|remote| remote == "origin") {
+        return "origin".to_string();
+    }
+    if let [only] = remotes.as_slice() {
+        return only.clone();
+    }
+    "origin".to_string()
+}
+
+/// Resolve the remote-qualified default branch ref of a repository, e.g.
+/// `"origin/main"` or `"upstream/trunk"`.
+///
+/// Reads the resolved remote's `HEAD` symref first; when that is unset (common
+/// on fresh clones that never ran `git remote set-head`), probes the well-known
+/// default branch names against the resolved remote.
+pub fn default_remote_branch(path: &Path) -> Option<String> {
+    let remote = resolve_default_remote(path);
+    let head_ref = format!("refs/remotes/{remote}/HEAD");
+
+    if let Some(value) = run_git(
+        path,
+        &["symbolic-ref", "--quiet", "--short", &head_ref],
+        "git default remote branch",
+    )
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+    {
+        return Some(value);
+    }
+
+    ["main", "trunk", "master"].iter().find_map(|branch| {
+        let candidate = format!("{remote}/{branch}");
+        run_git(
+            path,
+            &["rev-parse", "--verify", "--quiet", &candidate],
+            "git rev-parse",
+        )
+        .is_ok()
+        .then_some(candidate)
+    })
+}
+
+/// Resolve the bare default branch name of a repository, e.g. `"main"`,
+/// stripping the remote prefix from [`default_remote_branch`].
+pub fn default_branch_name(path: &Path) -> Option<String> {
+    default_remote_branch(path).map(|reference| {
+        reference
+            .split_once('/')
+            .map(|(_, branch)| branch.to_string())
+            .unwrap_or(reference)
+    })
+}
+
+/// Update a clean linked repo to the latest remote default-branch revision.
+pub fn update_to_remote_default_branch(git_root: &Path) -> Result<()> {
+    let remote = resolve_default_remote(git_root);
+    let old_branch = current_branch(git_root);
+    run_git(
+        git_root,
+        &["fetch", &remote],
+        &format!("git fetch {remote}"),
+    )?;
+    let mut detached_default_branch: Option<String> = None;
+
+    if let Some(remote_branch) = default_remote_branch(git_root) {
+        let local_branch = remote_branch
+            .strip_prefix(&format!("{remote}/"))
+            .unwrap_or(&remote_branch)
+            .to_string();
+
+        if old_branch.as_deref() != Some(local_branch.as_str())
+            && run_git(
+                git_root,
+                &["switch", &local_branch],
+                "git switch default branch",
+            )
+            .is_err()
+        {
+            run_git(
+                git_root,
+                &["switch", "--detach", &remote_branch],
+                "git switch detached default branch",
+            )?;
+            detached_default_branch = Some(local_branch);
+        }
+    }
+
+    if let Some(branch) = detached_default_branch {
+        run_git(
+            git_root,
+            &["pull", "--ff-only", &remote, &branch],
+            "git pull detached default branch --ff-only",
+        )?;
+    } else {
+        run_git(git_root, &["pull", "--ff-only"], "git pull --ff-only")?;
+    }
+
+    Ok(())
+}
+
+/// List all git-tracked markdown files in a directory.
+/// Uses `git ls-files` to respect .gitignore and only include tracked/staged files.
+/// Returns relative paths from the repository root.
+pub(crate) fn list_tracked_markdown_files(path: &Path) -> Result<Vec<String>> {
+    let stdout = run_git(
+        path,
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "*.md",
+        ],
+        "git ls-files",
+    )?;
+
+    Ok(stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+pub(crate) fn is_git_repo(path: &str) -> bool {
+    command::succeeded_in(path, "git", &["rev-parse", "--git-dir"])
+}
+
+/// Report whether `relative` (a repo-relative path) is committed/tracked in the
+/// git repository rooted at (or containing) `repo_dir`.
+///
+/// Returns `false` when the path is gitignored, untracked, or the directory is
+/// not a git repository. Uses `git ls-files --error-unmatch`, which only
+/// succeeds for paths recorded in the index.
+pub(crate) fn is_tracked_path(repo_dir: &Path, relative: &str) -> bool {
+    command::succeeded_in(
+        &repo_dir.to_string_lossy(),
+        "git",
+        &["ls-files", "--error-unmatch", "--", relative],
+    )
+}
+
+/// Get the git repository root directory from any path within the repo.
+pub fn get_git_root(path: &str) -> Result<String> {
+    run_git(
+        Path::new(path),
+        &["rev-parse", "--show-toplevel"],
+        "git root",
+    )
+    .map(|s| s.trim().to_string())
+}
+
+/// Normalize a path into a directory suitable for probing git provenance.
+///
+/// Git commands need a directory to run inside; when the caller hands us a file
+/// path (e.g. a toolchain binary or component artifact), probe its parent
+/// directory instead. Directories (and files with no parent) are returned
+/// unchanged.
+pub fn git_probe_path(path: &Path) -> std::path::PathBuf {
+    if path.is_file() {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Compute the relative path prefix of a component within a monorepo.
+///
+/// If `local_path` is a subdirectory of the git root, returns the relative path
+/// (e.g. "frontend" for `/repo/frontend`). Returns None if local_path IS the
+/// git root (not a monorepo component).
+pub fn get_component_path_prefix(local_path: &str) -> Option<String> {
+    let git_root = get_git_root(local_path).ok()?;
+    let root = std::path::Path::new(&git_root).canonicalize().ok()?;
+    let component = std::path::Path::new(local_path).canonicalize().ok()?;
+
+    if root == component {
+        return None; // Not a monorepo — component IS the repo root
+    }
+
+    component
+        .strip_prefix(&root)
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run git test fixture command");
+
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn run_git_failure_includes_command_cwd_exit_stdout_and_stderr() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let err = run_git(dir.path(), &["rev-parse", "--show-toplevel"], "git root")
+            .expect_err("non-repo git command should fail");
+
+        assert_eq!(err.code.as_str(), "git.command_failed");
+        assert_eq!(err.details["command"], "git rev-parse --show-toplevel");
+        assert_eq!(err.details["cwd"], dir.path().to_string_lossy().to_string());
+        assert!(err.details["exit_code"].as_i64().is_some());
+        assert!(err.details["stdout"].as_str().is_some());
+        assert!(err.details["stderr"].as_str().is_some());
+    }
+
+    #[test]
+    fn get_git_root_io_failure_keeps_git_diagnostics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing");
+
+        let err = get_git_root(&missing.to_string_lossy())
+            .expect_err("missing cwd should report git command failure details");
+
+        assert_eq!(err.code.as_str(), "git.command_failed");
+        assert_ne!(err.message, "IO error");
+        assert_eq!(err.details["command"], "git rev-parse --show-toplevel");
+        assert_eq!(err.details["cwd"], missing.to_string_lossy().to_string());
+        assert!(err.details["exit_code"].is_null());
+        assert!(err.details["io_error"].as_str().is_some());
+        assert_eq!(err.details["stdout"], "");
+        assert_eq!(err.details["stderr"], "");
+    }
+
+    #[test]
+    fn bounded_git_command_terminates_hung_child_process_group() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["config", "alias.hang", "!sleep 10"]);
+
+        let started = Instant::now();
+        let err = run_git_with_env_timeout(
+            dir.path(),
+            &["hang"],
+            "test hung Git phase",
+            &[],
+            Duration::from_millis(50),
+        )
+        .expect_err("hung Git alias should time out");
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(err.details["stderr"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("timed out")));
+    }
+
+    #[test]
+    fn resolve_default_remote_prefers_origin_then_sole_remote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        git(path, &["init", "-q"]);
+
+        // No remotes configured — fall back to the conventional "origin".
+        assert_eq!(resolve_default_remote(path), "origin");
+
+        // A single non-origin remote resolves to that remote.
+        git(
+            path,
+            &["remote", "add", "upstream", "https://example.test/x.git"],
+        );
+        assert_eq!(resolve_default_remote(path), "upstream");
+
+        // Once origin exists it is preferred even alongside other remotes.
+        git(
+            path,
+            &["remote", "add", "origin", "https://example.test/y.git"],
+        );
+        assert_eq!(resolve_default_remote(path), "origin");
+    }
+
+    #[test]
+    fn default_branch_resolves_through_a_non_origin_remote() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let remote = tmp.path().join("remote.git");
+        let seed = tmp.path().join("seed");
+        let clone = tmp.path().join("clone");
+
+        git(
+            tmp.path(),
+            &["init", "--bare", "-b", "main", remote.to_str().unwrap()],
+        );
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
+        );
+        git(&seed, &["config", "user.email", "t@x.test"]);
+        git(&seed, &["config", "user.name", "T"]);
+        git(&seed, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(seed.join("f.txt"), "x").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-q", "-m", "init"]);
+        git(&seed, &["push", "-q", "origin", "main"]);
+
+        // Fresh clone records refs/remotes/origin/HEAD; rename it so the remote
+        // is deliberately NOT named origin.
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+        git(&clone, &["remote", "rename", "origin", "upstream"]);
+
+        assert_eq!(resolve_default_remote(&clone), "upstream");
+        assert_eq!(
+            default_remote_branch(&clone).as_deref(),
+            Some("upstream/main")
+        );
+        assert_eq!(default_branch_name(&clone).as_deref(), Some("main"));
+    }
+}

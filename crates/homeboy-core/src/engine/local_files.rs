@@ -1,0 +1,372 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde::Serialize;
+
+use crate::error::{Error, Result};
+
+/// Entry returned from directory listing
+#[derive(Debug, Clone)]
+pub struct Entry {
+    pub path: PathBuf,
+    pub is_dir: bool,
+}
+
+impl Entry {
+    pub fn is_json(&self) -> bool {
+        self.path.extension().is_some_and(|ext| ext == "json")
+    }
+}
+
+/// Local filesystem implementation
+pub struct LocalFs;
+
+impl LocalFs {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn read(&self, path: &Path) -> Result<String> {
+        fs::read_to_string(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Error::internal_io(
+                    format!("File not found: {}", path.display()),
+                    Some("read file".to_string()),
+                )
+            } else {
+                Error::internal_io(e.to_string(), Some("read file".to_string()))
+            }
+        })
+    }
+
+    pub fn write(&self, path: &Path, content: &str) -> Result<()> {
+        write_file_atomic(path, content, "write file")
+    }
+
+    pub fn list(&self, dir: &Path) -> Result<Vec<Entry>> {
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let entries = fs::read_dir(dir)
+            .map_err(|e| Error::internal_io(e.to_string(), Some("list directory".to_string())))?;
+
+        let mut result = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_dir = path.is_dir();
+            result.push(Entry { path, is_dir });
+        }
+
+        Ok(result)
+    }
+
+    pub fn delete(&self, path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Err(Error::internal_io(
+                format!("File not found: {}", path.display()),
+                Some("delete file".to_string()),
+            ));
+        }
+
+        fs::remove_file(path)
+            .map_err(|e| Error::internal_io(e.to_string(), Some("delete file".to_string())))
+    }
+
+    pub fn ensure_dir(&self, dir: &Path) -> Result<()> {
+        if !dir.exists() {
+            fs::create_dir_all(dir).map_err(|e| {
+                Error::internal_io(e.to_string(), Some("create directory".to_string()))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl Default for LocalFs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Convenience function to get local filesystem
+pub fn local() -> LocalFs {
+    LocalFs::new()
+}
+
+/// Ensure all app directories exist
+pub fn ensure_app_dirs() -> Result<()> {
+    use crate::paths;
+
+    let dirs = [
+        paths::homeboy()?,
+        paths::projects()?,
+        paths::servers()?,
+        paths::components()?,
+        paths::extensions()?,
+        paths::keys()?,
+        paths::backups()?,
+    ];
+
+    let fs = local();
+    for dir in dirs {
+        fs.ensure_dir(&dir)?;
+    }
+
+    Ok(())
+}
+
+/// Read file contents with standardized error handling.
+pub fn read_file(path: &Path, operation: &str) -> Result<String> {
+    fs::read_to_string(path)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(operation.to_string())))
+}
+
+/// Write content to file with standardized error handling.
+pub fn write_file(path: &Path, content: &str, operation: &str) -> Result<()> {
+    fs::write(path, content)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(operation.to_string())))
+}
+
+/// Write content to file atomically (write to .tmp, then rename).
+pub fn write_file_atomic(path: &Path, content: &str, operation: &str) -> Result<()> {
+    write_file_atomic_with_owner_only(path, content, operation, false)
+}
+
+fn write_file_atomic_with_owner_only(
+    path: &Path,
+    content: &str,
+    operation: &str,
+    owner_only: bool,
+) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        Error::internal_io(
+            format!("Invalid path: {}", path.display()),
+            Some(operation.to_string()),
+        )
+    })?;
+
+    let filename = path.file_name().ok_or_else(|| {
+        Error::internal_io(
+            format!("Invalid path: {}", path.display()),
+            Some(operation.to_string()),
+        )
+    })?;
+
+    let tmp_path = unique_temp_path(parent, filename.to_string_lossy().as_ref());
+
+    if owner_only {
+        write_file_owner_only(&tmp_path, content, &format!("{} (write temp)", operation))?;
+    } else {
+        fs::write(&tmp_path, content).map_err(|e| {
+            Error::internal_io(e.to_string(), Some(format!("{} (write temp)", operation)))
+        })?;
+    }
+
+    fs::rename(&tmp_path, path)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(format!("{} (rename)", operation))))?;
+
+    Ok(())
+}
+
+/// Create parent directories and atomically persist pretty-printed JSON.
+pub(crate) fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    write_json_file_with_owner_only(path, value, false)
+}
+
+/// Create parent directories and atomically persist owner-only JSON on Unix.
+pub(crate) fn write_json_file_owner_only<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    write_json_file_with_owner_only(path, value, true)
+}
+
+fn write_json_file_with_owner_only<T: Serialize>(
+    path: &Path,
+    value: &T,
+    owner_only: bool,
+) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        Error::internal_unexpected(format!("path has no parent: {}", path.display()))
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+    })?;
+    let json = serde_json::to_string_pretty(value).map_err(|error| {
+        Error::internal_json(error.to_string(), Some(path.display().to_string()))
+    })?;
+    write_file_atomic_with_owner_only(
+        path,
+        &format!("{json}\n"),
+        &path.display().to_string(),
+        owner_only,
+    )
+}
+
+/// Create a file owner-only on Unix before writing its contents.
+pub(crate) fn write_file_owner_only(path: &Path, content: &str, operation: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))?;
+        file.write_all(content.as_bytes())
+            .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))
+    }
+
+    #[cfg(not(unix))]
+    {
+        write_file(path, content, operation)
+    }
+}
+
+fn unique_temp_path(parent: &Path, filename: &str) -> PathBuf {
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    parent.join(format!(
+        ".{}.{}.{}.tmp",
+        filename,
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Barrier};
+    use tempfile::tempdir;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_local_fs_write_read() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        let fs = local();
+
+        fs.write(&path, "hello world").unwrap();
+        let content = fs.read(&path).unwrap();
+        assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn local_fs_write_uses_unique_temp_paths_for_concurrent_writers() {
+        let dir = tempdir().unwrap();
+        let path = Arc::new(dir.path().join("config.json"));
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    local()
+                        .write(&path, &format!(r#"{{"writer":{index}}}"#))
+                        .expect("concurrent write succeeds");
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("writer thread");
+        }
+
+        let content = fs::read_to_string(path.as_ref()).expect("read final config");
+        serde_json::from_str::<serde_json::Value>(&content).expect("valid json");
+        let temp_files: Vec<_> = fs::read_dir(dir.path())
+            .expect("list tempdir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
+        assert!(
+            temp_files.is_empty(),
+            "temp files left behind: {temp_files:?}"
+        );
+    }
+
+    #[test]
+    fn test_local_fs_list() {
+        let dir = tempdir().unwrap();
+        let fs = local();
+
+        fs.write(&dir.path().join("a.json"), "{}").unwrap();
+        fs.write(&dir.path().join("b.txt"), "text").unwrap();
+
+        let entries = fs.list(dir.path()).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        let json_entries: Vec<_> = entries.iter().filter(|e| e.is_json()).collect();
+        assert_eq!(json_entries.len(), 1);
+    }
+
+    #[test]
+    fn test_local_fs_delete() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("delete_me.txt");
+        let fs = local();
+
+        fs.write(&path, "content").unwrap();
+        assert!(path.exists());
+
+        fs.delete(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn read_file_succeeds_for_existing_file() {
+        let mut temp = NamedTempFile::new().unwrap();
+        writeln!(temp, "test content").unwrap();
+
+        let content = read_file(temp.path(), "test read").unwrap();
+        assert!(content.contains("test content"));
+    }
+
+    #[test]
+    fn read_file_returns_error_for_missing_file() {
+        let result = read_file(Path::new("/nonexistent/path.txt"), "test read");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code.as_str(), "internal.io_error");
+    }
+
+    #[test]
+    fn write_file_succeeds_for_valid_path() {
+        let temp = NamedTempFile::new().unwrap();
+        let result = write_file(temp.path(), "new content", "test write");
+        assert!(result.is_ok());
+
+        let content = fs::read_to_string(temp.path()).unwrap();
+        assert_eq!(content, "new content");
+    }
+
+    #[test]
+    fn write_file_returns_error_for_invalid_path() {
+        let result = write_file(
+            Path::new("/nonexistent/dir/file.txt"),
+            "content",
+            "test write",
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code.as_str(), "internal.io_error");
+    }
+
+    #[test]
+    fn write_json_file_creates_parents_and_preserves_pretty_format() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested/state.json");
+
+        write_json_file(&path, &serde_json::json!({ "name": "homeboy" })).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "{\n  \"name\": \"homeboy\"\n}\n"
+        );
+    }
+}
