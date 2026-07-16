@@ -28,6 +28,7 @@ pub(crate) fn run_package(
     component_id: &str,
     component_local_path: &str,
     component_source_path: Option<&str>,
+    declared_build_artifact: Option<&str>,
     skip_build_validation: bool,
 ) -> Result<ReleaseStepResult> {
     let package_extensions: Vec<&ExtensionManifest> = extensions
@@ -70,6 +71,13 @@ pub(crate) fn run_package(
         }));
     }
 
+    collect_declared_build_artifact(
+        state,
+        declared_build_artifact,
+        component_id,
+        component_local_path,
+    )?;
+
     let data = if responses.len() == 1 {
         let response = responses.pop().expect("single package response");
         serde_json::json!({
@@ -86,6 +94,59 @@ pub(crate) fn run_package(
     };
 
     Ok(step_success("package", "package", Some(data), Vec::new()))
+}
+
+/// Add a component-owned deploy artifact even when its packaging provider also
+/// emits unrelated release artifacts (for example, a registry tarball).
+fn collect_declared_build_artifact(
+    state: &mut ReleaseState,
+    declared_build_artifact: Option<&str>,
+    component_id: &str,
+    component_local_path: &str,
+) -> Result<()> {
+    let Some(declared_build_artifact) =
+        declared_build_artifact.filter(|path| !path.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    let declared_path =
+        resolve_release_artifact_path(declared_build_artifact, component_local_path);
+    if !declared_path.is_file() {
+        return Err(Error::validation_invalid_argument(
+            "build_artifact",
+            format!(
+                "Configured build_artifact '{}' was not produced by release.package",
+                declared_build_artifact
+            ),
+            Some(declared_path.display().to_string()),
+            Some(vec![
+                "Update the component-owned release.package command to produce the configured build_artifact.".to_string(),
+            ]),
+        ));
+    }
+
+    let declared_path = std::fs::canonicalize(&declared_path).map_err(|error| {
+        Error::internal_io(
+            format!("Failed to resolve configured build_artifact: {}", error),
+            Some(declared_path.display().to_string()),
+        )
+    })?;
+    let already_collected = state.artifacts.iter().any(|artifact| {
+        let path = resolve_release_artifact_path(&artifact.path, component_local_path);
+        std::fs::canonicalize(path).ok().as_ref() == Some(&declared_path)
+    });
+    if already_collected {
+        return Ok(());
+    }
+
+    let artifact_start = state.artifacts.len();
+    state.artifacts.push(ReleaseArtifact {
+        path: declared_build_artifact.to_string(),
+        durable_path: None,
+        artifact_type: None,
+        platform: None,
+    });
+    persist_package_artifacts(state, artifact_start, component_id, component_local_path)
 }
 
 /// Execute a `release.package` action with a bounded retry for transient

@@ -110,6 +110,7 @@ pub(super) fn execute_release_plan_step(
                 context.component_id,
                 &context.component.local_path,
                 None,
+                context.component.build_artifact.as_deref(),
                 context.options.skip_build_validation,
             )
             .and_then(|result| {

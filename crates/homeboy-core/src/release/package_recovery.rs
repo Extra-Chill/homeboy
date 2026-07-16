@@ -52,6 +52,7 @@ pub fn package_existing_tag(
         component_id,
         &component.local_path,
         None,
+        component.build_artifact.as_deref(),
         skip_build_validation,
     )?;
     if state.artifacts.is_empty() {
