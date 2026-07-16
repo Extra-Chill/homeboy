@@ -97,6 +97,12 @@ Component configuration defines buildable and deployable units stored in `compon
   - **`enabled`** (boolean): Whether release pipeline is enabled
   - **`steps`** (array): Release step definitions
   - **`settings`** (object): Release pipeline settings
+  - **`package_coverage`** (array): Optional ZIP completeness mappings for transformed archive layouts
+    - **`artifact`** (string): Archive-relative ZIP path or glob pattern, normalized to slash-separated form
+    - **`artifact_match`** (`exact` or `glob`, default `exact`): Selects literal path equality or glob matching explicitly; each declaration must match exactly one emitted ZIP
+    - **`source_roots`** (array): One or more non-overlapping repository-relative source directories
+    - **`archive_root`** (string): Archive-relative directory where each selected source root's contents are packaged
+    - Unmapped ZIP artifacts use the identity-layout completeness check. Mapped archive paths are checked exactly.
 
 ### Runtime Requirements
 
@@ -179,6 +185,14 @@ Setting `local_path` to the same directory as the deploy target is a misconfigur
   },
   "release": {
     "enabled": true,
+    "package_coverage": [
+      {
+        "artifact": "dist/runtime-bundle.zip",
+        "artifact_match": "exact",
+        "source_roots": ["packages/runtime"],
+        "archive_root": "runtime-bundle"
+      }
+    ],
     "steps": [
       {
         "id": "preflight.test",

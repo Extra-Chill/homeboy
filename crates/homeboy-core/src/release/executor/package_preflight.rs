@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::component::{CommandScopeConfig, Component};
+use crate::component::{
+    CommandScopeConfig, Component, PackageCoverageArtifactMatch, PackageCoverageConfig,
+};
 use crate::error::{Error, Result};
 use crate::release::types::ReleaseArtifact;
 
@@ -33,53 +35,187 @@ pub(crate) fn validate_package_completeness(
     component_path: &Path,
     artifacts: &[ReleaseArtifact],
 ) -> Result<()> {
+    component.release.validate_package_coverage()?;
+    let zip_artifacts: Vec<(&ReleaseArtifact, BTreeSet<String>)> = artifacts
+        .iter()
+        .filter_map(|artifact| {
+            let artifact_path = resolve_artifact_path(component_path, artifact);
+            artifact_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+                .then(|| read_zip_entries(&artifact_path).map(|entries| (artifact, entries)))
+        })
+        .collect::<Result<_>>()?;
+
+    if zip_artifacts.is_empty() {
+        return Ok(());
+    }
+
+    for coverage in &component.release.package_coverage {
+        let matches: Vec<_> = zip_artifacts
+            .iter()
+            .filter(|(artifact, _)| artifact_matches(coverage, artifact))
+            .collect();
+        if matches.len() != 1 {
+            return Err(Error::validation_invalid_argument(
+                "release.package_coverage",
+                format!(
+                    "Package coverage artifact selector '{}' matched {} ZIP artifacts; it must match exactly one",
+                    coverage.artifact,
+                    matches.len()
+                ),
+                None,
+                None,
+            ));
+        }
+    }
+
+    // Selector ambiguity is invalid configuration independent of repository
+    // contents, so reject it before evaluating mapped source roots.
+    for (artifact, _) in &zip_artifacts {
+        let mappings = component
+            .release
+            .package_coverage
+            .iter()
+            .filter(|coverage| artifact_matches(coverage, artifact))
+            .count();
+        if mappings > 1 {
+            return Err(Error::validation_invalid_argument(
+                "release.package_coverage",
+                format!(
+                    "ZIP artifact '{}' matches multiple package coverage declarations",
+                    artifact.path
+                ),
+                None,
+                None,
+            ));
+        }
+    }
+
     let expected = tracked_runtime_files(component, component_path)?;
+    for coverage in &component.release.package_coverage {
+        for root in &coverage.source_roots {
+            if !expected
+                .iter()
+                .any(|path| source_root_suffix(path, root).is_some())
+            {
+                return Err(Error::validation_invalid_argument(
+                    "release.package_coverage",
+                    format!(
+                        "Package coverage source root '{}' matches no tracked runtime files",
+                        root
+                    ),
+                    None,
+                    None,
+                ));
+            }
+        }
+    }
     if expected.is_empty() {
         return Ok(());
     }
 
-    let mut archive_entries = BTreeSet::new();
-    for artifact in artifacts {
-        let artifact_path = resolve_artifact_path(component_path, artifact);
-        if !artifact_path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
-        {
+    for (artifact, entries) in zip_artifacts {
+        let mappings: Vec<&PackageCoverageConfig> = component
+            .release
+            .package_coverage
+            .iter()
+            .filter(|coverage| artifact_matches(coverage, artifact))
+            .collect();
+        debug_assert!(mappings.len() <= 1);
+        // Preserve the shipped identity-layout behavior: an empty archive does
+        // not assert coverage unless the component explicitly mapped it.
+        if entries.is_empty() && mappings.is_empty() {
             continue;
         }
-        archive_entries.extend(read_zip_entries(&artifact_path)?);
+
+        let (expected_paths, strict_archive_paths) = match mappings.first() {
+            Some(coverage) => (mapped_runtime_files(&expected, coverage)?, true),
+            None => (expected.clone(), false),
+        };
+        let missing: Vec<String> = expected_paths
+            .into_iter()
+            .filter(|path| !archive_contains_path(&entries, path, strict_archive_paths))
+            .collect();
+        if !missing.is_empty() {
+            return package_completeness_error(component_path, artifact, missing);
+        }
     }
 
-    if archive_entries.is_empty() {
-        return Ok(());
-    }
+    Ok(())
+}
 
-    let missing: Vec<String> = expected
-        .into_iter()
-        .filter(|path| !archive_contains_path(&archive_entries, path))
-        .collect();
-    if missing.is_empty() {
-        return Ok(());
+fn artifact_matches(coverage: &PackageCoverageConfig, artifact: &ReleaseArtifact) -> bool {
+    let path = normalize_archive_path(&artifact.path);
+    match coverage.artifact_match {
+        PackageCoverageArtifactMatch::Exact => path == coverage.artifact,
+        PackageCoverageArtifactMatch::Glob => glob_match::glob_match(&coverage.artifact, &path),
     }
+}
 
+fn mapped_runtime_files(
+    expected: &[String],
+    coverage: &PackageCoverageConfig,
+) -> Result<Vec<String>> {
+    let mut archive_paths = std::collections::BTreeMap::new();
+    for root in &coverage.source_roots {
+        for source_path in expected {
+            let Some(suffix) = source_root_suffix(source_path, root) else {
+                continue;
+            };
+            let archive_path = if coverage.archive_root == "." {
+                suffix.to_string()
+            } else {
+                format!("{}/{}", coverage.archive_root, suffix)
+            };
+            if let Some(existing) = archive_paths.insert(archive_path.clone(), source_path.clone())
+            {
+                return Err(Error::validation_invalid_argument(
+                    "release.package_coverage",
+                    format!(
+                        "Package coverage maps source files '{}' and '{}' to the same archive path '{}'",
+                        existing, source_path, archive_path
+                    ),
+                    None,
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(archive_paths.into_keys().collect())
+}
+
+fn source_root_suffix<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    if root == "." {
+        Some(path)
+    } else {
+        path.strip_prefix(root)
+            .and_then(|suffix| suffix.strip_prefix('/'))
+    }
+}
+
+fn package_completeness_error(
+    component_path: &Path,
+    artifact: &ReleaseArtifact,
+    missing: Vec<String>,
+) -> Result<()> {
     Err(Error::validation_invalid_argument(
         "package",
         format!(
-            "Release package is missing {} tracked runtime file(s): {}",
+            "Release package '{}' is missing {} tracked runtime file(s): {}",
+            artifact.path,
             missing.len(),
             missing.iter().take(20).cloned().collect::<Vec<_>>().join(", ")
         ),
-        Some(format!(
-            "{}",
-            serde_json::json!({
-                "missing": missing,
-                "source": component_path,
-                "checked_artifact_type": "zip"
-            })
-        )),
+        Some(serde_json::json!({
+            "missing": missing,
+            "source": component_path,
+            "artifact": artifact.path,
+            "checked_artifact_type": "zip"
+        }).to_string()),
         Some(vec![
-            "Update the release.package action so the artifact includes every tracked runtime file, or add an explicit release scope exclude for intentional omissions.".to_string(),
+            "Update the release.package action so this artifact includes every mapped tracked runtime file, or add an explicit release scope exclude for intentional omissions.".to_string(),
         ]),
     ))
 }
@@ -233,10 +369,10 @@ fn read_zip_entries(path: &Path) -> Result<BTreeSet<String>> {
     Ok(entries)
 }
 
-fn archive_contains_path(entries: &BTreeSet<String>, path: &str) -> bool {
+fn archive_contains_path(entries: &BTreeSet<String>, path: &str, strict: bool) -> bool {
     entries
         .iter()
-        .any(|entry| entry == path || entry.ends_with(&format!("/{}", path)))
+        .any(|entry| entry == path || (!strict && entry.ends_with(&format!("/{}", path))))
 }
 
 fn normalize_archive_path(path: &str) -> String {
@@ -312,6 +448,237 @@ mod tests {
     }
 
     #[test]
+    fn package_completeness_validates_transformed_source_root_and_direct_config() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::create_dir_all(repo.path().join("source/runtime")).expect("runtime dir");
+        std::fs::write(repo.path().join("source/runtime/main.php"), "<?php\n").expect("main");
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["add", "source/runtime/main.php"]);
+        let artifact_path = repo.path().join("build/runtime.zip");
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
+        write_zip(&artifact_path, &[("bundle/main.php", "<?php\n")]);
+        let mut component = test_component(repo.path());
+        component.release.package_coverage = vec![PackageCoverageConfig {
+            artifact: "build/runtime.zip".to_string(),
+            artifact_match: PackageCoverageArtifactMatch::Exact,
+            source_roots: vec!["source/runtime".to_string()],
+            archive_root: "bundle".to_string(),
+        }];
+
+        validate_package_completeness(&component, repo.path(), &zip_artifacts("build/runtime.zip"))
+            .expect("mapped runtime file should be present at its archive path");
+
+        component.release.package_coverage[0].archive_root = "../bundle".to_string();
+        write_zip(&artifact_path, &[("../bundle/main.php", "<?php\n")]);
+        let error = validate_package_completeness(
+            &component,
+            repo.path(),
+            &zip_artifacts("build/runtime.zip"),
+        )
+        .expect_err("direct traversal must fail before inspecting archive entries");
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("parent traversal"));
+    }
+
+    #[test]
+    fn package_completeness_rejects_missing_transformed_source_file() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::create_dir_all(repo.path().join("source/runtime")).expect("runtime dir");
+        std::fs::write(repo.path().join("source/runtime/main.php"), "<?php\n").expect("main");
+        std::fs::write(repo.path().join("source/runtime/extra.php"), "<?php\n").expect("extra");
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["add", "source/runtime"]);
+        let artifact_path = repo.path().join("build/runtime.zip");
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
+        write_zip(&artifact_path, &[("bundle/main.php", "<?php\n")]);
+        let mut component = test_component(repo.path());
+        component.release.package_coverage = vec![PackageCoverageConfig {
+            artifact: "build/runtime.zip".to_string(),
+            artifact_match: PackageCoverageArtifactMatch::Exact,
+            source_roots: vec!["source/runtime".to_string()],
+            archive_root: "bundle".to_string(),
+        }];
+
+        let error = validate_package_completeness(
+            &component,
+            repo.path(),
+            &zip_artifacts("build/runtime.zip"),
+        )
+        .expect_err("missing mapped runtime file should fail");
+        assert!(error.message.contains("bundle/extra.php"));
+    }
+
+    #[test]
+    fn package_completeness_does_not_union_zip_entries() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::write(repo.path().join("first.php"), "<?php\n").expect("first");
+        std::fs::write(repo.path().join("second.php"), "<?php\n").expect("second");
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["add", "first.php", "second.php"]);
+        let first_zip = repo.path().join("build/first.zip");
+        let second_zip = repo.path().join("build/second.zip");
+        std::fs::create_dir_all(first_zip.parent().unwrap()).expect("build dir");
+        write_zip(&first_zip, &[("first.php", "<?php\n")]);
+        write_zip(&second_zip, &[("second.php", "<?php\n")]);
+        let mut first_artifacts = zip_artifacts("build/first.zip");
+        let mut second_artifacts = zip_artifacts("build/second.zip");
+
+        let error = validate_package_completeness(
+            &test_component(repo.path()),
+            repo.path(),
+            &[first_artifacts.remove(0), second_artifacts.remove(0)],
+        )
+        .expect_err("each ZIP must cover its own runtime files");
+        assert!(error.message.contains("build/first.zip"));
+        assert!(error.message.contains("second.php"));
+    }
+
+    #[test]
+    fn package_completeness_preserves_identity_layout_success_and_failure() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::write(repo.path().join("runtime.php"), "<?php\n").expect("runtime");
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["add", "runtime.php"]);
+        let artifact_path = repo.path().join("build/package.zip");
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
+        write_zip(&artifact_path, &[("wrapped/runtime.php", "<?php\n")]);
+        validate_package_completeness(
+            &test_component(repo.path()),
+            repo.path(),
+            &zip_artifacts("build/package.zip"),
+        )
+        .expect("unmapped identity archive should retain wrapped-root support");
+
+        write_zip(&artifact_path, &[("other.php", "<?php\n")]);
+        let error = validate_package_completeness(
+            &test_component(repo.path()),
+            repo.path(),
+            &zip_artifacts("build/package.zip"),
+        )
+        .expect_err("identity archive missing a tracked runtime file should fail");
+        assert!(error.message.contains("runtime.php"));
+    }
+
+    #[test]
+    fn package_completeness_rejects_zero_match_source_root() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::write(repo.path().join("runtime.php"), "<?php\n").expect("runtime");
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["add", "runtime.php"]);
+        let artifact_path = repo.path().join("build/package.zip");
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
+        write_zip(&artifact_path, &[("bundle/runtime.php", "<?php\n")]);
+        let mut component = test_component(repo.path());
+        component.release.package_coverage = vec![PackageCoverageConfig {
+            artifact: "build/package.zip".to_string(),
+            artifact_match: PackageCoverageArtifactMatch::Exact,
+            source_roots: vec!["missing".to_string()],
+            archive_root: "bundle".to_string(),
+        }];
+
+        let error = validate_package_completeness(
+            &component,
+            repo.path(),
+            &zip_artifacts("build/package.zip"),
+        )
+        .expect_err("unmatched source roots must fail closed");
+        assert!(error.message.contains("matches no tracked runtime files"));
+    }
+
+    #[test]
+    fn package_completeness_rejects_archive_path_collisions() {
+        let repo = tempfile::tempdir().expect("repo");
+        for root in ["one", "two"] {
+            std::fs::create_dir_all(repo.path().join(root)).expect("source dir");
+            std::fs::write(repo.path().join(root).join("main.php"), "<?php\n").expect("runtime");
+        }
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["add", "one", "two"]);
+        let artifact_path = repo.path().join("build/package.zip");
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
+        write_zip(&artifact_path, &[("bundle/main.php", "<?php\n")]);
+        let mut component = test_component(repo.path());
+        component.release.package_coverage = vec![PackageCoverageConfig {
+            artifact: "build/package.zip".to_string(),
+            artifact_match: PackageCoverageArtifactMatch::Exact,
+            source_roots: vec!["one".to_string(), "two".to_string()],
+            archive_root: "bundle".to_string(),
+        }];
+
+        let error = validate_package_completeness(
+            &component,
+            repo.path(),
+            &zip_artifacts("build/package.zip"),
+        )
+        .expect_err("colliding mapped archive paths must fail");
+        assert!(error.message.contains("one/main.php"));
+        assert!(error.message.contains("two/main.php"));
+        assert!(error.message.contains("bundle/main.php"));
+    }
+
+    #[test]
+    fn package_completeness_rejects_overlapping_selectors_without_runtime_candidates() {
+        let repo = tempfile::tempdir().expect("repo");
+        run_git(repo.path(), &["init"]);
+        let artifact_path = repo.path().join("build/package.zip");
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
+        write_zip(&artifact_path, &[]);
+        let mut component = test_component(repo.path());
+        component.release.package_coverage = vec![
+            PackageCoverageConfig {
+                artifact: "build/package.zip".to_string(),
+                artifact_match: PackageCoverageArtifactMatch::Exact,
+                source_roots: vec![".".to_string()],
+                archive_root: "bundle".to_string(),
+            },
+            PackageCoverageConfig {
+                artifact: "build/*.zip".to_string(),
+                artifact_match: PackageCoverageArtifactMatch::Glob,
+                source_roots: vec![".".to_string()],
+                archive_root: "bundle".to_string(),
+            },
+        ];
+
+        let error = validate_package_completeness(
+            &component,
+            repo.path(),
+            &zip_artifacts("build/package.zip"),
+        )
+        .expect_err("overlapping selectors must fail before runtime coverage is evaluated");
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error
+            .message
+            .contains("matches multiple package coverage declarations"));
+    }
+
+    #[test]
+    fn package_completeness_rejects_empty_mapped_zip() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::create_dir_all(repo.path().join("source")).expect("source dir");
+        std::fs::write(repo.path().join("source/runtime.php"), "<?php\n").expect("runtime");
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["add", "source/runtime.php"]);
+        let artifact_path = repo.path().join("build/package.zip");
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
+        write_zip(&artifact_path, &[]);
+        let mut component = test_component(repo.path());
+        component.release.package_coverage = vec![PackageCoverageConfig {
+            artifact: "build/package.zip".to_string(),
+            artifact_match: PackageCoverageArtifactMatch::Exact,
+            source_roots: vec!["source".to_string()],
+            archive_root: "bundle".to_string(),
+        }];
+
+        let error = validate_package_completeness(
+            &component,
+            repo.path(),
+            &zip_artifacts("build/package.zip"),
+        )
+        .expect_err("explicit mappings make an empty ZIP incomplete");
+        assert!(error.message.contains("bundle/runtime.php"));
+    }
+
+    #[test]
     fn skip_build_validation_bypasses_package_completeness() {
         // #8189: when the operator passes --skip-build-validation, the
         // package-completeness structure assertion must not run, matching the
@@ -319,6 +686,23 @@ mod tests {
         assert!(!should_validate_package_completeness(true));
         // Default release behavior still enforces completeness.
         assert!(should_validate_package_completeness(false));
+    }
+
+    fn test_component(repo: &Path) -> Component {
+        Component {
+            id: "package".to_string(),
+            local_path: repo.to_string_lossy().to_string(),
+            ..Component::default()
+        }
+    }
+
+    fn zip_artifacts(path: &str) -> Vec<ReleaseArtifact> {
+        vec![ReleaseArtifact {
+            path: path.to_string(),
+            durable_path: None,
+            artifact_type: Some("archive".to_string()),
+            platform: None,
+        }]
     }
 
     fn run_git(repo: &Path, args: &[&str]) {

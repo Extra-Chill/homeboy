@@ -26,7 +26,8 @@ pub use config::{
     ArtifactInput, CleanupArtifactDeclaration, CommandScopeConfig, ComponentDeployConfig,
     ComponentGithubReleaseConfig, ComponentOverrideConfig, ComponentReleaseConfig,
     ComponentScriptsConfig, DependencyStackEdge, GitDeployConfig, GithubConfig, GithubHostConfig,
-    GithubReleaseOwner, ScopeConfig, ScopedExtensionConfig, VersionTarget,
+    GithubReleaseOwner, PackageCoverageArtifactMatch, PackageCoverageConfig, ScopeConfig,
+    ScopedExtensionConfig, VersionTarget,
 };
 pub use inventory::{
     exists, extension_provides_artifact_pattern, inventory, list, list_ids, load,
