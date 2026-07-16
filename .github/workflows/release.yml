@@ -447,6 +447,16 @@ jobs:
         if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
         run: cargo build --workspace --locked
 
+      # Compile every crate's TEST target too. `cargo build --workspace` above
+      # only builds lib/bin targets, so a test file that references a module
+      # moved during a crate extraction (e.g. a donor's orphaned `super::foo`
+      # after `foo` was extracted) compiles fine here yet breaks the test gate.
+      # `check --tests` is codegen-free and cheap; it fails the release closed
+      # before shipping a workspace whose tests don't build.
+      - name: Preflight workspace test-target compilation
+        if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
+        run: cargo check --workspace --tests --locked
+
       - uses: Extra-Chill/homeboy-action@v2
         id: release
         if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'

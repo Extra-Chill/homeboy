@@ -151,7 +151,7 @@ fn run_component_scripts_with_env_and_timeout(
     })
 }
 
-pub(crate) fn run_component_scripts_with_env(
+pub fn run_component_scripts_with_env(
     component: &Component,
     capability: ExtensionCapability,
     source_path: &Path,
@@ -282,7 +282,7 @@ fn command_with_args(command: &str, script_args: &[String]) -> String {
     )
 }
 
-pub(crate) fn source_path(component: &Component, path_override: Option<&str>) -> PathBuf {
+pub fn source_path(component: &Component, path_override: Option<&str>) -> PathBuf {
     path_override
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(&component.local_path))
