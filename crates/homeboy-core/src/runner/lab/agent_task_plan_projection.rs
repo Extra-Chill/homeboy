@@ -5,7 +5,7 @@ use crate::lab_contract::AgentTaskDispatchIdentity;
 use crate::notification_route::NotificationRoute;
 use crate::{config, Error, Result};
 
-pub(super) fn mirror_agent_task_run_plan_aggregate(
+pub(crate) fn mirror_agent_task_run_plan_aggregate(
     plan_spec: &str,
     run_id: &str,
     aggregate: AgentTaskAggregate,
@@ -36,12 +36,14 @@ pub(super) fn mirror_agent_task_run_plan_aggregate(
     if !controller_owned {
         agent_task_lifecycle::mark_running(run_id)?;
     }
-    agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
     if let Some(identity) = dispatch_identity.filter(|identity| {
         !identity.runner_id.trim().is_empty() && !identity.runner_job_id.trim().is_empty()
     }) {
         record_runner_job_identity(run_id, &identity.runner_id, &identity.runner_job_id)?;
     }
+    // Artifact projection needs the runner identity while reconciling the
+    // aggregate so it can distinguish runner provenance from controller bytes.
+    agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
     Ok(())
 }
 

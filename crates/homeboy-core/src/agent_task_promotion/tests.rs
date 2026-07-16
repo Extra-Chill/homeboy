@@ -28,11 +28,13 @@ use crate::agent_task::{
 use crate::agent_task_gate::{
     AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
 };
+use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::command_invocation::CommandInvocation;
 use crate::defaults::{
     HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind,
     WorktreeProviderListResultMapping,
 };
+use crate::lab_contract::AgentTaskDispatchIdentity;
 use crate::{Error, Result};
 
 const VALID_PATCH: &str = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
@@ -193,6 +195,196 @@ fn recovered_runner_aggregate(
         }]
     })
     .to_string()
+}
+
+#[test]
+fn bridge_reconciliation_projects_recovered_finalized_bytes_for_local_promotion_idempotently() {
+    crate::test_support::with_isolated_home(|_| {
+        let run_id = "recovered-typed-lab-run";
+        let task_id = "implement";
+        let artifact_id = "patch";
+        let plan = AgentTaskPlan::new("recovered-typed-lab-plan", Vec::new());
+        crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit plan");
+        let finalized = crate::paths::artifact_root()
+            .expect("artifact root")
+            .join("executor-finalized")
+            .join("recovered-run")
+            .join("patch");
+        std::fs::create_dir_all(finalized.parent().expect("finalized parent"))
+            .expect("create finalized parent");
+        std::fs::write(&finalized, VALID_PATCH).expect("write controller finalized patch");
+        let aggregate: AgentTaskAggregate = serde_json::from_str(
+            &serde_json::json!({
+                "schema": "homeboy/agent-task-aggregate/v1",
+                "plan_id": "recovered-typed-lab-plan",
+                "status": "succeeded",
+                "totals": { "skipped": 0, "succeeded": 1 },
+                "outcomes": [{
+                    "schema": AGENT_TASK_OUTCOME_SCHEMA,
+                    "task_id": task_id,
+                    "status": "succeeded",
+                    "artifacts": [{
+                        "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                        "id": artifact_id,
+                        "kind": "patch",
+                        "path": "/home/runner/.homeboy/executor-finalized/patch.diff",
+                        "url": "homeboy://agent-task/run/recovered-typed-lab-run/artifacts#task=implement&artifact=patch",
+                        "size_bytes": VALID_PATCH.len(),
+                        "sha256": sha256_hex(VALID_PATCH),
+                        "metadata": {
+                            "executor_artifact_finalized": true,
+                            "source_provenance": { "runner_id": "homeboy-lab" }
+                        }
+                    }],
+                    "typed_artifacts": [{
+                        "name": "patch",
+                        "artifact_type": "file",
+                        "payload": {
+                            "artifact_id": artifact_id,
+                            "kind": "patch",
+                            "path": "/home/runner/.homeboy/executor-finalized/patch.diff",
+                            "sha256": sha256_hex(VALID_PATCH),
+                            "size_bytes": VALID_PATCH.len(),
+                            "url": "homeboy://agent-task/run/recovered-typed-lab-run/artifacts#task=implement&artifact=patch"
+                        },
+                        "artifact": {
+                            "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                            "id": artifact_id,
+                            "kind": "patch",
+                            "path": "/home/runner/.homeboy/executor-finalized/patch.diff",
+                            "size_bytes": VALID_PATCH.len(),
+                            "sha256": sha256_hex(VALID_PATCH),
+                            "metadata": { "executor_artifact_finalized": true }
+                        }
+                    }]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("recovered aggregate");
+        let identity = AgentTaskDispatchIdentity {
+            runner_id: "homeboy-lab".to_string(),
+            runner_job_id: "job-recovered".to_string(),
+            ..Default::default()
+        };
+
+        crate::runner::mirror_agent_task_run_plan_aggregate(
+            "@runner-plan.json",
+            run_id,
+            aggregate.clone(),
+            None,
+            Some(&identity),
+        )
+        .expect("bridge reconciliation");
+        crate::runner::mirror_agent_task_run_plan_aggregate(
+            "@runner-plan.json",
+            run_id,
+            aggregate.clone(),
+            None,
+            Some(&identity),
+        )
+        .expect("idempotent bridge reconciliation");
+
+        let store = crate::observation::ObservationStore::open_initialized().expect("store");
+        let artifacts = store.list_artifacts(run_id).expect("projected artifacts");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].artifact_type, "file");
+        assert_eq!(artifacts[0].metadata_json["agent_task"]["task_id"], task_id);
+        assert_eq!(
+            artifacts[0].metadata_json["agent_task"]["logical_artifact_id"],
+            artifact_id
+        );
+
+        let temp = tempfile::tempdir().expect("promotion tempdir");
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(temp.path().join("target")),
+            ..Default::default()
+        };
+        let report = promote_with_provider(
+            AgentTaskPromotionOptions {
+                source: serde_json::to_string(&aggregate).expect("aggregate json"),
+                source_run_id: Some(run_id.to_string()),
+                source_path: None,
+                source_worktree_path: None,
+                base_ref: None,
+                task_base_sha: None,
+                to_worktree: "homeboy@recovered-promotion".to_string(),
+                task_id: Some(task_id.to_string()),
+                artifact_id: Some(artifact_id.to_string()),
+                dry_run: false,
+                gates: VerifyGateOptions::default(),
+                provider_command: None,
+                provider_invocation: None,
+            },
+            &mut provider,
+        )
+        .expect("promote recovered controller projection");
+        assert_eq!(report.patch_artifact.path, artifacts[0].path);
+        assert_eq!(
+            provider.applied_patch_contents,
+            vec![VALID_PATCH.to_string()]
+        );
+    });
+}
+
+#[test]
+fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_pending() {
+    crate::test_support::with_isolated_home(|_| {
+        for (run_id, contents) in [
+            ("recovered-missing-finalized", None),
+            (
+                "recovered-mismatched-finalized",
+                Some("different patch bytes"),
+            ),
+        ] {
+            let plan = AgentTaskPlan::new("recovered-lab-plan", Vec::new());
+            crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit plan");
+            if let Some(contents) = contents {
+                let finalized = crate::paths::artifact_root()
+                    .expect("artifact root")
+                    .join("executor-finalized")
+                    .join(run_id)
+                    .join("patch");
+                std::fs::create_dir_all(finalized.parent().expect("finalized parent"))
+                    .expect("create finalized parent");
+                std::fs::write(finalized, contents).expect("write mismatched finalized bytes");
+            }
+            let aggregate: AgentTaskAggregate = serde_json::from_str(&recovered_runner_aggregate(
+                "implement",
+                "patch",
+                &sha256_hex(VALID_PATCH),
+                VALID_PATCH.len(),
+            ))
+            .expect("recovered aggregate");
+            let identity = AgentTaskDispatchIdentity {
+                runner_id: "homeboy-lab".to_string(),
+                runner_job_id: format!("job-{run_id}"),
+                ..Default::default()
+            };
+
+            crate::runner::mirror_agent_task_run_plan_aggregate(
+                "@runner-plan.json",
+                run_id,
+                aggregate,
+                None,
+                Some(&identity),
+            )
+            .expect("bridge preserves aggregate while surfacing pending projection");
+
+            let record = crate::agent_task_lifecycle::status(run_id).expect("lifecycle status");
+            assert_eq!(record.metadata["artifact_projection"]["status"], "pending");
+            assert!(record.metadata["artifact_projection"]["error"]
+                .as_str()
+                .expect("actionable error")
+                .contains("controller-finalized bytes"));
+            let artifacts = crate::observation::ObservationStore::open_initialized()
+                .expect("store")
+                .list_artifacts(run_id)
+                .expect("artifact references");
+            assert_eq!(artifacts.len(), 1);
+            assert_eq!(artifacts[0].artifact_type, "remote_file");
+        }
+    });
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use super::*;
 use sha2::Digest;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn record_pre_execution_failure(
     run_id: &str,
@@ -611,6 +611,7 @@ pub(crate) fn project_terminal_artifacts(
     })?;
 
     let mut used_ids = std::collections::BTreeSet::new();
+    let mut projection_error = None;
     for outcome in &aggregate.outcomes {
         for artifact in &outcome.artifacts {
             let Some(path) = artifact.path.as_deref() else {
@@ -655,29 +656,61 @@ pub(crate) fn project_terminal_artifacts(
                         None,
                     ));
                 }
-                // The producing runner owns finalized bytes. Controller-side
-                // reconciliation indexes its canonical runner token instead of
-                // attempting to copy a runner-local filesystem path.
-                store.import_artifact(&crate::observation::ArtifactRecord {
-                    id: artifact_id,
-                    run_id: record.run_id.clone(),
-                    kind: artifact.kind.clone(),
-                    artifact_type: "remote_file".to_string(),
-                    path: crate::execution_contract::EXECUTION_CONTRACT
-                        .artifacts
-                        .runner_artifact_ref(runner_id, &record.run_id, &logical_id),
-                    url: None,
-                    public_url: None,
-                    viewer_url: None,
-                    viewer_links: Vec::new(),
-                    sha256: artifact.sha256.clone(),
-                    size_bytes: artifact
-                        .size_bytes
-                        .and_then(|value| i64::try_from(value).ok()),
-                    mime: artifact.mime.clone(),
-                    metadata_json: metadata,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                })?;
+                match controller_finalized_artifact_path(artifact)? {
+                    Some(path) => {
+                        let mut controller_hash = sha2::Sha256::new();
+                        sha2::Digest::update(&mut controller_hash, b"controller");
+                        sha2::Digest::update(&mut controller_hash, [0]);
+                        sha2::Digest::update(&mut controller_hash, artifact_id.as_bytes());
+                        let controller_artifact_id =
+                            format!("agent-task-{:x}", controller_hash.finalize());
+                        let mut metadata = metadata;
+                        metadata["agent_task"]["projection"] = json!("controller_finalized");
+                        store.record_artifact_with_id(
+                            &record.run_id,
+                            &artifact.kind,
+                            path,
+                            &controller_artifact_id,
+                            metadata,
+                        )?;
+                    }
+                    None => {
+                        // Keep the remote reference available for existing Lab
+                        // retrieval flows, but leave an actionable lifecycle
+                        // marker because it cannot satisfy local promotion.
+                        store.import_artifact(&crate::observation::ArtifactRecord {
+                            id: artifact_id,
+                            run_id: record.run_id.clone(),
+                            kind: artifact.kind.clone(),
+                            artifact_type: "remote_file".to_string(),
+                            path: crate::execution_contract::EXECUTION_CONTRACT
+                                .artifacts
+                                .runner_artifact_ref(runner_id, &record.run_id, &logical_id),
+                            url: None,
+                            public_url: None,
+                            viewer_url: None,
+                            viewer_links: Vec::new(),
+                            sha256: artifact.sha256.clone(),
+                            size_bytes: artifact
+                                .size_bytes
+                                .and_then(|value| i64::try_from(value).ok()),
+                            mime: artifact.mime.clone(),
+                            metadata_json: metadata,
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                        })?;
+                        projection_error.get_or_insert_with(|| {
+                            Error::validation_invalid_argument(
+                                "artifact.path",
+                                format!(
+                                    "controller-finalized bytes for run '{}', task '{}', and artifact '{}' were not found with the aggregate SHA-256 and size",
+                                    record.run_id, outcome.task_id, logical_id
+                                ),
+                                Some(artifact.id.clone()),
+                                None,
+                            )
+                        });
+                    }
+                }
             } else {
                 store.record_artifact_with_id(
                     &record.run_id,
@@ -687,6 +720,71 @@ pub(crate) fn project_terminal_artifacts(
                     metadata,
                 )?;
             }
+        }
+    }
+    projection_error.map_or(Ok(()), Err)
+}
+
+/// Find finalized bytes already copied into the controller artifact root. Lab
+/// aggregate paths describe runner provenance and are never read after recovery.
+fn controller_finalized_artifact_path(artifact: &AgentTaskArtifact) -> Result<Option<PathBuf>> {
+    let Some(expected_sha256) = artifact.sha256.as_deref() else {
+        return Ok(None);
+    };
+    let Some(expected_size) = artifact.size_bytes else {
+        return Ok(None);
+    };
+    let root = crate::paths::artifact_root()?.join("executor-finalized");
+    if !root.is_dir() {
+        return Ok(None);
+    }
+    let mut matches = Vec::new();
+    collect_matching_finalized_artifacts(&root, expected_sha256, expected_size, &mut matches)?;
+    matches.sort();
+    Ok(matches.into_iter().next())
+}
+
+fn collect_matching_finalized_artifacts(
+    directory: &Path,
+    expected_sha256: &str,
+    expected_size: u64,
+    matches: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(directory).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "read controller finalized artifact directory {}",
+                directory.display()
+            )),
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read controller finalized artifact entry".to_string()),
+            )
+        })?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "inspect controller finalized artifact {}",
+                    path.display()
+                )),
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            collect_matching_finalized_artifacts(&path, expected_sha256, expected_size, matches)?;
+        } else if metadata.is_file()
+            && metadata.len() == expected_size
+            && crate::artifact_metadata::sha256_file(&path)? == expected_sha256
+        {
+            matches.push(path);
         }
     }
     Ok(())
