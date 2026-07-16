@@ -18,7 +18,7 @@ use std::sync::Mutex;
 
 use homeboy_audit_contract::AuditConfig;
 
-use crate::extension::TestMappingConfig;
+use homeboy_audit_contract::TestMappingConfig;
 
 /// The slim, owned view of an extension manifest that the audit engine needs.
 ///

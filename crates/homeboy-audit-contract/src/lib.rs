@@ -1,9 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 pub mod fingerprint;
+pub mod test_mapping;
 pub use fingerprint::{
     AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker, FingerprintOutput,
     HookRef, UnusedParam,
+};
+pub use test_mapping::{
+    BehaviorScenarioNames, IncludeWrapperPolicy, PackageNameSource, TestMappingConfig,
+    TestVacuityPolicy,
 };
 
 mod command_status;
