@@ -274,6 +274,7 @@ fn apply_oversized_patch_release_policy(
 #[cfg(test)]
 mod tests {
     use super::apply_oversized_patch_release_policy;
+    use super::guard_stale_primary_at_head;
     use crate::core::release::types::{
         ReleaseChangelogPlan, ReleaseSemverCommit, ReleaseSemverRecommendation,
     };
