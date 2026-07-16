@@ -177,8 +177,8 @@ pub use workspace::{
 };
 pub(crate) use workspace::{
     verify_lab_workspace_from_env, verify_lab_workspace_git_root, workspace_content_hash,
-    workspace_content_hash_algorithm, VerifiedLabWorkspaceProvenance,
-    WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+    workspace_content_hash_algorithm, workspace_content_manifest_for_policy,
+    VerifiedLabWorkspaceProvenance, WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -18,10 +18,27 @@ use super::util::{
 const RUNNER_WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
 pub(crate) const WORKSPACE_CONTENT_PERMISSION_PORTABLE: &str = "portable-content-only";
 pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE: &str = "unix-executable";
+pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE: &str = "unix-owner-executable";
+const WORKSPACE_CONTENT_DIAGNOSTIC_ENTRY_LIMIT: usize = 16;
+pub(crate) const WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT: usize = 192;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct WorkspaceContentManifest {
+    pub(crate) entry_count: usize,
+    pub(crate) entries: Vec<WorkspaceContentManifestEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct WorkspaceContentManifestEntry {
+    pub(crate) path: String,
+    pub(crate) kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) owner_executable: Option<bool>,
+}
 
 #[cfg(unix)]
 pub(crate) const WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY: &str =
-    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE;
+    WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE;
 #[cfg(not(unix))]
 pub(crate) const WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY: &str =
     WORKSPACE_CONTENT_PERMISSION_PORTABLE;
@@ -64,6 +81,9 @@ pub(crate) fn workspace_content_hash_algorithm(policy: &str) -> Option<String> {
         WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE if cfg!(unix) => {
             Some("homeboy-workspace-content-v2+unix-executable".to_string())
         }
+        WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE if cfg!(unix) => {
+            Some("homeboy-workspace-content-v3+unix-owner-executable".to_string())
+        }
         _ => None,
     }
 }
@@ -73,14 +93,15 @@ pub(crate) fn workspace_content_hash_for_policy(
     excludes: &[String],
     policy: &str,
 ) -> Result<String> {
-    let algorithm = workspace_content_hash_algorithm(policy).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "permission_policy",
-            "workspace content hash policy is unsupported on this platform",
-            Some(policy.to_string()),
-            None,
-        )
-    })?;
+    let (algorithm, executable_capability) =
+        workspace_content_hash_contract(policy).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "permission_policy",
+                "workspace content hash policy is unsupported on this platform",
+                Some(policy.to_string()),
+                None,
+            )
+        })?;
     let mut hasher = Sha256::new();
     hasher.update(algorithm.as_bytes());
     hasher.update(b"\0");
@@ -92,9 +113,49 @@ pub(crate) fn workspace_content_hash_for_policy(
         excludes,
         &mut vec![root.clone()],
         &mut hasher,
-        policy == WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+        executable_capability,
+        None,
     )?;
     Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+/// A bounded, content-free sample used only to explain a verification mismatch.
+/// The complete hash remains the authority; this manifest never contains bytes.
+pub(crate) fn workspace_content_manifest_for_policy(
+    path: &Path,
+    excludes: &[String],
+    policy: &str,
+) -> Result<WorkspaceContentManifest> {
+    let executable_capability = match workspace_content_hash_contract(policy) {
+        Some((_, capability)) => capability,
+        None => {
+            return Err(Error::validation_invalid_argument(
+                "permission_policy",
+                "workspace content hash policy is unsupported on this platform",
+                Some(policy.to_string()),
+                None,
+            ));
+        }
+    };
+    let root = content_hash_root(path)?;
+    let mut manifest = WorkspaceContentManifest {
+        entry_count: 0,
+        entries: Vec::with_capacity(WORKSPACE_CONTENT_DIAGNOSTIC_ENTRY_LIMIT),
+    };
+    // Use the authoritative v2 traversal so diagnostics and the content hash
+    // have identical symlink, exclusion, and metadata behavior.
+    let mut hasher = Sha256::new();
+    collect_content_hash_entries_v2(
+        &root,
+        &root,
+        Path::new(""),
+        excludes,
+        &mut vec![root.clone()],
+        &mut hasher,
+        executable_capability,
+        Some(&mut manifest),
+    )?;
+    Ok(manifest)
 }
 
 /// Exact historical v1 algorithm for controllers that emitted
@@ -136,7 +197,8 @@ fn collect_content_hash_entries_v2(
     excludes: &[String],
     ancestors: &mut Vec<std::path::PathBuf>,
     hasher: &mut Sha256,
-    include_executable_bit: bool,
+    executable_capability: ExecutableCapability,
+    mut manifest: Option<&mut WorkspaceContentManifest>,
 ) -> Result<()> {
     let mut children = fs::read_dir(path)
         .map_err(|err| {
@@ -197,6 +259,12 @@ fn collect_content_hash_entries_v2(
             if !is_runner_metadata_directory {
                 hasher.update(relative.as_bytes());
                 hasher.update(b"\0dir\0");
+                record_workspace_content_manifest_entry(
+                    &mut manifest,
+                    relative.clone(),
+                    "directory",
+                    None,
+                );
             }
             ancestors.push(canonical);
             collect_content_hash_entries_v2(
@@ -206,7 +274,8 @@ fn collect_content_hash_entries_v2(
                 excludes,
                 ancestors,
                 hasher,
-                include_executable_bit,
+                executable_capability,
+                manifest.as_deref_mut(),
             )?;
             ancestors.pop();
         } else if metadata.is_file() {
@@ -215,25 +284,97 @@ fn collect_content_hash_entries_v2(
             })?;
             hasher.update(relative.as_bytes());
             hasher.update(b"\0file\0");
-            if include_executable_bit {
-                hasher.update([file_is_executable(&metadata) as u8]);
+            if let Some(executable) = executable_capability.value(&metadata) {
+                hasher.update([executable as u8]);
             }
             hasher.update((contents.len() as u64).to_le_bytes());
-            hasher.update(contents);
+            hasher.update(&contents);
+            record_workspace_content_manifest_entry(
+                &mut manifest,
+                relative,
+                "file",
+                executable_capability.owner_value(&metadata),
+            );
         }
     }
     Ok(())
 }
 
+fn record_workspace_content_manifest_entry(
+    manifest: &mut Option<&mut WorkspaceContentManifest>,
+    path: String,
+    kind: &str,
+    owner_executable: Option<bool>,
+) {
+    let Some(manifest) = manifest.as_deref_mut() else {
+        return;
+    };
+    manifest.entry_count += 1;
+    if path.len() <= WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT
+        && manifest.entries.len() < WORKSPACE_CONTENT_DIAGNOSTIC_ENTRY_LIMIT
+    {
+        manifest.entries.push(WorkspaceContentManifestEntry {
+            path,
+            kind: kind.to_string(),
+            owner_executable,
+        });
+    }
+}
+
 #[cfg(unix)]
-fn file_is_executable(metadata: &fs::Metadata) -> bool {
+fn file_has_any_execute_bit(metadata: &fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
     metadata.permissions().mode() & 0o111 != 0
 }
 
+#[cfg(unix)]
+fn file_is_owner_executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    // Snapshot extraction may apply the runner's umask to group/other bits.
+    // The owner execute bit is the portable capability required to run a file.
+    metadata.permissions().mode() & 0o100 != 0
+}
+
 #[cfg(not(unix))]
-fn file_is_executable(_metadata: &fs::Metadata) -> bool {
+fn file_has_any_execute_bit(_metadata: &fs::Metadata) -> bool {
     false
+}
+
+#[cfg(not(unix))]
+fn file_is_owner_executable(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+#[derive(Clone, Copy)]
+enum ExecutableCapability {
+    None,
+    Any,
+    Owner,
+}
+
+impl ExecutableCapability {
+    fn value(self, metadata: &fs::Metadata) -> Option<bool> {
+        match self {
+            Self::None => None,
+            Self::Any => Some(file_has_any_execute_bit(metadata)),
+            Self::Owner => Some(file_is_owner_executable(metadata)),
+        }
+    }
+    fn owner_value(self, metadata: &fs::Metadata) -> Option<bool> {
+        (!matches!(self, Self::None)).then(|| file_is_owner_executable(metadata))
+    }
+}
+
+fn workspace_content_hash_contract(policy: &str) -> Option<(String, ExecutableCapability)> {
+    let capability = match policy {
+        WORKSPACE_CONTENT_PERMISSION_PORTABLE => ExecutableCapability::None,
+        WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE if cfg!(unix) => ExecutableCapability::Any,
+        WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE if cfg!(unix) => {
+            ExecutableCapability::Owner
+        }
+        _ => return None,
+    };
+    workspace_content_hash_algorithm(policy).map(|algorithm| (algorithm, capability))
 }
 
 #[cfg(unix)]

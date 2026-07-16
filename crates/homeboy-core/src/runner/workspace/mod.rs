@@ -44,7 +44,8 @@ pub(crate) use provenance::{
 pub(crate) use snapshot::{
     copy_snapshot_to_directory, effective_snapshot_excludes, local_snapshot_stats,
     materialize_snapshot, materialize_snapshot_git, snapshot_identity, workspace_content_hash,
-    workspace_content_hash_algorithm, WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+    workspace_content_hash_algorithm, workspace_content_manifest_for_policy,
+    WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 pub(crate) use types::{canonical_workspace_path, DEFAULT_EXCLUDES};
 pub(crate) use util::{

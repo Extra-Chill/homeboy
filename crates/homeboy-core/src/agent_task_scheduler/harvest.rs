@@ -698,7 +698,7 @@ mod committed_harvest_tests {
             "workspace_verification": {
                 "schema": "homeboy/lab-workspace-verification/v2", "identity": "snapshot:provider-ready",
                 "content_hash": content_hash, "sync_excludes": snapshot.sync_excludes,
-                "permission_policy": "unix-executable", "content_hash_algorithm": "homeboy-workspace-content-v2+unix-executable",
+                "permission_policy": "unix-owner-executable", "content_hash_algorithm": "homeboy-workspace-content-v3+unix-owner-executable",
                 "source_snapshot": snapshot,
                 "primary_workspace": { "identity": "snapshot:provider-ready", "remote_path": workspace.path().display().to_string() }
             }
@@ -934,7 +934,7 @@ mod committed_harvest_tests {
                 "workspace_verification": {
                     "schema": "homeboy/lab-workspace-verification/v2", "identity": synced.snapshot_identity,
                     "content_hash": content_hash, "sync_excludes": snapshot.sync_excludes,
-                    "permission_policy": "unix-executable", "content_hash_algorithm": "homeboy-workspace-content-v2+unix-executable",
+                    "permission_policy": "unix-owner-executable", "content_hash_algorithm": "homeboy-workspace-content-v3+unix-owner-executable",
                     "source_snapshot": snapshot,
                     "primary_workspace": { "identity": synced.snapshot_identity, "remote_path": remote.display().to_string() }
                 }
@@ -1022,7 +1022,7 @@ mod committed_harvest_tests {
             "workspace_verification": {
                 "schema": "homeboy/lab-workspace-verification/v2", "identity": "snapshot:runner-resident",
                 "content_hash": content_hash, "sync_excludes": snapshot.sync_excludes,
-                "permission_policy": "unix-executable", "content_hash_algorithm": "homeboy-workspace-content-v2+unix-executable",
+                "permission_policy": "unix-owner-executable", "content_hash_algorithm": "homeboy-workspace-content-v3+unix-owner-executable",
                 "source_snapshot": snapshot,
                 "primary_workspace": { "identity": "snapshot:runner-resident", "remote_path": workspace.path().display().to_string() }
             }
