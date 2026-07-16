@@ -511,7 +511,7 @@ pub(crate) fn contains_word_in_code(content: &str, word: &str) -> bool {
 /// `#[` we keep the string contents (and never treat `#` as a comment). This
 /// keeps the detector from both (a) mistaking `#[...]` for a `#` comment and
 /// (b) blanking a serde/clap-resolved function reference.
-fn blank_comments_and_strings(content: &str) -> String {
+pub(crate) fn blank_comments_and_strings(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     for line in content.split_inclusive('\n') {
         // Attribute lines (e.g. `#[serde(default = "default_true")]`) can carry
