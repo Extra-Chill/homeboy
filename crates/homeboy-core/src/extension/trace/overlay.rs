@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::engine::detail_output::{bounded_items, DEFAULT_DETAIL_ITEM_LIMIT};
 use crate::engine::run_dir::RunDir;
 use crate::error::{Error, Result};
+use homeboy_engine_primitives::detail_output::{bounded_items, DEFAULT_DETAIL_ITEM_LIMIT};
 
 use super::overlay_lock;
 

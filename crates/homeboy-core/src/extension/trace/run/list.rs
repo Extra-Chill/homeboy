@@ -1,10 +1,10 @@
 //! Trace scenario discovery (list-only) workflow.
 
 use crate::component::Component;
-use crate::engine::baseline::BaselineFlags;
 use crate::engine::run_dir::{self, RunDir};
 use crate::error::{Error, Result};
 use crate::extension::{resolve_execution_context, ExtensionCapability, RunnerOutput};
+use homeboy_engine_primitives::baseline::BaselineFlags;
 
 use super::super::canonicality::TraceCanonicalPolicy;
 use super::super::parsing::{parse_trace_list_str, TraceList};

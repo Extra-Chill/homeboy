@@ -1,7 +1,4 @@
 use crate::component::Component;
-use crate::engine::baseline::BaselineFlags;
-use crate::engine::local_files;
-use crate::engine::output_parse::ParseSpec;
 use crate::engine::run_dir::{self, RunDir};
 use crate::error::{Error, ErrorCode};
 use crate::extension::runner::tail_lines;
@@ -18,6 +15,9 @@ use crate::finding::HomeboyFinding;
 use crate::observation::homeboy_findings_from_test_analysis_input;
 use crate::refactor::AppliedRefactor;
 use crate::validation_progress::{write_command_artifact, ValidationProgressRecorder};
+use homeboy_engine_primitives::baseline::BaselineFlags;
+use homeboy_engine_primitives::local_files;
+use homeboy_engine_primitives::output_parse::ParseSpec;
 use serde::Serialize;
 use std::path::Path;
 
@@ -809,10 +809,11 @@ fn run_declared_result_parser(
         },
     )?;
     if !output.success {
-        let mut command = crate::engine::shell::quote_path(&resolved_script.to_string_lossy());
+        let mut command =
+            homeboy_engine_primitives::shell::quote_path(&resolved_script.to_string_lossy());
         if !args.is_empty() {
             command.push(' ');
-            command.push_str(&crate::engine::shell::quote_args(&args));
+            command.push_str(&homeboy_engine_primitives::shell::quote_args(&args));
         }
         return Err(declared_result_parser_error(
             component,

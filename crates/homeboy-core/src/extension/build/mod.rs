@@ -6,9 +6,7 @@ use crate::artifact_inputs::{self, ResolvedArtifactInput};
 use crate::component::{self, Component};
 use crate::config::{is_json_input, parse_bulk_ids};
 use crate::deploy::permissions;
-use crate::engine::command::CapturedOutput;
 use crate::engine::run_dir::RunDir;
-use crate::engine::shell;
 use crate::error::{Error, Result};
 use crate::extension::{
     self, exec_context, ExtensionCapability, ExtensionExecutionContext, ExtensionPhaseTiming,
@@ -16,6 +14,8 @@ use crate::extension::{
 use crate::output::{BulkResult, BulkResultBuilder};
 use crate::paths;
 use crate::server::execute_local_command_in_dir;
+use homeboy_engine_primitives::command::CapturedOutput;
+use homeboy_engine_primitives::shell;
 
 const DEFAULT_BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const BUILD_TIMEOUT_ENV: &str = "HOMEBOY_BUILD_TIMEOUT_SECS";
@@ -738,7 +738,11 @@ fn command_with_args(command: &str, args: &[String]) -> String {
         return command.to_string();
     }
 
-    format!("{} {}", command, crate::engine::shell::quote_args(args))
+    format!(
+        "{} {}",
+        command,
+        homeboy_engine_primitives::shell::quote_args(args)
+    )
 }
 
 fn apply_artifact_inputs(comp: &Component) -> Result<Vec<ResolvedArtifactInput>> {

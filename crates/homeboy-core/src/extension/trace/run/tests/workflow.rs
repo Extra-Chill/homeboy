@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::component::Component;
-use crate::engine::baseline::BaselineFlags;
 use crate::engine::run_dir::RunDir;
 use crate::error::{Error, ErrorCode};
 use crate::extension::trace::attach::TraceAttachment;
@@ -13,6 +12,7 @@ use crate::extension::trace::canonicality::TraceCanonicalPolicy;
 use crate::extension::trace::parsing::{TraceGitProvenance, TraceResults, TraceStatus};
 use crate::extension::trace::probes::TraceProbeConfig;
 use crate::extension::{ExtensionCapability, ExtensionExecutionContext, RunnerOutput};
+use homeboy_engine_primitives::baseline::BaselineFlags;
 
 use super::super::list::run_trace_list_workflow;
 use super::super::provenance::{

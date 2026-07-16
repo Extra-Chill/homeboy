@@ -576,7 +576,7 @@ pub fn is_source_relevant_change(opts: &DriftOptions, path: &str) -> bool {
 
 /// Collect test files in the repo using extension-declared glob patterns.
 fn collect_test_files(root: &Path, test_patterns: &[String]) -> Vec<PathBuf> {
-    use crate::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+    use homeboy_engine_primitives::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
     let config = ScanConfig {
         extensions: ExtensionFilter::All,

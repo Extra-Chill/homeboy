@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use crate::engine::validation;
 use crate::error::{Error, Result};
 use crate::project;
 use crate::server::http::ApiClient;
+use homeboy_engine_primitives::validation;
 
 use super::{
     build_action_env, execute_extension_command, load_extension, ExtensionExecutionMode,
@@ -126,7 +126,7 @@ pub(crate) fn execute_action(
                 .and_then(|proj| proj.base_path.clone());
 
             let working_dir =
-                crate::engine::text::json_path_str(&payload, &["release", "local_path"])
+                homeboy_engine_primitives::text::json_path_str(&payload, &["release", "local_path"])
                     .unwrap_or(extension_path);
 
             let env = build_action_env(

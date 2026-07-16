@@ -1,5 +1,5 @@
 use super::manifest::ExtensionManifest;
-use crate::engine::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
+use homeboy_engine_primitives::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
 
 // The fingerprint output schema moved to the homeboy-audit-contract crate
 // (#8425) — it's audit's data model, not extension behavior. Re-exported here

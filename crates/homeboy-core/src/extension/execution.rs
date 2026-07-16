@@ -1,6 +1,4 @@
 use crate::component::{self, Component};
-use crate::engine::command::CapturedOutput;
-use crate::engine::shell;
 use crate::engine::{template, validation};
 use crate::error::{Error, Result};
 use crate::project::{self, Project};
@@ -11,6 +9,8 @@ use crate::server::{
     execute_local_command_passthrough_with_timeout, execute_local_command_stderr_passthrough,
     execute_local_command_stderr_passthrough_with_timeout, CommandOutput,
 };
+use homeboy_engine_primitives::command::CapturedOutput;
+use homeboy_engine_primitives::shell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
@@ -665,8 +665,10 @@ pub(super) fn build_action_env(
     project_base_path: Option<&str>,
 ) -> Vec<(String, String)> {
     let settings_json = payload.to_string();
-    let component_id = crate::engine::text::json_path_str(payload, &["release", "component_id"]);
-    let component_path = crate::engine::text::json_path_str(payload, &["release", "local_path"]);
+    let component_id =
+        homeboy_engine_primitives::text::json_path_str(payload, &["release", "component_id"]);
+    let component_path =
+        homeboy_engine_primitives::text::json_path_str(payload, &["release", "local_path"]);
 
     let mut env = build_exec_env(
         extension_id,
@@ -679,7 +681,7 @@ pub(super) fn build_action_env(
         component_path,
     );
     if let Some(source_path) =
-        crate::engine::text::json_path_str(payload, &["release", "source_path"])
+        homeboy_engine_primitives::text::json_path_str(payload, &["release", "source_path"])
     {
         env.push((
             "HOMEBOY_RELEASE_SOURCE_PATH".to_string(),

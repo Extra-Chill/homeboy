@@ -15,9 +15,9 @@ use super::span_summary::{
     format_span_summary_metadata, format_span_summary_status, trace_span_summaries,
     TraceSpanSummaryOutput,
 };
-use crate::engine::detail_output::{bounded_items, DEFAULT_DETAIL_ITEM_LIMIT};
 use crate::execution_contract::is_reportable_artifact_evidence_path;
 use crate::rig::RigStateSnapshot;
+use homeboy_engine_primitives::detail_output::{bounded_items, DEFAULT_DETAIL_ITEM_LIMIT};
 
 pub use aggregate_types::*;
 pub use builders::*;
@@ -858,7 +858,7 @@ mod markdown {
     fn push_omitted_detail_line(
         out: &mut String,
         label: &str,
-        metadata: &crate::engine::detail_output::DetailOutputMetadata,
+        metadata: &homeboy_engine_primitives::detail_output::DetailOutputMetadata,
     ) {
         if metadata.truncated {
             out.push_str(&format!(
@@ -875,7 +875,7 @@ mod markdown {
     fn push_indented_omitted_detail_line(
         out: &mut String,
         label: &str,
-        metadata: &crate::engine::detail_output::DetailOutputMetadata,
+        metadata: &homeboy_engine_primitives::detail_output::DetailOutputMetadata,
     ) {
         if metadata.truncated {
             out.push_str(&format!(

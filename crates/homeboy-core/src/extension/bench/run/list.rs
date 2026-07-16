@@ -3,12 +3,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::component::Component;
-use crate::engine::baseline::BaselineFlags;
 use crate::engine::invocation::InvocationRequirements;
 use crate::engine::run_dir::{self, RunDir};
 use crate::error::{Error, Result};
 use crate::extension::bench::parsing::{self, BenchRunExecution};
 use crate::extension::{resolve_execution_context, ExtensionCapability};
+use homeboy_engine_primitives::baseline::BaselineFlags;
 
 use super::runner::build_runner;
 use super::scenario::{apply_scenario_filter, normalize_workload_json_scenario_ids};

@@ -7,9 +7,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::baseline::{self as generic, BaselineConfig, Fingerprintable};
 use crate::finding::{FindingSource, HomeboyFinding};
 use crate::structured_sidecar;
+use homeboy_engine_primitives::baseline::{self as generic, BaselineConfig, Fingerprintable};
 
 const BASELINE_KEY: &str = "lint";
 

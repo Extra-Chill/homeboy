@@ -1,7 +1,7 @@
-use crate::engine::shell;
 use crate::error::{Error, Result};
 use crate::extension::manifest::ExtensionManifest;
 use crate::server::execute_local_command_in_dir;
+use homeboy_engine_primitives::shell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

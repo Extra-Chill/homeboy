@@ -6,7 +6,6 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use crate::component::{Component, ScopedExtensionConfig};
-use crate::engine::baseline::BaselineFlags;
 use crate::engine::invocation::InvocationRequirements;
 use crate::engine::run_dir::RunDir;
 use crate::error::{Error, ErrorCode};
@@ -19,6 +18,7 @@ use crate::extension::trace::overlay::{apply_trace_overlays, TraceOverlayRequest
 use crate::extension::trace::probes::TraceProbeConfig;
 use crate::extension::{ExtensionCapability, ExtensionExecutionContext, RunnerOutput};
 use crate::test_support::{exec_capable_tempdir, with_isolated_home};
+use homeboy_engine_primitives::baseline::BaselineFlags;
 
 use super::super::runner::{build_trace_runner, failure_from_output, trace_is_unclaimed};
 use super::super::types::{TraceRunWorkflowArgs, TraceRunnerInputs};

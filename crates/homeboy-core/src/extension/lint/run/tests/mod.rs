@@ -2,9 +2,9 @@
 
 use super::types::{LintRunWorkflowArgs, LintSniffFilters};
 use crate::component::Component;
-use crate::engine::baseline::BaselineFlags;
 use crate::extension::LintChangedFileRoute;
 use crate::finding::HomeboyFinding;
+use homeboy_engine_primitives::baseline::BaselineFlags;
 
 mod exit_code;
 mod findings;

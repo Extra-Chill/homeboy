@@ -17,9 +17,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::engine::local_files;
 use crate::error::Result;
 use crate::paths;
+use homeboy_engine_primitives::local_files;
 
 /// Schema marker for the persisted setup-env document.
 const SETUP_ENV_SCHEMA: &str = "homeboy/extension-setup-env/v1";

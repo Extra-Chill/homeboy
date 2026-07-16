@@ -10,10 +10,10 @@ use std::path::Path;
 
 use crate::agent_runtime_manifest::validate_installed_extension_agent_runtime_provider_discovery;
 use crate::config::{self, from_str};
-use crate::engine::local_files;
 use crate::error::{Error, Result};
 use crate::git;
 use crate::paths;
+use homeboy_engine_primitives::local_files;
 
 use super::super::execution::run_setup;
 use super::super::load_extension;
