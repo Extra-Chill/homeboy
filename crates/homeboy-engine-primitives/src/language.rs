@@ -4,11 +4,12 @@
 //! (Rust / PHP / JavaScript / TypeScript / Unknown) plus the builtin token
 //! tables and per-language behavioral predicates that many subsystems need.
 //!
-//! It lives in `engine` because it is a foundational primitive with **zero**
-//! dependencies on higher layers (audit, refactor, component). The audit,
-//! refactor, and fixer layers all classify source files, so this type sits
-//! below them in the dependency graph. `code_audit::conventions` re-exports it
-//! for backward compatibility.
+//! It lives in `homeboy-engine-primitives` because it is a foundational
+//! primitive with zero dependencies on higher layers (audit, refactor,
+//! component). The audit, refactor, and fixer layers all classify source
+//! files, so this type sits below them in the dependency graph. Core re-exports
+//! it as `crate::engine::language`, and `code_audit::conventions` re-exports
+//! `Language` for backward compatibility.
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
