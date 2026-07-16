@@ -3,7 +3,6 @@ use std::path::Path;
 use crate::code_audit::conventions::AuditFinding;
 use crate::code_audit::findings::{Finding, Severity};
 use crate::execution_contract::EXECUTION_CONTRACT;
-use crate::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
 use homeboy_audit_contract::ArtifactPortabilityConfig;
 use serde_json::Value;
 
@@ -47,26 +46,16 @@ pub(crate) fn run_report_with_config(
         run_window,
         ..Default::default()
     };
-    let Ok(store) = ObservationStore::open_initialized() else {
-        return report;
-    };
-    let Ok(runs) = store.list_runs(RunListFilter {
-        kind: None,
-        component_id: Some(component_id.to_string()),
-        status: None,
-        rig_id: None,
-        limit: Some(run_window as i64),
-    }) else {
-        return report;
-    };
+    let runs = crate::code_audit::recorded_artifacts::recent_recorded_runs(
+        component_id,
+        run_window as usize,
+    );
     let artifact_root = crate::artifact_root().ok();
     let path_policy = config.with_generic_defaults();
 
     for run in runs {
         report.runs_scanned += 1;
-        let Ok(artifacts) = store.list_artifacts(&run.id) else {
-            continue;
-        };
+        let artifacts = &run.artifacts;
         report.artifacts_scanned += artifacts.len();
         let artifact_paths: Vec<String> = artifacts
             .iter()
@@ -116,7 +105,10 @@ fn artifact_path_is_portable(
     !path_ref.is_absolute() && !looks_like_runtime_temp_path(path, config)
 }
 
-fn artifact_path_finding(run: &RunRecord, artifact: &ArtifactRecord) -> Finding {
+fn artifact_path_finding(
+    run: &crate::code_audit::recorded_artifacts::AuditRecordedRun,
+    artifact: &crate::code_audit::recorded_artifacts::AuditRecordedArtifact,
+) -> Finding {
     portability_finding(
         run,
         "artifact.path",
@@ -130,7 +122,7 @@ fn artifact_path_finding(run: &RunRecord, artifact: &ArtifactRecord) -> Finding 
 }
 
 fn metadata_path_findings(
-    run: &RunRecord,
+    run: &crate::code_audit::recorded_artifacts::AuditRecordedRun,
     artifact_paths: &[String],
     artifact_root: Option<&Path>,
     config: &ArtifactPortabilityConfig,
@@ -190,7 +182,7 @@ struct MetadataPathScan {
 }
 
 fn portability_finding(
-    run: &RunRecord,
+    run: &crate::code_audit::recorded_artifacts::AuditRecordedRun,
     field: &str,
     observed_path: &str,
     description: String,
@@ -326,7 +318,7 @@ fn looks_like_runtime_temp_path(path: &str, config: &ArtifactPortabilityConfig) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observation::{ArtifactRecord, NewRunRecord};
+    use crate::observation::{ArtifactRecord, NewRunRecord, ObservationStore};
     use crate::test_support::with_isolated_home;
 
     #[test]
@@ -362,6 +354,7 @@ mod tests {
                 })
                 .expect("artifact");
 
+            crate::observation::audit_artifact_provider::register();
             let findings = super::run("demo");
 
             assert_eq!(findings.len(), 1);
@@ -402,6 +395,7 @@ mod tests {
                 .finish_run(&run_record.id, crate::observation::RunStatus::Pass, None)
                 .expect("finish");
 
+            crate::observation::audit_artifact_provider::register();
             let findings = super::run("demo");
 
             assert_eq!(findings.len(), 1);
@@ -435,6 +429,7 @@ mod tests {
                 .finish_run(&run_record.id, crate::observation::RunStatus::Pass, None)
                 .expect("finish");
 
+            crate::observation::audit_artifact_provider::register();
             let findings = super::run("demo");
 
             assert_eq!(findings.len(), 1);
@@ -486,6 +481,7 @@ mod tests {
                 .finish_run(&run_record.id, crate::observation::RunStatus::Pass, None)
                 .expect("finish");
 
+            crate::observation::audit_artifact_provider::register();
             let findings = super::run("demo");
 
             assert!(findings.is_empty());
@@ -520,6 +516,7 @@ mod tests {
                 .finish_run(&run_record.id, crate::observation::RunStatus::Pass, None)
                 .expect("finish");
 
+            crate::observation::audit_artifact_provider::register();
             let findings = super::run("demo");
 
             assert!(findings.is_empty());
@@ -677,6 +674,7 @@ mod tests {
                     .expect("finish");
             }
 
+            crate::observation::audit_artifact_provider::register();
             let report = super::run_report_with_config(
                 "demo",
                 &ArtifactPortabilityConfig {

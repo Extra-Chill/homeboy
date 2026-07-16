@@ -104,6 +104,11 @@ impl CliRuntime {
         // depending on the extension layer's loader — the seam that lets audit
         // become its own crate.
         crate::core::extension::audit_manifest_provider::register();
+        // Register the audit recorded-artifact provider so the artifact-portability
+        // detector can read past runs' artifacts from the observation store without
+        // code_audit depending on observation — the last seam before audit becomes
+        // its own crate.
+        crate::core::observation::audit_artifact_provider::register();
         // Register the runner-evidence provider so observation::runs_service can
         // enrich run/artifact lookups with live runner + daemon evidence without
         // core depending on runner behavior. (Runner is still in-crate today;

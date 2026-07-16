@@ -5,6 +5,7 @@
 //! generated artifacts. This module only provides the storage substrate.
 
 pub mod artifact_preview;
+pub mod audit_artifact_provider;
 mod budget_findings;
 pub mod bundle;
 pub mod context;

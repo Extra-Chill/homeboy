@@ -36,6 +36,7 @@ mod idiomatic;
 pub(crate) mod impact;
 pub(crate) mod import_matching;
 pub(crate) mod naming;
+pub mod recorded_artifacts;
 pub mod report;
 mod requirements;
 pub mod run;
