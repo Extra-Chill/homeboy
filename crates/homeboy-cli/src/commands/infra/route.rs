@@ -559,15 +559,7 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCook
                 Some("serialize Lab cook attempt plan".to_string()),
             )
         })?;
-        let provider_args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "run-plan".to_string(),
-            "--plan".to_string(),
-            serialized_plan,
-            "--record-run-id".to_string(),
-            run_id.to_string(),
-        ];
+        let provider_args = lab_cook_attempt_args(serialized_plan, run_id);
         let provider_cli = Cli::try_parse_from(&provider_args).map_err(|error| {
             Error::validation_invalid_argument(
                 "agent-task cook",
@@ -649,6 +641,22 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCook
             LabRouteOutcome::InFlight(_) => Ok(()),
         }
     }
+}
+
+/// Build the runner-side child invocation after the controller has consumed
+/// Lab selection. The accepted runner workspace is the child's local context.
+fn lab_cook_attempt_args(serialized_plan: String, run_id: &str) -> Vec<String> {
+    vec![
+        "homeboy".to_string(),
+        "--placement".to_string(),
+        "local".to_string(),
+        "agent-task".to_string(),
+        "run-plan".to_string(),
+        "--plan".to_string(),
+        serialized_plan,
+        "--record-run-id".to_string(),
+        run_id.to_string(),
+    ]
 }
 
 /// Transfer the exact controller-compiled cook plan rather than asking the

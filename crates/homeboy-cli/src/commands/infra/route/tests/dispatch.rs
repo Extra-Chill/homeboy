@@ -73,6 +73,28 @@ fn lab_cook_dispatcher_recipe_round_trips_exact_transport() {
 }
 
 #[test]
+fn lab_cook_child_invocation_consumes_controller_runner_placement() {
+    let args = lab_cook_attempt_args("{\"tasks\":[]}".to_string(), "cook-attempt-1");
+
+    assert_eq!(
+        args,
+        vec![
+            "homeboy",
+            "--placement",
+            "local",
+            "agent-task",
+            "run-plan",
+            "--plan",
+            "{\"tasks\":[]}",
+            "--record-run-id",
+            "cook-attempt-1",
+        ]
+    );
+    assert!(!args.iter().any(|arg| arg == "--runner"));
+    assert!(!args.iter().any(|arg| arg.starts_with("--runner=")));
+}
+
+#[test]
 fn non_lab_command_continues_local_dispatch() {
     // route_after_parse mutates the process-global LAB_OFFLOAD_METADATA_ENV,
     // so hold the env lock to serialize against tests that assert on it.
