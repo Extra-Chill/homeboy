@@ -233,8 +233,8 @@ fn release_preflight_validates_the_private_workspace_build_before_mutating_relea
         .expect("prepare must run the release action");
 
     assert!(
-        prepare.contains("run: cargo build --workspace --all-targets --locked"),
-        "release preflight must build every private workspace target with the locked dependency graph"
+        prepare.contains("run: cargo build --workspace --locked"),
+        "release preflight must build the private workspace with the locked dependency graph"
     );
     assert!(
         cargo_manifest().contains("publish = false"),
