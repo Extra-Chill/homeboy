@@ -37,6 +37,8 @@ mod extension_materialization;
 mod git_dependency_materialization;
 mod homeboy_refresh;
 mod lab;
+#[cfg(test)]
+pub(crate) use lab::mirror_agent_task_run_plan_aggregate;
 mod lab_apply;
 mod lab_args;
 mod lab_capabilities;

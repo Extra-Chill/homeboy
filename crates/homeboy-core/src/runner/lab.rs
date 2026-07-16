@@ -41,4 +41,7 @@ pub use offload::{
 };
 
 #[cfg(test)]
+pub(crate) use agent_task_plan_projection::mirror_agent_task_run_plan_aggregate;
+
+#[cfg(test)]
 mod preparation_tests;
