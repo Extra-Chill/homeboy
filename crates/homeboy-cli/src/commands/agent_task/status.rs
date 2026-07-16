@@ -1055,6 +1055,9 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         "run_id": record.get("run_id").cloned().unwrap_or_else(|| json!(run_id)),
         "state": record.get("state").cloned().unwrap_or(Value::Null),
         "work_summary": work_summary,
+        // Keep typed refs so the shared status presentation can classify
+        // recovered terminal patch artifacts by their size and kind.
+        "artifact_refs": record.get("artifact_refs").cloned().unwrap_or(Value::Null),
         "totals": record.get("totals").cloned().unwrap_or(Value::Null),
         "tasks": task_table,
         "refs": refs,
@@ -1753,6 +1756,25 @@ mod tests {
             accepted_handoff["liveness"]["provider_boundary"]["runner_job_id"],
             "accepted-daemon-job"
         );
+    }
+
+    #[test]
+    fn compact_status_retains_recovered_patch_refs_for_summary_rendering() {
+        let record = json!({
+            "run_id": "recovered-lab-run",
+            "state": "succeeded",
+            "tasks": [{ "task_id": "cook", "state": "succeeded" }],
+            "artifact_refs": [{
+                "task_id": "cook",
+                "kind": "patch",
+                "uri": "homeboy://agent-task/run/recovered-lab-run/artifacts#task=cook&artifact=patch",
+                "size_bytes": 7926
+            }]
+        });
+
+        let summary = compact_status_summary(&record, "recovered-lab-run");
+
+        assert_eq!(summary["artifact_refs"], record["artifact_refs"]);
     }
 
     #[test]

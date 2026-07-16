@@ -906,6 +906,51 @@ mod tests {
     }
 
     #[test]
+    fn status_summary_classifies_recovered_finalized_patch_refs_like_review() {
+        let patch = json!({
+            "id": "patch",
+            "kind": "patch",
+            "url": "homeboy://agent-task/run/recovered/artifacts#task=cook&artifact=patch",
+            "size_bytes": 683500,
+            "sha256": "fe060d978ff0d4ad0705a759308728ae29250c1b07587fc5ba8d0223262d9deb",
+            "metadata": {
+                "executor_artifact_finalized": true,
+                "source_provenance": { "runner_id": "homeboy-lab" }
+            }
+        });
+        let payload = json!({
+            "run_id": "recovered",
+            "state": "succeeded",
+            "aggregate_path": "/tmp/recovered-aggregate.json",
+            "tasks": [{ "task_id": "cook", "state": "succeeded" }],
+            "artifact_refs": [
+                { "task_id": "cook", "kind": "patch", "uri": patch["url"], "size_bytes": 683500 },
+                { "task_id": "cook", "kind": "transcript", "uri": "file:///tmp/transcript", "size_bytes": 12 },
+                { "task_id": "cook", "kind": "json", "uri": "file:///tmp/result", "size_bytes": 4 },
+                { "task_id": "cook", "kind": "runtime_log", "uri": "file:///tmp/runtime", "size_bytes": 20 }
+            ],
+            "aggregate": {
+                "outcomes": [{
+                    "artifacts": [patch],
+                    "typed_artifacts": [{
+                        "name": "patch",
+                        "type": "file",
+                        "artifact": { "id": "patch", "kind": "patch", "path": "/tmp/finalized-patch", "size_bytes": 683500 }
+                    }]
+                }]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(summary.contains("Status: succeeded\n"));
+        assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
+        assert!(summary.contains("Diff bytes: 683500\n"));
+        assert!(summary.contains("Artifacts: 4\n"));
+        assert!(summary.contains("Next: homeboy agent-task review recovered\n"));
+    }
+
+    #[test]
     fn status_summary_flags_no_op_when_all_patch_artifacts_are_empty() {
         let payload = json!({
             "run_id": "agent-task-deadbeef",
