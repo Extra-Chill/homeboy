@@ -167,16 +167,6 @@ pub fn resolve_fleet_projects(fleet: &Fleet) -> Result<FleetProjectResolution> {
     Ok(resolution)
 }
 
-/// Get all successfully resolved projects in a fleet with full project data.
-pub fn get_projects(fleet_id: &str) -> Result<Vec<crate::project::Project>> {
-    Ok(resolve_projects(fleet_id)?.projects)
-}
-
-/// Get component usage across a fleet (component_id -> Vec<project_id>)
-pub fn component_usage(fleet_id: &str) -> Result<std::collections::HashMap<String, Vec<String>>> {
-    Ok(component_usage_with_resolution(fleet_id)?.0)
-}
-
 pub fn component_usage_with_resolution(
     fleet_id: &str,
 ) -> Result<(
