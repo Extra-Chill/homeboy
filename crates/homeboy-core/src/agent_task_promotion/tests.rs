@@ -164,6 +164,73 @@ fn write_empty_patch_source(temp: &tempfile::TempDir) -> (PathBuf, String) {
     (source_path, source)
 }
 
+#[test]
+fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let patch_path = temp.path().join("remediation.patch");
+    std::fs::write(&patch_path, VALID_PATCH).expect("write remediation patch");
+    let baseline = serde_json::json!({
+        "source_run_id": "source-run",
+        "source_task_id": "source-task",
+        "source_patch_task_id": "source-task",
+        "to_worktree": "fixture@target",
+        "current_diff": "diff --git a/a b/a",
+        "failed_gates": [],
+        "patch_artifact": { "path": "/candidate.patch", "sha256": "a".repeat(64) }
+    });
+    let source = serde_json::json!({
+        "schema": "homeboy/agent-task-aggregate/v1",
+        "outcomes": [{
+            "schema": AGENT_TASK_OUTCOME_SCHEMA,
+            "task_id": "follow-up",
+            "status": "succeeded",
+            "artifacts": [{
+                "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                "id": "patch",
+                "kind": "patch",
+                "path": patch_path,
+                "size_bytes": VALID_PATCH.len(),
+                "sha256": sha256_hex(VALID_PATCH),
+                "metadata": { "gate_feedback_baseline": baseline }
+            }],
+            "typed_artifacts": [{
+                "name": "patch",
+                "payload": { "artifact_id": "patch" },
+                "metadata": { "normalized_from": "artifact" }
+            }]
+        }]
+    })
+    .to_string();
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("follow-up-run".to_string()),
+            source_path: None,
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            to_worktree: "fixture@target".to_string(),
+            task_id: Some("follow-up".to_string()),
+            artifact_id: Some("patch".to_string()),
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("aggregate promotion");
+    assert_eq!(
+        provider.apply_calls[0].gate_feedback_baseline,
+        Some(baseline),
+        "only canonical artifact metadata authorizes the dirty target"
+    );
+}
+
 fn recoverable_patch_source(temp: &tempfile::TempDir, patch_count: usize) -> (PathBuf, String) {
     let artifacts = (0..patch_count)
         .map(|index| {
@@ -357,6 +424,7 @@ fn configured_command_provider_is_resolved_lazily_with_provenance() {
             patch: Some(VALID_PATCH.to_string()),
             patch_path: "changes.patch".to_string(),
             changed_files: vec!["src/lib.rs".to_string()],
+            gate_feedback_baseline: None,
             dry_run: false,
         })
         .expect_err("fixture executable is not an adapter");
@@ -459,6 +527,7 @@ fn lookup_only_configured_provider_cannot_construct_a_promotion_adapter() {
             patch: Some(VALID_PATCH.to_string()),
             patch_path: "changes.patch".to_string(),
             changed_files: vec!["src/lib.rs".to_string()],
+            gate_feedback_baseline: None,
             dry_run: false,
         })
         .expect_err("lookup-only provider must not authorize promotion");
@@ -1603,6 +1672,7 @@ fn provider_command_response_supplies_workspace_and_evidence() {
         patch: None,
         patch_path: temp.path().join("changes.patch").display().to_string(),
         changed_files: vec!["src/lib.rs".to_string()],
+        gate_feedback_baseline: None,
         dry_run: false,
     };
     let workspace = run_provider_command(
@@ -1644,6 +1714,7 @@ fn provider_failure_surfaces_bounded_stdout_and_stderr_evidence() {
         patch: None,
         patch_path: "changes.patch".to_string(),
         changed_files: vec!["src/lib.rs".to_string()],
+        gate_feedback_baseline: None,
         dry_run: false,
     };
 
@@ -1679,6 +1750,7 @@ fn provider_response_overflow_is_terminated_with_bounded_evidence() {
         patch: None,
         patch_path: "changes.patch".to_string(),
         changed_files: vec!["src/lib.rs".to_string()],
+        gate_feedback_baseline: None,
         dry_run: false,
     };
 

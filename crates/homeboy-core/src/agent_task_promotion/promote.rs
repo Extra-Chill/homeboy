@@ -237,6 +237,7 @@ pub(crate) fn promote_with_provider(
             Some(options.source.clone()),
         )
     })?;
+    let source_for_provenance = source_value.clone();
     let (source_kind, outcome) = select_outcome(source_value, options.task_id.as_deref())?;
 
     if !matches!(
@@ -287,6 +288,8 @@ pub(crate) fn promote_with_provider(
         }
         Err(error) => return Err(error),
     };
+    let gate_feedback_baseline =
+        gate_feedback_baseline_for_artifact(&source_for_provenance, &outcome, &artifact)?;
     let patch_path = resolve_artifact_path(&artifact, options.source_path.as_deref())?;
     let patch = std::fs::read_to_string(&patch_path).map_err(|error| {
         Error::internal_io(
@@ -354,6 +357,7 @@ pub(crate) fn promote_with_provider(
             patch: Some(normalized_patch.content.clone()),
             patch_path: provider_patch_path,
             changed_files: changed_files.clone(),
+            gate_feedback_baseline,
             dry_run: options.dry_run,
         })?;
         command_evidence.extend(target.command_evidence);
@@ -410,6 +414,92 @@ pub(crate) fn promote_with_provider(
     })
 }
 
+fn gate_feedback_baseline_for_artifact(
+    source: &Value,
+    outcome: &AgentTaskOutcome,
+    selected: &AgentTaskArtifact,
+) -> Result<Option<Value>> {
+    let canonical = outcome
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == selected.id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                "selected patch artifact is missing from canonical outcome artifacts",
+                None,
+                None,
+            )
+        })?;
+    let source_baseline = source_canonical_artifact(source, &outcome.task_id, &canonical.id)?
+        .and_then(|artifact| artifact.get("metadata"))
+        .and_then(|metadata| metadata.get("gate_feedback_baseline"))
+        .cloned();
+    let baseline = source_baseline
+        .clone()
+        .or_else(|| canonical.metadata.get("gate_feedback_baseline").cloned());
+    if let Some(raw) = source_baseline.as_ref() {
+        if canonical.metadata.get("gate_feedback_baseline") != Some(raw) {
+            return Err(Error::validation_invalid_argument(
+                "artifact_id",
+                "canonical patch artifact baseline provenance changed during source deserialization",
+                Some(canonical.id.clone()),
+                None,
+            ));
+        }
+    }
+    for typed in &outcome.typed_artifacts {
+        if let Some(duplicate) = typed
+            .artifact
+            .as_ref()
+            .filter(|artifact| artifact.id == canonical.id)
+            .and_then(|artifact| artifact.metadata.get("gate_feedback_baseline"))
+        {
+            if baseline.as_ref() != Some(duplicate) {
+                return Err(Error::validation_invalid_argument(
+                    "artifact_id",
+                    "typed patch artifact baseline provenance conflicts with the canonical artifact",
+                    Some(canonical.id.clone()),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(baseline)
+}
+
+fn source_canonical_artifact<'a>(
+    source: &'a Value,
+    task_id: &str,
+    artifact_id: &str,
+) -> Result<Option<&'a Value>> {
+    let outcomes = if source.get("schema").and_then(Value::as_str)
+        == Some(AGENT_TASK_OUTCOME_SCHEMA)
+    {
+        std::slice::from_ref(source)
+    } else if source.get("schema").and_then(Value::as_str) == Some(AGENT_TASK_AGGREGATE_SCHEMA) {
+        source
+            .get("outcomes")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    } else {
+        return Ok(None);
+    };
+    let outcome = outcomes
+        .iter()
+        .find(|outcome| outcome.get("task_id").and_then(Value::as_str) == Some(task_id));
+    let artifact = outcome
+        .and_then(|outcome| outcome.get("artifacts"))
+        .and_then(Value::as_array)
+        .and_then(|artifacts| {
+            artifacts
+                .iter()
+                .find(|artifact| artifact.get("id").and_then(Value::as_str) == Some(artifact_id))
+        });
+    Ok(artifact)
+}
+
 fn outcome_has_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {
     outcome
         .artifacts
@@ -444,6 +534,9 @@ fn promote_committed_changes(
         patch: Some(normalized_patch.content.clone()),
         patch_path: committed_patch.patch_path.display().to_string(),
         changed_files: normalized_patch.changed_files.clone(),
+        gate_feedback_baseline: artifact
+            .and_then(|artifact| artifact.metadata.get("gate_feedback_baseline"))
+            .cloned(),
         dry_run: options.dry_run,
     })?;
     command_evidence.extend(target.command_evidence);
