@@ -8,18 +8,18 @@ use homeboy::core::artifacts::{
 use homeboy::core::preview_client::{
     self, PreviewClientAuthDiagnostic, PreviewClientReport, PreviewClientStartSpec,
 };
-use homeboy::core::preview_consumer;
 use homeboy::core::preview_ingress::{
     self, PreviewIngressInstallOptions, PreviewIngressInstallPlan, PreviewIngressInstallStatusPlan,
     PreviewIngressRoute, PreviewIngressServeSpec, PreviewIngressStatus,
 };
-use homeboy::core::tunnel::{
-    self, ExposeServiceTunnelSpec, ServiceTunnel, ServiceTunnelAuth, ServiceTunnelAuthMode,
-    ServiceTunnelExposure, ServiceTunnelPolicy, ServiceTunnelPreviewPolicy,
+use homeboy::core::{EntityCrudOutput, MergeOutput};
+use homeboy_tunnel::preview_consumer;
+use homeboy_tunnel::{
+    self as tunnel, ExposeServiceTunnelSpec, ServiceTunnel, ServiceTunnelAuth,
+    ServiceTunnelAuthMode, ServiceTunnelExposure, ServiceTunnelPolicy, ServiceTunnelPreviewPolicy,
     ServiceTunnelPreviewPolicyMode, ServiceTunnelReadinessCheck, ServiceTunnelReadinessKind,
     ServiceTunnelStatus, ServiceTunnelTarget, ServiceTunnelTunnelBackend, StartServiceTunnelSpec,
 };
-use homeboy::core::{EntityCrudOutput, MergeOutput};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -76,7 +76,7 @@ pub enum PreviewIngressActionOutput {
 }
 
 /// Preview-consumer run output, owned by the core preview-consumer service.
-pub use homeboy::core::preview_consumer::PreviewConsumerRunResult as PreviewConsumerOutput;
+pub use homeboy_tunnel::preview_consumer::PreviewConsumerRunResult as PreviewConsumerOutput;
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]

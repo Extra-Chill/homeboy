@@ -209,11 +209,11 @@ pub struct ExposeServiceTunnelSpec {
     pub runner_local: bool,
 }
 
-pub(in crate::tunnel) fn default_scheme() -> String {
+pub(crate) fn default_scheme() -> String {
     "http".to_string()
 }
 
-pub(in crate::tunnel) fn default_local_host() -> String {
+pub(crate) fn default_local_host() -> String {
     "127.0.0.1".to_string()
 }
 

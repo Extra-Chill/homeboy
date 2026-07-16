@@ -1,0 +1,29 @@
+[package]
+name = "homeboy-tunnel"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Optional service-tunnel feature for homeboy: tunnel declarations, lifecycle, and native preview consumption. Sits on top of homeboy-core."
+repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
+
+[lib]
+name = "homeboy_tunnel"
+path = "src/lib.rs"
+
+[dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = "0.4"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "socks", "http2", "charset", "system-proxy"] }
+sha2 = "0.10.9"
+glob-match = "0.2"
+libc = "0.2"
+
+[dev-dependencies]
+# Shared hermetic test fixtures (with_isolated_home) live in homeboy-core behind
+# the test-support feature; the whole workspace shares one isolation contract.
+homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

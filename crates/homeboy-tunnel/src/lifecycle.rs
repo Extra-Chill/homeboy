@@ -4,8 +4,8 @@ use std::process::Stdio;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use crate::error::{Error, ErrorCode, Result};
-use crate::paths;
+use homeboy_core::error::{Error, ErrorCode, Result};
+use homeboy_core::paths;
 
 use super::preview::preview_artifact_for_status;
 use super::readiness::{check_runtime_health, check_runtime_readiness, wait_until_ready};
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn start_materializes_runner_local_service_without_server_declaration() {
-        crate::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|_| {
             let tunnel = materialize_runner_local_start_tunnel(&start_spec("preview-service"))
                 .expect("materialize runner-local service");
 
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn undeclared_runner_local_service_requires_host_and_port() {
-        crate::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|_| {
             let mut missing_host = start_spec("missing-host");
             missing_host.host = None;
             let err =

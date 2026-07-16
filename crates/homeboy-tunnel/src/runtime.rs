@@ -2,9 +2,9 @@ use std::fs;
 use std::process::{Child, Command};
 use std::time::Duration;
 
-use crate::error::{Error, Result};
-use crate::paths;
-use crate::process::{pid_is_running, process_group_is_running};
+use homeboy_core::error::{Error, Result};
+use homeboy_core::paths;
+use homeboy_core::process::{pid_is_running, process_group_is_running};
 
 use super::types::*;
 
