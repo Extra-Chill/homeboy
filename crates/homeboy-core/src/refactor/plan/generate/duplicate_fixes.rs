@@ -1,6 +1,6 @@
-use crate::code_audit::conventions::Language;
 use crate::code_audit::{AuditFinding, CodeAuditResult, DuplicateGroup};
 use crate::refactor::auto::{Fix, InsertionKind, NewFile, SkippedFile};
+use homeboy_engine_primitives::language::Language;
 
 use regex::Regex;
 use std::collections::HashSet;

@@ -1,4 +1,4 @@
-use crate::code_audit::conventions::Language;
+use homeboy_engine_primitives::language::Language;
 use regex::Regex;
 
 /// Full method signature extracted from a conforming file.

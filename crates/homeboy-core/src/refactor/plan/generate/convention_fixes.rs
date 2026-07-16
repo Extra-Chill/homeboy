@@ -1,7 +1,7 @@
-use crate::code_audit::conventions::Language;
 use crate::code_audit::naming::{detect_naming_suffix, suffix_matches};
 use crate::code_audit::{AuditFinding, CodeAuditResult};
 use crate::refactor::auto::{Fix, InsertionKind, SkippedFile};
+use homeboy_engine_primitives::language::Language;
 
 use regex::Regex;
 use std::collections::HashMap;
