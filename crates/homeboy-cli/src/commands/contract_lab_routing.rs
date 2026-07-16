@@ -13,6 +13,7 @@ use crate::command_contract::{
     RUNTIME_REFRESH_LAB_LABEL,
 };
 use crate::commands::{adapter, agent_task};
+use crate::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use crate::core::agent_tasks::provider::{default_backend, provider_requires_cwd_git_checkout};
 use crate::core::engine::execution_context::{self, ResolveOptions};
 use crate::core::extension::ExtensionCapability;
@@ -26,6 +27,8 @@ const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
 pub(crate) const AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON: &str =
     "agent-task cook is a controller-owned coordinator: it resolves the managed target, ingests provider artifacts, promotes candidates, runs deterministic gates, and finalizes. Offload the materialized agent-task run-plan provider attempt instead.";
+pub(crate) const AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON: &str =
+    "agent-task promote with a durable run id is controller-owned: it resolves authoritative lifecycle state and finalized artifact projections on the controller.";
 const AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON: &str =
     "agent-task fanout cook-batch --dry-run is controller-local planning; it does not execute cooks and should not offload or materialize the controller cwd";
 pub(crate) const AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON: &str =
@@ -72,6 +75,14 @@ impl Commands {
                 LAB_NO_EXTRA_CAPABILITIES,
             )
             .with_secret_env_sources(LAB_AGENT_TASK_SECRET_ENV_SOURCES),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command: agent_task::AgentTaskCommand::Promote(args),
+            }) if agent_task_promotion_source_is_controller_owned(&args.source) => {
+                LabCommandContract::local_only(
+                    AGENT_TASK_PROMOTE_LAB_LABEL,
+                    AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON,
+                )
+            }
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Promote(_),
             }) => LabCommandContract::portable(
@@ -298,6 +309,13 @@ fn agent_task_fanout_local_only_contract(
     reason: &'static str,
 ) -> LabCommandContract {
     LabCommandContract::local_only(label, reason)
+}
+
+/// A durable run id is resolved through the controller lifecycle store, whose
+/// aggregate and finalized artifact projections are not portable path inputs.
+/// Other promotion source forms retain their existing runner-local behavior.
+fn agent_task_promotion_source_is_controller_owned(source: &str) -> bool {
+    agent_task_lifecycle::status(source).is_ok()
 }
 
 pub(crate) fn agent_task_controller_materializes_worktree(

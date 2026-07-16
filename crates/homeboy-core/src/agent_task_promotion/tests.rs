@@ -360,6 +360,20 @@ fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
     });
     let source = serde_json::json!({
         "schema": "homeboy/agent-task-aggregate/v1",
+        "plan_id": "follow-up-plan",
+        "status": "succeeded",
+        "totals": {
+            "queued": 0,
+            "running": 0,
+            "blocked": 0,
+            "skipped": 0,
+            "succeeded": 1,
+            "candidate_recoverable": 0,
+            "recoverable_candidates": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "timed_out": 0
+        },
         "outcomes": [{
             "schema": AGENT_TASK_OUTCOME_SCHEMA,
             "task_id": "follow-up",

@@ -3,8 +3,10 @@
 use clap::Parser;
 
 use crate::cli_surface::{Cli, Commands};
+use crate::core::agent_tasks::{lifecycle as agent_task_lifecycle, AgentTaskPlan};
 
 use crate::command_contract::{LabCommandPortability, LabSourcePathMode, LabWorkspaceModePolicy};
+use crate::test_support::with_isolated_home;
 
 fn parsed_command(args: &[&str]) -> Commands {
     Cli::try_parse_from(args)
@@ -178,6 +180,34 @@ fn agent_task_promote_with_runner_only_source_remains_lab_portable() {
     );
     assert!(contract.capture_mutation_patch);
     assert!(!command.lab_offload_captures_mutation_patch());
+}
+
+#[test]
+fn agent_task_promote_with_controller_run_id_stays_with_finalized_artifacts() {
+    with_isolated_home(|_| {
+        let run_id = "controller-finalized-run";
+        agent_task_lifecycle::submit_plan(&AgentTaskPlan::new("fixture", Vec::new()), Some(run_id))
+            .expect("persist controller-owned run");
+
+        let command = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "promote",
+            run_id,
+            "--to-worktree",
+            "homeboy@fix-8511",
+        ]);
+
+        let contract = command.lab_contract().expect("promote contract");
+
+        assert_eq!(
+            contract.portability,
+            LabCommandPortability::LocalOnly(
+                crate::commands::contract_lab_routing::AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON
+            )
+        );
+        assert!(!contract.routing_policy.default_lab_offload);
+    });
 }
 
 #[test]
