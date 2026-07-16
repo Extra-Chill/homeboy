@@ -8,8 +8,8 @@ use homeboy::core::agent_tasks::finalization::{
 };
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::promotion::{
-    promote, resume_promoted_patch, AgentTaskPromotionOptions, AgentTaskPromotionReport,
-    AgentTaskPromotionStatus,
+    promote_with_checkpoint, resume_promoted_patch, AgentTaskPromotionOptions,
+    AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use homeboy::core::agent_tasks::provider::{
     AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
@@ -240,9 +240,12 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
             .ok()
             .and_then(|record| record.metadata.get("latest_promotion").cloned())
     });
-    let report = if let Some(previous) = previous_promotion
-        .filter(|previous| previous.get("status").and_then(Value::as_str) == Some("gate_failed"))
-    {
+    let report = if let Some(previous) = previous_promotion.filter(|previous| {
+        matches!(
+            previous.get("status").and_then(Value::as_str),
+            Some("gate_failed" | "verification_pending")
+        )
+    }) {
         let target_path = previous
             .pointer("/target/path")
             .and_then(Value::as_str)
@@ -260,7 +263,21 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
             &previous,
         )?
     } else {
-        promote(promotion_options)?
+        let checkpoint_run_id = (!args.dry_run).then(|| source_run_id.clone()).flatten();
+        promote_with_checkpoint(promotion_options, |checkpoint| {
+            if let Some(run_id) = checkpoint_run_id.as_deref() {
+                agent_task_lifecycle::record_promotion(
+                    run_id,
+                    serde_json::to_value(checkpoint).map_err(|error| {
+                        homeboy::core::Error::internal_json(
+                            error.to_string(),
+                            Some("serialize pending agent-task promotion report".to_string()),
+                        )
+                    })?,
+                )?;
+            }
+            Ok(())
+        })?
     };
     let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
         1

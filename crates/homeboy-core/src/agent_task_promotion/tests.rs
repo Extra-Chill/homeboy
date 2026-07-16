@@ -12,8 +12,9 @@ use super::apply::{
     AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 use super::promote::{
-    normalize_promotion_patch, promote, promote_with_provider, resume_promoted_patch,
-    select_patch_artifact, validate_artifact_content,
+    normalize_promotion_patch, promote, promote_with_provider,
+    promote_with_provider_and_checkpoint, resume_promoted_patch, select_patch_artifact,
+    validate_artifact_content,
 };
 use super::types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,
@@ -51,6 +52,7 @@ struct FakePromotionWorkspaceProvider {
         AgentTaskGateRevealPolicy,
     )>,
     verify_exit_code: i32,
+    verify_transport_error: bool,
 }
 
 impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
@@ -93,6 +95,12 @@ impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
             visibility,
             reveal_policy,
         ));
+        if self.verify_transport_error {
+            return Err(Error::internal_io(
+                "simulated verification transport interruption",
+                Some("promotion gate transport".to_string()),
+            ));
+        }
         Ok(AgentTaskGateReport::new(
             format!("gate-{index}"),
             vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
@@ -1719,7 +1727,65 @@ fn promote_verification_failure_keeps_the_applied_target_recoverable() {
 }
 
 #[test]
-fn resume_promoted_patch_rebuilds_green_proof_for_clean_committed_candidate() {
+fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let worktree_path = temp.path().join("managed-target");
+    std::fs::create_dir(&worktree_path).expect("create target");
+    git(&worktree_path, &["init"]);
+    let (source_path, source) = write_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(worktree_path.clone()),
+        verify_transport_error: true,
+        ..Default::default()
+    };
+    let mut checkpoints = Vec::new();
+
+    let error = promote_with_provider_and_checkpoint(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("restartable-run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            to_worktree: "homeboy@restartable".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["true".to_string()],
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+        &mut |report| {
+            checkpoints.push(report.clone());
+            Ok(())
+        },
+    )
+    .expect_err("gate transport failure propagates after checkpoint");
+
+    assert!(!error.message.is_empty());
+    assert_eq!(provider.apply_calls.len(), 1);
+    assert_eq!(provider.verify_calls.len(), 1);
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(
+        checkpoints[0].status,
+        AgentTaskPromotionStatus::VerificationPending
+    );
+    assert!(checkpoints[0].status.patch_promoted());
+    assert_eq!(
+        checkpoints[0].target.path.as_deref(),
+        worktree_path.to_str()
+    );
+    assert_eq!(checkpoints[0].provenance["post_apply"], true);
+}
+
+#[test]
+fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint() {
     let temp = tempfile::tempdir().expect("tempdir");
     let target = temp.path().join("target");
     std::fs::create_dir(&target).expect("target");
@@ -1754,8 +1820,8 @@ fn resume_promoted_patch_rebuilds_green_proof_for_clean_committed_candidate() {
         provider_invocation: None,
     };
     let previous = serde_json::json!({
-        "schema": "homeboy/agent-task-promotion-status/v1",
-        "status": "gate_failed",
+        "schema": "homeboy/agent-task-promotion-report/v1",
+        "status": "verification_pending",
         "source_run_id": "run-8307",
         "to_worktree": "repo@fix-8307",
         "target": { "worktree": "repo@fix-8307", "path": target },
@@ -1773,11 +1839,9 @@ fn resume_promoted_patch_rebuilds_green_proof_for_clean_committed_candidate() {
         report.gate_results[0].status,
         crate::gate::HomeboyGateStatus::Passed
     );
-    assert_eq!(
-        report.provenance["resumed_from_gate_failed_promotion"],
-        true
-    );
+    assert_eq!(report.provenance["resumed_post_apply_promotion"], true);
     assert!(report.provenance["candidate"].is_object());
+    assert_eq!(report.provenance["resumed_post_apply_promotion"], true);
 }
 
 #[test]

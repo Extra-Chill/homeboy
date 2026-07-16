@@ -70,6 +70,9 @@ pub struct AgentTaskPromotionReport {
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskPromotionStatus {
     DryRun,
+    /// The provider applied the patch and its target is durable, but verification
+    /// has not completed. Retrying must resume verification, not apply again.
+    VerificationPending,
     Applied,
     GateFailed,
     NoChanges,
@@ -79,7 +82,10 @@ impl AgentTaskPromotionStatus {
     /// Whether a patch was actually promoted into the target worktree for this
     /// status (true for both clean applies and gate-failed applies).
     pub fn patch_promoted(self) -> bool {
-        matches!(self, Self::Applied | Self::GateFailed)
+        matches!(
+            self,
+            Self::VerificationPending | Self::Applied | Self::GateFailed
+        )
     }
 
     /// Whether deterministic gates failed after the patch was promoted.
@@ -90,6 +96,7 @@ impl AgentTaskPromotionStatus {
     /// Stable handoff boundary identifier for this promotion status.
     pub fn handoff_boundary(self) -> &'static str {
         match self {
+            Self::VerificationPending => "patch_promoted_verification_pending",
             Self::Applied => "patch_promoted_no_pr",
             Self::GateFailed => "patch_promoted_gates_failed",
             Self::DryRun => "patch_not_promoted_dry_run",

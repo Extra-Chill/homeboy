@@ -20,8 +20,8 @@ use crate::agent_task_finalization::{
 use crate::agent_task_gate::VerifyGateOptions;
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
-    normalize_promotion_patch, promote, AgentTaskPromotionOptions, AgentTaskPromotionReport,
-    AgentTaskPromotionStatus,
+    normalize_promotion_patch, promote_with_checkpoint, AgentTaskPromotionOptions,
+    AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -1031,21 +1031,35 @@ fn promote_attempt(
     run_id: &str,
 ) -> Result<AgentTaskPromotionReport> {
     let (source, source_path) = promotion_source(run_id)?;
-    promote(AgentTaskPromotionOptions {
-        source,
-        source_run_id: Some(run_id.to_string()),
-        source_path,
-        source_worktree_path: options.source_worktree_path.clone(),
-        base_ref: Some(options.base.clone()),
-        task_base_sha: options.task_base_sha.clone(),
-        to_worktree: options.to_worktree.clone(),
-        task_id: None,
-        artifact_id: None,
-        dry_run: false,
-        gates: options.gates.clone(),
-        provider_command: options.provider_command.clone(),
-        provider_invocation: options.provider_invocation.clone(),
-    })
+    promote_with_checkpoint(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some(run_id.to_string()),
+            source_path,
+            source_worktree_path: options.source_worktree_path.clone(),
+            base_ref: Some(options.base.clone()),
+            task_base_sha: options.task_base_sha.clone(),
+            to_worktree: options.to_worktree.clone(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: options.gates.clone(),
+            provider_command: options.provider_command.clone(),
+            provider_invocation: options.provider_invocation.clone(),
+        },
+        |checkpoint| {
+            agent_task_lifecycle::record_promotion(
+                run_id,
+                serde_json::to_value(checkpoint).map_err(|error| {
+                    Error::internal_json(
+                        error.to_string(),
+                        Some("serialize pending cook promotion".to_string()),
+                    )
+                })?,
+            )?;
+            Ok(())
+        },
+    )
 }
 
 /// Promotion is the durable boundary between a terminal provider result and
