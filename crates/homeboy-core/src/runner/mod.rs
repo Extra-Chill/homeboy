@@ -70,7 +70,6 @@ mod source_materialization;
 mod tool_registry;
 mod transport;
 mod validation_dependencies;
-pub(crate) use validation_dependencies::validation_dependency_ids;
 pub use validation_dependencies::RunnerValidationDependencySyncOutput;
 mod worker;
 pub(crate) mod workload;

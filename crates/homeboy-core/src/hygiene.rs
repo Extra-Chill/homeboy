@@ -292,8 +292,61 @@ fn validation_dependency_ids_from_value(value: &serde_json::Value) -> Vec<String
         .collect()
 }
 
-fn validation_dependency_ids(source_path: &Path) -> Result<Vec<String>> {
-    crate::runner::validation_dependency_ids(source_path)
+const PORTABLE_CONFIG_FILE: &str = concat!("homeboy", ".json");
+
+/// Collect the declared `validation_dependencies` extension IDs from a portable
+/// homeboy.json manifest. Pure single-machine manifest parsing (no runner) — a
+/// component's validation deps are the same whether or not a runner is present.
+pub(crate) fn validation_dependency_ids(local_path: &Path) -> Result<Vec<String>> {
+    let manifest_path = local_path.join(PORTABLE_CONFIG_FILE);
+    let Ok(content) = fs::read_to_string(&manifest_path) else {
+        return Ok(Vec::new());
+    };
+    let manifest: serde_json::Value = serde_json::from_str(&content).map_err(|err| {
+        Error::validation_invalid_argument(
+            PORTABLE_CONFIG_FILE,
+            format!("failed to parse {}: {err}", manifest_path.display()),
+            None,
+            None,
+        )
+    })?;
+
+    let mut ids = Vec::new();
+    let Some(extensions) = manifest
+        .get("extensions")
+        .and_then(|value| value.as_object())
+    else {
+        return Ok(ids);
+    };
+
+    for extension in extensions.values() {
+        collect_validation_dependency_ids(extension, &mut ids);
+        if let Some(settings) = extension.get("settings") {
+            collect_validation_dependency_ids(settings, &mut ids);
+        }
+    }
+
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+fn collect_validation_dependency_ids(value: &serde_json::Value, ids: &mut Vec<String>) {
+    let Some(dependencies) = value
+        .get("validation_dependencies")
+        .and_then(|value| value.as_array())
+    else {
+        return;
+    };
+
+    ids.extend(
+        dependencies
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    );
 }
 
 fn resolve_validation_dependency_path(source_path: &Path, dependency: &str) -> Result<PathBuf> {
