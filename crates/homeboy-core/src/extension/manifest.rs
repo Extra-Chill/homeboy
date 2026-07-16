@@ -174,7 +174,7 @@ impl TestMappingConfig {
     /// and builtin defaults without core embedding the literals.
     pub fn effective_trivial_method_names(&self) -> Vec<String> {
         if self.trivial_method_names.is_empty() {
-            crate::code_audit::conventions::Language::builtin_trivial_method_names()
+            homeboy_engine_primitives::language::Language::builtin_trivial_method_names()
                 .iter()
                 .map(|s| s.to_string())
                 .collect()
@@ -188,7 +188,7 @@ impl TestMappingConfig {
     /// declared none.
     pub fn effective_trivial_method_prefixes(&self) -> Vec<String> {
         if self.trivial_method_prefixes.is_empty() {
-            crate::code_audit::conventions::Language::builtin_trivial_method_prefixes()
+            homeboy_engine_primitives::language::Language::builtin_trivial_method_prefixes()
                 .iter()
                 .map(|s| s.to_string())
                 .collect()
