@@ -7,8 +7,10 @@
 //! `crate::core::engine::*` in the main binary for source compatibility.
 
 pub mod baseline;
+pub mod codebase_scan;
 pub mod command;
 pub mod identifier;
+pub mod local_files;
 pub mod output_parse;
 pub mod shell;
 pub mod template;
