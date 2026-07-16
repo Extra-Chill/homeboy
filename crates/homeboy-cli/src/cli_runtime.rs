@@ -122,6 +122,10 @@ impl CliRuntime {
         // scheduler can verify lab-materialized workspaces without core depending
         // on runner behavior.
         crate::core::runner::register_lab_workspace_provenance_provider();
+        // Register the runner-continuation provider so the agent-task lifecycle
+        // can reconcile and resume runs dispatched to a remote runner without
+        // core depending on runner behavior.
+        crate::core::runner::register_runner_continuation_provider();
         // Register the runner-upgrade provider so the core upgrade flow can
         // refresh configured runners without depending on runner behavior.
         crate::core::upgrade::register_runner_upgrade();

@@ -241,6 +241,18 @@ pub struct JobEvent {
     pub data: Option<Value>,
 }
 
+/// A durable snapshot of a job together with its recorded event log.
+///
+/// This is the read model the agent-task lifecycle consumes when
+/// reconstructing a run's outcome from a runner's job log. It carries only
+/// core job types (`Job` + `JobEvent`), so it lives in `api_jobs` rather than
+/// the optional runner subsystem.
+#[derive(Debug, Clone)]
+pub struct RunnerJobLogSnapshot {
+    pub job: Job,
+    pub events: Vec<JobEvent>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct DaemonLeaseJobDiagnostics {
     pub expected_lease_id: String,

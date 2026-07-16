@@ -3836,9 +3836,9 @@ fn test_plan() -> AgentTaskPlan {
     )
 }
 
-fn terminal_child_snapshot(aggregate: &AgentTaskAggregate) -> crate::runner::RunnerJobLogSnapshot {
+fn terminal_child_snapshot(aggregate: &AgentTaskAggregate) -> crate::api_jobs::RunnerJobLogSnapshot {
     let job_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("job id");
-    crate::runner::RunnerJobLogSnapshot {
+    crate::api_jobs::RunnerJobLogSnapshot {
         job: crate::api_jobs::Job {
             id: job_id,
             operation: "agent-task".to_string(),
@@ -3883,7 +3883,7 @@ fn terminal_child_snapshot(aggregate: &AgentTaskAggregate) -> crate::runner::Run
 
 fn persisted_terminal_result_snapshot(
     aggregate: &AgentTaskAggregate,
-) -> crate::runner::RunnerJobLogSnapshot {
+) -> crate::api_jobs::RunnerJobLogSnapshot {
     let mut snapshot = terminal_child_snapshot(aggregate);
     snapshot.events[0].kind = JobEventKind::Result;
     snapshot.events[0].data = Some(json!({

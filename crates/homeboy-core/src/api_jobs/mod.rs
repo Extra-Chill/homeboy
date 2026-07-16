@@ -21,7 +21,8 @@ pub use types::{
     ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, DaemonActiveJobRecoveryDisposition,
     DaemonActiveJobRecoveryEvidence, DaemonLeaseJobDiagnostics, DaemonLinkedDurableRunState, Job,
     JobClaimMetadata, JobEvent, JobEventKind, JobStatus, LeaselessOrphanAffectedJob,
-    LeaselessOrphanJobDiagnostics, RunnerJobLifecycleOwner, RunnerJobProjection, RunnerJobSource,
+    LeaselessOrphanJobDiagnostics, RunnerJobLifecycleOwner, RunnerJobLogSnapshot,
+    RunnerJobProjection, RunnerJobSource,
 };
 
 #[cfg(test)]

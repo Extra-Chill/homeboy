@@ -606,13 +606,15 @@ fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) -> Result<()> {
     ) else {
         return Ok(());
     };
-    let snapshot = match crate::runners::runner_job_log_snapshot(&runner_id, &job_id) {
+    let snapshot = match super::runner_continuation::with_runner_continuation(|p| {
+        p.runner_job_log_snapshot(&runner_id, &job_id)
+    }) {
         Ok(snapshot) => snapshot,
         Err(_) => {
-            if crate::runners::status(&runner_id)
-                .map(|status| !status.connected)
-                .unwrap_or(false)
-            {
+            let disconnected = super::runner_continuation::with_runner_continuation(|p| {
+                !p.is_runner_connected(&runner_id)
+            });
+            if disconnected {
                 record.annotate_runner_disconnected();
             }
             return Ok(());
@@ -685,7 +687,9 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
 
     metadata.insert("runner_job_id".to_string(), json!(&runner_job_id));
 
-    match crate::runners::runner_job_log_snapshot(&runner_id, &runner_job_id) {
+    match super::runner_continuation::with_runner_continuation(|p| {
+        p.runner_job_log_snapshot(&runner_id, &runner_job_id)
+    }) {
         Ok(snapshot) => {
             reconcile_transport_proxy_snapshot(&mut record, &snapshot)?;
             store::write_record(&record)?;
@@ -721,7 +725,9 @@ pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
     ) else {
         return Ok(false);
     };
-    let snapshot = crate::runners::runner_job_log_snapshot(&runner_id, &runner_job_id)?;
+    let snapshot = super::runner_continuation::with_runner_continuation(|p| {
+        p.runner_job_log_snapshot(&runner_id, &runner_job_id)
+    })?;
     if !matches!(
         snapshot.job.status,
         crate::api_jobs::JobStatus::Succeeded
@@ -774,7 +780,7 @@ fn resume_transport_proxy_on_runner(
         }));
     };
 
-    if !crate::runners::exists(&runner_id) {
+    if !super::runner_continuation::with_runner_continuation(|p| p.runner_exists(&runner_id)) {
         store::write_record(&record)?;
         return Ok(Some(TransportProxyRecovery::ReconnectRequired {
             record,
@@ -782,15 +788,11 @@ fn resume_transport_proxy_on_runner(
         }));
     }
 
-    let (_, exit_code) = crate::runners::exec(
-        &runner_id,
-        crate::runners::RunnerExecOptions {
-            cwd: Some(remote_workspace.to_string()),
-            command: remote_command,
-            run_id: Some(record.run_id.clone()),
-            ..Default::default()
-        },
-    )?;
+    let remote_workspace = remote_workspace.to_string();
+    let run_id = record.run_id.clone();
+    let exit_code = super::runner_continuation::with_runner_continuation(|p| {
+        p.run_continuation_exec(&runner_id, &remote_workspace, &remote_command, &run_id)
+    })?;
     if exit_code != 0 {
         return Err(Error::internal_unexpected(format!(
             "runner continuation for agent-task run '{}' exited with status {exit_code}",
@@ -807,7 +809,7 @@ fn resume_transport_proxy_on_runner(
 
 pub(crate) fn reconcile_transport_proxy_snapshot(
     record: &mut AgentTaskRunRecord,
-    snapshot: &crate::runner::RunnerJobLogSnapshot,
+    snapshot: &crate::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
     if record.state == AgentTaskRunState::Queued {
         set_run_state(record, AgentTaskRunState::Running);
@@ -862,7 +864,7 @@ fn transport_proxy_runner_job_id(record: &AgentTaskRunRecord) -> Option<String> 
 
 pub(crate) fn reconcile_runner_job_snapshot(
     record: &mut AgentTaskRunRecord,
-    snapshot: &crate::runner::RunnerJobLogSnapshot,
+    snapshot: &crate::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
     if is_terminal_run_state(record.state) {
         // A transport-only terminal result can arrive before the daemon has
@@ -935,7 +937,7 @@ pub(crate) fn reconcile_runner_job_snapshot(
 
 fn terminal_runner_lifecycle_event(
     record: &AgentTaskRunRecord,
-    snapshot: &crate::runner::RunnerJobLogSnapshot,
+    snapshot: &crate::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<
     Option<crate::agent_task_lifecycle::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent>,
 > {
@@ -956,7 +958,7 @@ fn terminal_runner_lifecycle_event(
 
 fn project_terminal_runner_lifecycle_event(
     record: &mut AgentTaskRunRecord,
-    snapshot: &crate::runner::RunnerJobLogSnapshot,
+    snapshot: &crate::api_jobs::RunnerJobLogSnapshot,
     event: &crate::agent_task_lifecycle::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
 ) -> Result<()> {
     preserve_terminal_runner_identity(record, event)?;
@@ -976,7 +978,7 @@ fn project_terminal_runner_lifecycle_event(
 
 fn preserve_terminal_runner_identity(
     record: &mut AgentTaskRunRecord,
-    event: &crate::runner::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
+    event: &crate::agent_task_lifecycle::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
 ) -> Result<()> {
     let identity = &event.identity;
     if identity.runner_id.trim().is_empty()
@@ -1053,7 +1055,7 @@ fn merge_live_provider_handles(
 
 fn validate_runner_job_snapshot(
     record: &AgentTaskRunRecord,
-    snapshot: &crate::runner::RunnerJobLogSnapshot,
+    snapshot: &crate::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
     let expected_job_id = record.runner_job_id().unwrap_or_default();
     if expected_job_id == snapshot.job.id.to_string() {
@@ -1072,7 +1074,7 @@ fn validate_runner_job_snapshot(
 
 fn validate_terminal_child_identity(
     record: &AgentTaskRunRecord,
-    snapshot: &crate::runner::RunnerJobLogSnapshot,
+    snapshot: &crate::api_jobs::RunnerJobLogSnapshot,
     event: &crate::agent_task_lifecycle::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
 ) -> Result<()> {
     let expected_runner_id = record.runner_id().unwrap_or_default();
