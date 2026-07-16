@@ -65,28 +65,10 @@ pub struct Convention {
     pub confidence: f32,
 }
 
-/// A file that deviates from a convention.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Outlier {
-    /// Relative file path.
-    pub file: String,
-    /// Whether this outlier appears to be helper/utility drift rather than a real member.
-    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
-    pub noisy: bool,
-    /// What's missing or different.
-    pub deviations: Vec<Deviation>,
-}
-
-/// A specific deviation from the convention.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Deviation {
-    /// What kind of deviation.
-    pub kind: AuditFinding,
-    /// Human-readable description.
-    pub description: String,
-    /// Suggested fix.
-    pub suggestion: String,
-}
+// `Outlier` and `Deviation` now live in the shared audit contract; re-exported
+// so existing `code_audit::conventions::{Outlier, Deviation}` and
+// `code_audit::{Outlier, Deviation}` paths resolve.
+pub use homeboy_audit_contract::{Deviation, Outlier};
 
 pub(crate) fn unwired_test_file_finding() -> AuditFinding {
     AuditFinding::UnwiredNestedRustTest

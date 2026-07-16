@@ -21,6 +21,11 @@ use super::idiomatic::is_trivial_method;
 use super::walker::is_test_path;
 use homeboy_audit_contract::DuplicationDetectorConfig;
 
+// `DuplicateGroup` now lives in the shared audit contract; re-exported so
+// existing `code_audit::duplication::DuplicateGroup` and `code_audit::DuplicateGroup`
+// paths resolve.
+pub use homeboy_audit_contract::DuplicateGroup;
+
 mod intra_method;
 
 pub(crate) use intra_method::detect_intra_method_duplicates;
@@ -29,19 +34,6 @@ use intra_method::{has_logic_signal, is_scaffolding_line};
 
 /// Minimum number of locations for a function to count as duplicated.
 const MIN_DUPLICATE_LOCATIONS: usize = 2;
-
-/// A group of files containing an identical function.
-///
-/// The fixer uses this to keep the canonical copy and remove the rest.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DuplicateGroup {
-    /// The duplicated function name.
-    pub function_name: String,
-    /// File chosen to keep the function (canonical location).
-    pub canonical_file: String,
-    /// Files where the duplicate should be removed and replaced with an import.
-    pub remove_from: Vec<String>,
-}
 
 /// Build grouped duplication data from fingerprints.
 ///

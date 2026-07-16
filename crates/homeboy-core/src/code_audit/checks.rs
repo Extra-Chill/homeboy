@@ -5,6 +5,10 @@
 
 use super::conventions::{Convention, Outlier};
 
+// `CheckStatus` now lives in the shared audit contract; re-exported so existing
+// `code_audit::checks::CheckStatus` and `code_audit::CheckStatus` paths resolve.
+pub use homeboy_audit_contract::CheckStatus;
+
 /// Result of checking a set of conventions.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CheckResult {
@@ -18,17 +22,6 @@ pub struct CheckResult {
     pub total_count: usize,
     /// Outliers found.
     pub outliers: Vec<Outlier>,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckStatus {
-    /// All files conform.
-    Clean,
-    /// Some files deviate.
-    Drift,
-    /// Less than half conform — convention may be wrong or split.
-    Fragmented,
 }
 
 /// Run checks on all discovered conventions.
