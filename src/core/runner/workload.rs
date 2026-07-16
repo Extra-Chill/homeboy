@@ -671,16 +671,33 @@ mod tests {
     use crate::core::api_jobs::JobArtifactMetadata;
     use crate::core::plan::{HomeboyPlan, PlanKind};
 
-    /// Register the command-label resolver the way production startup does, so
-    /// tests that build workloads from dispatched argv resolve a hot-command
-    /// label (the parse now goes through the resolver hook rather than core
-    /// calling the CLI parser directly).
+    /// Register a stub command-label resolver for tests.
+    ///
+    /// Production wires this hook to the real CLI parser (`cli_surface::Cli`) at
+    /// startup; the parser's correctness is covered by the CLI layer's own
+    /// tests. Here we only exercise core's workload-building behaviour given a
+    /// resolved label, so the stub maps each test argv to its expected label via
+    /// the shared `command_label_for_test_argv` table (keeping core free of any
+    /// dependency on the CLI parser).
     fn register_test_command_label_resolver() {
-        crate::core::runner::set_command_label_resolver(|argv| {
-            let cli = <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).ok()?;
-            let route_contract = cli.command.lab_route_contract().ok()??;
-            Some(route_contract.command.hot_label.to_string())
-        });
+        crate::core::runner::set_command_label_resolver(command_label_for_test_argv);
+    }
+
+    /// Test-only argv -> hot-command-label mapping mirroring what the production
+    /// CLI parser would resolve for the argv shapes exercised in these tests.
+    fn command_label_for_test_argv(argv: &[String]) -> Option<String> {
+        let tokens: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let label = match tokens.as_slice() {
+            [_, "review", "lint", ..] => "review lint",
+            [_, "agent-task", "cook", ..] => "agent-task cook/run-plan/retry --run",
+            [_, "extension", "update", ..] => "extension update",
+            [_, "runtime", "refresh", ..] => "runtime refresh",
+            [_, "agent-task", "status", ..] => {
+                "agent-task run/run-next/status/logs/artifacts/review/list/active/latest"
+            }
+            _ => return None,
+        };
+        Some(label.to_string())
     }
 
     fn plan() -> HomeboyPlan {
