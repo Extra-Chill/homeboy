@@ -3001,6 +3001,129 @@ fn list_records_skips_malformed_observation_records() {
     });
 }
 
+#[test]
+fn record_health_reconciles_plan_backed_missing_metadata_idempotently() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("repairable-metadata")).expect("submitted");
+        let store = crate::observation::ObservationStore::open_initialized().expect("store");
+        let mut observation = store
+            .get_run("repairable-metadata")
+            .expect("read")
+            .expect("observation");
+        observation.metadata_json = json!({ "legacy_source": "fixture" });
+        store
+            .upsert_imported_run(&observation)
+            .expect("malformed fixture stored");
+
+        let before = record_health_summary().expect("health");
+        assert_eq!(before.malformed, 1);
+        assert_eq!(
+            before.samples[0].reason,
+            AgentTaskRecordHealthReason::MissingMetadata
+        );
+        let dry_run = reconcile_record_health(true).expect("dry run");
+        assert_eq!(dry_run.records[0].action, "would-migrate");
+        assert_eq!(
+            record_health_summary()
+                .expect("unmodified health")
+                .malformed,
+            1
+        );
+
+        let applied = reconcile_record_health(false).expect("applied");
+        assert_eq!(applied.migrated, 1);
+        let repaired = status("repairable-metadata").expect("reconstructed record");
+        assert_eq!(repaired.state, AgentTaskRunState::Running);
+        assert_eq!(
+            repaired.metadata["lifecycle_reconstruction"]["original_metadata"]["legacy_source"],
+            json!("fixture")
+        );
+        let healthy = record_health_summary().expect("healthy health");
+        assert_eq!(healthy.malformed + healthy.legacy + healthy.conflicting, 0);
+        assert_eq!(
+            reconcile_record_health(false).expect("repeat").considered,
+            0
+        );
+    });
+}
+
+#[test]
+fn record_health_migrates_legacy_and_quarantines_conflicting_projections() {
+    with_isolated_home(|_| {
+        submit_plan(&test_plan(), Some("legacy-record")).expect("submitted");
+        rewrite_record_for_test("legacy-record", |record| {
+            record.schema = "homeboy/agent-task-run/v0".to_string();
+        })
+        .expect("legacy stored");
+        let legacy = reconcile_record_health(false).expect("legacy migrated");
+        assert_eq!(legacy.migrated, 1);
+        let legacy_record = status("legacy-record").expect("legacy loaded");
+        assert_eq!(legacy_record.schema, schemas::RUN);
+        assert!(legacy_record
+            .metadata
+            .get("lifecycle_reconstruction")
+            .is_some());
+
+        submit_plan(&test_plan(), Some("conflicting-record")).expect("submitted");
+        rewrite_record_for_test("conflicting-record", |record| {
+            record.lifecycle.execution.state = RunExecutionState::Succeeded;
+        })
+        .expect("conflict stored");
+        let dry_run = reconcile_record_health(true).expect("conflict dry run");
+        assert_eq!(
+            dry_run.records[0].reason,
+            AgentTaskRecordHealthReason::ConflictingProjections
+        );
+        assert_eq!(dry_run.records[0].action, "would-quarantine");
+        let applied = reconcile_record_health(false).expect("conflict quarantined");
+        assert_eq!(applied.quarantined, 1);
+        let health = record_health_summary().expect("quarantine health");
+        assert_eq!(health.conflicting, 1);
+        assert_eq!(health.quarantined, 1);
+        assert_eq!(
+            reconcile_record_health(false)
+                .expect("repeat no-op")
+                .considered,
+            0
+        );
+    });
+}
+
+#[test]
+fn record_health_recovers_after_interrupted_migration_without_changing_terminal_status() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("interrupted-terminal")).expect("submitted");
+        let store = crate::observation::ObservationStore::open_initialized().expect("store");
+        let mut observation = store
+            .get_run("interrupted-terminal")
+            .expect("read")
+            .expect("observation");
+        observation.status = "pass".to_string();
+        observation.finished_at = Some("2026-01-01T00:01:00Z".to_string());
+        observation.metadata_json = json!({});
+        store
+            .upsert_imported_run(&observation)
+            .expect("terminal malformed fixture");
+
+        store::fail_next_record_write_for_test();
+        assert!(reconcile_record_health(false).is_err());
+        assert_eq!(
+            record_health_summary().expect("still malformed").malformed,
+            1
+        );
+        let applied = reconcile_record_health(false).expect("retry migration");
+        assert_eq!(applied.migrated, 1);
+        let repaired = status("interrupted-terminal").expect("repaired");
+        assert_eq!(repaired.state, AgentTaskRunState::Succeeded);
+        assert_eq!(
+            repaired.lifecycle.execution.finished_at.as_deref(),
+            Some("2026-01-01T00:01:00Z")
+        );
+    });
+}
+
 fn outcome_with_refs(
     task_id: &str,
     artifacts: Vec<AgentTaskArtifact>,

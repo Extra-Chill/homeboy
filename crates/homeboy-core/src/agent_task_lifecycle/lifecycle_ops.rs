@@ -1232,10 +1232,9 @@ pub fn list_records() -> Result<Vec<AgentTaskRunRecord>> {
     for record in store::read_records()? {
         match status(&record.run_id) {
             Ok(record) => records.push(record),
-            Err(error) => eprintln!(
-                "Warning: skipping malformed agent-task run status for {}: {}",
-                record.run_id, error.message
-            ),
+            // Discovery health owns malformed-record reporting. A transient
+            // status refresh failure must not reintroduce stderr-only state.
+            Err(_) => (),
         }
     }
     records.sort_by(|left, right| {
@@ -1248,6 +1247,27 @@ pub fn list_records() -> Result<Vec<AgentTaskRunRecord>> {
             .then_with(|| right.run_id.cmp(&left.run_id))
     });
     Ok(records)
+}
+
+pub fn list_records_with_health() -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)>
+{
+    let (records, health) = store::read_records_with_health()?;
+    let mut refreshed = Vec::new();
+    for record in records {
+        if let Ok(record) = status(&record.run_id) {
+            refreshed.push(record);
+        }
+    }
+    refreshed.sort_by(|left, right| {
+        right
+            .updated_at
+            .as_ref()
+            .unwrap_or(&right.submitted_at)
+            .cmp(left.updated_at.as_ref().unwrap_or(&left.submitted_at))
+            .then_with(|| right.submitted_at.cmp(&left.submitted_at))
+            .then_with(|| right.run_id.cmp(&left.run_id))
+    });
+    Ok((refreshed, health))
 }
 
 /// Resolve an aggregate artifact back to its controller-owned durable run.

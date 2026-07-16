@@ -122,6 +122,11 @@ pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), exit))
 }
 
+pub(super) fn reconcile_records(dry_run: bool) -> CmdResult<Value> {
+    let report = agent_task_lifecycle::reconcile_record_health(dry_run)?;
+    Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
+}
+
 /// Group active-run ids by liveness classification for a scannable triage view.
 fn active_liveness_buckets(report: &agent_task_service::AgentTaskDiscoveryReport) -> Value {
     use agent_task_service_direct::AgentTaskLiveness;

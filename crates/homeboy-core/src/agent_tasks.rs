@@ -249,15 +249,18 @@ pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
         aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run,
         cook_attempt_run_id, cook_index, list_records, load_controller_plan, load_plan, logs,
-        mark_resuming, mark_running, record_completed_run, record_cook_attempt,
-        record_detached_lab_run, record_lab_offload_phase, record_lab_offload_planned,
-        record_pre_dispatch_failure, record_pre_execution_failure, record_promotion,
-        record_remote_dispatch_failure, record_run_aggregate, retry, run_id_for_aggregate_path,
-        run_record_exists, run_status, status, submit_plan, AgentTaskArtifactRef,
-        AgentTaskCookIndex, AgentTaskCookIndexAttempt, AgentTaskEventEnvelope,
-        AgentTaskPreDispatchFailure, AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts,
-        AgentTaskRunLog, AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState,
-        AgentTaskRunStatus, AgentTaskRunTask, DetachedLabRunRecord, LabOffloadProxyPlan,
+        mark_resuming, mark_running, reconcile_record_health, record_completed_run,
+        record_cook_attempt, record_detached_lab_run, record_health_summary,
+        record_lab_offload_phase, record_lab_offload_planned, record_pre_dispatch_failure,
+        record_pre_execution_failure, record_promotion, record_remote_dispatch_failure,
+        record_run_aggregate, retry, run_id_for_aggregate_path, run_record_exists, run_status,
+        status, submit_plan, AgentTaskArtifactRef, AgentTaskCookIndex, AgentTaskCookIndexAttempt,
+        AgentTaskEventEnvelope, AgentTaskPreDispatchFailure, AgentTaskRecordHealthItem,
+        AgentTaskRecordHealthReason, AgentTaskRecordHealthSummary,
+        AgentTaskRecordReconciliationItem, AgentTaskRecordReconciliationReport,
+        AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunLog,
+        AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunStatus,
+        AgentTaskRunTask, DetachedLabRunRecord, LabOffloadProxyPlan,
     };
 }
 
