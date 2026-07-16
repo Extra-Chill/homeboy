@@ -189,6 +189,29 @@ where
         }
         agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
         let record = agent_task_lifecycle::status(&run_id)?;
+        if record.state == agent_task_lifecycle::AgentTaskRunState::Running
+            && record.runner_job_id().is_some()
+        {
+            // A detached runner handoff has durably accepted the provider
+            // child. Its daemon owns timeout and provider rotation; this
+            // controller returns without attempting to read a future aggregate.
+            attempts.push(AgentTaskCookAttemptReport {
+                attempt,
+                run_id: run_id.clone(),
+                run_state: format!("{:?}", record.state),
+                aggregate_path: record.aggregate_path,
+                promotion: None,
+                feedback: None,
+            });
+            return Ok(cook_report(
+                cook_id,
+                "in_flight",
+                attempts,
+                None,
+                Some("provider attempt accepted by the runner daemon".to_string()),
+                0,
+            ));
+        }
         let plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
         budget_limit.get_or_insert_with(|| plan.options.execution_budget.clone());
         let aggregate = agent_task_lifecycle::read_aggregate(&run_id)?;
@@ -1173,6 +1196,9 @@ fn source_spec_path(spec: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_task::{
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
+    };
     use crate::agent_task_finalization::{
         AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend, AgentTaskPrRef,
     };
@@ -1204,6 +1230,119 @@ mod tests {
             format!("{retry_attempt:?}"),
             "HarvestExecutionContext { source_snapshot: None, lab_offload: None }"
         );
+    }
+
+    #[derive(Debug)]
+    struct AcceptedDetachedAttemptDispatcher;
+
+    impl AgentTaskCookAttemptDispatcher for AcceptedDetachedAttemptDispatcher {
+        fn durable_recipe(&self) -> Result<Value> {
+            Ok(serde_json::json!({ "kind": "test-detached" }))
+        }
+
+        fn dispatch_attempt(
+            &self,
+            plan: AgentTaskPlan,
+            run_id: &str,
+            _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+        ) -> Result<()> {
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+            agent_task_lifecycle::record_detached_lab_run(
+                agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: "fixture-lab",
+                    runner_job_id: "accepted-daemon-job",
+                    remote_workspace: "/runner/workspace",
+                    remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+                },
+            )?;
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct UnusedExecutor;
+
+    impl AgentTaskExecutorAdapter for UnusedExecutor {
+        fn execute(
+            &self,
+            _request: crate::agent_task::AgentTaskRequest,
+            _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+        ) -> crate::agent_task::AgentTaskOutcome {
+            panic!("accepted detached attempts must remain daemon-owned")
+        }
+    }
+
+    #[test]
+    fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_completion() {
+        crate::test_support::with_isolated_home(|_| {
+            let run_id = "cook-detached-attempt-1";
+            let plan = AgentTaskPlan::new(
+                "cook-detached",
+                vec![AgentTaskRequest {
+                    schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                    task_id: "provider".to_string(),
+                    group_key: None,
+                    parent_plan_id: None,
+                    executor: AgentTaskExecutor {
+                        backend: "fixture".to_string(),
+                        selector: None,
+                        runtime_selection: None,
+                        required_capabilities: Vec::new(),
+                        secret_env: Vec::new(),
+                        model: None,
+                        config: Value::Null,
+                    },
+                    instructions: "complete the task".to_string(),
+                    inputs: Value::Null,
+                    source_refs: Vec::new(),
+                    workspace: AgentTaskWorkspace::default(),
+                    component_contracts: Vec::new(),
+                    policy: AgentTaskPolicy::default(),
+                    limits: AgentTaskLimits::default(),
+                    expected_artifacts: Vec::new(),
+                    artifact_declarations: Vec::new(),
+                    metadata: Value::Null,
+                }],
+            );
+            let result = run_cook(
+                AgentTaskCookServiceOptions {
+                    cook_id: "cook-detached".to_string(),
+                    initial_run_id: run_id.to_string(),
+                    initial_plan: plan,
+                    to_worktree: "fixture@detached".to_string(),
+                    source_worktree_path: None,
+                    provider_command: None,
+                    provider_invocation: None,
+                    gates: VerifyGateOptions::default(),
+                    max_attempts: 1,
+                    no_finalize: true,
+                    base: "main".to_string(),
+                    task_base_sha: None,
+                    head: None,
+                    title: "Detached cook".to_string(),
+                    commit_message: "test".to_string(),
+                    source_refs: Vec::new(),
+                    protected_branches: Vec::new(),
+                    ai_tool: "test".to_string(),
+                    ai_model: None,
+                    ai_used_for: "test".to_string(),
+                    attempt_dispatcher: Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
+                    harvest_context: Default::default(),
+                },
+                UnusedExecutor,
+            )
+            .expect("accepted detached cook returns");
+
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.value.status, "in_flight");
+            assert_eq!(result.value.attempts.len(), 1);
+            assert_eq!(result.value.attempts[0].run_id, run_id);
+            let record = agent_task_lifecycle::status(run_id).expect("detached attempt record");
+            assert_eq!(record.state, agent_task_lifecycle::AgentTaskRunState::Running);
+            assert_eq!(record.runner_id(), Some("fixture-lab"));
+            assert_eq!(record.runner_job_id(), Some("accepted-daemon-job"));
+        });
     }
 
     #[derive(Default)]

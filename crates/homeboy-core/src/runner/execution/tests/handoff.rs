@@ -631,6 +631,20 @@ fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
             matches!(job.status, JobStatus::Queued | JobStatus::Running),
             "detached handoff returned only after workload completion"
         );
+        let active_jobs: Value = client
+            .get(format!("{daemon_url}/jobs"))
+            .send()
+            .expect("list daemon jobs")
+            .json()
+            .expect("decode daemon jobs");
+        assert!(
+            active_jobs["data"]["body"]["active_runner_jobs"]
+                .as_array()
+                .expect("typed active jobs")
+                .iter()
+                .any(|summary| { summary["job_id"] == job_id && summary["runner_id"] == "lab" }),
+            "accepted daemon child must be visible through the typed runner projection"
+        );
         let events = fetch_daemon_events(&client, &daemon_url, &job_id)
             .expect("live daemon events while workload is blocked");
         let progress = events
@@ -647,6 +661,22 @@ fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
 
         std::fs::write(&release, "release").expect("release workload");
         wait_for_terminal_daemon_job(&client, &daemon_url, &job_id);
+        let terminal_jobs: Value = client
+            .get(format!("{daemon_url}/jobs"))
+            .send()
+            .expect("list terminal daemon jobs")
+            .json()
+            .expect("decode terminal daemon jobs");
+        assert_eq!(
+            terminal_jobs["data"]["body"]["jobs"]
+                .as_array()
+                .expect("typed jobs")
+                .iter()
+                .filter(|job| job["id"] == job_id)
+                .count(),
+            1,
+            "the terminal daemon child must retain one durable typed job projection"
+        );
     });
 }
 
