@@ -765,6 +765,7 @@ mod tests {
                 "fixture",
                 &component.path().to_string_lossy(),
                 None,
+                None,
                 false,
             )
             .expect("package step");
@@ -800,6 +801,105 @@ mod tests {
             assert!(!build_dir.exists());
             assert!(std::path::Path::new(durable_path).is_file());
         });
+    }
+
+    #[test]
+    fn run_package_collects_declared_component_artifact_alongside_provider_artifacts() {
+        crate::test_support::with_isolated_home(|_| {
+            let component = tempfile::tempdir().expect("component tempdir");
+            let package = release_package_extension(
+                "nodejs",
+                "mkdir -p packages/plugin/dist target; \
+                 printf plugin > packages/plugin/dist/plugin.zip; \
+                 printf npm > target/plugin-1.2.3.tgz; \
+                 printf '[{\"path\":\"target/plugin-1.2.3.tgz\",\"type\":\"npm\"}]'",
+            );
+            crate::extension::save_manifest(&package).expect("save package extension");
+
+            let mut state = ReleaseState {
+                version: Some("1.2.3".to_string()),
+                ..ReleaseState::default()
+            };
+            run_package(
+                &[package],
+                &mut state,
+                "plugin",
+                &component.path().to_string_lossy(),
+                None,
+                Some("packages/plugin/dist/plugin.zip"),
+                false,
+            )
+            .expect("package step should collect declared artifact");
+
+            assert_eq!(state.artifacts.len(), 2);
+            assert_eq!(state.artifacts[0].path, "target/plugin-1.2.3.tgz");
+            assert_eq!(state.artifacts[1].path, "packages/plugin/dist/plugin.zip");
+            assert!(state.artifacts[1]
+                .durable_path
+                .as_deref()
+                .is_some_and(|path| std::path::Path::new(path).is_file()));
+        });
+    }
+
+    #[test]
+    fn run_package_rejects_unrelated_provider_artifact_when_declared_artifact_is_absent() {
+        crate::test_support::with_isolated_home(|_| {
+            let component = tempfile::tempdir().expect("component tempdir");
+            let package = release_package_extension(
+                "nodejs",
+                "mkdir -p target; printf npm > target/plugin-1.2.3.tgz; \
+                 printf '[{\"path\":\"target/plugin-1.2.3.tgz\",\"type\":\"npm\"}]'",
+            );
+            crate::extension::save_manifest(&package).expect("save package extension");
+
+            let error = run_package(
+                &[package],
+                &mut ReleaseState::default(),
+                "plugin",
+                &component.path().to_string_lossy(),
+                None,
+                Some("packages/plugin/dist/plugin.zip"),
+                false,
+            )
+            .expect_err("unrelated provider artifact must not complete the release package");
+
+            assert!(error
+                .message
+                .contains("was not produced by release.package"));
+            assert_eq!(error.details["field"], "build_artifact");
+        });
+    }
+
+    #[test]
+    fn github_release_refuses_missing_declared_artifact_before_publication() {
+        let component_dir = tempfile::tempdir().expect("component tempdir");
+        let npm_artifact = component_dir.path().join("target/plugin-1.2.3.tgz");
+        std::fs::create_dir_all(npm_artifact.parent().expect("parent")).expect("target dir");
+        std::fs::write(&npm_artifact, "npm").expect("npm artifact");
+        let component = Component {
+            id: "plugin".to_string(),
+            local_path: component_dir.path().to_string_lossy().to_string(),
+            build_artifact: Some("packages/plugin/dist/plugin.zip".to_string()),
+            ..Component::default()
+        };
+        let state = ReleaseState {
+            tag: Some("v1.2.3".to_string()),
+            artifacts: vec![ReleaseArtifact {
+                path: npm_artifact.display().to_string(),
+                durable_path: None,
+                artifact_type: Some("npm".to_string()),
+                platform: None,
+            }],
+            ..ReleaseState::default()
+        };
+
+        let error = super::run_github_release(&component, &state)
+            .expect_err("missing declared artifact must block GitHub publication");
+
+        assert!(error
+            .message
+            .contains("absent from the GitHub Release assets"));
+        assert!(!error.message.contains("no remote_url"));
     }
 
     fn release_package_extension(id: &str, command: &str) -> ExtensionManifest {
@@ -856,6 +956,7 @@ mod tests {
                 "fixture",
                 &component.path().to_string_lossy(),
                 None,
+                None,
                 false,
             )
             .expect("package step");
@@ -889,6 +990,7 @@ mod tests {
                 &mut state,
                 "intelligence-horse-theme",
                 &component.path().to_string_lossy(),
+                None,
                 None,
                 false,
             )
@@ -990,6 +1092,7 @@ mod tests {
                 "fixture",
                 &component.path().to_string_lossy(),
                 None,
+                None,
                 true,
             )
             .expect_err("failing final package should surface output");
@@ -1020,6 +1123,7 @@ mod tests {
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
+                None,
                 None,
                 false,
             )
@@ -1057,6 +1161,7 @@ mod tests {
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
+                None,
                 None,
                 false,
             )
@@ -1108,6 +1213,7 @@ mod tests {
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
+                None,
                 None,
                 false,
             )

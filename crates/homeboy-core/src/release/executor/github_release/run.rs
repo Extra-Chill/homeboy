@@ -49,6 +49,7 @@ pub(crate) fn run_github_release(
             "github.release: tag state not set (git.tag must run first)".to_string(),
         )
     })?;
+    validate_declared_build_artifact(component, state)?;
     let local_path = &component.local_path;
 
     let remote_url = component
@@ -366,5 +367,53 @@ pub(crate) fn run_github_release(
             "release_body_file": persisted_notes_path,
         })),
         Vec::new(),
+    ))
+}
+
+/// A configured deploy artifact is part of the release contract, including
+/// `--head --from-artifacts` recovery where `release.package` is not run.
+fn validate_declared_build_artifact(component: &Component, state: &ReleaseState) -> Result<()> {
+    let Some(declared_build_artifact) = component
+        .build_artifact
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    let expected_name = std::path::Path::new(declared_build_artifact)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "build_artifact",
+                format!(
+                    "Configured build_artifact '{}' has no filename",
+                    declared_build_artifact
+                ),
+                Some(declared_build_artifact.to_string()),
+                None,
+            )
+        })?;
+    let is_collected = github_release_artifact_paths(state).iter().any(|path| {
+        std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(expected_name)
+    });
+    if is_collected {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "build_artifact",
+        format!(
+            "Configured build_artifact '{}' is absent from the GitHub Release assets",
+            declared_build_artifact
+        ),
+        Some(declared_build_artifact.to_string()),
+        Some(vec![
+            "Run release.package again and include the configured build_artifact before publishing the GitHub Release.".to_string(),
+        ]),
     ))
 }
