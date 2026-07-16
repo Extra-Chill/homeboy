@@ -1158,7 +1158,7 @@ fn test_chat_tools() {
             "tests/deploy_test.rs",
             vec!["test_parse_bulk_component_ids_supports_json_array"],
             r##"
-                use homeboy::core::deploy::parse_bulk_component_ids;
+                use crate::core::deploy::parse_bulk_component_ids;
 
                 #[test]
                 fn test_parse_bulk_component_ids_supports_json_array() {

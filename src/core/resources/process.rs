@@ -5,7 +5,7 @@
 //! stdout) and therefore lives in core rather than the command layer. Callers
 //! parse the raw snapshot into their own presentation types.
 
-use homeboy::core::{Error, Result};
+use crate::core::{Error, Result};
 use std::process::Command;
 
 /// Capture a snapshot of the live process table.

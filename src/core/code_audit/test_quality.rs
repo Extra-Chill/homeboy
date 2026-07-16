@@ -681,7 +681,7 @@ fn test_evaluate_file_exists() {
         let findings = detect_vacuous_tests(
             "tests/deps_test.rs",
             r#"
-use homeboy::core::deps;
+use crate::core::deps;
 
 #[test]
 fn status_filters_to_one_package() {

@@ -6,7 +6,7 @@
 //! controlled via [`OutputWriteOptions`]. This is generic reusable I/O
 //! infrastructure and lives in core so the command layer stays a thin adapter.
 
-use homeboy::core::{Error, Result};
+use crate::core::{Error, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
