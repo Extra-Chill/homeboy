@@ -10,6 +10,12 @@ use crate::{Error, Result};
 
 use super::{apply_aggregate_to_record, status, store};
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RunnerArtifactRoute {
+    runner_id: String,
+    job_id: String,
+}
+
 /// Materialize a recovered reverse-runner patch into controller-owned storage.
 /// The aggregate is updated atomically with the durable run record, making a
 /// replay reuse the verified local file instead of contacting the runner again.
@@ -19,15 +25,6 @@ pub fn materialize_recovered_patch_artifact(
     artifact_id: Option<&str>,
 ) -> Result<bool> {
     let mut record = status(run_id)?;
-    let Some(runner_id) = record.runner_id().filter(|value| !value.trim().is_empty()) else {
-        return Ok(false);
-    };
-    let Some(job_id) = record
-        .runner_job_id()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Ok(false);
-    };
     let mut aggregate = store::read_aggregate(&record.run_id)?;
     let mut changed = false;
     for outcome in &mut aggregate.outcomes {
@@ -40,15 +37,16 @@ pub fn materialize_recovered_patch_artifact(
             {
                 continue;
             }
+            let route = resolve_runner_artifact_route(&record, artifact)?;
             changed |= materialize_artifact(
                 artifact,
-                &runner_id,
-                &job_id,
+                &route.runner_id,
+                &route.job_id,
                 &record.run_id,
                 &outcome.task_id,
                 |id| {
                     crate::observation::runs_service::runner_evidence::with_runner_evidence(|p| {
-                        p.runner_artifact_content(&runner_id, &job_id, id)
+                        p.runner_artifact_content(&route.runner_id, &route.job_id, id)
                     })
                 },
             )?;
@@ -69,6 +67,31 @@ pub fn materialize_recovered_patch_artifact(
         store::write_aggregate_and_record(&record, &aggregate)?;
     }
     Ok(changed)
+}
+
+fn resolve_runner_artifact_route(
+    record: &super::AgentTaskRunRecord,
+    artifact: &AgentTaskArtifact,
+) -> Result<RunnerArtifactRoute> {
+    let mut routes =
+        if let (Some(runner_id), Some(job_id)) = (record.runner_id(), record.runner_job_id()) {
+            vec![RunnerArtifactRoute {
+                runner_id: runner_id.to_string(),
+                job_id: job_id.to_string(),
+            }]
+        } else {
+            crate::observation::runs_service::mirrored_runner_job_identities(&record.run_id)?
+                .into_iter()
+                .map(|(runner_id, job_id)| RunnerArtifactRoute { runner_id, job_id })
+                .collect()
+        };
+    routes.sort();
+    routes.dedup();
+    match routes.as_slice() {
+        [route] => Ok(route.clone()),
+        [] => Err(unavailable(artifact, "no authenticated runner/job binding exists in lifecycle or mirrored runner evidence")),
+        _ => Err(unavailable(artifact, "multiple conflicting authenticated runner/job bindings exist in lifecycle or mirrored runner evidence")),
+    }
 }
 
 fn materialize_artifact(

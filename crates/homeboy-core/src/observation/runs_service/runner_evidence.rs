@@ -157,6 +157,22 @@ pub fn register_runner_evidence_provider(provider: Box<dyn RunnerEvidenceProvide
     *guard = Some(provider);
 }
 
+/// Refresh runner-owned evidence and return its authenticated runner/job
+/// identities without exposing runner-specific metadata to consumers.
+pub fn mirrored_runner_job_identities(run_id: &str) -> Result<Vec<(String, String)>> {
+    let mut identities = with_runner_evidence(|provider| -> Result<Vec<(String, String)>> {
+        Ok(provider
+            .refresh_mirrored_daemon_evidence(run_id)?
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|run| provider.mirrored_runner_job_identity(run))
+            .collect())
+    })?;
+    identities.sort();
+    identities.dedup();
+    Ok(identities)
+}
+
 /// Whether a runner-evidence provider is currently registered.
 pub fn has_runner_evidence_provider() -> bool {
     PROVIDER
