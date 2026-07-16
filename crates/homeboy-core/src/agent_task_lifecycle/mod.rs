@@ -29,6 +29,7 @@ mod lifecycle_store;
 
 use lifecycle_store as store;
 
+mod artifact_materialization;
 mod cancellation;
 mod conversion;
 mod failure_recording;
@@ -37,6 +38,7 @@ mod lifecycle_ops;
 mod lifecycle_record_ops;
 mod records;
 
+pub use artifact_materialization::*;
 pub use cancellation::*;
 pub use failure_recording::*;
 pub use health::*;

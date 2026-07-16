@@ -93,7 +93,8 @@ pub(crate) use connection::disconnect_with_force;
 pub use connection::{
     connect, connect_reverse, connect_with_leaseless_orphan_reconciliation,
     connect_with_orphan_adoption, connect_with_recovery, disconnect, reverse_broker_artifact,
-    reverse_broker_reconcile, status, statuses,
+    reverse_broker_artifact_content, reverse_broker_reconcile, runner_artifact_content, status,
+    statuses,
 };
 pub(crate) use evidence::artifact_store_locator_from_runner_artifact_id;
 pub use evidence::runner_artifact_store_token;

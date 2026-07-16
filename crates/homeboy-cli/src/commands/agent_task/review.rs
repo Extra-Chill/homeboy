@@ -137,6 +137,11 @@ impl From<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
 
 pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
     let record = agent_task_lifecycle::status(&args.run_id)?;
+    // A review that names a target worktree is preparing a promotion handoff.
+    // Materialize recovered runner artifacts before rendering its command.
+    if args.to_worktree.is_some() {
+        agent_task_lifecycle::materialize_recovered_patch_artifact(&record.run_id, None, None)?;
+    }
     let log = agent_task_lifecycle::logs(&args.run_id)?;
     let artifacts = agent_task_lifecycle::artifacts(&args.run_id)?;
     let aggregate_source = completed_run_aggregate_source(&args.run_id).transpose()?;
@@ -196,7 +201,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
 
 pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     let to_worktree = args.to_worktree.clone();
-    let (raw, source_path) = read_promotion_source(&args.source)?;
+    let (_raw, source_path) = read_promotion_source(&args.source)?;
     let source_run_id = match agent_task_lifecycle::status(&args.source) {
         Ok(record) => Some(record.run_id),
         Err(_) => match source_path.as_deref() {
@@ -204,6 +209,14 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
             None => None,
         },
     };
+    if let Some(run_id) = source_run_id.as_deref() {
+        agent_task_lifecycle::materialize_recovered_patch_artifact(
+            run_id,
+            args.task_id.as_deref(),
+            args.artifact_id.as_deref(),
+        )?;
+    }
+    let (raw, source_path) = read_promotion_source(&args.source)?;
     let promotion_options = AgentTaskPromotionOptions {
         source: raw,
         source_run_id: source_run_id.clone(),
