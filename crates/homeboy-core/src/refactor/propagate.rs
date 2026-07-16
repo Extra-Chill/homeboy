@@ -213,8 +213,8 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
 
     // Step 5: Apply edits if write mode — route through shared EditOp engine
     let applied = if config.write && !all_edits.is_empty() {
-        use crate::engine::edit_op::propagate_result_to_edit_ops;
         use crate::engine::edit_op_apply::apply_edit_ops;
+        use crate::refactor::edit_op_tagged::propagate_result_to_edit_ops;
 
         // Build a temporary PropagateResult to convert edits
         let tmp_result = PropagateResult {
@@ -228,7 +228,8 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
             applied: false,
         };
         let ops = propagate_result_to_edit_ops(&tmp_result);
-        let report = apply_edit_ops(&ops, root).map_err(|e| {
+        let plain_ops: Vec<_> = ops.iter().map(|t| t.op.clone()).collect();
+        let report = apply_edit_ops(&plain_ops, root).map_err(|e| {
             Error::internal_io(e.to_string(), Some("apply propagate edits".to_string()))
         })?;
         report.files_modified > 0 || report.ops_applied > 0

@@ -14,7 +14,7 @@ use crate::error::Result;
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::edit_op::{EditOp, InsertAnchor, TaggedEditOp};
+use super::edit_op::{EditOp, InsertAnchor};
 
 mod imports;
 use imports::should_skip_import;
@@ -623,11 +623,15 @@ fn remove_from_reexport_block(lines: &mut Vec<String>, fn_name: &str) {
     }
 }
 
-/// Apply a list of `TaggedEditOp`s to the filesystem.
+/// Apply a list of `EditOp`s to the filesystem.
 ///
 /// Groups ops by file, reads each file once, applies all ops, writes once.
 /// `MoveFile` and `CreateFile` ops are handled separately after content edits.
-pub fn apply_edit_ops(ops: &[TaggedEditOp], root: &Path) -> Result<ApplyReport> {
+///
+/// Takes plain `EditOp`s so this engine primitive stays free of the
+/// fixer/refactor tagging vocabulary (`TaggedEditOp`, `RefactorPrimitive`,
+/// `AuditFinding`). Callers holding `TaggedEditOp`s pass `&t.op`.
+pub fn apply_edit_ops(ops: &[EditOp], root: &Path) -> Result<ApplyReport> {
     let mut report = ApplyReport::default();
 
     // Separate file-level ops from content-level ops
@@ -635,15 +639,15 @@ pub fn apply_edit_ops(ops: &[TaggedEditOp], root: &Path) -> Result<ApplyReport> 
     let mut move_ops: Vec<(&str, &str)> = Vec::new();
     let mut create_ops: Vec<(&str, &str)> = Vec::new();
 
-    for tagged in ops {
-        match &tagged.op {
+    for op in ops {
+        match op {
             EditOp::ReplaceText { file, .. }
             | EditOp::RemoveLines { file, .. }
             | EditOp::InsertLines { file, .. } => {
                 content_ops_by_file
                     .entry(file.as_str())
                     .or_default()
-                    .push(&tagged.op);
+                    .push(op);
             }
             EditOp::MoveFile { from, to } => {
                 move_ops.push((from.as_str(), to.as_str()));
@@ -1125,27 +1129,15 @@ mod tests {
         .unwrap();
 
         let ops = vec![
-            TaggedEditOp {
-                op: EditOp::ReplaceText {
-                    file: "test.rs".to_string(),
-                    line: 3,
-                    old_text: "old_name".to_string(),
-                    new_text: "new_name".to_string(),
-                },
-                primitive: None,
-                finding: None,
-                description: "Rename function".to_string(),
-                manual_only: false,
+            EditOp::ReplaceText {
+                file: "test.rs".to_string(),
+                line: 3,
+                old_text: "old_name".to_string(),
+                new_text: "new_name".to_string(),
             },
-            TaggedEditOp {
-                op: EditOp::CreateFile {
-                    file: "new_file.rs".to_string(),
-                    content: "// new file\npub fn created() {}\n".to_string(),
-                },
-                primitive: None,
-                finding: None,
-                description: "Create new file".to_string(),
-                manual_only: false,
+            EditOp::CreateFile {
+                file: "new_file.rs".to_string(),
+                content: "// new file\npub fn created() {}\n".to_string(),
             },
         ];
 
@@ -1177,15 +1169,9 @@ mod tests {
 
         fs::write(tmp.join("old.rs"), "fn moved() {}\n").unwrap();
 
-        let ops = vec![TaggedEditOp {
-            op: EditOp::MoveFile {
-                from: "old.rs".to_string(),
-                to: "subdir/new.rs".to_string(),
-            },
-            primitive: None,
-            finding: None,
-            description: "Move file".to_string(),
-            manual_only: false,
+        let ops = vec![EditOp::MoveFile {
+            from: "old.rs".to_string(),
+            to: "subdir/new.rs".to_string(),
         }];
 
         let report = apply_edit_ops(&ops, &tmp).unwrap();
@@ -1203,17 +1189,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let ops = vec![TaggedEditOp {
-            op: EditOp::ReplaceText {
-                file: "nonexistent.rs".to_string(),
-                line: 1,
-                old_text: "foo".to_string(),
-                new_text: "bar".to_string(),
-            },
-            primitive: None,
-            finding: None,
-            description: "Edit missing file".to_string(),
-            manual_only: false,
+        let ops = vec![EditOp::ReplaceText {
+            file: "nonexistent.rs".to_string(),
+            line: 1,
+            old_text: "foo".to_string(),
+            new_text: "bar".to_string(),
         }];
 
         let report = apply_edit_ops(&ops, &tmp).unwrap();
