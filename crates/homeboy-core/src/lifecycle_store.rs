@@ -39,17 +39,31 @@ pub(super) fn read_plan_path(path: &str) -> Result<AgentTaskPlan> {
 }
 
 pub(super) fn read_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
-    let plan = read_json(&run_dir(run_id)?.join("plan.json"))?;
+    let path = run_dir(run_id)?.join("plan.json");
+    let plan = read_json(&path).map_err(|error| {
+        if error.code == ErrorCode::InternalIoError {
+            Error::internal_io(
+                format!(
+                    "controller-owned durable plan is unavailable for run `{run_id}`: {}",
+                    error.message
+                ),
+                Some(path.display().to_string()),
+            )
+        } else {
+            error
+        }
+    })?;
     validate_execution_budget(&plan)?;
     Ok(plan)
 }
 
-/// Execution owns the one permitted durable legacy rewrite. Read-only callers
-/// (notably status) use `read_plan_path` and never mutate a plan preview.
-pub(super) fn read_plan_path_for_execution(path: &str) -> Result<AgentTaskPlan> {
+/// Controller lifecycle operations resolve the plan from their durable run
+/// identity. `AgentTaskRunRecord::plan_path` can be runner-local transport
+/// evidence after a Lab projection and is never controller execution authority.
+pub(super) fn read_controller_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
     crate::config::with_config_lock(|| {
-        let path = PathBuf::from(path);
-        let mut plan = read_json(&path)?;
+        let path = run_dir(run_id)?.join("plan.json");
+        let mut plan = read_controller_plan(run_id)?;
         if migrate_execution_budget(&mut plan)? {
             write_private_json(&path, &plan)?;
         }

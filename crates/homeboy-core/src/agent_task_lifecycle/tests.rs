@@ -558,6 +558,72 @@ fn retry_uses_controller_plan_when_runner_projection_replaces_plan_path() {
         let error = retry(&record.run_id, Some("missing-controller-plan"))
             .expect_err("missing controller plan fails closed");
         assert_eq!(error.code, ErrorCode::InternalIoError);
+        assert!(error
+            .message
+            .contains("controller-owned durable plan is unavailable"));
+    });
+}
+
+#[test]
+fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+        ];
+        let record = record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "cook-lab-attempt",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace",
+            remote_command: &command,
+            durable_plan: Some(&plan),
+        })
+        .expect("cook handoff persists its controller plan");
+        let aggregate = succeeded_aggregate(&plan);
+        record_run_aggregate(&record.run_id, &plan, &aggregate)
+            .expect("runner result mirrored to the controller");
+        rewrite_record_for_test(&record.run_id, |record| {
+            record.plan_path =
+                "/home/chubes/.local/share/homeboy/agent-task-runs/cook-lab-attempt/plan.json"
+                    .to_string();
+            record.state = AgentTaskRunState::Running;
+        })
+        .expect("runner transport projection replaces display path");
+
+        assert_eq!(
+            status(&record.run_id).expect("controller status").plan_id,
+            plan.plan_id
+        );
+        assert_eq!(
+            logs(&record.run_id).expect("controller logs").run_id,
+            record.run_id
+        );
+        assert_eq!(
+            artifacts(&record.run_id)
+                .expect("controller artifacts")
+                .run_id,
+            record.run_id
+        );
+        let retry = retry(&record.run_id, Some("cook-lab-retry"))
+            .expect("controller retry uses its durable plan");
+        assert_eq!(
+            load_controller_plan(&retry.run_id).expect("retry plan"),
+            plan
+        );
+
+        std::fs::remove_file(record.plan_path)
+            .expect("remove authoritative controller plan despite projected display path");
+        rewrite_record_for_test(&record.run_id, |record| {
+            record.state = AgentTaskRunState::Running;
+        })
+        .expect("restore active handoff projection");
+        let error = status(&record.run_id).expect_err("missing controller plan fails closed");
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+        assert!(error
+            .message
+            .contains("controller-owned durable plan is unavailable"));
     });
 }
 
