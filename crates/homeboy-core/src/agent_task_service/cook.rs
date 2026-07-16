@@ -162,14 +162,37 @@ where
             })
             .unwrap_or(true);
         if needs_execution {
+            let initial_baseline = if attempt == 1 {
+                materialize_initial_candidate_baseline(
+                    &plan,
+                    options.source_worktree_path.as_deref(),
+                    &run_id,
+                )?
+            } else {
+                None
+            };
+            let mut dispatch_plan = plan.clone();
+            if let Some(baseline) = initial_baseline.as_ref() {
+                for task in &mut dispatch_plan.tasks {
+                    task.workspace.root = Some(baseline.path.display().to_string());
+                }
+            }
             let execution = if let Some(dispatcher) = &options.attempt_dispatcher {
-                dispatcher.dispatch_attempt(plan.clone(), &run_id, None)
+                dispatcher.dispatch_attempt(
+                    dispatch_plan,
+                    &run_id,
+                    initial_baseline
+                        .as_ref()
+                        .map(CookFollowUpBaseline::capability),
+                )
             } else {
                 run_loaded_plan_with_derived_cook_baseline(
-                    plan.clone(),
+                    dispatch_plan,
                     Some(&run_id),
                     executor.clone(),
-                    None,
+                    initial_baseline
+                        .as_ref()
+                        .map(CookFollowUpBaseline::capability),
                     Some(cook_attempt_harvest_context(&options.harvest_context)),
                 )
                 .map(|_| ())
@@ -536,6 +559,7 @@ pub struct DerivedCookBaselineCapability {
     source_run_id: String,
     source_task_id: String,
     parent_snapshot: Option<Value>,
+    preexisting_candidate: bool,
 }
 
 impl DerivedCookBaselineCapability {
@@ -582,6 +606,7 @@ impl DerivedCookBaselineCapability {
                     .cloned()
                     .or_else(|| snapshot.get("identity").cloned())
             }),
+            "preexisting_candidate": self.preexisting_candidate,
         })
     }
 }
@@ -614,7 +639,121 @@ pub fn test_derived_cook_baseline_capability(
         source_run_id: "test-source-run".to_string(),
         source_task_id: task_id.to_string(),
         parent_snapshot,
+        preexisting_candidate: false,
     }
+}
+
+/// Materialize a Cook-declared dirty candidate in a detached checkout before
+/// provider dispatch. The caller workspace is never staged, reset, or edited.
+fn materialize_initial_candidate_baseline(
+    plan: &AgentTaskPlan,
+    source_root: Option<&std::path::Path>,
+    source_run_id: &str,
+) -> Result<Option<CookFollowUpBaseline>> {
+    let Some(source_root) = source_root else {
+        return Ok(None);
+    };
+    let status = git_output(
+        source_root,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )?;
+    if status.is_empty() {
+        return Ok(None);
+    }
+    let task_id = plan
+        .tasks
+        .first()
+        .map(|task| task.task_id.as_str())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "plan.tasks",
+                "Cook cannot adopt a dirty candidate without a provider task",
+                None,
+                None,
+            )
+        })?;
+    if plan.tasks.len() != 1 {
+        return Err(Error::validation_invalid_argument(
+            "plan.tasks",
+            "Cook can adopt a pre-existing candidate only for a single provider task",
+            None,
+            Some(vec![
+                "Run one Cook task per dirty candidate workspace.".to_string()
+            ]),
+        ));
+    }
+    let base = git_output(source_root, &["rev-parse", "HEAD"])?;
+    let index = tempfile::NamedTempFile::new().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create Cook candidate Git index".to_string()),
+        )
+    })?;
+    let index_path = index.path().display().to_string();
+    git_output_with_env(
+        source_root,
+        &["read-tree", &base],
+        &[("GIT_INDEX_FILE", &index_path)],
+    )?;
+    git_output_with_env(
+        source_root,
+        &["add", "--all"],
+        &[("GIT_INDEX_FILE", &index_path)],
+    )?;
+    let tree = git_output_with_env(
+        source_root,
+        &["write-tree"],
+        &[("GIT_INDEX_FILE", &index_path)],
+    )?;
+    let commit = git_output_with_env(
+        source_root,
+        &[
+            "-c",
+            "user.name=Homeboy",
+            "-c",
+            "user.email=homeboy@localhost",
+            "commit-tree",
+            &tree,
+            "-p",
+            &base,
+            "-m",
+            "homeboy: Cook pre-existing candidate baseline",
+        ],
+        &[("GIT_INDEX_FILE", &index_path)],
+    )?;
+    let parent = std::env::temp_dir().join("homeboy-cook-initial-baselines");
+    std::fs::create_dir_all(&parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create Cook candidate baseline directory".to_string()),
+        )
+    })?;
+    let path = parent.join(format!("baseline-{}", uuid::Uuid::new_v4()));
+    let path_string = path.display().to_string();
+    git_output(
+        source_root,
+        &["worktree", "add", "--detach", &path_string, &commit],
+    )?;
+    let canonical_path = path.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("canonicalize Cook candidate baseline".to_string()),
+        )
+    })?;
+    Ok(Some(CookFollowUpBaseline {
+        source_root: source_root.to_path_buf(),
+        path,
+        capability: DerivedCookBaselineCapability {
+            canonical_path,
+            commit,
+            tree: tree.clone(),
+            artifact_sha256: format!("{:x}", sha2::Sha256::digest(tree.as_bytes())),
+            source_run_id: source_run_id.to_string(),
+            source_task_id: task_id.to_string(),
+            parent_snapshot: None,
+            preexisting_candidate: true,
+        },
+    }))
 }
 
 impl Drop for CookFollowUpBaseline {
@@ -745,6 +884,7 @@ fn materialize_follow_up_baseline(
             source_run_id: source_run_id.to_string(),
             source_task_id: promotion.source.task_id.clone(),
             parent_snapshot,
+            preexisting_candidate: false,
         },
     };
     let patch_path = baseline.path.join(".homeboy-cook-baseline.patch");
