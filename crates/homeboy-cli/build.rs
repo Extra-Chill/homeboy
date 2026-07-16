@@ -6,7 +6,7 @@ use std::process::Command;
 fn main() {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR missing"));
-    let docs_root = manifest_dir.join("docs");
+    let docs_root = manifest_dir.join("..").join("..").join("docs");
 
     if !docs_root.exists() {
         panic!("Docs directory not found: {}", docs_root.display());

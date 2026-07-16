@@ -584,5 +584,5 @@ fn non_empty_resolution_errors(
 }
 
 #[cfg(test)]
-#[path = "../../tests/commands/fleet_test.rs"]
+#[path = "../../../../tests/commands/fleet_test.rs"]
 mod fleet_test;

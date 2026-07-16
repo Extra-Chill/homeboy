@@ -322,15 +322,14 @@ fn fake_synced_file(remote_spec: &str, role: &str) -> (String, LabWorkspaceMappi
         runner_id: "lab".to_string(),
         local_path: "/local/input".to_string(),
         remote_path: "/remote/input".to_string(),
-        materialization_plan:
-            crate::runner::RunnerWorkspaceMaterializationPlan::from_test_parts(
-                "/remote",
-                "/local/input",
-                "input",
-                "/remote/input",
-                RunnerWorkspaceSyncMode::Snapshot,
-                "snapshot",
-            ),
+        materialization_plan: crate::runner::RunnerWorkspaceMaterializationPlan::from_test_parts(
+            "/remote",
+            "/local/input",
+            "input",
+            "/remote/input",
+            RunnerWorkspaceSyncMode::Snapshot,
+            "snapshot",
+        ),
         current_workspace: crate::runner::RunnerWorkspaceCurrentSummary {
             local_path: "/local/input".to_string(),
             remote_path: "/remote/input".to_string(),
