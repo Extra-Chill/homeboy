@@ -1,5 +1,6 @@
 mod persistence;
 mod remote_runner;
+mod runner_job_preparation;
 mod store;
 mod summary;
 mod types;
@@ -7,6 +8,10 @@ mod types;
 pub use remote_runner::{
     JobArtifactMetadata, RemoteRunnerJobClaim, RemoteRunnerJobRequest, RemoteRunnerJobResult,
     RunnerJobLifecycleMetadata,
+};
+pub(crate) use runner_job_preparation::with_runner_job_preparation;
+pub use runner_job_preparation::{
+    register_runner_job_preparation_provider, RunnerJobPreparationProvider,
 };
 pub(crate) use store::LocalChildStartDiscriminator;
 pub(crate) use store::LocalRunnerJob;

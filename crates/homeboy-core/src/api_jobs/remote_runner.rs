@@ -103,13 +103,15 @@ impl RemoteRunnerJobRequest {
             }
         }
 
-        let secret_env_plan = crate::runner::runner_exec_secret_env_plan(
-            &self.command,
-            None,
-            &self.secret_env_names,
-            &self.env,
-            base_plan,
-        );
+        let secret_env_plan = super::with_runner_job_preparation(|p| {
+            p.runner_exec_secret_env_plan(
+                &self.command,
+                None,
+                &self.secret_env_names,
+                &self.env,
+                base_plan,
+            )
+        });
         self.secret_env_names = secret_env_plan.secret_env_names();
         self.secret_env_plan = secret_env_plan.clone();
         secret_env_plan
@@ -341,14 +343,16 @@ impl JobStore {
             ));
         }
         let secret_env_plan = request.normalize();
-        crate::runner::workload::validate_runner_workload_dispatch(
-            request.runner_workload.as_ref(),
-            &request.runner_id,
-            request.cwd.as_deref(),
-            &request.command,
-            &secret_env_plan,
-            request.capture_patch,
-        )?;
+        super::with_runner_job_preparation(|p| {
+            p.validate_runner_workload_dispatch(
+                request.runner_workload.as_ref(),
+                &request.runner_id,
+                request.cwd.as_deref(),
+                &request.command,
+                &secret_env_plan,
+                request.capture_patch,
+            )
+        })?;
 
         let now = timestamp_ms();
         let job = Job {

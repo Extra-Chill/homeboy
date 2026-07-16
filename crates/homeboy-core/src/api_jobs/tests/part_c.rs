@@ -14,6 +14,10 @@ use uuid::Uuid;
 
 #[test]
 fn remote_runner_job_submit_derives_implicit_command_secret_names() {
+    // This test exercises runner-augmented secret-env derivation, which lives
+    // behind the RunnerJobPreparationProvider hook. Register the runner provider
+    // (normally done at CLI startup) so the augmentation runs.
+    crate::runner::register_runner_job_preparation_provider();
     let store = JobStore::default();
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.command = vec![
@@ -787,6 +791,10 @@ fn remote_runner_jobs_persist_request_and_claim_state() {
 
 #[test]
 fn remote_runner_request_compiles_canonical_execution_envelope() {
+    // Exercises runner-augmented secret-env derivation via the
+    // RunnerJobPreparationProvider hook; register the runner provider (normally
+    // done at CLI startup) so the augmentation runs.
+    crate::runner::register_runner_job_preparation_provider();
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.command = vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()];
     request
