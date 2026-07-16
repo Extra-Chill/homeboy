@@ -926,7 +926,7 @@ fn bench_observation_persists_resource_policy_warning_for_hot_machine() {
         let synthetic = synthetic_resources(ResourceRecommendation::Hot);
         let warning = resource_policy::evaluate(HotCommand::lab_supported("bench"), &synthetic)
             .expect("synthetic warning");
-        resource_policy::capture_context(ResourcePolicyContext::from_evaluation(
+        resource_policy::capture_context(resource_policy_context_from_evaluation(
             HotCommand::lab_supported("bench"),
             &synthetic,
             Some(&warning),
@@ -997,7 +997,7 @@ fn bench_observation_records_local_placement_override_with_legacy_evidence() {
         let synthetic = synthetic_resources(ResourceRecommendation::Hot);
         let warning = resource_policy::evaluate(HotCommand::lab_supported("bench"), &synthetic)
             .expect("synthetic warning");
-        resource_policy::capture_context(ResourcePolicyContext::from_evaluation(
+        resource_policy::capture_context(resource_policy_context_from_evaluation(
             HotCommand::lab_supported("bench"),
             &synthetic,
             Some(&warning),

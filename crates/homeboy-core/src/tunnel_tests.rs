@@ -1,0 +1,1045 @@
+use super::tunnel::*;
+use crate::paths;
+use crate::server::Server;
+use crate::test_support;
+use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
+
+fn create_server() {
+    crate::server::save(&Server {
+        id: "private-host".to_string(),
+        aliases: Vec::new(),
+        host: "private.example.test".to_string(),
+        user: "tester".to_string(),
+        port: 22,
+        identity_file: None,
+        kind: None,
+        auth: None,
+        env: HashMap::new(),
+        runner: None,
+    })
+    .expect("save server");
+}
+
+fn reserve_loopback_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("reserve loopback port")
+        .local_addr()
+        .expect("reserved port address")
+        .port()
+}
+
+fn python_listener_command(port: u16, body: &str) -> String {
+    format!(
+        "python3 -c 'import socket,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind((\"127.0.0.1\", {port})); s.listen(1); {body}; s.close()'"
+    )
+}
+
+fn wait_for_stopped_status(id: &str) -> ServiceTunnelStatus {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let refreshed = status(id).expect("status refresh");
+        if !refreshed.running {
+            return refreshed;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "service {id} did not stop before timeout"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn expose_records_private_loopback_declaration_without_running_tunnel() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+
+        let tunnel = expose(ExposeServiceTunnelSpec {
+            id: "site-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 7331,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(8831),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("SITE_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: vec!["app-runtime".to_string()],
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: Some("Private preview service".to_string()),
+            runner_local: false,
+        })
+        .expect("expose service");
+
+        assert_eq!(tunnel.id, "site-preview");
+        let report = status("site-preview").expect("status");
+        assert!(report.declared);
+        assert!(!report.running);
+        assert_eq!(report.local_url, "http://127.0.0.1:8831");
+    });
+}
+
+#[test]
+fn expose_runner_local_does_not_require_a_server_declaration() {
+    test_support::with_isolated_home(|_| {
+        // No server is declared on this (runner-local) host: in a runner-local
+        // context the runner itself is the server, so expose must not demand a
+        // duplicate server declaration (#4606).
+        let tunnel = expose(ExposeServiceTunnelSpec {
+            id: "runner-local-preview".to_string(),
+            server_id: "homeboy-lab".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 7331,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(8831),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::SshOnly,
+                env_var: None,
+                header: None,
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+            runner_local: true,
+        })
+        .expect("runner-local expose without server declaration");
+
+        assert_eq!(tunnel.id, "runner-local-preview");
+        assert_eq!(tunnel.server_id, RUNNER_LOCAL_SERVICE_SERVER_ID);
+        assert!(is_runner_local_server_id(&tunnel.server_id));
+        let report = status("runner-local-preview").expect("status");
+        assert!(report.declared);
+    });
+}
+
+#[test]
+fn list_serializes_stable_service_ids() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+
+        expose(ExposeServiceTunnelSpec {
+            id: "copy-paste-service".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 7331,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(8831),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("COPY_PASTE_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: Some("Copy-pasteable service".to_string()),
+            runner_local: false,
+        })
+        .expect("expose service");
+
+        let tunnels = list().expect("list services");
+        let value = serde_json::to_value(&tunnels).expect("serialize list");
+
+        assert_eq!(value[0]["id"], "copy-paste-service");
+        assert_eq!(tunnels[0].id, "copy-paste-service");
+    });
+}
+
+#[test]
+fn validation_rejects_auth_mode_without_env_var() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+        let err = expose(ExposeServiceTunnelSpec {
+            id: "bad".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 7331,
+            },
+            scheme: "http".to_string(),
+            local_port: None,
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: None,
+                header: None,
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+            runner_local: false,
+        })
+        .expect_err("missing auth env should fail");
+
+        assert_eq!(err.code, crate::ErrorCode::ValidationInvalidArgument);
+        assert!(err.message.contains("auth.env_var"));
+    });
+}
+
+#[test]
+fn start_status_and_stop_manage_local_service_runtime_state() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+        expose(ExposeServiceTunnelSpec {
+            id: "local-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 7331,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(8832),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("LOCAL_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: vec!["app-runtime".to_string()],
+                preview: ServiceTunnelPreviewPolicy {
+                    mode: ServiceTunnelPreviewPolicyMode::Always,
+                    keep_alive_until: None,
+                },
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+            runner_local: false,
+        })
+        .expect("expose service");
+
+        let started = start(StartServiceTunnelSpec {
+            id: "local-preview".to_string(),
+            command: "while true; do sleep 1; done".to_string(),
+            cwd: None,
+            env: BTreeMap::from([("LOCAL_PREVIEW_MODE".to_string(), "test".to_string())]),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(8832),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 1,
+            backend: ServiceTunnelTunnelBackend::None,
+            backend_command: None,
+            backend_public_url: None,
+            source_run_id: Some("run-123".to_string()),
+            source_workflow_id: Some("workflow-abc".to_string()),
+            readiness_kind: ServiceTunnelReadinessKind::Process,
+            readiness_checks: Vec::new(),
+        })
+        .expect("start service");
+
+        assert!(started.running);
+        assert_eq!(started.local_url, "http://127.0.0.1:8832");
+        assert_eq!(started.preview_identity.public_url, None);
+        let preview = started.preview.as_ref().expect("preview artifact");
+        assert_eq!(preview.kind, "preview_url");
+        assert_eq!(preview.preview_identity.service_id, "local-preview");
+        assert_eq!(preview.local_url, "http://127.0.0.1:8832");
+        assert_eq!(preview.source.run_id.as_deref(), Some("run-123"));
+        assert_eq!(preview.source.workflow_id.as_deref(), Some("workflow-abc"));
+        let process = started.process.expect("process status");
+        assert!(process.running);
+        assert_eq!(process.process.command.env_keys, vec!["LOCAL_PREVIEW_MODE"]);
+        let evidence = started.evidence.expect("evidence paths");
+        assert!(std::path::Path::new(&evidence.state_path).exists());
+        assert!(std::path::Path::new(&evidence.logs.stdout_path).exists());
+        assert!(std::path::Path::new(&evidence.logs.stderr_path).exists());
+
+        let running = status("local-preview").expect("status");
+        assert!(running.running);
+
+        let stopped = stop("local-preview").expect("stop service");
+        assert!(!stopped.running);
+        assert!(stopped.process.is_none());
+        assert!(!std::path::Path::new(&evidence.state_path).exists());
+    });
+}
+
+#[test]
+fn start_cleans_runtime_state_when_readiness_fails() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+        expose(ExposeServiceTunnelSpec {
+            id: "failing-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 7331,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(8833),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("FAILING_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+            runner_local: false,
+        })
+        .expect("expose service");
+
+        let err = start(StartServiceTunnelSpec {
+            id: "failing-preview".to_string(),
+            command: "while true; do sleep 1; done".to_string(),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(8833),
+            scheme: Some("http".to_string()),
+            health_url: Some("http://127.0.0.1:9/health".to_string()),
+            health_path: None,
+            readiness_timeout_secs: 0,
+            backend: ServiceTunnelTunnelBackend::None,
+            backend_command: None,
+            backend_public_url: None,
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Process,
+            readiness_checks: Vec::new(),
+        })
+        .expect_err("readiness should fail");
+
+        assert_eq!(err.code, crate::ErrorCode::ValidationInvalidArgument);
+        let state_path =
+            paths::service_tunnel_runtime_state_file("failing-preview").expect("state path");
+        assert!(!state_path.exists());
+        let stopped = status("failing-preview").expect("status");
+        assert!(!stopped.running);
+    });
+}
+
+#[test]
+fn proof_readiness_waits_for_stdout_signal_not_just_process_liveness() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+        expose(ExposeServiceTunnelSpec {
+            id: "proof-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 7331,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(8835),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("PROOF_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+            runner_local: false,
+        })
+        .expect("expose service");
+
+        let started = start(StartServiceTunnelSpec {
+            id: "proof-preview".to_string(),
+            command: "printf 'proof ready\\n'; while true; do sleep 1; done".to_string(),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(8835),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 2,
+            backend: ServiceTunnelTunnelBackend::None,
+            backend_command: None,
+            backend_public_url: None,
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Proof,
+            readiness_checks: vec![ServiceTunnelReadinessCheck::StdoutRegex {
+                pattern: "proof ready".to_string(),
+            }],
+        })
+        .expect("start service");
+
+        let readiness = started.readiness.expect("readiness status");
+        assert!(readiness.process_running);
+        assert!(readiness.ready);
+        assert!(!readiness.preview_ready);
+        assert!(readiness.proof_ready);
+        assert_eq!(readiness.checks[0].check, "stdout_regex");
+
+        stop("proof-preview").expect("stop service");
+    });
+}
+
+#[test]
+fn preview_readiness_can_require_artifact_status() {
+    test_support::with_isolated_home(|home| {
+        create_server();
+        let artifact = home.path().join("preview-ready.json");
+        expose(ExposeServiceTunnelSpec {
+            id: "artifact-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 7331,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(8836),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("ARTIFACT_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+            runner_local: false,
+        })
+        .expect("expose service");
+
+        let started = start(StartServiceTunnelSpec {
+            id: "artifact-preview".to_string(),
+            command: format!(
+                "printf '{{\"status\":\"ready\"}}' > {}; while true; do sleep 1; done",
+                artifact.display()
+            ),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(8836),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 2,
+            backend: ServiceTunnelTunnelBackend::None,
+            backend_command: None,
+            backend_public_url: None,
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Preview,
+            readiness_checks: vec![ServiceTunnelReadinessCheck::ArtifactJsonPointer {
+                path: artifact.display().to_string(),
+                pointer: "/status".to_string(),
+                equals: "ready".to_string(),
+            }],
+        })
+        .expect("start service");
+
+        let readiness = started.readiness.expect("readiness status");
+        assert!(readiness.process_running);
+        assert!(readiness.preview_ready);
+        assert!(!readiness.proof_ready);
+        assert_eq!(readiness.checks[0].check, "artifact_json_pointer");
+
+        stop("artifact-preview").expect("stop service");
+    });
+}
+
+#[test]
+fn preview_start_fails_when_listener_process_exits_after_readiness() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+        let port = reserve_loopback_port();
+        expose(ExposeServiceTunnelSpec {
+            id: "flapping-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(port),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("FLAPPING_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+            runner_local: false,
+        })
+        .expect("expose service");
+
+        let err = start(StartServiceTunnelSpec {
+            id: "flapping-preview".to_string(),
+            command: python_listener_command(port, "conn,_=s.accept(); conn.close()"),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(port),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 2,
+            backend: ServiceTunnelTunnelBackend::Command,
+            backend_command: Some("while true; do sleep 1; done".to_string()),
+            backend_public_url: Some("https://flapping-preview.example.test".to_string()),
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Preview,
+            readiness_checks: vec![ServiceTunnelReadinessCheck::TcpListener],
+        })
+        .expect_err("exited listener must not start successfully");
+
+        assert_eq!(err.code, crate::ErrorCode::ValidationInvalidArgument);
+        assert!(err.message.contains("exited after becoming ready"));
+        let refreshed = status("flapping-preview").expect("status refresh");
+        assert!(!refreshed.running);
+        assert!(refreshed.preview_identity.public_url.is_none());
+        assert!(refreshed.readiness.is_none());
+        assert!(refreshed.tunnel_backend.is_none());
+    });
+}
+
+#[test]
+fn status_refresh_clears_exited_process_readiness() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+        let port = reserve_loopback_port();
+        expose(ExposeServiceTunnelSpec {
+            id: "short-lived-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(port),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("SHORT_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+            runner_local: false,
+        })
+        .expect("expose service");
+
+        let started = start(StartServiceTunnelSpec {
+            id: "short-lived-preview".to_string(),
+            command: python_listener_command(
+                port,
+                "end=time.time()+1.0\nwhile time.time()<end:\n s.settimeout(max(0.01,end-time.time()))\n try:\n  conn,_=s.accept(); conn.close()\n except Exception:\n  pass",
+            ),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(port),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 2,
+            backend: ServiceTunnelTunnelBackend::None,
+            backend_command: None,
+            backend_public_url: Some("https://short-lived-preview.example.test".to_string()),
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Preview,
+            readiness_checks: vec![ServiceTunnelReadinessCheck::TcpListener],
+        })
+        .expect("start short-lived service");
+
+        assert!(started.running);
+        assert!(started.readiness.expect("readiness").preview_ready);
+        let refreshed = wait_for_stopped_status("short-lived-preview");
+        assert!(!refreshed.running);
+        assert_eq!(refreshed.lifecycle, "declared");
+        assert!(refreshed.readiness.is_none());
+        assert!(refreshed.preview_identity.public_url.is_none());
+    });
+}
+
+#[test]
+fn command_backend_records_public_url_and_cleans_up_backend_process() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+        expose(ExposeServiceTunnelSpec {
+            id: "command-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 7331,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(8834),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("COMMAND_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+            runner_local: false,
+        })
+        .expect("expose service");
+
+        let started = start(StartServiceTunnelSpec {
+            id: "command-preview".to_string(),
+            command: "while true; do sleep 1; done".to_string(),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(8834),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 1,
+            backend: ServiceTunnelTunnelBackend::Command,
+            backend_command: Some("while true; do sleep 1; done".to_string()),
+            backend_public_url: Some("https://preview.example.test".to_string()),
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Process,
+            readiness_checks: Vec::new(),
+        })
+        .expect("start service with backend");
+
+        assert!(started.running);
+        assert_eq!(
+            started.preview_identity.public_url.as_deref(),
+            Some("https://preview.example.test")
+        );
+        let backend = started.tunnel_backend.expect("backend status");
+        assert_eq!(backend.backend, ServiceTunnelTunnelBackend::Command);
+        assert!(backend.active);
+        let process = backend.process.expect("backend process");
+        assert!(process.running);
+        assert_eq!(
+            process.process.command.env_keys,
+            vec![
+                "HOMEBOY_SERVICE_ID",
+                "HOMEBOY_SERVICE_LOCAL_URL",
+                "HOMEBOY_TUNNEL_PUBLIC_URL"
+            ]
+        );
+        let evidence = backend.evidence.expect("backend evidence");
+        assert!(std::path::Path::new(&evidence.stdout_path).exists());
+        assert!(std::path::Path::new(&evidence.stderr_path).exists());
+
+        let stopped = stop("command-preview").expect("stop service");
+        assert!(!stopped.running);
+        assert!(stopped.tunnel_backend.is_none());
+    });
+}
+
+#[test]
+fn status_reports_degraded_when_backend_outlives_service_process() {
+    test_support::with_isolated_home(|_| {
+        create_server();
+        let port = reserve_loopback_port();
+        expose(ExposeServiceTunnelSpec {
+            id: "orphaned-backend-preview".to_string(),
+            server_id: "private-host".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(port),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::BearerEnv,
+                env_var: Some("ORPHANED_BACKEND_PREVIEW_TOKEN".to_string()),
+                header: Some("Authorization".to_string()),
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+            runner_local: false,
+        })
+        .expect("expose service");
+
+        let started = start(StartServiceTunnelSpec {
+            id: "orphaned-backend-preview".to_string(),
+            command: python_listener_command(
+                port,
+                "end=time.time()+1.0\nwhile time.time()<end:\n s.settimeout(max(0.01,end-time.time()))\n try:\n  conn,_=s.accept(); conn.close()\n except Exception:\n  pass",
+            ),
+            cwd: None,
+            env: BTreeMap::new(),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(port),
+            scheme: Some("http".to_string()),
+            health_url: None,
+            health_path: None,
+            readiness_timeout_secs: 2,
+            backend: ServiceTunnelTunnelBackend::Command,
+            backend_command: Some("while true; do sleep 1; done".to_string()),
+            backend_public_url: Some("https://orphaned-backend.example.test".to_string()),
+            source_run_id: None,
+            source_workflow_id: None,
+            readiness_kind: ServiceTunnelReadinessKind::Preview,
+            readiness_checks: vec![ServiceTunnelReadinessCheck::TcpListener],
+        })
+        .expect("start preview service");
+
+        assert!(started.running);
+        let refreshed = wait_for_stopped_status("orphaned-backend-preview");
+        assert!(!refreshed.running);
+        assert_eq!(refreshed.lifecycle, "degraded");
+        assert_eq!(
+            refreshed.degraded_reason.as_deref(),
+            Some("local-origin-process-exited")
+        );
+        let backend = refreshed.tunnel_backend.expect("backend status");
+        assert!(backend.active);
+        assert_eq!(
+            backend.active_reason.as_deref(),
+            Some("backend-process-running-after-local-origin-exit")
+        );
+
+        let stopped = stop("orphaned-backend-preview").expect("stop degraded service");
+        assert!(!stopped.running);
+        assert!(stopped.tunnel_backend.is_none());
+    });
+}
+
+#[test]
+fn preview_policy_decisions_match_workflow_outcomes() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
+        .expect("timestamp")
+        .with_timezone(&chrono::Utc);
+    let failed = ServiceTunnelPreviewDecisionContext {
+        run_failed: true,
+        manual_approval_required: false,
+        now,
+    };
+    let success = ServiceTunnelPreviewDecisionContext {
+        run_failed: false,
+        manual_approval_required: false,
+        now,
+    };
+    let approval = ServiceTunnelPreviewDecisionContext {
+        run_failed: false,
+        manual_approval_required: true,
+        now,
+    };
+
+    assert!(!preview_policy_allows(
+        &ServiceTunnelPreviewPolicy::default(),
+        &failed
+    ));
+    assert!(preview_policy_allows(
+        &ServiceTunnelPreviewPolicy {
+            mode: ServiceTunnelPreviewPolicyMode::Always,
+            keep_alive_until: None,
+        },
+        &success
+    ));
+    assert!(preview_policy_allows(
+        &ServiceTunnelPreviewPolicy {
+            mode: ServiceTunnelPreviewPolicyMode::OnFailure,
+            keep_alive_until: None,
+        },
+        &failed
+    ));
+    assert!(!preview_policy_allows(
+        &ServiceTunnelPreviewPolicy {
+            mode: ServiceTunnelPreviewPolicyMode::OnFailure,
+            keep_alive_until: None,
+        },
+        &success
+    ));
+    assert!(preview_policy_allows(
+        &ServiceTunnelPreviewPolicy {
+            mode: ServiceTunnelPreviewPolicyMode::ManualApproval,
+            keep_alive_until: None,
+        },
+        &approval
+    ));
+    assert!(preview_policy_allows(
+        &ServiceTunnelPreviewPolicy {
+            mode: ServiceTunnelPreviewPolicyMode::KeepAliveUntil,
+            keep_alive_until: Some("2026-06-07T12:30:00Z".to_string()),
+        },
+        &success
+    ));
+    assert!(!preview_policy_allows(
+        &ServiceTunnelPreviewPolicy {
+            mode: ServiceTunnelPreviewPolicyMode::KeepAliveUntil,
+            keep_alive_until: Some("2026-06-07T11:59:59Z".to_string()),
+        },
+        &success
+    ));
+}
+
+fn native_preview_tunnel() -> ServiceTunnel {
+    let mut token = native_preview_token_record("lab-token", "secret-token");
+    token.allowed_clients = vec!["lab-client".to_string()];
+    token.allowed_public_hosts = vec!["*.preview.example.test".to_string()];
+    token.allowed_session_ids = vec!["run-123".to_string()];
+
+    ServiceTunnel {
+        id: "site-preview".to_string(),
+        aliases: Vec::new(),
+        description: None,
+        server_id: "private-host".to_string(),
+        target: ServiceTunnelTarget {
+            host: "127.0.0.1".to_string(),
+            port: 7331,
+        },
+        scheme: "http".to_string(),
+        local_host: "127.0.0.1".to_string(),
+        local_port: Some(7331),
+        auth: ServiceTunnelAuth {
+            mode: ServiceTunnelAuthMode::BearerEnv,
+            env_var: Some("TOKEN".to_string()),
+            header: Some("Authorization".to_string()),
+        },
+        policy: ServiceTunnelPolicy {
+            exposure: ServiceTunnelExposure::PrivateLoopback,
+            require_auth: true,
+            allowed_clients: Vec::new(),
+            preview: ServiceTunnelPreviewPolicy::default(),
+            native_preview_auth: ServiceTunnelNativePreviewAuthPolicy {
+                require_client_token: true,
+                default_session_ttl_secs: 60,
+                max_session_ttl_secs: 300,
+                allowed_public_hosts: vec!["*.preview.example.test".to_string()],
+                allowed_session_ids: vec!["run-123".to_string()],
+                tokens: vec![token],
+            },
+        },
+    }
+}
+
+fn native_preview_request() -> ServiceTunnelNativePreviewClaimRequest {
+    ServiceTunnelNativePreviewClaimRequest {
+        client_id: "lab-client".to_string(),
+        token: "secret-token".to_string(),
+        public_host: "run-123.preview.example.test".to_string(),
+        session_id: "run-123".to_string(),
+        local_origin: "http://127.0.0.1:7331".to_string(),
+        requested_ttl_secs: Some(120),
+        now: chrono::DateTime::parse_from_rfc3339("2026-06-07T12:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc),
+    }
+}
+
+#[test]
+fn native_preview_claim_accepts_scoped_client_host_session_and_caps_lease() {
+    let tunnel = native_preview_tunnel();
+    let mut request = native_preview_request();
+    request.requested_ttl_secs = Some(600);
+
+    let claim = validate_native_preview_claim(&tunnel, request).expect("valid claim");
+
+    assert_eq!(claim.service_id, "site-preview");
+    assert_eq!(claim.client_id, "lab-client");
+    assert_eq!(claim.token_id, "lab-token");
+    assert_eq!(claim.public_host, "run-123.preview.example.test");
+    assert_eq!(claim.session_id, "run-123");
+    assert_eq!(claim.local_origin, "http://127.0.0.1:7331");
+    assert_eq!(claim.expires_at, "2026-06-07T12:05:00+00:00");
+}
+
+#[test]
+fn native_preview_claim_rejects_wrong_token_without_leaking_expected_token() {
+    let tunnel = native_preview_tunnel();
+    let mut request = native_preview_request();
+    request.token = "wrong-token".to_string();
+
+    let err = validate_native_preview_claim(&tunnel, request).expect_err("wrong token fails");
+
+    assert_eq!(err.code, crate::ErrorCode::ValidationInvalidArgument);
+    assert!(err.message.contains("not recognized"));
+    assert!(!err.message.contains("secret-token"));
+    assert!(!err.details.to_string().contains("secret-token"));
+}
+
+#[test]
+fn native_preview_claim_rejects_wrong_client_host_session_and_origin() {
+    let tunnel = native_preview_tunnel();
+
+    let mut request = native_preview_request();
+    request.client_id = "other-client".to_string();
+    let err = validate_native_preview_claim(&tunnel, request).expect_err("wrong client fails");
+    assert!(err.message.contains("client is not authorized"));
+
+    let mut request = native_preview_request();
+    request.public_host = "run-123.other.example.test".to_string();
+    let err = validate_native_preview_claim(&tunnel, request).expect_err("wrong host fails");
+    assert!(err.message.contains("public host"));
+
+    let mut request = native_preview_request();
+    request.session_id = "run-456".to_string();
+    let err = validate_native_preview_claim(&tunnel, request).expect_err("wrong session fails");
+    assert!(err.message.contains("session id"));
+
+    let mut request = native_preview_request();
+    request.local_origin = "http://192.168.1.5:7331".to_string();
+    let err =
+        validate_native_preview_claim(&tunnel, request).expect_err("non-loopback origin fails");
+    assert!(err.message.contains("loopback"));
+}
+
+#[test]
+fn native_preview_claim_rejects_revoked_and_expired_tokens() {
+    let mut tunnel = native_preview_tunnel();
+    tunnel.policy.native_preview_auth.tokens[0].revoked = true;
+    let err = validate_native_preview_claim(&tunnel, native_preview_request())
+        .expect_err("revoked token fails");
+    assert!(err.message.contains("revoked"));
+
+    let mut tunnel = native_preview_tunnel();
+    tunnel.policy.native_preview_auth.tokens[0].expires_at =
+        Some("2026-06-07T11:59:59Z".to_string());
+    let err = validate_native_preview_claim(&tunnel, native_preview_request())
+        .expect_err("expired token fails");
+    assert!(err.message.contains("expired"));
+}
+
+#[test]
+fn preview_artifact_serializes_structured_reviewer_contract() {
+    let tunnel = ServiceTunnel {
+        id: "site-preview".to_string(),
+        aliases: Vec::new(),
+        description: None,
+        server_id: "private-host".to_string(),
+        target: ServiceTunnelTarget {
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+        },
+        scheme: "http".to_string(),
+        local_host: "127.0.0.1".to_string(),
+        local_port: Some(3000),
+        auth: ServiceTunnelAuth {
+            mode: ServiceTunnelAuthMode::BearerEnv,
+            env_var: Some("TOKEN".to_string()),
+            header: Some("Authorization".to_string()),
+        },
+        policy: ServiceTunnelPolicy {
+            exposure: ServiceTunnelExposure::PrivateLoopback,
+            require_auth: true,
+            allowed_clients: Vec::new(),
+            preview: ServiceTunnelPreviewPolicy {
+                mode: ServiceTunnelPreviewPolicyMode::KeepAliveUntil,
+                keep_alive_until: Some("2026-06-07T13:00:00Z".to_string()),
+            },
+            native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+        },
+    };
+    let state = ServiceTunnelRuntimeState {
+        preview_identity: ServiceTunnelPreviewIdentity {
+            service_id: "site-preview".to_string(),
+            public_url: Some("https://preview.example.test/site-preview".to_string()),
+        },
+        pid: 123,
+        process: ServiceTunnelProcessDescriptor {
+            process_group_id: Some(123),
+            command: ServiceTunnelCommandSpec {
+                command: "serve-app".to_string(),
+                cwd: Some("/workspace/app".to_string()),
+                env_keys: vec!["TOKEN".to_string()],
+            },
+        },
+        started_at: "2026-06-07T12:00:00Z".to_string(),
+        local_url: "http://127.0.0.1:3000".to_string(),
+        health_url: Some("http://127.0.0.1:3000/".to_string()),
+        logs: ServiceTunnelLogPaths {
+            stdout_path: "/tmp/homeboy/stdout.log".to_string(),
+            stderr_path: "/tmp/homeboy/stderr.log".to_string(),
+        },
+        backend: ServiceTunnelTunnelBackend::None,
+        backend_process: None,
+        source_run_id: Some("run-1".to_string()),
+        source_workflow_id: Some("workflow-1".to_string()),
+        readiness_kind: ServiceTunnelReadinessKind::Process,
+        readiness_checks: Vec::new(),
+    };
+    let context = ServiceTunnelPreviewDecisionContext {
+        run_failed: false,
+        manual_approval_required: false,
+        now: chrono::DateTime::parse_from_rfc3339("2026-06-07T12:30:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc),
+    };
+
+    let artifact = preview_artifact_for(&tunnel, &state, &context).expect("artifact");
+    let serialized = serde_json::to_value(&artifact).expect("serialize artifact");
+    let expected: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/output_contracts/tunnel/preview-artifact.json"
+    ))
+    .expect("fixture");
+
+    assert_eq!(serialized, expected);
+    assert_eq!(serialized["schema"], "homeboy/preview-url/v1");
+    assert_eq!(serialized["kind"], "preview_url");
+    assert_eq!(serialized["service_id"], "site-preview");
+    assert_eq!(serialized["local_url"], "http://127.0.0.1:3000");
+    assert_eq!(
+        serialized["public_url"],
+        "https://preview.example.test/site-preview"
+    );
+    assert_eq!(serialized["backend"], "none");
+    assert_eq!(serialized["policy"]["mode"], "keep_alive_until");
+    assert_eq!(serialized["cleanup"]["expires_at"], "2026-06-07T13:00:00Z");
+    assert_eq!(serialized["source"]["run_id"], "run-1");
+    assert_eq!(serialized["source"]["workflow_id"], "workflow-1");
+}

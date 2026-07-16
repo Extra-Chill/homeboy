@@ -21,7 +21,10 @@ pub mod cli_surface;
 pub mod command_contract;
 #[doc(hidden)]
 pub mod commands;
-pub mod core;
+// Core engine now lives in the homeboy-core crate. Re-exported as `core` so the
+// existing `crate::core::*` call sites across commands / command_contract / the
+// CLI runtime are unchanged.
+pub use homeboy_core as core;
 pub mod extensions;
 pub mod help_topics;
 

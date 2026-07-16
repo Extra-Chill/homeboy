@@ -1,0 +1,327 @@
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use uuid::Uuid;
+
+use super::remote_runner::JobArtifactMetadata;
+use super::remote_runner::RunnerJobLifecycleMetadata;
+use crate::runner_execution_envelope::PathMaterializationPlan;
+use crate::source_snapshot::SourceSnapshot;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl JobStatus {
+    pub(super) fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
+
+    pub fn run_status_label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Succeeded => "pass",
+            Self::Failed => "fail",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn daemon_status_label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobEventKind {
+    Status,
+    Stdout,
+    Stderr,
+    Progress,
+    Result,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Job {
+    pub id: Uuid,
+    pub operation: String,
+    pub status: JobStatus,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
+    pub event_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_snapshot: Option<SourceSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_materialization_plan: Option<PathMaterializationPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
+    /// Daemon lease that accepted this job. Missing values are legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_lease_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by_runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_expires_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<JobArtifactMetadata>,
+}
+
+/// Shared lease/claim identity fields carried by jobs that can be claimed by a
+/// runner. Flattened into the owning structs so the on-wire JSON shape is
+/// identical to the previously inlined fields (each field keeps its
+/// `skip_serializing_if`/`default` attrs verbatim).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobClaimMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by_runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_expires_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveRunnerJobSummary {
+    pub runner_id: String,
+    pub job_id: String,
+    pub operation: String,
+    pub source: String,
+    pub kind: String,
+    pub status: JobStatus,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub started_at_ms: u64,
+    #[serde(default)]
+    pub updated_at_ms: u64,
+    pub elapsed_ms: u64,
+    #[serde(default)]
+    pub heartbeat_age_ms: u64,
+    #[serde(flatten)]
+    pub claim: JobClaimMetadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_expires_in_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<RunnerJobLifecycleMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_child_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_cell_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerJobSource {
+    Broker,
+    Daemon,
+    #[serde(rename = "runner-daemon")]
+    RunnerDaemon,
+    #[serde(rename = "direct-daemon")]
+    DirectDaemon,
+    #[serde(rename = "reverse-broker")]
+    ReverseBroker,
+    Unknown,
+}
+
+impl RunnerJobSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Broker => "broker",
+            Self::Daemon => "daemon",
+            Self::RunnerDaemon => "runner-daemon",
+            Self::DirectDaemon => "direct-daemon",
+            Self::ReverseBroker => "reverse-broker",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_metadata(value: &str) -> Self {
+        match value {
+            "broker" => Self::Broker,
+            "daemon" => Self::Daemon,
+            "runner-daemon" | "runner_daemon" => Self::RunnerDaemon,
+            "direct-daemon" | "direct_daemon" => Self::DirectDaemon,
+            "reverse-broker" | "reverse_broker" => Self::ReverseBroker,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn lifecycle_owner(self) -> RunnerJobLifecycleOwner {
+        match self {
+            Self::Broker | Self::ReverseBroker => RunnerJobLifecycleOwner::Broker,
+            _ => RunnerJobLifecycleOwner::Controller,
+        }
+    }
+}
+
+impl fmt::Display for RunnerJobSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerJobLifecycleOwner {
+    Broker,
+    Controller,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveRunnerJobRunSummary {
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub started_at: String,
+    pub command: String,
+    pub cwd: Option<String>,
+    pub status_note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobEvent {
+    pub sequence: u64,
+    pub job_id: Uuid,
+    pub kind: JobEventKind,
+    pub timestamp_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct DaemonLeaseJobDiagnostics {
+    pub expected_lease_id: String,
+    pub matching_job_ids: Vec<Uuid>,
+    pub other_lease_job_ids: Vec<Uuid>,
+    pub unowned_job_ids: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_job_ids: Vec<Uuid>,
+    /// Broker-owned jobs preserved for the replacement daemon. These never
+    /// represent a local process that can block daemon replacement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preserved_remote_job_ids: Vec<Uuid>,
+}
+
+/// Read-only recovery evidence for one active daemon job.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DaemonActiveJobRecoveryEvidence {
+    pub job_id: Uuid,
+    pub operation: String,
+    pub status: JobStatus,
+    pub daemon_lease_id: Option<String>,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub started_at_ms: Option<u64>,
+    pub terminal_evidence: Option<JobStatus>,
+    pub child_pid: Option<u32>,
+    pub child_started_at: Option<String>,
+    pub linked_durable_run_id: Option<String>,
+    pub linked_durable_run_state: Option<DaemonLinkedDurableRunState>,
+    pub linked_durable_run_terminal_status: Option<JobStatus>,
+    pub disposition: DaemonActiveJobRecoveryDisposition,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonLinkedDurableRunState {
+    Terminal,
+    Active,
+    Unresolved,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonActiveJobRecoveryDisposition {
+    TerminalEvidence,
+    DeadChild,
+    MissingChildIdentityRecoverable,
+    ProtectedLive,
+    BlockingAmbiguous,
+}
+
+/// An active durable job terminalized after the daemon lease disappeared.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LeaselessOrphanAffectedJob {
+    pub job_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_daemon_lease_id: Option<String>,
+}
+
+/// Active durable jobs selected by the explicit missing-lease recovery operation.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct LeaselessOrphanJobDiagnostics {
+    pub reconciled_job_ids: Vec<Uuid>,
+    pub affected_jobs: Vec<LeaselessOrphanAffectedJob>,
+    pub historical_lease_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_job_ids: Vec<Uuid>,
+    /// Broker-owned queued or unexpired jobs preserved for their runner claim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preserved_remote_job_ids: Vec<Uuid>,
+}
+
+impl LeaselessOrphanJobDiagnostics {
+    pub fn reconciled_count(&self) -> usize {
+        self.reconciled_job_ids.len()
+    }
+}
+
+impl DaemonLeaseJobDiagnostics {
+    pub fn matching_count(&self) -> usize {
+        self.matching_job_ids.len()
+    }
+    pub fn other_lease_count(&self) -> usize {
+        self.other_lease_job_ids.len()
+    }
+    pub fn unowned_count(&self) -> usize {
+        self.unowned_job_ids.len()
+    }
+
+    pub fn protected_count(&self) -> usize {
+        self.protected_job_ids.len()
+    }
+
+    pub fn terminalized_count(&self) -> usize {
+        self.matching_count()
+            .saturating_sub(self.protected_count())
+            .saturating_sub(self.preserved_remote_job_ids.len())
+    }
+}

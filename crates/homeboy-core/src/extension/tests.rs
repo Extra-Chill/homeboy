@@ -1,0 +1,844 @@
+use super::*;
+use crate::component::{Component, ScopedExtensionConfig};
+use crate::config::ConfigEntity;
+use std::collections::HashMap;
+
+#[test]
+fn extension_capability_owns_labels_and_scripts() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "scripts": {
+            "compiler_warnings": "compiler-warnings.sh",
+            "compiler_warning_fixes": "compiler-warning-fixes.sh"
+        },
+        "runtime": { "runtimes": { "node": { "version": "24" } } },
+        "lint": { "extension_script": "lint.sh" },
+        "test": {
+            "extension_script": "test.sh",
+            "result_parse": {
+                "adapters": ["custom-json"],
+                "rules": [{ "pattern": "Tests: (\\d+)", "field": "total" }]
+            }
+        },
+        "build": { "extension_script": "build.sh" },
+        "bench": { "extension_script": "bench.sh" },
+        "fuzz": {
+            "extension_script": "fuzz.sh",
+            "env": ["HOMEBOY_SETTINGS_JSON", "SAMPLE_RUNTIME_BIN"],
+            "workloads": [{ "id": "parser", "label": "Parser fuzz" }]
+        },
+        "trace": { "extension_script": "trace.sh" },
+        "deps": { "extension_script": "deps.sh" }
+    }))
+    .unwrap();
+
+    assert_eq!(
+        manifest
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.runtimes.get("node"))
+            .map(|runtime| runtime.version.as_str()),
+        Some("24")
+    );
+    assert_eq!(
+        manifest
+            .test
+            .as_ref()
+            .and_then(|test| test.result_parse.as_ref())
+            .map(|spec| spec.rules.len()),
+        Some(1)
+    );
+    assert_eq!(
+        manifest
+            .test
+            .as_ref()
+            .and_then(|test| test.result_parse.as_ref())
+            .map(|spec| spec.adapters.clone()),
+        Some(vec!["custom-json".to_string()])
+    );
+    assert_eq!(
+        manifest.compiler_warnings_script(),
+        Some("compiler-warnings.sh")
+    );
+    assert_eq!(
+        manifest.compiler_warning_fixes_script(),
+        Some("compiler-warning-fixes.sh")
+    );
+
+    for (capability, label, script, requires_script) in [
+        (ExtensionCapability::Lint, "lint", "lint.sh", true),
+        (ExtensionCapability::Test, "test", "test.sh", true),
+        (ExtensionCapability::Build, "build", "build.sh", false),
+        (ExtensionCapability::Bench, "bench", "bench.sh", true),
+        (ExtensionCapability::Fuzz, "fuzz", "fuzz.sh", false),
+        (ExtensionCapability::Trace, "trace", "trace.sh", true),
+        (ExtensionCapability::Deps, "deps", "deps.sh", true),
+    ] {
+        assert_eq!(capability.label(), label);
+        assert!(capability.has_manifest_support(&manifest));
+        assert_eq!(capability.script_path(&manifest), Some(script));
+        assert_eq!(capability.requires_script(), requires_script);
+    }
+
+    assert_eq!(manifest.fuzz_workloads()[0].id, "parser");
+    assert_eq!(
+        manifest.fuzz.as_ref().map(|fuzz| fuzz.env.clone()),
+        Some(vec![
+            "HOMEBOY_SETTINGS_JSON".to_string(),
+            "SAMPLE_RUNTIME_BIN".to_string()
+        ])
+    );
+}
+
+#[test]
+fn fuzz_manifest_support_does_not_require_execution_script() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "fuzz": {
+            "workloads": [{ "id": "parser", "label": "Parser fuzz" }]
+        }
+    }))
+    .unwrap();
+
+    assert!(ExtensionCapability::Fuzz.has_manifest_support(&manifest));
+    assert_eq!(ExtensionCapability::Fuzz.script_path(&manifest), None);
+    assert!(!ExtensionCapability::Fuzz.requires_script());
+    assert_eq!(manifest.fuzz_workloads()[0].id, "parser");
+}
+
+#[test]
+fn extension_manifest_parses_declared_provider_config_path_fields() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "agent_runtimes": [{
+            "id": "example-runtime",
+            "config_path_fields": [
+                "provider_plugin_paths[]",
+                "runtime_component_paths.*",
+                "component_contracts[].path"
+            ]
+        }]
+    }))
+    .expect("manifest with path field declarations");
+
+    assert_eq!(
+        manifest.agent_runtimes[0].config_path_fields,
+        vec![
+            "provider_plugin_paths[]",
+            "runtime_component_paths.*",
+            "component_contracts[].path"
+        ]
+    );
+}
+
+#[test]
+fn extension_manifest_parses_trace_browser_evidence_adapters() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "trace": {
+            "extension_script": "trace.sh",
+            "browser_evidence": [{
+                "id": "custom-provider.browser-summary",
+                "summary_aliases": [{
+                    "request_total_keys": ["networkEvents"],
+                    "page_error_keys": ["errors"],
+                    "metrics": [{
+                        "metric": "browser_network_event_count",
+                        "keys": ["networkEvents"]
+                    }]
+                }],
+                "artifact_maps": [{ "field": "files" }]
+            }]
+        }
+    }))
+    .unwrap();
+
+    let adapters = manifest.trace_browser_evidence();
+    assert_eq!(adapters.len(), 1);
+    assert_eq!(adapters[0].id, "custom-provider.browser-summary");
+    assert_eq!(
+        adapters[0].summary_aliases[0].request_total_keys,
+        vec!["networkEvents"]
+    );
+    assert_eq!(adapters[0].artifact_maps[0].field, "files");
+}
+
+#[test]
+fn manifest_parses_declared_structured_sidecars() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "structured_sidecars": {
+            "findings": {
+                "path": "findings.json",
+                "schema_version": "1"
+            },
+            "producer.summary": {
+                "schema_version": "1",
+                "producer": "lint"
+            },
+            "lint.findings": true,
+            "lint.producers": true,
+            "fuzz.results": true,
+            "trace.results": true,
+            "trace.artifacts": true,
+            "test.coverage": false
+        }
+    }))
+    .unwrap();
+
+    let sidecars = manifest.structured_sidecars();
+    assert_eq!(sidecars.len(), 7);
+    assert_eq!(sidecars[0].name, "findings");
+    assert_eq!(sidecars[0].path, "findings.json");
+    assert_eq!(sidecars[0].schema_version.as_deref(), Some("1"));
+    assert_eq!(sidecars[0].producer, None);
+    assert_eq!(sidecars[1].name, "fuzz.results");
+    assert_eq!(sidecars[1].path, "fuzz-results.json");
+    assert_eq!(sidecars[1].producer.as_deref(), Some("fuzz"));
+    assert_eq!(sidecars[2].name, "lint.findings");
+    assert_eq!(sidecars[2].path, "lint-findings.json");
+    assert_eq!(sidecars[2].schema_version.as_deref(), Some("v1"));
+    assert_eq!(sidecars[2].producer.as_deref(), Some("lint"));
+    assert_eq!(sidecars[3].name, "lint.producers");
+    assert_eq!(sidecars[3].path, "lint-producers.json");
+    assert_eq!(sidecars[3].producer.as_deref(), Some("lint"));
+    assert_eq!(sidecars[4].name, "producer.summary");
+    assert_eq!(sidecars[4].path, "producer-summary.json");
+    assert_eq!(sidecars[4].producer.as_deref(), Some("lint"));
+    assert_eq!(sidecars[5].name, "trace.artifacts");
+    assert_eq!(sidecars[5].path, "artifacts");
+    assert_eq!(sidecars[5].producer.as_deref(), Some("trace"));
+    assert_eq!(sidecars[6].name, "trace.results");
+    assert_eq!(sidecars[6].path, "trace.json");
+    assert_eq!(sidecars[6].producer.as_deref(), Some("trace"));
+}
+
+#[test]
+fn extension_manifest_accepts_real_extension_fixture_shapes() {
+    for (fixture_id, raw) in [
+        (
+            "rust",
+            include_str!("../../../../tests/fixtures/extension_manifests/rust.json"),
+        ),
+        (
+            "fixture-js-runtime",
+            include_str!("../../../../tests/fixtures/extension_manifests/js_runtime.json"),
+        ),
+        (
+            "go",
+            include_str!("../../../../tests/fixtures/extension_manifests/go.json"),
+        ),
+        (
+            "swift",
+            include_str!("../../../../tests/fixtures/extension_manifests/swift.json"),
+        ),
+        (
+            "wordpress",
+            include_str!("../../../../tests/fixtures/extension_manifests/wordpress.json"),
+        ),
+        (
+            "managed-preview",
+            include_str!("../../../../tests/fixtures/extension_manifests/managed-preview.json"),
+        ),
+    ] {
+        let mut manifest: ExtensionManifest = serde_json::from_str(raw)
+            .unwrap_or_else(|err| panic!("{fixture_id} manifest should parse: {err}"));
+        if manifest.id.is_empty() {
+            manifest.set_id(fixture_id.to_string());
+        }
+
+        assert_eq!(manifest.id, fixture_id);
+        assert!(!manifest.name.is_empty());
+    }
+}
+
+#[test]
+fn executable_pruned_fields_remain_loadable_as_unknown_manifest_data() {
+    let raw = include_str!("../../../../tests/fixtures/extension_manifests/swift.json");
+    let manifest: ExtensionManifest =
+        serde_json::from_str(raw).expect("swift fixture should parse");
+    let executable = manifest.executable.expect("executable fixture");
+
+    assert_eq!(
+        executable.runtime.run_command.as_deref(),
+        Some("bash {{extension_path}}/scripts/test-runner.sh")
+    );
+    assert!(executable.extra.contains_key("output"));
+}
+
+#[test]
+fn structured_sidecar_schema_versions_come_from_top_level_contract() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "structured_sidecars": {
+            "findings": {
+                "path": "findings.json",
+                "schema_version": "2"
+            },
+            "lint.findings": true,
+            "test.failures": false
+        },
+        "lint": {
+            "extension_script": "lint.sh",
+            "findings_schema_version": "1"
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(
+        manifest.structured_sidecar_schema_version("findings"),
+        Some("2")
+    );
+    assert_eq!(
+        manifest.structured_sidecar_schema_version("lint.findings"),
+        Some("v1")
+    );
+    assert_eq!(
+        manifest.structured_sidecar_schema_version("test.failures"),
+        None
+    );
+}
+
+#[test]
+fn missing_sidecar_declarations_have_no_structured_contract() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "lint": { "extension_script": "lint.sh" },
+        "test": { "extension_script": "test.sh" }
+    }))
+    .unwrap();
+
+    assert!(manifest.structured_sidecars().is_empty());
+}
+
+#[test]
+fn manifest_parses_extension_materialization_source_contract() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "materialization_source": {
+            "source_kind": "archive",
+            "revision": "abc1234",
+            "runner_archive_url": "https://example.com/extensions/example.tar.gz",
+            "runner_archive_sha256": "sha256-fixture",
+            "runner_ref": "refs/tags/example-v1",
+            "helper_manifest_refs": [{
+                "id": "example-runtime",
+                "path": "runtime/example-runtime.json",
+                "schema": "homeboy/agent-runtime-manifest/v1",
+                "purpose": "agent runtime helper"
+            }]
+        }
+    }))
+    .unwrap();
+
+    let source = manifest
+        .materialization_source
+        .expect("materialization source contract");
+    assert_eq!(source.schema, EXTENSION_MATERIALIZATION_SOURCE_SCHEMA);
+    assert_eq!(
+        source.source_kind,
+        ExtensionMaterializationSourceKind::Archive
+    );
+    assert_eq!(source.revision.as_deref(), Some("abc1234"));
+    assert_eq!(
+        source.runner_archive_url.as_deref(),
+        Some("https://example.com/extensions/example.tar.gz")
+    );
+    assert_eq!(source.runner_ref.as_deref(), Some("refs/tags/example-v1"));
+    assert_eq!(source.helper_manifest_refs[0].id, "example-runtime");
+}
+
+#[test]
+fn manifest_parses_extension_contract_producers() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "contract_producers": [
+            {
+                "id": "capabilities",
+                "phase": "discovery",
+                "invocation": {
+                    "script": "contracts/discovery.sh",
+                    "args": ["--json"],
+                    "env": ["HOMEBOY_COMPONENT_ROOT"],
+                    "input_schema": "homeboy/extension-discovery-request/v1",
+                    "output_schema": "homeboy/extension-discovery-response/v1"
+                },
+                "produces": [{
+                    "kind": "capability",
+                    "name": "capabilities",
+                    "schema": "homeboy/extension-capabilities/v1"
+                }]
+            },
+            {
+                "id": "plans",
+                "phase": "planning",
+                "invocation": { "script": "contracts/planning.sh" },
+                "produces": [
+                    { "kind": "execution_plan" },
+                    { "kind": "materialization_plan" },
+                    { "kind": "secret_plan" }
+                ]
+            },
+            {
+                "id": "handoff",
+                "phase": "handoff",
+                "invocation": { "script": "contracts/handoff.sh" },
+                "produces": [{ "kind": "runner_envelope_addition" }]
+            },
+            {
+                "id": "results",
+                "phase": "result",
+                "invocation": { "script": "contracts/result.sh" },
+                "produces": [
+                    { "kind": "artifact" },
+                    { "kind": "status" },
+                    { "kind": "evidence" }
+                ]
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(manifest.contract_producers.len(), 4);
+    assert_eq!(
+        manifest.contract_producers[0].schema,
+        EXTENSION_CONTRACT_PRODUCER_SCHEMA
+    );
+    assert_eq!(
+        manifest.contract_producers[0].phase,
+        ExtensionContractProducerPhase::Discovery
+    );
+    assert_eq!(
+        manifest.contract_producers[0].invocation.script,
+        "contracts/discovery.sh"
+    );
+    assert_eq!(
+        manifest.contract_producers[0].invocation.args,
+        vec!["--json"]
+    );
+    assert_eq!(
+        manifest.contract_producers[0].produces[0].name.as_deref(),
+        Some("capabilities")
+    );
+    assert_eq!(
+        manifest.contract_producers[1].produces[0].kind,
+        ExtensionContractProducerOutputKind::ExecutionPlan
+    );
+    assert_eq!(
+        manifest.contract_producers[1].produces[1].kind,
+        ExtensionContractProducerOutputKind::MaterializationPlan
+    );
+    assert_eq!(
+        manifest.contract_producers[1].produces[2].kind,
+        ExtensionContractProducerOutputKind::SecretPlan
+    );
+    assert_eq!(
+        manifest.contract_producers[2].produces[0].kind,
+        ExtensionContractProducerOutputKind::RunnerEnvelopeAddition
+    );
+    assert_eq!(
+        manifest.contract_producers[3].produces[2].kind,
+        ExtensionContractProducerOutputKind::Evidence
+    );
+}
+
+#[test]
+fn contract_producers_reject_unknown_fields() {
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "contract_producers": [{
+            "id": "capabilities",
+            "phase": "discovery",
+            "domain": "wordpress",
+            "invocation": { "script": "contracts/discovery.sh" }
+        }]
+    }))
+    .expect_err("contract producers should stay explicit and generic");
+
+    assert!(err.to_string().contains("unknown field"));
+}
+
+#[test]
+fn structured_sidecar_declarations_reject_unknown_fields() {
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "structured_sidecars": {
+            "findings": {
+                "path": "findings.json",
+                "schema_version": "1",
+                "legacy": true
+            }
+        }
+    }))
+    .expect_err("sidecar declarations should have one explicit shape");
+
+    assert!(err.to_string().contains("data did not match"));
+}
+
+#[test]
+fn manifest_parses_changed_test_routing_contract() {
+    let fixture_extension = ["p", "hp"].concat();
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "test": {
+            "extension_script": "test.sh",
+            "changed_file_routing": {
+                "strategy": "exclusive_env",
+                "exclusive_env": {
+                    "name": "HOMEBOY_FIXTURE_HOST_SMOKE_FILES",
+                    "globs": [format!("tests/**/*-smoke.{fixture_extension}")]
+                }
+            }
+        }
+    }))
+    .unwrap();
+
+    let routing = manifest
+        .test
+        .as_ref()
+        .and_then(|test| test.changed_file_routing.as_ref())
+        .expect("test routing should parse");
+
+    assert_eq!(
+        routing.strategy,
+        TestChangedFileRoutingStrategy::ExclusiveEnv
+    );
+    assert_eq!(
+        routing
+            .exclusive_env
+            .as_ref()
+            .map(|exclusive_env| exclusive_env.name.as_str()),
+        Some("HOMEBOY_FIXTURE_HOST_SMOKE_FILES")
+    );
+}
+
+#[test]
+fn manifest_parses_passthrough_filter_contract() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "test": {
+            "extension_script": "test.sh",
+            "passthrough_filter": {
+                "strategy": "runner_positional"
+            }
+        }
+    }))
+    .unwrap();
+
+    let filter = manifest
+        .test
+        .as_ref()
+        .and_then(|test| test.passthrough_filter.as_ref())
+        .expect("test passthrough filter should parse");
+
+    assert_eq!(
+        filter.strategy,
+        TestPassthroughFilterStrategy::RunnerPositional
+    );
+}
+
+#[test]
+fn manifest_parses_archive_install_deploy_contract() {
+    let script_extension = ["p", "hp"].concat();
+    let script_glob = format!("*.{script_extension}");
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "deploy": {
+            "protected_path_suffixes": ["/srv/extensions"],
+            "owner_hints": [
+                {
+                    "path_contains": "extensions/",
+                    "suggested_owner": "www-data:www-data"
+                }
+            ],
+            "archive_install": [
+                {
+                    "path_pattern": "/srv/extensions/",
+                    "staging_path": "/tmp/homeboy-extension-staging",
+                    "root_must_match_target_basename": true,
+                    "required_header": {
+                        "file_glob": script_glob,
+                        "contains": "Plugin Name:"
+                    },
+                    "skip_permissions_fix": true
+                }
+            ]
+        }
+    }))
+    .expect("archive install deploy policy should parse");
+
+    let policy = manifest
+        .deploy_archive_installs()
+        .first()
+        .expect("archive install policy");
+    assert_eq!(policy.path_pattern, "/srv/extensions/");
+    assert_eq!(policy.staging_path, "/tmp/homeboy-extension-staging");
+    assert!(policy.root_must_match_target_basename);
+    assert!(policy.skip_permissions_fix);
+    assert_eq!(
+        policy
+            .required_header
+            .as_ref()
+            .and_then(|header| header.file_glob.as_deref()),
+        Some(format!("*.{}", script_extension).as_str())
+    );
+
+    let deploy = manifest.deploy.as_ref().expect("deploy contract");
+    assert_eq!(deploy.protected_path_suffixes, ["/srv/extensions"]);
+    assert_eq!(deploy.owner_hints[0].path_contains, "extensions/");
+    assert_eq!(deploy.owner_hints[0].suggested_owner, "www-data:www-data");
+}
+
+#[test]
+fn deploy_contract_rejects_unknown_active_policy_keys() {
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "deploy": {
+            "archiveInstall": []
+        }
+    }))
+    .expect_err("unsupported deploy keys should be rejected");
+
+    assert!(err.to_string().contains("archiveInstall"));
+}
+
+#[test]
+fn archive_install_required_header_rejects_ambiguous_selector() {
+    let protected_path = format!("/{}/plugins/", ["wp", "-content"].concat());
+    let script_extension = ["p", "hp"].concat();
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "deploy": {
+            "archive_install": [
+                {
+                    "path_pattern": protected_path,
+                    "required_header": {
+                        "file": format!("plugin.{script_extension}"),
+                        "file_glob": format!("*.{script_extension}"),
+                        "contains": "Plugin Name:"
+                    }
+                }
+            ]
+        }
+    }))
+    .expect_err("required_header must choose exactly one selector");
+
+    assert!(err.to_string().contains("exactly one of file or file_glob"));
+}
+
+#[test]
+fn archive_install_required_header_rejects_missing_selector() {
+    let protected_path = format!("/{}/plugins/", ["wp", "-content"].concat());
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "deploy": {
+            "archive_install": [
+                {
+                    "path_pattern": protected_path,
+                    "required_header": {
+                        "contains": "Plugin Name:"
+                    }
+                }
+            ]
+        }
+    }))
+    .expect_err("required_header must declare a selector");
+
+    assert!(err.to_string().contains("exactly one of file or file_glob"));
+}
+
+#[test]
+fn test_drift_ignores_audit_test_mapping_fallback() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "audit": {
+            "test_mapping": {
+                "source_dirs": ["src"],
+                "test_dirs": ["tests"],
+                "test_file_pattern": "tests/{dir}/{name}_test.{ext}",
+                "inline_tests": true
+            }
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(
+        manifest.test_mapping().map(|mapping| mapping.inline_tests),
+        Some(true)
+    );
+    assert_eq!(manifest.test_drift(), None);
+}
+
+#[test]
+fn validate_required_extensions_passes_with_no_modules() {
+    let comp = Component {
+        id: "test-component".to_string(),
+        ..Default::default()
+    };
+    assert!(validate_required_extensions(&comp).is_ok());
+}
+
+#[test]
+fn validate_required_extensions_passes_with_empty_modules() {
+    let comp = Component {
+        id: "test-component".to_string(),
+        extensions: Some(HashMap::new()),
+        ..Default::default()
+    };
+    assert!(validate_required_extensions(&comp).is_ok());
+}
+
+#[test]
+fn validate_required_extensions_fails_with_missing_module() {
+    let mut extensions = HashMap::new();
+    extensions.insert(
+        "nonexistent-extension-abc123".to_string(),
+        ScopedExtensionConfig::default(),
+    );
+    let comp = Component {
+        id: "test-component".to_string(),
+        extensions: Some(extensions),
+        ..Default::default()
+    };
+    let err = validate_required_extensions(&comp).unwrap_err();
+    assert_eq!(err.code, crate::error::ErrorCode::ExtensionNotFound);
+    assert!(err.message.contains("nonexistent-extension-abc123"));
+    assert!(err.message.contains("test-component"));
+    // Should have install hint + source guidance hint.
+    assert!(err.hints.len() >= 2);
+    assert!(err
+        .hints
+        .iter()
+        .any(|h| h.message.contains("homeboy extension install")));
+    assert!(!err
+        .hints
+        .iter()
+        .any(|h| h.message.contains("Extra-Chill/homeboy-extensions")));
+    assert!(err.hints.iter().any(|h| h.message.contains("<source>")));
+}
+
+#[test]
+fn validate_required_extensions_uses_declared_extension_source_hint() {
+    let mut extensions = HashMap::new();
+    extensions.insert(
+        "nonexistent-extension-abc123".to_string(),
+        ScopedExtensionConfig {
+            version: None,
+            settings: HashMap::from([(
+                "source".to_string(),
+                serde_json::Value::String("https://example.test/extensions.git".to_string()),
+            )]),
+        },
+    );
+    let comp = Component {
+        id: "test-component".to_string(),
+        extensions: Some(extensions),
+        ..Default::default()
+    };
+
+    let err = validate_required_extensions(&comp).unwrap_err();
+    let hints = err
+        .hints
+        .iter()
+        .map(|hint| hint.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(hints.contains(
+        "homeboy extension install https://example.test/extensions.git --id nonexistent-extension-abc123"
+    ));
+    assert!(!hints.contains("Extra-Chill/homeboy-extensions"));
+}
+
+#[test]
+fn validate_required_extensions_reports_all_missing() {
+    let mut extensions = HashMap::new();
+    extensions.insert(
+        "missing-mod-a".to_string(),
+        ScopedExtensionConfig::default(),
+    );
+    extensions.insert(
+        "missing-mod-b".to_string(),
+        ScopedExtensionConfig::default(),
+    );
+    let comp = Component {
+        id: "multi-dep".to_string(),
+        extensions: Some(extensions),
+        ..Default::default()
+    };
+    let err = validate_required_extensions(&comp).unwrap_err();
+    // Error should mention both missing extensions
+    assert!(err.message.contains("missing-mod-a"));
+    assert!(err.message.contains("missing-mod-b"));
+    // Should have install hint for each + browse hint
+    assert!(err.hints.len() >= 3);
+}
+
+#[test]
+fn test_validate_extension_requirements() {
+    let comp = Component {
+        id: "test-component".to_string(),
+        ..Default::default()
+    };
+    assert!(validate_extension_requirements(&comp).is_ok());
+}
+
+#[test]
+fn extension_guidance_hints_point_to_supported_paths() {
+    let comp = Component {
+        id: "plain-package".to_string(),
+        ..Default::default()
+    };
+
+    let hints = extension_guidance_hints(&comp, Some(ExtensionCapability::Build));
+
+    assert!(hints
+        .iter()
+        .any(|hint| { hint.contains("homeboy component set plain-package --extension") }));
+    assert!(hints
+        .iter()
+        .any(|hint| { hint.contains("Use `scripts.build` for component-owned build commands") }));
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains("homeboy extension list")));
+}
+
+#[test]
+fn runner_step_filter_applies_step_and_skip() {
+    let filter = RunnerStepFilter {
+        step: Some("lint,test".to_string()),
+        skip: Some("test".to_string()),
+    };
+    assert!(filter.should_run("lint"));
+    assert!(!filter.should_run("test"));
+    assert!(!filter.should_run("deploy"));
+}
+
+#[test]
+fn runner_step_filter_exports_env_pairs() {
+    let filter = RunnerStepFilter {
+        step: Some("a".to_string()),
+        skip: Some("b".to_string()),
+    };
+    let env = filter.to_env_pairs();
+    assert!(env.iter().any(|(k, v)| k == "HOMEBOY_STEP" && v == "a"));
+    assert!(env.iter().any(|(k, v)| k == "HOMEBOY_SKIP" && v == "b"));
+}
