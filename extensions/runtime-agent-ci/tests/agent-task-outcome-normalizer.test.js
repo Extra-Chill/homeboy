@@ -176,6 +176,7 @@ assert.equal(unknownProviderOutput.failure_category, 'provider.error');
 assert.equal(providerFailureClassification('task', 'failed'), 'execution_failed');
 assert.equal(providerFailureClassification('incomplete', 'failed'), 'execution_failed');
 assert.equal(providerFailureClassification('max_turns', 'timeout'), 'timeout');
+assert.equal(providerFailureClassification('provider_quota', 'provider_error'), 'provider_quota');
 assert.equal(providerFailureClassification('custom-runtime-detail', 'failed'), 'unknown');
 assert.equal(agentTaskFailureCategory({ provider_error: true }, [{ class: 'provider.rate_limit', message: 'rate limit' }], 'provider', 'provider_error'), 'provider.rate_limit');
 assert.equal(agentTaskFailureRetryable('provider.rate_limit', 'provider', 'provider_error'), true);

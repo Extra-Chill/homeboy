@@ -23,6 +23,7 @@ const AGENT_TASK_OUTCOME_STATUSES = [
 
 const AGENT_TASK_FAILURE_CLASSIFICATIONS = [
   'provider',
+  'provider_quota',
   'transient',
   'timeout',
   'policy_denied',

@@ -563,32 +563,74 @@ process.exit(0);
 	assert.equal(inheritedPipeResult.status, 'succeeded');
 	assert.match(inheritedPipeResult.diagnostics[0].message, /status 0/);
 
-	const quotaLogPath = path.join(root, 'opencode-quota.log');
-	const quotaCliPath = path.join(root, 'mock-opencode-quota.cjs');
-	fs.writeFileSync(quotaCliPath, `#!/usr/bin/env node
+	const quotaVariants = [
+		'AI_APICallError: Weekly Limit Exhausted. Your limit will reset at 2026-07-20T00:00:00Z.',
+		'AI_APICallError: Monthly Limit Exhausted. Your limit will reset at 2026-08-01T00:00:00Z.',
+		'AI_APICallError: Provider quota exhausted.',
+		'AI_APICallError: Provider quota exceeded.',
+		'AI_APICallError: Rate limit exceeded.',
+		'AI_APICallError: Usage limit exhausted.',
+		'AI_APICallError: Usage limit reached for 5 hours. Your limit will reset later.',
+	];
+	for (const [index, quotaError] of quotaVariants.entries()) {
+		const quotaInvocationPath = path.join(root, `opencode-quota-${index}-invocations`);
+		const quotaTerminationPath = path.join(root, `opencode-quota-${index}-terminated`);
+		const quotaCliPath = path.join(root, `mock-opencode-quota-${index}.cjs`);
+		fs.writeFileSync(quotaCliPath, `#!/usr/bin/env node
 const fs = require('node:fs');
-fs.appendFileSync(${JSON.stringify(quotaLogPath)}, 'timestamp=2026-06-30T17:03:48.665Z level=ERROR message="stream error" error.error="AI_APICallError: Usage limit reached for 5 hour. Your limit will reset later"\\n');
-setTimeout(() => {}, 10000);
+fs.appendFileSync(${JSON.stringify(quotaInvocationPath)}, 'started\\n');
+process.on('SIGTERM', () => {
+  fs.writeFileSync(${JSON.stringify(quotaTerminationPath)}, 'SIGTERM');
+  process.exit(0);
+});
+const event = JSON.stringify({ type: 'error', error: ${JSON.stringify(quotaError)}, token: process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN }) + '\\n';
+process.stderr.write(event.slice(0, 24));
+setTimeout(() => process.stderr.write(event.slice(24)), 5);
+setInterval(() => process.stderr.write('OpenCode retrying after provider backoff\\n'), 25);
 `);
-	const quotaResult = await Promise.race([
-		executeOpenCodeAgentTask({
-			...request,
-			task_id: 'opencode-quota-fail-fast',
-			executor: {
-				...request.executor,
-				config: {
-					...request.executor.config,
-					command_args: [quotaCliPath],
-					diagnostic_log_path: quotaLogPath,
+		const quotaResult = await Promise.race([
+			executeOpenCodeAgentTask({
+				...request,
+				task_id: `opencode-quota-fail-fast-${index}`,
+				executor: {
+					...request.executor,
+					config: { ...request.executor.config, command_args: [quotaCliPath] },
 				},
-			},
-		}, { env: fixtureEnv }),
-		new Promise((_, reject) => setTimeout(() => reject(new Error('OpenCode executor did not fail fast on provider quota exhaustion')), 3000)),
-	]);
-	assert.equal(quotaResult.status, 'provider_error');
-	assert.equal(quotaResult.failure_code, 'agent_task.opencode_usage_limit');
-	assert.equal(quotaResult.failure_classification, 'provider_quota');
-	assert.match(quotaResult.diagnostics[0].message, /Usage limit reached/);
+			}, { env: fixtureEnv }),
+			new Promise((_, reject) => setTimeout(() => reject(new Error('OpenCode executor did not fail fast on provider quota exhaustion')), 2000)),
+		]);
+		assert.equal(quotaResult.status, 'provider_error');
+		assert.equal(quotaResult.failure_code, 'agent_task.opencode_usage_limit');
+		assert.equal(quotaResult.failure_classification, 'provider_quota');
+		assert.equal(quotaResult.failure_category, 'provider.quota');
+		assert.equal(quotaResult.retryable, false);
+		assert.deepEqual(quotaResult.diagnostics, [{
+			class: 'opencode.provider_quota',
+			message: 'OpenCode reported a terminal provider quota limit. Wait for the provider limit to reset or select an available provider/model, then retry.',
+			data: {},
+		}]);
+		assert.equal(fs.readFileSync(quotaInvocationPath, 'utf8'), 'started\n');
+		assert.equal(fs.readFileSync(quotaTerminationPath, 'utf8'), 'SIGTERM');
+		assert.equal(JSON.stringify(quotaResult).includes('access-token-must-not-leak'), false);
+		for (const artifact of quotaResult.artifacts) {
+			assert.equal(fs.readFileSync(artifact.path, 'utf8').includes('access-token-must-not-leak'), false);
+		}
+	}
+
+	const transientQuotaCliPath = path.join(root, 'mock-opencode-transient-rate-limit.cjs');
+	fs.writeFileSync(transientQuotaCliPath, `#!/usr/bin/env node
+process.stderr.write(JSON.stringify({ type: 'error', error: 'AI_APICallError: Rate limit reached; retrying in 1 second.' }) + '\\n');
+process.exit(0);
+`);
+	const transientQuotaResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-transient-rate-limit',
+		executor: {
+			...request.executor,
+			config: { ...request.executor.config, command_args: [transientQuotaCliPath] },
+		},
+	}, { env: fixtureEnv });
+	assert.equal(transientQuotaResult.status, 'succeeded');
 
 	const implicitArtifactResult = await executeOpenCodeAgentTask({
 		...request,

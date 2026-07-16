@@ -30,7 +30,25 @@ const OPENCODE_SECRET_ENV = [
 ];
 const OPENCODE_FATAL_LOG_PATTERNS = [
 	{
-		pattern: /Usage limit reached/i,
+		pattern: /\bAI_APICallError\b[\s\S]{0,1000}\b(?:weekly|monthly)\s+limit\s+exhausted\b/i,
+		code: 'agent_task.opencode_usage_limit',
+		summary: 'OpenCode provider usage limit was reached.',
+		classification: 'provider_quota',
+	},
+	{
+		pattern: /\bAI_APICallError\b[\s\S]{0,1000}\bquota\s+(?:is\s+)?(?:exhausted|exceeded)\b/i,
+		code: 'agent_task.opencode_usage_limit',
+		summary: 'OpenCode provider usage limit was reached.',
+		classification: 'provider_quota',
+	},
+	{
+		pattern: /\bAI_APICallError\b[\s\S]{0,1000}\b(?:rate|usage)\s+limit\s+(?:has\s+been\s+)?(?:exhausted|exceeded)\b/i,
+		code: 'agent_task.opencode_usage_limit',
+		summary: 'OpenCode provider usage limit was reached.',
+		classification: 'provider_quota',
+	},
+	{
+		pattern: /\bAI_APICallError\b[\s\S]{0,1000}\busage\s+limit\s+reached\b[\s\S]{0,200}\blimit\s+will\s+reset\b/i,
 		code: 'agent_task.opencode_usage_limit',
 		summary: 'OpenCode provider usage limit was reached.',
 		classification: 'provider_quota',
@@ -796,7 +814,11 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 			failure_classification: fatalRuntimeError?.classification || (timedOut ? 'timeout' : 'provider'),
 			failure_code: fatalRuntimeError?.code || (timedOut ? 'agent_task.opencode_timeout' : 'agent_task.opencode_spawn_failed'),
 			summary: fatalRuntimeError?.summary || (timedOut ? 'OpenCode execution timed out.' : 'OpenCode process failed to start or complete.'),
-			diagnostics: [{ classification: fatalRuntimeError?.classification || (timedOut ? 'timeout' : 'provider_setup'), message: spawnResult.error.message }],
+			diagnostics: [{
+				class: fatalRuntimeError ? 'opencode.provider_quota' : undefined,
+				classification: fatalRuntimeError?.classification || (timedOut ? 'timeout' : 'provider_setup'),
+				message: spawnResult.error.message,
+			}],
 			metadata: { opencode_session: sessionMetadata(context) },
 			...runtimeLogs,
 		});
@@ -866,10 +888,12 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 	return new Promise((resolve) => {
 		const stdoutChunks = [];
 		const stderrChunks = [];
+		const fatalStreamBuffers = { stdout: '', stderr: '' };
 		let settled = false;
 		let timedOut = false;
 		let fatalRuntimeError = null;
 		let child;
+		let timer = null;
 		let exitFallbackTimer = null;
 		let diagnosticLogTimer = null;
 		let diagnosticLogOffset = diagnosticLogInitialOffset(options.diagnosticLogPath);
@@ -878,6 +902,14 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
 			fs.writeFileSync(filePath, '');
 		}
+
+		const reportFatalRuntimeError = (detected) => {
+			if (fatalRuntimeError) {
+				return;
+			}
+			fatalRuntimeError = detected;
+			child.kill('SIGTERM');
+		};
 
 		const append = (stream, chunk) => {
 			const content = redactKnownSecrets(chunk.toString('utf8'), options.env);
@@ -889,6 +921,11 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			const filePath = options.runtimeLogPaths?.[stream];
 			if (filePath) {
 				fs.appendFileSync(filePath, content);
+			}
+			fatalStreamBuffers[stream] = `${fatalStreamBuffers[stream]}${content}`.slice(-1200);
+			const matched = findOpenCodeFatalRuntimeError(fatalStreamBuffers[stream]);
+			if (matched) {
+				reportFatalRuntimeError(matched);
 			}
 		};
 
@@ -902,6 +939,9 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			}
 			if (diagnosticLogTimer) {
 				clearInterval(diagnosticLogTimer);
+			}
+			if (timer) {
+				clearTimeout(timer);
 			}
 			resolve({
 				stdout: stdoutChunks.join(''),
@@ -918,7 +958,7 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			return;
 		}
 
-		const timer = options.timeoutMs > 0 ? setTimeout(() => {
+		timer = options.timeoutMs > 0 ? setTimeout(() => {
 			timedOut = true;
 			child.kill('SIGTERM');
 		}, options.timeoutMs) : null;
@@ -927,8 +967,7 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			initialOffset: diagnosticLogOffset,
 			env: options.env,
 			onFatal: (detected) => {
-				fatalRuntimeError = detected;
-				child.kill('SIGTERM');
+				reportFatalRuntimeError(detected);
 			},
 		});
 
@@ -951,9 +990,6 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			}, 250);
 		});
 		child.on('close', (status, signal) => {
-			if (timer) {
-				clearTimeout(timer);
-			}
 			finish({
 				status,
 				signal,
@@ -1006,15 +1042,10 @@ function startOpenCodeDiagnosticLogMonitor({ logPath, initialOffset = 0, env = p
 			fs.readSync(fd, buffer, 0, length, offset);
 			offset = stat.size;
 			const content = redactKnownSecrets(buffer.toString('utf8'), env);
-			const matched = OPENCODE_FATAL_LOG_PATTERNS.find(({ pattern }) => pattern.test(content));
+			const matched = findOpenCodeFatalRuntimeError(content);
 			if (matched) {
 				reported = true;
-				onFatal({
-					code: matched.code,
-					summary: matched.summary,
-					classification: matched.classification,
-					message: `${matched.summary} OpenCode diagnostic log reported: ${content.trim()}`,
-				});
+				onFatal(matched);
 			}
 		} finally {
 			if (fd !== undefined) {
@@ -1022,6 +1053,19 @@ function startOpenCodeDiagnosticLogMonitor({ logPath, initialOffset = 0, env = p
 			}
 		}
 	}, 1000);
+}
+
+function findOpenCodeFatalRuntimeError(content = '') {
+	const matched = OPENCODE_FATAL_LOG_PATTERNS.find(({ pattern }) => pattern.test(content));
+	if (!matched) {
+		return null;
+	}
+	return {
+		code: matched.code,
+		summary: matched.summary,
+		classification: matched.classification,
+		message: 'OpenCode reported a terminal provider quota limit. Wait for the provider limit to reset or select an available provider/model, then retry.',
+	};
 }
 
 function parseEnvCommandArgs() {

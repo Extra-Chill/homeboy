@@ -2,7 +2,7 @@
   "schema": "homeboy/agent-runtime-manifest/v1",
   "id": "opencode",
   "name": "OpenCode",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "OpenCode agent runtime for nested orchestration and repository-scoped agent tasks.",
   "contract_producers": [
     {
@@ -57,6 +57,7 @@
       ],
       "failure_classifications": [
         "provider",
+        "provider_quota",
         "transient",
         "timeout",
         "policy_denied",
@@ -85,9 +86,18 @@
           ],
           "when": {
             "any": [
-              { "path": "executor.config.provider", "equals": "codex" },
-              { "path": "executor.provider", "equals": "codex" },
-              { "path": "provider", "equals": "codex" }
+              {
+                "path": "executor.config.provider",
+                "equals": "codex"
+              },
+              {
+                "path": "executor.provider",
+                "equals": "codex"
+              },
+              {
+                "path": "provider",
+                "equals": "codex"
+              }
             ]
           }
         }
@@ -109,15 +119,21 @@
         "cwd": "git_checkout",
         "requires_git": true,
         "write_scope": "workspace",
-        "artifact_paths": [".homeboy/opencode"]
+        "artifact_paths": [
+          ".homeboy/opencode"
+        ]
       },
       "runner_readiness": [
         {
           "id": "opencode.executable",
           "label": "OpenCode executable",
           "executable": {
-            "candidates": ["opencode"],
-            "version_command": ["--version"],
+            "candidates": [
+              "opencode"
+            ],
+            "version_command": [
+              "--version"
+            ],
             "install_hint": "Install OpenCode or set the generic runtime_bin executor config."
           },
           "remediation": "Install OpenCode or set the generic runtime_bin executor config."
@@ -163,7 +179,10 @@
               "source": "json-file-jwt-expiration",
               "path": "~/.codex/auth.json",
               "field": "tokens.access_token",
-              "fallback_fields": ["tokens.expires_at", "tokens.expiresAt"]
+              "fallback_fields": [
+                "tokens.expires_at",
+                "tokens.expiresAt"
+              ]
             },
             "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID": {
               "source": "json-file",
@@ -189,9 +208,13 @@
             "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
             "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID"
           ],
-          "optional_secret_env": ["AI_PROVIDER_OPENAI_CODEX_FEDRAMP"],
+          "optional_secret_env": [
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP"
+          ],
           "refresh_hook": "codex-oauth-refresh",
-          "validation_hooks": ["codex-token-expiration"],
+          "validation_hooks": [
+            "codex-token-expiration"
+          ],
           "guidance": "Refresh Codex OAuth credentials before launching OpenCode, for example by signing in with Codex locally so ~/.codex/auth.json contains current tokens, then pass the updated AI_PROVIDER_OPENAI_CODEX_* secret environment values to the OpenCode executor."
         }
       },
@@ -201,21 +224,43 @@
         "max_concurrency_default": 1
       },
       "artifact_contract": {
-        "patch": ["git-diff", "patch"],
-        "report": ["json", "markdown"]
+        "patch": [
+          "git-diff",
+          "patch"
+        ],
+        "report": [
+          "json",
+          "markdown"
+        ]
       },
       "role_aliases": {
         "artifact_kinds": {
-          "patch": ["opencode-patch", "git-diff", "patch"],
-          "transcript": ["opencode-transcript", "agent-runtime-transcript"],
-          "runtime_log": ["opencode-runtime-log"],
-          "report": ["opencode-report", "agent-runtime-report"]
+          "patch": [
+            "opencode-patch",
+            "git-diff",
+            "patch"
+          ],
+          "transcript": [
+            "opencode-transcript",
+            "agent-runtime-transcript"
+          ],
+          "runtime_log": [
+            "opencode-runtime-log"
+          ],
+          "report": [
+            "opencode-report",
+            "agent-runtime-report"
+          ]
         },
         "outputs": {
-          "provider_run_result": ["opencode_run_result"]
+          "provider_run_result": [
+            "opencode_run_result"
+          ]
         },
         "metadata": {
-          "provider_run_result": ["opencode_run_result"]
+          "provider_run_result": [
+            "opencode_run_result"
+          ]
         }
       },
       "status": "active",

@@ -80,7 +80,7 @@ function normalizeProviderStatus(result = {}, exitStatus = 0) {
 }
 
 function providerFailureClassification(classification, status) {
-  if (classification === 'provider' || classification === 'transient' || classification === 'timeout' || classification === 'policy_denied' || classification === 'capability_missing' || classification === 'invalid_input' || classification === 'execution_failed' || classification === 'unknown') {
+  if (classification === 'provider' || classification === 'provider_quota' || classification === 'transient' || classification === 'timeout' || classification === 'policy_denied' || classification === 'capability_missing' || classification === 'invalid_input' || classification === 'execution_failed' || classification === 'unknown') {
     return classification;
   }
   if (classification === 'max_turns') {
