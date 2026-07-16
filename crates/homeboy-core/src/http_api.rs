@@ -562,7 +562,7 @@ fn list_runs(
         runs.extend(
             active_runner_jobs_for_path(path, job_store)
                 .into_iter()
-                .map(active_runner_job_run_summary),
+                .filter_map(active_runner_job_run_summary_if_durable),
         );
     }
 
@@ -588,9 +588,9 @@ fn active_runner_jobs_for_path(path: &str, job_store: &JobStore) -> Vec<ActiveRu
     jobs
 }
 
-fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
-    let summary = api_jobs::active_runner_job_run_summary(job);
-    RunSummary {
+fn active_runner_job_run_summary_if_durable(job: ActiveRunnerJobSummary) -> Option<RunSummary> {
+    let summary = api_jobs::active_runner_job_run_summary_if_durable(job)?;
+    Some(RunSummary {
         id: summary.id,
         kind: summary.kind,
         status: summary.status,
@@ -602,7 +602,7 @@ fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
         command: Some(summary.command),
         cwd: summary.cwd,
         status_note: Some(summary.status_note),
-    }
+    })
 }
 
 fn show_run(run_id: &str) -> Result<RunDetail> {

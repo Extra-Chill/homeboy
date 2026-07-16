@@ -21,7 +21,7 @@ use super::remote_runner::JobArtifactMetadata;
 use super::types::{
     DaemonActiveJobRecoveryDisposition, DaemonActiveJobRecoveryEvidence, DaemonLeaseJobDiagnostics,
     DaemonLinkedDurableRunState, Job, JobEvent, JobEventKind, JobStatus,
-    LeaselessOrphanAffectedJob, LeaselessOrphanJobDiagnostics,
+    LeaselessOrphanAffectedJob, LeaselessOrphanJobDiagnostics, RunnerJobProjection,
 };
 use crate::agent_task_scheduler::AgentTaskAggregateStatus;
 use crate::agent_task_service;
@@ -284,6 +284,11 @@ impl JobStore {
         local_runner: Option<LocalRunnerJob>,
     ) -> Job {
         let now = timestamp_ms();
+        let runner_job_projection = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("runner_job_projection"))
+            .cloned()
+            .and_then(|projection| serde_json::from_value::<RunnerJobProjection>(projection).ok());
         let job = Job {
             id: Uuid::new_v4(),
             operation: operation.into(),
@@ -304,6 +309,7 @@ impl JobStore {
             claimed_at_ms: None,
             claim_expires_at_ms: None,
             artifacts: Vec::new(),
+            runner_job_projection,
         };
 
         let mut inner = self.inner.lock().expect("job store mutex poisoned");

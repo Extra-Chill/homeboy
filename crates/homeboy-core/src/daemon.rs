@@ -1596,6 +1596,29 @@ fn enqueue_exec_job(
     let source_snapshot = Some(plan.source_snapshot.clone());
     let path_materialization_plan = request.path_materialization_plan.clone();
 
+    let mut lifecycle = request.lifecycle.take();
+    let canonical_durable_run_id = exec_request_run_ref_metadata(
+        lifecycle.as_ref(),
+        request.runner_workload.as_ref(),
+        request.metadata.as_ref(),
+    )
+    .and_then(|metadata| {
+        metadata
+            .get("durable_run_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    });
+    if let Some(durable_run_id) = canonical_durable_run_id {
+        lifecycle
+            .get_or_insert_with(|| RunnerJobLifecycleMetadata {
+                source: None,
+                kind: None,
+                durable_run_id: None,
+                active_child_count: None,
+                active_cell_count: None,
+            })
+            .durable_run_id = Some(durable_run_id);
+    }
     let summary = json!({
         "runner_id": plan.runner.id,
         "cwd": plan.cwd,
@@ -1603,25 +1626,34 @@ fn enqueue_exec_job(
         "capture_patch": request.capture_patch,
         "source_snapshot": source_snapshot,
         "path_materialization_plan": path_materialization_plan,
-        "lifecycle": request.lifecycle.clone(),
+        "lifecycle": lifecycle.clone(),
     });
     let operation = "runner.exec".to_string();
-    let run_ref_metadata = exec_request_run_ref_metadata(
-        request.lifecycle.as_ref(),
+    let mut run_ref_metadata = exec_request_run_ref_metadata(
+        lifecycle.as_ref(),
         request.runner_workload.as_ref(),
         request.metadata.as_ref(),
-    );
+    )
+    .unwrap_or_else(|| json!({}));
+    run_ref_metadata["runner_job_projection"] = json!({
+        "runner_id": plan.runner.id,
+        "command": crate::redaction::redact_argv_display(&plan.command),
+        "cwd": plan.cwd,
+        "source": lifecycle.as_ref().and_then(|lifecycle| lifecycle.source.clone()).unwrap_or_else(|| "runner-daemon".to_string()),
+        "kind": lifecycle.as_ref().and_then(|lifecycle| lifecycle.kind.clone()).unwrap_or_else(|| "runner.exec".to_string()),
+        "lifecycle": lifecycle.clone(),
+    });
     let runner = job_store
         .run_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
             operation,
             source_snapshot.clone(),
-            run_ref_metadata,
+            Some(run_ref_metadata),
             path_materialization_plan.clone(),
             Some(LocalRunnerJob {
                 runner_id: plan.runner.id.clone(),
                 command: plan.command.clone(),
                 cwd: Some(plan.cwd.clone()),
-                lifecycle: request.lifecycle.clone(),
+                lifecycle: lifecycle.clone(),
             }),
             move |job| {
                 let mut plan = plan;
@@ -1834,6 +1866,111 @@ mod tests {
 
         assert_eq!(metadata["durable_run_id"], "agent-task-run-123");
         assert_eq!(metadata["agent_task_run_id"], "agent-task-run-123");
+    }
+
+    #[test]
+    fn daemon_exec_projects_metadata_run_id_through_jobs_and_runs_without_read_side_growth() {
+        with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let store = JobStore::default();
+            crate::observation::ObservationStore::open_initialized().expect("observation store");
+            let accepted = route_with_job_store_and_body(
+                "POST",
+                "/exec",
+                Some(json!({
+                    "runner_id": "homeboy-lab",
+                    "cwd": workspace.path(),
+                    "command": ["/bin/sh", "-c", "sleep 2"],
+                    "metadata": { "record_run_id": "durable-run-8341" }
+                })),
+                &store,
+            );
+            assert_eq!(accepted.status_code, 200);
+            let job_id = accepted.body["body"]["job"]["id"]
+                .as_str()
+                .expect("accepted job id");
+            let job_id = Uuid::parse_str(job_id).expect("job UUID");
+            wait_for_daemon_job_status(&store, job_id, JobStatus::Running);
+
+            let jobs = route_with_job_store("GET", "/jobs", &store);
+            assert_eq!(jobs.status_code, 200);
+            let active = &jobs.body["body"]["active_runner_jobs"];
+            assert_eq!(active.as_array().expect("typed jobs").len(), 1);
+            assert_eq!(active[0]["job_id"], job_id.to_string());
+            assert_eq!(active[0]["runner_id"], "homeboy-lab");
+            assert_eq!(active[0]["durable_run_id"], "durable-run-8341");
+
+            let runs = route_with_job_store("GET", "/runs?status=running", &store);
+            assert_eq!(runs.status_code, 200);
+            assert_eq!(runs.body["body"]["runs"][0]["id"], "durable-run-8341");
+
+            let repeat_jobs = route_with_job_store("GET", "/jobs", &store);
+            let repeat_runs = route_with_job_store("GET", "/runs?status=running", &store);
+            assert_eq!(repeat_jobs.body["body"]["active_runner_job_count"], 1);
+            assert_eq!(
+                repeat_runs.body["body"]["runs"]
+                    .as_array()
+                    .expect("runs")
+                    .len(),
+                1
+            );
+
+            store.cancel(job_id, "test cleanup").expect("cancel job");
+
+            let generic = route_with_job_store_and_body(
+                "POST",
+                "/exec",
+                Some(json!({
+                    "runner_id": "homeboy-lab",
+                    "cwd": workspace.path(),
+                    "command": ["/bin/sh", "-c", "sleep 2"]
+                })),
+                &store,
+            );
+            assert_eq!(generic.status_code, 200);
+            let generic_job_id = generic.body["body"]["job"]["id"]
+                .as_str()
+                .expect("generic job id");
+            let generic_job_id = Uuid::parse_str(generic_job_id).expect("generic job UUID");
+            wait_for_daemon_job_status(&store, generic_job_id, JobStatus::Running);
+
+            let generic_jobs = route_with_job_store("GET", "/jobs", &store);
+            assert_eq!(generic_jobs.body["body"]["active_runner_job_count"], 1);
+            assert_eq!(
+                generic_jobs.body["body"]["active_runner_jobs"][0]["job_id"],
+                generic_job_id.to_string()
+            );
+            let generic_runs = route_with_job_store("GET", "/runs?status=running", &store);
+            assert!(generic_runs.body["body"]["runs"]
+                .as_array()
+                .expect("runs")
+                .is_empty());
+
+            let repeated_generic_jobs = route_with_job_store("GET", "/jobs", &store);
+            let repeated_generic_runs = route_with_job_store("GET", "/runs?status=running", &store);
+            assert_eq!(
+                repeated_generic_jobs.body["body"]["active_runner_job_count"],
+                1
+            );
+            assert!(repeated_generic_runs.body["body"]["runs"]
+                .as_array()
+                .expect("runs")
+                .is_empty());
+            store
+                .cancel(generic_job_id, "test cleanup")
+                .expect("cancel generic job");
+        });
+    }
+
+    fn wait_for_daemon_job_status(store: &JobStore, job_id: Uuid, expected: JobStatus) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if store.get(job_id).expect("job").status == expected {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("daemon job {job_id} did not reach {expected:?} before timeout");
     }
 
     #[test]
