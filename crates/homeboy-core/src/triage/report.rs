@@ -10,8 +10,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::defaults;
-use crate::deploy::release_download::{detect_remote_url, parse_github_url, GitHubRepo};
 use crate::error::{Error, Result};
+use crate::git::release_download::{detect_remote_url, parse_github_url, GitHubRepo};
 use crate::observation::TriagePullRequestSignals;
 use crate::scope::{self, Scope, ScopeKind, ScopeOutput};
 

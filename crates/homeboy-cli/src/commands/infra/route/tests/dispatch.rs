@@ -45,7 +45,10 @@ fn lab_cook_dispatcher_recipe_round_trips_exact_transport() {
     let legacy = reconstruct_cook_attempt_dispatcher(&legacy_recipe)
         .unwrap()
         .expect("legacy Lab dispatcher reconstructed");
-    assert_eq!(legacy.durable_recipe().unwrap()["detach_after_handoff"], false);
+    assert_eq!(
+        legacy.durable_recipe().unwrap()["detach_after_handoff"],
+        false
+    );
 }
 
 #[test]

@@ -379,7 +379,7 @@ fn ensure_runtime_tmp_dir() -> Result<PathBuf> {
 /// Create a temporary directory under the runtime temp root.
 ///
 /// Used by `RunDir::create()` for pipeline run directories and by
-/// `deploy/release_download.rs` for ephemeral download artifacts.
+/// `git/release_download.rs` for ephemeral download artifacts.
 pub fn runtime_temp_dir(prefix: &str) -> Result<PathBuf> {
     let path = ensure_runtime_tmp_dir()?.join(unique_name(prefix, ""));
     fs::create_dir_all(&path).map_err(|e| {

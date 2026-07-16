@@ -55,7 +55,7 @@ pub(crate) fn run_github_release(
         .remote_url
         .clone()
         .or_else(|| {
-            crate::deploy::release_download::detect_remote_url(std::path::Path::new(local_path))
+            crate::git::release_download::detect_remote_url(std::path::Path::new(local_path))
         })
         .ok_or_else(|| {
             Error::internal_unexpected(
@@ -64,19 +64,18 @@ pub(crate) fn run_github_release(
             )
         })?;
 
-    let github =
-        crate::deploy::release_download::parse_github_url(&remote_url).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "github.release",
-                format!("Remote URL '{}' is not a GitHub URL", remote_url),
-                None,
-                Some(vec![
-                    "Use a GitHub or GitHub Enterprise remote for automatic GitHub Releases"
-                        .to_string(),
-                    "Use --no-github-release to skip this step".to_string(),
-                ]),
-            )
-        })?;
+    let github = crate::git::release_download::parse_github_url(&remote_url).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "github.release",
+            format!("Remote URL '{}' is not a GitHub URL", remote_url),
+            None,
+            Some(vec![
+                "Use a GitHub or GitHub Enterprise remote for automatic GitHub Releases"
+                    .to_string(),
+                "Use --no-github-release to skip this step".to_string(),
+            ]),
+        )
+    })?;
 
     // Collect artifact paths from state. Populated by release.package
     // (or any other extension action that emits artifact metadata into

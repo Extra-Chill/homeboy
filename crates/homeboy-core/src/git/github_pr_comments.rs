@@ -1,7 +1,7 @@
 //! GitHub pull-request comment helpers.
 
-use crate::deploy::release_download::GitHubRepo;
 use crate::error::{Error, Result};
+use crate::git::release_download::GitHubRepo;
 
 use super::gh_client::GhClient;
 use super::github::{push_markdown_body_file_arg, resolve_component_github, GithubPrOutput};

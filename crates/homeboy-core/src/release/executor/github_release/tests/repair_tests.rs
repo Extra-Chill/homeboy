@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::component::{GithubConfig, GithubHostConfig};
-use crate::deploy::release_download::GitHubRepo;
+use crate::git::release_download::GitHubRepo;
 
 use super::super::{gh_auth_failure_message, github_cli_env, github_release_repair_commands};
 use super::test_repo;

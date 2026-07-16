@@ -9,7 +9,6 @@ use super::super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
 use super::super::path_roots::{component_remote_path, resolve_effective_remote_path};
 use super::super::policy::{owner_hint_for_path, protected_path_suffixes, validate_deploy_target};
 use super::super::provenance::capture_build_provenance;
-use super::super::release_download::ReleaseArtifactLease;
 use super::super::types::{
     BuildProvenance, BuildSource, ComponentDeployResult, DeployArtifactSource, DeployConfig,
 };
@@ -17,6 +16,7 @@ use super::super::version_overrides::is_self_deploy;
 use super::preflight::{resolve_preflight_artifact_path, validate_preflight_file_artifact};
 use super::release_plan::{release_artifact_plan, ReleaseArtifactPlan};
 use super::strategies::{execute_artifact_deploy, execute_file_deploy, execute_git_deploy};
+use crate::git::release_download::ReleaseArtifactLease;
 
 pub(crate) struct PreparedComponentDeploy {
     pub component: Component,

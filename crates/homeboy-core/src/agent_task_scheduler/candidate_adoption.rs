@@ -267,7 +267,7 @@ fn sha256(content: &str) -> String {
 
 fn canonical_repository_identity_for_root(root: Option<&str>) -> Option<String> {
     let remote = crate::git::remote_origin_url(Path::new(root?))?;
-    let repository = crate::deploy::release_download::parse_github_url(&remote)?;
+    let repository = crate::git::release_download::parse_github_url(&remote)?;
     Some(format!(
         "github://{}/{}/{}",
         repository.host.to_ascii_lowercase(),

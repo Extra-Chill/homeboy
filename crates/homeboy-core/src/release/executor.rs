@@ -407,8 +407,8 @@ mod tests {
     use super::package::store_artifacts_from_output;
     use super::{github_release, package_preflight, run_cleanup, run_package};
     use crate::component::Component;
-    use crate::deploy::release_download::GitHubRepo;
     use crate::extension::ExtensionManifest;
+    use crate::git::release_download::GitHubRepo;
     use crate::release::types::ReleaseState;
     use crate::release::{ReleaseArtifact, ReleaseStepStatus};
     fn test_repo() -> GitHubRepo {

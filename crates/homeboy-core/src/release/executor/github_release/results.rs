@@ -1,6 +1,6 @@
 //! `ReleaseStepResult` builders for each GitHub Release outcome.
 
-use crate::deploy::release_download::GitHubRepo;
+use crate::git::release_download::GitHubRepo;
 use crate::release::types::ReleaseStepResult;
 
 use super::super::{step_failed, step_success};

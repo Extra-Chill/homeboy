@@ -175,7 +175,7 @@ fn validate_github_remote_url_field(component: &Value, field: &str) -> Result<()
     if url.trim().is_empty() {
         return Ok(());
     }
-    if crate::deploy::release_download::parse_github_url(url).is_some() {
+    if crate::git::release_download::parse_github_url(url).is_some() {
         return Ok(());
     }
 
@@ -283,7 +283,7 @@ pub fn try_discover_from_portable(dir: &Path) -> Result<Option<Component>> {
 
         // Auto-detect remote_url from git if not already set
         if !obj.contains_key("remote_url") {
-            if let Some(url) = crate::deploy::release_download::detect_remote_url(dir) {
+            if let Some(url) = crate::git::release_download::detect_remote_url(dir) {
                 obj.insert("remote_url".to_string(), Value::String(url));
             }
         }

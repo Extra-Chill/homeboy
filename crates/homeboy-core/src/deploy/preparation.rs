@@ -11,8 +11,8 @@ use super::execution::{
     release_artifact_plan, resolve_planned_release_artifact, ReleaseArtifactPlan,
 };
 use super::orchestration_ref_checkout::{ExactRefCheckout, ExactRefIdentity};
-use super::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
 use super::{sha256_file, DeployConfig, PreparedDeployArtifact};
+use crate::git::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
 
 /// Immutable, target-independent inputs used to prepare a component payload.
 ///
@@ -876,8 +876,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_path = temp.path().join("fixture.zip");
         std::fs::write(&artifact_path, "payload").expect("artifact");
-        let lease = super::super::release_download::ReleaseArtifactLease::test_new(
-            super::super::release_download::ReleaseArtifact {
+        let lease = crate::git::release_download::ReleaseArtifactLease::test_new(
+            crate::git::release_download::ReleaseArtifact {
                 path: artifact_path,
                 tag: "v1.0.0".to_string(),
                 commit: None,
@@ -985,8 +985,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact_path = temp.path().join("fixture.zip");
         std::fs::write(&artifact_path, "payload").expect("artifact");
-        let lease = super::super::release_download::ReleaseArtifactLease::test_new(
-            super::super::release_download::ReleaseArtifact {
+        let lease = crate::git::release_download::ReleaseArtifactLease::test_new(
+            crate::git::release_download::ReleaseArtifact {
                 path: artifact_path,
                 tag: "v1.0.0".to_string(),
                 commit: None,
@@ -1012,8 +1012,8 @@ mod tests {
         let other_temp = tempfile::tempdir().expect("other temp dir");
         let other_path = other_temp.path().join("fixture.zip");
         std::fs::write(&other_path, "changed").expect("other artifact");
-        let conflicting = super::super::release_download::ReleaseArtifactLease::test_new(
-            super::super::release_download::ReleaseArtifact {
+        let conflicting = crate::git::release_download::ReleaseArtifactLease::test_new(
+            crate::git::release_download::ReleaseArtifact {
                 path: other_path,
                 tag: "v1.0.1".to_string(),
                 commit: Some("different".to_string()),
@@ -1090,17 +1090,16 @@ mod tests {
         std::fs::write(&artifact_path, "payload").expect("artifact");
         std::fs::write(temp.path().join("package.json"), r#"{"version":"1.0.0"}"#)
             .expect("package manifest");
-        let lease =
-            ReleaseArtifactLease::test_new(super::super::release_download::ReleaseArtifact {
-                path: artifact_path.clone(),
-                tag: "v1.0.0".to_string(),
-                commit: Some("0123456789abcdef".to_string()),
-                url: "https://example.test/fixture.zip".to_string(),
-                name: "fixture.zip".to_string(),
-                size: 7,
-                sha256: sha256_file(&artifact_path).expect("sha"),
-            })
-            .expect("lease");
+        let lease = ReleaseArtifactLease::test_new(crate::git::release_download::ReleaseArtifact {
+            path: artifact_path.clone(),
+            tag: "v1.0.0".to_string(),
+            commit: Some("0123456789abcdef".to_string()),
+            url: "https://example.test/fixture.zip".to_string(),
+            name: "fixture.zip".to_string(),
+            size: 7,
+            sha256: sha256_file(&artifact_path).expect("sha"),
+        })
+        .expect("lease");
         let observer = lease.clone();
         let mut component = component();
         component.local_path = temp.path().display().to_string();
@@ -1135,7 +1134,7 @@ mod tests {
         let conflicting_path = conflicting_temp.path().join("conflicting.zip");
         std::fs::write(&conflicting_path, "changed").expect("conflicting artifact");
         let conflicting =
-            ReleaseArtifactLease::test_new(super::super::release_download::ReleaseArtifact {
+            ReleaseArtifactLease::test_new(crate::git::release_download::ReleaseArtifact {
                 path: conflicting_path,
                 tag: "v1.0.0".to_string(),
                 commit: Some("fedcba9876543210".to_string()),
@@ -1170,17 +1169,16 @@ mod tests {
         let artifact_path = temp.path().join("fixture.zip");
         let build_counter = temp.path().join("build-count");
         std::fs::write(&artifact_path, "payload").expect("artifact");
-        let lease =
-            ReleaseArtifactLease::test_new(super::super::release_download::ReleaseArtifact {
-                path: artifact_path,
-                tag: "v1.0.0".to_string(),
-                commit: None,
-                url: "https://example.test/fixture.zip".to_string(),
-                name: "fixture.zip".to_string(),
-                size: 7,
-                sha256: "wrong".to_string(),
-            })
-            .expect("lease");
+        let lease = ReleaseArtifactLease::test_new(crate::git::release_download::ReleaseArtifact {
+            path: artifact_path,
+            tag: "v1.0.0".to_string(),
+            commit: None,
+            url: "https://example.test/fixture.zip".to_string(),
+            name: "fixture.zip".to_string(),
+            size: 7,
+            sha256: "wrong".to_string(),
+        })
+        .expect("lease");
         let mut component = component();
         component.local_path = temp.path().display().to_string();
         component.build_artifact = Some("fixture.zip".to_string());

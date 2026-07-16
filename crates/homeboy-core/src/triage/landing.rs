@@ -4,8 +4,8 @@
 use std::collections::BTreeSet;
 
 use crate::component;
-use crate::deploy::release_download::{parse_github_url, GitHubRepo};
 use crate::error::{Error, Result};
+use crate::git::release_download::{parse_github_url, GitHubRepo};
 use crate::observation::TriagePullRequestSignals;
 use crate::scope::ScopeOutput;
 use crate::worktree::{self, TaskWorktreeRecord, TaskWorktreeState};

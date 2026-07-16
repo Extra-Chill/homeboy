@@ -803,6 +803,14 @@ pub(crate) fn reconcile_runner_job_snapshot(
     snapshot: &crate::runner::RunnerJobLogSnapshot,
 ) -> Result<()> {
     if is_terminal_run_state(record.state) {
+        // A transport-only terminal result can arrive before the daemon has
+        // published the inner agent-task aggregate. Adopt that later evidence
+        // when it proves the same controller run rather than losing its patch.
+        if let Some(event) = crate::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(
+            Some(&snapshot.events),
+        ) {
+            project_terminal_runner_lifecycle_event(record, snapshot, &event)?;
+        }
         return Ok(());
     }
     validate_runner_job_snapshot(record, snapshot)?;
@@ -837,21 +845,10 @@ pub(crate) fn reconcile_runner_job_snapshot(
         crate::api_jobs::JobStatus::Succeeded
         | crate::api_jobs::JobStatus::Failed
         | crate::api_jobs::JobStatus::Cancelled => {
-            if let Some(event) = crate::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(Some(&snapshot.events)) {
-                validate_terminal_child_identity(&reconciled, snapshot, &event)?;
-                let projection_plan = aggregate_projection_plan_from_outcomes(&event.aggregate);
-                let aggregate_path = store::aggregate_path(&reconciled.run_id)
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|_| "aggregate.json".to_string());
-                apply_aggregate_to_record(&mut reconciled, &projection_plan, &event.aggregate, aggregate_path);
-                // The aggregate is the task result. A successful enclosing daemon
-                // job only proves transport completion, not task success.
-                record_runner_job_terminal_metadata(&mut reconciled, snapshot.job.status, &snapshot.events);
-                store::write_aggregate_and_record(&reconciled, &event.aggregate)?;
-                crate::agent_task_lifecycle::record_terminal_artifact_projection(
-                    &mut reconciled,
-                    &event.aggregate,
-                )?;
+            if let Some(event) = crate::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(
+                Some(&snapshot.events),
+            ) {
+                project_terminal_runner_lifecycle_event(&mut reconciled, snapshot, &event)?;
             } else {
                 apply_runner_job_terminal_state(&mut reconciled, snapshot.job.status, &snapshot.events);
                 store::write_record(&reconciled)?;
@@ -860,6 +857,25 @@ pub(crate) fn reconcile_runner_job_snapshot(
     }
     *record = reconciled;
     Ok(())
+}
+
+fn project_terminal_runner_lifecycle_event(
+    record: &mut AgentTaskRunRecord,
+    snapshot: &crate::runner::RunnerJobLogSnapshot,
+    event: &crate::runner::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
+) -> Result<()> {
+    validate_runner_job_snapshot(record, snapshot)?;
+    validate_terminal_child_identity(record, snapshot, event)?;
+    let projection_plan = aggregate_projection_plan_from_outcomes(&event.aggregate);
+    let aggregate_path = store::aggregate_path(&record.run_id)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "aggregate.json".to_string());
+    apply_aggregate_to_record(record, &projection_plan, &event.aggregate, aggregate_path);
+    // The aggregate is the task result. A successful enclosing daemon job only
+    // proves transport completion, not task success.
+    record_runner_job_terminal_metadata(record, snapshot.job.status, &snapshot.events);
+    store::write_aggregate_and_record(record, &event.aggregate)?;
+    crate::agent_task_lifecycle::record_terminal_artifact_projection(record, &event.aggregate)
 }
 
 fn merge_live_provider_handles(

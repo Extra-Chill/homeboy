@@ -9,14 +9,12 @@ use crate::release::types::ReleaseOptions;
 /// through cleanly — the step simply isn't added to the plan.
 pub(in crate::release) fn github_release_applies(component: &Component) -> bool {
     let remote_url = component.remote_url.clone().or_else(|| {
-        crate::deploy::release_download::detect_remote_url(std::path::Path::new(
-            &component.local_path,
-        ))
+        crate::git::release_download::detect_remote_url(std::path::Path::new(&component.local_path))
     });
 
     remote_url
         .as_deref()
-        .and_then(crate::deploy::release_download::parse_github_url)
+        .and_then(crate::git::release_download::parse_github_url)
         .is_some()
 }
 
