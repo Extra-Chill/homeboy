@@ -708,17 +708,15 @@ fn refuses_to_replace_proven_dead_daemon_with_active_jobs_when_lease_mismatches(
 }
 
 #[test]
-fn dead_recorded_daemon_routes_to_idempotent_ensure_start() {
-    let status = RemoteDaemonStatus {
-        daemon: None,
-        stale_reason: Some("daemon lease pid is not running".to_string()),
-        stale_reason_code: Some(DaemonStaleReasonCode::PidDead),
-        fresh: false,
-        reachable: false,
-        active_jobs: 0,
-        endpoint_probe_error: None,
-        termination_evidence: None,
-    };
+fn dead_recorded_daemon_without_active_jobs_routes_to_idempotent_ensure_start() {
+    let status = remote_daemon_status_for_test_with_reason(
+        false,
+        false,
+        0,
+        "lease-dead",
+        4545,
+        Some(DaemonStaleReasonCode::PidDead),
+    );
 
     assert_eq!(
         remote_daemon_connect_action(Some(&direct_ssh_session("lease-dead")), &status)
