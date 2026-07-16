@@ -1,4 +1,3 @@
-use homeboy_audit_contract::AuditConfig;
 use crate::config::ConfigEntity;
 use crate::error::{Error, Result};
 use crate::paths;
@@ -6,6 +5,7 @@ pub use homeboy_audit_contract::test_mapping::{
     BehaviorScenarioNames, IncludeWrapperPolicy, PackageNameSource, TestMappingConfig,
     TestVacuityPolicy,
 };
+use homeboy_audit_contract::AuditConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
