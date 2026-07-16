@@ -197,17 +197,6 @@ pub struct RunnerDaemonDriftEntry {
 }
 
 #[derive(Deserialize)]
-pub(super) struct CratesIoResponse {
-    #[serde(rename = "crate")]
-    pub(super) crate_info: CrateInfo,
-}
-
-#[derive(Deserialize)]
-pub(super) struct CrateInfo {
-    pub(super) newest_version: String,
-}
-
-#[derive(Deserialize)]
 pub(super) struct GitHubRelease {
     pub(super) tag_name: String,
 }
