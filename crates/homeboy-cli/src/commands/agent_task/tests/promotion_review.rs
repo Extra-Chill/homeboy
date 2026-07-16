@@ -308,6 +308,23 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for Mirrore
 #[test]
 fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
     with_temp_home(|| {
+        let mut config = homeboy::core::defaults::load_config();
+        config.agent_task.rotation = Some(
+            homeboy::core::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                entries: vec![
+                    homeboy::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                        model: Some("openai/gpt-5.6-terra".to_string()),
+                        ..Default::default()
+                    },
+                    homeboy::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                        model: Some("fallback-model".to_string()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save provider rotation");
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
         let target = temp.path().join("target");
@@ -401,6 +418,13 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
 
         assert_eq!(exit_code, 0, "{value:#}");
         assert_eq!(value["status"], "green_no_finalize");
+        let lifecycle =
+            lifecycle_status("cook-committed-work-attempt-1").expect("local cook lifecycle");
+        assert_eq!(lifecycle.lifecycle.provider_runtime.len(), 1);
+        assert_eq!(
+            lifecycle.lifecycle.provider_runtime[0].metadata["model"],
+            "openai/gpt-5.6-terra"
+        );
         assert_eq!(
             value["attempts"][0]["promotion"]["patch_artifact"]["id"],
             "cook-fixture-component-attempt-1-committed-changes"

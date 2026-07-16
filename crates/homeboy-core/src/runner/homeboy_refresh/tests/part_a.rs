@@ -114,9 +114,35 @@ fn materialize_plan_uses_clean_runner_cache() {
 fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
     let fixture = tempfile::tempdir().expect("fixture directory");
     let source = fixture.path().join("source");
-    let tools = fixture.path().join("tools");
-    std::fs::create_dir_all(&source).expect("source directory");
-    std::fs::create_dir_all(&tools).expect("tool directory");
+    let core = source.join("crates/homeboy-core");
+    std::fs::create_dir_all(core.join("src")).expect("source directory");
+
+    std::fs::write(
+        source.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/homeboy-core\"]\n\n[package]\nname = \"homeboy\"\nversion = \"9.8.7\"\nedition = \"2021\"\n\n[[bin]]\nname = \"homeboy\"\npath = \"src/main.rs\"\n\n[dependencies]\nhomeboy-core = { path = \"crates/homeboy-core\" }\n",
+    )
+    .expect("write root manifest");
+    std::fs::create_dir_all(source.join("src")).expect("root source directory");
+    std::fs::write(
+        source.join("src/main.rs"),
+        "fn main() { println!(\"{\\\"data\\\":{\\\"git_commit\\\":\\\"{}\\\",\\\"git_dirty\\\":{}}}\", homeboy_core::git_commit(), homeboy_core::git_dirty()); }\n",
+    )
+    .expect("write root binary");
+    std::fs::write(
+        core.join("Cargo.toml"),
+        "[package]\nname = \"homeboy-core\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n",
+    )
+    .expect("write core manifest");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("build.rs"),
+        core.join("build.rs"),
+    )
+    .expect("copy core build identity script");
+    std::fs::write(
+        core.join("src/lib.rs"),
+        "pub fn git_commit() -> &'static str { env!(\"HOMEBOY_BUILD_GIT_COMMIT\") }\npub fn git_dirty() -> bool { env!(\"HOMEBOY_BUILD_GIT_DIRTY\") == \"true\" }\n",
+    )
+    .expect("write core build identity consumer");
 
     for args in [
         vec!["init", "--quiet"],
@@ -174,18 +200,6 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
     .to_string();
     assert_ne!(annotated_object, commit, "fixture tag is annotated");
 
-    let cargo = tools.join("cargo");
-    std::fs::write(
-        &cargo,
-        "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--manifest-path\" ]; then manifest=$2; break; fi\n  shift\ndone\ndir=$(dirname \"$manifest\")\nmkdir -p \"$dir/target/release\"\nprintf '%s\\n' '#!/bin/sh' 'dir=$(cd \"$(dirname \"$0\")/../..\" && pwd)' 'commit=$(git -C \"$dir\" rev-parse --short=12 HEAD)' 'printf \"{\\\"data\\\":{\\\"git_commit\\\":\\\"%s\\\",\\\"git_dirty\\\":false}}\\n\" \"$commit\"' > \"$dir/target/release/homeboy\"\nchmod 0755 \"$dir/target/release/homeboy\"\n",
-    )
-    .expect("write fake cargo");
-    let status = Command::new("chmod")
-        .args(["0755", cargo.to_str().expect("cargo path")])
-        .status()
-        .expect("make fake cargo executable");
-    assert!(status.success(), "fake cargo is executable");
-
     for (index, git_ref) in ["annotated", "lightweight", commit.as_str()]
         .iter()
         .enumerate()
@@ -200,14 +214,6 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
         );
         let output = Command::new("bash")
             .args(["-c", &script])
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    tools.display(),
-                    std::env::var("PATH").expect("PATH")
-                ),
-            )
             .output()
             .expect("run materialize script");
         assert!(
@@ -223,9 +229,9 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
         verify_materialized_identity(
             &ssh_bootstrap_plan(),
             &stdout,
-            &parse_identity(&stdout).expect("fake binary identity"),
+            &parse_identity(&stdout).expect("source-built binary identity"),
         )
-        .expect("peeled source identity matches the built commit");
+        .expect("peeled source identity matches the nested-workspace build commit");
     }
 }
 

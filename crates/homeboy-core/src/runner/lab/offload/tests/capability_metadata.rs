@@ -252,6 +252,18 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         Some(&remote_path.display().to_string()),
         None,
     );
+    let mut missing_source_path = snapshot.clone();
+    missing_source_path.local_path = None;
+    let error = attach_lab_workspace_metadata(
+        &mut metadata,
+        LabWorkspaceMetadataInputs {
+            source_snapshot: &missing_source_path,
+            legacy_path_materialization_plan: &path_materialization_plan,
+            primary_synced_workspace: &synced_workspace,
+        },
+    )
+    .expect_err("verification metadata requires the controller source path");
+    assert!(error.message.contains("requires a controller source path"));
     attach_lab_workspace_metadata(
         &mut metadata,
         LabWorkspaceMetadataInputs {
@@ -310,19 +322,31 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         metadata["workspace_verification"]["permission_policy"],
         crate::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY
     );
-    assert!(metadata["workspace_verification"]
-        .get("content_manifest")
-        .is_none());
-    assert!(metadata["workspace_verification"].get("entries").is_none());
+    assert_eq!(
+        metadata["workspace_verification"]["content_manifest"]["entry_count"],
+        1
+    );
+    assert_eq!(
+        metadata["workspace_verification"]["content_manifest"]["entries"][0]["path"],
+        "README.md"
+    );
+    assert_eq!(
+        metadata["workspace_verification"]["content_manifest"]["entries"][0]["kind"],
+        "file"
+    );
+    assert!(
+        metadata["workspace_verification"]["content_manifest"]["entries"][0]
+            .get("content_sha256")
+            .is_none()
+    );
     let serialized_metadata = serde_json::to_string(&metadata).expect("metadata JSON");
-    assert!(!serialized_metadata.contains("README.md"));
     assert!(!serialized_metadata.contains("verified contents"));
 
     std::fs::write(remote.path().join("README.md"), "changed contents\n")
         .expect("change remote file");
     let error = verify_lab_workspace_from_env(&remote_path.display().to_string(), remote.path())
         .expect_err("changed remote content must fail verification");
-    assert!(error.contains("homeboy-workspace-content-v2+"));
+    assert!(error.contains("homeboy-workspace-content-v3+"));
     assert!(error.contains("expected sha256:"));
     assert!(error.contains("got sha256:"));
     assert!(error.contains("homeboy runner workspace sync --mode snapshot"));

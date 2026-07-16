@@ -9,10 +9,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::agent_task_config_materialization::materialize_provider_config_refs;
-use crate::agent_task_dispatch_service::{
-    resolve_dispatch_request, AgentTaskDispatchCommand, ResolvedAgentTaskProviderPolicy,
-};
-use crate::agent_tasks::scheduler::AgentTaskRetryPolicy;
+use crate::agent_task_dispatch_service::{resolve_dispatch_request, AgentTaskDispatchCommand};
 use crate::config::read_json_spec_to_string;
 use crate::defaults;
 use crate::runner_execution_envelope::PathMaterializationPlan;
@@ -211,21 +208,7 @@ pub(in crate::runner) fn inject_agent_task_resolved_provider_policy_in_args(
         None => return Ok(args.to_vec()),
     };
     let request = resolve_dispatch_request(dispatch)?;
-    let rotation = defaults::load_config().agent_task.rotation;
-    let policy = ResolvedAgentTaskProviderPolicy {
-        backend: request.backend,
-        selector: request.selector,
-        model: request.model,
-        retry: AgentTaskRetryPolicy {
-            max_attempts: request.core.attempts.max(1),
-            ..AgentTaskRetryPolicy::default()
-        },
-        liveness_timeout_ms: rotation
-            .as_ref()
-            .and_then(|policy| policy.liveness_timeout_ms),
-        rotation,
-        rotation_starts_with_first_entry: true,
-    };
+    let policy = crate::agent_task_dispatch_service::controller_resolved_execution_policy(&request);
     let encoded = serde_json::to_string(&policy).map_err(|error| {
         Error::internal_json(
             error.to_string(),

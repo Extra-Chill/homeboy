@@ -5,12 +5,16 @@ use crate::engine::shell;
 use crate::observation::{LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADATA_ENV};
 use crate::source_snapshot::SourceSnapshot;
 
-use super::snapshot::{workspace_content_hash_for_policy, workspace_content_hash_v1};
+use super::snapshot::{
+    workspace_content_hash_for_policy, workspace_content_hash_v1,
+    workspace_content_manifest_for_policy, WorkspaceContentManifest, WorkspaceContentManifestEntry,
+};
 use super::workspace_content_hash_algorithm;
 
 const LAB_SOURCE_SNAPSHOT_SYNC_MODE: &str = "lab_offload";
 const SYNTHETIC_SNAPSHOT_BASELINE_REF: &str = "refs/heads/homeboy-snapshot-baseline";
 const SYNTHETIC_SNAPSHOT_AUTHOR: &str = "Homeboy Snapshot <snapshot@homeboy.invalid> 0 +0000";
+const CONTENT_MANIFEST_DIFFERENCE_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedLabWorkspaceProvenance {
@@ -22,6 +26,7 @@ pub(crate) struct VerifiedLabWorkspaceProvenance {
     content_hash: String,
     content_hash_algorithm: String,
     permission_policy: Option<String>,
+    content_manifest: Option<WorkspaceContentManifest>,
     sync_excludes: Vec<String>,
     local_source_path: Option<String>,
     remote_workspace_path: String,
@@ -488,6 +493,14 @@ pub(crate) fn verify_lab_workspace(
             }
             None => return Err("is missing workspace verification metadata".to_string()),
         };
+    let content_manifest = verification
+        .and_then(|verification| verification.get("content_manifest"))
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|error| format!("has invalid workspace content manifest: {error}"))?;
+    if let Some(manifest) = &content_manifest {
+        validate_content_manifest(manifest, permission_policy)?;
+    }
     if workspace_identity != verification_identity {
         return Err("workspace identity does not match workspace verification".to_string());
     }
@@ -500,6 +513,7 @@ pub(crate) fn verify_lab_workspace(
         content_hash: expected_content_hash.to_string(),
         content_hash_algorithm,
         permission_policy: permission_policy.map(str::to_string),
+        content_manifest,
         sync_excludes: snapshot.sync_excludes,
         local_source_path: snapshot.local_path,
         remote_workspace_path: recorded_remote_path.to_string(),
@@ -521,7 +535,10 @@ fn verify_snapshot_workspace_content(
         "homeboy-workspace-content-v1" => {
             workspace_content_hash_v1(workspace, &provenance.sync_excludes)
         }
-        algorithm if algorithm.starts_with("homeboy-workspace-content-v2+") => {
+        algorithm
+            if algorithm.starts_with("homeboy-workspace-content-v2+")
+                || algorithm == "homeboy-workspace-content-v3+unix-owner-executable" =>
+        {
             workspace_content_hash_for_policy(
                 workspace,
                 &provenance.sync_excludes,
@@ -553,10 +570,110 @@ fn verify_snapshot_workspace_content(
             ),
             _ => unreachable!("workspace verification mode was validated above"),
         };
+        let entry_diagnostic = provenance
+            .content_manifest
+            .as_ref()
+            .and_then(|expected| {
+                workspace_content_manifest_for_policy(
+                    workspace,
+                    &provenance.sync_excludes,
+                    provenance.permission_policy.as_deref()?,
+                )
+                .ok()
+                .map(|actual| content_manifest_difference(expected, &actual))
+            })
+            .unwrap_or_default();
         return Err(format!(
-            "workspace content hash does not match the controller materialization using {} (expected {}, got {}); operator diagnostic: `{diagnostic}`",
-            provenance.content_hash_algorithm, provenance.content_hash, actual_content_hash,
+            "workspace content hash does not match the controller materialization using {} (expected {}, got {});{} operator diagnostic: `{diagnostic}`",
+            provenance.content_hash_algorithm, provenance.content_hash, actual_content_hash, entry_diagnostic,
         ));
+    }
+    Ok(())
+}
+
+fn content_manifest_difference(
+    expected: &WorkspaceContentManifest,
+    actual: &WorkspaceContentManifest,
+) -> String {
+    let mut differing = Vec::with_capacity(CONTENT_MANIFEST_DIFFERENCE_LIMIT);
+    for entry in &expected.entries {
+        if differing.len() == CONTENT_MANIFEST_DIFFERENCE_LIMIT {
+            break;
+        }
+        match actual
+            .entries
+            .iter()
+            .find(|candidate| candidate.path == entry.path)
+        {
+            Some(candidate) if candidate == entry => {}
+            Some(candidate) => differing.push(format!(
+                "{} ({})",
+                entry.path,
+                content_manifest_entry_difference(entry, candidate)
+            )),
+            None => differing.push(format!("{} (missing)", entry.path)),
+        }
+    }
+    for entry in &actual.entries {
+        if differing.len() == CONTENT_MANIFEST_DIFFERENCE_LIMIT {
+            break;
+        }
+        if !expected
+            .entries
+            .iter()
+            .any(|candidate| candidate.path == entry.path)
+        {
+            differing.push(format!("{} (unexpected)", entry.path));
+        }
+    }
+    format!(
+        " entry diagnostics: {} differing logical entries in a bounded {}-entry sample (controller total {}, runner total {}): {};",
+        differing.len(),
+        expected.entries.len().max(actual.entries.len()),
+        expected.entry_count,
+        actual.entry_count,
+        if differing.is_empty() { "sample metadata matched; content differs outside bounded metadata".to_string() } else { differing.join(", ") },
+    )
+}
+
+fn content_manifest_entry_difference(
+    expected: &WorkspaceContentManifestEntry,
+    actual: &WorkspaceContentManifestEntry,
+) -> &'static str {
+    if expected.kind != actual.kind {
+        "kind changed"
+    } else if expected.owner_executable != actual.owner_executable {
+        "owner-executable capability changed"
+    } else {
+        "metadata changed"
+    }
+}
+
+fn validate_content_manifest(
+    manifest: &WorkspaceContentManifest,
+    permission_policy: Option<&str>,
+) -> std::result::Result<(), String> {
+    if manifest.entries.len() > 16 || manifest.entry_count < manifest.entries.len() {
+        return Err("has invalid bounded workspace content manifest".to_string());
+    }
+    for entry in &manifest.entries {
+        if entry.path.is_empty()
+            || entry.path.len() > super::snapshot::WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT
+            || entry.path.contains('\0')
+            || !matches!(entry.kind.as_str(), "file" | "directory")
+        {
+            return Err("has invalid bounded workspace content manifest entry".to_string());
+        }
+        if entry.kind == "directory" && entry.owner_executable.is_some() {
+            return Err("has invalid directory workspace content manifest entry".to_string());
+        }
+        if entry.kind == "file"
+            && permission_policy
+                == Some(super::snapshot::WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE)
+            && entry.owner_executable.is_none()
+        {
+            return Err("has incomplete v3 workspace content manifest entry".to_string());
+        }
     }
     Ok(())
 }
@@ -879,6 +996,82 @@ mod tests {
     }
 
     #[test]
+    fn content_hash_mismatch_reports_bounded_logical_entry_diagnostics() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file-00.txt"), "controller secret\n")
+            .expect("source file");
+        for index in 1..20 {
+            std::fs::write(
+                workspace.path().join(format!("file-{index:02}.txt")),
+                "baseline\n",
+            )
+            .expect("source file");
+        }
+        let snapshot = snapshot(workspace.path());
+        let content_hash =
+            super::super::workspace_content_hash(workspace.path(), &snapshot.sync_excludes)
+                .expect("content hash");
+        let content_manifest = workspace_content_manifest_for_policy(
+            workspace.path(),
+            &snapshot.sync_excludes,
+            WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+        )
+        .expect("content manifest");
+        let mut v2 = lab(workspace.path(), &snapshot);
+        v2["workspace_verification"]["schema"] =
+            serde_json::json!("homeboy/lab-workspace-verification/v2");
+        v2["workspace_verification"]["permission_policy"] =
+            serde_json::json!(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY);
+        v2["workspace_verification"]["content_hash_algorithm"] = serde_json::json!(
+            workspace_content_hash_algorithm(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY)
+                .expect("content hash algorithm")
+        );
+        v2["workspace_verification"]["content_hash"] = serde_json::json!(content_hash);
+        v2["workspace_verification"]["content_manifest"] =
+            serde_json::to_value(content_manifest).expect("manifest JSON");
+
+        std::fs::write(workspace.path().join("file-00.txt"), "runner mutation\n")
+            .expect("mutate materialization");
+        let error = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            v2,
+        )
+        .expect_err("changed materialization must fail");
+
+        assert!(error.contains("entry diagnostics: 0 differing logical entries"));
+        assert!(error.contains("sample metadata matched; content differs outside bounded metadata"));
+        assert!(error.contains("bounded 16-entry sample"));
+        assert!(!error.contains("controller secret"));
+        assert!(!error.contains("runner mutation"));
+    }
+
+    #[test]
+    fn content_manifest_validation_rejects_oversized_and_long_path_metadata() {
+        let entry = WorkspaceContentManifestEntry {
+            path: "file.txt".to_string(),
+            kind: "file".to_string(),
+            owner_executable: Some(false),
+        };
+        let oversized = WorkspaceContentManifest {
+            entry_count: 17,
+            entries: vec![entry.clone(); 17],
+        };
+        assert!(validate_content_manifest(&oversized, None).is_err());
+
+        let long_path = WorkspaceContentManifest {
+            entry_count: 1,
+            entries: vec![WorkspaceContentManifestEntry {
+                path: "a"
+                    .repeat(super::super::snapshot::WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT + 1),
+                ..entry
+            }],
+        };
+        assert!(validate_content_manifest(&long_path, None).is_err());
+    }
+
+    #[test]
     fn verified_snapshot_baseline_supports_committed_and_uncommitted_candidate_harvesting() {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
@@ -1084,7 +1277,8 @@ mod tests {
     }
 
     #[test]
-    fn verifier_accepts_legacy_v1_and_current_v2_content_hashes() {
+    #[cfg(unix)]
+    fn verifier_accepts_legacy_v1_v2_and_current_v3_content_hashes() {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
         let snapshot = snapshot(workspace.path());
@@ -1097,18 +1291,22 @@ mod tests {
         )
         .expect("legacy v1 metadata remains valid");
 
-        let content_hash =
-            super::super::workspace_content_hash(workspace.path(), &snapshot.sync_excludes)
-                .expect("v2 content hash");
+        let content_hash = workspace_content_hash_for_policy(
+            workspace.path(),
+            &snapshot.sync_excludes,
+            super::super::snapshot::WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+        )
+        .expect("historical v2 content hash");
         let mut v2 = lab(workspace.path(), &snapshot);
         v2["workspace_verification"]["schema"] =
             serde_json::json!("homeboy/lab-workspace-verification/v2");
         v2["workspace_verification"]["permission_policy"] =
-            serde_json::json!(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY);
-        v2["workspace_verification"]["content_hash_algorithm"] = serde_json::json!(
-            workspace_content_hash_algorithm(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY)
-                .expect("default content hash algorithm")
-        );
+            serde_json::json!(super::super::snapshot::WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE);
+        v2["workspace_verification"]["content_hash_algorithm"] =
+            serde_json::json!(workspace_content_hash_algorithm(
+                super::super::snapshot::WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE
+            )
+            .expect("historical v2 content hash algorithm"));
         v2["workspace_verification"]["content_hash"] = serde_json::json!(content_hash);
         verify_lab_workspace(
             &workspace.path().display().to_string(),
@@ -1116,7 +1314,58 @@ mod tests {
             snapshot.clone(),
             v2,
         )
-        .expect("v2 metadata verifies with v2 algorithm");
+        .expect("historical v2 metadata remains valid");
+
+        let content_hash =
+            super::super::workspace_content_hash(workspace.path(), &snapshot.sync_excludes)
+                .expect("current v3 content hash");
+        let mut v3 = lab(workspace.path(), &snapshot);
+        v3["workspace_verification"]["schema"] =
+            serde_json::json!("homeboy/lab-workspace-verification/v2");
+        v3["workspace_verification"]["permission_policy"] =
+            serde_json::json!(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY);
+        v3["workspace_verification"]["content_hash_algorithm"] = serde_json::json!(
+            workspace_content_hash_algorithm(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY)
+                .expect("current v3 content hash algorithm")
+        );
+        v3["workspace_verification"]["content_hash"] = serde_json::json!(content_hash);
+        verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            v3,
+        )
+        .expect("current v3 metadata verifies");
+    }
+
+    #[test]
+    fn verifier_accepts_portable_v2_content_hash_on_all_platforms() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        let snapshot = snapshot(workspace.path());
+        let content_hash = workspace_content_hash_for_policy(
+            workspace.path(),
+            &snapshot.sync_excludes,
+            WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+        )
+        .expect("portable v2 content hash");
+        let mut v2 = lab(workspace.path(), &snapshot);
+        v2["workspace_verification"]["schema"] =
+            serde_json::json!("homeboy/lab-workspace-verification/v2");
+        v2["workspace_verification"]["permission_policy"] =
+            serde_json::json!(WORKSPACE_CONTENT_PERMISSION_PORTABLE);
+        v2["workspace_verification"]["content_hash_algorithm"] = serde_json::json!(
+            workspace_content_hash_algorithm(WORKSPACE_CONTENT_PERMISSION_PORTABLE)
+                .expect("portable v2 content hash algorithm")
+        );
+        v2["workspace_verification"]["content_hash"] = serde_json::json!(content_hash);
+        verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            v2,
+        )
+        .expect("portable v2 metadata remains valid");
     }
 
     #[test]

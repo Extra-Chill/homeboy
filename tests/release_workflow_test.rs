@@ -241,16 +241,16 @@ fn release_preflight_validates_the_private_workspace_build_before_mutating_relea
         "the root package must not be planned for crates.io publication"
     );
     assert!(
-        cargo_manifest().contains("homeboy-cli = { version = \"0.1.0\", path = \"crates/homeboy-cli\" }"),
-        "the root package must consume the extracted CLI crate through the private workspace"
+        cargo_manifest().contains("homeboy-cli = { path = \"crates/homeboy-cli\" }"),
+        "the root package must consume the extracted CLI crate as a private path dependency"
     );
     assert!(
-        cargo_manifest().contains("homeboy-core = { version = \"0.1.0\", path = \"crates/homeboy-core\" }"),
-        "the root package must consume the extracted core crate through the private workspace"
+        cargo_manifest().contains("homeboy-core = { path = \"crates/homeboy-core\" }"),
+        "the root package must consume the extracted core crate as a private path dependency"
     );
     assert!(
-        cargo_manifest().contains("homeboy-lab-contract = { version = \"0.1.0\", path = \"crates/homeboy-lab-contract\" }"),
-        "the root package must consume the extracted Lab contract crate through the private workspace"
+        cargo_manifest().contains("homeboy-lab-contract = { path = \"crates/homeboy-lab-contract\" }"),
+        "the root package must consume the extracted Lab contract crate as a private path dependency"
     );
     assert!(
         package_preflight < release_action,
