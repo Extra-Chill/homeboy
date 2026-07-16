@@ -70,6 +70,9 @@ struct CountingFailingDispatchHook {
 struct RuntimeBudgetDispatchHook;
 
 #[derive(Clone, Default)]
+struct RunnerHandoffDispatchHook;
+
+#[derive(Clone, Default)]
 struct EvidenceExecutor;
 
 impl ControllerDispatchHook for CapturingDispatchHook {
@@ -240,6 +243,27 @@ impl ControllerDispatchHook for RuntimeBudgetDispatchHook {
                         }
                     }]
                 }
+            }),
+            0,
+        ))
+    }
+}
+
+impl ControllerDispatchHook for RunnerHandoffDispatchHook {
+    fn dispatch(&self, request: &Value) -> Result<(Value, i32)> {
+        let run_id = request["dispatch"]["run_id"]
+            .as_str()
+            .expect("controller injected run id");
+        Ok((
+            json!({
+                "schema": "homeboy/agent-task-controller-lab-handoff/v1",
+                "run_id": run_id,
+                "runner_id": "homeboy-lab",
+                "identity": {
+                    "run_id": run_id,
+                    "runner_id": "homeboy-lab",
+                    "runner_job_id": "job-8515",
+                },
             }),
             0,
         ))

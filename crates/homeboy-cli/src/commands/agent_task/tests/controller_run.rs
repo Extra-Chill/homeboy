@@ -77,6 +77,46 @@ fn controller_run_next_executes_spawn_task_plan_and_records_dedupe_lineage() {
 }
 
 #[test]
+fn controller_cli_hook_blocks_unavailable_required_runner_without_local_fallback() {
+    with_temp_home(|| {
+        let mut controller = agent_task_loop_controller::create_controller(
+            "loop-cli-runner-unavailable",
+            "repair",
+            "v1",
+        )
+        .expect("controller created");
+        controller.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "runner:required".to_string(),
+                entity_id: None,
+                request: json!({
+                    "mode": "dispatch",
+                    "runner": "missing-lab-runner",
+                    "local_fallback": false,
+                    "dispatch": { "prompt": "This must not run locally.", "backend": "fixture" },
+                }),
+            },
+            "runner required",
+        );
+        agent_task_loop_controller::write_controller(&controller).expect("controller written");
+
+        let (value, exit_code) = controller_run_next_with_executor(
+            "loop-cli-runner-unavailable".to_string(),
+            CapturingExecutor::default(),
+        )
+        .expect("controller reports policy block");
+        assert_eq!(exit_code, 1, "{value:#}");
+        assert_eq!(value["status"], "blocked_runner_unavailable");
+        let loaded = agent_task_loop_controller::load_controller("loop-cli-runner-unavailable")
+            .expect("controller loaded");
+        assert_eq!(
+            loaded.next_actions[0].status,
+            AgentTaskLoopActionStatus::BlockedRunnerUnavailable
+        );
+    });
+}
+
+#[test]
 fn controller_dispatch_runtime_component_contracts_reach_spawned_agent_task_request() {
     with_temp_home(|| {
         let component = tempfile::tempdir().expect("agents-api checkout");

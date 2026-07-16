@@ -158,9 +158,12 @@ pub(super) fn controller_action_plan_step(
         AgentTaskLoopActionStatus::BlockedRunnerUnavailable
         | AgentTaskLoopActionStatus::BlockedRemoteMaterialization
         | AgentTaskLoopActionStatus::BlockedLocalFallbackDenied => PlanStepStatus::Missing,
-        AgentTaskLoopActionStatus::Running => PlanStepStatus::Running,
+        AgentTaskLoopActionStatus::Running | AgentTaskLoopActionStatus::WaitingForRunner => {
+            PlanStepStatus::Running
+        }
         AgentTaskLoopActionStatus::Completed => PlanStepStatus::Success,
         AgentTaskLoopActionStatus::Failed => PlanStepStatus::Failed,
+        AgentTaskLoopActionStatus::Cancelled => PlanStepStatus::Skipped,
     };
     let mut inputs = HashMap::from([
         ("action".to_string(), action_value),

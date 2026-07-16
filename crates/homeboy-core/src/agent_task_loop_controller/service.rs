@@ -159,6 +159,19 @@ fn controller_state_diagnostic(
         };
     }
 
+    if record
+        .next_actions
+        .iter()
+        .any(|action| action.status == AgentTaskLoopActionStatus::WaitingForRunner)
+    {
+        return AgentTaskLoopControllerStateDiagnostic {
+            state: "waiting_for_runner".to_string(),
+            label: "waiting for runner".to_string(),
+            actionable: false,
+            reason: "a Lab runner accepted a controller action and remains authoritative until it reports a terminal result".to_string(),
+        };
+    }
+
     if record.next_actions.iter().any(is_failed_or_blocked_action) {
         return AgentTaskLoopControllerStateDiagnostic {
             state: "running_blocked_failed_action".to_string(),
@@ -215,6 +228,12 @@ fn relevant_action_diagnostic(
             record
                 .next_actions
                 .iter()
+                .find(|action| action.status == AgentTaskLoopActionStatus::WaitingForRunner)
+        })
+        .or_else(|| {
+            record
+                .next_actions
+                .iter()
                 .find(|action| action.status == AgentTaskLoopActionStatus::Pending)
         })?;
     let action_value = action_value(action);
@@ -253,6 +272,9 @@ fn controller_next_commands(
         )],
         "running_active_work" => vec![format!(
             "homeboy agent-task controller status {loop_id}  # active work is still running"
+        )],
+        "waiting_for_runner" => vec![format!(
+            "homeboy agent-task controller status {loop_id}  # Lab owns the accepted action until its terminal result is reconciled"
         )],
         "running_blocked_failed_action" => {
             let mut commands = vec![format!(

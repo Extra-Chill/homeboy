@@ -659,6 +659,47 @@ fn lab_cook_attempt_args(serialized_plan: String, run_id: &str) -> Vec<String> {
     ]
 }
 
+/// Dispatch one controller-owned plan through the canonical Lab attempt
+/// transport. The durable run record is created before handoff and receives the
+/// typed runner/job identity as soon as the daemon accepts it.
+pub(crate) fn dispatch_controller_plan_to_lab(
+    plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+    run_id: &str,
+    runner_id: &str,
+) -> homeboy::core::Result<serde_json::Value> {
+    let source_path = plan
+        .tasks
+        .first()
+        .and_then(|task| task.workspace.root.as_ref())
+        .map(PathBuf::from);
+    let dispatcher = LabCookAttemptDispatcher {
+        runner_id: runner_id.to_string(),
+        allow_local_fallback: false,
+        allow_dirty_lab_workspace: false,
+        skip_deps_hydration: false,
+        // Controller actions yield after the daemon accepts the child. The
+        // persisted run is the reconnect and terminal-event replay boundary.
+        detach_after_handoff: true,
+        source_path,
+        job_overrides: runners::LabJobOverrides::default(),
+    };
+    <LabCookAttemptDispatcher as crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>::prepare_for_cook(&dispatcher)?;
+    <LabCookAttemptDispatcher as crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>::dispatch_attempt(
+        &dispatcher,
+        plan,
+        run_id,
+        None,
+    )?;
+    let record = agent_task_lifecycle::status(run_id)?;
+    Ok(serde_json::json!({
+        "schema": "homeboy/agent-task-controller-lab-handoff/v1",
+        "run_id": run_id,
+        "runner_id": runner_id,
+        "identity": record.metadata.get("runner_handoff").and_then(|handoff| handoff.get("identity")).cloned(),
+        "run": record,
+    }))
+}
+
 /// Transfer the exact controller-compiled cook plan rather than asking the
 /// runner to rebuild it from command-line inputs after the durable handoff.
 fn inject_agent_task_cook_attempt_plan(
