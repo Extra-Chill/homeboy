@@ -73,18 +73,34 @@ fn resolve_runner_artifact_route(
     record: &super::AgentTaskRunRecord,
     artifact: &AgentTaskArtifact,
 ) -> Result<RunnerArtifactRoute> {
-    let mut routes =
-        if let (Some(runner_id), Some(job_id)) = (record.runner_id(), record.runner_job_id()) {
-            vec![RunnerArtifactRoute {
+    let lifecycle_route =
+        record
+            .runner_id()
+            .zip(record.runner_job_id())
+            .map(|(runner_id, job_id)| RunnerArtifactRoute {
                 runner_id: runner_id.to_string(),
                 job_id: job_id.to_string(),
-            }]
-        } else {
-            crate::observation::runs_service::mirrored_runner_job_identities(&record.run_id)?
-                .into_iter()
-                .map(|(runner_id, job_id)| RunnerArtifactRoute { runner_id, job_id })
-                .collect()
-        };
+            });
+    let mirrored_identities = if lifecycle_route.is_none() {
+        crate::observation::runs_service::mirrored_runner_job_identities(&record.run_id)?
+    } else {
+        Vec::new()
+    };
+    resolve_runner_artifact_route_from_identities(artifact, lifecycle_route, mirrored_identities)
+}
+
+fn resolve_runner_artifact_route_from_identities(
+    artifact: &AgentTaskArtifact,
+    lifecycle_route: Option<RunnerArtifactRoute>,
+    mirrored_identities: Vec<(String, String)>,
+) -> Result<RunnerArtifactRoute> {
+    let mut routes = lifecycle_route.into_iter().collect::<Vec<_>>();
+    if routes.is_empty() {
+        routes = mirrored_identities
+            .into_iter()
+            .map(|(runner_id, job_id)| RunnerArtifactRoute { runner_id, job_id })
+            .collect();
+    }
     routes.sort();
     routes.dedup();
     match routes.as_slice() {
@@ -251,6 +267,103 @@ mod tests {
             sha256: Some(format!("{:x}", Sha256::digest(bytes))),
             metadata: json!({}),
         }
+    }
+
+    #[test]
+    fn route_selection_prefers_lifecycle_and_fails_closed_for_missing_or_ambiguous_mirrors() {
+        let value = artifact(b"patch bytes");
+        let lifecycle = RunnerArtifactRoute {
+            runner_id: "lifecycle-runner".to_string(),
+            job_id: "lifecycle-job".to_string(),
+        };
+        assert_eq!(
+            resolve_runner_artifact_route_from_identities(
+                &value,
+                Some(lifecycle.clone()),
+                vec![("mirror-runner".to_string(), "mirror-job".to_string())],
+            )
+            .expect("lifecycle route wins"),
+            lifecycle
+        );
+        assert_eq!(
+            resolve_runner_artifact_route_from_identities(
+                &value,
+                None,
+                vec![("mirror-runner".to_string(), "mirror-job".to_string())],
+            )
+            .expect("single mirror route"),
+            RunnerArtifactRoute {
+                runner_id: "mirror-runner".to_string(),
+                job_id: "mirror-job".to_string(),
+            }
+        );
+
+        let missing = resolve_runner_artifact_route_from_identities(&value, None, Vec::new())
+            .expect_err("missing route fails closed");
+        assert_eq!(missing.code, crate::ErrorCode::ValidationInvalidArgument);
+        assert!(missing
+            .message
+            .contains("no authenticated runner/job binding"));
+
+        let ambiguous = resolve_runner_artifact_route_from_identities(
+            &value,
+            None,
+            vec![
+                ("runner-a".to_string(), "job-a".to_string()),
+                ("runner-b".to_string(), "job-b".to_string()),
+            ],
+        )
+        .expect_err("ambiguous routes fail closed");
+        assert_eq!(ambiguous.code, crate::ErrorCode::ValidationInvalidArgument);
+        assert!(ambiguous
+            .message
+            .contains("multiple conflicting authenticated runner/job bindings"));
+    }
+
+    #[test]
+    fn selected_mirrored_route_materializes_verified_controller_bytes() {
+        let _lock = artifact_root_lock().lock().expect("artifact root lock");
+        let root = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("HOMEBOY_ARTIFACT_ROOT", root.path());
+        let bytes = b"mirrored patch bytes";
+        let mut value = artifact(bytes);
+        let route = resolve_runner_artifact_route_from_identities(
+            &value,
+            None,
+            vec![("mirror-runner".to_string(), "mirror-job".to_string())],
+        )
+        .expect("select mirrored route");
+
+        assert!(materialize_artifact(
+            &mut value,
+            &route.runner_id,
+            &route.job_id,
+            "run",
+            "task",
+            |_| Ok(
+                json!({ "content_base64": base64::engine::general_purpose::STANDARD.encode(bytes) })
+            ),
+        )
+        .expect("materialize mirrored artifact"));
+        let path = PathBuf::from(value.path.as_deref().expect("controller path"));
+        assert_eq!(std::fs::read(path).expect("controller bytes"), bytes);
+        assert_eq!(
+            value.metadata["controller_artifact_materialization"]["runner_id"],
+            "mirror-runner"
+        );
+        assert_eq!(
+            value.metadata["controller_artifact_materialization"]["runner_job_id"],
+            "mirror-job"
+        );
+        assert_eq!(
+            value.metadata["controller_artifact_materialization"]["verified_size_bytes"],
+            bytes.len()
+        );
+        assert_eq!(
+            value.metadata["controller_artifact_materialization"]["verified_sha256"],
+            value.sha256.as_deref().expect("SHA")
+        );
+        std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
     }
 
     #[test]
