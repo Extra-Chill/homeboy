@@ -28,9 +28,9 @@ pub use super::runner::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path,
     broker_submit_token_for_runner, broker_token_from_env, connect,
     connect_with_leaseless_orphan_reconciliation, connect_with_orphan_adoption,
-    connect_with_recovery, reverse_broker_artifact, reverse_broker_reconcile, BrokerAuthGrant,
-    BrokerAuthStore, BrokerCredential, BrokerScope, MintedCredential, BROKER_TOKEN_ENV,
-    BROKER_TOKEN_HEADER,
+    connect_with_recovery, reverse_broker_artifact, reverse_broker_artifact_content,
+    reverse_broker_reconcile, runner_artifact_content, BrokerAuthGrant, BrokerAuthStore,
+    BrokerCredential, BrokerScope, MintedCredential, BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
 };
 pub use super::runner::{
     connect_reverse, disconnect, download_remote_artifact,

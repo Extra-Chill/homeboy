@@ -249,8 +249,8 @@ pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
         aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run,
         cook_attempt_run_id, cook_index, list_records, load_controller_plan, load_plan, logs,
-        mark_resuming, mark_running, reconcile_record_health, record_completed_run,
-        record_cook_attempt, record_detached_lab_run, record_health_summary,
+        mark_resuming, mark_running, materialize_recovered_patch_artifact, reconcile_record_health,
+        record_completed_run, record_cook_attempt, record_detached_lab_run, record_health_summary,
         record_lab_offload_phase, record_lab_offload_planned, record_pre_dispatch_failure,
         record_pre_execution_failure, record_promotion, record_remote_dispatch_failure,
         record_run_aggregate, retry, run_id_for_aggregate_path, run_record_exists, run_status,

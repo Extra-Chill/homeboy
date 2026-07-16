@@ -75,6 +75,38 @@ pub(super) fn reverse_controller_session() -> RunnerSession {
     }
 }
 
+fn direct_controller_session() -> RunnerSession {
+    let mut session = reverse_controller_session();
+    session.mode = RunnerTunnelMode::DirectSsh;
+    session.broker_url = None;
+    session.local_url = Some("http://127.0.0.1:9877".to_string());
+    session
+}
+
+#[test]
+fn artifact_content_transport_routes_direct_sessions_to_the_daemon() {
+    assert_eq!(
+        artifact_content_transport(&direct_controller_session()).expect("direct transport"),
+        RunnerArtifactContentTransport::DirectDaemon
+    );
+}
+
+#[test]
+fn artifact_content_transport_routes_reverse_sessions_to_the_broker() {
+    assert_eq!(
+        artifact_content_transport(&reverse_controller_session()).expect("reverse transport"),
+        RunnerArtifactContentTransport::ReverseBroker
+    );
+}
+
+#[test]
+fn artifact_content_transport_rejects_sessions_without_a_managed_endpoint() {
+    let mut session = direct_controller_session();
+    session.local_url = None;
+    let error = artifact_content_transport(&session).expect_err("missing endpoint");
+    assert!(error.message.contains("no managed daemon endpoint"));
+}
+
 pub(super) fn sample_run_summary(id: &str) -> RunSummary {
     RunSummary {
         id: id.to_string(),

@@ -9,7 +9,10 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::api_jobs::{ActiveRunnerJobSummary, JobClaimMetadata, JobStatus, RunnerJobSource};
+use crate::api_jobs::{
+    ActiveRunnerJobSummary, JobClaimMetadata, JobEventKind, JobStatus, RemoteRunnerJobResult,
+    RunnerJobSource,
+};
 use crate::daemon::{
     DaemonFreshnessReport, DaemonLeaselessRecoveryResult, DaemonStaleReasonCode,
     DaemonStateLossRecoveryResult,
@@ -1105,6 +1108,153 @@ pub fn reverse_broker_artifact(runner_id: &str, job_id: &str, artifact_id: &str)
         "lookup reverse runner broker artifact",
         broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
     )
+}
+
+/// Fetch bytes that a reverse runner mirrored into its terminal job result.
+/// Callers must still validate the returned content against durable metadata.
+pub fn reverse_broker_artifact_content(
+    runner_id: &str,
+    job_id: &str,
+    artifact_id: &str,
+) -> Result<Value> {
+    let broker_url = reverse_broker_url(runner_id)?;
+    let artifact_id = crate::execution_contract::encode_uri_component(artifact_id);
+    let client = broker_client("build broker artifact content client")?;
+    broker_http::get_json(
+        &client,
+        &broker_url,
+        &format!("/runner/jobs/{job_id}/artifacts/{artifact_id}/content"),
+        "fetch reverse runner broker artifact content",
+        broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
+    )
+}
+
+/// Retrieve terminal job artifact bytes through the runner's active managed
+/// transport. Direct sessions read the daemon's persisted job result; reverse
+/// sessions use the broker content endpoint.
+pub fn runner_artifact_content(runner_id: &str, job_id: &str, artifact_id: &str) -> Result<Value> {
+    let report = status(runner_id)?;
+    let Some(session) = report.session.filter(|_| report.connected) else {
+        return Err(Error::validation_invalid_argument(
+            "runner_id",
+            format!("runner `{runner_id}` is not connected"),
+            Some(runner_id.to_string()),
+            None,
+        ));
+    };
+    match artifact_content_transport(&session)? {
+        RunnerArtifactContentTransport::DirectDaemon => {
+            direct_daemon_job_artifact_content(runner_id, job_id, artifact_id)
+        }
+        RunnerArtifactContentTransport::ReverseBroker => {
+            reverse_broker_artifact_content(runner_id, job_id, artifact_id)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunnerArtifactContentTransport {
+    DirectDaemon,
+    ReverseBroker,
+}
+
+fn artifact_content_transport(session: &RunnerSession) -> Result<RunnerArtifactContentTransport> {
+    match session.mode {
+        RunnerTunnelMode::DirectSsh if session.local_url.is_some() => {
+            Ok(RunnerArtifactContentTransport::DirectDaemon)
+        }
+        RunnerTunnelMode::Reverse if session.broker_url.is_some() => {
+            Ok(RunnerArtifactContentTransport::ReverseBroker)
+        }
+        RunnerTunnelMode::DirectSsh => Err(Error::validation_invalid_argument(
+            "runner_id",
+            format!(
+                "direct runner `{}` has no managed daemon endpoint for artifact retrieval",
+                session.runner_id
+            ),
+            Some(session.runner_id.clone()),
+            Some(vec![
+                "Reconnect the direct runner so its local daemon URL is available, then retry the review or promotion."
+                    .to_string(),
+            ]),
+        )),
+        RunnerTunnelMode::Reverse => Err(Error::validation_invalid_argument(
+            "runner_id",
+            format!(
+                "reverse runner `{}` has no broker endpoint for artifact retrieval",
+                session.runner_id
+            ),
+            Some(session.runner_id.clone()),
+            Some(vec![
+                "Reconnect the reverse runner with its broker URL, then retry the review or promotion."
+                    .to_string(),
+            ]),
+        )),
+    }
+}
+
+fn direct_daemon_job_artifact_content(
+    runner_id: &str,
+    job_id: &str,
+    artifact_id: &str,
+) -> Result<Value> {
+    let snapshot = super::runner_job_log_snapshot(runner_id, job_id)?;
+    let result = snapshot
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.kind == JobEventKind::Result)
+        .and_then(|event| event.data.clone())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                format!("runner job `{job_id}` has no terminal result containing artifact bytes"),
+                Some(artifact_id.to_string()),
+                None,
+            )
+        })?;
+    let result: RemoteRunnerJobResult = serde_json::from_value(result).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse direct runner terminal job result for artifact retrieval".to_string()),
+        )
+    })?;
+    let artifact = result
+        .artifacts
+        .iter()
+        .chain(result.artifact_refs.iter())
+        .find(|artifact| artifact.id == artifact_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                format!("direct runner job `{job_id}` has no artifact `{artifact_id}`"),
+                Some(artifact_id.to_string()),
+                None,
+            )
+        })?;
+    let content_base64 = artifact.content_base64.clone().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "direct runner job `{job_id}` did not retain bytes for artifact `{artifact_id}`"
+            ),
+            Some(artifact_id.to_string()),
+            Some(vec![
+                "Only artifacts mirrored in the direct runner terminal result can be materialized."
+                    .to_string(),
+            ]),
+        )
+    })?;
+    Ok(serde_json::json!({
+        "command": "runner.jobs.artifacts.direct_daemon_content",
+        "job_id": job_id,
+        "artifact_id": artifact_id,
+        "content_base64": content_base64,
+        "filename": artifact.name,
+        "mime": artifact.mime,
+        "size_bytes": artifact.size_bytes,
+        "sha256": artifact.sha256,
+    }))
 }
 
 fn reverse_broker_url(runner_id: &str) -> Result<String> {
