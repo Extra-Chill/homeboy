@@ -556,7 +556,9 @@ pub(super) fn audit_internal(
 ///
 /// The snapshot uses structural source extensions so structural checks avoid a
 /// second walk/read of the tree.
-fn build_shared_source_snapshot(root: &Path) -> crate::engine::codebase_scan::CodebaseSnapshot {
+fn build_shared_source_snapshot(
+    root: &Path,
+) -> homeboy_engine_primitives::codebase_scan::CodebaseSnapshot {
     let additional: Vec<String> = structural::source_extensions()
         .iter()
         .map(|ext| (*ext).to_string())

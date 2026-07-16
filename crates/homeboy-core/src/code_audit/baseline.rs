@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::engine::baseline::{self as generic, BaselineConfig, Fingerprintable};
+use homeboy_engine_primitives::baseline::{self as generic, BaselineConfig, Fingerprintable};
 
 use super::conventions::AuditFinding as AuditFindingKind;
 use super::findings::{normalized_finding_description_for_fingerprint, Finding};

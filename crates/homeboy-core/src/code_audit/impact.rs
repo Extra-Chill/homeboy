@@ -118,8 +118,11 @@ pub(crate) fn fingerprint_from_git_ref(
 ) -> Option<FileFingerprint> {
     // Get file content from the git ref
     let git_spec = format!("{}:{}", git_ref, relative_path);
-    let content =
-        crate::engine::command::run_in_optional(source_path, "git", &["show", &git_spec])?;
+    let content = homeboy_engine_primitives::command::run_in_optional(
+        source_path,
+        "git",
+        &["show", &git_spec],
+    )?;
 
     let ext = Path::new(relative_path).extension()?.to_str()?;
     super::fingerprint::fingerprint_extension_content(ext, relative_path, &content)

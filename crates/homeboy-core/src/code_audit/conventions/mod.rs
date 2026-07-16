@@ -17,10 +17,10 @@ use super::naming::{detect_naming_suffix, suffix_matches};
 use super::signatures::{compute_signature_skeleton, tokenize_signature};
 use homeboy_audit_contract::AuditConfig;
 
-/// `Language` now lives in `crate::engine::language` — the foundation layer,
+/// `Language` now lives in `homeboy_engine_primitives::language` — the foundation layer,
 /// since it is a source-file primitive with no audit dependencies. Re-exported
 /// here so existing `code_audit::conventions::Language` paths keep resolving.
-pub use crate::engine::language::Language;
+pub use homeboy_engine_primitives::language::Language;
 
 /// Generic, framework-agnostic tracker-reference regex defaults shipped with
 /// Homeboy core. These match issue/PR/ticket URL shapes that are not tied to

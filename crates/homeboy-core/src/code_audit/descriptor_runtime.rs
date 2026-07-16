@@ -15,7 +15,7 @@ use super::{
     Finding, FingerprintDetectorRunner, GenericDetectorRunner, RootDetectorRunner,
 };
 use crate::component::{self, AuditConfig};
-use crate::engine::codebase_scan::CodebaseSnapshot;
+use homeboy_engine_primitives::codebase_scan::CodebaseSnapshot;
 use std::path::Path;
 
 /// Inputs shared by every data-driven detector. The descriptor table dispatches

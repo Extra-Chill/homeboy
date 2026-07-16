@@ -1,10 +1,12 @@
 //! walker — extracted from conventions.rs.
 //!
-//! File walking delegated to `crate::engine::codebase_scan` for consistency.
+//! File walking delegated to `homeboy_engine_primitives::codebase_scan` for consistency.
 
 use std::path::Path;
 
-use crate::engine::codebase_scan::{self, CodebaseSnapshot, ExtensionFilter, ScanConfig};
+use homeboy_engine_primitives::codebase_scan::{
+    self, CodebaseSnapshot, ExtensionFilter, ScanConfig,
+};
 
 // `is_test_path` is a pure path classifier consumed by both code_audit and
 // extension; it now lives in homeboy-engine-primitives so those two feature

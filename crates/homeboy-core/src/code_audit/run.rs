@@ -27,7 +27,7 @@ pub struct AuditRunWorkflowArgs {
     pub exclude_labels: Vec<String>,
     pub profile: code_audit::AuditProfile,
     pub extension_overrides: Vec<String>,
-    pub baseline_flags: crate::engine::baseline::BaselineFlags,
+    pub baseline_flags: homeboy_engine_primitives::baseline::BaselineFlags,
     pub changed_since: Option<String>,
     pub precomputed_changed_files: Option<Vec<String>>,
     pub json_summary: bool,

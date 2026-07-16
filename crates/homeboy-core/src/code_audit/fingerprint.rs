@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::conventions::Language;
-use crate::engine::codebase_scan::CodebaseSnapshot;
+use homeboy_engine_primitives::codebase_scan::CodebaseSnapshot;
 
 /// A structural fingerprint extracted from a single source file.
 #[derive(Debug, Clone, Default)]
@@ -274,7 +274,7 @@ impl FingerprintIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::codebase_scan::ScanConfig;
+    use homeboy_engine_primitives::codebase_scan::ScanConfig;
 
     /// Sort a slice of strings into an owned Vec for set-equivalence asserts.
     /// Used because some fingerprint vector fields come from HashMap iteration
