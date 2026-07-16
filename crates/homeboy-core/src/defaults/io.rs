@@ -63,8 +63,8 @@ fn clear_config_cache() {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn reset_config_cache_for_test() {
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_config_cache_for_test() {
     clear_config_cache();
 }
 

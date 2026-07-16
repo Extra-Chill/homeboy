@@ -23,7 +23,11 @@ pub mod command_contract;
 pub mod commands;
 pub mod help_topics;
 
-/// Test-only fixtures and hermetic process contexts.
+// Test-only fixtures / hermetic process contexts live in homeboy-core (the whole
+// workspace shares one isolation contract). Re-exported as `test_support` so this
+// layer's `crate::test_support::*` call sites are unchanged. Available only in
+// test builds (core exposes it via its `test-support` feature, which this crate
+// enables as a dev-dependency).
+#[cfg(test)]
 #[doc(hidden)]
-#[allow(dead_code)]
-pub mod test_support;
+pub use homeboy_core::test_support;

@@ -109,10 +109,10 @@ fn contract_output_exports_core_agent_task_metadata() {
 #[test]
 fn generic_loop_contract_fixtures_are_versioned_and_provider_neutral() {
     let fixtures = [
-        include_str!("../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json"),
-        include_str!("../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json"),
-        include_str!("../../../../tests/fixtures/agent_task_contract/local_file_evidence_refs.json"),
-        include_str!("../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json"),
+        include_str!("../../../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json"),
+        include_str!("../../../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json"),
+        include_str!("../../../../../../tests/fixtures/agent_task_contract/local_file_evidence_refs.json"),
+        include_str!("../../../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json"),
     ];
 
     for raw in fixtures {

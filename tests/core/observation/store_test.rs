@@ -3,11 +3,11 @@
 //! These isolate `HOME` / `XDG_DATA_HOME` so the developer's real local DB is
 //! never read or written.
 
-use crate::core::observation::store::{
+use crate::observation::store::{
     self, ObservationStore, CURRENT_SCHEMA_VERSION, LAB_OFFLOAD_METADATA_ENV,
     SOURCE_SNAPSHOT_METADATA_ENV,
 };
-use crate::core::observation::{
+use crate::observation::{
     FindingListFilter, NewFindingRecord, NewRunRecord, RunContext, RunListFilter, RunProvenance,
     RunRecord, RunStatus,
 };
@@ -1032,7 +1032,7 @@ mod write_retry {
     #[test]
     fn execute_with_retry_inner_exhausts_and_surfaces_lock_error() {
         let attempts = Cell::new(0u32);
-        let result: crate::core::Result<usize> =
+        let result: crate::Result<usize> =
             execute_with_retry_inner("persist run".to_string(), 4, 1, |_, _| {}, &mut || {
                 attempts.set(attempts.get() + 1);
                 Err(locked_error())
@@ -1046,7 +1046,7 @@ mod write_retry {
     #[test]
     fn execute_with_retry_inner_does_not_retry_persistent_error() {
         let attempts = Cell::new(0u32);
-        let result: crate::core::Result<usize> = execute_with_retry_inner(
+        let result: crate::Result<usize> = execute_with_retry_inner(
             "insert run record".to_string(),
             6,
             1,

@@ -1,9 +1,9 @@
-use homeboy::core::api_jobs::{JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest};
-use homeboy::core::http_api::{
+use crate::api_jobs::{JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest};
+use crate::http_api::{
     self, AnalysisJobRunOutput, AnalysisJobRunner, HttpApiRequest, HttpEndpoint, HttpMethod,
     JobReadyRunKind,
 };
-use homeboy::core::observation::{
+use crate::observation::{
     ArtifactRecord, NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus,
 };
 
@@ -13,7 +13,7 @@ use crate::test_support::with_isolated_home;
 struct FakeAnalysisJobRunner;
 
 impl AnalysisJobRunner for FakeAnalysisJobRunner {
-    fn run_analysis_job(&self, argv: Vec<String>) -> homeboy::core::Result<AnalysisJobRunOutput> {
+    fn run_analysis_job(&self, argv: Vec<String>) -> crate::Result<AnalysisJobRunOutput> {
         Ok(AnalysisJobRunOutput {
             exit_code: 0,
             output: serde_json::json!({ "argv": argv }),
@@ -288,7 +288,7 @@ fn test_handle_with_jobs() {
     store
         .append_event(
             job.id,
-            homeboy::core::api_jobs::JobEventKind::Stdout,
+            crate::api_jobs::JobEventKind::Stdout,
             Some("audit output".to_string()),
             None,
         )
@@ -562,7 +562,7 @@ fn artifact_content_serves_encoded_artifact_store_locator() {
         std::fs::create_dir_all(path.parent().expect("artifact parent"))
             .expect("create artifact parent");
         std::fs::write(&path, br#"{"steps":[]}"#).expect("artifact-store file");
-        let token = homeboy::core::runner::runner_artifact_store_token("lab", &run.id, locator)
+        let token = crate::runner::runner_artifact_store_token("lab", &run.id, locator)
             .rsplit('/')
             .next()
             .expect("artifact token")

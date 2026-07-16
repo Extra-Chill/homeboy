@@ -8,13 +8,13 @@ use crate::commands::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
 };
 use crate::commands::GlobalArgs;
-use crate::core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
-use crate::core::engine::run_dir::RunDir;
-use crate::core::extension::component_script::{
+use crate::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
+use crate::engine::run_dir::RunDir;
+use crate::extension::component_script::{
     run_component_scripts, run_component_scripts_with_env, run_component_scripts_with_run_dir,
     source_path,
 };
-use crate::core::extension::ExtensionCapability;
+use crate::extension::ExtensionCapability;
 use crate::test_support::with_isolated_home;
 
 fn component_script_args(root: &Path) -> PositionalComponentArgs {
@@ -141,7 +141,7 @@ fn component_config_env_is_available_to_component_scripts_and_extra_env_wins() {
 fn component_config_env_is_visible_to_env_providers() {
     with_isolated_home(|_| {
         let dir = tempfile::tempdir().expect("temp dir");
-        let extension_dir = crate::core::paths::extensions()
+        let extension_dir = crate::paths::extensions()
             .expect("extensions path")
             .join("fixture-provider-env");
         fs::create_dir_all(&extension_dir).expect("extension dir");
@@ -198,7 +198,7 @@ fn component_config_env_is_visible_to_env_providers() {
 fn component_scripts_include_linked_extension_env_provider_output() {
     with_isolated_home(|_| {
         let dir = tempfile::tempdir().expect("temp dir");
-        let extension_dir = crate::core::paths::extensions()
+        let extension_dir = crate::paths::extensions()
             .expect("extensions path")
             .join("fixture-env");
         fs::create_dir_all(&extension_dir).expect("extension dir");
@@ -416,7 +416,7 @@ fn wordpress_phpunit_no_discovery_is_neutral_skipped() {
         assert_eq!(output.status, "skipped");
         assert_eq!(output.test_counts.expect("test counts").total, 0);
         let phase = output.phase.expect("phase report");
-        assert_eq!(phase.status, crate::core::extension::PhaseStatus::Skipped);
+        assert_eq!(phase.status, crate::extension::PhaseStatus::Skipped);
         assert_eq!(
             phase.summary,
             "activation/install passed; PHPUnit discovery found zero tests; no PHPUnit assertions ran"
@@ -479,7 +479,7 @@ fn wordpress_phpunit_no_discovery_can_be_required_as_failure() {
         let failure = output.failure.expect("failure report");
         assert_eq!(
             failure.category,
-            crate::core::extension::PhaseFailureCategory::Findings
+            crate::extension::PhaseFailureCategory::Findings
         );
     });
 }

@@ -67,11 +67,11 @@
 
 use std::path::PathBuf;
 
-use crate::core::code_audit::{
+use crate::code_audit::{
     self, run_main_audit_workflow, AuditProfile, AuditRunWorkflowArgs, AuditRunWorkflowResult,
     Finding,
 };
-use crate::core::engine::baseline::BaselineFlags;
+use crate::engine::baseline::BaselineFlags;
 
 /// Component id declared in the fixture's `homeboy.json`.
 const FIXTURE_COMPONENT_ID: &str = "audit-runtime-fixture";

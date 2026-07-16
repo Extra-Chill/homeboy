@@ -1,12 +1,12 @@
 //! Tests for active rig run leases.
 
-use crate::core::error::ErrorCode;
-use crate::core::rig::lease::{
+use crate::error::ErrorCode;
+use crate::rig::lease::{
     acquire_active_run_lease, acquire_active_run_lease_with_settings, active_run_leases,
     release_active_run_lease, ReleaseLeaseOutcome, RIG_LEASE_TTL_ENV,
 };
-use crate::core::rig::spec::{RigResourcesSpec, RigSpec};
-use crate::core::rig::{run_up, RigRunLease};
+use crate::rig::spec::{RigResourcesSpec, RigSpec};
+use crate::rig::{run_up, RigRunLease};
 use crate::test_support::with_isolated_home;
 
 struct EnvVarGuard {
@@ -104,10 +104,9 @@ fn test_acquire_active_run_lease_blocks_overlapping_resources_until_drop() {
 #[test]
 fn test_resource_conflict_reports_active_run_context_when_available() {
     with_isolated_home(|_| {
-        let _run_id =
-            EnvVarGuard::set(crate::core::observation::ACTIVE_RUN_ID_ENV, "trace-run-123");
+        let _run_id = EnvVarGuard::set(crate::observation::ACTIVE_RUN_ID_ENV, "trace-run-123");
         let _lab_metadata = EnvVarGuard::set(
-            crate::core::observation::LAB_OFFLOAD_METADATA_ENV,
+            crate::observation::LAB_OFFLOAD_METADATA_ENV,
             r#"{"runner_id":"lab-runner-1"}"#,
         );
         let studio = rig("studio", resources());
@@ -267,7 +266,7 @@ fn test_acquire_active_run_lease_prunes_stale_pid() {
             runner_id: None,
             resources: resources(),
         };
-        let lease_dir = crate::core::paths::rig_leases_dir().expect("lease dir");
+        let lease_dir = crate::paths::rig_leases_dir().expect("lease dir");
         std::fs::create_dir_all(&lease_dir).expect("create lease dir");
         std::fs::write(
             lease_dir.join("studio.json"),
@@ -283,7 +282,7 @@ fn test_acquire_active_run_lease_prunes_stale_pid() {
 }
 
 fn write_lease(lease: &RigRunLease) {
-    let lease_dir = crate::core::paths::rig_leases_dir().expect("lease dir");
+    let lease_dir = crate::paths::rig_leases_dir().expect("lease dir");
     std::fs::create_dir_all(&lease_dir).expect("create lease dir");
     std::fs::write(
         lease_dir.join(format!("{}.json", lease.rig_id)),

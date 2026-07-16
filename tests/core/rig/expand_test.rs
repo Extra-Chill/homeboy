@@ -3,11 +3,11 @@
 //! Audit convention requires a `test_expand_vars` method matching the sole
 //! public function of the module; additional cases cover edge conditions.
 
-use crate::core::paths;
-use crate::core::rig::expand::{
+use crate::paths;
+use crate::rig::expand::{
     expand_resources, expand_resources_with_settings, expand_vars, expand_vars_with_settings,
 };
-use crate::core::rig::spec::{
+use crate::rig::spec::{
     ComponentSpec, DiscoverSpec, RigSpec, ServiceKind, ServiceSpec, SymlinkSpec,
 };
 use crate::test_support::with_isolated_home;

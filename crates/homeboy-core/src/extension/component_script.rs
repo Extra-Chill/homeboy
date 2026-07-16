@@ -288,6 +288,7 @@ pub(crate) fn source_path(component: &Component, path_override: Option<&str>) ->
         .unwrap_or_else(|| PathBuf::from(&component.local_path))
 }
 
-#[cfg(test)]
-#[path = "../../../../tests/core/extension/component_script_test.rs"]
-mod component_script_test;
+// NOTE: the component_script tests exercise the `test` CLI command (they run
+// component scripts end-to-end through commands::test), so they live in the
+// homeboy-cli crate's test scope rather than here — core cannot depend on the CLI
+// command layer. See crates/homeboy-cli tests for component-script coverage.

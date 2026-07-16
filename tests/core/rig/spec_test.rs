@@ -1,7 +1,7 @@
 //! Spec parsing tests — serde round-trips, pipeline step discriminants,
 //! service-kind parsing. Covers `src/core/rig/spec.rs`.
 
-use crate::core::rig::{
+use crate::rig::{
     FilesystemAssertionKind, PipelineStep, RigRequirementsSpec, RigResourcesSpec, RigSpec,
     ServiceKind, ServiceSpec, SharedPathSpec, SymlinkSpec, TraceConfig, TraceVariantSpec,
     WorkloadSpec,
@@ -607,7 +607,7 @@ fn test_spec_pipeline_step_id_and_dependencies_parse() {
 
 #[test]
 fn test_spec_git_step_parses_with_args() {
-    use crate::core::rig::spec::GitOp;
+    use crate::rig::spec::GitOp;
     let json = r#"{
         "id": "r",
         "components": { "studio": { "path": "/tmp/studio" } },
@@ -641,7 +641,7 @@ fn test_spec_git_step_parses_with_args() {
 
 #[test]
 fn test_spec_git_op_current_branch_kebab_serializes() {
-    use crate::core::rig::spec::GitOp;
+    use crate::rig::spec::GitOp;
     let json = r#"{
         "id": "r",
         "components": { "studio": { "path": "/tmp/studio" } },
@@ -660,7 +660,7 @@ fn test_spec_git_op_current_branch_kebab_serializes() {
 
 #[test]
 fn test_spec_stack_step_parses_sync_shape() {
-    use crate::core::rig::spec::StackOp;
+    use crate::rig::spec::StackOp;
     let json = r#"{
         "id": "r",
         "components": {
@@ -719,7 +719,7 @@ fn test_spec_round_trip_preserves_shape() {
 
 #[test]
 fn test_spec_patch_step_parses_full_shape() {
-    use crate::core::rig::spec::PatchOp;
+    use crate::rig::spec::PatchOp;
     let json = r#"{
         "id": "r",
         "components": { "playground": { "path": "/tmp/pg" } },
@@ -764,7 +764,7 @@ fn test_spec_patch_step_parses_full_shape() {
 
 #[test]
 fn test_spec_patch_op_defaults_to_apply_when_omitted() {
-    use crate::core::rig::spec::PatchOp;
+    use crate::rig::spec::PatchOp;
     let json = r#"{
         "id": "r",
         "components": { "c": { "path": "/tmp/c" } },

@@ -119,7 +119,7 @@ fn dev_sync_resource_replaces_existing_extension_overlay_by_id() {
         ]
     });
     let extension =
-        super::super::extension_materialization::RunnerExtensionMaterializationProvenance {
+        super::super::super::extension_materialization::RunnerExtensionMaterializationProvenance {
             id: "nodejs".to_string(),
             source_path: "/new/nodejs".to_string(),
             synced_source_path: "/runner/ws/_lab_workspaces/dev-extensions/nodejs/newhash/"
@@ -130,7 +130,7 @@ fn dev_sync_resource_replaces_existing_extension_overlay_by_id() {
             dirty_fingerprint: None,
             synced_at: "2026-07-07T00:00:00Z".to_string(),
             dev_overlay: true,
-            lifecycle: super::super::extension_materialization::dev_extension_lifecycle(
+            lifecycle: super::super::super::extension_materialization::dev_extension_lifecycle(
                 "lab",
                 "/runner/ws/_lab_workspaces/dev-extensions/nodejs/newhash/",
                 "nodejs",
@@ -294,7 +294,7 @@ fn ssh_dev_sync_rejects_darwin_binary_before_upload() {
     let dir = tempfile::tempdir().expect("binary dir");
     let binary = dir.path().join("homeboy");
     std::fs::write(&binary, [0xcf, 0xfa, 0xed, 0xfe]).expect("write macho binary");
-    let runner = super::super::Runner {
+    let runner = super::super::super::Runner {
         id: "homeboy-lab".to_string(),
         kind: RunnerKind::Ssh,
         server_id: Some("lab-server".to_string()),
@@ -321,7 +321,7 @@ fn local_dev_sync_allows_darwin_binary() {
     let dir = tempfile::tempdir().expect("binary dir");
     let binary = dir.path().join("homeboy");
     std::fs::write(&binary, [0xcf, 0xfa, 0xed, 0xfe]).expect("write macho binary");
-    let runner = super::super::Runner {
+    let runner = super::super::super::Runner {
         id: "lab-local".to_string(),
         kind: RunnerKind::Local,
         server_id: None,
@@ -338,7 +338,7 @@ fn local_dev_sync_allows_darwin_binary() {
 
 #[test]
 fn extension_overlay_lifecycle_uses_ttl_cleanup_policy() {
-    let lifecycle = super::super::extension_materialization::dev_extension_lifecycle(
+    let lifecycle = super::super::super::extension_materialization::dev_extension_lifecycle(
         "lab",
         "/runner/ws/dev/rust/hash",
         "rust",

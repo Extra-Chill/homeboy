@@ -274,6 +274,7 @@ fn detached_lab_run_plan_uses_one_identity_for_status_logs_artifacts_and_cancell
                         claimed_at_ms: None,
                         claim_expires_at_ms: None,
                         artifacts: Vec::new(),
+                        runner_job_projection: None,
                     },
                     Vec::new(),
                 ))
@@ -741,7 +742,7 @@ fn terminal_lab_artifact_attachment_skips_missing_controller_plan_and_preserves_
         let mut record = status("agent-task-late-artifact").expect("status");
         apply_runner_job_terminal_state(
             &mut record,
-            crate::core::api_jobs::JobStatus::Succeeded,
+            crate::api_jobs::JobStatus::Succeeded,
             &[],
         );
         store::write_record(&record).expect("terminal record");
@@ -777,7 +778,7 @@ fn terminal_lab_artifact_attachment_refuses_runner_provenance_mismatch() {
         let mut record = status("agent-task-late-artifact-mismatch").expect("status");
         apply_runner_job_terminal_state(
             &mut record,
-            crate::core::api_jobs::JobStatus::Succeeded,
+            crate::api_jobs::JobStatus::Succeeded,
             &[],
         );
         store::write_record(&record).expect("terminal record");
@@ -3261,6 +3262,7 @@ fn terminal_child_snapshot(aggregate: &AgentTaskAggregate) -> crate::runner::Run
             claimed_at_ms: None,
             claim_expires_at_ms: None,
             artifacts: Vec::new(),
+            runner_job_projection: None,
         },
         events: vec![crate::api_jobs::JobEvent {
             sequence: 1,

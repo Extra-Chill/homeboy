@@ -6,14 +6,14 @@ use super::{
     apply_finding_filters, build_comparison_output, compute_fixability_if_requested,
     default_audit_exit_code, scope_convention_outliers_to_findings, AuditRunWorkflowArgs,
 };
-use crate::core::code_audit::checks::CheckStatus;
-use crate::core::code_audit::conventions::{Deviation, Outlier};
-use crate::core::code_audit::findings::{Finding, Severity};
-use crate::core::code_audit::{
+use crate::code_audit::checks::CheckStatus;
+use crate::code_audit::conventions::{Deviation, Outlier};
+use crate::code_audit::findings::{Finding, Severity};
+use crate::code_audit::{
     AuditAnalysisContext, AuditExecutionPlan, AuditFinding, AuditProfile, AuditSummary,
     CodeAuditResult, ConventionReport, DetectorRuntime,
 };
-use crate::core::plan::PlanStepStatus;
+use crate::plan::PlanStepStatus;
 
 fn make_finding(kind: AuditFinding, file: &str) -> Finding {
     Finding {
@@ -50,8 +50,8 @@ fn make_analysis() -> AuditAnalysisContext {
     AuditAnalysisContext::default()
 }
 
-fn make_timing() -> crate::core::code_audit::AuditTiming {
-    crate::core::code_audit::AuditTiming::default()
+fn make_timing() -> crate::code_audit::AuditTiming {
+    crate::code_audit::AuditTiming::default()
 }
 
 fn make_convention_report(name: &str, outliers: Vec<Outlier>) -> ConventionReport {
@@ -98,7 +98,7 @@ fn make_args(include_fixability: bool) -> AuditRunWorkflowArgs {
         exclude_labels: vec![],
         profile: AuditProfile::Full,
         extension_overrides: vec![],
-        baseline_flags: crate::core::engine::baseline::BaselineFlags {
+        baseline_flags: crate::engine::baseline::BaselineFlags {
             baseline: false,
             ignore_baseline: false,
             ratchet: false,
@@ -126,15 +126,13 @@ fn make_changed_since_args() -> AuditRunWorkflowArgs {
     args
 }
 
-fn make_baseline(
-    known_fingerprints: Vec<&str>,
-) -> crate::core::code_audit::baseline::AuditBaseline {
-    crate::core::code_audit::baseline::AuditBaseline {
+fn make_baseline(known_fingerprints: Vec<&str>) -> crate::code_audit::baseline::AuditBaseline {
+    crate::code_audit::baseline::AuditBaseline {
         created_at: "2026-04-28T00:00:00Z".to_string(),
         context_id: "test".to_string(),
         item_count: known_fingerprints.len(),
         known_fingerprints: known_fingerprints.into_iter().map(str::to_string).collect(),
-        metadata: crate::core::code_audit::baseline::AuditBaselineMetadata {
+        metadata: crate::code_audit::baseline::AuditBaselineMetadata {
             outliers_count: 0,
             alignment_score: None,
             known_outliers: vec![],
@@ -272,7 +270,7 @@ mod full_audit_structural_complexity_tests {
 
         assert_eq!(workflow.exit_code, 0);
         match workflow.output {
-            crate::core::code_audit::report::AuditCommandOutput::Compared {
+            crate::code_audit::report::AuditCommandOutput::Compared {
                 passed,
                 baseline_comparison,
                 ..
@@ -327,12 +325,12 @@ fn changed_since_comparison_marks_existing_touched_findings_as_contextual() {
     let mut result = make_result(vec![existing_finding]);
     result.findings[0].convention = "structural".to_string();
 
-    let baseline = crate::core::code_audit::baseline::AuditBaseline {
+    let baseline = crate::code_audit::baseline::AuditBaseline {
         created_at: "2026-04-28T00:00:00Z".to_string(),
         context_id: "test".to_string(),
         item_count: 1,
         known_fingerprints: vec!["structural::src/large.rs::GodFile".to_string()],
-        metadata: crate::core::code_audit::baseline::AuditBaselineMetadata {
+        metadata: crate::code_audit::baseline::AuditBaselineMetadata {
             outliers_count: 1,
             alignment_score: None,
             known_outliers: vec!["src/large.rs".to_string()],
@@ -351,7 +349,7 @@ fn changed_since_comparison_marks_existing_touched_findings_as_contextual() {
 
     assert_eq!(workflow.exit_code, 0);
     match workflow.output {
-        crate::core::code_audit::report::AuditCommandOutput::Compared {
+        crate::code_audit::report::AuditCommandOutput::Compared {
             passed,
             changed_since,
             baseline_comparison,
@@ -361,7 +359,7 @@ fn changed_since_comparison_marks_existing_touched_findings_as_contextual() {
             assert!(baseline_comparison.new_items.is_empty());
             assert_eq!(
                 changed_since,
-                Some(crate::core::code_audit::report::AuditChangedSinceSummary {
+                Some(crate::code_audit::report::AuditChangedSinceSummary {
                     introduced_findings: 0,
                     contextual_findings: 1,
                 })
@@ -379,12 +377,12 @@ fn changed_since_comparison_counts_new_findings_as_introduced() {
     introduced_finding.convention = "dead_code".to_string();
     let result = make_result(vec![existing_finding, introduced_finding]);
 
-    let baseline = crate::core::code_audit::baseline::AuditBaseline {
+    let baseline = crate::code_audit::baseline::AuditBaseline {
         created_at: "2026-04-28T00:00:00Z".to_string(),
         context_id: "test".to_string(),
         item_count: 1,
         known_fingerprints: vec!["structural::src/large.rs::GodFile".to_string()],
-        metadata: crate::core::code_audit::baseline::AuditBaselineMetadata {
+        metadata: crate::code_audit::baseline::AuditBaselineMetadata {
             outliers_count: 1,
             alignment_score: None,
             known_outliers: vec!["src/large.rs".to_string()],
@@ -403,7 +401,7 @@ fn changed_since_comparison_counts_new_findings_as_introduced() {
 
     assert_eq!(workflow.exit_code, 1);
     match workflow.output {
-        crate::core::code_audit::report::AuditCommandOutput::Compared {
+        crate::code_audit::report::AuditCommandOutput::Compared {
             passed,
             changed_since,
             baseline_comparison,
@@ -413,7 +411,7 @@ fn changed_since_comparison_counts_new_findings_as_introduced() {
             assert_eq!(baseline_comparison.new_items.len(), 1);
             assert_eq!(
                 changed_since,
-                Some(crate::core::code_audit::report::AuditChangedSinceSummary {
+                Some(crate::code_audit::report::AuditChangedSinceSummary {
                     introduced_findings: 1,
                     contextual_findings: 1,
                 })
@@ -441,7 +439,7 @@ fn json_summary_names_baseline_known_findings_separately_from_blocking_findings(
 
     assert_eq!(workflow.exit_code, 0);
     match workflow.output {
-        crate::core::code_audit::report::AuditCommandOutput::Summary(summary) => {
+        crate::code_audit::report::AuditCommandOutput::Summary(summary) => {
             assert_eq!(summary.total_findings, 1);
             assert_eq!(summary.finding_groups.len(), 1);
 
@@ -480,7 +478,7 @@ fn json_summary_for_targeted_detector_counts_current_and_unbaselined_findings() 
 
     assert_eq!(workflow.exit_code, 1);
     match workflow.output {
-        crate::core::code_audit::report::AuditCommandOutput::Summary(summary) => {
+        crate::code_audit::report::AuditCommandOutput::Summary(summary) => {
             assert_eq!(summary.total_findings, 2);
             assert_eq!(summary.finding_groups.len(), 1);
             assert_eq!(summary.finding_groups[0].kind, "god_file");
