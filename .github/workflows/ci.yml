@@ -21,6 +21,23 @@ permissions:
   issues: write
 
 jobs:
+  # Non-differential safety net for crate-topology changes. The `review test`
+  # gate below is differentially scoped, so a crate extraction that orphans a
+  # DONOR crate's test wiring (e.g. a test file left referencing a `super::foo`
+  # module after `foo` moved to its own crate) can pass unnoticed — the donor
+  # isn't in the changed scope. This job compiles EVERY crate's test target
+  # (codegen-free, so it's cheap) and fails closed if any of them break.
+  workspace-tests-compile:
+    name: homeboy / Workspace Tests Compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compile all workspace test targets
+        run: cargo check --workspace --tests --locked
+
   homeboy:
     name: homeboy / ${{ matrix.title }}
     runs-on: ubuntu-latest
