@@ -1055,6 +1055,9 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         "run_id": record.get("run_id").cloned().unwrap_or_else(|| json!(run_id)),
         "state": record.get("state").cloned().unwrap_or(Value::Null),
         "work_summary": work_summary,
+        // Keep typed refs so the shared status presentation can classify
+        // recovered terminal patch artifacts by their size and kind.
+        "artifact_refs": record.get("artifact_refs").cloned().unwrap_or(Value::Null),
         "totals": record.get("totals").cloned().unwrap_or(Value::Null),
         "tasks": task_table,
         "refs": refs,
