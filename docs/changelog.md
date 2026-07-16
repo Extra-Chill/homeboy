@@ -4,6 +4,36 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.288.9] - 2026-07-16
+
+### Changed
+- route agent-task runner continuation through a hook
+- move Finding value types into homeboy-audit-contract (#8425)
+- import Language from primitives, not via code_audit::conventions (#8425)
+- move AuditFinding vocabulary into homeboy-audit-contract (#8425)
+- Unify scheduler attempt cleanup ownership
+- import AuditConfig direct from the contract in extension manifest (#8425)
+- import extension's engine primitives direct from the crate (#8425)
+- import HomeboyFinding direct from the homeboy-finding crate (#8425)
+- Persist recoverable promotion checkpoints
+- invert code_audit's observation-store reads behind a provider hook (#8425)
+- route daemon exec-prep + job cancellation through runner hooks
+- Recover legacy artifacts through mirrored runner evidence
+- fail loudly when a prepared release does not publish
+- Make Lab batch handoff durable
+- relocate validation_dependency_ids from runner into core hygiene
+- import code_audit's component config types direct from the contract (#8425)
+- relocate agent_task_lifecycle_event from runner into core
+- move test-mapping config schema into homeboy-audit-contract (#8425)
+
+### Fixed
+- Fix Lab cook child placement forwarding
+- reconcile stale daemon lease stops
+- add runner_job_cancel to the test FakeProvider
+- publish GitHub Release on recovery path
+- resume pinned agent-task runtimes
+- preserve detached runner artifact provenance
+
 ## [0.288.8] - 2026-07-16
 
 ### Changed
