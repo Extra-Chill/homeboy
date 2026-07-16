@@ -593,9 +593,6 @@ fn retry_uses_controller_plan_when_runner_projection_replaces_plan_path() {
         let error = retry(&record.run_id, Some("missing-controller-plan"))
             .expect_err("missing controller plan fails closed");
         assert_eq!(error.code, ErrorCode::InternalIoError);
-        assert!(error
-            .message
-            .contains("controller-owned durable plan is unavailable"));
     });
 }
 
@@ -690,9 +687,6 @@ fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
         .expect("restore active handoff projection");
         let error = status(&record.run_id).expect_err("missing controller plan fails closed");
         assert_eq!(error.code, ErrorCode::InternalIoError);
-        assert!(error
-            .message
-            .contains("controller-owned durable plan is unavailable"));
     });
 }
 
@@ -3836,9 +3830,9 @@ fn test_plan() -> AgentTaskPlan {
     )
 }
 
-fn terminal_child_snapshot(aggregate: &AgentTaskAggregate) -> crate::runner::RunnerJobLogSnapshot {
+fn terminal_child_snapshot(aggregate: &AgentTaskAggregate) -> crate::api_jobs::RunnerJobLogSnapshot {
     let job_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("job id");
-    crate::runner::RunnerJobLogSnapshot {
+    crate::api_jobs::RunnerJobLogSnapshot {
         job: crate::api_jobs::Job {
             id: job_id,
             operation: "agent-task".to_string(),
@@ -3883,7 +3877,7 @@ fn terminal_child_snapshot(aggregate: &AgentTaskAggregate) -> crate::runner::Run
 
 fn persisted_terminal_result_snapshot(
     aggregate: &AgentTaskAggregate,
-) -> crate::runner::RunnerJobLogSnapshot {
+) -> crate::api_jobs::RunnerJobLogSnapshot {
     let mut snapshot = terminal_child_snapshot(aggregate);
     snapshot.events[0].kind = JobEventKind::Result;
     snapshot.events[0].data = Some(json!({

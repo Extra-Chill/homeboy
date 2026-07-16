@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
+use crate::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus, RunnerJobLogSnapshot};
 use crate::error::{Error, Result};
 use crate::execution_contract::{encode_uri_component, EXECUTION_CONTRACT};
 use crate::notification_route::NotificationRoute;
@@ -30,12 +30,6 @@ pub(super) const MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT: usize = 1_024;
 pub struct MirroredDaemonEvidence {
     pub run: RunRecord,
     pub patch: Option<Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RunnerJobLogSnapshot {
-    pub job: Job,
-    pub events: Vec<JobEvent>,
 }
 
 pub fn mirror_daemon_evidence(

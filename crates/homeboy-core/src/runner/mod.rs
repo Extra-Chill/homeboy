@@ -32,6 +32,7 @@ pub use cli_resolver::{
 };
 mod command_path;
 mod connection;
+mod continuation_provider;
 mod daemon_health;
 mod daemon_http_get;
 mod evidence;
@@ -109,6 +110,7 @@ pub use connection::{
     statuses,
 };
 pub(crate) use evidence::artifact_store_locator_from_runner_artifact_id;
+pub use continuation_provider::register as register_runner_continuation_provider;
 pub use evidence::register_runner_evidence_provider;
 pub use evidence::runner_artifact_store_token;
 pub use evidence::{
