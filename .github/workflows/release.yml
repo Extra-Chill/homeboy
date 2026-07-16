@@ -445,7 +445,7 @@ jobs:
 
       - name: Preflight release workspace build
         if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
-        run: cargo build --workspace --all-targets --locked
+        run: cargo build --workspace --locked
 
       - uses: Extra-Chill/homeboy-action@v2
         id: release

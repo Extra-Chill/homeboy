@@ -233,12 +233,20 @@ fn release_preflight_validates_the_private_workspace_build_before_mutating_relea
         .expect("prepare must run the release action");
 
     assert!(
-        prepare.contains("run: cargo build --workspace --all-targets --locked"),
-        "release preflight must build every private workspace target with the locked dependency graph"
+        prepare.contains("run: cargo build --workspace --locked"),
+        "release preflight must build the private workspace with the locked dependency graph"
     );
     assert!(
         cargo_manifest().contains("publish = false"),
         "the root package must not be planned for crates.io publication"
+    );
+    assert!(
+        cargo_manifest().contains("homeboy-cli = { path = \"crates/homeboy-cli\" }"),
+        "the root package must consume the extracted CLI crate as a private path dependency"
+    );
+    assert!(
+        cargo_manifest().contains("homeboy-core = { path = \"crates/homeboy-core\" }"),
+        "the root package must consume the extracted core crate as a private path dependency"
     );
     assert!(
         cargo_manifest().contains("homeboy-lab-contract = { path = \"crates/homeboy-lab-contract\" }"),

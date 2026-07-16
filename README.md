@@ -53,8 +53,8 @@ Portable repo config starts with `homeboy.json`:
 brew tap Extra-Chill/homebrew-tap
 brew install homeboy
 
-# Cargo
-cargo install homeboy
+# Release binary
+curl -fsSL https://github.com/Extra-Chill/homeboy/releases/latest/download/homeboy-installer.sh | sh
 
 # From source
 git clone https://github.com/Extra-Chill/homeboy.git
