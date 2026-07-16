@@ -5,10 +5,15 @@ pub mod finding_kind;
 pub use finding::{finding_confidence, Finding, FindingConfidence, Severity};
 pub use finding_kind::AuditFinding;
 pub mod fingerprint;
+pub mod result;
 pub mod test_mapping;
 pub use fingerprint::{
     AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker, FingerprintOutput,
     HookRef, UnusedParam,
+};
+pub use result::{
+    AuditSummary, CheckStatus, CodeAuditResult, ConventionReport, Deviation, DirectoryConvention,
+    DirectoryOutlier, DuplicateGroup, Outlier,
 };
 pub use test_mapping::{
     BehaviorScenarioNames, IncludeWrapperPolicy, PackageNameSource, TestMappingConfig,
