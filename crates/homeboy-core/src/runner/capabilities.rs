@@ -22,13 +22,9 @@ pub struct RunnerCapabilityPreflight {
     pub timeout: Option<Duration>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RunnerToolCapabilityRequirement {
-    pub tool: String,
-    pub command: String,
-    pub env: Vec<String>,
-    pub capabilities: Vec<String>,
-}
+// RunnerToolCapabilityRequirement now lives in the shared runner-contract crate
+// (behavior-free data). Re-exported so existing call sites resolve unchanged.
+pub use homeboy_runner_contract::RunnerToolCapabilityRequirement;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedLabRunnerCapability {
@@ -61,38 +57,22 @@ pub enum LabRunnerGateDecision {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RunnerRequiredTool {
-    id: String,
-}
+// RunnerRequiredTool (data + pure constructors) now lives in the shared
+// runner-contract crate. Re-exported so existing call sites resolve unchanged.
+pub use homeboy_runner_contract::RunnerRequiredTool;
 
-impl RunnerRequiredTool {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self { id: id.into() }
-    }
-
-    pub fn homeboy() -> Self {
-        Self::new("homeboy")
-    }
-
-    pub fn git() -> Self {
-        Self::new("git")
-    }
-
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    pub(crate) fn remediation(&self) -> String {
-        RunnerToolRegistry::spec_for_required_tool(self)
-            .map(|spec| spec.capability_remediation)
-            .unwrap_or_else(|| {
-                format!(
-                    "Install '{}' on the runner and ensure it is on PATH.",
-                    self.id()
-                )
-            })
-    }
+/// Remediation text for a required tool. Lives in core (not on the contract
+/// type) because it consults core's runner tool registry — an inherent method
+/// can't span crates, so it's a free function here.
+pub(crate) fn required_tool_remediation(tool: &RunnerRequiredTool) -> String {
+    RunnerToolRegistry::spec_for_required_tool(tool)
+        .map(|spec| spec.capability_remediation)
+        .unwrap_or_else(|| {
+            format!(
+                "Install '{}' on the runner and ensure it is on PATH.",
+                tool.id()
+            )
+        })
 }
 
 pub fn prepare_lab_runner_capability(
@@ -215,7 +195,7 @@ pub(crate) fn validate_runner_capability_preflight(
     };
     let mut remediation = missing_tools
         .iter()
-        .map(|tool| tool.remediation())
+        .map(required_tool_remediation)
         .collect::<Vec<_>>();
     remediation.extend(missing_components.iter().map(|component| {
         format!("Register component '{component}' on the runner capability profile or choose a runner with that component.")
@@ -509,7 +489,7 @@ fn evaluate_lab_runner_capabilities(
     };
     let mut remediation = missing_tools
         .iter()
-        .map(|tool| tool.remediation())
+        .map(required_tool_remediation)
         .collect::<Vec<_>>();
     match mode {
         LabRunnerGateMode::Automatic => remediation.push(
