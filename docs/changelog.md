@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.288.2] - 2026-07-16
+
+### Changed
+- remove dead engine::validate_write module (#8425)
+- extract homeboy-triage feature crate from core
+- move the grammar parsing engine into homeboy-engine-primitives (#8425)
+
+### Fixed
+- require declared build artifact
+- fix(agent-task): preserve selected model in Lab plans
+
 ## [0.288.1] - 2026-07-16
 
 ### Changed
