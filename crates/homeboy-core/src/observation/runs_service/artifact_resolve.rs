@@ -176,7 +176,9 @@ pub fn download_remote_artifact(
     artifact: ArtifactRecord,
     output: Option<PathBuf>,
 ) -> Result<ArtifactFetchOutcome> {
-    let download = crate::runners::download_remote_artifact(&artifact.path, output)?;
+    let download = runner_evidence::with_runner_evidence(|p| {
+        p.download_remote_artifact(&artifact.path, output)
+    })?;
     Ok(ArtifactFetchOutcome {
         run_id: artifact.run_id,
         artifact_id: artifact.id,

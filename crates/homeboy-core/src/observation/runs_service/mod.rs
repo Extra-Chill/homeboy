@@ -161,12 +161,17 @@ mod artifact_resolve;
 mod persisted_cleanup;
 mod run_lookup;
 mod runner_downloads;
+pub mod runner_evidence;
 
 pub use artifact_links::*;
 pub use artifact_resolve::*;
 pub use persisted_cleanup::*;
 pub use run_lookup::*;
 pub use runner_downloads::*;
+pub use runner_evidence::{
+    register_runner_evidence_provider, RemoteArtifactDownloadInfo, RunnerConnectionInfo,
+    RunnerEvidenceProvider, StaleRunnerJobInfo,
+};
 
 /// Safe, bounded retention of terminal observation rows. Artifact byte cleanup
 /// remains a separate explicit operation because artifact roots may have their

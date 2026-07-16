@@ -98,6 +98,11 @@ impl CliRuntime {
         // IDs/aliases participate in cross-entity collision detection. Core owns
         // the collision invariant but must not depend on these optional features.
         homeboy_tunnel::register();
+        // Register the runner-evidence provider so observation::runs_service can
+        // enrich run/artifact lookups with live runner + daemon evidence without
+        // core depending on runner behavior. (Runner is still in-crate today;
+        // this registration is the seam that lets it become its own crate.)
+        crate::core::runner::register_runner_evidence_provider();
         // Register the command-label resolver so core::runner can map dispatched
         // argv to a hot-command label without depending on the full CLI parser.
         crate::core::runner::set_command_label_resolver(|argv| {
