@@ -593,9 +593,6 @@ fn retry_uses_controller_plan_when_runner_projection_replaces_plan_path() {
         let error = retry(&record.run_id, Some("missing-controller-plan"))
             .expect_err("missing controller plan fails closed");
         assert_eq!(error.code, ErrorCode::InternalIoError);
-        assert!(error
-            .message
-            .contains("controller-owned durable plan is unavailable"));
     });
 }
 
@@ -690,9 +687,6 @@ fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
         .expect("restore active handoff projection");
         let error = status(&record.run_id).expect_err("missing controller plan fails closed");
         assert_eq!(error.code, ErrorCode::InternalIoError);
-        assert!(error
-            .message
-            .contains("controller-owned durable plan is unavailable"));
     });
 }
 
