@@ -358,8 +358,88 @@ pub fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
     store::read_controller_plan_for_execution(&run_id)
 }
 
+/// Validate a queued lifecycle's pinned controller without scheduling provider work.
+pub fn validate_controller_runtime(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    migrate_record_controller_runtime(&mut record)?;
+    crate::controller_runtime::validate(
+        record
+            .metadata
+            .get(crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "controller_runtime",
+                    "durable run has no controller runtime pin",
+                    Some(record.run_id.clone()),
+                    None,
+                )
+            })?,
+    )?;
+    Ok(record)
+}
+
+/// Resolve the compatible immutable executable for a lifecycle mutation.
+/// Legacy pins are migrated atomically before returning a path for re-exec.
+pub fn pinned_runtime_for_mutation(run_id: &str) -> Result<Option<std::path::PathBuf>> {
+    let mut record = store::read_record(&resolve_run_id(run_id)?)?;
+    migrate_record_controller_runtime(&mut record)?;
+    crate::controller_runtime::pinned_executable_for_mutation(
+        &record.metadata,
+        &crate::build_identity::current().display,
+    )
+}
+
+/// Prune immutable controller pins through the durable lifecycle ownership
+/// boundary so nonterminal records remain authoritative retention roots.
+pub fn prune_controller_runtime_pins(
+    apply: bool,
+) -> Result<crate::controller_runtime::ControllerRuntimePruneResult> {
+    crate::controller_runtime::prune_pins(apply)
+}
+
+fn migrate_record_controller_runtime(record: &mut AgentTaskRunRecord) -> Result<()> {
+    let Some(runtime) = record
+        .metadata
+        .get(crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+    else {
+        return Ok(());
+    };
+    let migrated = crate::controller_runtime::migrate_legacy_pin(runtime)?;
+    if &migrated != runtime {
+        record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = migrated;
+        store::write_record(record)?;
+    }
+    Ok(())
+}
+
+/// Repair only the executable artifact named by durable controller provenance.
+pub fn recover_controller_runtime(
+    run_id: &str,
+    artifact: Option<&std::path::Path>,
+    source: Option<&std::path::Path>,
+) -> Result<Value> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let runtime = record
+        .metadata
+        .get(crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller_runtime",
+                "durable run has no controller runtime pin",
+                Some(record.run_id.clone()),
+                None,
+            )
+        })?;
+    let recovered = crate::controller_runtime::recover_pin(runtime, artifact, source)?;
+    // The new pin is verified before this single-record durable mutation.
+    record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = recovered.clone();
+    store::write_record(&record)?;
+    Ok(recovered)
+}
+
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    migrate_record_controller_runtime(&mut record)?;
     crate::controller_runtime::validate_for_mutation(
         &record.metadata,
         &crate::build_identity::current().display,

@@ -7,8 +7,8 @@ use super::cook::{AgentTaskCookArgs, AgentTaskLoopArgs, PromotionProviderArgs};
 use super::fanout::AgentTaskFanoutArgs;
 use super::lifecycle::{
     CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs,
-    ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs, StatusArgs,
-    SubmitArgs,
+    ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs, RuntimeRecoverArgs,
+    RuntimeValidateArgs, StatusArgs, SubmitArgs,
 };
 
 pub use super::super::auth::{
@@ -49,6 +49,10 @@ pub enum AgentTaskCommand {
     Artifacts(StatusArgs),
     Evidence(EvidenceArgs),
     Diagnose(DiagnoseArgs),
+    /// Recover a missing or corrupted immutable controller runtime pin.
+    RuntimeRecover(RuntimeRecoverArgs),
+    /// Validate controller runtime eligibility without executing provider work.
+    RuntimeValidate(RuntimeValidateArgs),
     ReplayProviderBoundary(ReplayProviderBoundaryArgs),
     Cancel(CancelArgs),
     Resume(StatusArgs),

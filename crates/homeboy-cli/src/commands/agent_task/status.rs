@@ -16,7 +16,10 @@ use homeboy::core::agent_tasks::service as agent_task_service;
 use homeboy::core::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
 
 use super::super::CmdResult;
-use super::args::{CancelArgs, DiagnoseArgs, EvidenceArgs, ReplayProviderBoundaryArgs, StatusArgs};
+use super::args::{
+    CancelArgs, DiagnoseArgs, EvidenceArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs,
+    RuntimeValidateArgs, StatusArgs,
+};
 use crate::commands::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandNextAction, CommandNextActionKind,
     CommandResultRefs, ACTIONABLE_METADATA_KEY,
@@ -481,6 +484,26 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
             "hydrated_evidence": hydrated_evidence,
             "next_commands": next_commands,
         }),
+        0,
+    ))
+}
+
+pub(super) fn recover_runtime(args: RuntimeRecoverArgs) -> CmdResult<Value> {
+    let recovered = homeboy::core::agent_task_lifecycle::recover_controller_runtime(
+        &args.run_id,
+        args.artifact.as_deref().map(std::path::Path::new),
+        args.source.as_deref().map(std::path::Path::new),
+    )?;
+    Ok((
+        json!({ "schema": "homeboy/controller-runtime-recovery/v1", "run_id": args.run_id, "recovered": recovered }),
+        0,
+    ))
+}
+
+pub(super) fn validate_runtime(args: RuntimeValidateArgs) -> CmdResult<Value> {
+    let record = homeboy::core::agent_task_lifecycle::validate_controller_runtime(&args.run_id)?;
+    Ok((
+        json!({ "schema": "homeboy/controller-runtime-validation/v1", "run_id": record.run_id, "state": record.state, "executable": true }),
         0,
     ))
 }
