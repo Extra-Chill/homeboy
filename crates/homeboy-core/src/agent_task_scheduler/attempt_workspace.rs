@@ -164,16 +164,21 @@ pub(super) fn prepare_committed_harvest(
             "parent_snapshot": capability.parent_snapshot(),
         }))
     } else if snapshot_signaled {
-        let provenance = crate::runner::verify_lab_workspace(
-            &root.display().to_string(),
-            root,
-            context.source_snapshot()?,
-            context.lab_offload()?,
-        )
+        let source_snapshot = context.source_snapshot()?;
+        let lab_offload = context.lab_offload()?;
+        let provenance = lab_workspace_provenance::with_lab_workspace_provenance(|p| {
+            p.verify_lab_workspace(
+                &root.display().to_string(),
+                root,
+                source_snapshot,
+                lab_offload,
+                is_repository,
+            )
+        })
         .map_err(snapshot_harvest_error)?;
         if is_repository {
-            crate::runner::verify_lab_workspace_git_root(root, &provenance)
-                .map_err(snapshot_harvest_error)?;
+            // git-root verification is folded into verify_lab_workspace above via
+            // require_git_root = is_repository.
         } else {
             if provenance.materialization_mode == "git" {
                 return Err(snapshot_harvest_error(
@@ -217,12 +222,16 @@ pub(super) fn prepare_committed_harvest(
         None
     };
     if !is_repository {
-        crate::runner::materialize_verified_lab_snapshot_git_baseline(
-            &root.display().to_string(),
-            root,
-            context.source_snapshot()?,
-            context.lab_offload()?,
-        )
+        let source_snapshot = context.source_snapshot()?;
+        let lab_offload = context.lab_offload()?;
+        lab_workspace_provenance::with_lab_workspace_provenance(|p| {
+            p.materialize_verified_lab_snapshot_git_baseline(
+                &root.display().to_string(),
+                root,
+                source_snapshot,
+                lab_offload,
+            )
+        })
         .map_err(|message| HarvestError::Git {
             command: "materialize verified Lab snapshot Git baseline".to_string(),
             message,

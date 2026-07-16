@@ -73,7 +73,7 @@ impl Default for SourceSnapshotPolicy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceSnapshot {
     pub runner_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]

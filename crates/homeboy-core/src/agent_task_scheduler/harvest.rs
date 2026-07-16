@@ -839,6 +839,10 @@ mod committed_harvest_tests {
 
     #[test]
     fn authorized_dirty_lab_snapshot_preflight_materializes_a_provider_ready_attempt_workspace() {
+        // Exercises lab-workspace provenance verification, which lives behind the
+        // LabWorkspaceProvenanceProvider hook. Register the runner provider
+        // (normally done at CLI startup) so verification runs.
+        crate::runner::register_lab_workspace_provenance_provider();
         let _guard = LAB_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()

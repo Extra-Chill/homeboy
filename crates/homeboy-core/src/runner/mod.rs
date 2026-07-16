@@ -38,6 +38,7 @@ mod git_dependency_materialization;
 mod homeboy_refresh;
 mod job_preparation;
 mod lab;
+mod lab_workspace_provenance_provider;
 #[cfg(test)]
 pub(crate) use lab::mirror_agent_task_run_plan_aggregate;
 mod lab_apply;
@@ -72,9 +73,13 @@ mod worker;
 pub(crate) mod workload;
 mod workspace;
 pub(crate) use workspace::copy_snapshot_to_directory;
+// Only test code (extension::trace::canonicality) still calls verify_lab_workspace
+// directly; production goes through the LabWorkspaceProvenanceProvider hook.
+#[cfg(test)]
+pub(crate) use workspace::verify_lab_workspace;
 #[cfg(test)]
 pub(crate) use workspace::workspace_resource_lifecycle;
-pub(crate) use workspace::{materialize_verified_lab_snapshot_git_baseline, verify_lab_workspace};
+
 pub(crate) use workspace::{MaterializedWorkspace, WorkspaceCleanupPolicy};
 
 pub use apply::{
@@ -144,6 +149,7 @@ pub use lab::{
 #[cfg(test)]
 pub(crate) use lab_env::build_lab_offload_env;
 pub use lab_selection::prepare_explicit_lab_runner_for_offload;
+pub use lab_workspace_provenance_provider::register as register_lab_workspace_provenance_provider;
 pub use offload_changed_since::{
     lab_offload_changed_since_ref, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since,
@@ -182,9 +188,9 @@ pub use workspace::{
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 pub(crate) use workspace::{
-    verify_lab_workspace_from_env, verify_lab_workspace_git_root, workspace_content_hash,
-    workspace_content_hash_algorithm, workspace_content_manifest_for_policy,
-    VerifiedLabWorkspaceProvenance, WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+    verify_lab_workspace_from_env, workspace_content_hash, workspace_content_hash_algorithm,
+    workspace_content_manifest_for_policy, VerifiedLabWorkspaceProvenance,
+    WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 
 // RunnerKind now lives in the shared runner-contract crate so core code can
