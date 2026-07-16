@@ -845,6 +845,39 @@ fn force_stop_default_non_force_behavior_remains_unchanged() {
 }
 
 #[test]
+fn lease_bound_stop_reconciles_an_absent_lease_idempotently_without_jobs() {
+    let _home = HomeGuard::new();
+
+    let normal = stop_for_lease("stale-lease").expect("normal stop reconciles missing lease");
+    let forced = force_stop_for_lease("stale-lease").expect("forced stop replays safely");
+
+    assert!(!normal.stopped);
+    assert!(!forced.stopped);
+    assert_eq!(normal.pid, None);
+    assert_eq!(forced.pid, None);
+}
+
+#[test]
+fn lease_bound_stop_keeps_active_jobs_protected_when_lease_is_absent() {
+    let _home = HomeGuard::new();
+    let store = JobStore::open_without_reconciliation(
+        &crate::paths::daemon_jobs_file().expect("jobs path"),
+    )
+    .expect("store")
+    .with_daemon_lease("stale-lease".to_string());
+    let job = store.create("runner.exec");
+    store.start(job.id).expect("start job");
+
+    for result in [
+        stop_for_lease("stale-lease"),
+        force_stop_for_lease("stale-lease"),
+    ] {
+        let error = result.expect_err("active job blocks missing-lease reconciliation");
+        assert_eq!(error.details["active_job_ids"], serde_json::json!([job.id]));
+    }
+}
+
+#[test]
 fn stop_reports_corrupt_lease_without_signalling_pid() {
     let _home = HomeGuard::new();
     let path = state_path().expect("state path");
