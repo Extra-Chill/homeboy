@@ -8,7 +8,7 @@ use super::conventions::{AuditFinding, Language};
 use super::detectors::upstream_workaround;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
-use crate::component::DetectorProfileConfig;
+use homeboy_audit_contract::DetectorProfileConfig;
 
 const TODO_MARKERS: &[&str] = &["TODO", "FIXME", "HACK", "XXX"];
 const LEGACY_MARKERS: &[&str] = &[
@@ -183,7 +183,7 @@ mod tests {
     use super::*;
     use crate::code_audit::conventions::Language;
     use crate::code_audit::fingerprint::FileFingerprint;
-    use crate::component::DetectorProfileConfig;
+    use homeboy_audit_contract::DetectorProfileConfig;
 
     fn make_fp(path: &str, lang: Language, content: &str) -> FileFingerprint {
         FileFingerprint {

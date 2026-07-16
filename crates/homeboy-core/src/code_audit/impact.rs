@@ -465,7 +465,7 @@ mod tests {
             imports: imports.iter().map(|s| s.to_string()).collect(),
             hooks: hooks
                 .iter()
-                .map(|(t, n)| crate::extension::HookRef {
+                .map(|(t, n)| homeboy_audit_contract::HookRef {
                     hook_type: t.to_string(),
                     name: n.to_string(),
                 })

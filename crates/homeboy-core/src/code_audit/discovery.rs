@@ -8,8 +8,8 @@ use super::fingerprint::{fingerprint_content, normalize_convention_tags, FileFin
 use super::walker::{
     extension_provided_file_extensions, is_extension_provided_source_file, is_test_path,
 };
-use crate::component::AuditConfig;
 use crate::engine::codebase_scan::CodebaseSnapshot;
+use homeboy_audit_contract::AuditConfig;
 
 type DiscoveryGroupKey = (String, Language, bool, Vec<String>);
 
@@ -322,7 +322,7 @@ mod tests {
             ..Default::default()
         };
         let audit_config = AuditConfig {
-            convention_tag_globs: vec![crate::component::ConventionTagGlob {
+            convention_tag_globs: vec![homeboy_audit_contract::ConventionTagGlob {
                 tag: "component:generated".to_string(),
                 globs: vec!["src/generated/*".to_string()],
             }],

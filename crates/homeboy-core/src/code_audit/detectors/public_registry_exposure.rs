@@ -2,7 +2,7 @@
 
 use regex::Regex;
 
-use crate::component::PublicRegistryExposureConfig;
+use homeboy_audit_contract::PublicRegistryExposureConfig;
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};

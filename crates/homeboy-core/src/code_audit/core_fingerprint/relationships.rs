@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::extension::grammar::Symbol;
+use homeboy_engine_primitives::grammar::Symbol;
 
 /// Extract extends (parent class) from symbols.
 pub(super) fn extract_extends(symbols: &[Symbol]) -> Option<String> {

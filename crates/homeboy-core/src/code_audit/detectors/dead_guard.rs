@@ -21,7 +21,7 @@ use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::requirements::{known_available_symbols, KnownSymbols};
 use super::source_locations::line_of_offset;
-use crate::component::AuditConfig;
+use homeboy_audit_contract::AuditConfig;
 
 /// Kinds of guards we detect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

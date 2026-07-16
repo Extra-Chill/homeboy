@@ -29,7 +29,7 @@ use super::comment_blocks;
 use super::conventions::{builtin_tracker_reference_regexes, AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
-use crate::component::DetectorProfileConfig;
+use homeboy_audit_contract::DetectorProfileConfig;
 
 // ============================================================================
 // Tier A — marker + tracker reference catalogues

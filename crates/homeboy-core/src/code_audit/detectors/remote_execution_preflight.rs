@@ -6,7 +6,7 @@
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
-use crate::component::audit::RemoteExecutionSafetyConfig;
+use homeboy_audit_contract::RemoteExecutionSafetyConfig;
 
 pub(in crate::code_audit) fn run(
     fingerprints: &[&FileFingerprint],

@@ -37,11 +37,11 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use crate::extension::grammar::{self, AggregateSeamConfig, Grammar, Symbol};
 use crate::extension::{
     self, AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker, HookRef,
     UnusedParam,
 };
+use homeboy_engine_primitives::grammar::{self, AggregateSeamConfig, Grammar, Symbol};
 
 use super::conventions::Language;
 use super::fingerprint::FileFingerprint;

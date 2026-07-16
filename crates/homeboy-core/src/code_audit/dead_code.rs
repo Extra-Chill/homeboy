@@ -12,7 +12,7 @@ use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::import_matching::{blank_comments_and_strings, contains_word_in_code};
 use super::walker::is_test_path;
-use crate::component::AuditConfig;
+use homeboy_audit_contract::AuditConfig;
 
 /// A cross-file caller record: which files call a function and with how many args.
 struct CallerRecord {
@@ -412,7 +412,7 @@ fn is_runtime_dispatched_type(
 /// 2. **Callers exist but none pass enough args** → `UnusedParameter` (truly dead, safe to remove)
 /// 3. **Callers pass args for this position** → `IgnoredParameter` (received but ignored, likely a bug)
 fn classify_unused_param(
-    unused: &crate::extension::UnusedParam,
+    unused: &homeboy_audit_contract::UnusedParam,
     caller_map: &HashMap<String, CallerRecord>,
 ) -> (AuditFinding, String, String) {
     let fn_name = &unused.function;
@@ -539,7 +539,7 @@ mod tests {
 
         // Caller in another file passes only 2 args
         let mut caller_fp = make_fingerprint("src/bar.rs", vec![], vec![], vec!["process"], vec![]);
-        caller_fp.call_sites.push(crate::extension::CallSite {
+        caller_fp.call_sites.push(homeboy_audit_contract::CallSite {
             target: "process".to_string(),
             line: 10,
             arg_count: 2,
@@ -567,7 +567,7 @@ mod tests {
         });
 
         let mut caller_fp = make_fingerprint("src/bar.rs", vec![], vec![], vec!["process"], vec![]);
-        caller_fp.call_sites.push(crate::extension::CallSite {
+        caller_fp.call_sites.push(homeboy_audit_contract::CallSite {
             target: "process".to_string(),
             line: 10,
             arg_count: 3,

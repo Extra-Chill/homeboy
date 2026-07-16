@@ -11,8 +11,8 @@ use super::execution_plan::AuditExecutionPlan;
 use super::findings::Finding;
 use super::types::{AuditWithAnalysis, CodeAuditResult};
 use super::{fingerprint, walker};
-use crate::component::AuditConfig;
 use crate::{component, Result};
+use homeboy_audit_contract::AuditConfig;
 
 /// Audit a registered component by ID.
 pub fn audit_component(component_id: &str) -> Result<CodeAuditResult> {

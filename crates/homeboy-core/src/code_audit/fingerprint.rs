@@ -63,15 +63,15 @@ pub struct FileFingerprint {
     /// Public/protected class properties (e.g., ["string $name", "$data"]).
     pub properties: Vec<String>,
     /// Hook references: do_action() and apply_filters() calls.
-    pub hooks: Vec<crate::extension::HookRef>,
+    pub hooks: Vec<homeboy_audit_contract::HookRef>,
     /// Function parameters that are declared but never used in the function body.
-    pub unused_parameters: Vec<crate::extension::UnusedParam>,
+    pub unused_parameters: Vec<homeboy_audit_contract::UnusedParam>,
     /// Dead code suppression markers (e.g., `#[allow(dead_code)]`).
-    pub dead_code_markers: Vec<crate::extension::DeadCodeMarker>,
+    pub dead_code_markers: Vec<homeboy_audit_contract::DeadCodeMarker>,
     /// Function/method names called within this file.
     pub internal_calls: Vec<String>,
     /// Call sites with argument counts (for cross-file parameter analysis).
-    pub call_sites: Vec<crate::extension::CallSite>,
+    pub call_sites: Vec<homeboy_audit_contract::CallSite>,
     /// Public functions/methods exported from this file.
     pub public_api: Vec<String>,
     /// Functions/methods registered as hook/callback targets from WITHIN
@@ -96,9 +96,9 @@ pub struct FileFingerprint {
     /// Method names that are trait implementations (called via trait dispatch).
     pub trait_impl_methods: Vec<String>,
     /// Extension-reported direct aggregate literal construction sites.
-    pub aggregate_literals: Vec<crate::extension::AggregateLiteral>,
+    pub aggregate_literals: Vec<homeboy_audit_contract::AggregateLiteral>,
     /// Extension-reported canonical construction seams for aggregate types.
-    pub aggregate_construction_seams: Vec<crate::extension::AggregateConstructionSeam>,
+    pub aggregate_construction_seams: Vec<homeboy_audit_contract::AggregateConstructionSeam>,
 }
 
 /// Extract a structural fingerprint from a source file on disk.

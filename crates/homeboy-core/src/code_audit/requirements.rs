@@ -21,11 +21,11 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::component::audit::KnownSymbolSourceScanConfig;
 use crate::component::{
     AuditConfig, KnownSymbolEntry, KnownSymbolHeaderVersionProvider, KnownSymbolKind,
     KnownSymbolVersionedEntry,
 };
+use homeboy_audit_contract::KnownSymbolSourceScanConfig;
 
 /// Symbols guaranteed to be defined at runtime given the plugin's declared
 /// requirements and its explicit bootstrap wiring.

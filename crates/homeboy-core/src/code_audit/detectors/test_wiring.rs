@@ -162,7 +162,7 @@ fn normalize_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::TestWiringConfig;
+    use homeboy_audit_contract::TestWiringConfig;
     use tempfile::TempDir;
 
     fn write(path: &Path, content: &str) {

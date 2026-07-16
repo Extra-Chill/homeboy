@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use sha2::{Digest, Sha256};
 
-use crate::extension::grammar::Grammar;
+use homeboy_engine_primitives::grammar::Grammar;
 
 /// Compute exact body hash: normalize whitespace, SHA256, truncate to 16 hex chars.
 pub(super) fn exact_hash(body: &str) -> String {
