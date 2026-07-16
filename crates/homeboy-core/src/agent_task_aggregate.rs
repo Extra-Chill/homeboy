@@ -405,9 +405,15 @@ fn reconcile_outcome(
 fn is_verified_recoverable_patch(outcome: &AgentTaskOutcome, artifact: &AgentTaskArtifact) -> bool {
     if !is_apply_artifact(artifact)
         || artifact.kind != "patch"
+        || outcome.failure_classification != Some(AgentTaskFailureClassification::Timeout)
         || artifact.metadata.get("task_id").and_then(Value::as_str) != Some(&outcome.task_id)
         || !non_empty_metadata_string(artifact, "run_id")
+        || !artifact
+            .metadata
+            .get("producer_attempt")
+            .is_some_and(Value::is_u64)
         || !non_empty_metadata_string(artifact, "base_ref")
+        || !non_empty_metadata_string(artifact, "provider_backend")
         || !non_empty_metadata_string(artifact, "repository_identity")
         || !non_empty_metadata_string(artifact, "workspace_identity")
     {
@@ -426,7 +432,9 @@ fn is_verified_recoverable_patch(outcome: &AgentTaskOutcome, artifact: &AgentTas
     let Ok(content) = std::fs::read(path) else {
         return false;
     };
-    !content.is_empty() && expected_sha256 == format!("{:x}", Sha256::digest(&content))
+    !content.is_empty()
+        && artifact.size_bytes == Some(content.len() as u64)
+        && expected_sha256 == format!("{:x}", Sha256::digest(&content))
 }
 
 fn non_empty_metadata_string(artifact: &AgentTaskArtifact, key: &str) -> bool {
@@ -636,7 +644,9 @@ mod tests {
                     metadata: json!({
                         "run_id": "run-1",
                         "task_id": "timed-out",
+                        "producer_attempt": 1,
                         "base_ref": "base-fingerprint",
+                        "provider_backend": "provider",
                         "repository_identity": "repository-identity",
                         "workspace_identity": "workspace-identity"
                     }),
@@ -678,7 +688,8 @@ mod tests {
                     size_bytes: Some(size_bytes),
                     sha256: Some(sha256.to_string()),
                     metadata: json!({
-                        "run_id": "run-1", "task_id": id, "base_ref": "base-fingerprint",
+                        "run_id": "run-1", "task_id": id, "producer_attempt": 1,
+                        "base_ref": "base-fingerprint", "provider_backend": "provider",
                         "repository_identity": "repository-identity", "workspace_identity": "workspace-identity"
                     }),
                 }],
