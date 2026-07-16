@@ -39,11 +39,12 @@ pub(crate) const RUNNER_EXEC_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_EXEC_WAIT_
 /// only mirroring it. Off by default — the default contract leaves the remote job
 /// in flight and uncancelled (#6891).
 pub(crate) const RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT";
-pub const RUNNER_HOSTED_EXEC_ENV: &str = "HOMEBOY_RUNNER_HOSTED_EXEC";
-/// Private process marker added only while RunnerExecOptions crosses a remote
-/// runner boundary. It is intentionally absent from CLI parsing and argv.
-pub const RUNNER_PLACEMENT_RESOLVED_ENV: &str = "HOMEBOY_RUNNER_PLACEMENT_RESOLVED";
-pub const RUNNER_ID_ENV: &str = "HOMEBOY_RUNNER_ID";
+// These runner env-var markers now live in the shared runner-contract crate so
+// core can reference them without a core -> runner edge. Re-exported here so the
+// existing `runner::execution::RUNNER_*_ENV` call sites keep resolving.
+pub use homeboy_runner_contract::{
+    RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV,
+};
 
 pub(crate) fn is_internal_control_env(name: &str) -> bool {
     name == RUNNER_PLACEMENT_RESOLVED_ENV

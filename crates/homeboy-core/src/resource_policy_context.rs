@@ -118,7 +118,7 @@ pub fn reset_captured_context_for_test() {
 }
 
 pub fn is_runner_hosted_exec() -> bool {
-    std::env::var(crate::runner::RUNNER_HOSTED_EXEC_ENV)
+    std::env::var(homeboy_runner_contract::RUNNER_HOSTED_EXEC_ENV)
         .ok()
         .is_some_and(|value| value == "1")
 }
@@ -146,23 +146,23 @@ pub fn is_ci_execution() -> bool {
 /// and daemon job preparation rather than trusting the resolved marker alone.
 pub fn is_managed_runner_placement_context() -> bool {
     is_runner_hosted_exec()
-        && std::env::var(crate::runner::RUNNER_PLACEMENT_RESOLVED_ENV)
+        && std::env::var(homeboy_runner_contract::RUNNER_PLACEMENT_RESOLVED_ENV)
             .ok()
             .is_some_and(|value| value == "1")
-        && std::env::var(crate::runner::RUNNER_ID_ENV)
+        && std::env::var(homeboy_runner_contract::RUNNER_ID_ENV)
             .ok()
             .is_some_and(|value| !value.trim().is_empty())
 }
 
 pub fn clear_runner_hosted_exec() {
-    std::env::remove_var(crate::runner::RUNNER_HOSTED_EXEC_ENV);
+    std::env::remove_var(homeboy_runner_contract::RUNNER_HOSTED_EXEC_ENV);
 }
 
 /// Remove the private runner-placement transport context after CLI routing.
 /// Child workloads and persisted artifacts must not inherit controller routing
 /// markers once their single placement decision has been consumed.
 pub fn clear_managed_runner_placement_context() {
-    std::env::remove_var(crate::runner::RUNNER_HOSTED_EXEC_ENV);
-    std::env::remove_var(crate::runner::RUNNER_PLACEMENT_RESOLVED_ENV);
-    std::env::remove_var(crate::runner::RUNNER_ID_ENV);
+    std::env::remove_var(homeboy_runner_contract::RUNNER_HOSTED_EXEC_ENV);
+    std::env::remove_var(homeboy_runner_contract::RUNNER_PLACEMENT_RESOLVED_ENV);
+    std::env::remove_var(homeboy_runner_contract::RUNNER_ID_ENV);
 }

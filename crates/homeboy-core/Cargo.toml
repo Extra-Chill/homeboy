@@ -29,6 +29,7 @@ homeboy-process = { version = "0.1.0", path = "../homeboy-process" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
 homeboy-lab-contract = { version = "0.1.0", path = "../homeboy-lab-contract" }
+homeboy-runner-contract = { version = "0.1.0", path = "../homeboy-runner-contract" }
 homeboy-redaction = { version = "0.1.0", path = "../homeboy-redaction" }
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
