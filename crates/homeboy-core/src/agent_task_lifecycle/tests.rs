@@ -539,6 +539,29 @@ fn failed_lab_handoff_retry_recovers_the_materialized_user_plan() {
 }
 
 #[test]
+fn retry_uses_controller_plan_when_runner_projection_replaces_plan_path() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let record =
+            submit_plan(&plan, Some("runner-projected-retry")).expect("controller plan submitted");
+        let mut projected = store::read_record(&record.run_id).expect("source record");
+        projected.plan_path =
+            "/home/chubes/.local/share/homeboy/agent-task-runs/runner-projected-retry/plan.json"
+                .to_string();
+        store::write_record(&projected).expect("runner projection mirrored");
+
+        let retry_record = retry(&record.run_id, Some("runner-projected-retry-local"))
+            .expect("local retry uses controller plan");
+        assert_eq!(load_plan(&retry_record.run_id).expect("retry plan"), plan);
+
+        std::fs::remove_file(record.plan_path).expect("remove authoritative controller plan");
+        let error = retry(&record.run_id, Some("missing-controller-plan"))
+            .expect_err("missing controller plan fails closed");
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+    });
+}
+
+#[test]
 fn controller_proxy_records_pre_execution_phase_progress() {
     with_isolated_home(|_| {
         let source = json!({
