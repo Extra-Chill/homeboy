@@ -864,6 +864,16 @@ pub(crate) fn reconcile_runner_job_snapshot(
         }
         return Ok(());
     }
+    if matches!(
+        snapshot.job.status,
+        crate::api_jobs::JobStatus::Succeeded
+            | crate::api_jobs::JobStatus::Failed
+            | crate::api_jobs::JobStatus::Cancelled
+    ) {
+        if let Some(event) = terminal_runner_lifecycle_event(record, snapshot)? {
+            preserve_terminal_runner_identity(record, &event)?;
+        }
+    }
     validate_runner_job_snapshot(record, snapshot)?;
     let mut reconciled = record.clone();
     reconciled.record_runner_reachable();
@@ -938,6 +948,7 @@ fn project_terminal_runner_lifecycle_event(
     snapshot: &crate::runner::RunnerJobLogSnapshot,
     event: &crate::agent_task_lifecycle::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
 ) -> Result<()> {
+    preserve_terminal_runner_identity(record, event)?;
     validate_runner_job_snapshot(record, snapshot)?;
     validate_terminal_child_identity(record, snapshot, event)?;
     let projection_plan = aggregate_projection_plan_from_outcomes(&event.aggregate);
@@ -950,6 +961,37 @@ fn project_terminal_runner_lifecycle_event(
     record_runner_job_terminal_metadata(record, snapshot.job.status, &snapshot.events);
     store::write_aggregate_and_record(record, &event.aggregate)?;
     crate::agent_task_lifecycle::record_terminal_artifact_projection(record, &event.aggregate)
+}
+
+fn preserve_terminal_runner_identity(
+    record: &mut AgentTaskRunRecord,
+    event: &crate::runner::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
+) -> Result<()> {
+    let identity = &event.identity;
+    if identity.runner_id.trim().is_empty()
+        || identity.runner_job_id.trim().is_empty()
+        || identity.run_id.as_deref() != Some(record.run_id.as_str())
+        || identity.persisted_run_id.as_deref() != Some(record.run_id.as_str())
+    {
+        return Ok(());
+    }
+
+    let metadata = record.ensure_metadata_object();
+    if metadata
+        .get("runner_id")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        metadata.insert("runner_id".to_string(), json!(identity.runner_id));
+    }
+    if metadata
+        .get("runner_job_id")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        metadata.insert("runner_job_id".to_string(), json!(identity.runner_job_id));
+    }
+    Ok(())
 }
 
 fn merge_live_provider_handles(
