@@ -1388,6 +1388,57 @@ fn terminal_proxy_reconciliation_hydrates_persisted_nested_result_idempotently()
 }
 
 #[test]
+fn terminal_proxy_reconciliation_hydrates_persisted_dispatch_terminal_states() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        for (run_id, aggregate_status, outcome_status, expected_state) in [
+            (
+                "agent-task-persisted-dispatch-failure",
+                AgentTaskAggregateStatus::Failed,
+                AgentTaskOutcomeStatus::Failed,
+                AgentTaskRunState::Failed,
+            ),
+            (
+                "agent-task-persisted-dispatch-timeout",
+                AgentTaskAggregateStatus::Failed,
+                AgentTaskOutcomeStatus::Timeout,
+                AgentTaskRunState::Failed,
+            ),
+        ] {
+            let mut record = record_detached_lab_run(DetachedLabRunRecord {
+                run_id,
+                runner_id: "homeboy-lab",
+                runner_job_id: "00000000-0000-0000-0000-000000000123",
+                remote_workspace: "/runner/workspace/repo",
+                remote_command: &command,
+            })
+            .expect("running proxy");
+            let mut aggregate = succeeded_aggregate(&test_plan());
+            aggregate.status = aggregate_status;
+            aggregate.outcomes[0].status = outcome_status;
+            aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
+                kind: "transcript".to_string(),
+                uri: format!("homeboy://lab/{run_id}/transcript"),
+                label: Some("Provider transcript".to_string()),
+            }];
+
+            reconcile_runner_job_snapshot(
+                &mut record,
+                &persisted_terminal_result_snapshot(&aggregate),
+            )
+            .expect("hydrate persisted dispatch result");
+
+            let artifact_report = artifacts(run_id).expect("controller artifacts");
+            assert_eq!(record.state, expected_state);
+            assert!(artifact_report
+                .evidence_refs
+                .iter()
+                .any(|evidence| evidence.kind == "transcript"));
+        }
+    });
+}
+
+#[test]
 fn disconnected_runner_marks_nonterminal_proxy_stale_without_advancing_heartbeat() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
@@ -3579,7 +3630,10 @@ fn persisted_terminal_result_snapshot(
             "command": "agent-task",
             "success": true,
             "exit_code": 0,
-            "data": aggregate,
+            "data": {
+                "schema": "homeboy/agent-task-dispatch/v1",
+                "aggregate": aggregate,
+            },
         }))
     }));
     snapshot

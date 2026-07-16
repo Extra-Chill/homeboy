@@ -51,15 +51,17 @@ pub(crate) fn parse_offloaded_run_plan_envelope(stdout: &str) -> Result<serde_js
 }
 
 pub(crate) fn is_agent_task_run_plan_envelope(value: &serde_json::Value) -> bool {
-    value
-        .get("data")
-        .and_then(|data| data.get("schema"))
-        .and_then(serde_json::Value::as_str)
+    let Some(data) = value.get("data") else {
+        return false;
+    };
+    data.get("schema").and_then(serde_json::Value::as_str)
         == Some("homeboy/agent-task-aggregate/v1")
-        || value
-            .get("data")
-            .and_then(|data| data.get("plan_id"))
-            .is_some()
+        || data.get("plan_id").is_some()
+        || data.get("aggregate").is_some_and(|aggregate| {
+            aggregate.get("schema").and_then(serde_json::Value::as_str)
+                == Some("homeboy/agent-task-aggregate/v1")
+                || aggregate.get("plan_id").is_some()
+        })
 }
 
 pub(crate) fn agent_task_run_plan_lifecycle_event_from_job_events(
@@ -212,7 +214,9 @@ fn agent_task_aggregate_from_terminal_result(
                     )
                 });
         }
-        let Some(next) = current.get("data") else {
+        // Command results wrap their payload in `data`; agent-task cook then
+        // wraps the terminal aggregate in its dispatch envelope's `aggregate`.
+        let Some(next) = current.get("data").or_else(|| current.get("aggregate")) else {
             return Ok(None);
         };
         current = next;
