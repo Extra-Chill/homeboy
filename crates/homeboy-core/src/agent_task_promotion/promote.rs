@@ -31,8 +31,17 @@ mod gate_run;
 use gate_run::PromotionGateRun;
 
 pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionReport> {
+    promote_with_checkpoint(options, |_| Ok(()))
+}
+
+/// Promote a patch while recording the recoverable post-apply boundary before
+/// dependency materialization or verification is attempted.
+pub fn promote_with_checkpoint(
+    options: AgentTaskPromotionOptions,
+    mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
+) -> Result<AgentTaskPromotionReport> {
     let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
-    let mut report = promote_with_provider(options, &mut provider)?;
+    let mut report = promote_with_provider_and_checkpoint(options, &mut provider, &mut checkpoint)?;
     if let Some(provenance) = provider.provenance() {
         report.provenance["worktree_provider"] = provenance.clone();
     }
@@ -50,9 +59,9 @@ pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionR
     Ok(report)
 }
 
-/// Rebuild a full proof for a clean candidate that was already applied before
-/// its deterministic gates failed. The reverse apply check proves the original
-/// artifact remains in the candidate before any gate result is trusted.
+/// Rebuild a full proof for a clean candidate from a durable post-apply report.
+/// The reverse apply check proves the original artifact remains in the candidate
+/// before any gate result is trusted.
 pub fn resume_promoted_patch(
     options: AgentTaskPromotionOptions,
     target_path: &Path,
@@ -119,7 +128,7 @@ pub fn resume_promoted_patch(
             "worktree_path": target_path,
             "dependencies_materialized": gates.dependencies_materialized,
             "candidate": candidate,
-            "resumed_from_gate_failed_promotion": true,
+            "resumed_post_apply_promotion": true,
         }),
         operator_notification: promotion_notification(gates.status, &target),
     };
@@ -134,10 +143,13 @@ fn validate_resume_provenance(
     target_path: &Path,
     previous: &Value,
 ) -> Result<()> {
-    if previous.get("status").and_then(Value::as_str) != Some("gate_failed") {
+    if !matches!(
+        previous.get("status").and_then(Value::as_str),
+        Some("gate_failed" | "verification_pending")
+    ) {
         return Err(Error::validation_invalid_argument(
             "promotion",
-            "promotion resume requires a durable gate-failed promotion",
+            "promotion resume requires a durable post-apply promotion",
             None,
             None,
         ));
@@ -149,7 +161,7 @@ fn validate_resume_provenance(
     if previous_run != options.source_run_id.as_deref() {
         return Err(Error::validation_invalid_argument(
             "promotion",
-            "promotion resume source run does not match the durable gate-failed promotion",
+            "promotion resume source run does not match the durable post-apply promotion",
             None,
             None,
         ));
@@ -162,7 +174,7 @@ fn validate_resume_provenance(
     {
         return Err(Error::validation_invalid_argument(
             "promotion",
-            "promotion resume target does not match the durable gate-failed promotion",
+            "promotion resume target does not match the durable post-apply promotion",
             None,
             None,
         ));
@@ -234,6 +246,14 @@ pub(crate) fn promote_with_provider(
     options: AgentTaskPromotionOptions,
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
 ) -> Result<AgentTaskPromotionReport> {
+    promote_with_provider_and_checkpoint(options, provider, &mut |_| Ok(()))
+}
+
+pub(super) fn promote_with_provider_and_checkpoint(
+    options: AgentTaskPromotionOptions,
+    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
+) -> Result<AgentTaskPromotionReport> {
     validate_workspace_handle(&options.to_worktree)?;
     let source_value: Value = serde_json::from_str(&options.source).map_err(|error| {
         Error::validation_invalid_json(
@@ -283,6 +303,7 @@ pub(crate) fn promote_with_provider(
                 return promote_committed_changes(
                     &options,
                     provider,
+                    checkpoint,
                     &source_kind,
                     &outcome,
                     None,
@@ -323,6 +344,7 @@ pub(crate) fn promote_with_provider(
             return promote_committed_changes(
                 &options,
                 provider,
+                checkpoint,
                 &source_kind,
                 &outcome,
                 Some(&artifact),
@@ -386,15 +408,34 @@ pub(crate) fn promote_with_provider(
         }
     }
 
+    let target = AgentTaskPromotionTarget::from_worktree(
+        options.to_worktree.clone(),
+        applied_worktree_path.as_deref(),
+    );
+    if let Some(worktree_path) = applied_worktree_path.as_deref() {
+        checkpoint(&post_apply_report(
+            &options,
+            &source_kind,
+            &outcome,
+            AgentTaskPromotionArtifactRef {
+                id: artifact.id.clone(),
+                kind: artifact.kind.clone(),
+                path: patch_path.display().to_string(),
+                sha256: artifact.sha256.clone(),
+            },
+            changed_files.clone(),
+            command_evidence.clone(),
+            target.clone(),
+            worktree_path,
+            &outcome.schema,
+            artifact.metadata.clone(),
+        ))?;
+    }
     let gates = if let Some(worktree_path) = applied_worktree_path.as_deref() {
         run_promotion_gates(&options, provider, worktree_path)?
     } else {
         PromotionGateRun::without_gates(options.dry_run)
     };
-    let target = AgentTaskPromotionTarget::from_worktree(
-        options.to_worktree.clone(),
-        applied_worktree_path.as_deref(),
-    );
     let operator_notification = promotion_notification(gates.status, &target);
     let candidate = if gates.status == AgentTaskPromotionStatus::Applied {
         applied_worktree_path
@@ -570,6 +611,7 @@ fn valid_sha256(value: &str) -> bool {
 fn promote_committed_changes(
     options: &AgentTaskPromotionOptions,
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     source_kind: &str,
     outcome: &AgentTaskOutcome,
     artifact: Option<&AgentTaskArtifact>,
@@ -601,15 +643,36 @@ fn promote_committed_changes(
     })?;
     command_evidence.extend(target.command_evidence);
     let applied_worktree_path = (!options.dry_run).then_some(target.path);
+    let target = AgentTaskPromotionTarget::from_worktree(
+        options.to_worktree.clone(),
+        applied_worktree_path.as_deref(),
+    );
+    if let Some(path) = applied_worktree_path.as_deref() {
+        checkpoint(&post_apply_report(
+            options,
+            source_kind,
+            outcome,
+            AgentTaskPromotionArtifactRef {
+                id: "committed-changes".to_string(),
+                kind: "patch".to_string(),
+                path: committed_patch.patch_path.display().to_string(),
+                sha256: Some(committed_patch.sha256.clone()),
+            },
+            normalized_patch.changed_files.clone(),
+            command_evidence.clone(),
+            target.clone(),
+            path,
+            &outcome.schema,
+            artifact
+                .map(|artifact| artifact.metadata.clone())
+                .unwrap_or(Value::Null),
+        ))?;
+    }
     let gates = if let Some(path) = applied_worktree_path.as_deref() {
         run_promotion_gates(options, provider, path)?
     } else {
         PromotionGateRun::without_gates(options.dry_run)
     };
-    let target = AgentTaskPromotionTarget::from_worktree(
-        options.to_worktree.clone(),
-        applied_worktree_path.as_deref(),
-    );
     let operator_notification = promotion_notification(gates.status, &target);
 
     Ok(AgentTaskPromotionReport {
@@ -789,6 +852,12 @@ fn promotion_notification(
 ) -> AgentTaskPromotionNotification {
     let target_path = target.path.as_deref().unwrap_or(target.worktree.as_str());
     match status {
+        AgentTaskPromotionStatus::VerificationPending => AgentTaskPromotionNotification {
+            status: "blocked".to_string(),
+            message: "patch promoted; deterministic verification is pending".to_string(),
+            resumable_blocker: Some("rerun promotion to resume verification without reapplying the patch".to_string()),
+            next_command: None,
+        },
         AgentTaskPromotionStatus::Applied => AgentTaskPromotionNotification {
             status: "completed".to_string(),
             message: format!(
@@ -823,6 +892,42 @@ fn promotion_notification(
             resumable_blocker: None,
             next_command: None,
         },
+    }
+}
+
+fn post_apply_report(
+    options: &AgentTaskPromotionOptions,
+    source_kind: &str,
+    outcome: &AgentTaskOutcome,
+    patch_artifact: AgentTaskPromotionArtifactRef,
+    changed_files: Vec<String>,
+    command_evidence: Vec<AgentTaskPromotionCommandReport>,
+    target: AgentTaskPromotionTarget,
+    worktree_path: &Path,
+    source_schema: &str,
+    artifact_metadata: Value,
+) -> AgentTaskPromotionReport {
+    let status = AgentTaskPromotionStatus::VerificationPending;
+    let operator_notification = promotion_notification(status, &target);
+    AgentTaskPromotionReport {
+        schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
+        status,
+        source: promotion_source(source_kind, outcome, options),
+        to_worktree: options.to_worktree.clone(),
+        target,
+        patch_artifact,
+        changed_files,
+        command_evidence,
+        deterministic_gates: Vec::new(),
+        gate_results: Vec::new(),
+        provenance: json!({
+            "source_schema": source_schema,
+            "artifact_metadata": artifact_metadata,
+            "worktree_path": worktree_path,
+            "dependencies_materialized": false,
+            "post_apply": true,
+        }),
+        operator_notification,
     }
 }
 
