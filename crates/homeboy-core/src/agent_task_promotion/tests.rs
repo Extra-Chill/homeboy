@@ -243,7 +243,16 @@ fn recoverable_patch_source(temp: &tempfile::TempDir, patch_count: usize) -> (Pa
                 "path": name,
                 "size_bytes": VALID_PATCH.len(),
                 "sha256": sha256_hex(VALID_PATCH),
-                "metadata": { "role": "patch" }
+                "metadata": {
+                    "role": "patch",
+                    "run_id": "recoverable-run",
+                    "task_id": "task-1",
+                    "producer_attempt": 1,
+                    "base_ref": "base-fingerprint",
+                    "provider_backend": "provider",
+                    "repository_identity": "repository-identity",
+                    "workspace_identity": "workspace-identity"
+                }
             })
         })
         .collect::<Vec<_>>();
@@ -307,6 +316,41 @@ fn promote_recoverable_candidate_applies_exactly_one_actionable_patch() {
         AgentTaskPromotionStatus::Applied
     );
     assert_eq!(apply_calls, 1);
+}
+
+#[test]
+fn promote_recoverable_candidate_rejects_mismatched_run_provenance() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (source_path, source) = recoverable_patch_source(&temp, 1);
+    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
+    source["artifacts"][0]["metadata"]["run_id"] = Value::String("different-run".to_string());
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("target")),
+        ..Default::default()
+    };
+
+    let error = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source: source.to_string(),
+            source_run_id: Some("recoverable-run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            to_worktree: "repo@recoverable".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect_err("mismatched provenance rejected");
+
+    assert!(error.message.contains("fingerprinted artifact"));
+    assert!(provider.apply_calls.is_empty());
 }
 
 #[test]

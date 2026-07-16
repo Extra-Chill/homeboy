@@ -288,6 +288,16 @@ pub(crate) fn promote_with_provider(
         }
         Err(error) => return Err(error),
     };
+    if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
+        && !has_recoverable_candidate_provenance(&options, &outcome, &artifact)
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            "recoverable-candidate promotion requires a fingerprinted artifact bound to its producing run, task, base, and workspace",
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
     let gate_feedback_baseline =
         gate_feedback_baseline_for_artifact(&source_for_provenance, &outcome, &artifact)?;
     let patch_path = resolve_artifact_path(&artifact, options.source_path.as_deref())?;
@@ -505,6 +515,46 @@ fn outcome_has_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {
         .artifacts
         .iter()
         .any(|artifact| is_actionable_patch_artifact(artifact) || is_empty_patch_artifact(artifact))
+}
+
+fn has_recoverable_candidate_provenance(
+    options: &AgentTaskPromotionOptions,
+    outcome: &AgentTaskOutcome,
+    artifact: &AgentTaskArtifact,
+) -> bool {
+    artifact.kind == "patch"
+        && artifact.size_bytes.is_some_and(|size| size > 0)
+        && artifact.sha256.as_deref().is_some_and(valid_sha256)
+        && artifact.metadata.get("task_id").and_then(Value::as_str) == Some(&outcome.task_id)
+        && artifact
+            .metadata
+            .get("producer_attempt")
+            .is_some_and(Value::is_u64)
+        && [
+            "run_id",
+            "base_ref",
+            "provider_backend",
+            "repository_identity",
+            "workspace_identity",
+        ]
+        .iter()
+        .all(|key| {
+            artifact
+                .metadata
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        })
+        && options.source_run_id.as_deref().is_none_or(|run_id| {
+            artifact.metadata.get("run_id").and_then(Value::as_str) == Some(run_id)
+        })
+        && options.task_base_sha.as_deref().is_none_or(|base_ref| {
+            artifact.metadata.get("base_ref").and_then(Value::as_str) == Some(base_ref)
+        })
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn promote_committed_changes(
