@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+pub mod fingerprint;
+pub use fingerprint::{
+    AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker, FingerprintOutput,
+    HookRef, UnusedParam,
+};
+
 mod command_status;
 mod config_key_usage;
 mod detector_profile;
