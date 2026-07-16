@@ -10,6 +10,7 @@ use std::path::PathBuf;
 pub mod add;
 pub mod auto;
 pub mod decompose;
+pub mod edit_op_tagged;
 pub mod move_items;
 pub mod plan;
 pub mod propagate;
