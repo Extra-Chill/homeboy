@@ -87,13 +87,15 @@ fn active_runner_job_summaries(status: Option<&str>) -> Vec<RunSummary> {
             Some(status) => status == job.status.run_status_label(),
             None => true,
         })
-        .map(active_runner_job_run_summary)
+        .filter_map(active_runner_job_run_summary_if_durable)
         .collect()
 }
 
-fn active_runner_job_run_summary(job: api_jobs::ActiveRunnerJobSummary) -> RunSummary {
-    let summary = api_jobs::active_runner_job_run_summary(job);
-    RunSummary {
+fn active_runner_job_run_summary_if_durable(
+    job: api_jobs::ActiveRunnerJobSummary,
+) -> Option<RunSummary> {
+    let summary = api_jobs::active_runner_job_run_summary_if_durable(job)?;
+    Some(RunSummary {
         id: summary.id,
         kind: summary.kind,
         status: summary.status,
@@ -106,7 +108,7 @@ fn active_runner_job_run_summary(job: api_jobs::ActiveRunnerJobSummary) -> RunSu
         cwd: summary.cwd,
         status_note: Some(summary.status_note),
         artifact_index: None,
-    }
+    })
 }
 
 pub fn show_run(run_id: &str) -> CmdResult<RunsOutput> {

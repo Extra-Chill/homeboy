@@ -66,18 +66,26 @@ pub(super) fn active_runner_job_summary(
 
 pub(super) fn active_daemon_job_summary(job: &Job, now_ms: u64) -> ActiveRunnerJobSummary {
     let started_at_ms = job.started_at_ms.unwrap_or(job.created_at_ms);
+    let projection = job.runner_job_projection.as_ref();
+    let lifecycle = projection.and_then(|projection| projection.lifecycle.clone());
     ActiveRunnerJobSummary {
-        runner_id: job
-            .target_runner_id
-            .clone()
+        runner_id: projection
+            .map(|projection| projection.runner_id.clone())
+            .or_else(|| job.target_runner_id.clone())
             .unwrap_or_else(|| "daemon".to_string()),
         job_id: job.id.to_string(),
         operation: job.operation.clone(),
-        source: "daemon".to_string(),
-        kind: job.operation.clone(),
+        source: projection
+            .map(|projection| projection.source.clone())
+            .unwrap_or_else(|| "daemon".to_string()),
+        kind: projection
+            .map(|projection| projection.kind.clone())
+            .unwrap_or_else(|| job.operation.clone()),
         status: job.status,
-        command: job.operation.clone(),
-        cwd: None,
+        command: projection
+            .map(|projection| projection.command.clone())
+            .unwrap_or_else(|| job.operation.clone()),
+        cwd: projection.and_then(|projection| projection.cwd.clone()),
         started_at_ms,
         updated_at_ms: job.updated_at_ms,
         elapsed_ms: now_ms.saturating_sub(started_at_ms),
@@ -91,8 +99,10 @@ pub(super) fn active_daemon_job_summary(job: &Job, now_ms: u64) -> ActiveRunnerJ
         claim_expires_in_ms: job
             .claim_expires_at_ms
             .map(|expires_at| expires_at.saturating_sub(now_ms)),
-        lifecycle: None,
-        durable_run_id: None,
+        durable_run_id: lifecycle
+            .as_ref()
+            .and_then(|lifecycle| lifecycle.durable_run_id.clone()),
+        lifecycle,
         stale_reason: job.stale_reason.clone(),
         lifecycle_state: Some(runner_job_lifecycle_state(job).to_string()),
         retryable: Some(runner_job_retryable(job)),
@@ -155,6 +165,23 @@ fn request_metadata_u64(request: &RemoteRunnerJobRequest, key: &str) -> Option<u
 }
 
 pub fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> ActiveRunnerJobRunSummary {
+    active_runner_job_run_summary_if_durable(job.clone()).unwrap_or_else(|| {
+        let run_id = format!("runner-job-{}", job.job_id);
+        active_runner_job_run_summary_with_id(job, run_id)
+    })
+}
+
+pub fn active_runner_job_run_summary_if_durable(
+    job: ActiveRunnerJobSummary,
+) -> Option<ActiveRunnerJobRunSummary> {
+    let durable_run_id = job.durable_run_id.clone()?;
+    Some(active_runner_job_run_summary_with_id(job, durable_run_id))
+}
+
+fn active_runner_job_run_summary_with_id(
+    job: ActiveRunnerJobSummary,
+    run_id: String,
+) -> ActiveRunnerJobRunSummary {
     let active_child_count = optional_count(job.active_child_count);
     let active_cell_count = optional_count(job.active_cell_count);
     let durable_run_id = job.durable_run_id.as_deref().unwrap_or("unknown");
@@ -183,10 +210,7 @@ pub fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> ActiveRunne
     );
 
     ActiveRunnerJobRunSummary {
-        id: job
-            .durable_run_id
-            .clone()
-            .unwrap_or_else(|| format!("runner-job-{}", job.job_id)),
+        id: run_id,
         kind: job.kind,
         status: job.status.run_status_label().to_string(),
         started_at: ms_to_rfc3339(job.started_at_ms),

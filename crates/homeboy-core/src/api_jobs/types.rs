@@ -91,6 +91,21 @@ pub struct Job {
     pub claim_expires_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<JobArtifactMetadata>,
+    /// Canonical typed identity for a daemon-accepted execution job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_job_projection: Option<RunnerJobProjection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerJobProjection {
+    pub runner_id: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub source: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<RunnerJobLifecycleMetadata>,
 }
 
 /// Shared lease/claim identity fields carried by jobs that can be claimed by a

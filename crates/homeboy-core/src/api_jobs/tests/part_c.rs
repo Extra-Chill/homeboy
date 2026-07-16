@@ -205,6 +205,58 @@ fn active_runner_jobs_include_daemon_local_jobs_counted_by_freshness() {
 }
 
 #[test]
+fn daemon_exec_projection_survives_event_retention_and_separates_run_identity() {
+    let store = JobStore::default();
+    let job = store.create_with_source_snapshot_and_metadata(
+        "runner.exec",
+        None,
+        Some(json!({
+            "runner_job_projection": {
+                "runner_id": "homeboy-lab",
+                "command": "homeboy agent-task status durable-run-8341",
+                "cwd": "/runner/homeboy",
+                "source": "runner-daemon",
+                "kind": "runner.exec",
+                "lifecycle": {
+                    "source": "runner-daemon",
+                    "kind": "runner.exec",
+                    "durable_run_id": "durable-run-8341"
+                }
+            }
+        })),
+    );
+
+    let active = store.active_runner_jobs();
+    assert_eq!(active[0].runner_id, "homeboy-lab");
+    assert_eq!(
+        active[0].durable_run_id.as_deref(),
+        Some("durable-run-8341")
+    );
+    assert_eq!(
+        active_runner_job_run_summary_if_durable(active[0].clone())
+            .expect("durable run projection")
+            .id,
+        "durable-run-8341"
+    );
+
+    store
+        .inner
+        .lock()
+        .expect("job store")
+        .jobs
+        .get_mut(&job.id)
+        .expect("job")
+        .events
+        .clear();
+    let retained = store.active_runner_jobs();
+    assert_eq!(retained[0].runner_id, "homeboy-lab");
+    assert_eq!(
+        retained[0].durable_run_id.as_deref(),
+        Some("durable-run-8341")
+    );
+}
+
+#[test]
 fn durable_remote_runner_restart_failure_moves_to_stale_runner_jobs() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join("jobs.json");

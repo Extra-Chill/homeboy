@@ -99,7 +99,7 @@ fn merge_active_runner_jobs(
             Some(status) => status == job.status.run_status_label(),
             None => true,
         })
-        .map(active_runner_job_run_summary)
+        .filter_map(active_runner_job_run_summary_if_durable)
         .collect::<Vec<_>>();
     append_missing_run_summaries(runs, jobs, limit);
 }
@@ -115,9 +115,11 @@ fn append_missing_run_summaries(runs: &mut Vec<RunSummary>, jobs: Vec<RunSummary
     }
 }
 
-fn active_runner_job_run_summary(job: api_jobs::ActiveRunnerJobSummary) -> RunSummary {
-    let summary = api_jobs::active_runner_job_run_summary(job);
-    RunSummary {
+fn active_runner_job_run_summary_if_durable(
+    job: api_jobs::ActiveRunnerJobSummary,
+) -> Option<RunSummary> {
+    let summary = api_jobs::active_runner_job_run_summary_if_durable(job)?;
+    Some(RunSummary {
         id: summary.id,
         kind: summary.kind,
         status: summary.status,
@@ -130,7 +132,7 @@ fn active_runner_job_run_summary(job: api_jobs::ActiveRunnerJobSummary) -> RunSu
         cwd: summary.cwd,
         status_note: Some(summary.status_note),
         artifact_index: None,
-    }
+    })
 }
 
 pub fn runner_artifacts(runner_id: &str, run_id: &str) -> CmdResult<RunsOutput> {
@@ -415,7 +417,8 @@ mod tests {
             active_cell_count: None,
         };
 
-        let summary = active_runner_job_run_summary(job);
+        let summary =
+            active_runner_job_run_summary_if_durable(job).expect("durable runner job summary");
 
         assert_eq!(summary.id, "bench-run-123");
         assert_eq!(summary.status, "running");

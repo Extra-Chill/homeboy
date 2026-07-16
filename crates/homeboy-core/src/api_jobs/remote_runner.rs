@@ -371,6 +371,7 @@ impl JobStore {
             claimed_at_ms: None,
             claim_expires_at_ms: None,
             artifacts: Vec::new(),
+            runner_job_projection: None,
         };
 
         let public_request = request.public_metadata();
