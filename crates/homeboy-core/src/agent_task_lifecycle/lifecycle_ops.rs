@@ -915,10 +915,12 @@ pub(crate) fn reconcile_runner_job_snapshot(
 fn terminal_runner_lifecycle_event(
     record: &AgentTaskRunRecord,
     snapshot: &crate::runner::RunnerJobLogSnapshot,
-) -> Result<Option<crate::runner::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent>> {
+) -> Result<
+    Option<crate::agent_task_lifecycle::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent>,
+> {
     let runner_id = record.runner_id().unwrap_or_default();
     let runner_job_id = record.runner_job_id().unwrap_or_default();
-    if let Some(event) = crate::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_persisted_job_events(
+    if let Some(event) = crate::agent_task_lifecycle::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_persisted_job_events(
         &snapshot.events,
         runner_id,
         runner_job_id,
@@ -926,7 +928,7 @@ fn terminal_runner_lifecycle_event(
     )? {
         return Ok(Some(event));
     }
-    Ok(crate::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(
+    Ok(crate::agent_task_lifecycle::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(
         Some(&snapshot.events),
     ))
 }
@@ -934,7 +936,7 @@ fn terminal_runner_lifecycle_event(
 fn project_terminal_runner_lifecycle_event(
     record: &mut AgentTaskRunRecord,
     snapshot: &crate::runner::RunnerJobLogSnapshot,
-    event: &crate::runner::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
+    event: &crate::agent_task_lifecycle::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
 ) -> Result<()> {
     validate_runner_job_snapshot(record, snapshot)?;
     validate_terminal_child_identity(record, snapshot, event)?;
@@ -1018,7 +1020,7 @@ fn validate_runner_job_snapshot(
 fn validate_terminal_child_identity(
     record: &AgentTaskRunRecord,
     snapshot: &crate::runner::RunnerJobLogSnapshot,
-    event: &crate::runner::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
+    event: &crate::agent_task_lifecycle::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
 ) -> Result<()> {
     let expected_runner_id = record.runner_id().unwrap_or_default();
     let expected_job_id = record.runner_job_id().unwrap_or_default();

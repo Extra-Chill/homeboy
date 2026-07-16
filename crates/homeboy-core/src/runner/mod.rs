@@ -10,7 +10,11 @@ use crate::error::{Error, Result};
 use crate::output::{BatchResult, CreateOutput, CreateResult, MergeOutput, MergeResult};
 use crate::server::{self, RunnerPolicy, RunnerSecretEnvRef, RunnerSettings, ServerRunner};
 
-pub(crate) mod agent_task_lifecycle_event;
+// agent_task_lifecycle_event is pure core logic (job-events -> lifecycle events)
+// that was mis-filed under runner. It now lives in agent_task_lifecycle; re-
+// exported here so runner-internal `super::agent_task_lifecycle_event` /
+// `crate::runner::agent_task_lifecycle_event` call sites resolve unchanged.
+pub(crate) use crate::agent_task_lifecycle::agent_task_lifecycle_event;
 mod apply;
 mod broker_auth;
 mod broker_http;
