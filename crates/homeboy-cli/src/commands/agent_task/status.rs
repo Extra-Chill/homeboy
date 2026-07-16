@@ -1759,6 +1759,25 @@ mod tests {
     }
 
     #[test]
+    fn compact_status_retains_recovered_patch_refs_for_summary_rendering() {
+        let record = json!({
+            "run_id": "recovered-lab-run",
+            "state": "succeeded",
+            "tasks": [{ "task_id": "cook", "state": "succeeded" }],
+            "artifact_refs": [{
+                "task_id": "cook",
+                "kind": "patch",
+                "uri": "homeboy://agent-task/run/recovered-lab-run/artifacts#task=cook&artifact=patch",
+                "size_bytes": 7926
+            }]
+        });
+
+        let summary = compact_status_summary(&record, "recovered-lab-run");
+
+        assert_eq!(summary["artifact_refs"], record["artifact_refs"]);
+    }
+
+    #[test]
     fn compact_work_summary_separates_no_patch_promotion_from_provider_artifacts() {
         let record = json!({
             "run_id": "agent-task-run-artifacts",
