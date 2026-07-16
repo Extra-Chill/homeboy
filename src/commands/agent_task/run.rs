@@ -143,8 +143,24 @@ where
             .run_id
             .clone()
             .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
-        let request = dispatch_service::resolve_dispatch_request(dispatch_args.into())?;
-        (run_id, dispatch_service::build_dispatch_plan(&request)?)
+        let mut request = dispatch_service::resolve_dispatch_request(dispatch_args.into())?;
+        let plan = match dispatch_service::build_dispatch_plan(&request) {
+            Ok(plan) => plan,
+            // A managed promotion handle may be intentionally unavailable until
+            // after provider execution. Keep the compiled task durable and let
+            // promotion report its established controlled policy failure.
+            Err(error)
+                if request.workspace.as_deref() == Some(args.to_worktree.as_str())
+                    && error.message.contains(
+                        "neither an existing directory nor a resolvable managed worktree handle",
+                    ) =>
+            {
+                request.workspace = None;
+                dispatch_service::build_dispatch_plan(&request)?
+            }
+            Err(error) => return Err(error),
+        };
+        (run_id, plan)
     };
     let cook_id = requested_cook_id.unwrap_or_else(|| run_id.clone());
     // Capture the resolved task workspace before dispatch. The provider may
@@ -313,9 +329,12 @@ pub(super) fn run_next() -> CmdResult<Value> {
 
 pub(super) fn run_next_with_executor<E>(executor: E) -> CmdResult<Value>
 where
-    E: AgentTaskExecutorAdapter,
+    E: AgentTaskExecutorAdapter + Clone,
 {
-    let result = agent_task_service::run_next(executor)?;
+    let result = agent_task_service::run_next_with_cook_dispatcher(
+        executor,
+        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+    )?;
     let Some(aggregate) = result.value else {
         return Ok((serde_json::json!({ "claimed": false }), 0));
     };

@@ -502,6 +502,38 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
             )?;
         }
     }
+    // Read-side reconciliation only writes the durable continuation signal.
+    // The separate consumer owns execution and cannot inherit a local closure.
+    if matches!(
+        record.state,
+        AgentTaskRunState::Succeeded
+            | AgentTaskRunState::CandidateRecoverable
+            | AgentTaskRunState::PartialRecoverable
+    ) {
+        if let Some(cook_id) = record
+            .metadata
+            .get("cook_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            if crate::core::agent_task_service::recipe_exists(&cook_id)? {
+                if let Err(error) = crate::core::agent_task_service::enqueue_terminal_continuation(
+                    &cook_id,
+                    &record.run_id,
+                ) {
+                    record.ensure_metadata_object().insert(
+                        "cook_continuation_scheduler".to_string(),
+                        json!({
+                            "status": "failed",
+                            "error_code": error.code.as_str(),
+                            "message": error.message,
+                        }),
+                    );
+                    store::write_record(&record)?;
+                }
+            }
+        }
+    }
     Ok(record)
 }
 

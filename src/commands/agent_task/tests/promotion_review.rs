@@ -286,6 +286,10 @@ struct MirroredAttemptDispatcher {
 }
 
 impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for MirroredAttemptDispatcher {
+    fn durable_recipe(&self) -> homeboy::core::Result<serde_json::Value> {
+        Ok(serde_json::json!({ "kind": "local" }))
+    }
+
     fn dispatch_attempt(
         &self,
         plan: AgentTaskPlan,

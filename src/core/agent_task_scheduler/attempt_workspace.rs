@@ -12,7 +12,7 @@ use super::*;
 
 /// Immutable provenance for one scheduler execution. Controller-local callers
 /// use an empty context; only a Lab subprocess captures its paired transport.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct HarvestExecutionContext {
     source_snapshot: Option<crate::core::source_snapshot::SourceSnapshot>,
     lab_offload: Option<serde_json::Value>,

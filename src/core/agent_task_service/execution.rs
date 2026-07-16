@@ -201,8 +201,39 @@ where
 
 pub fn run_next<E>(executor: E) -> Result<AgentTaskRunResult<Option<AgentTaskAggregate>>>
 where
-    E: AgentTaskExecutorAdapter,
+    E: AgentTaskExecutorAdapter + Clone,
 {
+    run_next_with_cook_dispatcher(executor, |_| Ok(None))
+}
+
+pub fn run_next_with_cook_dispatcher<E>(
+    executor: E,
+    dispatcher: impl FnOnce(
+        &Value,
+    ) -> Result<
+        Option<std::sync::Arc<dyn super::cook::AgentTaskCookAttemptDispatcher>>,
+    >,
+) -> Result<AgentTaskRunResult<Option<AgentTaskAggregate>>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    if let Some(claim) = super::claim_continuation()? {
+        let cook_id = claim.continuation().cook_id.clone();
+        let run_id = claim.continuation().run_id.clone();
+        let exit_code = super::consume_claimed_with_dispatcher(claim, dispatcher, |options| {
+            super::run_cook(options, executor.clone()).map(|result| result.exit_code)
+        })?;
+        let latest_run_id = agent_task_lifecycle::cook_index(&cook_id)
+            .map(|index| index.latest_run_id)
+            .unwrap_or(run_id);
+        let aggregate = agent_task_lifecycle::read_aggregate(&latest_run_id).ok();
+        return Ok(AgentTaskRunResult {
+            value: aggregate.map(|aggregate| {
+                crate::core::agent_task_artifacts::reviewer_facing_aggregate(&aggregate)
+            }),
+            exit_code,
+        });
+    }
     let Some(record) = agent_task_lifecycle::claim_next_queued_run()? else {
         return Ok(AgentTaskRunResult {
             value: None,

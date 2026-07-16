@@ -89,6 +89,7 @@ pub(crate) fn init_runtime_component_checkout(path: &std::path::Path) {
     run(&["commit", "-m", "init"]);
 }
 
+#[derive(Clone)]
 pub(crate) struct InspectingExecutor {
     pub(crate) run_id: String,
     pub(crate) observed_status: Arc<Mutex<Option<AgentTaskRunRecord>>>,
