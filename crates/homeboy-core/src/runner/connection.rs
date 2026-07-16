@@ -1300,6 +1300,16 @@ pub(crate) fn daemon_endpoint_identity(local_url: &str) -> std::result::Result<S
     daemon_http_identity(local_url)
 }
 
+pub(crate) fn local_live_session(
+    runner_id: &str,
+    timeout: Duration,
+) -> Result<Option<RunnerSession>> {
+    let Some(session) = read_session(runner_id)? else {
+        return Ok(None);
+    };
+    Ok(session_is_live_with_timeout(&session, timeout).then_some(session))
+}
+
 fn stale_daemon_warning(
     runner: &Runner,
     session: Option<&RunnerSession>,

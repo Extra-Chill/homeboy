@@ -212,12 +212,13 @@ pub(super) fn daemon_http_freshness(
 /// A direct-SSH session is live only when its loopback endpoint still serves
 /// the daemon lease recorded in the session. A listening TCP port alone can
 /// belong to a replaced tunnel or an unrelated local process.
-pub(super) fn daemon_http_health_matches(
+pub(super) fn daemon_http_health_matches_with_timeout(
     local_url: &str,
     expected_lease_id: Option<&str>,
     expected_pid: Option<u32>,
+    timeout: Duration,
 ) -> bool {
-    let Ok(report) = daemon_health_report(local_url) else {
+    let Ok(report) = daemon_health_report_with_timeout(local_url, timeout) else {
         return false;
     };
     match expected_lease_id.filter(|lease_id| !lease_id.is_empty()) {
@@ -235,9 +236,17 @@ fn daemon_http_body_at(
     local_url: &str,
     endpoint: &str,
 ) -> std::result::Result<DaemonVersionResponse, String> {
+    daemon_http_body_at_with_timeout(local_url, endpoint, Duration::from_secs(2))
+}
+
+fn daemon_http_body_at_with_timeout(
+    local_url: &str,
+    endpoint: &str,
+    timeout: Duration,
+) -> std::result::Result<DaemonVersionResponse, String> {
     let client = Client::builder()
         .no_proxy()
-        .timeout(Duration::from_secs(2))
+        .timeout(timeout)
         .build()
         .map_err(|err| format!("build daemon HTTP client: {err}"))?;
     let response = client
@@ -271,7 +280,14 @@ fn daemon_http_body(local_url: &str) -> std::result::Result<DaemonVersionRespons
 }
 
 fn daemon_health_report(local_url: &str) -> std::result::Result<DaemonHealthReport, String> {
-    let response = daemon_http_body_at(local_url, "health")?;
+    daemon_health_report_with_timeout(local_url, Duration::from_secs(2))
+}
+
+fn daemon_health_report_with_timeout(
+    local_url: &str,
+    timeout: Duration,
+) -> std::result::Result<DaemonHealthReport, String> {
+    let response = daemon_http_body_at_with_timeout(local_url, "health", timeout)?;
     let freshness = daemon_freshness_from_body(&response.body).ok_or_else(|| {
         format!(
             "remote daemon health response did not include freshness; raw body: {}",
@@ -549,10 +565,11 @@ mod tests {
         });
 
         let endpoint = format!("http://{address}");
-        assert!(daemon_http_health_matches(
+        assert!(daemon_http_health_matches_with_timeout(
             &endpoint,
             Some("lease-live"),
-            Some(7331)
+            Some(7331),
+            Duration::from_secs(2),
         ));
         server.join().expect("server");
     }
@@ -581,10 +598,11 @@ mod tests {
                 .expect("health response");
         });
 
-        assert!(daemon_http_health_matches(
+        assert!(daemon_http_health_matches_with_timeout(
             &format!("http://{address}"),
             None,
-            Some(7331)
+            Some(7331),
+            Duration::from_secs(2),
         ));
         server.join().expect("server");
     }

@@ -98,6 +98,7 @@ pub(crate) use command_path::{
 };
 pub(crate) use connection::daemon_endpoint_identity;
 pub(crate) use connection::disconnect_with_force;
+pub(crate) use connection::local_live_session;
 pub use connection::{
     connect, connect_reverse, connect_with_leaseless_orphan_reconciliation,
     connect_with_orphan_adoption, connect_with_recovery, disconnect, reverse_broker_artifact,

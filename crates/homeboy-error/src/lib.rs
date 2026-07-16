@@ -44,6 +44,7 @@ pub enum ErrorCode {
     StackNotFound,
     StackApplyConflict,
     RunnerControllerDisconnected,
+    RuntimePromotionContended,
     DependencyStepFailed,
     DependencyOutputMissing,
 
@@ -102,6 +103,7 @@ impl ErrorCode {
             ErrorCode::StackNotFound => "stack.not_found",
             ErrorCode::StackApplyConflict => "stack.apply_conflict",
             ErrorCode::RunnerControllerDisconnected => "runner.controller_disconnected",
+            ErrorCode::RuntimePromotionContended => "runtime_promotion.contended",
             ErrorCode::DependencyStepFailed => "dependency_step_failed",
             ErrorCode::DependencyOutputMissing => "dependency_output_missing",
 

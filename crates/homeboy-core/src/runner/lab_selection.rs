@@ -214,8 +214,18 @@ fn connect_runner_for_offload(
     {
         Ok(lease) => lease,
         Err(lease_error) => {
-            if let Some(report) = wait_for_connected_runner(timeout, || status(runner_id))? {
-                return connected_runner_connect_report(runner_id, report);
+            if let Some(session) =
+                wait_for_contended_runner(lease_error.clone(), timeout, |remaining| {
+                    crate::runner::local_live_session(runner_id, remaining)
+                })?
+            {
+                return connected_runner_connect_report_from_session(
+                    runner_id,
+                    session,
+                    crate::paths::runner_session_file(runner_id)?
+                        .display()
+                        .to_string(),
+                );
             }
             return Err(Error::validation_invalid_argument(
                 "runner",
@@ -290,24 +300,31 @@ fn connect_runner_for_offload(
     ))
 }
 
-pub(super) fn wait_for_connected_runner<Status>(
+pub(super) fn wait_for_contended_runner<Session>(
+    lease_error: Error,
     timeout: Duration,
-    status: Status,
-) -> Result<Option<RunnerStatusReport>>
+    session: Session,
+) -> Result<Option<super::RunnerSession>>
 where
-    Status: Fn() -> Result<RunnerStatusReport>,
+    Session: Fn(Duration) -> Result<Option<super::RunnerSession>>,
 {
+    if !crate::runtime_promotion::is_contention_error(&lease_error) {
+        return Err(lease_error);
+    }
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if let Ok(report) = status() {
-            if report.connected {
-                return Ok(Some(report));
-            }
-        }
-        if std::time::Instant::now() >= deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
             return Ok(None);
         }
-        std::thread::sleep(HANDOFF_CONNECT_POLL_INTERVAL);
+        if let Some(session) = session(remaining.min(HANDOFF_CONNECT_POLL_INTERVAL))? {
+            return Ok(Some(session));
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        std::thread::sleep(remaining.min(HANDOFF_CONNECT_POLL_INTERVAL));
     }
 }
 
@@ -318,6 +335,14 @@ fn connected_runner_connect_report(
     let session = status.session.ok_or_else(|| {
         Error::internal_unexpected("connected runner status did not include a session")
     })?;
+    connected_runner_connect_report_from_session(runner_id, session, status.session_path)
+}
+
+fn connected_runner_connect_report_from_session(
+    runner_id: &str,
+    session: super::RunnerSession,
+    session_path: String,
+) -> Result<(RunnerConnectReport, i32)> {
     Ok((
         RunnerConnectReport {
             runner_id: runner_id.to_string(),
@@ -334,7 +359,7 @@ fn connected_runner_connect_report(
             connection_warning: None,
             homeboy_version: Some(session.homeboy_version),
             homeboy_build_identity: session.homeboy_build_identity,
-            session_path: Some(status.session_path),
+            session_path: Some(session_path),
             leaseless_recovery: None,
             state_loss_recovery: None,
             leaseless_recovery_evidence: session.leaseless_recovery_evidence,

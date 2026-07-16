@@ -1,5 +1,5 @@
 use super::super::lab_selection::{
-    prepare_lab_runner_for_offload_with, wait_for_connected_runner, LabRunnerPreparation,
+    prepare_lab_runner_for_offload_with, wait_for_contended_runner, LabRunnerPreparation,
     LabRunnerSelection,
 };
 use super::*;
@@ -7,6 +7,7 @@ use crate::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use crate::runner::{
     RunnerActiveJobState, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode,
 };
+use crate::{Error, ErrorCode};
 
 use super::super::session::{RunnerStaleDaemonWarning, RunnerStaleRuntimePath};
 
@@ -392,18 +393,50 @@ fn lease_contender_waits_for_owner_session_without_a_second_connect() {
 
     // This is the contender branch after RuntimePromotionLease::acquire reports
     // another process owns the reconnect transaction.
-    let report = wait_for_connected_runner(std::time::Duration::from_secs(1), || {
-        Ok(unreachable_health_status(
-            "lab-lease-contention",
-            connected.load(Ordering::SeqCst),
-        ))
+    let lease_error = contention_error();
+    let session = wait_for_contended_runner(lease_error, std::time::Duration::from_secs(1), |_| {
+        Ok(connected.load(Ordering::SeqCst).then(|| {
+            connected_direct_session("lab-lease-contention", Some("http://127.0.0.1:63378"))
+        }))
     })
     .expect("wait succeeds")
     .expect("owner publishes a healthy session");
 
     owner.join().expect("owner");
-    assert!(report.connected);
+    assert_eq!(session.runner_id, "lab-lease-contention");
     assert_eq!(connects.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn non_contention_lease_failure_is_not_retried() {
+    let error = Error::internal_io(
+        "permission denied",
+        Some("read promotion lease".to_string()),
+    );
+    let returned = wait_for_contended_runner(error, std::time::Duration::from_secs(1), |_| {
+        panic!("non-contention errors must not poll or reconnect")
+    })
+    .expect_err("non-contention failure propagates");
+
+    assert_eq!(returned.code, ErrorCode::InternalIoError);
+    assert_eq!(returned.details["context"], "read promotion lease");
+}
+
+#[test]
+fn contended_session_wait_obeys_the_deadline() {
+    let started = std::time::Instant::now();
+    let result = wait_for_contended_runner(
+        contention_error(),
+        std::time::Duration::from_millis(250),
+        |remaining| {
+            std::thread::sleep(remaining);
+            Ok(None)
+        },
+    )
+    .expect("contention wait completes");
+
+    assert!(result.is_none());
+    assert!(started.elapsed() < std::time::Duration::from_millis(750));
 }
 
 #[test]
@@ -694,6 +727,14 @@ fn connected_direct_connect_report(runner_id: &str) -> RunnerConnectReport {
         failure_kind: None,
         failure_message: None,
     }
+}
+
+fn contention_error() -> Error {
+    Error::new(
+        ErrorCode::RuntimePromotionContended,
+        "runtime promotion is held by pid 42".to_string(),
+        serde_json::json!({ "holder_pid": 42 }),
+    )
 }
 
 fn stale_daemon_warning(runner_id: &str) -> RunnerStaleDaemonWarning {
