@@ -217,14 +217,18 @@ pub(super) fn daemon_http_health_matches(
     expected_lease_id: Option<&str>,
     expected_pid: Option<u32>,
 ) -> bool {
-    let Some(expected_lease_id) = expected_lease_id.filter(|lease_id| !lease_id.is_empty()) else {
-        return false;
-    };
     let Ok(report) = daemon_health_report(local_url) else {
         return false;
     };
-    report.freshness.lease_id.as_deref() == Some(expected_lease_id)
-        && report.pid.is_none_or(|pid| Some(pid) == expected_pid)
+    match expected_lease_id.filter(|lease_id| !lease_id.is_empty()) {
+        Some(expected_lease_id) => {
+            report.freshness.lease_id.as_deref() == Some(expected_lease_id)
+                && report.pid.is_none_or(|pid| Some(pid) == expected_pid)
+        }
+        // Older sessions did not persist a lease. Preserve their existing
+        // PID/address reattach contract rather than treating them as dead.
+        None => expected_pid.is_some_and(|pid| report.pid == Some(pid)),
+    }
 }
 
 fn daemon_http_body_at(
@@ -548,6 +552,38 @@ mod tests {
         assert!(daemon_http_health_matches(
             &endpoint,
             Some("lease-live"),
+            Some(7331)
+        ));
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn loopback_liveness_preserves_legacy_pid_only_sessions() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let body = serde_json::json!({
+            "freshness": report("lease-live", 7331).freshness,
+            "pid": 7331,
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("health request");
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).expect("read request");
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    )
+                    .as_bytes(),
+                )
+                .expect("health response");
+        });
+
+        assert!(daemon_http_health_matches(
+            &format!("http://{address}"),
+            None,
             Some(7331)
         ));
         server.join().expect("server");

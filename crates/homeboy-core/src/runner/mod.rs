@@ -96,6 +96,7 @@ pub(crate) use command_path::{
     normalize_runner_command_env_for_homeboy_path, quote_runner_env_value,
     remote_shell_path_preamble,
 };
+pub(crate) use connection::daemon_endpoint_identity;
 pub(crate) use connection::disconnect_with_force;
 pub use connection::{
     connect, connect_reverse, connect_with_leaseless_orphan_reconciliation,

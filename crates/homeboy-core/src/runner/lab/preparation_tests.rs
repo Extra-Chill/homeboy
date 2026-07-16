@@ -323,6 +323,56 @@ fn concurrent_stale_handoffs_preserve_the_shared_tunnel() {
 }
 
 #[test]
+fn concurrent_unreachable_health_handoffs_connect_once() {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Barrier,
+    };
+
+    let selection = LabRunnerSelection {
+        runner_id: "lab-unreachable-health".to_string(),
+        source: LabRunnerSelectionSource::Explicit,
+        mode: RunnerTunnelMode::DirectSsh,
+    };
+    let barrier = Arc::new(Barrier::new(5));
+    let connected = Arc::new(AtomicBool::new(false));
+    let connects = Arc::new(AtomicUsize::new(0));
+    let handoffs: Vec<_> = (0..5)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let connected = Arc::clone(&connected);
+            let connects = Arc::clone(&connects);
+            let selection = selection.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                prepare_lab_runner_for_offload_with(
+                    &selection,
+                    |runner_id| {
+                        Ok(unreachable_health_status(
+                            runner_id,
+                            connected.load(Ordering::SeqCst),
+                        ))
+                    },
+                    |runner_id| {
+                        connects.fetch_add(1, Ordering::SeqCst);
+                        connected.store(true, Ordering::SeqCst);
+                        Ok((connected_direct_connect_report(runner_id), 0))
+                    },
+                )
+            })
+        })
+        .collect();
+
+    for handoff in handoffs {
+        assert_eq!(
+            handoff.join().expect("handoff thread").expect("handoff"),
+            LabRunnerPreparation::Ready
+        );
+    }
+    assert_eq!(connects.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn lab_runner_preparation_falls_back_for_stale_default_direct_session_without_daemon_url() {
     let selection = LabRunnerSelection {
         runner_id: "lab".to_string(),
@@ -557,6 +607,58 @@ fn connected_direct_session(
         worker_pid: None,
         last_seen_at: None,
         leaseless_recovery_evidence: None,
+    }
+}
+
+fn unreachable_health_status(runner_id: &str, connected: bool) -> RunnerStatusReport {
+    RunnerStatusReport {
+        runner_id: runner_id.to_string(),
+        connected,
+        state: if connected {
+            super::super::RunnerSessionState::Connected
+        } else {
+            super::super::RunnerSessionState::Disconnected
+        },
+        session: Some(connected_direct_session(
+            runner_id,
+            Some("http://127.0.0.1:63378"),
+        )),
+        stale_daemon: None,
+        daemon_freshness: None,
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_jobs: Vec::new(),
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::Unavailable,
+        active_job_source: None,
+        active_job_error: None,
+        session_path: "/tmp/lab-unreachable-health.json".to_string(),
+    }
+}
+
+fn connected_direct_connect_report(runner_id: &str) -> RunnerConnectReport {
+    RunnerConnectReport {
+        runner_id: runner_id.to_string(),
+        mode: Some(RunnerTunnelMode::DirectSsh),
+        role: Some(super::super::RunnerSessionRole::Controller),
+        connected: true,
+        recorded: None,
+        local_url: Some("http://127.0.0.1:63378".to_string()),
+        broker_url: None,
+        controller_id: None,
+        remote_daemon_address: Some("127.0.0.1:5678".to_string()),
+        tunnel_pid: None,
+        remote_daemon_pid: Some(42),
+        connection_warning: None,
+        homeboy_version: Some("homeboy 0.0.0".to_string()),
+        homeboy_build_identity: Some("homeboy 0.0.0+test".to_string()),
+        session_path: Some("/tmp/lab-unreachable-health.json".to_string()),
+        leaseless_recovery: None,
+        state_loss_recovery: None,
+        leaseless_recovery_evidence: None,
+        failure_kind: None,
+        failure_message: None,
     }
 }
 

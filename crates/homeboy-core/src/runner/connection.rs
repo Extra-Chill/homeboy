@@ -1296,6 +1296,10 @@ fn broker_client(action: &str) -> Result<Client> {
         .map_err(|err| Error::internal_unexpected(format!("{action}: {err}")))
 }
 
+pub(crate) fn daemon_endpoint_identity(local_url: &str) -> std::result::Result<String, String> {
+    daemon_http_identity(local_url)
+}
+
 fn stale_daemon_warning(
     runner: &Runner,
     session: Option<&RunnerSession>,
