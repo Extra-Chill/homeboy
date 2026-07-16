@@ -20,7 +20,6 @@ pub mod hooks;
 pub mod invocation;
 pub mod language;
 pub(crate) mod local_files;
-pub mod refactor_primitive;
 pub mod resource;
 pub mod run_dir;
 pub mod symbol_graph;

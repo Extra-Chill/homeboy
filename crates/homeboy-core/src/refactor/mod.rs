@@ -13,6 +13,7 @@ pub mod decompose;
 pub mod edit_op_tagged;
 pub mod move_items;
 pub mod plan;
+pub mod primitive_builders;
 pub mod propagate;
 mod rename;
 pub mod transform;
