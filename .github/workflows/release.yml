@@ -510,7 +510,13 @@ jobs:
   plan:
     name: Plan Build Matrix
     needs: prepare
-    if: needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != ''
+    # Recovery releases (HEAD already tagged, GitHub Release missing) reach
+    # `prepare` through its `always()` gate while the quality-policy job is
+    # skipped. Without `always()` here, GitHub propagates that skipped
+    # ancestor down the `needs` chain and skips `plan` too — so the tag lands
+    # with no GitHub Release. Gate on prepare's result + outputs explicitly,
+    # mirroring the `host` job, so both fresh and recovery paths publish.
+    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' }}
     runs-on: ubuntu-22.04
     outputs:
       val: ${{ steps.plan.outputs.manifest }}

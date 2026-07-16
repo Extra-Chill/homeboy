@@ -315,6 +315,22 @@ fn release_prepare_uses_prepared_output_to_unlock_publish_jobs() {
     assert!(plan.contains("needs.prepare.outputs['release-tag'] != ''"));
     assert!(plan.contains("needs.prepare.outputs['release-tag']"));
     assert!(!plan.contains("needs.prepare.outputs.released == 'true'"));
+
+    // Regression guard: recovery releases reach `prepare` through its
+    // `always()` gate while the quality-policy job is skipped. If `plan`
+    // relied on the implicit `success()`, that skipped ancestor would
+    // propagate down the `needs` chain and skip `plan` too — landing the
+    // tag with no GitHub Release. `plan` must gate explicitly on
+    // `always()` + `prepare.result == 'success'` so the recovery path
+    // still publishes.
+    assert!(
+        plan.contains("always()"),
+        "plan must use always() so a skipped quality-policy ancestor does not skip publish"
+    );
+    assert!(
+        plan.contains("needs.prepare.result == 'success'"),
+        "plan must gate on prepare's result explicitly instead of the implicit success()"
+    );
 }
 
 #[test]
