@@ -20,6 +20,74 @@ fn apply_patch_step_accepts_noop_mutation_return() {
 }
 
 #[test]
+fn lost_exec_response_reconciles_the_single_accepted_durable_job() {
+    crate::test_support::with_isolated_home(|_| {
+        let run_id = "cook-8525-attempt-1";
+        crate::agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "dispatching",
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("record controller proxy before daemon acceptance");
+        let mut status = reverse_status("homeboy-lab");
+        status.active_runner_jobs.push(crate::runner::RunnerJob {
+            runner_id: "homeboy-lab".to_string(),
+            job_id: "job-8525".to_string(),
+            operation: "runner.exec".to_string(),
+            status: crate::api_jobs::JobStatus::Running,
+            command: "homeboy agent-task cook".to_string(),
+            cwd: Some("/runner/workspace".to_string()),
+            source: "runner-daemon".to_string(),
+            lifecycle_owner: crate::runner::RunnerLifecycleOwner::Controller,
+            lifecycle: None,
+            started_at_ms: Some(1),
+            updated_at_ms: Some(1),
+            elapsed_ms: Some(1),
+            heartbeat_age_ms: Some(1),
+            claim: Default::default(),
+            claim_expires_in_ms: None,
+            durable_run_id: Some(run_id.to_string()),
+            stale_reason: None,
+            lifecycle_state: Some("running".to_string()),
+            retryable: Some(false),
+            artifact_refs: Vec::new(),
+        });
+
+        let response_error = Error::internal_unexpected("/exec response connection reset");
+        let job_id = accepted_runner_job_id_with("homeboy-lab", run_id, || Ok(status))
+            .expect("reconcile exactly one accepted daemon job");
+        let outcome = in_flight_daemon_disconnect_outcome(
+            base_lab_plan(Some(&portable_lab_command("agent-task cook"))),
+            "homeboy-lab",
+            &job_id,
+            run_id,
+            "/runner/workspace",
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+            ],
+            "daemon accepted the durable job before the exec response was lost",
+            &response_error,
+        )
+        .expect("accepted job must become an in-flight outcome");
+
+        assert!(matches!(outcome, LabOffloadOutcome::InFlight { .. }));
+        let record = crate::agent_task_lifecycle::status(run_id).expect("controller record");
+        assert_eq!(
+            record.state,
+            crate::agent_task_lifecycle::AgentTaskRunState::Running
+        );
+        assert_eq!(record.runner_job_id(), Some("job-8525"));
+        assert!(record.metadata.get("pre_execution_failure").is_none());
+    });
+}
+
+#[test]
 fn lab_remote_dispatch_preflight_requires_configured_homeboy_path() {
     let runner = crate::runner::Runner {
         id: "lab-default".to_string(),

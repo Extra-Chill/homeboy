@@ -489,6 +489,11 @@ fn test_mirrored_patch_result_reports_accessible_artifact_token() {
             .expect("patch");
 
         assert_eq!(mirrored["patch_artifact_path"], token);
+        assert!(is_retrievable_runner_artifact(
+            mirrored["patch_artifact_path"]
+                .as_str()
+                .expect("projected patch artifact token")
+        ));
     });
 }
 

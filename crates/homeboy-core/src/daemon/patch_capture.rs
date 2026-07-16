@@ -14,6 +14,7 @@ use crate::source_snapshot::SourceSnapshot;
 
 const PATCH_CAPTURE_EXCLUDES: &[&str] = &[
     ".git",
+    ".homeboy",
     "node_modules",
     "target",
     "vendor",
@@ -27,6 +28,7 @@ const PATCH_CAPTURE_EXCLUDES: &[&str] = &[
 pub(super) struct BaselineCapture {
     _scratch: ScratchDir,
     path: PathBuf,
+    excludes: Vec<String>,
 }
 
 struct ScratchDir {
@@ -63,7 +65,10 @@ struct PatchRunInput<'a> {
     exit_code: i32,
 }
 
-pub(super) fn capture_baseline(cwd: &str) -> Result<BaselineCapture> {
+pub(super) fn capture_baseline(
+    cwd: &str,
+    source_snapshot: Option<&SourceSnapshot>,
+) -> Result<BaselineCapture> {
     let cwd_path = Path::new(cwd);
     if !cwd_path.is_dir() {
         return Err(Error::validation_invalid_argument(
@@ -75,10 +80,14 @@ pub(super) fn capture_baseline(cwd: &str) -> Result<BaselineCapture> {
     }
     let scratch = create_scratch_dir("baseline")?;
     let baseline_path = scratch.path.join("baseline");
-    copy_dir_filtered(cwd_path, &baseline_path)?;
+    let excludes = source_snapshot
+        .map(|snapshot| snapshot.sync_excludes.clone())
+        .unwrap_or_default();
+    copy_dir_filtered(cwd_path, &baseline_path, cwd_path, &excludes)?;
     Ok(BaselineCapture {
         _scratch: scratch,
         path: baseline_path,
+        excludes,
     })
 }
 
@@ -93,7 +102,8 @@ pub(super) fn capture_patch_report(
 ) -> Result<PatchCaptureReport> {
     let after_scratch = create_scratch_dir("after")?;
     let after_path = after_scratch.path.join("after");
-    copy_dir_filtered(Path::new(cwd), &after_path)?;
+    let cwd_path = Path::new(cwd);
+    copy_dir_filtered(cwd_path, &after_path, cwd_path, &baseline.excludes)?;
 
     let patch = normalized_no_index_diff(&baseline.path, &after_path)?;
     let modified_files = no_index_modified_files(&baseline.path, &after_path)?;
@@ -294,7 +304,7 @@ fn normalize_patch_paths(patch: &str, baseline: &Path, after: &Path) -> String {
         .replace(after.as_ref(), "b")
 }
 
-fn copy_dir_filtered(source: &Path, target: &Path) -> Result<()> {
+fn copy_dir_filtered(source: &Path, target: &Path, root: &Path, excludes: &[String]) -> Result<()> {
     fs::create_dir_all(target).map_err(|err| {
         Error::internal_io(
             err.to_string(),
@@ -311,7 +321,8 @@ fn copy_dir_filtered(source: &Path, target: &Path) -> Result<()> {
         let Some(name_str) = name.to_str() else {
             continue;
         };
-        if PATCH_CAPTURE_EXCLUDES.contains(&name_str) {
+        let relative = source_path_relative(root, &entry.path());
+        if PATCH_CAPTURE_EXCLUDES.contains(&name_str) || is_excluded(&relative, excludes) {
             continue;
         }
         let source_path = entry.path();
@@ -323,7 +334,7 @@ fn copy_dir_filtered(source: &Path, target: &Path) -> Result<()> {
             )
         })?;
         if metadata.is_dir() {
-            copy_dir_filtered(&source_path, &target_path)?;
+            copy_dir_filtered(&source_path, &target_path, root, excludes)?;
         } else if metadata.is_file() {
             fs::copy(&source_path, &target_path).map_err(|err| {
                 Error::internal_io(
@@ -334,6 +345,25 @@ fn copy_dir_filtered(source: &Path, target: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn source_path_relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn is_excluded(path: &str, excludes: &[String]) -> bool {
+    excludes.iter().any(|pattern| {
+        let pattern = pattern.trim_matches('/');
+        !pattern.is_empty()
+            && (path == pattern
+                || path
+                    .strip_prefix(pattern)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                || glob_match::glob_match(pattern, path))
+    })
 }
 
 #[cfg(test)]
@@ -353,7 +383,8 @@ mod tests {
         )
         .expect("ignored file");
 
-        let baseline = capture_baseline(&workspace.path().display().to_string()).expect("baseline");
+        let baseline =
+            capture_baseline(&workspace.path().display().to_string(), None).expect("baseline");
 
         assert!(baseline.path.join("file.txt").exists());
         assert!(!baseline.path.join("target").exists());
@@ -364,7 +395,8 @@ mod tests {
         let _home = HomeGuard::new();
         let workspace = tempfile::tempdir().expect("workspace");
         fs::write(workspace.path().join("file.txt"), "before\n").expect("before");
-        let baseline = capture_baseline(&workspace.path().display().to_string()).expect("baseline");
+        let baseline =
+            capture_baseline(&workspace.path().display().to_string(), None).expect("baseline");
         fs::write(workspace.path().join("file.txt"), "after\n").expect("after");
         let job_id = uuid::Uuid::new_v4();
         let command = vec!["sh".to_string(), "-c".to_string(), "true".to_string()];
@@ -385,6 +417,43 @@ mod tests {
         let patch_body = fs::read_to_string(artifact_path).expect("patch body");
         assert!(patch_body.contains("-before"));
         assert!(patch_body.contains("+after"));
+    }
+
+    #[test]
+    fn capture_patch_report_excludes_runner_metadata_and_staged_excludes() {
+        let _home = HomeGuard::new();
+        let workspace = tempfile::tempdir().expect("workspace");
+        fs::create_dir_all(workspace.path().join(".homeboy")).expect("runner metadata");
+        fs::create_dir_all(workspace.path().join("docs")).expect("docs");
+        fs::write(workspace.path().join("tracked.txt"), "before\n").expect("tracked");
+        fs::write(workspace.path().join("docs/superpowers"), "before\n").expect("excluded");
+        let snapshot = SourceSnapshot::existing_remote("lab", "/runner/workspace", None);
+        let snapshot = SourceSnapshot {
+            sync_excludes: vec!["docs/superpowers".to_string()],
+            ..snapshot
+        };
+        let baseline = capture_baseline(&workspace.path().display().to_string(), Some(&snapshot))
+            .expect("baseline");
+        fs::write(workspace.path().join("tracked.txt"), "after\n").expect("tracked change");
+        fs::write(
+            workspace.path().join(".homeboy/runner-workspace.json"),
+            "removed later\n",
+        )
+        .expect("runner metadata");
+        fs::write(workspace.path().join("docs/superpowers"), "after\n").expect("excluded change");
+
+        let report = capture_patch_report(
+            uuid::Uuid::new_v4(),
+            "lab",
+            &workspace.path().display().to_string(),
+            &["true".to_string()],
+            Some(&snapshot),
+            &baseline,
+            0,
+        )
+        .expect("patch report");
+
+        assert_eq!(report.modified_files, vec!["tracked.txt".to_string()]);
     }
 
     #[test]
@@ -442,7 +511,7 @@ mod tests {
                 Some(String::new())
             );
 
-            let baseline = capture_baseline(&sync.remote_path).expect("capture baseline");
+            let baseline = capture_baseline(&sync.remote_path, None).expect("capture baseline");
             fs::write(remote.join("tracked.txt"), "after\n").expect("modify tracked file");
             let report = capture_patch_report(
                 uuid::Uuid::new_v4(),

@@ -116,6 +116,9 @@ use super::super::{
     RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy,
 };
 
+#[cfg(test)]
+pub(super) use inner::accepted_runner_job_id_with;
+
 use super::super::workload::{
     build_runner_workload_for_dispatched_command, runner_workload_agent_task_from_command,
     RunnerWorkloadBuildInput,
