@@ -49,6 +49,7 @@ pub(super) enum LabRunnerPreparation {
 
 static HANDOFF_CONNECT_LOCKS: OnceLock<Mutex<std::collections::BTreeMap<String, Arc<Mutex<()>>>>> =
     OnceLock::new();
+const HANDOFF_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub(super) fn prepare_lab_runner_for_offload(
     selection: &LabRunnerSelection,
@@ -208,13 +209,37 @@ fn connect_runner_for_offload(
 ) -> Result<(RunnerConnectReport, i32)> {
     // Serialize with other controller processes before replacing a direct-SSH
     // session. The child `runner connect` receives this lease capability.
-    let lease = crate::runtime_promotion::acquire("Lab runner handoff", runner_id.to_string())?;
+    let timeout = lab_connect_timeout(source);
+    let lease = match crate::runtime_promotion::acquire("Lab runner handoff", runner_id.to_string())
+    {
+        Ok(lease) => lease,
+        Err(lease_error) => {
+            if let Some(report) = wait_for_connected_runner(timeout, || status(runner_id))? {
+                return connected_runner_connect_report(runner_id, report);
+            }
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                format!(
+                    "Lab runner `{runner_id}` remained unavailable while another controller owned its reconnect lease: {}",
+                    lease_error.message
+                ),
+                Some(runner_id.to_string()),
+                Some(vec![
+                    format!(
+                        "Waited {}s for the reconnect owner to publish a healthy session; it did not complete.",
+                        timeout.as_secs()
+                    ),
+                    format!("Inspect `homeboy runner status {runner_id} --json` before retrying."),
+                    format!("Inspect `homeboy runner doctor {runner_id}` if the daemon remains unreachable."),
+                ]),
+            ));
+        }
+    };
     if let Ok(report) = status(runner_id) {
         if report.connected {
             return connected_runner_connect_report(runner_id, report);
         }
     }
-    let timeout = lab_connect_timeout(source);
     let (stdout, stderr, exit_code, timed_out) =
         run_runner_connect_command(runner_id, timeout, &lease)?;
     let status = status(runner_id)?;
@@ -263,6 +288,27 @@ fn connect_runner_for_offload(
         },
         exit_code,
     ))
+}
+
+pub(super) fn wait_for_connected_runner<Status>(
+    timeout: Duration,
+    status: Status,
+) -> Result<Option<RunnerStatusReport>>
+where
+    Status: Fn() -> Result<RunnerStatusReport>,
+{
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(report) = status() {
+            if report.connected {
+                return Ok(Some(report));
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(HANDOFF_CONNECT_POLL_INTERVAL);
+    }
 }
 
 fn connected_runner_connect_report(

@@ -1,5 +1,6 @@
 use super::super::lab_selection::{
-    prepare_lab_runner_for_offload_with, LabRunnerPreparation, LabRunnerSelection,
+    prepare_lab_runner_for_offload_with, wait_for_connected_runner, LabRunnerPreparation,
+    LabRunnerSelection,
 };
 use super::*;
 use crate::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
@@ -369,6 +370,39 @@ fn concurrent_unreachable_health_handoffs_connect_once() {
             LabRunnerPreparation::Ready
         );
     }
+    assert_eq!(connects.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn lease_contender_waits_for_owner_session_without_a_second_connect() {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let connected = Arc::new(AtomicBool::new(false));
+    let connects = Arc::new(AtomicUsize::new(0));
+    let owner_connected = Arc::clone(&connected);
+    let owner_connects = Arc::clone(&connects);
+    let owner = std::thread::spawn(move || {
+        owner_connects.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(75));
+        owner_connected.store(true, Ordering::SeqCst);
+    });
+
+    // This is the contender branch after RuntimePromotionLease::acquire reports
+    // another process owns the reconnect transaction.
+    let report = wait_for_connected_runner(std::time::Duration::from_secs(1), || {
+        Ok(unreachable_health_status(
+            "lab-lease-contention",
+            connected.load(Ordering::SeqCst),
+        ))
+    })
+    .expect("wait succeeds")
+    .expect("owner publishes a healthy session");
+
+    owner.join().expect("owner");
+    assert!(report.connected);
     assert_eq!(connects.load(Ordering::SeqCst), 1);
 }
 
