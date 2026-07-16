@@ -36,6 +36,20 @@ pub fn route_after_parse(
         return Ok(None);
     }
 
+    // Promotion owns target resolution because gate-feedback artifacts can
+    // authorize an exact dirty candidate. Generic Lab routing has no artifact
+    // provenance and would reject that target before local promotion starts.
+    if cli.placement == homeboy::cli_surface::Placement::Local
+        && matches!(
+            cli.command,
+            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                command: crate::commands::agent_task::AgentTaskCommand::Promote(_),
+            })
+        )
+    {
+        return Ok(None);
+    }
+
     if let (Some(runner_id), Commands::Runs(args)) = (cli.runner.as_deref(), &cli.command) {
         if !is_runs_list_runner_option(normalized_args) && !args.has_command_local_runner_option() {
             return Err(crate::commands::runs::global_runner_error(args, runner_id));
