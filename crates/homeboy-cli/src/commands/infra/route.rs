@@ -329,16 +329,34 @@ fn run_split_placement_cook(
     output_file: Option<&str>,
     runner_id: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
-    if cli.placement == homeboy::cli_surface::Placement::Local {
-        return Ok(None);
-    }
-    let Some(runner_id) = runner_id else {
-        return Ok(None);
-    };
     let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
         command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
     }) = &cli.command
     else {
+        return Ok(None);
+    };
+    if cook.dispatch.core.queue_only {
+        return Err(Error::validation_invalid_argument(
+            "queue-only",
+            "agent-task cook cannot queue its controller-owned lifecycle; it must retain provider completion to ingest artifacts, promote candidates, run gates, and finalize",
+            None,
+            Some(vec![
+                "Use `homeboy agent-task run-plan --plan <materialized-plan> --record-run-id <run-id> --queue-only` only when a controller owns the corresponding continuation.".to_string(),
+            ]),
+        ));
+    }
+    if cli.placement == homeboy::cli_surface::Placement::Local {
+        if cli.runner.is_some() {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                "--placement local cannot be combined with --runner for agent-task cook; omit --runner for a fully local cook or select Lab placement for its provider attempt",
+                cli.runner.clone(),
+                None,
+            ));
+        }
+        return Ok(None);
+    }
+    let Some(runner_id) = runner_id else {
         return Ok(None);
     };
 

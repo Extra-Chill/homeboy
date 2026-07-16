@@ -147,6 +147,29 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
         return None;
     }
 
+    if matches!(
+        command,
+        Commands::AgentTask(agent_task::AgentTaskArgs {
+            command: agent_task::AgentTaskCommand::Cook(cook),
+        }) if cook.dispatch.core.queue_only
+    ) {
+        return None;
+    }
+
+    // Cook's controller remains local, but its materialized provider attempt
+    // can run on Lab. Resource policy must recommend that supported boundary,
+    // rather than treating the whole coordinator as an unavailable offload.
+    if matches!(
+        command,
+        Commands::AgentTask(agent_task::AgentTaskArgs {
+            command: agent_task::AgentTaskCommand::Cook(_),
+        })
+    ) {
+        return Some(HotCommand::lab_supported(
+            "agent-task cook/run-plan/retry --run",
+        ));
+    }
+
     let contract = command.lab_contract()?;
 
     match contract.portability {
@@ -527,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_agent_task_cook_keeps_its_controller_on_a_warm_controller() {
+    fn verified_agent_task_cook_can_offload_its_provider_attempt() {
         let cli = Cli::parse_from([
             "homeboy",
             "agent-task",
@@ -540,8 +563,26 @@ mod tests {
             "cargo test --locked",
         ]);
         let command = hot_command(&cli.command).expect("verified cook is hot");
-        assert!(!command.lab_offload_supported);
+        assert!(command.lab_offload_supported);
         assert_eq!(command.label, "agent-task cook/run-plan/retry --run");
+    }
+
+    #[test]
+    fn queue_only_cook_skips_resource_preflight_for_controller_validation() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "example@worktree",
+            "--verify",
+            "true",
+            "--queue-only",
+        ]);
+
+        assert!(hot_command(&cli.command).is_none());
     }
 
     #[test]

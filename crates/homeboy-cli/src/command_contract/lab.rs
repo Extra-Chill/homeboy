@@ -43,6 +43,20 @@ fn scope_lab_cli_arguments_at_path(
     } else {
         command
     };
+    // Cook coordinates durable promotion and finalization, so it cannot hand
+    // its controller lifecycle to the generic queue. Keep parsing the inherited
+    // dispatch flag for a precise validation error, but do not advertise it.
+    let command = if matches!(
+        path.iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        ["agent-task", "cook"]
+    ) {
+        command.mut_arg("queue_only", |arg| arg.hide(true))
+    } else {
+        command
+    };
     command.mut_subcommands(|subcommand| {
         let mut subcommand_path = path.to_vec();
         subcommand_path.push(subcommand.get_name().to_string());
