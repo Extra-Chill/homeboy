@@ -1,5 +1,6 @@
 use super::*;
 use sha2::Digest;
+use std::path::PathBuf;
 
 pub fn record_pre_execution_failure(
     run_id: &str,
@@ -689,6 +690,80 @@ pub(crate) fn project_terminal_artifacts(
         }
     }
     Ok(())
+}
+
+/// Locate the controller-owned copy of a lifecycle artifact. Aggregate paths
+/// describe producer provenance and can point at a runner after reconciliation;
+/// promotion must consume the controller projection instead.
+pub fn verified_controller_artifact_projection_path(
+    run_id: &str,
+    task_id: &str,
+    artifact: &AgentTaskArtifact,
+) -> Result<Option<PathBuf>> {
+    let Some(expected_sha256) = artifact.sha256.as_deref() else {
+        return Ok(None);
+    };
+    let Some(expected_size) = artifact
+        .size_bytes
+        .and_then(|size| i64::try_from(size).ok())
+    else {
+        return Ok(None);
+    };
+    let store = crate::observation::ObservationStore::open_initialized()?;
+    let candidates: Vec<_> = store
+        .list_artifacts(run_id)?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.artifact_type == "file"
+                && candidate.kind == artifact.kind
+                && candidate
+                    .metadata_json
+                    .pointer("/agent_task/task_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(task_id)
+                && candidate
+                    .metadata_json
+                    .pointer("/agent_task/logical_artifact_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(artifact.id.as_str())
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    if candidates.len() != 1 {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "multiple controller-side artifact projections match run '{run_id}', task '{task_id}', and artifact '{}'",
+                artifact.id
+            ),
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    let candidate = &candidates[0];
+    let path = PathBuf::from(&candidate.path);
+    let actual_size = std::fs::metadata(&path)
+        .ok()
+        .and_then(|metadata| i64::try_from(metadata.len()).ok());
+    let actual_sha256 = crate::artifact_metadata::sha256_file(&path).ok();
+    if candidate.sha256.as_deref() != Some(expected_sha256)
+        || candidate.size_bytes != Some(expected_size)
+        || actual_size != Some(expected_size)
+        || actual_sha256.as_deref() != Some(expected_sha256)
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "controller-side artifact projection for run '{run_id}', task '{task_id}', and artifact '{}' does not match the aggregate SHA-256 and size",
+                artifact.id
+            ),
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    Ok(Some(path))
 }
 
 fn unique_logical_artifact_id(

@@ -121,6 +121,186 @@ fn sha256_hex(content: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn record_controller_projection(
+    run_id: &str,
+    task_id: &str,
+    artifact_id: &str,
+    contents: &str,
+) -> PathBuf {
+    let store =
+        crate::observation::ObservationStore::open_initialized().expect("observation store");
+    store
+        .upsert_imported_run(&crate::observation::RunRecord {
+            id: run_id.to_string(),
+            kind: "agent-task".to_string(),
+            component_id: None,
+            started_at: "2026-07-16T00:00:00Z".to_string(),
+            finished_at: Some("2026-07-16T00:00:01Z".to_string()),
+            status: "pass".to_string(),
+            command: Some("homeboy agent-task".to_string()),
+            cwd: None,
+            homeboy_version: Some("test".to_string()),
+            git_sha: None,
+            rig_id: None,
+            metadata_json: serde_json::json!({}),
+        })
+        .expect("record run");
+    let input = tempfile::NamedTempFile::new().expect("projection input");
+    std::fs::write(input.path(), contents).expect("write projection input");
+    PathBuf::from(
+        store
+            .record_artifact_with_id(
+                run_id,
+                "patch",
+                input.path(),
+                "controller-finalized-patch",
+                serde_json::json!({
+                    "agent_task": {
+                        "task_id": task_id,
+                        "logical_artifact_id": artifact_id,
+                    }
+                }),
+            )
+            .expect("record controller projection")
+            .path,
+    )
+}
+
+fn recovered_runner_aggregate(
+    task_id: &str,
+    artifact_id: &str,
+    sha256: &str,
+    size: usize,
+) -> String {
+    serde_json::json!({
+        "schema": "homeboy/agent-task-aggregate/v1",
+        "plan_id": "recovered-lab-plan",
+        "status": "succeeded",
+        "totals": { "skipped": 0, "succeeded": 1 },
+        "outcomes": [{
+            "schema": AGENT_TASK_OUTCOME_SCHEMA,
+            "task_id": task_id,
+            "status": "succeeded",
+            "artifacts": [{
+                "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                "id": artifact_id,
+                "kind": "patch",
+                "path": "/home/runner/.homeboy/executor-finalized/patch.diff",
+                "size_bytes": size,
+                "sha256": sha256,
+                "metadata": { "executor_artifact_finalized": true }
+            }]
+        }]
+    })
+    .to_string()
+}
+
+#[test]
+fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_sources() {
+    crate::test_support::with_isolated_home(|_| {
+        let run_id = "recovered-lab-run";
+        let task_id = "implement";
+        let artifact_id = "patch";
+        let projected_path =
+            record_controller_projection(run_id, task_id, artifact_id, VALID_PATCH);
+        let source = recovered_runner_aggregate(
+            task_id,
+            artifact_id,
+            &sha256_hex(VALID_PATCH),
+            VALID_PATCH.len(),
+        );
+
+        for aggregate_file_source in [false, true] {
+            let aggregate_file = tempfile::NamedTempFile::new().expect("aggregate source");
+            std::fs::write(aggregate_file.path(), &source).expect("write aggregate source");
+            let source_path = aggregate_file_source.then(|| aggregate_file.path().to_path_buf());
+            let temp = tempfile::tempdir().expect("promotion tempdir");
+            let mut provider = FakePromotionWorkspaceProvider {
+                workspace_path: Some(temp.path().join("target")),
+                ..Default::default()
+            };
+
+            let report = promote_with_provider(
+                AgentTaskPromotionOptions {
+                    source: source.clone(),
+                    source_run_id: Some(run_id.to_string()),
+                    source_path,
+                    source_worktree_path: None,
+                    base_ref: None,
+                    task_base_sha: None,
+                    to_worktree: "homeboy@recovered-promotion".to_string(),
+                    task_id: Some(task_id.to_string()),
+                    artifact_id: Some(artifact_id.to_string()),
+                    dry_run: false,
+                    gates: VerifyGateOptions::default(),
+                    provider_command: None,
+                    provider_invocation: None,
+                },
+                &mut provider,
+            )
+            .expect("recovered aggregate promotes from controller projection");
+
+            assert_eq!(
+                report.patch_artifact.path,
+                projected_path.display().to_string()
+            );
+            assert_eq!(
+                provider.applied_patch_contents,
+                vec![VALID_PATCH.to_string()]
+            );
+        }
+    });
+}
+
+#[test]
+fn promotion_rejects_missing_or_mismatched_recovered_controller_projection() {
+    crate::test_support::with_isolated_home(|_| {
+        let run_id = "recovered-lab-run";
+        let task_id = "implement";
+        let artifact_id = "patch";
+        let source = recovered_runner_aggregate(
+            task_id,
+            artifact_id,
+            &sha256_hex(VALID_PATCH),
+            VALID_PATCH.len(),
+        );
+        let temp = tempfile::tempdir().expect("promotion tempdir");
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(temp.path().join("target")),
+            ..Default::default()
+        };
+        let options = || AgentTaskPromotionOptions {
+            source: source.clone(),
+            source_run_id: Some(run_id.to_string()),
+            source_path: None,
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            to_worktree: "homeboy@recovered-promotion".to_string(),
+            task_id: Some(task_id.to_string()),
+            artifact_id: Some(artifact_id.to_string()),
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        };
+
+        let missing = promote_with_provider(options(), &mut provider)
+            .expect_err("missing projection rejected");
+        assert!(missing
+            .message
+            .contains("verified controller-side artifact projection"));
+
+        record_controller_projection(run_id, task_id, artifact_id, "different patch bytes");
+        let mismatched = promote_with_provider(options(), &mut provider)
+            .expect_err("mismatched projection rejected");
+        assert!(mismatched
+            .message
+            .contains("does not match the aggregate SHA-256 and size"));
+        assert!(provider.apply_calls.is_empty());
+    });
+}
+
 fn write_patch_source(temp: &tempfile::TempDir) -> (PathBuf, String) {
     let patch_path = temp.path().join("changes.patch");
     std::fs::write(&patch_path, VALID_PATCH).expect("write patch");

@@ -68,7 +68,12 @@ pub fn resume_promoted_patch(
     })?;
     let (source_kind, outcome) = select_outcome(source_value, options.task_id.as_deref())?;
     let artifact = select_patch_artifact(&outcome, options.artifact_id.as_deref())?;
-    let patch_path = resolve_artifact_path(&artifact, options.source_path.as_deref())?;
+    let patch_path = resolve_artifact_path(
+        &artifact,
+        &outcome.task_id,
+        options.source_run_id.as_deref(),
+        options.source_path.as_deref(),
+    )?;
     let patch = std::fs::read_to_string(&patch_path).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -300,7 +305,12 @@ pub(crate) fn promote_with_provider(
     }
     let gate_feedback_baseline =
         gate_feedback_baseline_for_artifact(&source_for_provenance, &outcome, &artifact)?;
-    let patch_path = resolve_artifact_path(&artifact, options.source_path.as_deref())?;
+    let patch_path = resolve_artifact_path(
+        &artifact,
+        &outcome.task_id,
+        options.source_run_id.as_deref(),
+        options.source_path.as_deref(),
+    )?;
     let patch = std::fs::read_to_string(&patch_path).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -924,6 +934,8 @@ pub(crate) fn select_patch_artifact(
 
 fn resolve_artifact_path(
     artifact: &AgentTaskArtifact,
+    task_id: &str,
+    source_run_id: Option<&str>,
     source_path: Option<&Path>,
 ) -> Result<PathBuf> {
     let path = artifact.path.as_ref().ok_or_else(|| {
@@ -936,6 +948,23 @@ fn resolve_artifact_path(
     })?;
     let path = PathBuf::from(path);
     if path.is_absolute() {
+        if let Some(run_id) = source_run_id {
+            if let Some(projected) =
+                crate::agent_task_lifecycle::verified_controller_artifact_projection_path(
+                    run_id, task_id, artifact,
+                )?
+            {
+                return Ok(projected);
+            }
+        }
+        if !path.is_file() {
+            return Err(Error::validation_invalid_argument(
+                "artifact.path",
+                "promotion could not find a verified controller-side artifact projection; reconcile the run on this controller before promoting its runner-produced artifact",
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
         return Ok(path);
     }
     if let Some(source_path) = source_path.and_then(Path::parent) {
