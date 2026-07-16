@@ -4,12 +4,12 @@ use super::*;
 use crate::runner;
 use crate::runner::Runner;
 use crate::runner::RunnerExecOptions;
-use crate::runner::RunnerWorkspaceSyncMode;
-use crate::runner::RunnerWorkspaceSyncOptions;
 use crate::Result;
 use homeboy_runner_contract::RunnerCapabilityPreflight;
 use homeboy_runner_contract::RunnerKind;
 use homeboy_runner_contract::RunnerRequiredTool;
+use homeboy_runner_contract::RunnerWorkspaceSyncMode;
+use homeboy_runner_contract::RunnerWorkspaceSyncOptions;
 use std::path::Path;
 use std::process::Command;
 

@@ -17,6 +17,48 @@ pub enum RunnerKind {
     Ssh,
 }
 
+/// How a runner workspace is synced before a job runs.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerWorkspaceSyncMode {
+    #[default]
+    Snapshot,
+    SnapshotGit,
+    Git,
+}
+
+impl RunnerWorkspaceSyncMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Snapshot => "snapshot",
+            Self::SnapshotGit => "snapshot-git",
+            Self::Git => "git",
+        }
+    }
+}
+
+/// Options controlling how a runner workspace is synced before a job runs.
+#[derive(Debug, Clone, Default)]
+pub struct RunnerWorkspaceSyncOptions {
+    pub path: String,
+    pub mode: RunnerWorkspaceSyncMode,
+    pub controller_routed_git: bool,
+    pub changed_since_base: Option<String>,
+    pub git_fetch_refs: Vec<String>,
+    pub snapshot_includes: Vec<String>,
+    pub allow_dirty_lab_workspace: bool,
+    /// Opaque per-run token (e.g. an agent-task run id) folded into the
+    /// deterministic remote workspace path so two distinct cook/dispatch runs
+    /// at the same source HEAD never share a long-lived remote checkout.
+    ///
+    /// Without this, the git-mode remote path is keyed only on
+    /// `(source path, HEAD)`, so a later unrelated run reuses the earlier run's
+    /// workspace directory and can observe leftover untracked artifacts from it
+    /// (cross-run contamination, see #4393). When set, each run gets an
+    /// isolated `_lab_workspaces/<name>-<digest>` directory.
+    pub run_isolation_token: Option<String>,
+}
+
 /// Set while a hosted exec runs inside a runner (as opposed to the local host).
 pub const RUNNER_HOSTED_EXEC_ENV: &str = "HOMEBOY_RUNNER_HOSTED_EXEC";
 

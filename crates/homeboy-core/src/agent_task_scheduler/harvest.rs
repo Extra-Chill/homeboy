@@ -1103,9 +1103,9 @@ mod committed_harvest_tests {
             .expect("create runner");
             let (synced, exit_code) = crate::runner::sync_workspace(
                 "lab-snapshot-git",
-                crate::runner::RunnerWorkspaceSyncOptions {
+                homeboy_runner_contract::RunnerWorkspaceSyncOptions {
                     path: source.path().display().to_string(),
-                    mode: crate::runner::RunnerWorkspaceSyncMode::SnapshotGit,
+                    mode: homeboy_runner_contract::RunnerWorkspaceSyncMode::SnapshotGit,
                     controller_routed_git: false,
                     changed_since_base: None,
                     git_fetch_refs: Vec::new(),

@@ -27,45 +27,11 @@ pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
     "*.pfx",
 ];
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerWorkspaceSyncMode {
-    #[default]
-    Snapshot,
-    SnapshotGit,
-    Git,
-}
-
-impl RunnerWorkspaceSyncMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Snapshot => "snapshot",
-            Self::SnapshotGit => "snapshot-git",
-            Self::Git => "git",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RunnerWorkspaceSyncOptions {
-    pub path: String,
-    pub mode: RunnerWorkspaceSyncMode,
-    pub controller_routed_git: bool,
-    pub changed_since_base: Option<String>,
-    pub git_fetch_refs: Vec<String>,
-    pub snapshot_includes: Vec<String>,
-    pub allow_dirty_lab_workspace: bool,
-    /// Opaque per-run token (e.g. an agent-task run id) folded into the
-    /// deterministic remote workspace path so two distinct cook/dispatch runs
-    /// at the same source HEAD never share a long-lived remote checkout.
-    ///
-    /// Without this, the git-mode remote path is keyed only on
-    /// `(source path, HEAD)`, so a later unrelated run reuses the earlier run's
-    /// workspace directory and can observe leftover untracked artifacts from it
-    /// (cross-run contamination, see #4393). When set, each run gets an
-    /// isolated `_lab_workspaces/<name>-<digest>` directory.
-    pub run_isolation_token: Option<String>,
-}
+// RunnerWorkspaceSyncMode + RunnerWorkspaceSyncOptions are behavior-free data;
+// they now live in the shared runner-contract crate so core can name them
+// without a core -> runner edge. Re-exported so internal/CLI call sites resolve
+// unchanged.
+pub use homeboy_runner_contract::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerWorkspaceSyncOutput {
