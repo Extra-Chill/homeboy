@@ -3,13 +3,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
-use std::sync::{mpsc, Arc, Mutex};
 
 use homeboy::core::agent_task_provider::AgentTaskProviderProfileDeclaration;
 use homeboy::core::agent_tasks::batch;
-use homeboy::core::agent_tasks::dispatch_service::{
-    self, AgentTaskDispatchCommand, DispatchCoreInputs,
-};
+use homeboy::core::agent_tasks::dispatch_service::{AgentTaskDispatchCommand, DispatchCoreInputs};
 use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::provider::{self, AgentTaskProviderCatalog};
@@ -132,17 +129,17 @@ where
     if let Some(record_run_id) = args.record_run_id {
         plan.fanout_id = record_run_id;
     }
-    run_batch_cook_fanout_plan_with_terminal(plan, None, move |mut options| {
-        options.attempt_dispatcher = Some(attempt_dispatcher(&options));
-        let result = agent_task_service::run_cook(
-            options,
-            provider::ExtensionProviderAgentTaskExecutor::discover(),
-        )?;
-        Ok(serde_json::json!({
-            "exit_code": result.exit_code,
-            "result": serde_json::to_value(result.value).unwrap_or(Value::Null),
-        }))
-    })
+    let result = agent_task_service::run_cook_batch(
+        agent_task_service::AgentTaskCookBatchOptions {
+            batch_id: plan.fanout_id.clone(),
+            cooks: compile_batch_cooks(&plan, |options| {
+                options.attempt_dispatcher = Some(attempt_dispatcher(options));
+            })?,
+            max_concurrency: batch_worker_limit(&plan),
+        },
+        provider::ExtensionProviderAgentTaskExecutor::discover(),
+    )?;
+    Ok(batch_cook_result(&plan, result))
 }
 
 fn run_batch_cook_fanout_plan(plan: BatchCookFanoutPlan) -> CmdResult<Value> {
@@ -157,15 +154,17 @@ fn run_batch_cook_fanout_plan_with_executor<E>(
     executor: E,
 ) -> CmdResult<Value>
 where
-    E: homeboy::core::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone,
+    E: homeboy::core::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone + Send,
 {
-    run_batch_cook_fanout_plan_with_terminal(plan, None, move |options| {
-        let result = agent_task_service::run_cook(options, executor.clone())?;
-        Ok(serde_json::json!({
-            "exit_code": result.exit_code,
-            "result": serde_json::to_value(result.value).unwrap_or(Value::Null),
-        }))
-    })
+    let result = agent_task_service::run_cook_batch(
+        agent_task_service::AgentTaskCookBatchOptions {
+            batch_id: plan.fanout_id.clone(),
+            cooks: compile_batch_cooks(&plan, |_| {})?,
+            max_concurrency: batch_worker_limit(&plan),
+        },
+        executor,
+    )?;
+    Ok(batch_cook_result(&plan, result))
 }
 
 fn batch_harvest_context() -> Result<homeboy::core::agent_task_scheduler::HarvestExecutionContext> {
@@ -176,117 +175,66 @@ fn batch_harvest_context() -> Result<homeboy::core::agent_task_scheduler::Harves
     }
 }
 
-/// Runs one controller-owned batch. The controller captures one immutable Lab
-/// process context; each cell receives a clone after its dispatch plan and cook
-/// options have been constructed. Batch cook specs currently have no per-cell
-/// runner or placement field, so they cannot request mixed local/Lab routing.
-fn run_batch_cook_fanout_plan_with_terminal<F>(
-    plan: BatchCookFanoutPlan,
-    worker_limit: Option<usize>,
-    terminal: F,
-) -> CmdResult<Value>
-where
-    F: Fn(AgentTaskCookServiceOptions) -> Result<Value> + Clone + Send,
-{
+fn compile_batch_cooks(
+    plan: &BatchCookFanoutPlan,
+    configure: impl Fn(&mut AgentTaskCookServiceOptions),
+) -> Result<Vec<AgentTaskCookServiceOptions>> {
     let harvest_context = batch_harvest_context()?;
-    let workers = worker_limit.unwrap_or_else(|| {
-        plan.cooks
-            .len()
-            .min(std::thread::available_parallelism().map_or(1, usize::from))
-    });
-    run_batch_cook_fanout_plan_with_terminal_and_workers(plan, harvest_context, workers, terminal)
+    plan.cooks
+        .iter()
+        .map(|cook| {
+            let invocation = cook.to_cook_invocation(plan)?;
+            let mut options =
+                agent_task_service::compile_cook_attempt(invocation.options, invocation.dispatch)?;
+            options.harvest_context = harvest_context.clone();
+            configure(&mut options);
+            Ok(options)
+        })
+        .collect()
 }
 
-fn run_batch_cook_fanout_plan_with_terminal_and_workers<F>(
-    plan: BatchCookFanoutPlan,
-    harvest_context: homeboy::core::agent_task_scheduler::HarvestExecutionContext,
-    workers: usize,
-    terminal: F,
-) -> CmdResult<Value>
-where
-    F: Fn(AgentTaskCookServiceOptions) -> Result<Value> + Clone + Send,
-{
-    let total = plan.cooks.len();
-    let workers = workers.min(total);
-    let plan = Arc::new(plan);
-    let next = Arc::new(Mutex::new(0usize));
-    let (tx, rx) = mpsc::channel();
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            let plan = Arc::clone(&plan);
-            let next = Arc::clone(&next);
-            let tx = tx.clone();
-            let terminal = terminal.clone();
-            let harvest_context = harvest_context.clone();
-            scope.spawn(move || loop {
-                let index = {
-                    let mut next = next.lock().expect("batch cook work queue");
-                    if *next == plan.cooks.len() {
-                        return;
-                    }
-                    let index = *next;
-                    *next += 1;
-                    index
-                };
-                let cook = &plan.cooks[index];
-                let cell = (|| -> Result<Value> {
-                    let invocation = cook.to_cook_invocation(&plan)?;
-                    let run_id = invocation.options.initial_run_id.clone();
-                    let request =
-                        dispatch_service::resolve_dispatch_request(invocation.dispatch.into())?;
-                    let initial_plan = dispatch_service::build_dispatch_plan(&request)?;
-                    let mut options = invocation.options;
-                    options.initial_run_id = run_id;
-                    options.initial_plan = initial_plan;
-                    options.harvest_context = harvest_context.clone();
-                    terminal(options)
-                })();
-                let _ = tx.send((index, cell));
-            });
-        }
-    });
-    drop(tx);
+fn batch_worker_limit(plan: &BatchCookFanoutPlan) -> usize {
+    plan.cooks
+        .len()
+        .min(std::thread::available_parallelism().map_or(1, usize::from))
+}
 
-    let mut results = (0..total).map(|_| None).collect::<Vec<Option<Value>>>();
-    for (index, cell) in rx {
-        let cook = &plan.cooks[index];
-        let cell = match cell {
-            Ok(cell) => cell,
-            Err(error) => serde_json::json!({
-                "exit_code": 1,
-                "result": { "error": error.to_string() },
-            }),
-        };
-        results[index] = Some(serde_json::json!({
-            "cook_id": cook.cook_id,
-            "run_id": cook.run_id(),
-            "worktree": cook.to_worktree,
-            "head": cook.head,
-            "workspace_materialization": cook.workspace_materialization,
-            "exit_code": cell["exit_code"],
-            "result": cell["result"],
-        }));
-    }
-    let results = results.into_iter().flatten().collect::<Vec<_>>();
-    let failed = results
+fn batch_cook_result(
+    plan: &BatchCookFanoutPlan,
+    result: agent_task_service::AgentTaskRunResult<agent_task_service::AgentTaskCookBatchReport>,
+) -> (Value, i32) {
+    let report = result.value;
+    let cooks = report
+        .cooks
         .iter()
-        .filter(|result| result["exit_code"].as_i64() != Some(0))
-        .count();
-
-    Ok((
+        .zip(&plan.cooks)
+        .map(|(cell, cook)| {
+            let cell_result = cell
+                .result
+                .as_ref()
+                .map(|result| serde_json::to_value(result).unwrap_or(Value::Null))
+                .unwrap_or_else(|| serde_json::json!({ "error": cell.error }));
+            serde_json::json!({
+                "cook_id": cook.cook_id,
+                "run_id": cook.run_id(),
+                "worktree": cook.to_worktree,
+                "head": cook.head,
+                "workspace_materialization": cook.workspace_materialization,
+                "exit_code": cell.exit_code,
+                "result": cell_result,
+            })
+        })
+        .collect::<Vec<_>>();
+    (
         serde_json::json!({
             "schema": AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA,
             "fanout_id": plan.fanout_id,
-            "status": if failed == 0 { "succeeded" } else { "failed" },
-            "summary": {
-                "total": results.len(),
-                "succeeded": results.len() - failed,
-                "failed": failed,
-            },
-            "cooks": results,
+            "status": report.status,
+            "summary": { "total": report.total, "succeeded": report.succeeded, "failed": report.failed },
+            "cooks": cooks,
         }),
-        if failed == 0 { 0 } else { 1 },
-    ))
+        result.exit_code,
+    )
 }
 
 fn cook_batch(mut args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value> {
