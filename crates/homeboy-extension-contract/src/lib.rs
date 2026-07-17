@@ -17,6 +17,7 @@ pub mod manifest_deploy_config;
 pub mod manifest_test_config;
 pub mod runner_contract;
 pub mod source_metadata_repair;
+pub mod test_drift;
 pub mod update_output;
 pub mod version;
 
@@ -32,4 +33,5 @@ pub use runner_contract::{
     PhaseFailure, PhaseFailureCategory, PhaseReport, PhaseStatus, RunnerStepFilter,
     VerificationPhase, GENERIC_INFRASTRUCTURE_FAILURE_MARKERS,
 };
+pub use test_drift::TestDriftConfig;
 pub use version::{parse_extension_version, VersionConstraint};
