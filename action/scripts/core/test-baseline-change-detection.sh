@@ -184,7 +184,12 @@ git -C "${ABSENT_REPO}" add .
 git -C "${ABSENT_REPO}" commit -q -m initial
 
 mv "${FAKE_BIN}/homeboy" "${FAKE_BIN}/homeboy.bak"
+original_path="${PATH}"
+# Removing the fake alone exposes a host-installed Homeboy, defeating this
+# fixture and allowing its real component resolver to block the shell suite.
+PATH="${FAKE_BIN}:/usr/bin:/bin"
 assert_equals "homeboy.json" "$(drift_file_paths "${ABSENT_REPO}")" "no homeboy on PATH falls back to baseline only"
+PATH="${original_path}"
 mv "${FAKE_BIN}/homeboy.bak" "${FAKE_BIN}/homeboy"
 
 printf 'All baseline change detection checks passed.\n'

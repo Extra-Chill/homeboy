@@ -3,6 +3,29 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TMP_DIR="$(mktemp -d)"
+FAKE_BIN="${TMP_DIR}/bin"
+mkdir -p "${FAKE_BIN}"
+cleanup() {
+  rm -rf "${TMP_DIR}"
+}
+trap cleanup EXIT
+
+cat > "${FAKE_BIN}/homeboy" <<'SH'
+#!/usr/bin/env bash
+
+if [ "${1:-}" = "--help" ] && [ "${HOMEBOY_FAKE_STALLED_HELP:-false}" = "true" ]; then
+  sleep 30 &
+  printf '%s\n' "$!" > "${HOMEBOY_FAKE_CHILD_PID_FILE}"
+  wait
+fi
+
+if [ "${*: -1}" = "--help" ]; then
+  printf '  --placement <auto|local|lab>\n'
+fi
+SH
+chmod +x "${FAKE_BIN}/homeboy"
+export PATH="${FAKE_BIN}:${PATH}"
 source "${SCRIPT_DIR}/lib.sh"
 
 assert_equals() {
@@ -53,6 +76,33 @@ assert_not_contains() {
 WORKSPACE="/tmp/workspace"
 COMPONENT="data-machine"
 OUTPUT_JSON="/tmp/workspace/out.json"
+
+# The placement fallback executes Homeboy help commands. Verify a stalled probe
+# cannot retain a child or block command construction indefinitely.
+child_pid_file="${TMP_DIR}/stalled-help-child.pid"
+placement_probe_log="${TMP_DIR}/placement-probe.log"
+unset HOMEBOY_ACTION_PLACEMENT_MODE
+export HOMEBOY_FAKE_STALLED_HELP=true
+export HOMEBOY_FAKE_CHILD_PID_FILE="${child_pid_file}"
+export HOMEBOY_ACTION_PLACEMENT_PROBE_TIMEOUT_SECONDS=1
+export HOMEBOY_ACTION_PLACEMENT_PROBE_CLEANUP_TIMEOUT_SECONDS=1
+homeboy_placement_mode 2>"${placement_probe_log}"
+if [ "${HOMEBOY_ACTION_PLACEMENT_MODE}" != "scoped" ]; then
+  printf 'FAIL: stalled global placement probe does not recover through scoped placement\n'
+  exit 1
+fi
+if ! grep -q 'placement capability probe exceeded its 1s timeout' "${placement_probe_log}"; then
+  printf 'FAIL: stalled placement probe does not report timeout diagnostics\n'
+  exit 1
+fi
+child_pid="$(<"${child_pid_file}")"
+if kill -0 "${child_pid}" 2>/dev/null; then
+  printf 'FAIL: stalled placement probe leaves child process %s alive\n' "${child_pid}"
+  exit 1
+fi
+printf 'PASS: stalled placement probe is bounded and cleans its child\n'
+unset HOMEBOY_ACTION_PLACEMENT_MODE HOMEBOY_FAKE_STALLED_HELP HOMEBOY_FAKE_CHILD_PID_FILE
+unset HOMEBOY_ACTION_PLACEMENT_PROBE_TIMEOUT_SECONDS HOMEBOY_ACTION_PLACEMENT_PROBE_CLEANUP_TIMEOUT_SECONDS
 
 # ── Unscoped (full mode) ──
 unset GITHUB_ACTIONS SCOPE_MODE SCOPE_BASE_REF EXTRA_ARGS || true

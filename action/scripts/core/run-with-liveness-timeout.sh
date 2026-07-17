@@ -2,21 +2,36 @@
 
 set -euo pipefail
 
+log_file=""
+if [ "${1:-}" = "--log-file" ]; then
+  log_file="${2:-}"
+  shift 2
+fi
+
 label="$1"
 shift
 timeout_seconds="${HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS:-1800}"
+cleanup_timeout_seconds="${HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS:-15}"
 
-if ! [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "::error::${label} timeout must be a positive number of seconds; received '${timeout_seconds}'."
-  exit 2
-fi
+for value_name in timeout_seconds cleanup_timeout_seconds; do
+  value="${!value_name}"
+  if ! [[ "${value}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "::error::${label} ${value_name//_/ } must be a positive number of seconds; received '${value}'."
+    exit 2
+  fi
+done
 
 start_seconds="$(date +%s)"
 
-# Job control gives the child command its own process group. Killing only the
-# wrapper leaves grandchildren such as cargo and homeboy running after a timeout.
+# Job control gives the child command its own process group. Capturing its output
+# directly in a file prevents a descendant-held stdout pipe from wedging `tee`
+# after the command parent exits.
 set -m
-"$@" &
+if [ -n "${log_file}" ]; then
+  "$@" >"${log_file}" 2>&1 &
+else
+  "$@" &
+fi
 command_pid=$!
 set +m
 
@@ -28,8 +43,6 @@ set +m
       if [ "${elapsed}" -ge "${timeout_seconds}" ]; then
         echo "::error::${label} exceeded its ${timeout_seconds}s execution timeout; terminating its process group."
         kill -TERM -- "-${command_pid}" 2>/dev/null || true
-        sleep 5
-        kill -KILL -- "-${command_pid}" 2>/dev/null || true
         exit 0
       fi
       if [ "$(( elapsed % 60 ))" -eq 0 ]; then
@@ -46,6 +59,31 @@ command_exit=$?
 set -e
 kill "${liveness_pid}" 2>/dev/null || true
 wait "${liveness_pid}" 2>/dev/null || true
+
+if kill -0 -- "-${command_pid}" 2>/dev/null; then
+  echo "::warning::${label} finalization found a live process group after the command parent exited; terminating it within ${cleanup_timeout_seconds}s."
+  kill -TERM -- "-${command_pid}" 2>/dev/null || true
+  cleanup_deadline="$(( $(date +%s) + cleanup_timeout_seconds ))"
+  while kill -0 -- "-${command_pid}" 2>/dev/null && [ "$(date +%s)" -lt "${cleanup_deadline}" ]; do
+    sleep 1
+  done
+
+  if kill -0 -- "-${command_pid}" 2>/dev/null; then
+    echo "::warning::${label} finalization grace expired; sending SIGKILL to process group ${command_pid}."
+    kill -KILL -- "-${command_pid}" 2>/dev/null || true
+    cleanup_deadline="$(( $(date +%s) + cleanup_timeout_seconds ))"
+    while kill -0 -- "-${command_pid}" 2>/dev/null && [ "$(date +%s)" -lt "${cleanup_deadline}" ]; do
+      sleep 1
+    done
+  fi
+
+  if kill -0 -- "-${command_pid}" 2>/dev/null; then
+    echo "::error::${label} finalization could not terminate process group ${command_pid} within ${cleanup_timeout_seconds}s. Retained command output: ${log_file:-standard output}."
+    exit 125
+  fi
+
+  echo "::notice::${label} finalization terminated surviving process group ${command_pid}; retained command output: ${log_file:-standard output}."
+fi
 
 if [ "$(( $(date +%s) - start_seconds ))" -ge "${timeout_seconds}" ]; then
   echo "::error::${label} exceeded its ${timeout_seconds}s execution timeout and was terminated. Inspect this step's logs and rerun after resolving the blocked command; the caller can continue when this action is advisory."

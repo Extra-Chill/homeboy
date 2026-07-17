@@ -92,6 +92,10 @@ inputs:
     description: 'Maximum wall-clock time for a Homeboy command or autofix phase. Emits liveness notices and exits with actionable timeout evidence.'
     required: false
     default: '1800'
+  cleanup-timeout-seconds:
+    description: 'Maximum wall-clock time to terminate and verify a Homeboy command process group after command completion or timeout. Emits retained-log diagnostics and fails when cleanup cannot finish.'
+    required: false
+    default: '15'
   import-observations:
     description: 'Download and import earlier homeboy-observations artifacts from the same workflow run before command execution. Import is best-effort and non-fatal.'
     required: false
@@ -506,6 +510,7 @@ runs:
         HOMEBOY_DIFFERENTIAL_GATING: ${{ inputs.differential-gating }}
         RUN_GROUP_PREFIX: homeboy
         HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
+        HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
       run: bash ${{ github.action_path }}/scripts/core/run-homeboy-commands.sh
 
     - name: Resolve artifact names
@@ -627,6 +632,7 @@ runs:
         AUTOFIX_MAX_COMMITS: ${{ inputs.autofix-max-commits }}
         APP_TOKEN: ${{ inputs.app-token }}
         HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
+        HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
       run: bash ${{ github.action_path }}/scripts/core/run-with-liveness-timeout.sh "Non-PR autofix" bash ${{ github.action_path }}/scripts/autofix/prepare-autofix-branch.sh
 
     - name: Open non-PR autofix PR

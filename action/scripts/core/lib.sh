@@ -884,11 +884,75 @@ homeboy_global_flags() {
 
 # The action preflights this after selecting the binary. Keep this fallback for
 # direct script consumers and cache the probe within a shell process.
+homeboy_help_supports_placement() {
+  local output_file command_pid timeout_seconds cleanup_timeout_seconds deadline
+  local label="homeboy $* --help placement capability probe"
+
+  timeout_seconds="${HOMEBOY_ACTION_PLACEMENT_PROBE_TIMEOUT_SECONDS:-10}"
+  cleanup_timeout_seconds="${HOMEBOY_ACTION_PLACEMENT_PROBE_CLEANUP_TIMEOUT_SECONDS:-5}"
+  for value_name in timeout_seconds cleanup_timeout_seconds; do
+    if ! [[ "${!value_name}" =~ ^[1-9][0-9]*$ ]]; then
+      printf '::warning::%s %s must be a positive number of seconds; using the default.\n' "${label}" "${value_name//_/ }" >&2
+      if [ "${value_name}" = "timeout_seconds" ]; then
+        timeout_seconds=10
+      else
+        cleanup_timeout_seconds=5
+      fi
+    fi
+  done
+
+  output_file="$(mktemp)"
+  # Job control gives the probe and any child it leaves behind a dedicated
+  # process group, so a stalled help command cannot retain this shell's pipe.
+  set -m
+  homeboy "$@" --help >"${output_file}" 2>&1 &
+  command_pid=$!
+  set +m
+
+  deadline="$(( $(date +%s) + timeout_seconds ))"
+  while kill -0 "${command_pid}" 2>/dev/null; do
+    if [ "$(date +%s)" -ge "${deadline}" ]; then
+      printf '::warning::%s exceeded its %ss timeout; terminating process group %s.\n' "${label}" "${timeout_seconds}" "${command_pid}" >&2
+      kill -TERM -- "-${command_pid}" 2>/dev/null || true
+      break
+    fi
+    sleep 0.1
+  done
+
+  if kill -0 -- "-${command_pid}" 2>/dev/null; then
+    deadline="$(( $(date +%s) + cleanup_timeout_seconds ))"
+    while kill -0 -- "-${command_pid}" 2>/dev/null && [ "$(date +%s)" -lt "${deadline}" ]; do
+      sleep 0.1
+    done
+  fi
+
+  if kill -0 -- "-${command_pid}" 2>/dev/null; then
+    printf '::warning::%s did not exit after %ss cleanup; sending SIGKILL to process group %s.\n' "${label}" "${cleanup_timeout_seconds}" "${command_pid}" >&2
+    kill -KILL -- "-${command_pid}" 2>/dev/null || true
+  fi
+
+  wait "${command_pid}" 2>/dev/null || true
+
+  if kill -0 -- "-${command_pid}" 2>/dev/null; then
+    printf '::warning::%s retained process group %s after bounded cleanup.\n' "${label}" "${command_pid}" >&2
+    rm -f "${output_file}"
+    return 1
+  fi
+
+  if grep -E '^[[:space:]]+--placement([[:space:]]|<)' "${output_file}" >/dev/null; then
+    rm -f "${output_file}"
+    return 0
+  fi
+
+  rm -f "${output_file}"
+  return 1
+}
+
 homeboy_placement_mode() {
   if [ -z "${HOMEBOY_ACTION_PLACEMENT_MODE+x}" ]; then
-    if homeboy --help 2>&1 | grep -E '^[[:space:]]+--placement([[:space:]]|<)' >/dev/null; then
+    if homeboy_help_supports_placement; then
       HOMEBOY_ACTION_PLACEMENT_MODE=global
-    elif homeboy review audit --help 2>&1 | grep -E '^[[:space:]]+--placement([[:space:]]|<)' >/dev/null; then
+    elif homeboy_help_supports_placement review audit; then
       HOMEBOY_ACTION_PLACEMENT_MODE=scoped
     else
       HOMEBOY_ACTION_PLACEMENT_MODE=legacy
