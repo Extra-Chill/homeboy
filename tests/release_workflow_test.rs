@@ -266,6 +266,32 @@ fn release_preflight_validates_the_private_workspace_build_before_mutating_relea
 }
 
 #[test]
+fn release_blocks_preparation_and_publication_on_a_native_windows_workspace_build() {
+    let windows_build = job_section(release_workflow(), "gate-windows-build");
+    let quality_policy = job_section(release_workflow(), "release-quality-policy");
+    let prepare = job_section(release_workflow(), "prepare");
+
+    assert!(windows_build.contains("runs-on: windows-latest"));
+    assert!(windows_build.contains("run: cargo build --workspace --locked"));
+    assert!(
+        quality_policy.contains("- gate-windows-build"),
+        "the release quality policy must wait for the native Windows build"
+    );
+    assert!(
+        quality_policy.contains("needs.gate-windows-build.result == 'success'"),
+        "the release quality policy must fail closed when the native Windows build fails"
+    );
+    assert!(
+        prepare.contains("- gate-windows-build"),
+        "release preparation must wait for the native Windows build"
+    );
+    assert!(
+        prepare.contains("needs.gate-windows-build.result == 'success'"),
+        "a failed native Windows build must prevent tag preparation and publication"
+    );
+}
+
+#[test]
 fn release_workflow_publishes_binary_channels_not_crates_io() {
     let workflow = release_workflow();
     let host = job_section(workflow, "host");

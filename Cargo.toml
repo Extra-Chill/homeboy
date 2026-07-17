@@ -87,9 +87,6 @@ clap = { version = "4.5", features = ["derive", "string"] }
 toml = "1.0.3"
 sha2 = "0.10.9"
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
-
 [dev-dependencies]
 # Enable homeboy-core's shared hermetic test fixtures for this crate's test build
 # (integration tests reach them via `homeboy::test_support`).
