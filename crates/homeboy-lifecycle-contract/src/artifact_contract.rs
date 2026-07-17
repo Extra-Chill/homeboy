@@ -10,6 +10,14 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactViewerLink {
+    pub kind: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<serde_json::Value>,
+}
+
 pub const ARTIFACT_CONTRACT_SCHEMA: &str = "homeboy/artifact-contract/v1";
 pub const EVIDENCE_CONTRACT_SCHEMA: &str = "homeboy/evidence-contract/v1";
 

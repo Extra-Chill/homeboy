@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::context::RunContext;
+pub use homeboy_lifecycle_contract::ArtifactViewerLink;
 
 #[path = "finding_records.rs"]
 mod finding_records;
@@ -111,14 +112,6 @@ pub struct ArtifactRecord {
     #[serde(default)]
     pub metadata_json: serde_json::Value,
     pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ArtifactViewerLink {
-    pub kind: String,
-    pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replay: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
