@@ -123,6 +123,14 @@ pub fn is_runner_hosted_exec() -> bool {
         .is_some_and(|value| value == "1")
 }
 
+/// True when this process is already executing on a Lab runner. This is
+/// lifecycle provenance, not controller transport selection.
+pub fn has_lab_execution_provenance() -> bool {
+    std::env::var(crate::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV)
+        .ok()
+        .is_some_and(|runner_id| !runner_id.trim().is_empty())
+}
+
 /// True when Homeboy is executing inside a GitHub Actions CI job.
 ///
 /// CI runners are ephemeral, single-purpose, and non-interactive by design.

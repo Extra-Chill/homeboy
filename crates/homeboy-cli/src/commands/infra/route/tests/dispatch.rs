@@ -505,12 +505,16 @@ fn managed_runner_context_bypasses_auto_routing_once() {
 }
 
 #[test]
-fn managed_run_plan_handoff_does_not_require_a_second_controller_session() {
+fn runner_resident_run_plan_does_not_require_a_second_controller_session() {
     let _env = EnvGuard::set_many(&[
         (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
-        (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
-        (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, Some("1")),
-        (homeboy::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
+        (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, None),
+        (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, None),
+        (homeboy::runner::RUNNER_ID_ENV, None),
+        (
+            homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV,
+            Some("homeboy-lab"),
+        ),
     ]);
     let normalized = vec![
         "homeboy".to_string(),
@@ -526,7 +530,7 @@ fn managed_run_plan_handoff_does_not_require_a_second_controller_session() {
     let cli = Cli::parse_from(&normalized);
 
     assert_eq!(
-        route_after_parse(&cli, &normalized, None).expect("managed handoff stays local"),
+        route_after_parse(&cli, &normalized, None).expect("runner-resident handoff stays local"),
         None
     );
 }
