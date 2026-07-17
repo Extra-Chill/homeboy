@@ -8,7 +8,7 @@
 use serde::Deserialize;
 use std::path::Path;
 
-use crate::agent_runtime_manifest::validate_installed_extension_agent_runtime_provider_discovery;
+use crate::extension_provider_discovery::validate_installed_extension_provider_discovery;
 use crate::config::{self, from_str};
 use crate::error::{Error, Result};
 use crate::git;
@@ -154,7 +154,7 @@ pub(super) fn install_from_url(
     }
 
     let manifest_path = paths::extension_manifest(&extension_id)?;
-    if let Err(err) = validate_installed_extension_agent_runtime_provider_discovery(&extension_id) {
+    if let Err(err) = validate_installed_extension_provider_discovery(&extension_id) {
         let _ = std::fs::remove_dir_all(&extension_dir);
         return Err(err);
     }
@@ -543,7 +543,7 @@ pub(super) fn install_from_path(
         return Err(err);
     }
     let manifest_path = paths::extension_manifest(&extension_id)?;
-    if let Err(err) = validate_installed_extension_agent_runtime_provider_discovery(&extension_id) {
+    if let Err(err) = validate_installed_extension_provider_discovery(&extension_id) {
         let _ = std::fs::remove_file(&extension_dir);
         return Err(err);
     }

@@ -3,12 +3,6 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-use crate::agent_task_provider::WorkspaceCwdMode;
-use crate::agent_task_provider::{
-    AgentTaskExecutorProvider, AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
-    AgentTaskProviderWorkspaceMaterialization,
-};
 use crate::command_invocation::COMMAND_INVOCATION_SCHEMA;
 use crate::extension::{
     self, load_all_extensions, load_extension, ExtensionManifest, RequirementsConfig,
@@ -44,8 +38,11 @@ pub struct AgentRuntimeManifest {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Agent-task executor providers declared by this runtime, carried opaquely
+    /// as JSON so core does not depend on the agent-task provider types. The
+    /// agent-task layer deserializes and validates them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agent_task_executors: Vec<AgentTaskExecutorProvider>,
+    pub agent_task_executors: Vec<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_path_fields: Vec<String>,
     #[serde(
@@ -70,13 +67,13 @@ pub struct AgentRuntimeManifest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AgentRuntimeMaterializationContract {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub source_roots: Vec<AgentTaskProviderRunnerSource>,
+    pub source_roots: Vec<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<AgentRuntimeMaterializationDependency>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub executable_requirements: Vec<AgentRuntimeExecutableRequirement>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub readiness_checks: Vec<AgentTaskProviderRunnerReadiness>,
+    pub readiness_checks: Vec<Value>,
     #[serde(
         default,
         skip_serializing_if = "AgentRuntimeDiagnosticsContract::is_empty"
@@ -85,7 +82,7 @@ pub struct AgentRuntimeMaterializationContract {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env_passthrough: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<AgentTaskProviderWorkspaceMaterialization>,
+    pub workspace: Option<Value>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
 }
@@ -258,17 +255,17 @@ pub struct AgentRuntimeMaterializationPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub source_roots: Vec<AgentTaskProviderRunnerSource>,
+    pub source_roots: Vec<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<AgentRuntimeMaterializationDependency>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub executable_requirements: Vec<AgentRuntimeExecutableRequirement>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub readiness_checks: Vec<AgentTaskProviderRunnerReadiness>,
+    pub readiness_checks: Vec<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env_passthrough: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<AgentTaskProviderWorkspaceMaterialization>,
+    pub workspace: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -612,14 +609,10 @@ pub(crate) fn discover_agent_runtime_catalog_from_extensions(
                 diagnostics.push(diagnostic);
                 continue;
             }
-            let provider_catalog = parse_agent_task_executor_provider_catalog(
-                &runtime.agent_task_executors,
-                &runtime.id,
-                Some(&extension.id),
-                extension.extension_path.as_deref(),
-            );
-            diagnostics.extend(provider_catalog.diagnostics);
-            let providers = provider_catalog.providers;
+            // The executor providers are carried opaquely as JSON; the
+            // agent-task layer validates them at discovery time. Core just
+            // passes them through into the runtime manifest.
+            let providers = runtime.agent_task_executors.clone();
             if providers.is_empty() {
                 continue;
             }
@@ -737,235 +730,8 @@ fn agent_runtime_core_incompatible_diagnostic(
     })
 }
 
-pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {
-    discover_agent_task_executor_provider_catalog().providers
-}
-
-pub(crate) fn discover_agent_task_executor_provider_catalog(
-) -> AgentTaskExecutorProviderDiscoveryCatalog {
-    let catalog = discover_agent_runtime_catalog();
-    let mut diagnostics = catalog.diagnostics;
-    AgentTaskExecutorProviderDiscoveryCatalog {
-        providers: reject_duplicate_provider_ids(
-            agent_task_executor_providers_from_runtime_manifests(catalog.manifests),
-            &mut diagnostics,
-        ),
-        diagnostics,
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskExecutorProviderDiscoveryCatalog {
-    pub providers: Vec<AgentTaskExecutorProvider>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
-}
-
-fn agent_task_executor_providers_from_runtime_manifests(
-    runtime_manifests: Vec<AgentRuntimeManifest>,
-) -> Vec<AgentTaskExecutorProvider> {
-    let mut providers = Vec::new();
-    for runtime_manifest in runtime_manifests {
-        for mut provider in runtime_manifest.agent_task_executors.clone() {
-            normalize_agent_task_executor_provider_invocation(&mut provider);
-            provider.extension_id = runtime_manifest.extension_id.clone();
-            provider.extension_path = runtime_manifest.extension_path.clone();
-            if provider.runtime_package_source.is_none() {
-                provider.runtime_package_source = runtime_manifest.extension_id.clone();
-            }
-            provider.runtime_id = Some(runtime_manifest.id.clone());
-            provider.runtime_path = runtime_manifest.runtime_path.clone();
-            let materialization_plan =
-                runtime_materialization_plan(&runtime_manifest, &provider.id);
-            if let Ok(value) = serde_json::to_value(&materialization_plan) {
-                provider
-                    .extra
-                    .insert("runtime_materialization_plan".to_string(), value);
-            }
-            providers.push(provider);
-        }
-    }
-    providers
-}
-
-fn reject_duplicate_provider_ids(
-    providers: Vec<AgentTaskExecutorProvider>,
-    diagnostics: &mut Vec<AgentRuntimeDiscoveryDiagnostic>,
-) -> Vec<AgentTaskExecutorProvider> {
-    let mut by_id = BTreeMap::<String, Vec<AgentTaskExecutorProvider>>::new();
-    for provider in providers {
-        by_id.entry(provider.id.clone()).or_default().push(provider);
-    }
-
-    by_id
-        .into_iter()
-        .filter_map(|(id, providers)| {
-            if providers.len() == 1 {
-                return providers.into_iter().next();
-            }
-            let sources = providers
-                .iter()
-                .map(|provider| {
-                    format!(
-                        "runtime:{} source:{}",
-                        provider.runtime_id.as_deref().unwrap_or("<unknown>"),
-                        provider
-                            .extension_id
-                            .as_deref()
-                            .unwrap_or("standalone")
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            diagnostics.push(AgentRuntimeDiscoveryDiagnostic {
-                class: "agent_task_executor_provider.id_conflict".to_string(),
-                message: format!(
-                    "Agent-task provider id '{}' is declared by multiple sources: {}. Select one source explicitly before dispatching this provider.",
-                    id, sources
-                ),
-                runtime_id: None,
-                extension_id: None,
-                path: None,
-            });
-            None
-        })
-        .collect()
-}
-
-fn normalize_agent_task_executor_provider_invocation(provider: &mut AgentTaskExecutorProvider) {
-    if !provider.invocation.argv.is_empty()
-        || !provider.command_argv.is_empty()
-        || provider.command.trim().is_empty()
-    {
-        return;
-    }
-
-    provider.invocation.schema = Some(COMMAND_INVOCATION_SCHEMA.to_string());
-    provider.invocation.argv = provider
-        .command
-        .split_whitespace()
-        .map(str::to_string)
-        .collect();
-}
-
-pub(crate) fn validate_installed_extension_agent_runtime_provider_discovery(
-    extension_id: &str,
-) -> Result<()> {
-    let extension = load_extension(extension_id)?;
-    let expected = expected_agent_runtime_provider_refs(&extension)?;
-    if expected.is_empty() {
-        return Ok(());
-    }
-
-    let discovered = discover_agent_task_executor_providers();
-    let missing: Vec<_> = expected
-        .iter()
-        .filter(|expected| {
-            !discovered.iter().any(|provider| {
-                provider.extension_id.as_deref() == Some(extension_id)
-                    && provider.runtime_id.as_deref() == Some(expected.runtime_id.as_str())
-                    && provider.id == expected.provider_id
-                    && provider.backend == expected.backend
-            })
-        })
-        .cloned()
-        .collect();
-
-    if missing.is_empty() {
-        return Ok(());
-    }
-
-    Err(Error::validation_invalid_argument(
-        "source",
-        format!(
-            "Extension '{}' declares agent runtime providers that were not discoverable after install/setup",
-            extension_id
-        ),
-        Some(extension_id.to_string()),
-        None,
-    )
-    .with_hint(format!(
-        "Missing provider discovery: {}",
-        missing
-            .iter()
-            .map(|entry| format!(
-                "runtime={} provider={} backend={}",
-                entry.runtime_id, entry.provider_id, entry.backend
-            ))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ExpectedAgentRuntimeProviderRef {
-    runtime_id: String,
-    provider_id: String,
-    backend: String,
-}
-
-fn expected_agent_runtime_provider_refs(
-    extension: &ExtensionManifest,
-) -> Result<Vec<ExpectedAgentRuntimeProviderRef>> {
-    let mut expected = Vec::new();
-    for runtime in &extension.agent_runtimes {
-        for value in &runtime.agent_task_executors {
-            let provider: AgentTaskExecutorProvider = serde_json::from_value(value.clone()).map_err(|err| {
-                Error::validation_invalid_argument(
-                    "agent_runtimes.agent_task_executors",
-                    format!(
-                        "Extension '{}' declares an agent runtime provider that cannot be parsed: {}",
-                        extension.id, err
-                    ),
-                    Some(runtime.id.clone()),
-                    None,
-                )
-            })?;
-            expected.push(ExpectedAgentRuntimeProviderRef {
-                runtime_id: runtime.id.clone(),
-                provider_id: provider.id,
-                backend: provider.backend,
-            });
-        }
-    }
-    Ok(expected)
-}
-
-struct ParsedAgentTaskExecutorProviderCatalog {
-    providers: Vec<AgentTaskExecutorProvider>,
-    diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
-}
-
-fn parse_agent_task_executor_provider_catalog(
-    values: &[Value],
-    runtime_id: &str,
-    extension_id: Option<&str>,
-    path: Option<&str>,
-) -> ParsedAgentTaskExecutorProviderCatalog {
-    let mut providers = Vec::new();
-    let mut diagnostics = Vec::new();
-    for value in values {
-        match serde_json::from_value(value.clone()) {
-            Ok(provider) => providers.push(provider),
-            Err(error) => diagnostics.push(AgentRuntimeDiscoveryDiagnostic {
-                class: "agent_task_executor_provider.parse_failed".to_string(),
-                message: error.to_string(),
-                runtime_id: Some(runtime_id.to_string()),
-                extension_id: extension_id.map(str::to_string),
-                path: path.map(str::to_string),
-            }),
-        }
-    }
-    ParsedAgentTaskExecutorProviderCatalog {
-        providers,
-        diagnostics,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use serde_json::json;
 
     use super::*;
