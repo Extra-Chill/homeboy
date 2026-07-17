@@ -442,14 +442,14 @@ fn selected_provider_executor_resolution_providers<'a>(
 }
 
 fn local_provider_executor_resolution_check(provider: &AgentTaskExecutorProvider) -> RunnerCheck {
-    match homeboy::core::agent_tasks::provider::probe_provider_executor_resolves(provider) {
-        homeboy::core::agent_tasks::provider::ProviderExecutorResolution::Resolved => {
+    match homeboy::agents::agent_tasks::provider::probe_provider_executor_resolves(provider) {
+        homeboy::agents::agent_tasks::provider::ProviderExecutorResolution::Resolved => {
             provider_executor_resolution_ok_check(provider, None)
         }
-        homeboy::core::agent_tasks::provider::ProviderExecutorResolution::Skipped { reason } => {
+        homeboy::agents::agent_tasks::provider::ProviderExecutorResolution::Skipped { reason } => {
             provider_executor_resolution_skipped_check(provider, reason)
         }
-        homeboy::core::agent_tasks::provider::ProviderExecutorResolution::Unresolved {
+        homeboy::agents::agent_tasks::provider::ProviderExecutorResolution::Unresolved {
             command,
             detail,
         } => provider_executor_resolution_error_check(provider, command, detail),
@@ -555,7 +555,8 @@ pub(super) fn remote_provider_executor_entrypoint(
     if runtime_id.is_empty() || runtime_root.as_os_str().is_empty() {
         return None;
     }
-    let (program, args, cwd) = crate::core::agent_task_provider::provider_command_parts(provider)?;
+    let (program, args, cwd) =
+        crate::agents::agent_task_provider::provider_command_parts(provider)?;
     let program = runtime_relative_entrypoint_part(runtime_root, &program)?;
     // A bare executable such as `node` is runner-local by definition. Any
     // absolute invocation value must be rooted in the declared runtime.

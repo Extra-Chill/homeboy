@@ -116,7 +116,7 @@ pub fn register_lab_workspace_provenance_provider(
 
 /// Run `f` against the registered provider, or the no-op provider if none is
 /// registered.
-pub(crate) fn with_lab_workspace_provenance<T>(
+pub fn with_lab_workspace_provenance<T>(
     f: impl FnOnce(&dyn LabWorkspaceProvenanceProvider) -> T,
 ) -> T {
     let guard = PROVIDER

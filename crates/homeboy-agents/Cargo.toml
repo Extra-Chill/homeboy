@@ -1,0 +1,38 @@
+[package]
+name = "homeboy-agents"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Agent-task subsystem for homeboy: durable agent-task orchestration, controller loops, dispatch, promotion, and review. Depends on homeboy-core; core does not depend on it."
+publish = false
+
+[lib]
+name = "homeboy_agents"
+path = "src/lib.rs"
+
+[dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
+homeboy-lab-contract = { version = "0.1.0", path = "../homeboy-lab-contract" }
+homeboy-lab-runner-contract = { version = "0.1.0", path = "../homeboy-lab-runner-contract" }
+homeboy-agents-contract = { version = "0.1.0", path = "../homeboy-agents-contract" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_json_path = "0.7"
+chrono = "0.4"
+uuid = { version = "1.11", features = ["v4", "v5", "serde"] }
+sha2 = "0.10.9"
+base64 = "0.22"
+regex = "1.11"
+glob = "0.3"
+libc = "0.2"
+fs4 = "0.13"
+shellexpand = "3.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "socks", "http2", "charset", "system-proxy"] }
+tempfile = "3.14"
+
+[dev-dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
+
+[features]
+test-support = []

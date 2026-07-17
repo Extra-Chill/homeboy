@@ -120,8 +120,8 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
     })
     .to_string();
 
-    let report = homeboy::core::agent_task_promotion::promote(
-        homeboy::core::agent_task_promotion::AgentTaskPromotionOptions {
+    let report = homeboy::agents::agent_task_promotion::promote(
+        homeboy::agents::agent_task_promotion::AgentTaskPromotionOptions {
             source,
             source_run_id: Some(run_id.clone()),
             source_path: None,
@@ -133,11 +133,11 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
             task_id: None,
             artifact_id: None,
             dry_run: false,
-            gates: homeboy::core::agent_task_gate::VerifyGateOptions {
+            gates: homeboy::agents::agent_task_gate::VerifyGateOptions {
                 verify: vec![helper.display().to_string()],
                 private_verify: Vec::new(),
                 private_gate_reveal:
-                    homeboy::core::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
+                    homeboy::agents::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
             },
             provider_command: Some(provider.display().to_string()),
             provider_invocation: None,
@@ -147,7 +147,7 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
 
     assert_eq!(
         report.status,
-        homeboy::core::agent_task_promotion::AgentTaskPromotionStatus::Applied
+        homeboy::agents::agent_task_promotion::AgentTaskPromotionStatus::Applied
     );
     let socket_path = report.deterministic_gates[0].stdout.trim();
     assert!(socket_path.ends_with("gate.sock"));

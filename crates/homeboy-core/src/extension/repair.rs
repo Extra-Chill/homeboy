@@ -1,6 +1,6 @@
-use crate::agent_runtime_manifest::validate_installed_extension_agent_runtime_provider_discovery;
 use crate::config::{self, from_str};
 use crate::error::{Error, Result};
+use crate::extension_provider_discovery::validate_installed_extension_provider_discovery;
 use crate::git;
 use crate::paths;
 use homeboy_engine_primitives::local_files;
@@ -349,7 +349,7 @@ fn validate_agent_runtime_discovery_or_restore(
     extension_dir: &Path,
     backup_dir: &Path,
 ) -> Result<()> {
-    if let Err(err) = validate_installed_extension_agent_runtime_provider_discovery(extension_id) {
+    if let Err(err) = validate_installed_extension_provider_discovery(extension_id) {
         let _ = remove_existing_install(extension_dir);
         let _ = restore_existing_install(backup_dir, extension_dir);
         return Err(err);

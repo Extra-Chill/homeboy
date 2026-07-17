@@ -1,21 +1,21 @@
 use serde::Serialize;
 
+use crate::agents::agent_task::AGENT_TASK_ARTIFACT_SCHEMA;
+use crate::agents::agent_task_batch::AGENT_TASK_BATCH_ARTIFACTS_SCHEMA;
+use crate::agents::agent_task_contract::AGENT_TASK_LOOP_ACTION_SCHEMA;
+use crate::agents::agent_task_executor_evidence::{
+    EXECUTOR_INPUT_EVIDENCE_KIND, EXECUTOR_INPUT_FILE, EXECUTOR_RESULT_EVIDENCE_KIND,
+    EXECUTOR_RESULT_FILE,
+};
+use crate::agents::agent_task_loop_controller::{
+    AGENT_TASK_LOOP_CONTROLLER_SCHEMA, AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA,
+};
+use crate::agents::agent_task_loop_definition::AGENT_TASK_LOOP_DEFINITION_SCHEMA;
 use crate::command_contract::{
     registered_contract, RUNNER_ARTIFACT_MANIFEST_FILE, RUNNER_ARTIFACT_MANIFEST_REF_NAME,
     RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
     RUNNER_ARTIFACT_ROOT_DIR_SUFFIX,
 };
-use crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA;
-use crate::core::agent_task_batch::AGENT_TASK_BATCH_ARTIFACTS_SCHEMA;
-use crate::core::agent_task_contract::AGENT_TASK_LOOP_ACTION_SCHEMA;
-use crate::core::agent_task_executor_evidence::{
-    EXECUTOR_INPUT_EVIDENCE_KIND, EXECUTOR_INPUT_FILE, EXECUTOR_RESULT_EVIDENCE_KIND,
-    EXECUTOR_RESULT_FILE,
-};
-use crate::core::agent_task_loop_controller::{
-    AGENT_TASK_LOOP_CONTROLLER_SCHEMA, AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA,
-};
-use crate::core::agent_task_loop_definition::AGENT_TASK_LOOP_DEFINITION_SCHEMA;
 use crate::core::artifact_address::ARTIFACT_ADDRESS_SCHEMA;
 use crate::core::artifact_contract::{ARTIFACT_CONTRACT_SCHEMA, EVIDENCE_CONTRACT_SCHEMA};
 use crate::core::artifact_dom_boxes::ARTIFACT_DOM_BOXES_SCHEMA;

@@ -1,0 +1,237 @@
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::agent_task_gate::{AgentTaskGateReport, VerifyGateOptions};
+use homeboy_core::command_invocation::CommandInvocation;
+use homeboy_core::gate::HomeboyGateResult;
+use homeboy_core::stream_capture::StreamCaptureMetadata;
+
+pub const AGENT_TASK_PROMOTION_REPORT_SCHEMA: &str = "homeboy/agent-task-promotion-report/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPromotionOptions {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_run_id: Option<String>,
+    pub source_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_worktree_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    /// Immutable task workspace base captured before provider dispatch. This is
+    /// required when recovering agent-created commits so promotion never picks
+    /// up commits that were already present in a reused workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_base_sha: Option<String>,
+    /// An immutable commit selected by a controller-owned candidate adoption.
+    /// When present promotion derives the patch from this revision rather than
+    /// the source workspace's current HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_ref: Option<String>,
+    pub to_worktree: String,
+    pub task_id: Option<String>,
+    pub artifact_id: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Deterministic verification gates. Flattened so the serialized shape keeps
+    /// the historical flat `verify` / `private_verify` / `private_gate_reveal`
+    /// keys while the field group is defined once in `VerifyGateOptions`.
+    #[serde(flatten)]
+    pub gates: VerifyGateOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_command: Option<String>,
+    /// Structured provider invocation. This preserves argv boundaries for
+    /// portable providers; `provider_command` remains a deprecated fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_invocation: Option<CommandInvocation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskPromotionReport {
+    #[serde(default = "promotion_report_schema")]
+    pub schema: String,
+    pub status: AgentTaskPromotionStatus,
+    pub source: AgentTaskPromotionSource,
+    pub to_worktree: String,
+    pub target: AgentTaskPromotionTarget,
+    pub patch_artifact: AgentTaskPromotionArtifactRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_evidence: Vec<AgentTaskPromotionCommandReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deterministic_gates: Vec<AgentTaskGateReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate_results: Vec<HomeboyGateResult>,
+    /// Declared base branch snapshot captured immediately before promotion gates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_base: Option<AgentTaskPromotionVerifiedBase>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub provenance: Value,
+    pub operator_notification: AgentTaskPromotionNotification,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPromotionVerifiedBase {
+    pub base: String,
+    pub sha: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskPromotionStatus {
+    DryRun,
+    /// The provider applied the patch and its target is durable, but verification
+    /// has not completed. Retrying must resume verification, not apply again.
+    VerificationPending,
+    Applied,
+    GateFailed,
+    /// A provider produced no patch, but the pinned candidate workspace passed
+    /// every declared deterministic verification gate.
+    VerifiedNoChanges,
+    /// A provider produced no patch and the pinned candidate workspace failed
+    /// deterministic verification. The candidate remains available for repair.
+    NoChangesGateFailed,
+    NoChanges,
+}
+
+impl AgentTaskPromotionStatus {
+    /// Whether a patch was actually promoted into the target worktree for this
+    /// status (true for both clean applies and gate-failed applies).
+    pub fn patch_promoted(self) -> bool {
+        matches!(
+            self,
+            Self::VerificationPending | Self::Applied | Self::GateFailed
+        )
+    }
+
+    /// Whether deterministic gates failed after the patch was promoted.
+    pub fn gate_failed(self) -> bool {
+        matches!(self, Self::GateFailed)
+    }
+
+    /// Stable handoff boundary identifier for this promotion status.
+    pub fn handoff_boundary(self) -> &'static str {
+        match self {
+            Self::VerificationPending => "patch_promoted_verification_pending",
+            Self::Applied => "patch_promoted_no_pr",
+            Self::GateFailed => "patch_promoted_gates_failed",
+            Self::VerifiedNoChanges => "no_patch_verified",
+            Self::NoChangesGateFailed => "no_patch_gates_failed",
+            Self::DryRun => "patch_not_promoted_dry_run",
+            Self::NoChanges => "patch_not_promoted_no_changes",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPromotionSource {
+    pub kind: String,
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPromotionTarget {
+    pub worktree: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPromotionArtifactRef {
+    pub id: String,
+    pub kind: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPromotionCommandReport {
+    pub command: Vec<String>,
+    pub exit_code: i32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stdout: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stderr: String,
+    /// Per-stream truncation metadata describing the retained-byte bound applied
+    /// to `stdout`/`stderr`. Skipped when both streams fit within the cap so the
+    /// historical serialized shape is preserved (#5077).
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskPromotionCommandCapture::is_empty"
+    )]
+    pub capture: AgentTaskPromotionCommandCapture,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPromotionCommandCapture {
+    #[serde(default, skip_serializing_if = "is_untruncated_stream")]
+    pub stdout: StreamCaptureMetadata,
+    #[serde(default, skip_serializing_if = "is_untruncated_stream")]
+    pub stderr: StreamCaptureMetadata,
+}
+
+impl AgentTaskPromotionCommandCapture {
+    fn is_empty(&self) -> bool {
+        is_untruncated_stream(&self.stdout) && is_untruncated_stream(&self.stderr)
+    }
+}
+
+fn is_untruncated_stream(stream: &StreamCaptureMetadata) -> bool {
+    !stream.truncated
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPromotionNotification {
+    pub status: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumable_blocker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_command: Option<String>,
+}
+
+impl AgentTaskPromotionTarget {
+    pub(crate) fn from_worktree(worktree: String, path: Option<&Path>) -> Self {
+        Self {
+            worktree,
+            path: path.map(|path| path.display().to_string()),
+            branch: path.and_then(|path| git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"])),
+            head: path.and_then(|path| git_output(path, &["rev-parse", "HEAD"])),
+            dirty: path.and_then(|path| {
+                git_output(path, &["status", "--porcelain"]).map(|status| !status.is_empty())
+            }),
+        }
+    }
+}
+
+fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn promotion_report_schema() -> String {
+    AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string()
+}

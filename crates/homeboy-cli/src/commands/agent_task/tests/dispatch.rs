@@ -40,7 +40,7 @@ fn cook_rejects_queue_only_before_creating_a_durable_recipe() {
         assert!(error
             .message
             .contains("cannot queue its controller-owned lifecycle"));
-        assert!(!homeboy::core::agent_task_service::recipe_exists("cook-queue-only").unwrap());
+        assert!(!homeboy::agents::agent_task_service::recipe_exists("cook-queue-only").unwrap());
     });
 }
 
@@ -131,7 +131,7 @@ fn from_spec_dispatch_defaults_fall_back_to_current_git_checkout() {
         initial_event: None,
     };
     spec.workflows.push(
-        homeboy::core::agent_tasks::controller_service::AgentTaskRepoLoopSpecWorkflow {
+        homeboy::agents::agent_tasks::controller_service::AgentTaskRepoLoopSpecWorkflow {
             workflow_id: "store-idea".to_string(),
             agent_id: None,
             prompt: Some("cook the next workflow".to_string()),
@@ -225,7 +225,7 @@ fn from_spec_dispatch_defaults_replace_stale_workspace_cwd() {
         initial_event: None,
     };
 
-    homeboy::core::agent_tasks::controller_service::apply_spec_dispatch_defaults_with_cwd(
+    homeboy::agents::agent_tasks::controller_service::apply_spec_dispatch_defaults_with_cwd(
         &mut spec,
         "-",
         || Some(repo.path().to_path_buf()),
@@ -270,7 +270,7 @@ fn from_spec_dispatch_defaults_replace_stale_cwd_in_snapshot_workspace() {
         initial_event: None,
     };
 
-    homeboy::core::agent_tasks::controller_service::apply_spec_dispatch_defaults_with_cwd(
+    homeboy::agents::agent_tasks::controller_service::apply_spec_dispatch_defaults_with_cwd(
         &mut spec,
         "-",
         || Some(workspace.path().to_path_buf()),
@@ -302,15 +302,16 @@ fn controller_dispatch_args_preserve_top_level_workspace_context_in_plan() {
     });
 
     let command =
-        homeboy::core::agent_tasks::controller_service::controller_request_dispatch_command(
+        homeboy::agents::agent_tasks::controller_service::controller_request_dispatch_command(
             &request,
-            &homeboy::core::agent_tasks::controller_service::ControllerDispatchOverrides::default(),
+            &homeboy::agents::agent_tasks::controller_service::ControllerDispatchOverrides::default(
+            ),
         )
         .expect("dispatch command");
     let dispatch_request =
-        homeboy::core::agent_tasks::dispatch_service::resolve_dispatch_request(command)
+        homeboy::agents::agent_tasks::dispatch_service::resolve_dispatch_request(command)
             .expect("dispatch request");
-    let plan = homeboy::core::agent_tasks::dispatch_service::build_dispatch_plan_with_provider_requirements(
+    let plan = homeboy::agents::agent_tasks::dispatch_service::build_dispatch_plan_with_provider_requirements(
             &dispatch_request,
             |_backend, _selector| false,
         )
@@ -514,7 +515,7 @@ fn controller_dispatch_provider_id_alias_maps_to_dispatch_selector() {
 fn controller_events_command_applies_generic_event() {
     with_isolated_home(|_| {
         agent_task_controller_service::init(
-            homeboy::core::agent_tasks::controller_service::ControllerInitRequest {
+            homeboy::agents::agent_tasks::controller_service::ControllerInitRequest {
                 loop_id: "controller-events-cli".to_string(),
                 phase: "init".to_string(),
                 config_version: "v1".to_string(),
@@ -535,7 +536,7 @@ fn controller_events_command_applies_generic_event() {
         assert_eq!(status, 0);
         assert_eq!(
             value["schema"],
-            homeboy::core::agent_tasks::controller_service::APPLY_EVENT_RESULT_SCHEMA
+            homeboy::agents::agent_tasks::controller_service::APPLY_EVENT_RESULT_SCHEMA
         );
         assert_eq!(
             value["controller"]["history"][0]["event_type"],

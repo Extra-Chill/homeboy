@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use homeboy_core::agent_task_scheduler::AgentTaskPlan;
+use homeboy_agents::agent_task_provider;
+use homeboy_agents::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::worktree::TaskWorktreeState;
-use homeboy_core::{agent_task_provider, component, worktree, Error, Result};
+use homeboy_core::{component, worktree, Error, Result};
 
 use super::lab_workspaces_deps::{
     accepted_extra_lab_workspaces, add_candidate_extra_workspace, bare_module_imports,

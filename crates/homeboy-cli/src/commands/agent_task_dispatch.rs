@@ -1,6 +1,8 @@
 use clap::Args;
 
-use homeboy::core::agent_tasks::dispatch_service::{AgentTaskDispatchCommand, DispatchCoreInputs};
+use homeboy::agents::agent_tasks::dispatch_service::{
+    AgentTaskDispatchCommand, DispatchCoreInputs,
+};
 
 /// CLI surface for the dispatch inputs shared across dispatch carriers. Flattened
 /// into [`DispatchArgs`] so the `--tasks/--provider-config/--client-context/
@@ -64,12 +66,12 @@ pub struct DispatchCoreArgs {
         value_parser = parse_resolved_provider_policy
     )]
     pub resolved_provider_policy:
-        Option<homeboy::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy>,
+        Option<homeboy::agents::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy>,
 }
 
 fn parse_resolved_provider_policy(
     raw: &str,
-) -> Result<homeboy::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy, String> {
+) -> Result<homeboy::agents::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy, String> {
     serde_json::from_str(raw)
         .map_err(|error| format!("invalid resolved provider policy JSON: {error}"))
 }
@@ -178,15 +180,15 @@ impl From<DispatchArgs> for AgentTaskDispatchCommand {
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
-    use homeboy::core::agent_task::AgentTaskRequest;
-    use homeboy::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
-    use homeboy::core::agent_task_prompts;
-    use homeboy::core::agent_tasks::dispatch_service;
-    use homeboy::core::agent_tasks::scheduler::AgentTaskPlan;
-    use homeboy::core::agent_tasks::scheduler::{
+    use homeboy::agents::agent_task::AgentTaskRequest;
+    use homeboy::agents::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
+    use homeboy::agents::agent_task_prompts;
+    use homeboy::agents::agent_tasks::dispatch_service;
+    use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
+    use homeboy::agents::agent_tasks::scheduler::{
         AgentTaskExecutionContext, AgentTaskExecutorAdapter,
     };
-    use homeboy::core::agent_tasks::{
+    use homeboy::agents::agent_tasks::{
         AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
     };
     use serde_json::Value;

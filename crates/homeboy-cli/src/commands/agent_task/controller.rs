@@ -3,28 +3,28 @@
 
 use serde_json::Value;
 
-use homeboy::core::agent_task_controller_service::{
+use homeboy::agents::agent_task_controller_service::{
     build_run_failure_summary, controller_spec_fingerprint_for_status,
     init_from_spec_for_resume_with_resolution, spec_fingerprint_for_status,
     ControllerResumeStateResolution,
 };
-use homeboy::core::agent_task_loop_definition::{
+use homeboy::agents::agent_task_loop_definition::{
     materialize_repo_loop_spec, AgentTaskLoopPolicyResultMaterialization,
     AgentTaskLoopSpecMaterializationRequest,
 };
-use homeboy::core::agent_tasks::controller_service as agent_task_controller_service;
-use homeboy::core::agent_tasks::controller_service::{
+use homeboy::agents::agent_tasks::controller_service as agent_task_controller_service;
+use homeboy::agents::agent_tasks::controller_service::{
     AgentTaskRepoLoopSpec, ControllerApplyEventRequest, ControllerDispatchHook,
     ControllerFromSpecRequest, ControllerInitRequest, ControllerMarkHumanReadyRequest,
     ControllerPlanRequest,
 };
-use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
-use homeboy::core::agent_tasks::scheduler::AgentTaskExecutorAdapter;
+use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
+use homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter;
 use homeboy::core::config;
 use homeboy::core::proof::validate_proof_value;
 
-use homeboy::core::agent_tasks::dispatch_service;
-use homeboy::core::agent_tasks::loop_controller::AgentTaskLoopPolicyAction;
+use homeboy::agents::agent_tasks::dispatch_service;
+use homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopPolicyAction;
 
 use super::super::CmdResult;
 use super::args::{
@@ -106,7 +106,7 @@ fn controller_status_report_value(
     args: AgentTaskControllerStatusArgs,
 ) -> homeboy::core::Result<Value> {
     let report =
-        homeboy::core::agent_tasks::loop_controller::controller_status_report(&args.loop_id)?;
+        homeboy::agents::agent_tasks::loop_controller::controller_status_report(&args.loop_id)?;
     let mut value = serde_json::to_value(report)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     if args.spec.is_some()
@@ -281,7 +281,7 @@ fn loop_define(args: AgentTaskLoopDefineArgs) -> CmdResult<Value> {
 
 fn loop_status(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
     let report =
-        homeboy::core::agent_tasks::loop_controller::controller_status_report(&args.loop_id)?;
+        homeboy::agents::agent_tasks::loop_controller::controller_status_report(&args.loop_id)?;
     Ok((
         command_json_value(serde_json::json!({
             "schema": "homeboy/agent-task-loop-status-result/v1",
@@ -311,7 +311,7 @@ fn loop_resume_with_executor<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    let mut record = homeboy::core::agent_tasks::loop_controller::load_controller(&loop_id)?;
+    let mut record = homeboy::agents::agent_tasks::loop_controller::load_controller(&loop_id)?;
     let runtime = loop_runtime_metadata(&record.metadata);
     if !runtime["on"].as_bool().unwrap_or(true) {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -342,14 +342,14 @@ where
     }
 
     stamp_record_loop_runtime_metadata(&mut record, true, limit, true)?;
-    homeboy::core::agent_tasks::loop_controller::write_controller(&record)?;
+    homeboy::agents::agent_tasks::loop_controller::write_controller(&record)?;
     let resumed_loop_id = loop_id.clone();
     let (value, exit_code) =
         controller_resume_with_executor_and_defaults(loop_id, executor, defaults)?;
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-loop-resume-result/v1",
-            "runtime": loop_runtime_metadata(&homeboy::core::agent_tasks::loop_controller::load_controller(&resumed_loop_id)?.metadata),
+            "runtime": loop_runtime_metadata(&homeboy::agents::agent_tasks::loop_controller::load_controller(&resumed_loop_id)?.metadata),
             "resume": value,
         }),
         exit_code,
@@ -357,13 +357,13 @@ where
 }
 
 fn loop_stop(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
-    let mut record = homeboy::core::agent_tasks::loop_controller::load_controller(&args.loop_id)?;
+    let mut record = homeboy::agents::agent_tasks::loop_controller::load_controller(&args.loop_id)?;
     let runtime = loop_runtime_metadata(&record.metadata);
     let limit = runtime["revolution_limit"]
         .as_u64()
         .map(|value| value as u32);
     stamp_record_loop_runtime_metadata(&mut record, false, limit, false)?;
-    homeboy::core::agent_tasks::loop_controller::write_controller(&record)?;
+    homeboy::agents::agent_tasks::loop_controller::write_controller(&record)?;
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-loop-stop-result/v1",
@@ -596,8 +596,9 @@ where
     let stopped_reason = resume_result.value.stopped_reason.clone();
     let results = resume_result.value.results;
 
-    let status =
-        homeboy::core::agent_tasks::loop_controller::controller_status_report(&from_spec.loop_id)?;
+    let status = homeboy::agents::agent_tasks::loop_controller::controller_status_report(
+        &from_spec.loop_id,
+    )?;
 
     // On a terminal failure, normalize the nested provider/runtime failures into
     // a compact root-cause `failure_summary` with durable evidence refs so
@@ -923,7 +924,7 @@ fn doctor_dispatch_request_checks(
 
     match dispatch_service::build_dispatch_plan(&dispatch_request) {
         Ok(mut dispatch_plan) => {
-            homeboy::core::agent_task_provider::apply_provider_runner_secret_env_contracts(
+            homeboy::agents::agent_task_provider::apply_provider_runner_secret_env_contracts(
                 &mut dispatch_plan,
             );
             if let Err(error) = dispatch_service::preflight_dispatch_provider_secrets(&dispatch_plan)
@@ -1295,7 +1296,7 @@ fn stamp_loop_runtime_metadata(
 }
 
 fn stamp_record_loop_runtime_metadata(
-    record: &mut homeboy::core::agent_tasks::loop_controller::AgentTaskLoopControllerRecord,
+    record: &mut homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerRecord,
     on: bool,
     revolution_limit: Option<u32>,
     increment_revolution: bool,

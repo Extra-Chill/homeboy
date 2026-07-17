@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{build_identity, paths, Error, Result};
 
-pub(crate) const CONTROLLER_RUNTIME_METADATA_KEY: &str = "controller_runtime";
+pub const CONTROLLER_RUNTIME_METADATA_KEY: &str = "controller_runtime";
 
 const ACTIVE_GENERATION_FILE: &str = "active.json";
 const ADMISSION_LOCK_DIR: &str = "admission.lock";
@@ -180,7 +180,7 @@ fn discover_pin_paths(root: &Path) -> Result<BTreeSet<PathBuf>> {
 /// Holds the short admission critical section.  Keeping selection and durable
 /// record creation together prevents a submission from observing A after B is
 /// published.
-pub(crate) struct RuntimeAdmission {
+pub struct RuntimeAdmission {
     _lock: AdmissionLock,
     pub runtime: Value,
 }
@@ -205,7 +205,7 @@ impl Drop for AdmissionLock {
     }
 }
 
-pub(crate) fn pin_current() -> Result<Value> {
+pub fn pin_current() -> Result<Value> {
     let identity = build_identity::current();
     let executable = std::env::current_exe().map_err(|error| {
         Error::internal_io(
@@ -246,7 +246,7 @@ fn runtime_pin(identity: &str, executable: &Path, pinned_path: &Path, digest: &s
 /// active-generation pointer is diagnostic state only: every fresh run must
 /// retain the executable that created it, rather than inherit a previous
 /// controller's selection.
-pub(crate) fn admit_current() -> Result<RuntimeAdmission> {
+pub fn admit_current() -> Result<RuntimeAdmission> {
     let root = runtime_root()?;
     let lock_path = root.join(ADMISSION_LOCK_DIR);
     let lock = acquire_admission_lock(&lock_path)?;
@@ -261,7 +261,7 @@ pub(crate) fn admit_current() -> Result<RuntimeAdmission> {
 
 /// Publish the current executable as the generation selected for future
 /// admissions. Existing records retain their own pinned runtime metadata.
-pub(crate) fn activate_current_generation() -> Result<Value> {
+pub fn activate_current_generation() -> Result<Value> {
     let executable = std::env::current_exe().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -274,7 +274,7 @@ pub(crate) fn activate_current_generation() -> Result<Value> {
 /// Publish the executable that installation just verified. This intentionally
 /// does not use the upgrading process's executable: after an on-disk swap that
 /// process can still be running the previous generation.
-pub(crate) fn activate_installed_generation(executable: &Path) -> Result<Value> {
+pub fn activate_installed_generation(executable: &Path) -> Result<Value> {
     let root = runtime_root()?;
     let lock_path = root.join(ADMISSION_LOCK_DIR);
     let _lock = acquire_admission_lock(&lock_path)?;
@@ -284,7 +284,7 @@ pub(crate) fn activate_installed_generation(executable: &Path) -> Result<Value> 
     Ok(runtime)
 }
 
-pub(crate) fn pinned_executable_for_mutation(
+pub fn pinned_executable_for_mutation(
     metadata: &Value,
     current_identity: &str,
 ) -> Result<Option<PathBuf>> {
@@ -306,7 +306,7 @@ pub(crate) fn pinned_executable_for_mutation(
     Ok(Some(PathBuf::from(pinned)))
 }
 
-pub(crate) fn validate_for_mutation(metadata: &Value, current_identity: &str) -> Result<()> {
+pub fn validate_for_mutation(metadata: &Value, current_identity: &str) -> Result<()> {
     let Some(pinned) = pinned_executable_for_mutation(metadata, current_identity)? else {
         return Ok(());
     };
@@ -330,7 +330,7 @@ pub(crate) fn validate_for_mutation(metadata: &Value, current_identity: &str) ->
 
 /// Upgrade a legacy pin into the immutable content-addressed v2 format.
 /// The caller persists the returned metadata only after this has completed.
-pub(crate) fn migrate_legacy_pin(runtime: &Value) -> Result<Value> {
+pub fn migrate_legacy_pin(runtime: &Value) -> Result<Value> {
     let identity =
         required_runtime_string(runtime, "/originating/build_identity", "build identity")?;
     let current = required_runtime_string(
@@ -379,14 +379,14 @@ pub(crate) fn migrate_legacy_pin(runtime: &Value) -> Result<Value> {
     Ok(migrated)
 }
 
-pub(crate) fn validate(runtime: &Value) -> Result<()> {
+pub fn validate(runtime: &Value) -> Result<()> {
     validate_pin(runtime)
 }
 
 /// Restore a missing or corrupted pin from one explicitly supplied trusted
 /// artifact or source checkout without changing the durable identity or digest
 /// contract.
-pub(crate) fn recover_pin(
+pub fn recover_pin(
     runtime: &Value,
     artifact: Option<&Path>,
     source: Option<&Path>,

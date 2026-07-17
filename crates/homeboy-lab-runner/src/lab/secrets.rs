@@ -8,14 +8,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use homeboy_core::agent_tasks::provider::{
+use homeboy_agents::agent_tasks::provider::{
     provider_runner_secret_env_for_plan_with_providers,
     provider_secret_sources_for_plan_with_providers, provider_secret_sources_for_providers,
     AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
 };
-use homeboy_core::agent_tasks::scheduler::AgentTaskPlan;
-use homeboy_core::agent_tasks::secrets as agent_task_secrets;
-use homeboy_core::agent_tasks::{
+use homeboy_agents::agent_tasks::scheduler::AgentTaskPlan;
+use homeboy_agents::agent_tasks::secrets as agent_task_secrets;
+use homeboy_agents::agent_tasks::{
     AgentTaskExecutor, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
 };
 use homeboy_core::lab_contract::LabSecretEnvSource;

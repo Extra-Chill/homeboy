@@ -1,7 +1,8 @@
 use serde_json::Value;
 
+use homeboy::agents::agent_tasks::loop_definition;
 use homeboy::core::config;
-use homeboy::core::{agent_tasks::loop_definition, Error};
+use homeboy::core::Error;
 
 use super::super::CmdResult;
 use super::args::CompileLoopArgs;

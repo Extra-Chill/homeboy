@@ -33,32 +33,34 @@ pub(in crate::commands::agent_task) use super::super::status::{
 pub(in crate::commands::agent_task) use super::super::{
     review, CancelArgs, ProvidersArgs, RetryArgs,
 };
-pub(crate) use homeboy::core::agent_tasks::controller_service::{
+pub(crate) use homeboy::agents::agent_tasks::controller_service::{
     apply_spec_dispatch_defaults as apply_from_spec_dispatch_defaults,
     apply_spec_dispatch_defaults_with_cwd as apply_from_spec_dispatch_defaults_with_cwd,
 };
-pub(crate) use homeboy::core::agent_tasks::controller_service::{
+pub(crate) use homeboy::agents::agent_tasks::controller_service::{
     AgentTaskRepoLoopSpec, ControllerFromSpecRequest,
 };
-pub(crate) use homeboy::core::agent_tasks::gate::AgentTaskGateRevealPolicy;
-pub(crate) use homeboy::core::agent_tasks::provider::{
+pub(crate) use homeboy::agents::agent_tasks::gate::AgentTaskGateRevealPolicy;
+pub(crate) use homeboy::agents::agent_tasks::provider::{
     ExtensionProviderAgentTaskExecutor, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
     AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
 };
-pub(crate) use homeboy::core::agent_tasks::scheduler::{
+pub(crate) use homeboy::agents::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
 
 pub(crate) use crate::test_support::with_isolated_home;
-pub(crate) use homeboy::core::agent_tasks::controller_service as agent_task_controller_service;
-pub(crate) use homeboy::core::agent_tasks::lifecycle::{
+pub(crate) use homeboy::agents::agent_tasks::controller_service as agent_task_controller_service;
+pub(crate) use homeboy::agents::agent_tasks::lifecycle::{
     self as agent_task_lifecycle, status as lifecycle_status, AgentTaskRunRecord, AgentTaskRunState,
 };
-pub(crate) use homeboy::core::agent_tasks::loop_controller::{
+pub(crate) use homeboy::agents::agent_tasks::loop_controller::{
     self as agent_task_loop_controller, AgentTaskLoopActionStatus, AgentTaskLoopPolicyAction,
 };
-pub(crate) use homeboy::core::agent_tasks::scheduler::{AgentTaskExecutionContext, AgentTaskState};
-pub(crate) use homeboy::core::agent_tasks::{
+pub(crate) use homeboy::agents::agent_tasks::scheduler::{
+    AgentTaskExecutionContext, AgentTaskState,
+};
+pub(crate) use homeboy::agents::agent_tasks::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutor,
     AgentTaskFailureClassification, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
     AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA,

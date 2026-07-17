@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::Path;
 
-pub(crate) fn sha256_file(path: &Path) -> Result<String> {
+pub fn sha256_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path).map_err(|e| {
         Error::internal_io(
             e.to_string(),
@@ -27,7 +27,7 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-pub(crate) fn content_type_from_path(path: &Path) -> Option<String> {
+pub fn content_type_from_path(path: &Path) -> Option<String> {
     let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
     let mime = match extension.as_str() {
         "json" => "application/json",

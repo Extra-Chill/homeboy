@@ -701,10 +701,6 @@ mod runner_sessions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_task_lifecycle::{
-        reconcile_active_lab_runner_handoffs, record_lab_offload_planned, rewrite_record_for_test,
-        status, AgentTaskRunState, LabOffloadProxyPlan,
-    };
     use crate::api_jobs::JobStatus;
     use crate::observation::NewRunRecord;
     use crate::test_support::with_isolated_home;
@@ -828,19 +824,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_status_projection_preserves_every_state() {
-        for label in "queued,running,succeeded,partial_failure,failed,cancelled".split(',') {
-            let state: AgentTaskRunState = serde_json::from_value(label.into()).unwrap();
-            let expected: ActivityState = serde_json::from_value(label.into()).unwrap();
-            assert_eq!(
-                ActivityState::from(RunExecutionState::from(state)),
-                expected,
-                "{state:?}"
-            );
-        }
-    }
-
-    #[test]
     fn activity_policy_preserves_active_and_failure_sets() {
         for case in "unknown:01,queued:10,running:10,succeeded:00,partial_failure:01,failed:01,cancelled:00,timed_out:01,stale:01".split(',') {
             let (label, flags) = case.split_once(':').expect("policy case");
@@ -896,54 +879,6 @@ mod tests {
             assert_eq!(
                 reopened.get(job.id).expect("job remains").status,
                 JobStatus::Running
-            );
-        });
-    }
-
-    #[test]
-    fn active_handoff_reconciliation_expires_a_busy_lab_runner_handoff_idempotently() {
-        with_isolated_home(|_| {
-            let command = vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-            ];
-            record_lab_offload_planned(LabOffloadProxyPlan {
-                run_id: "busy-runner-expired-handoff",
-                runner_id: "homeboy-lab",
-                remote_workspace: "/runner/workspace/homeboy",
-                remote_command: &command,
-                durable_plan: None,
-            })
-            .expect("persist unbound handoff while runner is busy");
-            rewrite_record_for_test("busy-runner-expired-handoff", |record| {
-                record.metadata["handoff_acceptance"]["deadline_at"] =
-                    serde_json::json!("2000-01-01T00:00:00+00:00");
-            })
-            .expect("expire unbound handoff");
-
-            assert_eq!(
-                reconcile_active_lab_runner_handoffs().expect("reconcile expired handoff"),
-                1
-            );
-            let expired = status("busy-runner-expired-handoff").expect("expired handoff status");
-            assert_eq!(expired.state, AgentTaskRunState::Cancelled);
-            assert_eq!(expired.metadata["handoff_acceptance"]["state"], "expired");
-            assert_eq!(
-                expired.metadata["runner_execution_record"]["status"],
-                "failed"
-            );
-            assert_eq!(expired.metadata["retryable"], true);
-
-            assert_eq!(
-                reconcile_active_lab_runner_handoffs().expect("idempotent handoff reconciliation"),
-                0
-            );
-            assert_eq!(
-                status("busy-runner-expired-handoff")
-                    .expect("expired handoff remains terminal")
-                    .state,
-                AgentTaskRunState::Cancelled
             );
         });
     }

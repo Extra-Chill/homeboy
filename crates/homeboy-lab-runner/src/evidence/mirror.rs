@@ -334,8 +334,8 @@ pub(super) fn mirror_job_run(
             .get_run(run_id)?
             .is_some_and(|existing| existing.metadata_json.get("agent_task_run").is_some())
         {
-            homeboy_core::agent_task_lifecycle::record_detached_lab_run(
-                homeboy_core::agent_task_lifecycle::DetachedLabRunRecord {
+            homeboy_agents::agent_task_lifecycle::record_detached_lab_run(
+                homeboy_agents::agent_task_lifecycle::DetachedLabRunRecord {
                     run_id,
                     runner_id: &runner.id,
                     runner_job_id: &job.id.to_string(),

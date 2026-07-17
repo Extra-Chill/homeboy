@@ -28,7 +28,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use homeboy_core::agent_task_provider::AgentTaskProviderRunnerSource;
+use homeboy_agents::agent_task_provider::AgentTaskProviderRunnerSource;
 use homeboy_core::engine::shell;
 
 /// A resolved, validated plan for syncing a single managed runner source. The

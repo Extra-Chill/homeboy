@@ -2384,7 +2384,7 @@ mod tests {
                     .contains("captured.txt")
             );
 
-            homeboy_core::agent_task_lifecycle::record_lab_offload_phase(
+            homeboy_agents::agent_task_lifecycle::record_lab_offload_phase(
                 &canonical_attempt_id,
                 "lab-managed-worktree-stage",
                 "materializing",
@@ -2394,8 +2394,8 @@ mod tests {
                 None,
             )
             .expect("pre-acceptance lifecycle record");
-            let accepted = homeboy_core::agent_task_lifecycle::record_detached_lab_run(
-                homeboy_core::agent_task_lifecycle::DetachedLabRunRecord {
+            let accepted = homeboy_agents::agent_task_lifecycle::record_detached_lab_run(
+                homeboy_agents::agent_task_lifecycle::DetachedLabRunRecord {
                     run_id: &canonical_attempt_id,
                     runner_id: "lab-managed-worktree-stage",
                     runner_job_id: "job-8009",

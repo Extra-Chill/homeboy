@@ -2,8 +2,8 @@
 
 use clap::Parser;
 
+use crate::agents::agent_tasks::{lifecycle as agent_task_lifecycle, AgentTaskPlan};
 use crate::cli_surface::{Cli, Commands};
-use crate::core::agent_tasks::{lifecycle as agent_task_lifecycle, AgentTaskPlan};
 
 use crate::command_contract::{LabCommandPortability, LabSourcePathMode, LabWorkspaceModePolicy};
 use crate::test_support::with_isolated_home;

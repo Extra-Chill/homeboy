@@ -415,7 +415,7 @@ impl PlanStepBuilder {
         self
     }
 
-    pub(crate) fn needs(mut self, needs: impl IntoIterator<Item = String>) -> Self {
+    pub fn needs(mut self, needs: impl IntoIterator<Item = String>) -> Self {
         self.step.needs.extend(needs);
         self
     }
@@ -425,7 +425,7 @@ impl PlanStepBuilder {
         self
     }
 
-    pub(crate) fn input_value(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+    pub fn input_value(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.step.inputs.insert(key.into(), value);
         self
     }
@@ -498,11 +498,11 @@ pub struct PlanSummary {
 }
 
 impl PlanSummary {
-    pub(crate) fn from_steps(steps: &[PlanStep]) -> Self {
+    pub fn from_steps(steps: &[PlanStep]) -> Self {
         Self::from_steps_with_skipped_statuses(steps, &[PlanStepStatus::Skipped])
     }
 
-    pub(crate) fn from_steps_counting_disabled_as_skipped(steps: &[PlanStep]) -> Self {
+    pub fn from_steps_counting_disabled_as_skipped(steps: &[PlanStep]) -> Self {
         Self::from_steps_with_skipped_statuses(
             steps,
             &[PlanStepStatus::Skipped, PlanStepStatus::Disabled],

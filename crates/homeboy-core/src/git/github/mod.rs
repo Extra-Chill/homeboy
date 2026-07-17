@@ -30,7 +30,7 @@
 //! - [`fleet`] — batch PR reporting and landing.
 //! - [`readiness`] — CI-check classification and merge-readiness reasoning.
 
-mod body_file;
+pub mod body_file;
 mod checks;
 mod client;
 mod fleet;
@@ -53,7 +53,7 @@ pub use super::github_types::{
 // Internal helpers shared with sibling modules (e.g. `github_pr_comments`),
 // re-exported at this module path so existing `super::github::X` paths keep
 // resolving after the split.
-pub(crate) use body_file::push_markdown_body_file_arg;
+pub use body_file::push_markdown_body_file_arg;
 // Shared status-check classifier consumed by the readiness summary, the fleet
 // rollup, and the sibling PR-land merge gate (`crate::git::pr_land`).
 pub(in crate::git) use checks::{classify_check, CheckClass};

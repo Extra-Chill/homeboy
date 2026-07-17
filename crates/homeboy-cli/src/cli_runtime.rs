@@ -171,24 +171,33 @@ impl CliRuntime {
         // executables are still referenced by nonterminal durable agent-task
         // records without core depending on the agent-task subsystem. (This is
         // the seam that lets agent-task become its own crate.)
-        crate::core::agent_task_lifecycle::controller_pin_reference_provider::register();
+        crate::agents::agent_task_lifecycle::controller_pin_reference_provider::register();
         // Register the loop-spec validation provider so core's proof validator
         // can validate a materialized agent-task loop-spec artifact without
         // depending on the agent-task subsystem.
-        crate::core::agent_task_controller_service::loop_spec_validation_provider::register();
+        crate::agents::agent_task_controller_service::loop_spec_validation_provider::register();
         // Register the gate-feedback candidate-baseline provider so core's
         // worktree-safety logic can accept a dirty worktree that is a verified
         // agent-task gate-feedback candidate without depending on the agent-task
         // subsystem.
-        crate::core::agent_task_candidate_baseline::register();
+        crate::agents::agent_task_candidate_baseline::register();
         // Register the agent-task activity provider so core's activity report
         // includes durable agent-task records and their health summary without
         // depending on the agent-task subsystem.
-        crate::core::agent_task_lifecycle::activity_provider::register();
+        crate::agents::agent_task_lifecycle::activity_provider::register();
         // Register the bench agent-task matrix provider so core's cross-rig
         // bench comparison can project rig entries into an agent-task matrix
         // without depending on the agent-task subsystem.
-        crate::core::agent_task::bench_matrix_provider::register();
+        crate::agents::agent_task::bench_matrix_provider::register();
+        // Register the agent-task terminal-recovery provider so core's job store
+        // can recover terminal jobs from durable agent-task runs.
+        crate::agents::api_jobs_terminal_recovery::register();
+        // Register the agent-task secret provider so core's trace secret
+        // resolution can consult the agent-task secret store.
+        crate::agents::agent_task_secrets::register();
+        // Register the extension provider-discovery validator so core's
+        // extension install/repair can verify declared agent-runtime providers.
+        crate::agents::agent_task_provider::discovery::register();
         // Register the command-label resolver so core::runner can map dispatched
         // argv to a hot-command label without depending on the full CLI parser.
         crate::runner::set_command_label_resolver(|argv| {
@@ -454,7 +463,7 @@ fn delegate_agent_task_cook_to_pinned_runtime(
         }
     }
 
-    let pinned = crate::core::agent_tasks::lifecycle::pin_current_controller_runtime()?;
+    let pinned = crate::agents::agent_tasks::lifecycle::pin_current_controller_runtime()?;
     let status = ProcessCommand::new(&pinned)
         .args(&normalized_args[1..])
         .env(COOK_PINNED_RUNTIME_ENV, &pinned)
@@ -490,7 +499,7 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
     let Some(run_id) = run_id else {
         return Ok(None);
     };
-    let Some(pinned) = crate::core::agent_tasks::lifecycle::pinned_runtime_for_mutation(run_id)?
+    let Some(pinned) = crate::agents::agent_tasks::lifecycle::pinned_runtime_for_mutation(run_id)?
     else {
         return Ok(None);
     };

@@ -739,6 +739,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-agents"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "fs4",
+ "glob",
+ "homeboy-agents-contract",
+ "homeboy-core",
+ "homeboy-error",
+ "homeboy-lab-contract",
+ "homeboy-lab-runner-contract",
+ "libc",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_json_path",
+ "sha2",
+ "shellexpand",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "homeboy-agents-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "homeboy-audit-contract"
 version = "0.1.0"
 dependencies = [
@@ -760,6 +793,7 @@ dependencies = [
  "glob",
  "glob-match",
  "heck",
+ "homeboy-agents",
  "homeboy-cli-contract",
  "homeboy-core",
  "homeboy-engine-primitives",
@@ -837,6 +871,7 @@ dependencies = [
  "glob",
  "glob-match",
  "heck",
+ "homeboy-agents-contract",
  "homeboy-audit-contract",
  "homeboy-cli-contract",
  "homeboy-code-audit",
@@ -957,6 +992,7 @@ dependencies = [
  "clap",
  "glob",
  "glob-match",
+ "homeboy-agents",
  "homeboy-cli-contract",
  "homeboy-core",
  "homeboy-fuzz",

@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::{agent_task_secrets, keychain, Error, Result};
+use crate::{keychain, Error, Result};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TraceSecretEnvStatus {
@@ -25,13 +25,13 @@ pub fn resolve_secret_env(
             continue;
         }
 
-        if let Ok(mut values) = agent_task_secrets::resolve_secret_env(std::slice::from_ref(&name))
-        {
-            if let Some((_resolved_name, value)) = values.pop() {
-                resolved.push((name.clone(), value));
-                statuses.push(status(name, true, "agent-task"));
-                continue;
-            }
+        let mut values = crate::agent_task_secret_provider::resolve_agent_task_secret_env(
+            std::slice::from_ref(&name),
+        );
+        if let Some((_resolved_name, value)) = values.pop() {
+            resolved.push((name.clone(), value));
+            statuses.push(status(name, true, "agent-task"));
+            continue;
         }
 
         if let Some(project_id) = project_id {

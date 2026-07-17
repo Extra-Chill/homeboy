@@ -567,7 +567,7 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
 fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-8332-attempt-1";
-        homeboy_core::agent_task_lifecycle::record_lab_offload_phase(
+        homeboy_agents::agent_task_lifecycle::record_lab_offload_phase(
             run_id,
             "lab",
             "dispatching",
@@ -623,7 +623,7 @@ fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
             "detached handoff waited for the blocked workload"
         );
         let job_id = output.job_id.expect("durably accepted daemon job");
-        let controller_record = homeboy_core::agent_task_lifecycle::status(run_id)
+        let controller_record = homeboy_agents::agent_task_lifecycle::status(run_id)
             .expect("controller record remains observable after accepted handoff");
         assert_eq!(controller_record.runner_id(), Some("lab"));
         assert_eq!(controller_record.runner_job_id(), Some(job_id.as_str()));

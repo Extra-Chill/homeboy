@@ -14,15 +14,15 @@ use crate::agent_task_lifecycle_event::{
     agent_task_run_plan_lifecycle_event_from_job_events, is_agent_task_run_plan_envelope,
     parse_offloaded_run_plan_envelope,
 };
-use homeboy_core::agent_task::AgentTaskEvidenceRef;
-use homeboy_core::agent_task_lifecycle::{
+use homeboy_agents::agent_task::AgentTaskEvidenceRef;
+use homeboy_agents::agent_task_lifecycle::{
     cook_attempt_run_id, AgentTaskArtifactRef, AgentTaskRunRecord, AgentTaskRunState,
 };
-use homeboy_core::agent_tasks::lifecycle as agent_task_lifecycle;
-use homeboy_core::agent_tasks::provider::{
+use homeboy_agents::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy_agents::agent_tasks::provider::{
     dependency_failure_patterns, AgentTaskProviderDependencyFailurePattern,
 };
-use homeboy_core::agent_tasks::scheduler::{
+use homeboy_agents::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskPlan,
 };
 use homeboy_core::api_jobs::JobEvent;
@@ -44,7 +44,7 @@ use super::super::lab_args::AgentTaskInlineJsonSpec;
 use super::super::lab_workspaces::{workspace_mapping_entry, LabWorkspaceMappingEntry};
 use super::super::{sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use super::args_util::{subcommand_index, ArgEditor, CommandInvocation};
-use homeboy_core::agent_task_promotion::mirror_agent_task_run_plan_aggregate;
+use homeboy_agents::agent_task_promotion::mirror_agent_task_run_plan_aggregate;
 
 #[cfg(test)]
 fn materialize_inline_agent_task_tasks_arg_with(
@@ -362,7 +362,7 @@ fn handoff_envelope_from_typed_handoff(handoff: &AgentTaskLabHandoff) -> Value {
     }
     if let Some(aggregate) = handoff.aggregate.as_ref() {
         if let Ok(value) = serde_json::to_value(
-            &homeboy_core::agent_task_artifacts::reviewer_facing_aggregate(aggregate),
+            &homeboy_agents::agent_task_artifacts::reviewer_facing_aggregate(aggregate),
         ) {
             envelope.insert("aggregate".to_string(), value);
         }
@@ -1195,7 +1195,7 @@ mod tests {
             assert_eq!(record.metadata["runner_job_id"], "job-completed-noop");
             assert_eq!(
                 aggregate.outcomes[0].status,
-                homeboy_core::agent_task::AgentTaskOutcomeStatus::NoOp
+                homeboy_agents::agent_task::AgentTaskOutcomeStatus::NoOp
             );
             assert!(artifacts.evidence_refs.iter().any(|reference| {
                 reference.kind == "agent-task-child-run"
@@ -1211,12 +1211,12 @@ mod tests {
             let plan_path = temp.path().join("plan.json");
             let plan = AgentTaskPlan::new(
                 "plan-remapped-model",
-                vec![homeboy_core::agent_task::AgentTaskRequest {
-                    schema: homeboy_core::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                vec![homeboy_agents::agent_task::AgentTaskRequest {
+                    schema: homeboy_agents::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
                     task_id: "cook".to_string(),
                     group_key: None,
                     parent_plan_id: None,
-                    executor: homeboy_core::agent_task::AgentTaskExecutor {
+                    executor: homeboy_agents::agent_task::AgentTaskExecutor {
                         backend: "opencode".to_string(),
                         selector: None,
                         runtime_selection: None,
@@ -1246,7 +1246,7 @@ mod tests {
                 run_id: "run-remapped-model".to_string(),
                 plan_ref: Some(format!("@{}", plan_path.display())),
                 resolved_provider_policy: Some(
-                    homeboy_core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
+                    homeboy_agents::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
                         backend: "opencode".to_string(),
                         selector: None,
                         model: Some("openai/gpt-5.6-terra".to_string()),
@@ -1279,15 +1279,15 @@ mod tests {
                         "aggregate": serde_json::to_value(AgentTaskAggregate {
                             schema: "homeboy/agent-task-aggregate/v1".to_string(),
                             plan_id: plan.plan_id.clone(),
-                            status: homeboy_core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
+                            status: homeboy_agents::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
                             totals: AgentTaskAggregateTotals {
                                 succeeded: 1,
                                 ..Default::default()
                             },
-                            outcomes: vec![homeboy_core::agent_task::AgentTaskOutcome {
-                                schema: homeboy_core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                            outcomes: vec![homeboy_agents::agent_task::AgentTaskOutcome {
+                                schema: homeboy_agents::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                                 task_id: "cook".to_string(),
-                                status: homeboy_core::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                                status: homeboy_agents::agent_task::AgentTaskOutcomeStatus::Succeeded,
                                 summary: None,
                                 failure_classification: None,
                                 artifacts: Vec::new(),

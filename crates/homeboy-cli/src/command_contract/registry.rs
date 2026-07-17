@@ -179,12 +179,12 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         rust_type: "homeboy::core::extension::ExtensionMaterializationSourceContract",
     },
     ContractRegistryEntry {
-        schema_id: crate::core::agent_task_provider::RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA,
+        schema_id: crate::agents::agent_task_provider::RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA,
         name: "resolved-agent-runtime-execution-contract",
         title: "Resolved agent runtime execution contract",
         owner: "homeboy-core",
         summary: "Captures the selected agent runtime provider, materialization, secrets, readiness, and capabilities.",
-        rust_type: "homeboy::core::agent_task_provider::ResolvedAgentRuntimeExecutionContract",
+        rust_type: "homeboy::agents::agent_task_provider::ResolvedAgentRuntimeExecutionContract",
     },
     ContractRegistryEntry {
         schema_id: crate::core::artifact_ref::ARTIFACT_REF_SCHEMA,

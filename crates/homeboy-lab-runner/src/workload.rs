@@ -1,5 +1,5 @@
 use clap::Parser;
-use homeboy_core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
+use homeboy_agents::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::{
     LabRunnerWorkload, LabRunnerWorkloadAgentTask, LabRunnerWorkloadAgentTaskDispatchKind,

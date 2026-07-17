@@ -1378,13 +1378,8 @@ exec '{}' "$@"
                 result.manifest_path,
                 home.join(".config/homeboy/extensions/wordpress/wordpress.json")
             );
-            let providers = crate::agent_runtime_manifest::discover_agent_task_executor_providers();
-            assert!(providers.iter().any(|provider| {
-                provider.extension_id.as_deref() == Some("wordpress")
-                    && provider.runtime_id.as_deref() == Some("wordpress-runtime")
-                    && provider.id == "wordpress.default"
-                    && provider.backend == "wordpress"
-            }));
+            // (Agent-task executor-provider discovery assertions moved to the
+            // homeboy-agents crate along with the discovery machinery.)
         });
     }
 

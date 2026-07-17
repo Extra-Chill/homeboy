@@ -9,6 +9,7 @@ extern crate self as homeboy;
 
 // The core engine lives in the homeboy-core crate. Re-exported as `core` so the
 // existing `crate::core::*` call sites across this layer are unchanged.
+pub use homeboy_agents as agents;
 pub use homeboy_core as core;
 
 // The optional Lab-offload runner subsystem lives in the homeboy-runner crate.

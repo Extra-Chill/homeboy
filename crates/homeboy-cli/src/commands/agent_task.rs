@@ -108,7 +108,7 @@ pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     }
 }
 
-use homeboy::core::agent_tasks::service as agent_task_service;
+use homeboy::agents::agent_tasks::service as agent_task_service;
 
 pub(crate) fn command_json_value<T: Serialize>(value: T) -> homeboy::core::Result<Value> {
     serde_json::to_value(value)

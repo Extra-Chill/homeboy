@@ -3,8 +3,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use homeboy_core::agent_task_provider::{resolve_provider_for_backend, ProviderResolution};
-use homeboy_core::agent_tasks::provider::{
+use homeboy_agents::agent_task_provider::{resolve_provider_for_backend, ProviderResolution};
+use homeboy_agents::agent_tasks::provider::{
     default_backend_for_component, AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
 };
 use homeboy_core::engine::shell;

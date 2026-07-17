@@ -1,3 +1,4 @@
+pub mod agent_task_terminal_recovery;
 mod persistence;
 mod remote_runner;
 mod runner_job_preparation;
@@ -15,7 +16,7 @@ pub use runner_job_preparation::{
 };
 pub(crate) use store::LocalChildStartDiscriminator;
 pub(crate) use store::LocalRunnerJob;
-pub use store::{JobHandle, JobRunner, JobStore};
+pub use store::{JobHandle, JobRunner, JobStore, RecoveredTerminalJob};
 pub use summary::{active_runner_job_run_summary, active_runner_job_run_summary_if_durable};
 pub use types::{
     ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, DaemonActiveJobRecoveryDisposition,

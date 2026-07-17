@@ -484,30 +484,6 @@ mod tests {
     }
 
     #[test]
-    fn proof_validation_accepts_successful_command_envelope_data() {
-        crate::agent_task_controller_service::loop_spec_validation_provider::register();
-        let report = validate_proof_value(json!({
-            "success": true,
-            "data": valid_materialized_spec()
-        }));
-
-        assert!(report.valid, "{report:?}");
-        assert!(report.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn proof_validation_accepts_successful_command_envelope_value() {
-        crate::agent_task_controller_service::loop_spec_validation_provider::register();
-        let report = validate_proof_value(json!({
-            "success": true,
-            "value": valid_materialized_spec()
-        }));
-
-        assert!(report.valid, "{report:?}");
-        assert!(report.diagnostics.is_empty());
-    }
-
-    #[test]
     fn proof_validation_rejects_failed_command_envelope() {
         let report = validate_proof_value(json!({
             "success": false,
@@ -530,64 +506,6 @@ mod tests {
 
         assert!(!report.valid);
         assert_eq!(report.diagnostics[0].code, "malformed_command_envelope");
-    }
-
-    #[test]
-    fn proof_validation_accepts_materialized_controller_gates_and_metrics() {
-        // Loop-spec validation runs through the agent-task provider hook; register
-        // it so proof validation can validate the materialized spec.
-        crate::agent_task_controller_service::loop_spec_validation_provider::register();
-        let report = validate_proof_value(json!({
-            "schema": "homeboy/agent-task-loop-spec-materialization/v1",
-            "spec": {
-                "loop_id": "example/join",
-                "config_version": "v1",
-                "artifacts": [{ "artifact_id": "page_blocks", "kind": "json" }],
-                "gates": [{ "gate_id": "review" }],
-                "metrics": [{ "metric_id": "fallback_blocks" }],
-                "workflows": [
-                    {
-                        "workflow_id": "build_page",
-                        "prompt": "build page",
-                        "entity_ids": ["home", "about"],
-                        "emits": ["page_blocks"]
-                    },
-                    {
-                        "workflow_id": "publish_site",
-                        "prompt": "publish site",
-                        "consumes": ["page_blocks"],
-                        "gates": ["review"],
-                        "metrics": ["fallback_blocks"]
-                    }
-                ]
-            }
-        }));
-
-        assert!(report.valid, "{report:?}");
-        assert!(report.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn proof_validation_rejects_undeclared_materialized_controller_gate() {
-        // Loop-spec validation runs through the agent-task provider hook; register
-        // it so proof validation can validate the materialized spec.
-        crate::agent_task_controller_service::loop_spec_validation_provider::register();
-        let report = validate_proof_value(json!({
-            "schema": "homeboy/agent-task-loop-spec-materialization/v1",
-            "spec": {
-                "loop_id": "example/join",
-                "config_version": "v1",
-                "workflows": [{
-                    "workflow_id": "publish_site",
-                    "prompt": "publish site",
-                    "gates": ["review"]
-                }]
-            }
-        }));
-
-        assert!(!report.valid);
-        assert_eq!(report.diagnostics[0].code, "invalid_controller_loop_spec");
-        assert!(report.diagnostics[0].message.contains("workflows[0].gates"));
     }
 
     #[test]

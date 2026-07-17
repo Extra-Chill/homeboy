@@ -35,6 +35,7 @@ homeboy-lifecycle-contract = { version = "0.1.0", path = "../homeboy-lifecycle-c
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
 homeboy-lab-contract = { version = "0.1.0", path = "../homeboy-lab-contract" }
 homeboy-lab-runner-contract = { version = "0.1.0", path = "../homeboy-lab-runner-contract" }
+homeboy-agents-contract = { version = "0.1.0", path = "../homeboy-agents-contract" }
 homeboy-redaction = { version = "0.1.0", path = "../homeboy-redaction" }
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }

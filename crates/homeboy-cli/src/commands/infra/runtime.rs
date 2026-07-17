@@ -146,7 +146,7 @@ pub fn run_plain_text(args: RuntimeArgs) -> homeboy::core::Result<(String, i32)>
 }
 
 fn controller_prune(apply: bool) -> CmdResult<RuntimeOutput> {
-    let result = homeboy::core::agent_tasks::lifecycle::prune_controller_runtime_pins(apply)?;
+    let result = homeboy::agents::agent_tasks::lifecycle::prune_controller_runtime_pins(apply)?;
     let stringify = |paths: Vec<std::path::PathBuf>| {
         paths
             .into_iter()

@@ -1,7 +1,7 @@
 //! Agent-task command promotion source resolution and review/loop reporting tests.
 
 use super::support::*;
-use crate::core::agent_task_service::DerivedCookBaselineCapability;
+use crate::agents::agent_task_service::DerivedCookBaselineCapability;
 
 #[test]
 fn promotion_source_resolves_completed_run_id() {
@@ -286,7 +286,9 @@ struct MirroredAttemptDispatcher {
     prepared: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for MirroredAttemptDispatcher {
+impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
+    for MirroredAttemptDispatcher
+{
     fn durable_recipe(&self) -> homeboy::core::Result<serde_json::Value> {
         Ok(serde_json::json!({ "kind": "local" }))
     }
@@ -307,7 +309,7 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for Mirrore
             self.prepared.load(std::sync::atomic::Ordering::SeqCst),
             "cook must prepare the dispatcher before pinning and dispatching its attempt"
         );
-        homeboy::core::agent_tasks::service::run_loaded_plan(
+        homeboy::agents::agent_tasks::service::run_loaded_plan(
             plan,
             Some(run_id),
             self.executor.clone(),
@@ -322,13 +324,13 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         let mut config = homeboy::core::defaults::load_config();
         config.agent_task.rotation = Some(
             serde_json::to_value(
-                homeboy::core::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy {
                     entries: vec![
-                        homeboy::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                        homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
                             model: Some("openai/gpt-5.6-terra".to_string()),
                             ..Default::default()
                         },
-                        homeboy::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                        homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
                             model: Some("fallback-model".to_string()),
                             ..Default::default()
                         },

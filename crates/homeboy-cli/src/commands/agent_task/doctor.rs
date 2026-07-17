@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use homeboy::core::agent_tasks::provider::{
+use homeboy::agents::agent_tasks::provider::{
     resolve_provider_for_backend, ExtensionProviderAgentTaskExecutor, ProviderResolution,
 };
 
@@ -59,8 +59,8 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
     let executor = ExtensionProviderAgentTaskExecutor::discover();
     let providers = executor.providers();
     let fallback_sources =
-        homeboy::core::agent_tasks::provider::provider_secret_sources_for_providers(providers);
-    let secret_env = homeboy::core::agent_tasks::secrets::secret_env_status_with_fallbacks(
+        homeboy::agents::agent_tasks::provider::provider_secret_sources_for_providers(providers);
+    let secret_env = homeboy::agents::agent_tasks::secrets::secret_env_status_with_fallbacks(
         &args.secret_env,
         &fallback_sources,
     );
@@ -68,7 +68,7 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
     // Resolve the backend the cook would use: explicit --backend, else the
     // extension/policy-declared default. Selector is operator-supplied only.
     let default_backend =
-        homeboy::core::agent_tasks::provider::default_backend().unwrap_or_default();
+        homeboy::agents::agent_tasks::provider::default_backend().unwrap_or_default();
     let selected_backend = args.backend.clone().or_else(|| default_backend.clone());
 
     let (provider_ready, blocker, mapping_value) = match selected_backend.as_deref() {
@@ -140,7 +140,7 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
     let value = json!({
         "schema": "homeboy/agent-task-providers/v1",
         "ready": provider_ready,
-        "capability_contract": homeboy::core::agent_tasks::provider::provider_capability_contract(),
+        "capability_contract": homeboy::agents::agent_tasks::provider::provider_capability_contract(),
         "providers": providers,
         "diagnostics": executor.diagnostics(),
         "backend_mapping": mapping_value,

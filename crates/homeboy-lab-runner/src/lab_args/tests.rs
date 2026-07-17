@@ -1054,7 +1054,7 @@ mod provider_config_remap_tests {
 
 mod provider_config_default_injection_tests {
     use super::*;
-    use homeboy_core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
+    use homeboy_agents::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
 
     #[test]
     fn injects_default_provider_config_for_agent_task_cook() {
@@ -1423,7 +1423,7 @@ mod run_plan_remap_tests {
 
 mod prompt_files_tests {
     use super::*;
-    use homeboy_core::agent_task_prompts;
+    use homeboy_agents::agent_task_prompts;
     use homeboy_core::test_support::with_isolated_home;
 
     #[test]

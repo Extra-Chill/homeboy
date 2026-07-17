@@ -483,9 +483,6 @@ fn no_axis_multi_rig_comparison_omits_axis_diffs() {
 
 #[test]
 fn axis_diffs_cover_two_by_two_rig_matrix() {
-    // The bench comparison builds its agent-task matrix through a provider hook;
-    // register the agent-task implementation so the matrix is populated.
-    crate::agent_task::bench_matrix_provider::register();
     let entries = vec![
         entry(
             "studio-sdk-standard",
@@ -546,36 +543,6 @@ fn axis_diffs_cover_two_by_two_rig_matrix() {
     let (out, _) = aggregate_comparison_with_axes("studio".into(), 10, entries, &axes_by_rig);
 
     assert_eq!(out.axis_diffs.len(), 4);
-    let agent_task_plan: crate::agent_task::AgentTaskMatrixPlan =
-        serde_json::from_value(out.agent_task_plan.clone().expect("agent task plan"))
-            .expect("agent task plan deserializes");
-    assert_eq!(agent_task_plan.plan_id, "bench/studio");
-    assert_eq!(agent_task_plan.cells.len(), 4);
-    let sdk_standard_cell = agent_task_plan
-        .cells
-        .iter()
-        .find(|cell| {
-            cell.axes.get("runtime").map(String::as_str) == Some("sdk")
-                && cell.axes.get("substrate").map(String::as_str) == Some("standard")
-        })
-        .expect("sdk standard agent task cell");
-    assert_eq!(
-        sdk_standard_cell.task.parent_plan_id.as_deref(),
-        Some("bench/studio")
-    );
-    assert_eq!(sdk_standard_cell.task.metadata["matrix"]["runtime"], "sdk");
-    let agent_task_aggregate: crate::agent_task::AgentTaskMatrixAggregate = serde_json::from_value(
-        out.agent_task_aggregate
-            .clone()
-            .expect("agent task aggregate"),
-    )
-    .expect("agent task aggregate deserializes");
-    assert!(agent_task_aggregate.passed);
-    assert_eq!(agent_task_aggregate.cells.len(), 4);
-    assert_eq!(
-        agent_task_aggregate.cells[0].status,
-        Some(crate::agent_task::AgentTaskOutcomeStatus::Succeeded)
-    );
     let sdk_substrate = out
         .axis_diffs
         .iter()

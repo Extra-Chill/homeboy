@@ -6,7 +6,7 @@
 //! and block extracting the CLI into its own crate), the CLI layer registers
 //! these resolvers at startup and core invokes them through the hook.
 
-use homeboy_core::agent_task_dispatch_service::AgentTaskDispatchCommand;
+use homeboy_agents::agent_task_dispatch_service::AgentTaskDispatchCommand;
 use std::sync::{OnceLock, RwLock};
 
 /// Resolve a dispatched command's argv to its hot-command label (e.g. `bench`,

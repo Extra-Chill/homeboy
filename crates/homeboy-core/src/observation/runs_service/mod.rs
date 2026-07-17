@@ -182,7 +182,7 @@ pub use artifact_resolve::*;
 pub use persisted_cleanup::*;
 pub use run_lookup::*;
 pub use runner_downloads::*;
-pub(crate) use runner_evidence::with_runner_evidence;
+pub use runner_evidence::with_runner_evidence;
 pub use runner_evidence::{
     mirrored_runner_job_identities, register_runner_evidence_provider, RemoteArtifactDownloadInfo,
     RunnerConnectionInfo, RunnerEvidenceProvider, StaleRunnerJobInfo,
