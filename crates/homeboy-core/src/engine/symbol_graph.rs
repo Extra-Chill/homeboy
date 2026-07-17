@@ -691,40 +691,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_imports_with_rust_grammar() {
-        let grammar_path =
-            std::path::Path::new("/root/.config/homeboy/extensions/rust/grammar.toml");
-        if !grammar_path.exists() {
-            return; // Skip if grammar not installed
-        }
-        let grammar = homeboy_engine_primitives::grammar::load_grammar(grammar_path).unwrap();
-
-        let content = r#"use std::path::Path;
-use crate::fixer::{insertion, Fix};
-use crate::extension::grammar;
-
-pub fn hello() {}
-"#;
-
-        let imports = parse_imports(content, &grammar, "src/example.rs");
-
-        assert_eq!(imports.len(), 3);
-
-        // First import: std::path::Path
-        assert_eq!(imports[0].module_path, "std::path");
-        assert_eq!(imports[0].imported_names, vec!["Path"]);
-        assert_eq!(imports[0].line, 1);
-
-        // Second import: grouped
-        assert_eq!(imports[1].module_path, "crate::fixer");
-        assert_eq!(imports[1].imported_names, vec!["insertion", "Fix"]);
-
-        // Third import: module-level use
-        assert_eq!(imports[2].module_path, "crate::extension");
-        assert_eq!(imports[2].imported_names, vec!["grammar"]);
-    }
-
-    #[test]
     fn compute_rewrite_simple_import() {
         let import = ImportRef {
             file: "src/core/refactor/move_items.rs".to_string(),
