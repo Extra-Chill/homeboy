@@ -306,18 +306,26 @@ fn runner_attach_metadata(
         metadata["role"] = serde_json::Value::String("static_site_artifact".to_string());
     }
     if let Ok(record) = agent_task_lifecycle::status(run_id) {
-        if record.runner_id() == Some(runner.id.as_str()) {
-            if let Some(runner_job_id) = record.runner_job_id() {
-                metadata["agent_task"] = serde_json::json!({
-                    "retained_runner_binding": {
-                        "runner_id": runner.id,
-                        "runner_job_id": runner_job_id,
-                    }
-                });
-            }
+        if let Some(binding) = retained_agent_task_binding(&record, &runner.id) {
+            metadata["agent_task"] = binding;
         }
     }
     metadata
+}
+
+fn retained_agent_task_binding(
+    record: &homeboy::core::agent_tasks::lifecycle::AgentTaskRunRecord,
+    runner_id: &str,
+) -> Option<serde_json::Value> {
+    let runner_job_id = record.runner_job_id()?;
+    (record.runner_id() == Some(runner_id)).then(|| {
+        serde_json::json!({
+            "retained_runner_binding": {
+                "runner_id": runner_id,
+                "runner_job_id": runner_job_id,
+            }
+        })
+    })
 }
 
 fn validate_artifact_name(name: &str) -> homeboy::core::Result<()> {
@@ -499,7 +507,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
+    use homeboy::core::{
+        agent_tasks::lifecycle as agent_task_lifecycle,
+        observation::{NewRunRecord, ObservationStore, RunStatus},
+    };
     use homeboy::test_support::with_isolated_home;
 
     use super::*;
@@ -561,6 +572,7 @@ mod tests {
                 output.artifact.metadata_json["runner_path"],
                 source.display().to_string()
             );
+            assert!(output.artifact.metadata_json.get("agent_task").is_none());
             assert_eq!(
                 output.artifact.metadata_json["resource_lifecycle"]["cleanup_policy"],
                 "delete_after_ttl"

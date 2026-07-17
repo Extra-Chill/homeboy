@@ -767,22 +767,6 @@ mod tests {
             )
             .expect("record runner handoff");
             let store = crate::observation::ObservationStore::open_initialized().expect("store");
-            store
-                .upsert_imported_run(&crate::observation::RunRecord {
-                    id: run_id.to_string(),
-                    kind: "agent-task".to_string(),
-                    component_id: None,
-                    started_at: "2026-07-17T00:00:00Z".to_string(),
-                    finished_at: None,
-                    status: "pass".to_string(),
-                    command: None,
-                    cwd: None,
-                    homeboy_version: None,
-                    git_sha: None,
-                    rig_id: None,
-                    metadata_json: json!({}),
-                })
-                .expect("observation run");
             let retained = store
                 .record_artifact_with_id(
                     run_id,
@@ -1273,25 +1257,25 @@ pub fn verified_controller_artifact_projection_path(
     let store = crate::observation::ObservationStore::open_initialized()?;
     let record = store::read_record(run_id)?;
     let runner_binding = record.runner_id().zip(record.runner_job_id());
-    let candidates: Vec<_> = store
-        .list_artifacts(run_id)?
-        .into_iter()
-        .filter(|candidate| {
-            candidate.artifact_type == "file"
-                && candidate.kind == artifact.kind
-                && (candidate
-                    .metadata_json
-                    .pointer("/agent_task/task_id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(task_id)
-                    && candidate
-                        .metadata_json
-                        .pointer("/agent_task/logical_artifact_id")
-                        .and_then(serde_json::Value::as_str)
-                        == Some(artifact.id.as_str())
-                    || retained_attachment_binding_matches(candidate, runner_binding))
-        })
+    let artifacts = store.list_artifacts(run_id)?;
+    let canonical: Vec<_> = artifacts
+        .iter()
+        .filter(|candidate| canonical_projection_matches(candidate, task_id, artifact))
         .collect();
+    // A task-labelled projection is the controller's authoritative byte copy.
+    // Retained runner attachments only bootstrap recovery when it is absent.
+    let candidates = if canonical.is_empty() {
+        artifacts
+            .iter()
+            .filter(|candidate| {
+                candidate.artifact_type == "file"
+                    && candidate.kind == artifact.kind
+                    && retained_attachment_binding_matches(candidate, runner_binding)
+            })
+            .collect()
+    } else {
+        canonical
+    };
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -1306,7 +1290,7 @@ pub fn verified_controller_artifact_projection_path(
             None,
         ));
     }
-    let candidate = &candidates[0];
+    let candidate = candidates[0];
     let path = PathBuf::from(&candidate.path);
     let actual_size = std::fs::metadata(&path)
         .ok()
@@ -1328,6 +1312,25 @@ pub fn verified_controller_artifact_projection_path(
         ));
     }
     Ok(Some(path))
+}
+
+fn canonical_projection_matches(
+    candidate: &crate::observation::ArtifactRecord,
+    task_id: &str,
+    artifact: &AgentTaskArtifact,
+) -> bool {
+    candidate.artifact_type == "file"
+        && candidate.kind == artifact.kind
+        && candidate
+            .metadata_json
+            .pointer("/agent_task/task_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(task_id)
+        && candidate
+            .metadata_json
+            .pointer("/agent_task/logical_artifact_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(artifact.id.as_str())
 }
 
 /// A manually retained runner artifact can become a controller projection only

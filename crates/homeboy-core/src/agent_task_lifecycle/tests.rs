@@ -2435,6 +2435,92 @@ fn terminal_reconciliation_reuses_verified_directly_imported_artifact() {
 }
 
 #[test]
+fn terminal_projection_supersedes_retained_runner_attachment_idempotently() {
+    with_isolated_home(|home| {
+        let run_id = "retained-to-canonical";
+        let patch = b"patch bytes";
+        let source = home.path().join("retained.patch");
+        std::fs::write(&source, patch).expect("write retained patch");
+        let plan = test_plan();
+        let mut aggregate = succeeded_aggregate(&plan);
+        let artifact = AgentTaskArtifact {
+            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "patch".to_string(),
+            kind: "patch".to_string(),
+            name: None,
+            label: None,
+            role: Some("patch".to_string()),
+            semantic_key: None,
+            path: Some("/runner/workspace/patch.diff".to_string()),
+            url: None,
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some(patch.len() as u64),
+            sha256: Some(format!("{:x}", sha2::Sha256::digest(patch))),
+            metadata: json!({ "executor_artifact_finalized": true }),
+        };
+        aggregate.outcomes[0].artifacts.push(artifact.clone());
+        let submitted = submit_plan(&plan, Some(run_id)).expect("submit");
+        record_runner_job_identity(run_id, "homeboy-lab", "job-1").expect("runner identity");
+        let store = crate::observation::ObservationStore::open_initialized().expect("store");
+        let retained = store
+            .record_artifact_with_id(
+                run_id,
+                "patch",
+                &source,
+                "retained-patch",
+                json!({
+                    "agent_task": {
+                        "retained_runner_binding": {
+                            "runner_id": "homeboy-lab",
+                            "runner_job_id": "job-1"
+                        }
+                    }
+                }),
+            )
+            .expect("retain runner attachment");
+        assert_eq!(
+            verified_controller_artifact_projection_path(
+                run_id,
+                &aggregate.outcomes[0].task_id,
+                &artifact,
+            )
+            .expect("retained attachment resolves"),
+            Some(std::path::PathBuf::from(&retained.path))
+        );
+
+        let finalized = crate::paths::artifact_root()
+            .expect("artifact root")
+            .join("executor-finalized")
+            .join(run_id)
+            .join("patch.diff");
+        std::fs::create_dir_all(finalized.parent().expect("finalized parent"))
+            .expect("create finalized parent");
+        std::fs::write(&finalized, patch).expect("write finalized patch");
+        record_run_aggregate(&submitted.run_id, &plan, &aggregate).expect("terminal projection");
+        reconcile_terminal_artifact_projection(run_id).expect("repeat reconciliation");
+
+        let canonical = verified_controller_artifact_projection_path(
+            run_id,
+            &aggregate.outcomes[0].task_id,
+            &artifact,
+        )
+        .expect("canonical projection resolves")
+        .expect("canonical projection exists");
+        assert_ne!(canonical, std::path::PathBuf::from(&retained.path));
+        assert_eq!(std::fs::read(&canonical).expect("canonical bytes"), patch);
+        assert_eq!(
+            verified_controller_artifact_projection_path(
+                run_id,
+                &aggregate.outcomes[0].task_id,
+                &artifact,
+            )
+            .expect("repeat promotion lookup"),
+            Some(canonical)
+        );
+    });
+}
+
+#[test]
 fn terminal_reconciliation_rejects_conflicting_directly_imported_artifact() {
     with_isolated_home(|home| {
         let patch = b"patch bytes";
