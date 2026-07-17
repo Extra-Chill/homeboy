@@ -154,6 +154,12 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
     let failure_reasons = aggregate
         .map(super::status::failure_reasons_from_aggregate)
         .filter(|reasons| !reasons.is_empty());
+    let execution_states = aggregate.map(|aggregate| {
+        super::status::execution_states_from_aggregate(
+            aggregate,
+            &serde_json::to_value(&record).unwrap_or(Value::Null),
+        )
+    });
     let promotion_candidates = aggregate_review
         .as_ref()
         .map(|review| {
@@ -188,6 +194,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
             "aggregate_review": aggregate_review,
             "diagnostic_summary": diagnostic_summary,
             "failure_reasons": failure_reasons,
+            "execution_states": execution_states,
             "promotion_candidates": promotion_candidates,
             "next_actions": next_actions,
             "transport": {
