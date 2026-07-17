@@ -12,7 +12,7 @@ use crate::code_audit::{
     baseline, AuditFinding, CodeAuditResult, ConventionReport, DirectoryConvention,
     FindingConfidence, Severity,
 };
-use crate::extension::ExtensionPhaseTiming;
+use homeboy_audit_contract::ExtensionPhaseTiming;
 use homeboy_finding::HomeboyFinding;
 use serde::Serialize;
 use serde_json::Value;
