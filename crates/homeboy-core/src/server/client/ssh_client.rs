@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -142,34 +143,46 @@ impl SshClient {
             auth,
             is_local,
             env: server.env.clone(),
-            probe_limits: None,
         })
     }
 
     /// Apply bounded execution only to a sequence of short diagnostic probes.
     /// Ordinary runner commands retain their existing execution semantics.
-    pub fn with_probe_limits(
+    pub fn scoped_probe_limits(
         &self,
         per_probe: Duration,
         overall: Duration,
         progress_prefix: impl Into<String>,
-    ) -> Self {
-        let mut client = self.clone();
-        client.probe_limits = Some(ProbeLimits {
-            per_probe,
-            overall,
-            started: Instant::now(),
-            progress_prefix: progress_prefix.into(),
-            timed_out: Arc::new(Mutex::new(Vec::new())),
+    ) -> ProbeLimitsGuard {
+        ACTIVE_PROBE_LIMITS.with(|limits| {
+            limits.borrow_mut().push(ProbeLimits {
+                per_probe,
+                overall,
+                started: Instant::now(),
+                progress_prefix: progress_prefix.into(),
+                timed_out: Arc::new(Mutex::new(Vec::new())),
+            });
         });
-        client
+        ProbeLimitsGuard {}
     }
 
     pub fn timed_out_probes(&self) -> Vec<BoundedProbeTimeout> {
-        self.probe_limits
-            .as_ref()
-            .map(ProbeLimits::timed_out_probes)
-            .unwrap_or_default()
+        ACTIVE_PROBE_LIMITS.with(|limits| {
+            limits
+                .borrow()
+                .last()
+                .map(ProbeLimits::timed_out_probes)
+                .unwrap_or_default()
+        })
+    }
+
+    pub fn remaining_probe_budget(&self) -> Option<Duration> {
+        ACTIVE_PROBE_LIMITS.with(|limits| {
+            limits
+                .borrow()
+                .last()
+                .map(|limits| limits.overall.saturating_sub(limits.started.elapsed()))
+        })
     }
 
     pub(crate) fn build_ssh_args(&self, command: Option<&str>, interactive: bool) -> Vec<String> {
@@ -357,7 +370,7 @@ impl SshClient {
     }
 
     pub fn execute(&self, command: &str) -> CommandOutput {
-        if let Some(limits) = &self.probe_limits {
+        if let Some(limits) = ACTIVE_PROBE_LIMITS.with(|limits| limits.borrow().last().cloned()) {
             return limits.execute(self, command);
         }
         let effective = self.prepend_env(command);
@@ -373,96 +386,7 @@ impl SshClient {
         if self.is_local {
             return execute_local_command_in_dir_with_timeout(&effective, None, None, timeout);
         }
-
-        let args = self.build_ssh_args(Some(&effective), false);
-        let mut cmd = Command::new("ssh");
-        cmd.args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        crate::server::process_cleanup::configure_process_group_cleanup(&mut cmd);
-        let mut child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(err) => {
-                return CommandOutput {
-                    stdout: String::new(),
-                    stderr: format!("SSH error: {err}"),
-                    success: false,
-                    exit_code: -1,
-                    timed_out: false,
-                    child_resource: None,
-                }
-            }
-        };
-        let pid = child.id();
-        let stdout = child.stdout.take().map(|mut pipe| {
-            thread::spawn(move || {
-                let mut bytes = Vec::new();
-                let _ = pipe.read_to_end(&mut bytes);
-                String::from_utf8_lossy(&bytes).to_string()
-            })
-        });
-        let stderr = child.stderr.take().map(|mut pipe| {
-            thread::spawn(move || {
-                let mut bytes = Vec::new();
-                let _ = pipe.read_to_end(&mut bytes);
-                String::from_utf8_lossy(&bytes).to_string()
-            })
-        });
-        let started = Instant::now();
-        let mut timed_out = false;
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(25)),
-                Ok(None) => {
-                    timed_out = true;
-                    #[cfg(unix)]
-                    unsafe {
-                        libc::kill(-(pid as i32), libc::SIGTERM);
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                    #[cfg(unix)]
-                    unsafe {
-                        libc::kill(-(pid as i32), libc::SIGKILL);
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        let _ = child.kill();
-                    }
-                    let _ = child.wait();
-                    break;
-                }
-                Err(_) => break,
-            }
-        }
-        let status = child.wait().ok();
-        let stdout = stdout
-            .and_then(|handle| handle.join().ok())
-            .unwrap_or_default();
-        let mut stderr = stderr
-            .and_then(|handle| handle.join().ok())
-            .unwrap_or_default();
-        if timed_out {
-            if !stderr.is_empty() && !stderr.ends_with('\n') {
-                stderr.push('\n');
-            }
-            stderr.push_str(&format!(
-                "Homeboy remote probe timed out after {}ms; terminated child process group.",
-                timeout.as_millis()
-            ));
-        }
-        CommandOutput {
-            stdout,
-            stderr,
-            success: !timed_out && status.is_some_and(|status| status.success()),
-            exit_code: if timed_out {
-                124
-            } else {
-                status.and_then(|status| status.code()).unwrap_or(-1)
-            },
-            timed_out,
-            child_resource: None,
-        }
+        self.execute_ssh_with_timeout(&effective, None, timeout)
     }
 
     /// Execute `command` with secret env vars delivered over stdin instead of
@@ -545,6 +469,20 @@ pub(crate) struct ProbeLimits {
     started: Instant,
     progress_prefix: String,
     timed_out: Arc<Mutex<Vec<BoundedProbeTimeout>>>,
+}
+
+thread_local! {
+    static ACTIVE_PROBE_LIMITS: RefCell<Vec<ProbeLimits>> = const { RefCell::new(Vec::new()) };
+}
+
+pub struct ProbeLimitsGuard {}
+
+impl Drop for ProbeLimitsGuard {
+    fn drop(&mut self) {
+        ACTIVE_PROBE_LIMITS.with(|limits| {
+            limits.borrow_mut().pop();
+        });
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -643,11 +581,12 @@ mod bounded_probe_tests {
 
     #[test]
     fn bounded_probes_preserve_healthy_output_and_record_stalled_command() {
-        let client = localhost_client().with_probe_limits(
+        let _limits = localhost_client().scoped_probe_limits(
             Duration::from_millis(50),
             Duration::from_secs(1),
             "test doctor",
         );
+        let client = localhost_client();
 
         let healthy = client.execute("printf healthy");
         let stalled = client.execute("sleep 1");
@@ -662,11 +601,33 @@ mod bounded_probe_tests {
     }
 
     #[test]
+    fn timed_out_local_probe_terminates_descendants() {
+        let marker =
+            std::env::temp_dir().join(format!("homeboy-probe-leak-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let client = localhost_client();
+        let _limits = client.scoped_probe_limits(
+            Duration::from_millis(50),
+            Duration::from_secs(1),
+            "test doctor",
+        );
+
+        let output = client.execute(&format!(
+            "(sleep 1; touch {}) & wait",
+            crate::engine::shell::quote_path(&marker.to_string_lossy())
+        ));
+
+        assert!(output.timed_out);
+        thread::sleep(Duration::from_millis(1100));
+        assert!(!marker.exists(), "timed-out probe child leaked");
+    }
+
+    #[test]
     fn unreachable_ssh_probe_returns_a_result_within_its_budget() {
         let mut client = localhost_client();
         client.is_local = false;
         client.port = 1;
-        let client = client.with_probe_limits(
+        let _limits = client.scoped_probe_limits(
             Duration::from_millis(100),
             Duration::from_millis(200),
             "test doctor",

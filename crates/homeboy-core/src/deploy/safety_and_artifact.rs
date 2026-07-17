@@ -491,7 +491,6 @@ mod tests {
             auth: None,
             is_local: true,
             env: HashMap::new(),
-            probe_limits: None,
         }
     }
 

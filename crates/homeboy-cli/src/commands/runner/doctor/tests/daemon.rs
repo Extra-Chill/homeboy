@@ -77,6 +77,27 @@ fn stalled_daemon_probe_returns_timeout_reason_code() {
 }
 
 #[test]
+fn exhausted_overall_budget_skips_daemon_probe_with_stable_reason_code() {
+    let check = probes::daemon_exec_check_with_timeout(
+        "homeboy-lab",
+        "/home/user/Developer",
+        "http://127.0.0.1:9",
+        std::time::Duration::ZERO,
+    );
+
+    assert_eq!(check.id, "daemon.exec");
+    assert_eq!(check.status, RunnerDoctorStatus::Error);
+    assert_eq!(
+        check.details.get("reason_code").map(String::as_str),
+        Some("runner_doctor.overall_timeout")
+    );
+    assert_eq!(
+        check.details.get("timeout_ms").map(String::as_str),
+        Some("0")
+    );
+}
+
+#[test]
 fn ssh_target_uses_runner_env_for_remote_probes() {
     crate::test_support::with_isolated_home(|_| {
         server::create(

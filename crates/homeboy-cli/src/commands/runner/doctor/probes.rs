@@ -1246,6 +1246,18 @@ pub fn remote_artifact_store_available(client: &SshClient, path: &str) -> bool {
 }
 
 pub fn connected_daemon_exec_checks(runner_id: &str, workspace_root: &str) -> Vec<RunnerCheck> {
+    connected_daemon_exec_checks_with_timeout(
+        runner_id,
+        workspace_root,
+        std::time::Duration::from_secs(5),
+    )
+}
+
+pub fn connected_daemon_exec_checks_with_timeout(
+    runner_id: &str,
+    workspace_root: &str,
+    timeout: std::time::Duration,
+) -> Vec<RunnerCheck> {
     let Ok(status) = runner::status(runner_id) else {
         return Vec::new();
     };
@@ -1269,7 +1281,12 @@ pub fn connected_daemon_exec_checks(runner_id: &str, workspace_root: &str) -> Ve
         )];
     };
 
-    vec![daemon_exec_check(runner_id, workspace_root, &local_url)]
+    vec![daemon_exec_check_with_timeout(
+        runner_id,
+        workspace_root,
+        &local_url,
+        timeout,
+    )]
 }
 
 pub(super) fn daemon_exec_check(
@@ -1294,6 +1311,21 @@ pub(super) fn daemon_exec_check_with_timeout(
     let mut details = BTreeMap::new();
     details.insert("url".to_string(), local_url.to_string());
     details.insert("cwd".to_string(), workspace_root.to_string());
+    if timeout.is_zero() {
+        details.insert(
+            "reason_code".to_string(),
+            "runner_doctor.overall_timeout".to_string(),
+        );
+        details.insert("timeout_ms".to_string(), "0".to_string());
+        return checks::error(
+            "daemon.exec",
+            "Connected runner daemon probe was skipped because the overall diagnostic deadline was exhausted".to_string(),
+            Some(format!(
+                "Rerun `homeboy runner doctor {runner_id} --scope lab-offload` after reconnecting the runner if needed"
+            )),
+            details,
+        );
+    }
     let client = match reqwest::blocking::Client::builder()
         .timeout(timeout)
         .build()

@@ -81,7 +81,6 @@ fn secret_env_execution_timeout_terminates_the_blocking_process_group() {
         auth: None,
         is_local: true,
         env: HashMap::new(),
-        probe_limits: None,
     };
     let secret_env = std::collections::BTreeMap::from([(
         "OPENAI_API_KEY".to_string(),
@@ -308,7 +307,6 @@ fn test_upload_file() {
         auth: None,
         is_local: true,
         env: HashMap::new(),
-        probe_limits: None,
     };
 
     let output = client.upload_file(&source.to_string_lossy(), &target.to_string_lossy());
@@ -335,7 +333,6 @@ fn test_download_file_copies_large_local_file_without_stdout_payload() {
         auth: None,
         is_local: true,
         env: HashMap::new(),
-        probe_limits: None,
     };
 
     let output = client.download_file(&source.to_string_lossy(), &target.to_string_lossy());
@@ -393,7 +390,6 @@ fn managed_session_connect_builds_master_command() {
         }),
         is_local: false,
         env: HashMap::new(),
-        probe_limits: None,
     };
 
     let args = client.build_session_connect_args().expect("args");
@@ -514,7 +510,6 @@ fn test_execute_interactive() {
         auth: None,
         is_local: true,
         env: HashMap::new(),
-        probe_limits: None,
     };
 
     assert_eq!(client.execute_interactive(Some("true")), 0);
@@ -545,7 +540,6 @@ fn local_managed_session_client() -> SshClient {
         }),
         is_local: true,
         env: HashMap::new(),
-        probe_limits: None,
     }
 }
 

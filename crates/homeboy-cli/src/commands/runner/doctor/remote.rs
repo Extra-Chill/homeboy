@@ -23,16 +23,13 @@ pub fn report(
         .workspace_root
         .clone()
         .unwrap_or_else(|| ".".to_string());
-    let bounded_client = if options.scope == RunnerDoctorScope::LabOffload {
-        client.with_probe_limits(
+    let _probe_limits = (options.scope == RunnerDoctorScope::LabOffload).then(|| {
+        client.scoped_probe_limits(
             std::time::Duration::from_secs(5),
             std::time::Duration::from_secs(60),
             "runner doctor",
         )
-    } else {
-        client.clone()
-    };
-    let client = &bounded_client;
+    });
     let artifact_root = default_artifact_root(client);
     let mut checks = Vec::new();
     let mut tools = BTreeMap::new();
@@ -221,10 +218,22 @@ pub fn report(
         ));
     }
 
-    checks.extend(probes::connected_daemon_exec_checks(
+    let daemon_timeout = client
+        .remaining_probe_budget()
+        .unwrap_or(std::time::Duration::from_secs(5))
+        .min(std::time::Duration::from_secs(5));
+    let daemon_checks = probes::connected_daemon_exec_checks_with_timeout(
         runner_id,
         &workspace_root,
-    ));
+        daemon_timeout,
+    );
+    let daemon_timed_out = daemon_checks.iter().any(|check| {
+        matches!(
+            check.details.get("reason_code").map(String::as_str),
+            Some("runner_doctor.daemon_timeout" | "runner_doctor.overall_timeout")
+        )
+    });
+    checks.extend(daemon_checks);
 
     for extension_id in normalized_extension_ids(&options.extensions) {
         checks.push(extension_parity::remote_check(
@@ -254,7 +263,7 @@ pub fn report(
         declared_tools,
     };
 
-    let timed_out_probes = client
+    let mut timed_out_probes = client
         .timed_out_probes()
         .into_iter()
         .map(|probe| types::RunnerDoctorTimedOutProbe {
@@ -267,6 +276,20 @@ pub fn report(
             ),
         })
         .collect::<Vec<_>>();
+    if daemon_timed_out {
+        timed_out_probes.push(types::RunnerDoctorTimedOutProbe {
+            reason_code: if daemon_timeout.is_zero() {
+                "runner_doctor.overall_timeout".to_string()
+            } else {
+                "runner_doctor.daemon_timeout".to_string()
+            },
+            command: "daemon.exec".to_string(),
+            replay_command: format!(
+                "homeboy runner doctor {} --scope lab-offload",
+                shell::quote_arg(runner_id)
+            ),
+        });
+    }
     let diagnostics = Some(types::RunnerDoctorDiagnostics {
         status: if timed_out_probes.is_empty() {
             "complete"
