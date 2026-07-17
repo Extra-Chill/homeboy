@@ -269,6 +269,12 @@ where
     run_claimed(run_id, executor)
 }
 
+/// Reconcile a completed run's controller-owned artifact projection without
+/// resuming or redispatching provider execution.
+pub fn reconcile_terminal_artifact_projection(run_id: &str) -> Result<bool> {
+    agent_task_lifecycle::reconcile_terminal_artifact_projection(run_id)
+}
+
 /// Return durable terminal evidence instead of attempting to transition a
 /// completed child run back into execution during controller reconciliation.
 pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {

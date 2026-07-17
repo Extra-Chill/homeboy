@@ -362,14 +362,47 @@ pub(super) fn submit(args: SubmitArgs) -> CmdResult<Value> {
 }
 
 pub(super) fn resume(args: StatusArgs) -> CmdResult<Value> {
-    run_resume_with_executor(args.run_id, ExtensionProviderAgentTaskExecutor::discover())
+    run_resume_with_executor_and_bridge(
+        args.run_id,
+        args.bridge,
+        args.since_cursor,
+        ExtensionProviderAgentTaskExecutor::discover(),
+    )
 }
 
 pub(super) fn run_resume_with_executor<E>(run_id: String, executor: E) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter,
 {
-    let result = agent_task_service::resume(run_id, executor)?;
+    run_resume_with_executor_and_bridge(run_id, false, None, executor)
+}
+
+pub(super) fn run_resume_with_executor_and_bridge<E>(
+    run_id: String,
+    bridge: bool,
+    since_cursor: Option<u64>,
+    executor: E,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter,
+{
+    if bridge {
+        // Reconcile before `resume` reads terminal evidence so a historical Lab
+        // aggregate receives its controller projection through the explicit
+        // recovery path rather than relying on incidental status reads.
+        agent_task_service::reconcile_terminal_artifact_projection(&run_id)?;
+    }
+    let result = agent_task_service::resume(run_id.clone(), executor)?;
+    if bridge {
+        // This is a terminal-only recovery operation. It reuses the persisted
+        // controller plan, aggregate, and runner identity; it cannot rerun a
+        // provider or reinterpret runner event envelopes.
+        let status = agent_task_service::run_status(&run_id, since_cursor)?;
+        return Ok((
+            serde_json::to_value(status).unwrap_or(Value::Null),
+            result.exit_code,
+        ));
+    }
     Ok((
         aggregate_value_with_failure_reasons(&result.value),
         result.exit_code,

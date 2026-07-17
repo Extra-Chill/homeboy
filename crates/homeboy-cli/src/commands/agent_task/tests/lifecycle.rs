@@ -1,6 +1,7 @@
 //! Agent-task command run submission, status, run-next, cancel, retry, and resume tests.
 
 use super::support::*;
+use sha2::{Digest, Sha256};
 
 #[test]
 fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
@@ -1106,6 +1107,152 @@ fn resume_command_executes_existing_run() {
         assert_eq!(exit_code, 0);
         assert!(observed.metadata["resume_requested_at"].is_string());
         assert_eq!(completed.state, AgentTaskRunState::Succeeded);
+    });
+}
+
+#[test]
+fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor_shape() {
+    with_temp_home(|| {
+        let run_id = "run-cli-bridge-reconcile";
+        let task_id = "task-a";
+        let artifact_id = "patch";
+        let patch = "diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut hasher = Sha256::new();
+        hasher.update(patch.as_bytes());
+        let sha256 = format!("{:x}", hasher.finalize());
+        let plan = test_plan();
+
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted historical plan");
+        let aggregate: AgentTaskAggregate = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": plan.plan_id,
+            "status": "succeeded",
+            "totals": { "skipped": 0, "succeeded": 1, "failed": 0 },
+            "events": [
+                { "task_id": task_id, "state": "running", "attempt": 1 },
+                { "task_id": task_id, "state": "succeeded", "attempt": 1 }
+            ],
+            "outcomes": [{
+                "schema": AGENT_TASK_OUTCOME_SCHEMA,
+                "task_id": task_id,
+                "status": "succeeded",
+                "artifacts": [{
+                    "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                    "id": artifact_id,
+                    "kind": "patch",
+                    "path": "/runner/executor-finalized/patch.diff",
+                    "size_bytes": patch.len(),
+                    "sha256": sha256,
+                    "metadata": { "executor_artifact_finalized": true }
+                }]
+            }]
+        }))
+        .expect("historical aggregate");
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
+            .expect("persist historical aggregate");
+        agent_task_lifecycle::record_runner_job_identity(
+            run_id,
+            "lab-historical-missing",
+            "job-historical",
+        )
+        .expect("persist Lab identity");
+
+        let finalized = homeboy::core::paths::artifact_root()
+            .expect("artifact root")
+            .join("executor-finalized")
+            .join(run_id)
+            .join(artifact_id);
+        std::fs::create_dir_all(finalized.parent().expect("finalized parent"))
+            .expect("create finalized parent");
+        std::fs::write(&finalized, patch).expect("write controller-finalized bytes");
+
+        let store = homeboy::core::observation::ObservationStore::open_initialized()
+            .expect("observation store");
+        assert!(store
+            .list_artifacts(run_id)
+            .expect("artifacts before bridge")
+            .is_empty());
+
+        let (value, exit_code) = resume(StatusArgs {
+            run_id: run_id.to_string(),
+            bridge: true,
+            since_cursor: Some(1),
+            full: false,
+        })
+        .expect("bridge resume reconciles terminal projection");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["schema"], "homeboy/agent-task-run-status/v1");
+        assert_eq!(value["latest_event_cursor"], 2);
+        assert_eq!(value["normalized_events"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            value["normalized_events"][0]["type"],
+            "agent_task.state_changed"
+        );
+        assert_eq!(value["normalized_events"][0]["status"], "succeeded");
+        let artifacts = store.list_artifacts(run_id).expect("projected artifacts");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].artifact_type, "file");
+        assert_eq!(
+            homeboy::core::agent_tasks::lifecycle::verified_controller_artifact_projection_path(
+                run_id,
+                task_id,
+                &aggregate.outcomes[0].artifacts[0],
+            )
+            .expect("projection lookup"),
+            Some(std::path::PathBuf::from(&artifacts[0].path))
+        );
+
+        resume(StatusArgs {
+            run_id: run_id.to_string(),
+            bridge: true,
+            since_cursor: Some(1),
+            full: false,
+        })
+        .expect("bridge reconciliation is idempotent");
+        assert_eq!(
+            store
+                .list_artifacts(run_id)
+                .expect("artifacts after retry")
+                .len(),
+            1
+        );
+    });
+}
+
+#[test]
+fn non_bridge_resume_keeps_aggregate_output_shape() {
+    with_temp_home(|| {
+        let run_id = "run-cli-resume-ordinary";
+        let plan = test_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted plan");
+        let aggregate: AgentTaskAggregate = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": plan.plan_id,
+            "status": "succeeded",
+            "totals": { "skipped": 0, "succeeded": 1, "failed": 0 },
+            "outcomes": [{
+                "schema": AGENT_TASK_OUTCOME_SCHEMA,
+                "task_id": "task-a",
+                "status": "succeeded"
+            }]
+        }))
+        .expect("terminal aggregate");
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
+            .expect("persist terminal aggregate");
+
+        let (value, exit_code) = resume(StatusArgs {
+            run_id: run_id.to_string(),
+            bridge: false,
+            since_cursor: None,
+            full: false,
+        })
+        .expect("ordinary resume returns terminal aggregate");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["schema"], "homeboy/agent-task-aggregate/v1");
+        assert_eq!(value["status"], "succeeded");
+        assert!(value.get("latest_event_cursor").is_none());
     });
 }
 

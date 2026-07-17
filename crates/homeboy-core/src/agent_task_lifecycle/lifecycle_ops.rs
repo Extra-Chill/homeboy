@@ -520,6 +520,24 @@ pub fn record_run_aggregate(
     record_aggregate(&mut record, plan, aggregate)
 }
 
+/// Reproject terminal artifacts from controller-owned durable state. This is a
+/// recovery path for historical runner results whose aggregate was persisted
+/// before the controller finalized its artifact-byte projection.
+pub fn reconcile_terminal_artifact_projection(run_id: &str) -> Result<bool> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if !is_terminal_run_state(record.state) {
+        return Ok(false);
+    }
+
+    // Require the controller-owned plan as part of the durable lifecycle
+    // contract even though artifact projection derives its byte checks from the
+    // aggregate. The runner staging plan is never a recovery input.
+    let _plan = store::read_controller_plan(&record.run_id)?;
+    let aggregate = store::read_aggregate(&record.run_id)?;
+    record_terminal_artifact_projection(&mut record, &aggregate)?;
+    Ok(true)
+}
+
 /// Retain the runner-side job identity after a completed remote aggregate is
 /// mirrored so the controller record remains joinable to daemon evidence.
 pub fn record_runner_job_identity(
