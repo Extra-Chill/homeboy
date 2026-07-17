@@ -2022,6 +2022,7 @@ mod tests {
 
     #[test]
     fn daemon_exec_projects_metadata_run_id_through_jobs_and_runs_without_read_side_growth() {
+        crate::runner::register_runner_daemon_exec_driver();
         with_isolated_home(|_| {
             let workspace = tempfile::tempdir().expect("workspace");
             let store = JobStore::default();

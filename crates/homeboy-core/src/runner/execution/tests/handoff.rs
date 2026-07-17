@@ -1156,6 +1156,10 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
 }
 
 fn allow_unauthenticated_loopback_broker() {
+    // The in-process daemon's /exec endpoint drives runner processes through the
+    // RunnerExecDriver hook; register the runner-side driver so these end-to-end
+    // handoff tests can run the child (production wires this at CLI startup).
+    crate::runner::register_runner_daemon_exec_driver();
     // Skip hashing the (multi-hundred-MB debug) test binary during in-process
     // daemon startup, which otherwise blocks `serve_listener` past the client's
     // connect timeout and makes the mock broker appear unreachable.
