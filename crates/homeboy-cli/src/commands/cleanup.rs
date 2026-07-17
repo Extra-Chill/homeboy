@@ -12,11 +12,11 @@ use homeboy::core::observation::runs_service::{
     self, PersistedArtifactCleanupOptions, RunnerDownloadCleanupOptions,
 };
 use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
-use homeboy::core::runners::{
-    self as runner, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
-};
 use homeboy::core::worktree::{self, WorktreeCleanupOptions, WorktreeCleanupOutput};
 use homeboy::core::worktree_providers::WorktreeProviderCleanupOptions;
+use homeboy::runner::runners::{
+    self as runner, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
+};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -1030,7 +1030,7 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
-    use homeboy::core::runners::{RunnerActiveJobState, RunnerSessionState, RunnerStatusReport};
+    use homeboy::runner::runners::{RunnerActiveJobState, RunnerSessionState, RunnerStatusReport};
     use serde_json::json;
 
     use crate::cli_surface::{Cli, Commands};

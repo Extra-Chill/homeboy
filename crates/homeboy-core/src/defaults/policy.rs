@@ -84,7 +84,7 @@ pub fn resolve_release_gate_local_hot_policy() -> ReleaseGateLocalHotPolicy {
     resolve_release_gate_local_hot_policy_from(&load_config())
 }
 
-pub(crate) fn resolve_release_gate_local_hot_policy_from(
+pub fn resolve_release_gate_local_hot_policy_from(
     config: &HomeboyConfig,
 ) -> ReleaseGateLocalHotPolicy {
     if let Ok(raw) = std::env::var(RELEASE_GATE_LOCAL_HOT_ENV) {

@@ -13,7 +13,6 @@ use crate::lab_contract::{
 };
 use crate::observation::records::RunEvidenceCommands;
 use crate::observation::RunStatus;
-use crate::runners;
 use crate::Result;
 
 pub const DEFAULT_LAB_DISPATCH_TIMEOUT_SECS: u64 = 9 * 60;
@@ -26,7 +25,7 @@ pub const LAB_TRACE_DISPATCH_TIMEOUT_ENV: &str = "HOMEBOY_LAB_TRACE_DISPATCH_TIM
 const LAB_DISPATCH_PHASE: &str = "route_lab_dispatch";
 
 pub struct LabRoutingRequest<'a> {
-    pub command: Option<runners::LabOffloadCommand>,
+    pub command: Option<crate::lab_offload::LabOffloadCommand>,
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
     pub placement: homeboy_cli_contract::Placement,
@@ -53,36 +52,17 @@ pub struct LabRoutingRequest<'a> {
     /// Require controller bundle materialization for the selected source
     /// checkout before any runner-side Git transport is attempted.
     pub require_controller_git_bundle: bool,
-    pub job_overrides: runners::LabJobOverrides,
+    pub job_overrides: crate::lab_offload::LabJobOverrides,
 }
 
 pub(crate) fn route_lab_offload(
     request: LabRoutingRequest<'_>,
-) -> Result<runners::LabOffloadOutcome> {
+) -> Result<crate::lab_offload::LabOffloadOutcome> {
     if let Some(timeout) = request.timeout {
         return execute_lab_offload_with_timeout(request, timeout);
     }
 
-    runners::execute_lab_offload(runners::LabOffloadRequest {
-        command: request.command,
-        normalized_args: request.normalized_args,
-        explicit_runner: request.explicit_runner,
-        placement: request.placement,
-        allow_local_fallback: request.allow_local_fallback,
-        allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
-        skip_deps_hydration: request.skip_deps_hydration,
-        capture_patch: request.capture_patch,
-        mutation_flag: request.mutation_flag,
-        detach_after_handoff: request.detach_after_handoff,
-        output_file_requested: request.output_file_requested,
-        read_only_polling: request.read_only_polling,
-        local_output_file: request.local_output_file,
-        durable_agent_task_plan: request.durable_agent_task_plan,
-        source_path: request.source_path,
-        verified_cook_baseline: request.verified_cook_baseline,
-        require_controller_git_bundle: request.require_controller_git_bundle,
-        job_overrides: request.job_overrides,
-    })
+    crate::lab_offload::execute_lab_offload(request)
 }
 
 /// Retrieval guidance for a persisted Homeboy run, derived solely from a run id.
@@ -196,7 +176,7 @@ pub fn dispatch_lab_offload(
 }
 
 fn lab_offload_outcome_to_route_outcome(
-    outcome: Result<runners::LabOffloadOutcome>,
+    outcome: Result<crate::lab_offload::LabOffloadOutcome>,
     runner_id: Option<&str>,
     observer: Box<dyn LabDispatchObserver>,
 ) -> Result<LabRouteOutcome> {
@@ -219,7 +199,7 @@ fn lab_offload_outcome_to_route_outcome(
             );
             Err(err)
         }
-        Ok(runners::LabOffloadOutcome::RunLocal {
+        Ok(crate::lab_offload::LabOffloadOutcome::RunLocal {
             metadata, messages, ..
         }) => {
             let _ = observer.finish(
@@ -238,7 +218,7 @@ fn lab_offload_outcome_to_route_outcome(
             }
             Ok(LabRouteOutcome::RunLocal)
         }
-        Ok(runners::LabOffloadOutcome::Offloaded {
+        Ok(crate::lab_offload::LabOffloadOutcome::Offloaded {
             stdout,
             stderr,
             exit_code,
@@ -263,7 +243,7 @@ fn lab_offload_outcome_to_route_outcome(
                 output_file_content,
             }))
         }
-        Ok(runners::LabOffloadOutcome::InFlight {
+        Ok(crate::lab_offload::LabOffloadOutcome::InFlight {
             stdout,
             stderr,
             exit_code,
@@ -447,7 +427,7 @@ pub(crate) fn stdout_with_persisted_run_retrieval(
 pub fn lab_offload_command_from_contract(
     contract: LabCommandContract,
     required_extensions: Vec<String>,
-) -> runners::LabOffloadCommand {
+) -> crate::lab_offload::LabOffloadCommand {
     lab_offload_command_from_route_contract(contract.into_route_contract(required_extensions))
 }
 
@@ -457,8 +437,8 @@ pub fn lab_route_plan_from_contract(contract: LabCommandContract) -> LabRoutePla
 
 pub fn lab_offload_command_from_route_contract(
     route_contract: LabCommandRouteContract,
-) -> runners::LabOffloadCommand {
-    runners::LabOffloadCommand {
+) -> crate::lab_offload::LabOffloadCommand {
+    crate::lab_offload::LabOffloadCommand {
         command: route_contract.command,
         required_extensions: route_contract.required_extensions,
         required_capabilities: route_contract.required_capabilities,
@@ -517,7 +497,7 @@ pub fn is_lab_offload_subprocess() -> bool {
 fn execute_lab_offload_with_timeout(
     request: LabRoutingRequest<'_>,
     timeout: Duration,
-) -> Result<runners::LabOffloadOutcome> {
+) -> Result<crate::lab_offload::LabOffloadOutcome> {
     let command = request.command;
     let normalized_args = request.normalized_args.to_vec();
     let explicit_runner = request.explicit_runner.map(str::to_string);
@@ -539,7 +519,7 @@ fn execute_lab_offload_with_timeout(
     let job_overrides = request.job_overrides;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let result = runners::execute_lab_offload(runners::LabOffloadRequest {
+        let result = crate::lab_offload::execute_lab_offload(LabRoutingRequest {
             command,
             normalized_args: &normalized_args,
             explicit_runner: explicit_runner.as_deref(),
@@ -549,6 +529,8 @@ fn execute_lab_offload_with_timeout(
             skip_deps_hydration,
             capture_patch,
             mutation_flag: mutation_flag.as_deref(),
+            timeout: None,
+            active_run_id: None,
             detach_after_handoff,
             output_file_requested,
             read_only_polling,
@@ -660,7 +642,7 @@ mod tests {
         assert!(command.routing_policy.default_lab_offload);
         assert_eq!(
             command.workspace_mode_policy,
-            runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
+            crate::lab_offload::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
         );
         assert!(command.routing_policy.requires_extension_parity);
         assert_eq!(command.required_extensions, vec!["wordpress", "playwright"]);
@@ -747,13 +729,13 @@ mod tests {
             source_path: None,
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
-            job_overrides: runners::LabJobOverrides::default(),
+            job_overrides: crate::lab_offload::LabJobOverrides::default(),
         })
         .unwrap();
 
         assert!(matches!(
             outcome,
-            runners::LabOffloadOutcome::RunLocal { .. }
+            crate::lab_offload::LabOffloadOutcome::RunLocal { .. }
         ));
     }
 
@@ -856,7 +838,7 @@ mod tests {
         }"#;
 
         let outcome = lab_offload_outcome_to_route_outcome(
-            Ok(runners::LabOffloadOutcome::InFlight {
+            Ok(crate::lab_offload::LabOffloadOutcome::InFlight {
                 plan: test_plan(),
                 stdout: stdout.to_string(),
                 stderr: String::new(),
@@ -899,7 +881,7 @@ mod tests {
         });
 
         let outcome = lab_offload_outcome_to_route_outcome(
-            Ok(runners::LabOffloadOutcome::Offloaded {
+            Ok(crate::lab_offload::LabOffloadOutcome::Offloaded {
                 plan: test_plan(),
                 stdout: r#"{"success":true}"#.to_string(),
                 stderr: String::new(),
@@ -1051,7 +1033,7 @@ mod tests {
                 source_path: None,
                 verified_cook_baseline: None,
                 require_controller_git_bundle: false,
-                job_overrides: runners::LabJobOverrides::default(),
+                job_overrides: crate::lab_offload::LabJobOverrides::default(),
             },
             None,
             observer,

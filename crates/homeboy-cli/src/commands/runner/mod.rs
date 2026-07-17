@@ -1,4 +1,4 @@
-use homeboy::core::runners::{self as runner};
+use homeboy::runner::runners::{self as runner};
 
 use super::CmdResult;
 

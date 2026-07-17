@@ -1,0 +1,775 @@
+use std::io::Read;
+use std::process::Stdio;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+use crate::resolve_lab_runner_hint;
+use homeboy_core::lab_contract::LabCommandPortability;
+use homeboy_core::{Error, ErrorCode, Result};
+
+use super::{
+    default_lab_runner_availability, load, status, LabOffloadCommand, LabRunnerGateMode,
+    RunnerAvailability, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabRunnerSelectionSource {
+    Explicit,
+    Default,
+}
+
+impl LabRunnerSelectionSource {
+    pub(super) fn metadata_value(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Default => "automatic",
+        }
+    }
+
+    pub(super) fn gate_mode(self) -> LabRunnerGateMode {
+        match self {
+            Self::Explicit => LabRunnerGateMode::Explicit,
+            Self::Default => LabRunnerGateMode::Automatic,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LabRunnerSelection {
+    pub(super) runner_id: String,
+    pub(super) source: LabRunnerSelectionSource,
+    pub(super) mode: RunnerTunnelMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum LabRunnerPreparation {
+    Ready,
+    FallBackLocal { reason: String },
+}
+
+static HANDOFF_CONNECT_LOCKS: OnceLock<Mutex<std::collections::BTreeMap<String, Arc<Mutex<()>>>>> =
+    OnceLock::new();
+const HANDOFF_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+pub(super) fn prepare_lab_runner_for_offload(
+    selection: &LabRunnerSelection,
+) -> Result<LabRunnerPreparation> {
+    let runner = load(&selection.runner_id)?;
+    if runner.kind != super::RunnerKind::Ssh {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "Lab offload requires a remote direct SSH or reverse-connected runner; local runners would execute on this machine",
+            Some(runner.id),
+            Some(vec![
+                "Register a direct SSH runner or configure a reverse-connected runner before using Lab offload.".to_string(),
+            ]),
+        ));
+    }
+
+    prepare_lab_runner_for_offload_with(selection, status, |runner_id| {
+        connect_runner_for_offload(runner_id, selection.source)
+    })
+}
+
+/// Prepare an explicitly selected runner before a controller-owned cook pins
+/// its runtime generation. This reuses the normal Lab readiness policy,
+/// including daemon freshness repair and connection ownership protections.
+pub fn prepare_explicit_lab_runner_for_offload(runner_id: &str) -> Result<()> {
+    let selection = LabRunnerSelection {
+        runner_id: runner_id.to_string(),
+        source: LabRunnerSelectionSource::Explicit,
+        mode: runner_status_tunnel_mode(runner_id),
+    };
+    match prepare_lab_runner_for_offload(&selection)? {
+        LabRunnerPreparation::Ready => Ok(()),
+        LabRunnerPreparation::FallBackLocal { reason } => Err(Error::internal_unexpected(format!(
+            "explicit Lab runner preparation unexpectedly requested local fallback: {reason}"
+        ))),
+    }
+}
+
+pub(super) fn preflight_lab_runner_availability(
+    command: &LabOffloadCommand,
+    selection: &LabRunnerSelection,
+) -> Result<()> {
+    let availability = preflight_lab_runner_availability_with(selection, status)?;
+    if availability.accepts_jobs {
+        return Ok(());
+    }
+
+    let eligible = if matches!(selection.source, LabRunnerSelectionSource::Default) {
+        default_lab_runner_availability().unwrap_or_else(|_| vec![availability.clone()])
+    } else {
+        vec![availability.clone()]
+    };
+    Err(lab_runner_availability_error(
+        command.hot_label,
+        Some(&availability),
+        eligible,
+    ))
+}
+
+fn preflight_lab_runner_availability_with(
+    selection: &LabRunnerSelection,
+    status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
+) -> Result<RunnerAvailability> {
+    let status = status_fn(&selection.runner_id)?;
+    Ok(RunnerAvailability::from_status_parts(
+        selection.runner_id.clone(),
+        status.connected,
+        status.stale_daemon.is_some(),
+        status.active_jobs.len(),
+        &status.active_job_state,
+        load(&selection.runner_id)?.settings.concurrency_limit,
+    ))
+}
+
+pub(super) fn fail_if_no_default_runner_accepts_jobs(command: &LabOffloadCommand) -> Result<()> {
+    if !command.is_portable() || !command.routing_policy.default_lab_offload {
+        return Ok(());
+    }
+    fail_if_no_default_runner_accepts_jobs_with(command, default_lab_runner_availability()?)
+}
+
+pub(super) fn fail_if_no_default_runner_accepts_jobs_with(
+    command: &LabOffloadCommand,
+    eligible: Vec<RunnerAvailability>,
+) -> Result<()> {
+    if eligible.is_empty()
+        || eligible
+            .iter()
+            .any(|availability| availability.accepts_jobs)
+    {
+        return Ok(());
+    }
+
+    // Ordinary auto-routed portable work may remain local when every default
+    // runner is full. A release gate is evidence of the configured Lab policy,
+    // so it must never silently become controller-local merely because capacity
+    // changed after selection.
+    if !command.routing_policy.release_gate {
+        return Ok(());
+    }
+
+    Err(lab_runner_availability_error(
+        command.hot_label,
+        None,
+        eligible,
+    ))
+}
+
+pub(super) fn lab_runner_availability_error(
+    command_label: &str,
+    selected: Option<&RunnerAvailability>,
+    eligible: Vec<RunnerAvailability>,
+) -> Error {
+    let selected_runner_id = selected.map(|availability| availability.runner_id.clone());
+    let reasons: Vec<String> = selected
+        .map(|availability| availability.reasons.clone())
+        .unwrap_or_else(|| {
+            eligible
+                .iter()
+                .flat_map(|availability| availability.reasons.iter().cloned())
+                .collect()
+        });
+    let message = if let Some(runner_id) = selected_runner_id.as_deref() {
+        format!(
+            "Lab offload selected runner `{runner_id}` for `{command_label}`, but that runner cannot accept jobs"
+        )
+    } else {
+        format!(
+            "Lab offload found eligible runners for `{command_label}`, but none can accept jobs"
+        )
+    };
+
+    Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        format!("Invalid argument 'runner': {message}"),
+        serde_json::json!({
+            "field": "runner",
+            "problem": message,
+            "id": selected_runner_id,
+            "runner_availability": {
+                "selected": selected,
+                "eligible": eligible,
+                "reasons": reasons,
+            },
+            "tried": [
+                "Wait for an active Lab runner job to finish, then retry.",
+                "Choose another available runner with --runner <runner-id>.",
+                "Inspect availability with `homeboy runner status <runner-id> --json`.",
+            ],
+        }),
+    )
+}
+
+fn connect_runner_for_offload(
+    runner_id: &str,
+    source: LabRunnerSelectionSource,
+) -> Result<(RunnerConnectReport, i32)> {
+    // Serialize with other controller processes before replacing a direct-SSH
+    // session. The child `runner connect` receives this lease capability.
+    let timeout = lab_connect_timeout(source);
+    let lease = match homeboy_core::runtime_promotion::acquire(
+        "Lab runner handoff",
+        runner_id.to_string(),
+    ) {
+        Ok(lease) => lease,
+        Err(lease_error) => {
+            if let Some(session) =
+                wait_for_contended_runner(lease_error.clone(), timeout, |remaining| {
+                    crate::local_live_session(runner_id, remaining)
+                })?
+            {
+                return connected_runner_connect_report_from_session(
+                    runner_id,
+                    session,
+                    homeboy_core::paths::runner_session_file(runner_id)?
+                        .display()
+                        .to_string(),
+                );
+            }
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                format!(
+                    "Lab runner `{runner_id}` remained unavailable while another controller owned its reconnect lease: {}",
+                    lease_error.message
+                ),
+                Some(runner_id.to_string()),
+                Some(vec![
+                    format!(
+                        "Waited {}s for the reconnect owner to publish a healthy session; it did not complete.",
+                        timeout.as_secs()
+                    ),
+                    format!("Inspect `homeboy runner status {runner_id} --json` before retrying."),
+                    format!("Inspect `homeboy runner doctor {runner_id}` if the daemon remains unreachable."),
+                ]),
+            ));
+        }
+    };
+    if let Ok(report) = status(runner_id) {
+        if report.connected {
+            return connected_runner_connect_report(runner_id, report);
+        }
+    }
+    let (stdout, stderr, exit_code, timed_out) =
+        run_runner_connect_command(runner_id, timeout, &lease)?;
+    let status = status(runner_id)?;
+
+    if status.connected {
+        return connected_runner_connect_report(runner_id, status);
+    }
+
+    let reason = if timed_out {
+        format!("runner connect timed out after {}s", timeout.as_secs())
+    } else {
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        if detail.is_empty() {
+            format!("runner connect exited with code {exit_code}")
+        } else {
+            format!("runner connect exited with code {exit_code}: {detail}")
+        }
+    };
+
+    Ok((
+        RunnerConnectReport {
+            runner_id: runner_id.to_string(),
+            mode: None,
+            role: None,
+            connected: false,
+            recorded: None,
+            local_url: None,
+            broker_url: None,
+            controller_id: None,
+            remote_daemon_address: None,
+            tunnel_pid: None,
+            remote_daemon_pid: None,
+            connection_warning: None,
+            homeboy_version: None,
+            homeboy_build_identity: None,
+            session_path: Some(status.session_path),
+            leaseless_recovery: None,
+            state_loss_recovery: None,
+            leaseless_recovery_evidence: None,
+            failure_kind: Some(super::RunnerFailureKind::SshFailure),
+            failure_message: Some(reason),
+        },
+        exit_code,
+    ))
+}
+
+pub(super) fn wait_for_contended_runner<Session>(
+    lease_error: Error,
+    timeout: Duration,
+    session: Session,
+) -> Result<Option<super::RunnerSession>>
+where
+    Session: Fn(Duration) -> Result<Option<super::RunnerSession>>,
+{
+    if !homeboy_core::runtime_promotion::is_contention_error(&lease_error) {
+        return Err(lease_error);
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        if let Some(session) = session(remaining.min(HANDOFF_CONNECT_POLL_INTERVAL))? {
+            return Ok(Some(session));
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        std::thread::sleep(remaining.min(HANDOFF_CONNECT_POLL_INTERVAL));
+    }
+}
+
+fn connected_runner_connect_report(
+    runner_id: &str,
+    status: RunnerStatusReport,
+) -> Result<(RunnerConnectReport, i32)> {
+    let session = status.session.ok_or_else(|| {
+        Error::internal_unexpected("connected runner status did not include a session")
+    })?;
+    connected_runner_connect_report_from_session(runner_id, session, status.session_path)
+}
+
+fn connected_runner_connect_report_from_session(
+    runner_id: &str,
+    session: super::RunnerSession,
+    session_path: String,
+) -> Result<(RunnerConnectReport, i32)> {
+    Ok((
+        RunnerConnectReport {
+            runner_id: runner_id.to_string(),
+            mode: Some(session.mode),
+            role: Some(session.role),
+            connected: true,
+            recorded: None,
+            local_url: session.local_url,
+            broker_url: session.broker_url,
+            controller_id: session.controller_id,
+            remote_daemon_address: session.remote_daemon_address,
+            tunnel_pid: session.tunnel_pid,
+            remote_daemon_pid: session.remote_daemon_pid,
+            connection_warning: None,
+            homeboy_version: Some(session.homeboy_version),
+            homeboy_build_identity: session.homeboy_build_identity,
+            session_path: Some(session_path),
+            leaseless_recovery: None,
+            state_loss_recovery: None,
+            leaseless_recovery_evidence: session
+                .leaseless_recovery_evidence
+                .and_then(|v| serde_json::from_value(v).ok()),
+            failure_kind: None,
+            failure_message: None,
+        },
+        0,
+    ))
+}
+
+fn lab_connect_timeout(source: LabRunnerSelectionSource) -> Duration {
+    match source {
+        LabRunnerSelectionSource::Explicit => Duration::from_secs(30),
+        LabRunnerSelectionSource::Default => Duration::from_secs(3),
+    }
+}
+
+fn run_runner_connect_command(
+    runner_id: &str,
+    timeout: Duration,
+    lease: &homeboy_core::runtime_promotion::RuntimePromotionLease,
+) -> Result<(String, String, i32, bool)> {
+    let exe = std::env::current_exe().map_err(|err| {
+        Error::internal_io(err.to_string(), Some("resolve homeboy executable".into()))
+    })?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(["runner", "connect", runner_id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    lease.authorize_subprocess(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|err| Error::internal_io(err.to_string(), Some("start runner connect".into())))?;
+    let deadline = std::time::Instant::now() + timeout;
+
+    loop {
+        if let Some(status) = child.try_wait().map_err(|err| {
+            Error::internal_io(err.to_string(), Some("wait runner connect".into()))
+        })? {
+            let mut stdout = String::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                let _ = pipe.read_to_string(&mut stdout);
+            }
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            return Ok((stdout, stderr, status.code().unwrap_or(-1), false));
+        }
+
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok((String::new(), String::new(), 124, true));
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+pub(super) fn prepare_lab_runner_for_offload_with(
+    selection: &LabRunnerSelection,
+    status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
+    connect_fn: impl Fn(&str) -> Result<(RunnerConnectReport, i32)>,
+) -> Result<LabRunnerPreparation> {
+    let status = status_fn(&selection.runner_id)?;
+    if status.connected {
+        if let Some(reason) = connected_runner_not_ready_reason(&selection.runner_id, &status) {
+            return automatic_fallback_or_explicit_error(
+                selection,
+                reason,
+                format!(
+                    "Lab offload runner `{}` is connected but is not ready for remote execution",
+                    selection.runner_id
+                ),
+                daemon_repair_command(&selection.runner_id, &status),
+            );
+        }
+        eprintln!(
+            "Lab offload: runner `{}` is connected via {} mode.",
+            selection.runner_id,
+            status_tunnel_mode(&status).label()
+        );
+        return Ok(LabRunnerPreparation::Ready);
+    }
+
+    if status_tunnel_mode(&status) == RunnerTunnelMode::Reverse {
+        let reason = format!(
+            "reverse-connected runner `{}` is not currently connected",
+            selection.runner_id
+        );
+        return automatic_fallback_or_explicit_error(
+            selection,
+            reason,
+            format!(
+                "Lab offload requires reverse runner `{}` to have an active reverse session",
+                selection.runner_id
+            ),
+            "Start the reverse runner session on the Lab machine before using --runner."
+                .to_string(),
+        );
+    }
+
+    eprintln!(
+        "Lab offload: direct SSH runner `{}` is not connected; attempting connection.",
+        selection.runner_id
+    );
+    let lock = handoff_connect_lock(&selection.runner_id)?;
+    let _lock = lock.lock().map_err(|_| {
+        Error::internal_unexpected("Lab runner handoff connection lock was poisoned")
+    })?;
+    // Another concurrent handoff may have connected the runner while this one
+    // waited; always re-check before creating another tunnel/session.
+    if status_fn(&selection.runner_id)?.connected {
+        return Ok(LabRunnerPreparation::Ready);
+    }
+    let (report, _) = connect_fn(&selection.runner_id)?;
+    if report.connected {
+        return Ok(LabRunnerPreparation::Ready);
+    }
+
+    let reason = report
+        .failure_message
+        .unwrap_or_else(|| "runner connection did not become ready".to_string());
+
+    automatic_fallback_or_explicit_error(
+        selection,
+        reason,
+        format!(
+            "Lab offload could not connect runner `{}` before execution",
+            selection.runner_id
+        ),
+        format!(
+            "Run `homeboy runner connect {}` for full diagnostics.",
+            selection.runner_id
+        ),
+    )
+}
+
+fn handoff_connect_lock(runner_id: &str) -> Result<Arc<Mutex<()>>> {
+    let locks = HANDOFF_CONNECT_LOCKS.get_or_init(|| Mutex::new(Default::default()));
+    let mut locks = locks.lock().map_err(|_| {
+        Error::internal_unexpected("Lab runner handoff connection lock registry was poisoned")
+    })?;
+    Ok(locks
+        .entry(runner_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
+}
+
+fn automatic_fallback_or_explicit_error(
+    selection: &LabRunnerSelection,
+    reason: String,
+    explicit_message: String,
+    remediation: String,
+) -> Result<LabRunnerPreparation> {
+    match selection.source {
+        LabRunnerSelectionSource::Default => Ok(LabRunnerPreparation::FallBackLocal { reason }),
+        LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
+            "runner",
+            format!("{explicit_message}: {reason}"),
+            Some(selection.runner_id.clone()),
+            Some(vec![
+                remediation,
+                "Use --placement local to run the command locally instead of offloading."
+                    .to_string(),
+            ]),
+        )),
+    }
+}
+
+fn connected_runner_not_ready_reason(
+    runner_id: &str,
+    status: &RunnerStatusReport,
+) -> Option<String> {
+    if let Some(warning) = status.stale_daemon.as_ref() {
+        let restart = daemon_repair_command(runner_id, status);
+        if !warning.stale_runtime_paths.is_empty() || !warning.changed_runtime_paths.is_empty() {
+            return Some(format!(
+                "connected runner `{runner_id}` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `{restart}`"
+            ));
+        }
+        return Some(format!(
+            "connected runner `{runner_id}` daemon is stale (severity={}): active daemon control plane reports {}, but the job command binary reports {}; stale runner runtimes can return malformed or misleading provider output; refresh with `{restart}`",
+            warning.severity,
+            warning.active_daemon_control_plane_version,
+            warning.job_command_binary_version
+        ));
+    }
+
+    let session = status.session.as_ref()?;
+    match session.mode {
+        RunnerTunnelMode::DirectSsh if session.local_url.as_deref().unwrap_or("").is_empty() => {
+            Some(format!(
+                "direct SSH runner `{runner_id}` has no local daemon URL; reconnect it with `homeboy runner connect {runner_id}`"
+            ))
+        }
+        RunnerTunnelMode::Reverse if session.broker_url.as_deref().unwrap_or("").is_empty() => {
+            Some(format!(
+                "reverse-connected runner `{runner_id}` has no broker URL; restart the reverse runner session before retrying"
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String {
+    if let Some(report) = status.daemon_freshness.as_ref() {
+        let commands: Vec<_> = report
+            .repair_plan
+            .iter()
+            .map(|step| step.command.clone())
+            .collect();
+        if !commands.is_empty() {
+            return commands.join(" && ");
+        }
+    }
+    let restart = status
+        .stale_daemon
+        .as_ref()
+        .map(|warning| warning.recovery_commands.join(" && "))
+        .unwrap_or_default();
+    if restart.is_empty() {
+        format!("homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}")
+    } else {
+        restart
+    }
+}
+
+pub(super) fn resolve_lab_runner_selection(
+    command: &LabOffloadCommand,
+    explicit_runner: Option<&str>,
+    placement: homeboy_cli_contract::Placement,
+) -> Result<Option<LabRunnerSelection>> {
+    let config = homeboy_core::defaults::load_config();
+    let deny_local_bench = config.bench.local_execution.is_denied();
+    let release_gate_local_hot_allowed =
+        homeboy_core::defaults::resolve_release_gate_local_hot_policy_from(&config).is_allowed();
+    let default_runner = if explicit_runner.is_none()
+        && command.is_portable()
+        && (command.routing_policy.default_lab_offload || placement.requests_lab())
+    {
+        super::resolve_default_lab_runner()?
+    } else {
+        None
+    };
+
+    resolve_lab_runner_selection_from_placement(
+        command,
+        explicit_runner,
+        placement,
+        deny_local_bench,
+        release_gate_local_hot_allowed,
+        default_runner,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resolve_lab_runner_selection_from_placement(
+    command: &LabOffloadCommand,
+    explicit_runner: Option<&str>,
+    placement: homeboy_cli_contract::Placement,
+    deny_local_bench: bool,
+    release_gate_local_hot_allowed: bool,
+    default_runner: Option<String>,
+) -> Result<Option<LabRunnerSelection>> {
+    if let Some(runner_id) = explicit_runner {
+        if let LabCommandPortability::LocalOnly(reason) = command.portability {
+            let message = format!("--runner is unavailable for this hot command. {reason}");
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                message,
+                Some(runner_id.to_string()),
+                Some(vec![resolve_lab_runner_hint().hint]),
+            ));
+        }
+
+        return Ok(Some(LabRunnerSelection {
+            runner_id: runner_id.to_string(),
+            source: LabRunnerSelectionSource::Explicit,
+            mode: runner_status_tunnel_mode(runner_id),
+        }));
+    }
+
+    if placement == homeboy_cli_contract::Placement::Lab && !command.is_portable() {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            "--placement lab is unavailable for this local-only command",
+            None,
+            Some(vec![resolve_lab_runner_hint().hint]),
+        ));
+    }
+
+    if !command.routing_policy.default_lab_offload && !placement.requests_lab() {
+        fail_if_local_bench_denied(command, deny_local_bench)?;
+        return Ok(None);
+    }
+
+    // Release-gate routing safety (#4603 / #4605): local placement for a release gate silently routes the
+    // gate to the controller machine instead of the configured Lab runner,
+    // producing a gate result that is not faithful to the routing policy. Fail
+    // closed with a clear diagnostic unless the operator explicitly opts back
+    // into local execution via config/env, in which case the override is recorded
+    // by the offload metadata.
+    if command.routing_policy.release_gate && placement == homeboy_cli_contract::Placement::Local {
+        if let Some(runner_id) = default_runner.as_ref() {
+            if !release_gate_local_hot_allowed {
+                return Err(release_gate_local_hot_denied_error(
+                    format!(
+                "Release gate `{}` cannot bypass Lab routing with --placement local while default Lab runner `{}` is configured and `/release_gate/local_hot` is `fail_closed`",
+                        command.hot_label, runner_id
+                    ),
+                    "placement",
+                ));
+            }
+        }
+    }
+
+    if placement == homeboy_cli_contract::Placement::Local || !command.is_portable() {
+        fail_if_local_bench_denied(command, deny_local_bench)?;
+        return Ok(None);
+    }
+
+    if placement == homeboy_cli_contract::Placement::Lab && default_runner.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            format!(
+                "--placement lab requires an eligible Lab runner for `{}`",
+                command.hot_label
+            ),
+            None,
+            Some(vec![
+                "Connect a Lab runner or use --placement local to run on the controller."
+                    .to_string(),
+            ]),
+        ));
+    }
+
+    if default_runner.is_none() {
+        fail_if_local_bench_denied(command, deny_local_bench)?;
+    }
+
+    default_runner
+        .map(|runner_id| {
+            Ok(LabRunnerSelection {
+                mode: runner_status_tunnel_mode(&runner_id),
+                runner_id,
+                source: LabRunnerSelectionSource::Default,
+            })
+        })
+        .transpose()
+}
+
+fn fail_if_local_bench_denied(command: &LabOffloadCommand, denied: bool) -> Result<()> {
+    if !denied || command.hot_label != "bench" {
+        return Ok(());
+    }
+
+    let config_path = homeboy_core::defaults::config_path()
+        .unwrap_or_else(|_| "the global Homeboy config".to_string());
+    Err(Error::validation_invalid_argument(
+        "bench.local_execution",
+        "Refusing to run `homeboy bench` locally because global config `/bench/local_execution` is `denied`",
+        Some("denied".to_string()),
+        Some(vec![
+            "Configure `lab.preferred_runner`, or keep exactly one SSH Lab runner configured, then run `homeboy bench <component>` so Homeboy auto-routes the benchmark to Lab.".to_string(),
+            "Use `--runner <runner-id>` only to override an ambiguous or non-default Lab selection.".to_string(),
+            format!("Change `/bench/local_execution` in {config_path} to `allowed` before intentionally re-enabling local benchmark execution."),
+        ]),
+    ))
+}
+
+/// Build the fail-closed error for a release-gate routing-policy violation.
+///
+/// `message` is the already-formatted diagnostic. The remediation always
+/// points the operator at the config/env override (the explicit operator-only
+/// escape hatch) rather than a convenience CLI flag, so the bypass cannot
+/// become a habit.
+pub(super) fn release_gate_local_hot_denied_error(message: String, field: &str) -> Error {
+    let config_path = homeboy_core::defaults::config_path()
+        .unwrap_or_else(|_| "the global Homeboy config".to_string());
+    let env_var = homeboy_core::defaults::RELEASE_GATE_LOCAL_HOT_ENV;
+    Error::validation_invalid_argument(
+        field,
+        message,
+        Some("fail_closed".to_string()),
+        Some(vec![
+            "Run the gate with --placement auto or --placement lab so the configured Lab runner routing applies.".to_string(),
+            format!("Reconnect or upgrade a stale runner with `homeboy runner doctor <runner-id>` before retrying the gate."),
+            format!("To intentionally run a release gate locally, set `/release_gate/local_hot` to `allowed` in {config_path} (the override is recorded in offload metadata)."),
+            format!("For a single invocation, export {env_var}=allowed instead of editing config."),
+        ]),
+    )
+}
+
+fn runner_status_tunnel_mode(runner_id: &str) -> RunnerTunnelMode {
+    status(runner_id).map_or(RunnerTunnelMode::DirectSsh, |status| {
+        status_tunnel_mode(&status)
+    })
+}
+
+pub(super) fn status_tunnel_mode(status: &RunnerStatusReport) -> RunnerTunnelMode {
+    status
+        .session
+        .as_ref()
+        .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone())
+}

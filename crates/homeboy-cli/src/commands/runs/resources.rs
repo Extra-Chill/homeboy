@@ -372,7 +372,7 @@ fn cleanup_dispatch(
             return Ok(CleanupDispatch::Plan);
         }
         let runner_id = record.runner_id.as_deref().expect("checked runner_id");
-        homeboy::core::runner::reap_run_workspace(runner_id, &record.path, None)?;
+        homeboy::runner::reap_run_workspace(runner_id, &record.path, None)?;
         return Ok(CleanupDispatch::Applied);
     }
 
@@ -1405,7 +1405,7 @@ mod tests {
             std::fs::create_dir_all(&resource_path).expect("runner workspace");
             std::fs::write(resource_path.join("generated.txt"), "generated")
                 .expect("workspace file");
-            homeboy::core::runner::create(
+            homeboy::runner::create(
                 &format!(
                     r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
                     workspace_root.path().display()

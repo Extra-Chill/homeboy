@@ -335,7 +335,7 @@ impl JobStore {
             .expect("newly-created job must be readable after insert")
     }
 
-    pub(crate) fn get(&self, job_id: Uuid) -> Result<Job> {
+    pub fn get(&self, job_id: Uuid) -> Result<Job> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         let stored = inner
             .jobs
@@ -1059,7 +1059,7 @@ impl JobStore {
         jobs
     }
 
-    pub(crate) fn events(&self, job_id: Uuid) -> Result<Vec<JobEvent>> {
+    pub fn events(&self, job_id: Uuid) -> Result<Vec<JobEvent>> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         let stored = inner
             .jobs
@@ -1087,7 +1087,7 @@ impl JobStore {
         self.transition(job_id, JobStatus::Failed, error)
     }
 
-    pub(crate) fn cancel(&self, job_id: Uuid, reason: impl Into<String>) -> Result<Job> {
+    pub fn cancel(&self, job_id: Uuid, reason: impl Into<String>) -> Result<Job> {
         self.transition(job_id, JobStatus::Cancelled, reason.into())
     }
 

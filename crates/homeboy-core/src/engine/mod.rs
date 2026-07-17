@@ -11,7 +11,7 @@ pub use homeboy_engine_primitives::{
 };
 // local_files was `pub(crate)` in-tree; preserve that visibility across the
 // crate boundary rather than widening it via the `pub use` above.
-pub(crate) use homeboy_engine_primitives::local_files;
+pub use homeboy_engine_primitives::local_files;
 
 pub mod cli_tool;
 pub mod execution_context;

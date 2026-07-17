@@ -205,7 +205,7 @@ pub(crate) fn default_sync_excludes() -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn declared_sync_excludes_for_path(path: &Path) -> Vec<String> {
+pub fn declared_sync_excludes_for_path(path: &Path) -> Vec<String> {
     let mut excludes = Vec::new();
     append_unique(&mut excludes, component_extension_sync_excludes(path));
     append_unique(&mut excludes, gitignore_sync_excludes(path));

@@ -233,7 +233,7 @@ impl AgentTaskRunRecord {
             .and_then(|pid| u32::try_from(pid).ok())
     }
 
-    pub(crate) fn runner_job_id(&self) -> Option<&str> {
+    pub fn runner_job_id(&self) -> Option<&str> {
         self.metadata
             .get("runner_job_id")
             .or_else(|| self.metadata.get("job_id"))
@@ -241,7 +241,7 @@ impl AgentTaskRunRecord {
             .filter(|value| !value.trim().is_empty())
     }
 
-    pub(crate) fn runner_id(&self) -> Option<&str> {
+    pub fn runner_id(&self) -> Option<&str> {
         self.metadata
             .get("runner_id")
             .and_then(Value::as_str)

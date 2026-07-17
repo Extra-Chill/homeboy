@@ -136,7 +136,7 @@ fn controller_proxy_run_resumes_on_its_recorded_runner_workspace() {
     with_temp_home(|| {
         let workspace = tempfile::tempdir().expect("runner workspace");
         let continuation = workspace.path().join("runner-continuation");
-        homeboy::core::runners::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+        homeboy::runner::runners::create(r#"{"id":"lab-local","kind":"local"}"#, false)
             .expect("local runner created");
         let command = vec![
             "sh".to_string(),

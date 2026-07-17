@@ -4,11 +4,11 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use homeboy::core::engine::shell;
-use homeboy::core::runners::{self as runner, RunnerExecOutput, RunnerKind};
 use homeboy::core::secret_env_plan::SecretEnvPlan;
 use homeboy::core::source_snapshot::SourceSnapshot;
 use homeboy::core::stream_capture::StreamCaptureMetadata;
 use homeboy::core::Error;
+use homeboy::runner::runners::{self as runner, RunnerExecOutput, RunnerKind};
 
 use super::super::CmdResult;
 

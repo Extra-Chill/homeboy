@@ -108,14 +108,6 @@ impl CliRuntime {
         // extension fingerprint scripts (for files the core grammar engine can't
         // handle) without depending on the extension script runner.
         crate::core::extension::audit_fingerprint_script_provider::register();
-        // Register the grammar-source provider so code_audit's core fingerprint
-        // engine can load extension-shipped grammars without resolving them
-        // through the extension registry directly.
-        crate::core::extension::audit_grammar_source_provider::register();
-        // Register the compiler-warning provider so code_audit's compiler-warnings
-        // detector can run extension compiler/checker scripts without depending on
-        // the extension script runner.
-        crate::core::extension::audit_compiler_warning_provider::register();
         // Register the audit recorded-artifact provider so the artifact-portability
         // detector can read past runs' artifacts from the observation store without
         // code_audit depending on observation — the last seam before audit becomes
@@ -134,48 +126,54 @@ impl CliRuntime {
         // enrich run/artifact lookups with live runner + daemon evidence without
         // core depending on runner behavior. (Runner is still in-crate today;
         // this registration is the seam that lets it become its own crate.)
-        crate::core::runner::register_runner_evidence_provider();
+        crate::runner::register_runner_evidence_provider();
         // Register the runner job-preparation provider so api_jobs can compute
         // the secret-env plan and validate workload dispatch for remote-runner
         // jobs without core depending on runner behavior.
-        crate::core::runner::register_runner_job_preparation_provider();
+        crate::runner::register_runner_job_preparation_provider();
         // Register the lab-workspace provenance provider so the agent-task
         // scheduler can verify lab-materialized workspaces without core depending
         // on runner behavior.
-        crate::core::runner::register_lab_workspace_provenance_provider();
+        crate::runner::register_lab_workspace_provenance_provider();
         // Register the runner-continuation provider so the agent-task lifecycle
         // can reconcile and resume runs dispatched to a remote runner without
         // core depending on runner behavior.
-        crate::core::runner::register_runner_continuation_provider();
+        crate::runner::register_runner_continuation_provider();
         // Register the runner daemon-exec driver so the daemon's /exec endpoint
         // can prepare and run a runner job as a local child without core
         // depending on runner process-execution behavior.
-        crate::core::runner::register_runner_daemon_exec_driver();
+        crate::runner::register_runner_daemon_exec_driver();
         // Register the runner workspace-root provider so the daemon file API can
         // resolve a runner's configured workspace_root without core depending on
         // the runner config registry.
-        crate::core::runner::register_runner_workspace_root_provider();
+        crate::runner::register_runner_workspace_root_provider();
         // Register Runner as a config entity so it participates in config
         // id/alias collision detection, mirroring how feature crates register
         // their own entities (moves into the runner crate once extracted).
-        crate::core::runner::register_runner_config_entity();
+        crate::runner::register_runner_config_entity();
         // Register the runner-upgrade provider so the core upgrade flow can
         // refresh configured runners without depending on runner behavior.
-        crate::core::upgrade::register_runner_upgrade();
+        crate::runner::register_runner_upgrade();
+        // Register the runner-availability provider so the controller action loop
+        // can gate execution on a runner's live status.
+        crate::runner::register_runner_availability_provider();
+        // Register the Lab-offload provider so core's lab_routing can execute an
+        // offload without depending on runner behavior.
+        crate::runner::register_runner_lab_offload_provider();
         // Register the workspace-snapshot provider so core's hygiene subsystem
         // can materialize an isolated validation-dependency workspace without
         // depending on runner behavior.
-        crate::core::runner::register_workspace_snapshot_provider();
+        crate::runner::register_workspace_snapshot_provider();
         // Register the command-label resolver so core::runner can map dispatched
         // argv to a hot-command label without depending on the full CLI parser.
-        crate::core::runner::set_command_label_resolver(|argv| {
+        crate::runner::set_command_label_resolver(|argv| {
             let cli = <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).ok()?;
             let route_contract = cli.command.lab_route_contract().ok()??;
             Some(route_contract.command.hot_label.to_string())
         });
         // Register the agent-task dispatch resolver so core::runner can extract a
         // cook dispatch command from argv without depending on the CLI parser.
-        crate::core::runner::set_agent_task_dispatch_resolver(|argv| {
+        crate::runner::set_agent_task_dispatch_resolver(|argv| {
             let cli = <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).map_err(
                 |error| {
                     crate::core::error::Error::validation_invalid_argument(
@@ -199,9 +197,9 @@ impl CliRuntime {
         // Register the Lab-runner hint provider so core::runner can compose
         // `--runner`/`--placement` unsupported errors from the command-spec table
         // without depending on `command_contract`.
-        crate::core::runner::set_lab_runner_hint_provider(|| {
+        crate::runner::set_lab_runner_hint_provider(|| {
             let summary = crate::command_contract::lab_runner_support_summary();
-            crate::core::runner::LabRunnerHint {
+            crate::runner::LabRunnerHint {
                 hint: summary.hint,
                 unsupported_message: summary.unsupported_message,
             }
@@ -735,9 +733,7 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
     if let Some(hot_command) = resource_policy::hot_command(&cli.command) {
         if let Ok((resources, _)) = crate::commands::resources::run_preflight() {
             let default_lab_runner = if hot_command.lab_offload_supported {
-                crate::core::runner::resolve_default_lab_runner()
-                    .ok()
-                    .flatten()
+                crate::runner::resolve_default_lab_runner().ok().flatten()
             } else {
                 None
             };
@@ -1487,14 +1483,14 @@ mod tests {
     fn managed_runner_context_clears_before_production_run_command() {
         let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let previous = [
-            crate::core::runner::RUNNER_HOSTED_EXEC_ENV,
-            crate::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV,
-            crate::core::runner::RUNNER_ID_ENV,
+            crate::runner::RUNNER_HOSTED_EXEC_ENV,
+            crate::runner::RUNNER_PLACEMENT_RESOLVED_ENV,
+            crate::runner::RUNNER_ID_ENV,
         ]
         .map(|name| (name, std::env::var(name).ok()));
-        std::env::set_var(crate::core::runner::RUNNER_HOSTED_EXEC_ENV, "1");
-        std::env::set_var(crate::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV, "1");
-        std::env::set_var(crate::core::runner::RUNNER_ID_ENV, "homeboy-lab");
+        std::env::set_var(crate::runner::RUNNER_HOSTED_EXEC_ENV, "1");
+        std::env::set_var(crate::runner::RUNNER_PLACEMENT_RESOLVED_ENV, "1");
+        std::env::set_var(crate::runner::RUNNER_ID_ENV, "homeboy-lab");
 
         *marker_context_before_run_command()
             .lock()

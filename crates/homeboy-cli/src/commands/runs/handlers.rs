@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use homeboy::core::api_jobs;
 use homeboy::core::artifact_address::ArtifactAddress;
 use homeboy::core::observation::evidence_report::directory_publication_guidance;
 use homeboy::core::observation::runs_service;
@@ -15,7 +16,7 @@ use homeboy::core::observation::{FindingListFilter, ObservationStore, RunListFil
 use homeboy::core::resource_lifecycle_index::resource_lifecycle_index_from_artifacts;
 use homeboy::core::validation_progress::ValidationProgressLedger;
 use homeboy::core::Error;
-use homeboy::core::{api_jobs, runners as runner};
+use homeboy::runner::runners as runner;
 
 use super::bench::run_contains_scenario;
 use super::common::{run_summaries_with_artifact_indexes, RunSummary};

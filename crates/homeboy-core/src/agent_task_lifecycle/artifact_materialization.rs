@@ -108,7 +108,9 @@ fn materialize_artifact(
         .artifacts
         .runner_artifact_ref(runner_id, run_id, &artifact.id);
     let path = materialized_path(run_id, task_id, &artifact.id)?;
-    let download = crate::runners::download_remote_artifact(&remote_ref, Some(path))?;
+    let download = crate::observation::runs_service::with_runner_evidence(|provider| {
+        provider.download_remote_artifact(&remote_ref, Some(path.clone()))
+    })?;
     validate_file(artifact, &download.output_path)?;
     artifact.path = Some(download.output_path.display().to_string());
     set_materialization_metadata(

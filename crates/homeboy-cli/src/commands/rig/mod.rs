@@ -9,7 +9,7 @@ use clap::{Args, Subcommand, ValueEnum};
 
 use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::rig;
-use homeboy::core::runners;
+use homeboy::runner::runners;
 
 use self::output::{
     RigAppOutput, RigCheckOutput, RigDownOutput, RigInstallOutput, RigInstalledStackSummary,

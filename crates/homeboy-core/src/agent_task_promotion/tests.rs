@@ -310,7 +310,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
             .to_string(),
         )
         .expect("recovered aggregate");
-        crate::runner::mirror_agent_task_run_plan_aggregate(
+        crate::agent_task_promotion::mirror_agent_task_run_plan_aggregate(
             "@runner-plan.json",
             run_id,
             aggregate.clone(),
@@ -318,7 +318,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
             None,
         )
         .expect("bridge reconciliation");
-        crate::runner::mirror_agent_task_run_plan_aggregate(
+        crate::agent_task_promotion::mirror_agent_task_run_plan_aggregate(
             "@runner-plan.json",
             run_id,
             aggregate.clone(),
@@ -410,7 +410,7 @@ fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_pending() {
                 ..Default::default()
             };
 
-            crate::runner::mirror_agent_task_run_plan_aggregate(
+            crate::agent_task_promotion::mirror_agent_task_run_plan_aggregate(
                 "@runner-plan.json",
                 run_id,
                 aggregate,

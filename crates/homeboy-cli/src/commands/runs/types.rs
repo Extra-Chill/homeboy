@@ -16,8 +16,8 @@ use homeboy::core::observation::evidence_report::DirectoryArtifactPublicationGui
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::resource_lifecycle_index::ResourceLifecycleIndex;
-use homeboy::core::runners::RunnerArtifactRef;
 use homeboy::core::validation_progress::ValidationCommandSummary;
+use homeboy::runner::runners::RunnerArtifactRef;
 
 use super::bench::{BenchCompareOutput, RunsBenchCompareArgs};
 use super::bundle::{RunsExportArgs, RunsExportOutput, RunsImportArgs, RunsImportOutput};

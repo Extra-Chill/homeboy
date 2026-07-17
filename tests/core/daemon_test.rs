@@ -103,16 +103,29 @@ fn write_legacy_daemon_state_for_test(pid: u32, address: &str) -> (std::path::Pa
 }
 
 fn create_local_runner_for_file_api(id: &str, workspace_root: &std::path::Path) {
-    crate::runner::create(
+    // Write the runner config directly (the runner subsystem's `create` lives in
+    // the homeboy-runner crate, which core tests cannot depend on). A runner is a
+    // config entity stored at `<homeboy>/runners/<id>.json`.
+    write_runner_config(
+        id,
         &serde_json::json!({
             "id": id,
             "kind": "local",
             "workspace_root": workspace_root.display().to_string(),
-        })
-        .to_string(),
-        false,
+        }),
+    );
+}
+
+fn write_runner_config(id: &str, value: &serde_json::Value) {
+    let dir = crate::paths::homeboy()
+        .expect("homeboy dir")
+        .join("runners");
+    std::fs::create_dir_all(&dir).expect("create runners dir");
+    std::fs::write(
+        dir.join(format!("{id}.json")),
+        serde_json::to_string_pretty(value).expect("serialize runner"),
     )
-    .expect("create local runner");
+    .expect("write runner config");
 }
 
 fn file_api_workspace(configure_runner: bool) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -1569,46 +1582,6 @@ fn daemon_http_error_envelope_includes_error_payload() {
 }
 
 #[test]
-fn routes_remote_runner_session_registration() {
-    let _home = HomeGuard::new();
-    crate::runner::create(
-        r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/runner/workspaces"}"#,
-        false,
-    )
-    .expect("create runner");
-    let store = JobStore::default();
-
-    let response = route_with_job_store_and_body(
-        "POST",
-        "/runner/sessions",
-        Some(serde_json::json!({
-            "runner_id": "homeboy-lab",
-            "controller_id": "extra-chill",
-            "broker_url": "http://127.0.0.1:49152",
-            "homeboy_version": "test-version"
-        })),
-        &store,
-    );
-
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body["endpoint"], "runner.sessions.register");
-    assert_eq!(
-        response.body["body"]["session"]["role"],
-        serde_json::json!("controller")
-    );
-
-    let status = crate::runner::status("homeboy-lab").expect("runner status");
-    assert!(status.connected);
-    assert_eq!(status.state, crate::runner::RunnerSessionState::Connected);
-    let session = status.session.expect("session");
-    assert_eq!(session.controller_id.as_deref(), Some("extra-chill"));
-    assert_eq!(
-        session.broker_url.as_deref(),
-        Some("http://127.0.0.1:49152")
-    );
-}
-
-#[test]
 fn routes_json_body_to_analysis_enqueue() {
     let store = JobStore::default();
     let response = route_with_job_store_and_body(
@@ -1648,8 +1621,10 @@ fn route_with_body_validates_exec_requests() {
 
 fn create_lab_local_runner() -> HomeGuard {
     let home = HomeGuard::new();
-    crate::runner::create(r#"{"id":"lab-local","kind":"local"}"#, false)
-        .expect("create lab local runner");
+    write_runner_config(
+        "lab-local",
+        &serde_json::json!({"id": "lab-local", "kind": "local"}),
+    );
     home
 }
 
@@ -1760,78 +1735,6 @@ fn routes_exec_preserves_path_materialization_plan_on_job_metadata() {
         result["path_materialization_plan"],
         path_materialization_plan
     );
-}
-
-#[test]
-fn daemon_exec_derives_implicit_command_secret_names_before_workload_validation() {
-    let _home = HomeGuard::new();
-    let store = JobStore::default();
-    let cwd = std::env::current_dir()
-        .expect("cwd")
-        .to_string_lossy()
-        .to_string();
-    let plan = crate::plan::HomeboyPlan::builder_for_description(
-        crate::plan::PlanKind::LabOffload,
-        "test",
-    )
-    .build();
-    let command_contract = crate::runner::LabOffloadCommand {
-        command: crate::lab_contract::LabCommandContract::portable(
-            "tunnel preview-client start",
-            None,
-            false,
-            &[],
-        ),
-        required_extensions: Vec::new(),
-        required_capabilities: Vec::new(),
-        workload: None,
-    };
-    let workload = crate::runner::workload::build_runner_workload(
-        crate::runner::workload::RunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command_contract,
-            capture_patch: false,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "homeboy-lab",
-            runner_mode: "daemon",
-            assignment_source: "daemon",
-            status: "queued",
-            remote_workspace: Some(&cwd),
-            fallback_reason: None,
-            workspace_mapping_ref: None,
-            proof_id: None,
-        },
-    );
-
-    let response = route_with_job_store_and_body(
-        "POST",
-        "/exec",
-        Some(serde_json::json!({
-            "runner_id": "homeboy-lab",
-            "cwd": cwd,
-            "command": [
-                "homeboy",
-                "tunnel",
-                "preview-client",
-                "start",
-                "--ingress",
-                "https://preview-broker.example.test",
-                "--public-host",
-                "preview.example.test",
-                "--local-origin",
-                "http://127.0.0.1:8888"
-            ],
-            "env": {
-                "HOMEBOY_PREVIEW_TUNNEL_TOKEN": "dummy-token"
-            },
-            "runner_workload": workload
-        })),
-        &store,
-    );
-
-    assert_eq!(response.status_code, 200);
-    assert_eq!(response.body["endpoint"], "jobs.exec");
 }
 
 #[test]
@@ -2026,58 +1929,6 @@ fn exec_capture_patch_records_remote_delta_artifact() {
     let patch_body = std::fs::read_to_string(&artifacts[0].path).expect("patch file");
     assert!(patch_body.contains("-before"));
     assert!(patch_body.contains("+after"));
-}
-
-#[test]
-fn runner_exec_rejects_requests_that_violate_runner_policy_before_daemon_dispatch() {
-    let _home = HomeGuard::new();
-    crate::server::create(
-        r#"{"id":"lab-server","host":"192.0.2.10","user":"user"}"#,
-        false,
-    )
-    .expect("create server");
-    crate::runner::create(
-        r#"{"id":"lab-server","kind":"ssh","server_id":"lab-server","workspace_root":"/srv/homeboy"}"#,
-        false,
-    )
-    .expect("create ssh runner");
-
-    let err = crate::runner::exec(
-        "lab-server",
-        crate::runner::RunnerExecOptions {
-            cwd: Some("/srv/homeboy/project".to_string()),
-            project_id: None,
-            allow_diagnostic_ssh: false,
-            diagnostic_ssh_timeout: None,
-            command: vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                "printf denied".to_string(),
-            ],
-            env: Default::default(),
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            env_materialization: None,
-            capture_patch: false,
-            raw_exec: true,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            capability_preflight: None,
-            required_extensions: Vec::new(),
-            accepted_extension_settings: Vec::new(),
-            require_paths: Vec::new(),
-            runner_workload: None,
-            run_id: None,
-            detach_after_handoff: false,
-            mirror_evidence: true,
-            print_handoff: true,
-        },
-    )
-    .expect_err("policy denied");
-
-    assert_eq!(err.code.as_str(), "runner.policy_denied");
-    assert_eq!(err.details["runner_id"], "lab-server");
-    assert_eq!(err.details["field"], "raw_exec");
 }
 
 fn wait_for_job(store: &JobStore, job_id: &str) -> crate::api_jobs::Job {

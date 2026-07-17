@@ -438,12 +438,9 @@ fn lab_offload_subprocess_skips_recursive_lab_routing() {
 fn runner_hosted_bench_exec_skips_recursive_lab_routing_without_explicit_runner() {
     let _env = EnvGuard::set_many(&[
         (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
-        (homeboy::core::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
-        (
-            homeboy::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV,
-            Some("1"),
-        ),
-        (homeboy::core::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
+        (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
+        (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, Some("1")),
+        (homeboy::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
     ]);
     let normalized = vec![
         "homeboy".to_string(),
@@ -465,12 +462,9 @@ fn runner_hosted_bench_exec_skips_recursive_lab_routing_without_explicit_runner(
 fn ambient_resolved_marker_cannot_bypass_explicit_lab_placement() {
     let _env = EnvGuard::set_many(&[
         (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
-        (homeboy::core::runner::RUNNER_HOSTED_EXEC_ENV, None),
-        (homeboy::core::runner::RUNNER_ID_ENV, None),
-        (
-            homeboy::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV,
-            Some("1"),
-        ),
+        (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, None),
+        (homeboy::runner::RUNNER_ID_ENV, None),
+        (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, Some("1")),
     ]);
     let normalized = vec![
         "homeboy".to_string(),
@@ -493,12 +487,9 @@ fn ambient_resolved_marker_cannot_bypass_explicit_lab_placement() {
 fn managed_runner_context_bypasses_auto_routing_once() {
     let _env = EnvGuard::set_many(&[
         (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
-        (homeboy::core::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
-        (
-            homeboy::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV,
-            Some("1"),
-        ),
-        (homeboy::core::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
+        (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
+        (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, Some("1")),
+        (homeboy::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
     ]);
     let normalized = vec![
         "homeboy".to_string(),
@@ -517,12 +508,9 @@ fn managed_runner_context_bypasses_auto_routing_once() {
 fn managed_run_plan_handoff_does_not_require_a_second_controller_session() {
     let _env = EnvGuard::set_many(&[
         (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
-        (homeboy::core::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
-        (
-            homeboy::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV,
-            Some("1"),
-        ),
-        (homeboy::core::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
+        (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
+        (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, Some("1")),
+        (homeboy::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
     ]);
     let normalized = vec![
         "homeboy".to_string(),
@@ -547,12 +535,9 @@ fn managed_run_plan_handoff_does_not_require_a_second_controller_session() {
 fn managed_promotion_handoff_does_not_require_runner_side_artifact_hydration() {
     let _env = EnvGuard::set_many(&[
         (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
-        (homeboy::core::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
-        (
-            homeboy::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV,
-            Some("1"),
-        ),
-        (homeboy::core::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
+        (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
+        (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, Some("1")),
+        (homeboy::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
     ]);
     let normalized = vec![
         "homeboy".to_string(),
@@ -583,9 +568,9 @@ fn managed_promotion_handoff_does_not_require_runner_side_artifact_hydration() {
 fn unmanaged_explicit_lab_handoff_keeps_runner_connection_requirements() {
     let _env = EnvGuard::set_many(&[
         (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
-        (homeboy::core::runner::RUNNER_HOSTED_EXEC_ENV, None),
-        (homeboy::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV, None),
-        (homeboy::core::runner::RUNNER_ID_ENV, None),
+        (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, None),
+        (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, None),
+        (homeboy::runner::RUNNER_ID_ENV, None),
     ]);
     let normalized = vec![
         "homeboy".to_string(),

@@ -9,7 +9,7 @@ use crate::api_jobs::{
 use crate::broker_auth::{BrokerAuthStore, BrokerScope};
 use crate::error::{Error, Result};
 use crate::paths;
-use crate::runner::{self, RunnerSession, RunnerSessionRole, RunnerTunnelMode};
+use homeboy_runner_contract::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
 /// Per-request broker authentication context extracted from the network layer.
 ///
@@ -378,11 +378,9 @@ fn claim(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) ->
     let request: ClaimRequest = parse_body(body, "remote runner claim request")?;
     auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
     touch_reverse_session(&request.runner_id)?;
-    let concurrency_limit = request.concurrency_limit.or_else(|| {
-        runner::load(&request.runner_id)
-            .ok()
-            .and_then(|runner| runner.settings.concurrency_limit)
-    });
+    let concurrency_limit = request
+        .concurrency_limit
+        .or_else(|| super::runner_workspace_root::runner_concurrency_limit(&request.runner_id));
     let claim = job_store.claim_remote_runner_job(
         &request.runner_id,
         request.project_id.as_deref(),

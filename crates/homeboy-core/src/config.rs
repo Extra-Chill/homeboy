@@ -21,11 +21,11 @@ pub use json_io::{
 };
 pub use json_io::{serialize_with_id, to_json_string};
 pub use json_ops::collect_array_fields;
-pub(crate) use json_ops::{merge_config, remove_config};
+pub use json_ops::{merge_config, remove_config};
 pub(crate) use json_pointer::value_type_name;
 pub use json_pointer::{remove_json_pointer, set_json_pointer};
 
-pub(crate) fn with_config_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+pub fn with_config_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let lock_path = paths::homeboy()?.join("config.lock");
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -608,7 +608,7 @@ pub(crate) fn create_batch<T: ConfigEntity>(
     Ok(summary)
 }
 
-pub(crate) fn merge_from_json<T: ConfigEntity>(
+pub fn merge_from_json<T: ConfigEntity>(
     id: Option<&str>,
     json_spec: &str,
     replace_fields: &[String],
@@ -646,7 +646,7 @@ pub(crate) fn merge_from_json<T: ConfigEntity>(
     })
 }
 
-pub(crate) fn merge_batch_from_json<T: ConfigEntity>(raw_json: &str) -> Result<BatchResult> {
+pub fn merge_batch_from_json<T: ConfigEntity>(raw_json: &str) -> Result<BatchResult> {
     let value: serde_json::Value = from_str(raw_json)?;
 
     let items: Vec<serde_json::Value> = if value.is_array() {

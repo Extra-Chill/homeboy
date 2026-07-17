@@ -3,7 +3,6 @@ mod execution;
 mod helpers;
 mod planning;
 mod runner_upgrade_provider;
-mod runners;
 mod services;
 mod types;
 pub mod update_check;
@@ -12,15 +11,14 @@ mod validation;
 pub(crate) use constants::VERSION;
 pub use helpers::{
     current_build_version, current_version, detect_install_method, fetch_latest_version,
-    run_upgrade_with_method,
+    run_upgrade_with_method, version_is_newer,
 };
 pub use planning::resolve_binary_on_path;
 pub(crate) use runner_upgrade_provider::with_runner_upgrade;
 pub use runner_upgrade_provider::{register_runner_upgrade_provider, RunnerUpgradeProvider};
-pub use runners::register as register_runner_upgrade;
 pub use types::{
-    ExtensionUpgradeEntry, InstallMethod, RunnerUpgradeEntry, ServiceRestartEntry, UpgradeResult,
-    VersionCheck,
+    ExtensionUpgradeEntry, InstallMethod, RunnerDaemonDriftEntry, RunnerExtensionSyncEntry,
+    RunnerUpgradeEntry, ServiceRestartEntry, UpgradeResult, VersionCheck,
 };
 pub use validation::check_for_updates;
 

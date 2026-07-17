@@ -10,9 +10,9 @@ use homeboy::core::runner_execution_envelope::{
     RunnerExecutionLifecyclePolicy, RunnerExecutionRecord, RunnerExecutionResultRefs,
     RUNNER_EXECUTION_ENVELOPE_SCHEMA,
 };
-use homeboy::core::runners;
-use homeboy::core::runners::{RunnerSession, RunnerStaleDaemonWarning, RunnerWorkspaceSyncMode};
 use homeboy::core::secret_env_plan::SecretEnvPlan;
+use homeboy::runner::runners;
+use homeboy::runner::runners::{RunnerSession, RunnerStaleDaemonWarning, RunnerWorkspaceSyncMode};
 
 #[derive(Args, Debug, Clone)]
 pub struct RefreshPlanArgs {

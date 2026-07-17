@@ -7,7 +7,7 @@ use homeboy::core::agent_runtime_manifest::{
     AgentRuntimeToolDiagnosticDeclaration,
 };
 use homeboy::core::daemon::DaemonStaleReasonCode;
-use homeboy::core::runners::{
+use homeboy::runner::runners::{
     self as runner, RunnerActiveJobState, RunnerAvailability, RunnerBinarySource, RunnerSession,
     RunnerStatusReport, RunnerTunnelMode, RuntimeMaterializationStatus,
 };
@@ -1110,10 +1110,8 @@ pub(super) fn runner_status_operator_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::core::runner::{
-        RunnerActiveJobState, RunnerSessionRole, RunnerStaleDaemonWarning,
-    };
-    use homeboy::core::runners::{RunnerSessionState, RunnerTunnelMode};
+    use homeboy::runner::runners::{RunnerSessionState, RunnerTunnelMode};
+    use homeboy::runner::{RunnerActiveJobState, RunnerSessionRole, RunnerStaleDaemonWarning};
 
     #[test]
     fn stale_daemon_status_hint_labels_control_plane_and_job_binary() {

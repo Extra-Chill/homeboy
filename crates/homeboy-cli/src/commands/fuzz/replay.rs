@@ -8,8 +8,8 @@ use homeboy::core::fuzz::{
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore};
-use homeboy::core::runners::is_retrievable_runner_artifact;
 use homeboy::core::{Error, ErrorCode};
+use homeboy::runner::runners::is_retrievable_runner_artifact;
 
 use super::super::utils::args::PositionalComponentArgs;
 use super::types::{

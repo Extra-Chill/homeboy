@@ -677,7 +677,7 @@ fn mutable_runtime_source_diagnostic(
     })
 }
 
-pub(crate) fn is_immutable_revision(value: &str) -> bool {
+pub fn is_immutable_revision(value: &str) -> bool {
     let value = value.trim();
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }

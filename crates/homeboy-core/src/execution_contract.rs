@@ -170,6 +170,29 @@ pub fn reportable_artifact_evidence_path(path: Option<&String>) -> Option<String
         .cloned()
 }
 
+/// A runner-artifact token addressing an artifact-store locator. Contract-driven
+/// token construction (base64 URL-safe locator), not runner behavior, so it
+/// lives in core alongside the artifact URI contract.
+pub fn runner_artifact_store_token(runner_id: &str, run_id: &str, locator: &str) -> String {
+    use base64::Engine;
+    let encoded_locator = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(locator);
+    EXECUTION_CONTRACT.artifacts.runner_artifact_ref(
+        runner_id,
+        run_id,
+        &format!("artifact-store:{encoded_locator}"),
+    )
+}
+
+/// The artifact-store locator encoded in a runner artifact id, if present.
+pub fn artifact_store_locator_from_runner_artifact_id(artifact_id: &str) -> Option<String> {
+    use base64::Engine;
+    let encoded_locator = artifact_id.strip_prefix("artifact-store:")?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded_locator)
+        .ok()?;
+    String::from_utf8(bytes).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

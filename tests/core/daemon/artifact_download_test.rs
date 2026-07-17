@@ -49,7 +49,7 @@ fn route_serves_run_scoped_artifact_store_tokens() {
     let path = artifact_root.join(locator);
     fs::create_dir_all(path.parent().expect("artifact parent")).expect("artifact parent");
     fs::write(&path, br#"{"ok":true}"#).expect("artifact-store file");
-    let token = crate::runner::runner_artifact_store_token("lab", &run.id, locator)
+    let token = crate::execution_contract::runner_artifact_store_token("lab", &run.id, locator)
         .rsplit('/')
         .next()
         .expect("artifact token")

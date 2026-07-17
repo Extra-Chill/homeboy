@@ -54,7 +54,7 @@ impl CheckoutHygieneSnapshot {
     }
 }
 
-pub(crate) fn write_validation_dependency_source_evidence(
+pub fn write_validation_dependency_source_evidence(
     id: &str,
     source_path: &Path,
     destination_path: &Path,
@@ -147,7 +147,7 @@ pub fn require_checkout_hygiene(
     require_checkout_hygiene_inner(checkouts, options, true)
 }
 
-pub(crate) fn require_checkout_hygiene_without_lifecycle(
+pub fn require_checkout_hygiene_without_lifecycle(
     checkouts: Vec<DependencyCheckout>,
     options: DependencyHygieneOptions,
 ) -> Result<Vec<CheckoutHygieneSnapshot>> {
@@ -297,7 +297,7 @@ const PORTABLE_CONFIG_FILE: &str = concat!("homeboy", ".json");
 /// Collect the declared `validation_dependencies` extension IDs from a portable
 /// homeboy.json manifest. Pure single-machine manifest parsing (no runner) — a
 /// component's validation deps are the same whether or not a runner is present.
-pub(crate) fn validation_dependency_ids(local_path: &Path) -> Result<Vec<String>> {
+pub fn validation_dependency_ids(local_path: &Path) -> Result<Vec<String>> {
     let manifest_path = local_path.join(PORTABLE_CONFIG_FILE);
     let Ok(content) = fs::read_to_string(&manifest_path) else {
         return Ok(Vec::new());
@@ -564,10 +564,7 @@ fn run_validation_dependency_snapshot_lifecycle(snapshot: &CheckoutHygieneSnapsh
     run_validation_dependency_lifecycle_isolated(&component, path)
 }
 
-pub(crate) fn run_validation_dependency_lifecycle(
-    component: &Component,
-    path: &Path,
-) -> Result<()> {
+pub fn run_validation_dependency_lifecycle(component: &Component, path: &Path) -> Result<()> {
     run_dependency_install_lifecycle(component, path).map_err(|err| {
         dependency_step_failed_error(component, path, "dependency.install", err, None)
     })?;
@@ -909,9 +906,6 @@ mod tests {
     /// Register the runner-backed workspace-snapshot provider so tests that run
     /// an isolated validation-dependency lifecycle can materialize the snapshot.
     /// Production wires this at CLI startup; core tests wire it explicitly.
-    fn ensure_snapshot_provider() {
-        crate::runner::register_workspace_snapshot_provider();
-    }
 
     fn init_repo_with_upstream(path: &Path) -> tempfile::TempDir {
         let remote = tempfile::tempdir().unwrap();
@@ -923,50 +917,6 @@ mod tests {
         );
         git(path, &["push", "-u", "origin", "main"]);
         remote
-    }
-
-    #[test]
-    fn dependency_hygiene_fast_forwards_validation_dependency_behind_upstream() {
-        ensure_snapshot_provider();
-        let local = tempfile::tempdir().unwrap();
-        let remote = tempfile::tempdir().unwrap();
-        let writer = tempfile::tempdir().unwrap();
-        init_repo(local.path());
-        git(remote.path(), &["init", "--bare", "-b", "main"]);
-        git(
-            local.path(),
-            &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        );
-        git(local.path(), &["push", "-u", "origin", "main"]);
-        git(
-            writer.path(),
-            &[
-                "clone",
-                "--branch",
-                "main",
-                remote.path().to_str().unwrap(),
-                ".",
-            ],
-        );
-        git(writer.path(), &["config", "user.email", "test@example.com"]);
-        git(writer.path(), &["config", "user.name", "Homeboy Test"]);
-        fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
-        git(writer.path(), &["add", "."]);
-        git(writer.path(), &["commit", "-m", "remote update"]);
-        git(writer.path(), &["push", "origin", "HEAD:main"]);
-
-        let snapshots = require_checkout_hygiene(
-            vec![DependencyCheckout {
-                id: "dep".to_string(),
-                role: "validation_dependency".to_string(),
-                path: local.path().to_path_buf(),
-            }],
-            DependencyHygieneOptions { allow_stale: false },
-        )
-        .expect("clean validation dependency should fast-forward");
-
-        assert_eq!(snapshots[0].behind, Some(0));
-        assert!(local.path().join("remote.txt").exists());
     }
 
     #[test]
@@ -1010,27 +960,6 @@ mod tests {
 
         assert_eq!(err.code, ErrorCode::ValidationMultipleErrors);
         assert_eq!(err.details["checkouts"][0]["behind"].as_u64(), Some(1));
-    }
-
-    #[test]
-    fn dependency_hygiene_allows_stale_with_explicit_opt_in() {
-        ensure_snapshot_provider();
-        let local = tempfile::tempdir().unwrap();
-        init_repo(local.path());
-        fs::write(local.path().join("dirty.txt"), "dirty\n").unwrap();
-
-        let snapshots = require_checkout_hygiene(
-            vec![DependencyCheckout {
-                id: "dep".to_string(),
-                role: "validation_dependency".to_string(),
-                path: local.path().to_path_buf(),
-            }],
-            DependencyHygieneOptions { allow_stale: true },
-        )
-        .expect("explicit opt-in should allow dirty checkout");
-
-        assert!(snapshots[0].allowed);
-        assert_eq!(snapshots[0].dirty, Some(true));
     }
 
     #[test]
@@ -1120,96 +1049,6 @@ mod tests {
 
         assert_eq!(err.code, ErrorCode::ValidationMultipleErrors);
         assert_eq!(err.details["checkouts"][0]["dirty"].as_bool(), Some(true));
-    }
-
-    #[test]
-    fn dependency_hygiene_runs_validation_dependency_lifecycle() {
-        ensure_snapshot_provider();
-        crate::test_support::with_isolated_home(|_| {
-            let workspace_parent = tempfile::tempdir().unwrap();
-            let source = workspace_parent.path().join("source");
-            let dependency = workspace_parent.path().join("dep");
-            fs::create_dir_all(&source).unwrap();
-            fs::create_dir_all(&dependency).unwrap();
-            fs::write(
-                source.join(PORTABLE_CONFIG_FILE),
-                serde_json::json!({
-                    "id": "source",
-                    "extensions": {
-                        "example": {
-                            "settings": { "validation_dependencies": ["dep"] }
-                        }
-                    }
-                })
-                .to_string(),
-            )
-            .unwrap();
-            fs::write(
-                dependency.join(PORTABLE_CONFIG_FILE),
-                serde_json::json!({
-                    "id": "dep",
-                    "scripts": {
-                        "deps": ["sh -c 'printf install > deps-installed.txt'"],
-                        "build": ["sh -c 'printf build > build-built.txt'"]
-                    }
-                })
-                .to_string(),
-            )
-            .unwrap();
-            fs::write(
-                dependency.join(".gitignore"),
-                "deps-installed.txt\nbuild-built.txt\n",
-            )
-            .unwrap();
-            let _remote = init_repo_with_upstream(&dependency);
-
-            require_dependency_hygiene_for_source(
-                &source,
-                None,
-                DependencyHygieneOptions { allow_stale: false },
-            )
-            .expect("validation dependency lifecycle should run after hygiene passes");
-
-            assert!(!dependency.join("deps-installed.txt").exists());
-            assert!(!dependency.join("build-built.txt").exists());
-            let status =
-                git_output(&dependency, &["status", "--porcelain=v1"]).expect("dependency status");
-            assert_eq!(status, "");
-        });
-    }
-
-    #[test]
-    fn dependency_hygiene_uses_manifest_id_for_runtime_path_dependency_lifecycle() {
-        ensure_snapshot_provider();
-        crate::test_support::with_isolated_home(|_| {
-            let source = tempfile::tempdir().unwrap();
-            let dependency = tempfile::tempdir().unwrap();
-            fs::write(
-                dependency.path().join(PORTABLE_CONFIG_FILE),
-                serde_json::json!({
-                    "id": "dep",
-                    "scripts": {
-                        "build": ["sh -c 'test \"$HOMEBOY_COMPONENT_ID\" = dep'"]
-                    }
-                })
-                .to_string(),
-            )
-            .unwrap();
-            let _remote = init_repo_with_upstream(dependency.path());
-
-            let settings = vec![(
-                "validation_dependencies".to_string(),
-                serde_json::json!([dependency.path().to_str().unwrap()]),
-            )];
-
-            require_dependency_hygiene_for_source_with_settings(
-                source.path(),
-                None,
-                &settings,
-                DependencyHygieneOptions { allow_stale: false },
-            )
-            .expect("runtime path dependency lifecycle should use portable manifest id");
-        });
     }
 
     #[test]

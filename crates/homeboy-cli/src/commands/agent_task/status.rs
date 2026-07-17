@@ -15,7 +15,7 @@ use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::core::agent_tasks::service as agent_task_service;
 use homeboy::core::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
 use homeboy::core::engine::shell::quote_arg;
-use homeboy::core::runners::{self as runner, RunnerKind};
+use homeboy::runner::runners::{self as runner, RunnerKind};
 
 use super::super::CmdResult;
 use super::args::{

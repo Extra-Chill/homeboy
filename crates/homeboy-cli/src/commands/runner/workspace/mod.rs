@@ -1,7 +1,7 @@
 use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
 
-use homeboy::core::runners::{
+use homeboy::runner::runners::{
     self as runner, RunnerWorkspaceApplyOutput, RunnerWorkspaceListOutput,
     RunnerWorkspacePruneOutput, RunnerWorkspacePullOutput, RunnerWorkspaceSnapshotFilters,
     RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput,

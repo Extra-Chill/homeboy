@@ -11,13 +11,13 @@ use crate::engine::command::CommandCaptureMetadata;
 use crate::env_materialization_plan::EnvMaterializationPlan;
 use crate::error::{Error, Result};
 use crate::lab_contract::RunnerWorkload;
-use crate::runner::{RunnerMutationArtifacts, RunnerResourceMetrics};
 use crate::runner_execution_envelope::{
     PathMaterializationPlan, RunnerExecutionDispatch, RunnerExecutionEnvelope,
     RunnerExecutionLifecycle, RunnerExecutionMutationPolicy, RunnerExecutionResultRefs,
 };
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
+use homeboy_runner_contract::{RunnerMutationArtifacts, RunnerResourceMetrics};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobArtifactMetadata {
@@ -117,7 +117,7 @@ impl RemoteRunnerJobRequest {
         secret_env_plan
     }
 
-    pub(crate) fn execution_envelope(&self) -> RunnerExecutionEnvelope {
+    pub fn execution_envelope(&self) -> RunnerExecutionEnvelope {
         let mut request = self.clone();
         let secret_env_plan = request.normalize();
         let envelope_id = request
@@ -322,10 +322,7 @@ pub(super) struct StoredRemoteRunnerJob {
 }
 
 impl JobStore {
-    pub(crate) fn submit_remote_runner_job(
-        &self,
-        mut request: RemoteRunnerJobRequest,
-    ) -> Result<Job> {
+    pub fn submit_remote_runner_job(&self, mut request: RemoteRunnerJobRequest) -> Result<Job> {
         if request.runner_id.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
                 "runner_id",
@@ -409,7 +406,7 @@ impl JobStore {
         self.get(job.id)
     }
 
-    pub(crate) fn claim_remote_runner_job(
+    pub fn claim_remote_runner_job(
         &self,
         runner_id: &str,
         project_id: Option<&str>,
@@ -502,7 +499,7 @@ impl JobStore {
         }))
     }
 
-    pub(crate) fn append_remote_runner_event(
+    pub fn append_remote_runner_event(
         &self,
         job_id: Uuid,
         runner_id: &str,
@@ -515,7 +512,7 @@ impl JobStore {
         self.append_event(job_id, kind, message, data)
     }
 
-    pub(crate) fn finish_remote_runner_job(
+    pub fn finish_remote_runner_job(
         &self,
         job_id: Uuid,
         runner_id: &str,

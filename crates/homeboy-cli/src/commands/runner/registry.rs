@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use homeboy::core::redaction::RedactionPolicy;
-use homeboy::core::runners::{self as runner, ReverseRunnerConnectOptions, Runner, RunnerKind};
 use homeboy::core::server::{RunnerPolicy, RunnerSettings};
 use homeboy::core::MergeOutput;
+use homeboy::runner::runners::{self as runner, ReverseRunnerConnectOptions, Runner, RunnerKind};
 
 use super::super::{CmdResult, DynamicSetArgs};
 use super::cli::RunnerKindArg;

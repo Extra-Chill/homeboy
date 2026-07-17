@@ -272,3 +272,177 @@ pub enum LabRunnerGateDecision {
         remediation: Vec<String>,
     },
 }
+
+/// Resource-usage metrics captured while a runner child process ran. Pure serde
+/// data (no runner behavior) so it can live in the contract and be embedded in
+/// core job records (`api_jobs`) without a core -> runner edge.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerResourceMetrics {
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_user_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_system_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_rss_bytes: Option<u64>,
+    pub sample_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_process_count_peak: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_guard: Option<RunnerResourceGuardLimits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_violation: Option<RunnerResourceGuardViolation>,
+    pub source: String,
+}
+
+/// The resource-guard limits in force for a runner child process.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerResourceGuardLimits {
+    pub rss_limit_bytes: u64,
+    pub process_count_limit: u64,
+    pub concurrency: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_capacity_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_headroom_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_rss_budget_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_rss_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_rss_bytes: Option<u64>,
+    pub rss_limit_source: String,
+}
+
+/// A resource-guard violation that terminated or flagged a runner child.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerResourceGuardViolation {
+    pub reason: String,
+    pub message: String,
+    pub rss_bytes: u64,
+    pub rss_limit_bytes: u64,
+    pub process_count: u64,
+    pub process_count_limit: u64,
+}
+
+/// Artifact references produced by a runner mutation (patch, file bundle,
+/// operation log). Pure serde data embedded in core job records.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerMutationArtifacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_ref: Option<RunnerArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_bundle_ref: Option<RunnerArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_log_ref: Option<RunnerArtifactRef>,
+}
+
+impl RunnerMutationArtifacts {
+    pub fn is_empty(&self) -> bool {
+        self.patch_ref.is_none()
+            && self.file_bundle_ref.is_none()
+            && self.operation_log_ref.is_none()
+    }
+}
+
+/// How a runner session is tunneled. Pure serde data (with small label helpers)
+/// so the core daemon can build/persist sessions without a core -> runner edge.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerTunnelMode {
+    DirectSsh,
+    Reverse,
+}
+
+impl RunnerTunnelMode {
+    pub fn label(&self) -> &'static str {
+        self.labels().0
+    }
+
+    pub fn metadata_value(&self) -> &'static str {
+        self.labels().1
+    }
+
+    fn labels(&self) -> (&'static str, &'static str) {
+        match self {
+            RunnerTunnelMode::DirectSsh => ("direct SSH", "direct_ssh"),
+            RunnerTunnelMode::Reverse => ("reverse-connected", "reverse"),
+        }
+    }
+}
+
+fn default_tunnel_mode() -> RunnerTunnelMode {
+    RunnerTunnelMode::DirectSsh
+}
+
+/// Which side owns a runner session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerSessionRole {
+    Controller,
+    Runner,
+}
+
+fn default_session_role() -> RunnerSessionRole {
+    RunnerSessionRole::Controller
+}
+
+/// The connectivity state of a runner session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerSessionState {
+    Connected,
+    Disconnected,
+    Recorded,
+}
+
+/// A persisted runner session record. Pure serde data so the core daemon's
+/// `/runner/sessions` endpoints can build and persist sessions without a
+/// core -> runner edge. `leaseless_recovery_evidence` is carried as opaque JSON
+/// (the runner layer owns its typed `RunnerLeaselessRecoveryEvidence`); the
+/// daemon never populates it, so the JSON roundtrips identically.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerSession {
+    pub runner_id: String,
+    #[serde(default = "default_tunnel_mode")]
+    pub mode: RunnerTunnelMode,
+    #[serde(default = "default_session_role")]
+    pub role: RunnerSessionRole,
+    pub server_id: Option<String>,
+    #[serde(default)]
+    pub controller_id: Option<String>,
+    #[serde(default)]
+    pub broker_url: Option<String>,
+    #[serde(default)]
+    pub remote_daemon_address: Option<String>,
+    #[serde(default)]
+    pub local_port: Option<u16>,
+    #[serde(default)]
+    pub local_url: Option<String>,
+    pub tunnel_pid: Option<u32>,
+    pub remote_daemon_pid: Option<u32>,
+    #[serde(default)]
+    pub remote_daemon_lease_id: Option<String>,
+    pub homeboy_version: String,
+    #[serde(default)]
+    pub homeboy_build_identity: Option<String>,
+    pub connected_at: String,
+    #[serde(default)]
+    pub worker_identity: Option<String>,
+    #[serde(default)]
+    pub worker_pid: Option<u32>,
+    #[serde(default)]
+    pub last_seen_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaseless_recovery_evidence: Option<serde_json::Value>,
+}
+
+impl RunnerSession {
+    /// Which side owns this session's lifecycle, derived from its role.
+    pub fn lifecycle_owner(&self) -> RunnerLifecycleOwner {
+        match self.role {
+            RunnerSessionRole::Controller => RunnerLifecycleOwner::Controller,
+            RunnerSessionRole::Runner => RunnerLifecycleOwner::Runner,
+        }
+    }
+}

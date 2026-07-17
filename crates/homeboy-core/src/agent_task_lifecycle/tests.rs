@@ -1948,7 +1948,7 @@ fn recovery_preserves_terminal_runner_identity_before_projecting_runner_artifact
         snapshot.events[0].data.as_mut().expect("event data")["identity"]["run_id"] = json!(run_id);
         snapshot.events[0].data.as_mut().expect("event data")["identity"]["persisted_run_id"] =
             json!(run_id);
-        let event = crate::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(
+        let event = crate::agent_task_lifecycle::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(
             Some(&snapshot.events),
         )
         .expect("terminal lifecycle event");
@@ -2166,10 +2166,10 @@ fn status_backfills_legacy_runner_provenance_and_mirrors_a_verified_projection_i
                 }
             }
         });
-        let session = crate::runner::RunnerSession {
+        let session = homeboy_runner_contract::RunnerSession {
             runner_id: "local".to_string(),
-            mode: crate::runner::RunnerTunnelMode::DirectSsh,
-            role: crate::runner::RunnerSessionRole::Controller,
+            mode: homeboy_runner_contract::RunnerTunnelMode::DirectSsh,
+            role: homeboy_runner_contract::RunnerSessionRole::Controller,
             server_id: None,
             controller_id: None,
             broker_url: None,

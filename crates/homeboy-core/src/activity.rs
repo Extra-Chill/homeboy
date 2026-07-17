@@ -9,7 +9,7 @@ use crate::api_jobs::{self, ActiveRunnerJobSummary, Job, JobEvent};
 use crate::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
 use crate::run_lifecycle_record::RunExecutionState;
 use crate::run_lifecycle_status::RunLifecycleStatus;
-use crate::{paths, runners, Error, Result};
+use crate::{paths, Error, Result};
 
 pub const ACTIVITY_REPORT_SCHEMA: &str = "homeboy/activity-report/v1";
 
@@ -716,10 +716,10 @@ mod runner_sessions {
     use super::*;
 
     pub(super) fn collect(collector: &mut ActivityCollector) {
-        for report in runners::statuses()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|report| report.connected)
+        for report in
+            crate::observation::runs_service::with_runner_evidence(|provider| provider.statuses())
+                .into_iter()
+                .filter(|report| report.connected)
         {
             for job in report.active_jobs {
                 collector.insert(item_from_active_runner_job(job));

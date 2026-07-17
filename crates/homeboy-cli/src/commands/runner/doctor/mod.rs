@@ -8,10 +8,10 @@ use homeboy::core::agent_tasks::provider::{
     AgentTaskExecutorProvider, AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
 };
 use homeboy::core::engine::shell;
-use homeboy::core::runners::{
+use homeboy::core::server::{self, Server, SshClient};
+use homeboy::runner::runners::{
     self as runner, Runner, RunnerKind, RunnerToolRegistry, RunnerToolSpec, RunnerTunnelMode,
 };
-use homeboy::core::server::{self, Server, SshClient};
 use serde::Serialize;
 
 use crate::commands::CmdResult;

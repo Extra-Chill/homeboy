@@ -1,7 +1,7 @@
-use homeboy::core::runners::{
+use homeboy::core::server::RunnerSettings;
+use homeboy::runner::runners::{
     self as runner, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, RunnerExecOutput,
 };
-use homeboy::core::server::RunnerSettings;
 use serde_json::Value;
 
 use super::super::output_runtime::{CommandPresentation, CommandRun};

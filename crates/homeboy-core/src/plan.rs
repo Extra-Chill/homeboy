@@ -39,7 +39,7 @@ impl PlanValues {
         self
     }
 
-    pub(crate) fn json<T: Serialize>(mut self, key: impl Into<String>, value: T) -> Self {
+    pub fn json<T: Serialize>(mut self, key: impl Into<String>, value: T) -> Self {
         self.values.insert(
             key.into(),
             serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
@@ -257,7 +257,7 @@ impl PlanStepDependencyKind {
 }
 
 impl PlanStep {
-    pub(crate) fn builder(
+    pub fn builder(
         id: impl Into<String>,
         kind: impl Into<String>,
         status: PlanStepStatus,
@@ -287,7 +287,7 @@ impl PlanStep {
         PlanStepBuilder::new(id, kind, PlanStepStatus::Disabled)
     }
 
-    pub(crate) fn disabled_with_reason(
+    pub fn disabled_with_reason(
         id: impl Into<String>,
         kind: impl Into<String>,
         reason: impl Into<String>,
@@ -443,7 +443,7 @@ impl PlanStepBuilder {
         self
     }
 
-    pub(crate) fn gate_result(mut self, gate_result: impl Into<HomeboyGateResult>) -> Self {
+    pub fn gate_result(mut self, gate_result: impl Into<HomeboyGateResult>) -> Self {
         self.step.outputs.insert(
             "gate_result".to_string(),
             serde_json::to_value(gate_result.into()).unwrap_or(serde_json::Value::Null),
@@ -456,7 +456,7 @@ impl PlanStepBuilder {
         self
     }
 
-    pub(crate) fn skip_reason(mut self, reason: impl Into<String>) -> Self {
+    pub fn skip_reason(mut self, reason: impl Into<String>) -> Self {
         self.step.skip_reason = Some(reason.into());
         self
     }

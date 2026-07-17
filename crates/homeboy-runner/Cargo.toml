@@ -1,0 +1,36 @@
+[package]
+name = "homeboy-runner"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Optional Lab-offload runner subsystem for homeboy: runner config, connection, execution, workspace sync, and lab offload. Registers its behavior with homeboy-core at startup."
+repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
+
+[lib]
+name = "homeboy_runner"
+path = "src/lib.rs"
+
+[dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+homeboy-cli-contract = { version = "0.1.0", path = "../homeboy-cli-contract" }
+homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
+homeboy-runner-contract = { version = "0.1.0", path = "../homeboy-runner-contract" }
+base64 = "0.22"
+chrono = "0.4"
+clap = { version = "4.5", features = ["derive", "string"] }
+glob = "0.3"
+glob-match = "0.2"
+libc = "0.2"
+shellexpand = "3.1"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "socks", "http2", "charset", "system-proxy"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10.9"
+tempfile = "3.14"
+uuid = { version = "1.11", features = ["v4", "v5", "serde"] }
+
+[dev-dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
