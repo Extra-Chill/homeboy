@@ -208,7 +208,7 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> crate::Result<Option<AuditWithAnaly
     if let Some(ref git_ref) = args.changed_since {
         let changed = changed_files_for_scope(args, git_ref)?;
         if changed.is_empty() {
-            crate::log_status!("audit", "No files changed since {}", git_ref);
+            log_status!("audit", "No files changed since {}", git_ref);
             return Ok(None);
         }
         Ok(Some(code_audit::audit_path_scoped_with_plan_and_analysis(
@@ -253,13 +253,13 @@ fn run_baseline_save(
     let saved = if let Some(ref git_ref) = args.changed_since {
         let changed = changed_files_for_scope(args, git_ref)?;
         if changed.is_empty() {
-            crate::log_status!(
+            log_status!(
                 "baseline",
                 "No files changed since {} — baseline unchanged",
                 git_ref
             );
         } else {
-            crate::log_status!(
+            log_status!(
                 "baseline",
                 "Scoped baseline update: {} file(s) in scope",
                 changed.len()

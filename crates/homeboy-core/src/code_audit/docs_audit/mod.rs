@@ -16,7 +16,12 @@ use std::path::Path;
 pub use claims::{Claim, ClaimConfidence, ClaimType};
 pub use verify::VerifyResult;
 
-use crate::is_zero;
+/// Serde helper for `#[serde(skip_serializing_if = "is_zero")]` on `usize`
+/// fields. Defined locally so `code_audit` does not depend on a crate-root
+/// helper (extraction-prep).
+fn is_zero(v: &usize) -> bool {
+    *v == 0
+}
 
 /// A doc that needs content review due to referenced files changing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

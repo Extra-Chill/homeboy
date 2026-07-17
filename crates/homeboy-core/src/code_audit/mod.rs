@@ -11,6 +11,8 @@
 //! 5. Producing actionable findings for outliers
 //! 6. Analyzing structural complexity (god files, high item counts)
 
+#[macro_use]
+mod audit_log;
 pub mod baseline;
 pub mod baseline_merge;
 mod checks;
