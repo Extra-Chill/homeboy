@@ -1448,6 +1448,54 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn pinned_runtime_executes_original_controller_after_global_binary_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+
+        crate::test_support::with_isolated_home(|_| {
+            let temporary = tempfile::tempdir().expect("temporary executable directory");
+            let global = temporary.path().join("homeboy");
+            let write_controller = |identity: &str| {
+                let identity = serde_json::to_string(identity).expect("serialize identity");
+                fs::write(
+                    &global,
+                    format!(
+                        "#!/bin/sh\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{{\"data\":{{\"display\":{identity}}}}}'\n  exit 0\nfi\nif [ \"$1\" = controller ] && [ \"$2\" = admission ]; then\n  printf '%s\\n' {identity}\n  exit 0\nfi\nexit 1\n"
+                    ),
+                )
+                .expect("write global controller");
+                fs::set_permissions(&global, fs::Permissions::from_mode(0o755))
+                    .expect("make global controller executable");
+            };
+
+            write_controller("homeboy 0.288.13+original");
+            let runtime = pin_executable(&global, "homeboy 0.288.13+original")
+                .expect("pin original controller");
+            let pinned = runtime
+                .pointer("/originating/pinned_executable")
+                .and_then(Value::as_str)
+                .expect("pinned executable");
+
+            // Simulate a concurrent global install after pin creation and before admission.
+            write_controller("homeboy 0.288.13+replacement");
+            let output = Command::new(pinned)
+                .args(["controller", "admission"])
+                .output()
+                .expect("execute pinned controller admission");
+
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                "homeboy 0.288.13+original"
+            );
+            assert_eq!(
+                executable_identity(&global).expect("global replacement identity"),
+                "homeboy 0.288.13+replacement"
+            );
+        });
+    }
+
     #[test]
     fn publication_is_no_clobber_and_idempotent() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");

@@ -19,6 +19,8 @@ use crate::core::extension::{
 };
 use crate::core::upgrade;
 
+const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
+
 pub struct CliRuntime {
     extension_discovery: OnceLock<ExtensionCliDiscovery>,
 }
@@ -311,6 +313,15 @@ impl CliRuntime {
             }
         }
 
+        match delegate_agent_task_cook_to_pinned_runtime(&cli, &normalized) {
+            Ok(Some(exit_code)) => return std::process::ExitCode::from(exit_code_to_u8(exit_code)),
+            Ok(None) => {}
+            Err(err) => {
+                output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
+                return std::process::ExitCode::from(2);
+            }
+        }
+
         match delegate_agent_task_lifecycle_to_pinned_runtime(&cli, &normalized) {
             Ok(Some(exit_code)) => return std::process::ExitCode::from(exit_code_to_u8(exit_code)),
             Ok(None) => {}
@@ -388,6 +399,53 @@ impl CliRuntime {
         self.extension_discovery
             .get_or_init(collect_extension_cli_info)
     }
+}
+
+/// A cook has no durable run record until controller admission. Re-exec before
+/// routing so every subsequent local phase uses the immutable controller that
+/// started the cook rather than a globally replaced executable.
+fn delegate_agent_task_cook_to_pinned_runtime(
+    cli: &Cli,
+    normalized_args: &[String],
+) -> homeboy::core::Result<Option<i32>> {
+    if !matches!(
+        &cli.command,
+        Commands::AgentTask(agent_task)
+            if matches!(
+                &agent_task.command,
+                crate::commands::agent_task::AgentTaskCommand::Cook(_)
+            )
+    ) {
+        return Ok(None);
+    }
+
+    if let Some(expected) = std::env::var_os(COOK_PINNED_RUNTIME_ENV) {
+        let current = std::env::current_exe().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("resolve current controller executable".to_string()),
+            )
+        })?;
+        if current == std::path::PathBuf::from(expected) {
+            return Ok(None);
+        }
+    }
+
+    let pinned = crate::core::agent_tasks::lifecycle::pin_current_controller_runtime()?;
+    let status = ProcessCommand::new(&pinned)
+        .args(&normalized_args[1..])
+        .env(COOK_PINNED_RUNTIME_ENV, &pinned)
+        .status()
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "execute pinned controller runtime {}",
+                    pinned.display()
+                )),
+            )
+        })?;
+    Ok(Some(status.code().unwrap_or(1)))
 }
 
 /// Durable lifecycle mutations remain owned by the runtime that admitted the
