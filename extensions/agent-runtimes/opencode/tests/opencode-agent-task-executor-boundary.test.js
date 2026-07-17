@@ -173,10 +173,26 @@ assert.equal(config.model, 'opencode-go/kimi-k2.7-code');
 assert.equal(config.agent.build.model, 'opencode-go/kimi-k2.7-code');
 assert.equal(config.small_model, 'zai-coding-plan/glm-5.2');
 assert.equal(config.agent.title.disable, true);
-assert.equal(config.agent.title.model, 'ambient-title-model-must-not-change');
-assert.deepEqual(config.mcp, { example: { type: 'local' } });
-assert.equal(Object.hasOwn(config, 'agents'), false);
-process.exit(0);
+	assert.equal(config.agent.title.model, 'ambient-title-model-must-not-change');
+	assert.deepEqual(config.mcp, { example: { type: 'local' } });
+	assert.equal(Object.hasOwn(config, 'agents'), false);
+	assert.deepEqual(config.permission, {
+	  read: { '*.env': 'deny' },
+	  glob: { '*': 'ask' },
+	  grep: { '*': 'ask', 'secret': 'deny' },
+	  edit: { '*': 'ask' },
+	  bash: { '*': 'ask' },
+	  external_directory: {
+	    '/unrelated/**': 'deny',
+	    ${JSON.stringify(path.join(realModelWorkspace, '**'))}: 'allow'
+	  }
+	});
+	assert.deepEqual(config.agent.build.permission, {
+	  external_directory: {
+	    ${JSON.stringify(path.join(realModelWorkspace, '**'))}: 'allow'
+	  }
+	});
+	process.exit(0);
 `);
 	const modelResult = await executeOpenCodeAgentTask({
 		...request,
@@ -191,6 +207,14 @@ process.exit(0);
 				runtime_env: {
 					OPENCODE_CONFIG_CONTENT: JSON.stringify({
 						mcp: { example: { type: 'local' } },
+						permission: {
+							read: { '*.env': 'deny' },
+							glob: { '*': 'ask' },
+							grep: { '*': 'ask', secret: 'deny' },
+							edit: { '*': 'ask' },
+							bash: { '*': 'ask' },
+							external_directory: { '/unrelated/**': 'deny' },
+						},
 						agents: { build: { model: 'invalid-plural-key/must-not-survive' } },
 						agent: { title: { disable: false, model: 'ambient-title-model-must-not-change' } },
 					}),
@@ -200,6 +224,76 @@ process.exit(0);
 		},
 	}, { env: fixtureEnv });
 	assert.equal(modelResult.status, 'succeeded');
+
+	const permissionWorkspaces = [
+		{
+			label: 'controller-scratch',
+			workspace: path.join(root, 'controller-scratch', 'wp-codebox-1825-gate-fix-2c'),
+			workspaceConfig: 'cwd',
+		},
+		{
+			label: 'managed-worktree',
+			workspace: path.join(root, 'managed-worktrees', 'homeboy-extensions@attempt'),
+			workspaceConfig: 'workspace_path',
+		},
+	];
+	for (const permissionWorkspace of permissionWorkspaces) {
+		fs.mkdirSync(permissionWorkspace.workspace, { recursive: true });
+		spawnSync('git', ['init'], { cwd: permissionWorkspace.workspace, encoding: 'utf8' });
+		spawnSync('git', ['commit', '--allow-empty', '-m', 'initial'], {
+			cwd: permissionWorkspace.workspace,
+			encoding: 'utf8',
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: 'Homeboy Test',
+				GIT_AUTHOR_EMAIL: 'homeboy@example.test',
+				GIT_COMMITTER_NAME: 'Homeboy Test',
+				GIT_COMMITTER_EMAIL: 'homeboy@example.test',
+			},
+		});
+		const concreteWorkspace = fs.realpathSync(permissionWorkspace.workspace);
+		const workspacePattern = path.join(concreteWorkspace, '**');
+		const permissionCliPath = path.join(root, `mock-opencode-permission-${permissionWorkspace.label}.cjs`);
+		fs.writeFileSync(permissionCliPath, `#!/usr/bin/env node
+const assert = require('node:assert/strict');
+assert.equal(process.cwd(), ${JSON.stringify(concreteWorkspace)});
+const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
+assert.equal(config.permission.external_directory[${JSON.stringify(workspacePattern)}], 'allow');
+assert.equal(config.permission.external_directory['/unrelated/**'], 'deny');
+assert.deepEqual(config.permission.grep, { '*': 'ask' });
+assert.deepEqual(config.permission.glob, { '*': 'ask' });
+assert.deepEqual(config.permission.read, { '*.env': 'deny' });
+assert.deepEqual(config.permission.edit, { '*': 'ask' });
+assert.deepEqual(config.agent.build.permission.external_directory, { ${JSON.stringify(workspacePattern)}: 'allow' });
+process.exit(0);
+`);
+		const workspaceRequest = {
+			...request,
+			task_id: `opencode-permission-${permissionWorkspace.label}`,
+			executor: {
+				...request.executor,
+				config: {
+					...request.executor.config,
+					command_args: [permissionCliPath],
+					runtime_env: {
+						OPENCODE_CONFIG_CONTENT: JSON.stringify({
+							permission: {
+								external_directory: { '/unrelated/**': 'deny' },
+								grep: { '*': 'ask' }, glob: { '*': 'ask' }, read: { '*.env': 'deny' }, edit: { '*': 'ask' },
+							},
+						}),
+					},
+				},
+			},
+		};
+		if (permissionWorkspace.workspaceConfig === 'cwd') {
+			workspaceRequest.executor.config.cwd = permissionWorkspace.workspace;
+		} else {
+			workspaceRequest.workspace_path = permissionWorkspace.workspace;
+		}
+		const permissionResult = await executeOpenCodeAgentTask(workspaceRequest, { env: fixtureEnv });
+		assert.equal(permissionResult.status, 'succeeded');
+	}
 
 	const scratchAttempts = [
 		{ id: 'run-2250-attempt-1', status: 0 },

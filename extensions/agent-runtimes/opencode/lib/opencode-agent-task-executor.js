@@ -259,6 +259,7 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '') {
 	const config = request.executor?.config || {};
 	const model = config.model || request.executor?.model || request.model;
 	const smallModel = config.small_model || config.smallModel;
+	const primaryAgent = config.agent || 'build';
 
 	const content = parseOpenCodeConfigContent(existingContent);
 	content.$schema = content.$schema || 'https://opencode.ai/config.json';
@@ -267,7 +268,6 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '') {
 
 	if (model) {
 		content.model = model;
-		const primaryAgent = config.agent || 'build';
 		content.agent[primaryAgent] = { ...objectValue(content.agent[primaryAgent]), model };
 	}
 
@@ -278,8 +278,57 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '') {
 	// Homeboy owns durable task identity, so OpenCode must not create a competing
 	// provider session title from an ambient or run-scoped configuration layer.
 	content.agent.title = { ...objectValue(content.agent.title), disable: true };
+	const workspacePattern = opencodeExternalDirectoryPattern(request, config);
+	if (workspacePattern) {
+		content.permission = permissionWithWorkspaceAllowance(content.permission, workspacePattern);
+		content.agent[primaryAgent] = {
+			...objectValue(content.agent[primaryAgent]),
+			permission: permissionWithWorkspaceAllowance(
+				objectValue(content.agent[primaryAgent]).permission,
+				workspacePattern
+			),
+		};
+	}
 
 	return JSON.stringify(content);
+}
+
+function opencodeExternalDirectoryPattern(request = {}, config = {}) {
+	const cwd = resolveOpenCodeCwd(request, config);
+	if (typeof cwd !== 'string' || cwd.trim() === '') {
+		return '';
+	}
+
+	const workspace = path.resolve(cwd);
+	// OpenCode compares tool paths against the process working directory, which
+	// resolves symlinks when the child process starts.
+	let concreteWorkspace = workspace;
+	try {
+		concreteWorkspace = fs.realpathSync.native?.(workspace) || fs.realpathSync(workspace);
+	} catch {
+		// Keep the configured request path when the caller materializes it after
+		// constructing the executor environment.
+	}
+	return path.join(concreteWorkspace, '**');
+}
+
+function permissionWithWorkspaceAllowance(permission, workspacePattern) {
+	const rules = typeof permission === 'string'
+		? { '*': permission }
+		: objectValue(permission);
+	const externalDirectory = typeof rules.external_directory === 'string'
+		? { '*': rules.external_directory }
+		: objectValue(rules.external_directory);
+
+	return {
+		...rules,
+		external_directory: {
+			...externalDirectory,
+			// OpenCode resolves matching rules in order, so this narrowly scoped rule
+			// deliberately supersedes an inherited catch-all for this task workspace.
+			[workspacePattern]: 'allow',
+		},
+	};
 }
 
 function parseOpenCodeConfigContent(content) {
