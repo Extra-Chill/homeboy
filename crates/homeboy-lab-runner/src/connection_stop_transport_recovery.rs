@@ -9,7 +9,7 @@ const REMOTE_LEASE_BOUND_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Capture the recorded session before a binary promotion changes runner
 /// configuration. The caller can later require this remote daemon owner.
 pub(crate) fn recorded_session(runner_id: &str) -> Result<Option<RunnerSession>> {
-    read_session(runner_id)
+    read_session_or_live_peer(runner_id)
 }
 
 pub(crate) fn disconnect_with_force(
@@ -31,7 +31,18 @@ pub(crate) fn disconnect_with_session(
         runner_id.to_string(),
     )?;
     promotion_lease.assert_generation()?;
-    let session = read_session(runner_id)?;
+    let local_session = read_session(runner_id)?;
+    let session = match expected_session {
+        Some(expected_session)
+            if local_session.as_ref().is_some_and(|current_session| {
+                same_remote_daemon_ownership(runner_id, expected_session, current_session)
+            }) =>
+        {
+            local_session
+        }
+        Some(_) => read_session_or_live_peer(runner_id)?,
+        None => local_session,
+    };
     if let Some(expected_session) = expected_session {
         if !session.as_ref().is_some_and(|current_session| {
             same_remote_daemon_ownership(runner_id, expected_session, current_session)

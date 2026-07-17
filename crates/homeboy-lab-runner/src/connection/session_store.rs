@@ -102,13 +102,33 @@ pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
 /// tunnel for an in-process handoff. Borrowing never writes a controller
 /// record, so only the original controller may later tear down that tunnel.
 pub(super) fn read_session_or_live_peer(runner_id: &str) -> Result<Option<RunnerSession>> {
-    let session = read_session(runner_id)?;
+    read_session_or_live_peer_for_controller(runner_id, &controller_id())
+}
+
+fn read_session_or_live_peer_for_controller(
+    runner_id: &str,
+    controller_id: &str,
+) -> Result<Option<RunnerSession>> {
+    let session = read_session_for_controller(runner_id, controller_id)?;
     if session.as_ref().is_some_and(session_is_live) {
         return Ok(session);
     }
 
     let directory = paths::runner_sessions_dir()?.join(runner_id);
-    let peer = live_peer_session_in(&directory, None, session_is_live)?;
+    resolve_session_or_live_peer_in(&directory, controller_id, session, session_is_live)
+}
+
+fn resolve_session_or_live_peer_in(
+    directory: &PathBuf,
+    controller_id: &str,
+    session: Option<RunnerSession>,
+    is_live: impl Fn(&RunnerSession) -> bool,
+) -> Result<Option<RunnerSession>> {
+    if session.as_ref().is_some_and(|session| is_live(session)) {
+        return Ok(session);
+    }
+
+    let peer = live_peer_session_in(directory, Some(controller_id), is_live)?;
     Ok(peer.or(session))
 }
 
@@ -353,6 +373,37 @@ mod tests {
         assert_eq!(adopted.controller_id.as_deref(), Some("cook-readiness"));
         assert!(root.path().join("cook-readiness.json").exists());
         assert!(!root.path().join("cook-handoff.json").exists());
+    }
+
+    #[test]
+    fn stale_controller_scope_resolves_the_live_peer_for_refresh_and_availability() {
+        let root = TempDir::new().expect("session directory");
+        let stale = session("worktree-a", "lease-stale");
+        let connected = session("worktree-b", "lease-live");
+        let stale_path = root.path().join("worktree-a.json");
+        let connected_path = root.path().join("worktree-b.json");
+        write_session_at(&stale_path, &stale).expect("write stale controller session");
+        write_session_at(&connected_path, &connected).expect("write connected controller session");
+
+        let local = read_session_at(&stale_path).expect("read stale controller session");
+        let resolved = resolve_session_or_live_peer_in(
+            &root.path().to_path_buf(),
+            "worktree-a",
+            local,
+            |candidate| candidate.remote_daemon_lease_id.as_deref() == Some("lease-live"),
+        )
+        .expect("resolve live peer")
+        .expect("authoritative session");
+
+        assert_eq!(resolved.controller_id.as_deref(), Some("worktree-b"));
+        assert_eq!(
+            resolved.remote_daemon_lease_id.as_deref(),
+            Some("lease-live")
+        );
+        assert_eq!(
+            read_session_at(&stale_path).expect("read stale session after resolution"),
+            Some(stale)
+        );
     }
 
     #[test]

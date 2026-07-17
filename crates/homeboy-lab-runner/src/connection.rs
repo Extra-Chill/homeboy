@@ -140,7 +140,7 @@ pub fn connect_with_orphan_adoption(
         ));
     };
     let version = identity.version.clone();
-    let previous_session = read_session(runner_id)?;
+    let previous_session = read_session_or_live_peer(runner_id)?;
 
     let mut leaseless_recovery = None;
     let mut state_loss_recovery = None;
