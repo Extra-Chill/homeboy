@@ -175,8 +175,12 @@ pub(super) fn execute_release_plan_step(
             .map(Some)
         }
         "github.release" => Ok(Some(
-            executor::run_github_release(context.component, &context.state)
-                .unwrap_or_else(|err| failed_result("github.release", "github.release", err)),
+            executor::run_github_release(
+                context.component,
+                &context.state,
+                context.options.pipeline.from_artifacts.is_some(),
+            )
+            .unwrap_or_else(|err| failed_result("github.release", "github.release", err)),
         )),
         "cleanup" => {
             if context.publish_failed {

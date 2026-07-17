@@ -911,13 +911,53 @@ mod tests {
             ..ReleaseState::default()
         };
 
-        let error = super::run_github_release(&component, &state)
+        let error = super::run_github_release(&component, &state, false)
             .expect_err("missing declared artifact must block GitHub publication");
 
         assert!(error
             .message
             .contains("absent from the GitHub Release assets"));
         assert!(!error.message.contains("no remote_url"));
+    }
+
+    #[test]
+    fn external_cargo_dist_artifacts_do_not_require_raw_deploy_artifact() {
+        let artifact_dir = tempfile::tempdir().expect("artifact tempdir");
+        let archive = artifact_dir
+            .path()
+            .join("homeboy-x86_64-unknown-linux-gnu.tar.xz");
+        let checksum = artifact_dir
+            .path()
+            .join("homeboy-x86_64-unknown-linux-gnu.tar.xz.sha256");
+        let manifest = artifact_dir.path().join("dist-manifest.json");
+        std::fs::write(&archive, "archive").expect("write archive");
+        std::fs::write(&checksum, "checksum").expect("write checksum");
+        std::fs::write(
+            &manifest,
+            r#"{"artifacts":[{"path":"homeboy-x86_64-unknown-linux-gnu.tar.xz"},{"path":"homeboy-x86_64-unknown-linux-gnu.tar.xz.sha256"}]}"#,
+        )
+        .expect("write manifest");
+
+        let mut state = ReleaseState {
+            tag: Some("v1.2.3".to_string()),
+            ..ReleaseState::default()
+        };
+        super::artifacts::run_artifact_inventory(
+            &mut state,
+            &artifact_dir.path().to_string_lossy(),
+        )
+        .expect("inventory external artifacts");
+        let component = Component {
+            id: "homeboy".to_string(),
+            local_path: artifact_dir.path().to_string_lossy().to_string(),
+            build_artifact: Some("target/release/homeboy".to_string()),
+            ..Component::default()
+        };
+
+        let error = super::run_github_release(&component, &state, true)
+            .expect_err("missing remote should stop after asset validation");
+        assert!(error.message.contains("no remote_url"));
+        assert!(!error.message.contains("build_artifact"));
     }
 
     fn release_package_extension(id: &str, command: &str) -> ExtensionManifest {

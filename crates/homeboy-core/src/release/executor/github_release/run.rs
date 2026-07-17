@@ -43,13 +43,14 @@ use super::{
 pub(crate) fn run_github_release(
     component: &Component,
     state: &ReleaseState,
+    external_artifacts: bool,
 ) -> Result<ReleaseStepResult> {
     let tag = state.tag.clone().ok_or_else(|| {
         Error::internal_unexpected(
             "github.release: tag state not set (git.tag must run first)".to_string(),
         )
     })?;
-    validate_declared_build_artifact(component, state)?;
+    validate_declared_build_artifact(component, state, external_artifacts)?;
     let local_path = &component.local_path;
 
     let remote_url = component
@@ -414,9 +415,16 @@ pub(crate) fn run_github_release(
     ))
 }
 
-/// A configured deploy artifact is part of the release contract, including
-/// `--head --from-artifacts` recovery where `release.package` is not run.
-fn validate_declared_build_artifact(component: &Component, state: &ReleaseState) -> Result<()> {
+/// Package-owned releases must include the component deploy artifact. Externally
+/// supplied release assets have their own validated inventory contract.
+pub(crate) fn validate_declared_build_artifact(
+    component: &Component,
+    state: &ReleaseState,
+    external_artifacts: bool,
+) -> Result<()> {
+    if external_artifacts {
+        return Ok(());
+    }
     let Some(declared_build_artifact) = component
         .build_artifact
         .as_deref()
