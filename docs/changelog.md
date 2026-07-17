@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.288.10] - 2026-07-17
+
+### Changed
+- move CodeAuditResult schema into homeboy-audit-contract
+
+### Fixed
+- pin fresh runs to submitting controller
+
 ## [0.288.9] - 2026-07-16
 
 ### Changed

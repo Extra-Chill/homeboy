@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.288.9"
+version = "0.288.10"
 dependencies = [
  "base64",
  "chrono",
