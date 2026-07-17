@@ -2244,6 +2244,203 @@ fn promotion_options_keep_flat_verify_gate_serialized_shape() {
     assert_eq!(round_trip, options);
 }
 
+fn adopted_commit_options(
+    temp: &tempfile::TempDir,
+    repo: &Path,
+    base: String,
+    candidate_ref: String,
+    gates: VerifyGateOptions,
+) -> AgentTaskPromotionOptions {
+    let source_path = temp.path().join("adoption-outcome.json");
+    let source = serde_json::json!({
+        "schema": AGENT_TASK_OUTCOME_SCHEMA,
+        "task_id": "adoption-task",
+        "status": "succeeded",
+        "artifacts": []
+    })
+    .to_string();
+    std::fs::write(&source_path, &source).expect("write adoption outcome");
+    AgentTaskPromotionOptions {
+        source,
+        source_run_id: Some("adoption-run".to_string()),
+        source_path: Some(source_path),
+        source_worktree_path: Some(repo.to_path_buf()),
+        // The immutable task base is the candidate contract; this fixture does
+        // not configure a remote branch snapshot for finalization.
+        base_ref: None,
+        task_base_sha: Some(base),
+        candidate_ref: Some(candidate_ref),
+        to_worktree: "repo@adopted".to_string(),
+        task_id: None,
+        artifact_id: None,
+        dry_run: false,
+        gates,
+        provider_command: None,
+        provider_invocation: None,
+    }
+}
+
+fn adopted_commit_repo() -> (tempfile::TempDir, PathBuf, String, String) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "agent@example.test"]);
+    git(&repo, &["config", "user.name", "Agent"]);
+    git(&repo, &["checkout", "-b", "main"]);
+    std::fs::write(repo.join("lib.rs"), "base\n").expect("write base");
+    git(&repo, &["add", "lib.rs"]);
+    git(&repo, &["commit", "-m", "base"]);
+    let base = git_head(&repo, "HEAD");
+    std::fs::write(repo.join("lib.rs"), "candidate\n").expect("write candidate");
+    git(&repo, &["commit", "-am", "candidate"]);
+    let candidate = git_head(&repo, "HEAD");
+    (temp, repo, base, candidate)
+}
+
+#[test]
+fn explicit_candidate_commit_adoption_promotes_and_records_green_gate_handoff() {
+    let (temp, repo, base, candidate) = adopted_commit_repo();
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(repo.clone()),
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        adopted_commit_options(
+            &temp,
+            &repo,
+            base,
+            candidate.clone(),
+            VerifyGateOptions {
+                verify: vec!["cargo test --lib".to_string()],
+                ..Default::default()
+            },
+        ),
+        &mut provider,
+    )
+    .expect("candidate adoption promotes");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(
+        report.provenance["commit_range"],
+        format!(
+            "{}..{}",
+            report.provenance["base_ref"].as_str().unwrap(),
+            candidate
+        )
+    );
+    assert_eq!(provider.apply_calls.len(), 1);
+    assert_eq!(provider.verify_calls.len(), 1);
+    assert_eq!(
+        report.deterministic_gates[0].status,
+        crate::agent_task_gate::AgentTaskGateStatus::Succeeded
+    );
+}
+
+#[test]
+fn explicit_candidate_rejections_leave_target_unmodified() {
+    let (temp, repo, base, candidate) = adopted_commit_repo();
+    let cases = [
+        (
+            "unresolved",
+            "not-a-commit".to_string(),
+            base.clone(),
+            "not present",
+        ),
+        (
+            "stale",
+            candidate.clone(),
+            "0000000000000000000000000000000000000000".to_string(),
+            "git rev-parse",
+        ),
+    ];
+    for (name, candidate_ref, task_base, expected) in cases {
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(repo.clone()),
+            ..Default::default()
+        };
+        let error = promote_with_provider(
+            adopted_commit_options(
+                &temp,
+                &repo,
+                task_base,
+                candidate_ref,
+                VerifyGateOptions::default(),
+            ),
+            &mut provider,
+        )
+        .expect_err(name);
+        assert!(
+            error.message.contains(expected),
+            "{name}: {}",
+            error.message
+        );
+        assert!(provider.apply_calls.is_empty(), "{name} mutated target");
+    }
+}
+
+#[test]
+fn explicit_candidate_rejects_non_ancestor_base_and_dirty_source_before_apply() {
+    let (temp, repo, base, candidate) = adopted_commit_repo();
+    git(&repo, &["checkout", "-b", "unrelated", &base]);
+    std::fs::write(repo.join("other.rs"), "other\n").expect("write unrelated");
+    git(&repo, &["add", "other.rs"]);
+    git(&repo, &["commit", "-m", "unrelated"]);
+    let unrelated = git_head(&repo, "HEAD");
+    git(&repo, &["checkout", "main"]);
+    let mut provider = FakePromotionWorkspaceProvider::default();
+    let error = promote_with_provider(
+        adopted_commit_options(
+            &temp,
+            &repo,
+            unrelated,
+            candidate.clone(),
+            VerifyGateOptions::default(),
+        ),
+        &mut provider,
+    )
+    .expect_err("non-ancestor base");
+    assert!(error.message.contains("ancestor"), "{}", error.message);
+    assert!(provider.apply_calls.is_empty());
+
+    std::fs::write(repo.join("dirty.txt"), "dirty\n").expect("dirty source");
+    let error = promote_with_provider(
+        adopted_commit_options(&temp, &repo, base, candidate, VerifyGateOptions::default()),
+        &mut provider,
+    )
+    .expect_err("dirty source");
+    assert!(error.message.contains("source worktree is dirty"));
+    assert!(provider.apply_calls.is_empty());
+}
+
+#[test]
+fn explicit_candidate_gate_failure_is_recorded_after_normal_promotion_handoff() {
+    let (temp, repo, base, candidate) = adopted_commit_repo();
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(repo),
+        verify_exit_code: 1,
+        ..Default::default()
+    };
+    let report = promote_with_provider(
+        adopted_commit_options(
+            &temp,
+            provider.workspace_path.as_deref().expect("workspace"),
+            base,
+            candidate,
+            VerifyGateOptions {
+                verify: vec!["failing-gate".to_string()],
+                ..Default::default()
+            },
+        ),
+        &mut provider,
+    )
+    .expect("gate failure is a promotion report");
+    assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
+    assert_eq!(provider.apply_calls.len(), 1);
+    assert_eq!(provider.verify_calls.len(), 1);
+}
+
 fn git_head(cwd: &Path, reference: &str) -> String {
     let output = Command::new("git")
         .args(["rev-parse", reference])

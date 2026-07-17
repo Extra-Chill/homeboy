@@ -107,6 +107,10 @@ an exhausted run records which budget stopped further execution.
 | `finalize-pr` | Finalize a green cook run into a review-ready pull request. |
 | `gate-feedback` | Convert deterministic gate results into a cook retry or stop decision. |
 
+`adopt` accepts only immutable commits from the recorded cook source workspace.
+Use `promote` for patch-artifact candidates; it remains the controller-owned
+patch-artifact ingestion and gate path.
+
 `finalize-pr` is the core-owned publication boundary for external runtimes. Its
 `homeboy/agent-task-pr-finalization/v1` report keeps the legacy top-level
 `status`, `pr_action`, `pr_number`, and `pr_url` fields, and also emits explicit
