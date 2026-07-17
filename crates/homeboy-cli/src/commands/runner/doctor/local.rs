@@ -200,6 +200,7 @@ pub fn report(
         capabilities,
         resources,
         checks,
+        diagnostics: None,
         daemon_recovery: None,
         repairs: Vec::new(),
     }

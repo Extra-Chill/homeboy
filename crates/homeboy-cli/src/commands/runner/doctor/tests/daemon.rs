@@ -49,6 +49,55 @@ fn daemon_exec_probe_reports_structured_failure() {
 }
 
 #[test]
+fn stalled_daemon_probe_returns_timeout_reason_code() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    std::thread::spawn(move || {
+        let (_stream, _) = listener.accept().expect("accept");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    });
+
+    let check = probes::daemon_exec_check_with_timeout(
+        "homeboy-lab",
+        "/home/user/Developer",
+        &format!("http://{addr}"),
+        std::time::Duration::from_millis(50),
+    );
+
+    assert_eq!(check.id, "daemon.exec");
+    assert_eq!(check.status, RunnerDoctorStatus::Error);
+    assert_eq!(
+        check.details.get("reason_code").map(String::as_str),
+        Some("runner_doctor.daemon_timeout")
+    );
+    assert_eq!(
+        check.details.get("timeout_ms").map(String::as_str),
+        Some("50")
+    );
+}
+
+#[test]
+fn exhausted_overall_budget_skips_daemon_probe_with_stable_reason_code() {
+    let check = probes::daemon_exec_check_with_timeout(
+        "homeboy-lab",
+        "/home/user/Developer",
+        "http://127.0.0.1:9",
+        std::time::Duration::ZERO,
+    );
+
+    assert_eq!(check.id, "daemon.exec");
+    assert_eq!(check.status, RunnerDoctorStatus::Error);
+    assert_eq!(
+        check.details.get("reason_code").map(String::as_str),
+        Some("runner_doctor.overall_timeout")
+    );
+    assert_eq!(
+        check.details.get("timeout_ms").map(String::as_str),
+        Some("0")
+    );
+}
+
+#[test]
 fn ssh_target_uses_runner_env_for_remote_probes() {
     crate::test_support::with_isolated_home(|_| {
         server::create(
