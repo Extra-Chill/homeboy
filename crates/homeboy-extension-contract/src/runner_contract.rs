@@ -122,10 +122,10 @@ impl RunnerStepFilter {
     pub fn to_env_pairs(&self) -> Vec<(String, String)> {
         let mut env = Vec::new();
         if let Some(step) = &self.step {
-            env.push((super::exec_context::STEP.to_string(), step.clone()));
+            env.push((crate::exec_context::STEP.to_string(), step.clone()));
         }
         if let Some(skip) = &self.skip {
-            env.push((super::exec_context::SKIP.to_string(), skip.clone()));
+            env.push((crate::exec_context::SKIP.to_string(), skip.clone()));
         }
         env
     }
