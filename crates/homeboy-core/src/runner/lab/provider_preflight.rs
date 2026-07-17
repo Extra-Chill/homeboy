@@ -24,6 +24,7 @@ use super::offload::runner_homeboy_daemon_display;
 struct AgentTaskProviderSelection {
     backend: String,
     selector: Option<String>,
+    runtime_identity: Option<crate::agent_task_config::ResolvedAgentTaskRuntimeIdentity>,
 }
 
 const PROVIDER_SESSION_REFRESH_RETRY_ATTEMPTS: usize = 20;
@@ -46,6 +47,9 @@ pub(super) fn preflight_agent_task_provider_on_runner(
     let Some(selection) = agent_task_provider_selection_from_args(args)? else {
         return Ok(());
     };
+    if let Some(identity) = selection.runtime_identity.as_ref() {
+        return validate_controller_runtime_identity(identity, &selection);
+    }
 
     let mut command = command_prefix.to_vec();
     command.extend([
@@ -359,6 +363,7 @@ fn agent_task_provider_selection_from_args(
     let mut backend = None;
     let mut selector = None;
     let mut repo = None;
+    let mut resolved_provider_policy = None;
     let mut iter = args.iter().skip(action_index + 1);
     while let Some(arg) = iter.next() {
         if arg == "--" {
@@ -368,6 +373,7 @@ fn agent_task_provider_selection_from_args(
             "--backend" => backend = iter.next().cloned(),
             "--selector" => selector = iter.next().cloned(),
             "--repo" => repo = iter.next().cloned(),
+            "--resolved-provider-policy" => resolved_provider_policy = iter.next().cloned(),
             _ => {
                 if let Some(value) = arg.strip_prefix("--backend=") {
                     backend = Some(value.to_string());
@@ -375,6 +381,8 @@ fn agent_task_provider_selection_from_args(
                     selector = Some(value.to_string());
                 } else if let Some(value) = arg.strip_prefix("--repo=") {
                     repo = Some(value.to_string());
+                } else if let Some(value) = arg.strip_prefix("--resolved-provider-policy=") {
+                    resolved_provider_policy = Some(value.to_string());
                 }
             }
         }
@@ -385,7 +393,63 @@ fn agent_task_provider_selection_from_args(
         None => default_backend_for_component(repo.as_deref())?,
     };
 
-    Ok(backend.map(|backend| AgentTaskProviderSelection { backend, selector }))
+    let runtime_identity = resolved_provider_policy
+        .map(|policy| {
+            serde_json::from_str::<crate::agent_task_config::ResolvedAgentTaskProviderPolicy>(
+                &policy,
+            )
+            .map(|policy| policy.runtime_identity)
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "resolved-provider-policy",
+                    "Lab received an invalid controller provider policy",
+                    Some(error.to_string()),
+                    None,
+                )
+            })
+        })
+        .transpose()?
+        .flatten();
+    Ok(backend.map(|backend| AgentTaskProviderSelection {
+        backend,
+        selector,
+        runtime_identity,
+    }))
+}
+
+fn validate_controller_runtime_identity(
+    identity: &crate::agent_task_config::ResolvedAgentTaskRuntimeIdentity,
+    selection: &AgentTaskProviderSelection,
+) -> Result<()> {
+    if !crate::agent_runtime_manifest::is_immutable_revision(&identity.source_revision) {
+        return Err(Error::validation_invalid_argument(
+            "resolved-provider-policy",
+            "Lab requires a full immutable runtime source revision from the controller",
+            Some(identity.source_revision.clone()),
+            None,
+        ));
+    }
+    let provider: AgentTaskExecutorProvider = serde_json::from_value(identity.provider.clone())
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "resolved-provider-policy",
+                "Lab received an invalid controller-selected provider",
+                Some(error.to_string()),
+                None,
+            )
+        })?;
+    if provider.id != identity.provider_id || provider.backend != selection.backend {
+        return Err(Error::validation_invalid_argument(
+            "resolved-provider-policy",
+            "Lab controller runtime identity does not match the requested provider",
+            Some(format!(
+                "identity provider '{}' backend '{}'; request backend '{}'",
+                identity.provider_id, provider.backend, selection.backend
+            )),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn parse_agent_task_providers_output(
@@ -667,6 +731,83 @@ mod tests {
     }
 
     #[test]
+    fn controller_identity_bypasses_runner_discovery_with_full_selected_provider() {
+        let policy = crate::agent_task_config::ResolvedAgentTaskProviderPolicy {
+            backend: "controller-backend".to_string(),
+            selector: Some("controller-source".to_string()),
+            model: None,
+            rotation: None,
+            rotation_starts_with_first_entry: false,
+            retry: Default::default(),
+            liveness_timeout_ms: None,
+            runtime_identity: Some(crate::agent_task_config::ResolvedAgentTaskRuntimeIdentity {
+                runtime_id: "controller-runtime".to_string(),
+                provider_id: "controller-provider".to_string(),
+                source_selector: "extension:controller-source".to_string(),
+                source_revision: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                freshness:
+                    crate::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Unverifiable,
+                provider: serde_json::json!({
+                    "id": "controller-provider",
+                    "backend": "controller-backend",
+                    "argv": ["controller-provider"]
+                }),
+                materialization_plan: serde_json::json!({"runtime_id": "controller-runtime"}),
+            }),
+        };
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--backend".to_string(),
+            "controller-backend".to_string(),
+            "--resolved-provider-policy".to_string(),
+            serde_json::to_string(&policy).expect("policy"),
+        ];
+
+        let selection = agent_task_provider_selection_from_args(&args)
+            .expect("selection")
+            .expect("agent task selection");
+
+        assert_eq!(
+            selection
+                .runtime_identity
+                .as_ref()
+                .expect("identity")
+                .provider_id,
+            "controller-provider"
+        );
+        validate_controller_runtime_identity(
+            selection.runtime_identity.as_ref().expect("identity"),
+            &selection,
+        )
+        .expect("controller identity is sufficient without runner discovery");
+    }
+
+    #[test]
+    fn controller_identity_rejects_short_source_revision() {
+        let selection = AgentTaskProviderSelection {
+            backend: "controller-backend".to_string(),
+            selector: None,
+            runtime_identity: None,
+        };
+        let identity = crate::agent_task_config::ResolvedAgentTaskRuntimeIdentity {
+            runtime_id: "runtime".to_string(),
+            provider_id: "provider".to_string(),
+            source_selector: "extension:source".to_string(),
+            source_revision: "0123456".to_string(),
+            freshness: crate::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Unverifiable,
+            provider: serde_json::json!({"id": "provider", "backend": "controller-backend"}),
+            materialization_plan: serde_json::Value::Null,
+        };
+
+        let error = validate_controller_runtime_identity(&identity, &selection)
+            .expect_err("short revision must fail");
+
+        assert!(error.message.contains("full immutable"));
+    }
+
+    #[test]
     fn runner_provider_output_parser_accepts_cli_envelope_with_chatter() {
         let stdout = concat!(
             "Preparing runtime...\n",
@@ -693,6 +834,7 @@ mod tests {
         let mut selection = AgentTaskProviderSelection {
             backend: "extension-a".to_string(),
             selector: None,
+            runtime_identity: None,
         };
         assert!(runner_provider_unavailable_reason(&providers, &selection).is_none());
         assert!(provider_available(
@@ -731,6 +873,7 @@ mod tests {
         let selection = AgentTaskProviderSelection {
             backend: "primary".to_string(),
             selector: None,
+            runtime_identity: None,
         };
         let runner_homeboy = serde_json::json!({
             "refresh_commands": [
@@ -782,6 +925,7 @@ mod tests {
         let selection = AgentTaskProviderSelection {
             backend: "primary".to_string(),
             selector: None,
+            runtime_identity: None,
         };
         let runner_homeboy = serde_json::json!({
             "active_daemon_build_identity": "homeboy 0.0.0+old",
@@ -825,6 +969,7 @@ mod tests {
         let selection = AgentTaskProviderSelection {
             backend: "opencode".to_string(),
             selector: Some("opencode.agent-task-executor".to_string()),
+            runtime_identity: None,
         };
         let runner_homeboy = serde_json::json!({
             "refresh_commands": [

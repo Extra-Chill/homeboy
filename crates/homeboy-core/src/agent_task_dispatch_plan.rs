@@ -173,12 +173,28 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 backend: policy_backend.clone(),
                 selector: policy_selector.clone(),
                 runtime_selection: Some(AgentTaskRuntimeSelection {
-                    runtime_id: None,
+                    runtime_id: request
+                        .core
+                        .resolved_provider_policy
+                        .as_ref()
+                        .and_then(|policy| policy.runtime_identity.as_ref())
+                        .map(|identity| identity.runtime_id.clone()),
                     executor_backend: Some(policy_backend.clone()),
-                    executor_provider_id: policy_selector.clone(),
+                    executor_provider_id: request
+                        .core
+                        .resolved_provider_policy
+                        .as_ref()
+                        .and_then(|policy| policy.runtime_identity.as_ref())
+                        .map(|identity| identity.provider_id.clone())
+                        .or_else(|| policy_selector.clone()),
                     ai_provider_id: config_string(&provider_config, "provider"),
                     model: policy_model.clone(),
-                    substrate_ref: None,
+                    substrate_ref: request
+                        .core
+                        .resolved_provider_policy
+                        .as_ref()
+                        .and_then(|policy| policy.runtime_identity.as_ref())
+                        .map(|identity| identity.source_revision.clone()),
                 }),
                 required_capabilities: request.required_capabilities.clone(),
                 secret_env: secret_env.clone(),
@@ -238,6 +254,9 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 "dispatch": "agent-task cook",
                 "required_capabilities": request.required_capabilities,
                 "runtime_dependency_graph": runtime_dependency_graph_evidence,
+                "resolved_runtime_identity": request.core.resolved_provider_policy
+                    .as_ref()
+                    .and_then(|policy| policy.runtime_identity.as_ref()),
             }),
         });
     }
@@ -1114,6 +1133,7 @@ mod tests {
                                 ..Default::default()
                             },
                             liveness_timeout_ms: Some(45_000),
+                            runtime_identity: None,
                         },
                     ),
                     ..DispatchCoreInputs::default()
@@ -1199,6 +1219,7 @@ mod tests {
                                 ..Default::default()
                             },
                             liveness_timeout_ms: None,
+                            runtime_identity: None,
                         },
                     ),
                     ..DispatchCoreInputs::default()
@@ -1240,6 +1261,7 @@ mod tests {
                             ..Default::default()
                         },
                         liveness_timeout_ms: None,
+                        runtime_identity: None,
                     },
                 ),
                 ..DispatchCoreInputs::default()
@@ -1329,6 +1351,7 @@ mod tests {
                     rotation_starts_with_first_entry: false,
                     retry: AgentTaskRetryPolicy::default(),
                     liveness_timeout_ms: None,
+                    runtime_identity: None,
                 };
             let mut request = dispatch_request(DispatchRequestOverrides {
                 prompt: Some("Cook with the submitted model.".to_string()),

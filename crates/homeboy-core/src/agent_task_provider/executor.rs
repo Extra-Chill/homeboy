@@ -1,6 +1,7 @@
 use super::command_runner::{failure_outcome, run_materialized_provider_command};
 use super::fixtures::run_fixture_provider;
 use super::*;
+use std::borrow::Cow;
 
 impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
     fn execute(
@@ -36,17 +37,30 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             return run_repo_local_gate_task(&request);
         }
 
-        let provider = match resolve_provider_for_backend(
-            self.providers(),
-            &request.executor.backend,
-            request.executor.selector.as_deref(),
-        ) {
-            ProviderResolution::Resolved(provider) => provider,
-            resolution => {
-                return provider_resolution_failure_outcome(
+        let provider = match resolved_provider_from_request(&request) {
+            Ok(Some(provider)) => Cow::Owned(provider),
+            Ok(None) => match resolve_provider_for_backend(
+                self.providers(),
+                &request.executor.backend,
+                request.executor.selector.as_deref(),
+            ) {
+                ProviderResolution::Resolved(provider) => Cow::Borrowed(provider),
+                resolution => {
+                    return provider_resolution_failure_outcome(
+                        &request,
+                        resolution,
+                        self.diagnostics(),
+                    )
+                }
+            },
+            Err(message) => {
+                return failure_outcome(
                     &request,
-                    resolution,
-                    self.diagnostics(),
+                    AgentTaskOutcomeStatus::ProviderError,
+                    AgentTaskFailureClassification::Provider,
+                    "agent_task.runtime_identity_invalid",
+                    message,
+                    Value::Null,
                 )
             }
         };
@@ -73,8 +87,39 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             );
         }
 
-        run_materialized_provider_command(&request, provider, context.run_id.as_deref())
+        run_materialized_provider_command(&request, &provider, context.run_id.as_deref())
     }
+}
+
+fn resolved_provider_from_request(
+    request: &AgentTaskExecutorRequest,
+) -> std::result::Result<Option<AgentTaskExecutorProvider>, String> {
+    let Some(identity) = request
+        .request
+        .metadata
+        .get("resolved_runtime_identity")
+        .filter(|identity| !identity.is_null())
+    else {
+        return Ok(None);
+    };
+    let identity: crate::agent_task_config::ResolvedAgentTaskRuntimeIdentity =
+        serde_json::from_value(identity.clone())
+            .map_err(|error| format!("invalid controller runtime identity: {error}"))?;
+    if !crate::agent_runtime_manifest::is_immutable_revision(&identity.source_revision) {
+        return Err(format!(
+            "controller runtime identity for provider '{}' has a non-immutable source revision '{}'",
+            identity.provider_id, identity.source_revision
+        ));
+    }
+    let provider: AgentTaskExecutorProvider = serde_json::from_value(identity.provider)
+        .map_err(|error| format!("invalid controller-selected provider: {error}"))?;
+    if provider.id != identity.provider_id || provider.backend != request.request.executor.backend {
+        return Err(format!(
+            "controller runtime identity does not match requested provider backend '{}' and id '{}'",
+            request.request.executor.backend, identity.provider_id
+        ));
+    }
+    Ok(Some(provider))
 }
 
 fn materialize_executor_request(

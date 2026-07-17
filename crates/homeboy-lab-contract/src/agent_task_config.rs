@@ -336,6 +336,36 @@ pub struct ResolvedAgentTaskProviderPolicy {
     pub retry: AgentTaskRetryPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_timeout_ms: Option<u64>,
+    /// Controller-selected runtime identity. Lab consumes this opaque identity
+    /// instead of reapplying local extension discovery precedence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_identity: Option<ResolvedAgentTaskRuntimeIdentity>,
+}
+
+/// Immutable runtime identity selected by the controller for an agent-task
+/// provider. `source_selector` is deliberately explicit so a collision is
+/// observable in handoff evidence rather than hidden by local precedence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedAgentTaskRuntimeIdentity {
+    pub runtime_id: String,
+    pub provider_id: String,
+    pub source_selector: String,
+    pub source_revision: String,
+    pub freshness: ResolvedAgentTaskRuntimeFreshness,
+    /// Controller-resolved provider definition. This opaque payload prevents a
+    /// Lab runner from applying its own extension discovery precedence.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub provider: Value,
+    /// Controller-resolved materialization contract for the selected provider.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub materialization_plan: Value,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedAgentTaskRuntimeFreshness {
+    Pinned,
+    Unverifiable,
 }
 
 /// One rotation target: executor selector overrides and/or nested provider
