@@ -1271,6 +1271,93 @@ mod tests {
     }
 
     #[test]
+    fn exact_ref_command_preparation_rebuilds_extension_owned_artifact() {
+        with_isolated_home(|home| {
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions/fixture-packager");
+            std::fs::create_dir_all(&extension_dir).expect("extension directory");
+            std::fs::write(
+                extension_dir.join("fixture-packager.json"),
+                r#"{"name":"fixture-packager","version":"1.0.0","build":{"extension_script":"build.sh","artifact_pattern":"build/plugin.zip"}}"#,
+            )
+            .expect("extension manifest");
+            std::fs::write(
+                extension_dir.join("build.sh"),
+                "mkdir -p build\n[ -f build/plugin.zip ] || git archive --format=zip --output=build/plugin.zip HEAD\n",
+            )
+            .expect("extension build script");
+
+            let repo = TempDir::new().expect("repo");
+            run_git(repo.path(), &["init", "-q"]);
+            run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+            run_git(repo.path(), &["config", "user.name", "Test"]);
+            std::fs::write(repo.path().join("payload.txt"), "stale\n").expect("stale payload");
+            std::fs::create_dir_all(repo.path().join("build")).expect("build directory");
+            std::fs::write(repo.path().join("build/plugin.zip"), "stale artifact\n")
+                .expect("stale artifact");
+            run_git(repo.path(), &["add", "."]);
+            run_git(repo.path(), &["commit", "-q", "-m", "stale artifact"]);
+
+            std::fs::write(repo.path().join("payload.txt"), "requested\n")
+                .expect("requested payload");
+            run_git(repo.path(), &["commit", "-am", "requested", "-q"]);
+            run_git(repo.path(), &["branch", "requested"]);
+            let requested_sha = git_stdout(repo.path(), &["rev-parse", "requested"]);
+            std::fs::write(repo.path().join("payload.txt"), "configured\n")
+                .expect("configured payload");
+            run_git(repo.path(), &["commit", "-am", "configured", "-q"]);
+
+            let mut component = Component::new(
+                "plugin".to_string(),
+                repo.path().display().to_string(),
+                "plugins/plugin".to_string(),
+                None,
+            );
+            component.extract_command = Some("unzip -o {{artifact}}".to_string());
+            component.extensions = Some(HashMap::from([(
+                "fixture-packager".to_string(),
+                crate::component::ScopedExtensionConfig::default(),
+            )]));
+            let checkout = ExactRefCheckout::materialize(&component, "requested")
+                .expect("materialize requested ref");
+            checkout.verify().expect("verify requested ref");
+
+            let mut config = base_deploy_config();
+            config.requested_ref = Some("requested".to_string());
+            config.force = true;
+            let prepared = prepare_component_deployments(
+                &[checkout.component.clone()],
+                &config,
+                &Project::default(),
+                "/srv/site",
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .expect("prepare exact-ref extension artifact");
+
+            let artifact = prepared[0].artifact_path.as_ref().expect("artifact path");
+            let file = std::fs::File::open(artifact).expect("open artifact");
+            let mut archive = zip::ZipArchive::new(file).expect("read artifact");
+            assert_eq!(
+                std::io::read_to_string(archive.by_name("payload.txt").expect("payload entry"))
+                    .expect("payload content"),
+                "requested\n"
+            );
+            assert_eq!(
+                prepared[0]
+                    .config
+                    .prepared_artifact
+                    .as_ref()
+                    .expect("prepared artifact")
+                    .source_commit,
+                requested_sha
+            );
+        });
+    }
+
+    #[test]
     fn exact_ref_hydration_fixtures_build_concurrently_without_crossing_worktrees() {
         let _home_env = home_env_guard();
         let barrier = Arc::new(Barrier::new(2));
