@@ -5,35 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::parsing::BenchResults;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct BenchDiagnostic {
-    /// Workload-defined diagnostic class used for grouping related failures.
-    #[serde(alias = "kind", alias = "code")]
-    pub class: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub severity: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<BenchDiagnosticSource>,
-    #[serde(default, alias = "details", skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum BenchDiagnosticSource {
-    Run,
-    Scenario {
-        scenario_id: String,
-    },
-    ScenarioRun {
-        scenario_id: String,
-        run_index: usize,
-    },
-}
+pub use homeboy_extension_contract::bench_diagnostics::{BenchDiagnostic, BenchDiagnosticSource};
 
 pub fn collect_diagnostics(results: Option<&BenchResults>) -> Vec<BenchDiagnostic> {
     let Some(results) = results else {
