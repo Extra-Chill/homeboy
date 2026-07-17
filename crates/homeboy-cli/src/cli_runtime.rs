@@ -147,6 +147,10 @@ impl CliRuntime {
         // resolve a runner's configured workspace_root without core depending on
         // the runner config registry.
         crate::core::runner::register_runner_workspace_root_provider();
+        // Register Runner as a config entity so it participates in config
+        // id/alias collision detection, mirroring how feature crates register
+        // their own entities (moves into the runner crate once extracted).
+        crate::core::runner::register_runner_config_entity();
         // Register the runner-upgrade provider so the core upgrade flow can
         // refresh configured runners without depending on runner behavior.
         crate::core::upgrade::register_runner_upgrade();
