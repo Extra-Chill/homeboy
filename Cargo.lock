@@ -808,6 +808,7 @@ dependencies = [
  "homeboy-process",
  "homeboy-product-identity",
  "homeboy-redaction",
+ "homeboy-refactor-contract",
  "homeboy-triage",
  "homeboy-tunnel",
  "libc",

@@ -149,6 +149,7 @@ pub mod quality;
 // existing `crate::redaction::*` call sites keep working unchanged.
 pub use homeboy_redaction as redaction;
 pub mod refactor;
+pub mod refactor_transform_provider;
 pub mod release;
 pub mod release_set;
 pub mod report_compare;

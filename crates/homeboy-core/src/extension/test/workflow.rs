@@ -4,10 +4,6 @@ use crate::extension::test::resolve_drift_options;
 use crate::extension::test::TestScopeOutput;
 use crate::extension::test::{ChangeType, TestAnalysis};
 use crate::extension::test::{TestBaselineComparison, TestCounts};
-use crate::refactor::{
-    self,
-    auto::{self, AutofixMode},
-};
 use homeboy_refactor_contract::{AppliedRefactor, TransformSet};
 use serde::Serialize;
 
@@ -205,15 +201,18 @@ pub fn auto_fix_test_drift(
     let output = if rules.is_empty() {
         crate::log_status!("test", "No auto-fixable drift detected. Nothing to apply.");
 
-        AutoFixDriftOutput {
-            since: since.to_string(),
-            auto_fixable_changes: drift_report.auto_fixable,
-            generated_rules: 0,
-            replacements: 0,
-            files_modified: 0,
-            written: write,
-            rerun_recommended: false,
-        }
+        (
+            AutoFixDriftOutput {
+                since: since.to_string(),
+                auto_fixable_changes: drift_report.auto_fixable,
+                generated_rules: 0,
+                replacements: 0,
+                files_modified: 0,
+                written: write,
+                rerun_recommended: false,
+            },
+            Vec::new(),
+        )
     } else {
         let set = TransformSet {
             description: format!(
@@ -222,27 +221,34 @@ pub fn auto_fix_test_drift(
             ),
             rules,
         };
+        let generated_rules = set.rules.len();
 
-        let result = refactor::apply_transforms(
+        // Applying transforms + formatting the autofix outcome is refactor-engine
+        // behavior, inverted behind the refactor transform provider hook so the
+        // extension does not depend on the refactor feature layer.
+        let summary = crate::refactor_transform_provider::apply_transform_set(
             &source_path,
             "test_auto_fix_drift",
             &set,
             write,
-            None,
-            Some(refactor::DEFAULT_MATCH_DETAIL_LIMIT),
+            Some(format!("homeboy review test {} --analyze", component_id)),
+            vec![format!(
+                "Use --since <ref> to target a drift window (current: {})",
+                since
+            )],
         )?;
 
         crate::log_status!(
             "test",
             "Applied {} replacement{} across {} file{}",
-            result.total_replacements,
-            if result.total_replacements == 1 {
+            summary.total_replacements,
+            if summary.total_replacements == 1 {
                 ""
             } else {
                 "s"
             },
-            result.total_files,
-            if result.total_files == 1 { "" } else { "s" },
+            summary.total_files,
+            if summary.total_files == 1 { "" } else { "s" },
         );
 
         if !write {
@@ -250,7 +256,7 @@ pub fn auto_fix_test_drift(
                 "hint",
                 "Dry-run only. Re-run with --write to apply generated fixes."
             );
-        } else if result.total_replacements > 0 {
+        } else if summary.total_replacements > 0 {
             crate::log_status!(
                 "hint",
                 "Re-run tests: homeboy review test {} --analyze",
@@ -258,38 +264,25 @@ pub fn auto_fix_test_drift(
             );
         }
 
-        AutoFixDriftOutput {
-            since: since.to_string(),
-            auto_fixable_changes: drift_report.auto_fixable,
-            generated_rules: set.rules.len(),
-            replacements: result.total_replacements,
-            files_modified: result.total_files,
-            written: write,
-            rerun_recommended: write && result.total_replacements > 0,
-        }
+        (
+            AutoFixDriftOutput {
+                since: since.to_string(),
+                auto_fixable_changes: drift_report.auto_fixable,
+                generated_rules,
+                replacements: summary.total_replacements,
+                files_modified: summary.total_files,
+                written: write,
+                rerun_recommended: summary.rerun_recommended,
+            },
+            summary.hints,
+        )
     };
-
-    let outcome = auto::standard_outcome(
-        if write {
-            AutofixMode::Write
-        } else {
-            AutofixMode::DryRun
-        },
-        output.replacements,
-        Some(format!("homeboy review test {} --analyze", component_id)),
-        vec![format!(
-            "Use --since <ref> to target a drift window (current: {})",
-            since
-        )],
-    );
+    let (output, outcome_hints) = output;
 
     Ok(AutoFixDriftWorkflowResult {
         component: component_id.to_string(),
-        output: AutoFixDriftOutput {
-            rerun_recommended: outcome.rerun_recommended,
-            ..output
-        },
-        hints: outcome.hints,
+        output,
+        hints: outcome_hints,
         report: if include_report {
             Some(drift_report)
         } else {

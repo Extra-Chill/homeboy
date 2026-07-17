@@ -92,3 +92,23 @@ fn default_files_glob() -> String {
 fn default_context() -> String {
     "line".to_string()
 }
+
+/// Slim view of a refactor source-run, as the extension lint-command report
+/// layer consumes it when formatting `refactor --from lint --write` output.
+///
+/// Carries only the fields the lint report reads, so `homeboy-core` can format
+/// the report without depending on the refactor engine's full `RefactorSourceRun`
+/// type. The refactor layer (via the CLI) builds this from its run result.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LintFixInput {
+    pub applied: bool,
+    pub files_modified: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix_summary: Option<FixResultsSummary>,
+}
