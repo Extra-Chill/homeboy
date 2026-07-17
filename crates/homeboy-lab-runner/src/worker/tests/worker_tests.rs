@@ -117,6 +117,75 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
 }
 
 #[test]
+fn reverse_worker_drains_fifo_jobs_after_completion_and_reconnect() {
+    test_support::with_isolated_home(|_| {
+        create_shell_runner();
+        let store = JobStore::default();
+        let mut first = run_id_echo_request();
+        first.command[2] = "printf first".to_string();
+        first.lifecycle = Some(RunnerJobLifecycleMetadata {
+            source: Some("lab-handoff".to_string()),
+            kind: Some("agent-task".to_string()),
+            durable_run_id: Some("lab-run-first".to_string()),
+            active_child_count: None,
+            active_cell_count: None,
+        });
+        let mut second = first.clone();
+        second.command[2] = "printf second".to_string();
+        second.lifecycle.as_mut().expect("lifecycle").durable_run_id =
+            Some("lab-run-second".to_string());
+
+        let first_job = store.submit_remote_runner_job(first).expect("queue first");
+        let second_job = store
+            .submit_remote_runner_job(second)
+            .expect("queue second");
+
+        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
+        let (first_output, first_exit) =
+            run_reverse_worker(worker_options(broker_url)).expect("first worker");
+        assert_eq!(first_exit, 0);
+        assert_eq!(first_output.job.expect("first job").id, first_job.id);
+        handle.join().expect("first broker joins");
+        assert_eq!(
+            store.get(second_job.id).expect("queued second").status,
+            JobStatus::Queued
+        );
+
+        // A reconnect is only another worker claim: the broker retains the
+        // queue and its FIFO order instead of involving controller execution.
+        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
+        let (second_output, second_exit) =
+            run_reverse_worker(worker_options(broker_url)).expect("reconnected worker");
+        assert_eq!(second_exit, 0);
+        assert_eq!(second_output.job.expect("second job").id, second_job.id);
+        handle.join().expect("second broker joins");
+
+        let (broker_url, handle) = spawn_mock_broker(store.clone(), 1);
+        let (idle_output, idle_exit) =
+            run_reverse_worker(worker_options(broker_url)).expect("duplicate wake");
+        assert_eq!(idle_exit, 0);
+        assert!(!idle_output.claimed);
+        handle.join().expect("idle broker joins");
+
+        assert_eq!(
+            result_event_data(&store, first_job.id)["stdout"],
+            serde_json::json!("first")
+        );
+        assert_eq!(
+            result_event_data(&store, second_job.id)["stdout"],
+            serde_json::json!("second")
+        );
+        assert_eq!(
+            store
+                .get(second_job.id)
+                .expect("finished second")
+                .claimed_by_runner_id,
+            Some("lab".to_string())
+        );
+    });
+}
+
+#[test]
 fn reverse_worker_streams_redacted_child_progress_without_trusting_stdout_lifecycle_fields() {
     test_support::with_isolated_home(|_| {
         create_shell_runner();

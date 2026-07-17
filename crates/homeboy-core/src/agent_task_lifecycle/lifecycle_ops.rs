@@ -361,7 +361,7 @@ where
 
     let mut record = AgentTaskRunRecord {
         schema: schemas::RUN.to_string(),
-        run_id: run_id.clone(),
+        run_id,
         plan_id: plan.plan_id.clone(),
         state: AgentTaskRunState::Queued,
         submitted_at: now_timestamp(),
@@ -591,6 +591,9 @@ where
 }
 
 pub fn claim_next_queued_run() -> Result<Option<AgentTaskRunRecord>> {
+    // Interactive local `run-next` invocations can race across processes. Keep
+    // their selection and transition atomic without assigning them daemon ownership.
+    let _claim_lock = QueuedRunClaimLock::lock()?;
     let mut queued: Vec<AgentTaskRunRecord> = store::read_records()?
         .into_iter()
         .filter(|record| record.state == AgentTaskRunState::Queued && !is_transport_proxy(record))
