@@ -24,7 +24,7 @@ fn fake_controller_artifact(path: &std::path::Path, identity: &str, marker: &str
     std::fs::write(
         path,
         format!(
-            "#!/bin/sh\n# {marker}\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{{\"data\":{{\"display\":{identity}}}}}'\n  exit 0\nfi\nexit 1\n"
+            "#!/bin/sh\n# {marker}\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{{\"data\":{{\"display\":{identity}}}}}'\n  exit 0\nfi\nif [ \"$1\" = self ] && [ \"$2\" = status ]; then\n  printf '%s\\n' '{{\"data\":{{\"active_build_identity\":{{\"display\":{identity}}}}}}}'\n  exit 0\nfi\nexit 1\n"
         ),
     )
     .expect("write fake controller artifact");
@@ -199,33 +199,66 @@ fn artifact_recovery_rejects_wrong_hash_and_identity_without_record_mutation() {
 
 #[cfg(unix)]
 #[test]
-fn legacy_pin_migration_failure_leaves_durable_record_unchanged() {
+fn legacy_v1_pin_migration_failures_leave_durable_record_unchanged() {
     with_isolated_home(|_| {
+        use std::os::unix::fs::PermissionsExt;
+
         let temporary = tempfile::tempdir().expect("temporary fake controller directory");
         let identity = crate::build_identity::current().display;
-        let legacy = temporary.path().join("legacy-homeboy");
-        let digest = fake_controller_artifact(&legacy, &identity, "legacy artifact");
         let record = submit_plan(&test_plan(), Some("migration-failure")).expect("submit");
-        rewrite_record_for_test(&record.run_id, |record| {
-            record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
-                "originating": {
-                    "build_identity": identity,
-                    "pinned_executable": legacy,
-                    "sha256": format!("{digest}00"),
+        let cases = [
+            (
+                "missing",
+                temporary.path().join("missing-homeboy"),
+                None,
+                "missing",
+            ),
+            (
+                "non-executable",
+                temporary.path().join("non-executable-homeboy"),
+                Some(identity.clone()),
+                "not executable",
+            ),
+            (
+                "identity-mismatch",
+                temporary.path().join("wrong-identity-homeboy"),
+                Some("homeboy test+wrong".to_string()),
+                "build identity mismatch",
+            ),
+        ];
+
+        for (name, legacy, artifact_identity, expected_error) in cases {
+            if let Some(artifact_identity) = artifact_identity {
+                fake_controller_artifact(&legacy, &artifact_identity, name);
+                if name == "non-executable" {
+                    std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o600))
+                        .expect("remove executable permission");
                 }
-            });
-        })
-        .expect("project invalid legacy pin");
-        let before = status(&record.run_id).expect("record before migration");
+            }
+            rewrite_record_for_test(&record.run_id, |record| {
+                record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+                    "originating": {
+                        "build_identity": identity,
+                        "pinned_executable": legacy,
+                    }
+                });
+            })
+            .expect("project v1 legacy pin");
+            let before = status(&record.run_id).expect("record before migration");
 
-        let error =
-            validate_controller_runtime(&record.run_id).expect_err("migration fails closed");
+            let error = validate_controller_runtime(&record.run_id)
+                .expect_err("legacy migration fails closed");
 
-        assert!(error.message.contains("hash mismatch"));
-        assert_eq!(
-            status(&record.run_id).expect("record after migration"),
-            before
-        );
+            assert!(
+                error.message.contains(expected_error),
+                "{name}: {}",
+                error.message
+            );
+            assert_eq!(
+                status(&record.run_id).expect("record after migration"),
+                before
+            );
+        }
     });
 }
 
