@@ -47,7 +47,7 @@ pub fn promote_with_checkpoint(
     if let Some(provenance) = provider.provenance() {
         report.provenance["worktree_provider"] = provenance.clone();
     }
-    if let Ok(runner_id) = std::env::var("HOMEBOY_LAB_RUNNER_ID") {
+    if let Ok(runner_id) = std::env::var(crate::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV) {
         if !runner_id.trim().is_empty() {
             report.provenance["lab_offload"] = json!({
                 "runner_id": runner_id,

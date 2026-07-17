@@ -1559,11 +1559,18 @@ mod tests {
             crate::runner::RUNNER_HOSTED_EXEC_ENV,
             crate::runner::RUNNER_PLACEMENT_RESOLVED_ENV,
             crate::runner::RUNNER_ID_ENV,
+            "HOMEBOY_LAB_RUNNER_ID",
+            homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV,
         ]
         .map(|name| (name, std::env::var(name).ok()));
         std::env::set_var(crate::runner::RUNNER_HOSTED_EXEC_ENV, "1");
         std::env::set_var(crate::runner::RUNNER_PLACEMENT_RESOLVED_ENV, "1");
         std::env::set_var(crate::runner::RUNNER_ID_ENV, "homeboy-lab");
+        std::env::set_var("HOMEBOY_LAB_RUNNER_ID", "homeboy-lab");
+        std::env::set_var(
+            homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV,
+            "homeboy-lab",
+        );
 
         *marker_context_before_run_command()
             .lock()
@@ -1580,6 +1587,12 @@ mod tests {
             "run_command must not inherit managed placement markers"
         );
         assert!(!resource_policy::is_managed_runner_placement_context());
+        assert!(std::env::var_os("HOMEBOY_LAB_RUNNER_ID").is_none());
+        assert_eq!(
+            std::env::var_os(homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV),
+            Some("homeboy-lab".into()),
+            "runner execution provenance survives without exposing controller transport intent"
+        );
 
         for (name, value) in previous {
             match value {

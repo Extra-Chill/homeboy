@@ -239,7 +239,7 @@ fn lab_runner_exec_options(
         "1".to_string(),
     );
     env.insert(
-        "HOMEBOY_LAB_RUNNER_ID".to_string(),
+        homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV.to_string(),
         context.runner_id.to_string(),
     );
     RunnerExecOptions {

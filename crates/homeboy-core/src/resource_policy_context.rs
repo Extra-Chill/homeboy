@@ -165,4 +165,7 @@ pub fn clear_managed_runner_placement_context() {
     std::env::remove_var(homeboy_lab_runner_contract::RUNNER_HOSTED_EXEC_ENV);
     std::env::remove_var(homeboy_lab_runner_contract::RUNNER_PLACEMENT_RESOLVED_ENV);
     std::env::remove_var(homeboy_lab_runner_contract::RUNNER_ID_ENV);
+    // This legacy value selected a controller daemon. A runner-local child must
+    // not pass it into provider preflight after the Lab handoff is accepted.
+    std::env::remove_var("HOMEBOY_LAB_RUNNER_ID");
 }
