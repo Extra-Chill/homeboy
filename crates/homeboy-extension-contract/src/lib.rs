@@ -13,6 +13,7 @@ pub mod action_types;
 pub mod autofix_config;
 pub mod bench_artifact;
 pub mod bench_diagnostics;
+pub mod bench_distribution;
 pub mod bench_gate;
 pub mod bench_metric_preset;
 pub mod bench_responsiveness;
@@ -23,6 +24,7 @@ pub use bench_diagnostics::{
     BenchDiagnostic, BenchDiagnosticSource, BenchPhaseEvent, BenchPhaseFailureClassification,
     BenchPhaseSummary,
 };
+pub use bench_distribution::BenchRunDistribution;
 pub use bench_gate::{BenchGate, BenchGateOp, BenchGateResult};
 pub use bench_metric_preset::{BenchMetricPolicyPreset, BenchMetricPolicyPresetKind};
 pub use bench_responsiveness::{BenchFailureMemorySample, BenchResponsivenessSummary};
