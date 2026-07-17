@@ -142,7 +142,6 @@ pub(crate) mod http_probe;
 pub mod http_request;
 pub mod hygiene;
 pub mod io;
-pub mod issues;
 pub mod keychain;
 pub mod lab_offload;
 pub mod lab_routing;

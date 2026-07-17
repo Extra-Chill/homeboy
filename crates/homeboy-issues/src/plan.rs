@@ -7,8 +7,8 @@
 use serde::ser::Error as SerializeError;
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::code_audit::FindingConfidence;
-use crate::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
+use homeboy_code_audit::FindingConfidence;
+use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 
 const ACTION_INPUT_KEY: &str = "action";
 

@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 
-use crate::error::{Error, Result};
+use homeboy_core::error::{Error, Result};
 
 use super::plan::{ReconcileAction, ReconcilePlan, ReconcilePlanCounts};
 use super::tracker::{CloseReason, Tracker};
@@ -180,7 +180,7 @@ pub struct ReconcileResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::issues::plan::{ReconcileAction, ReconcileSkipReason};
+    use crate::plan::{ReconcileAction, ReconcileSkipReason};
     use std::cell::RefCell;
 
     /// Mock tracker: records every call, returns canned IDs for create_issue.
@@ -202,11 +202,7 @@ mod tests {
     }
 
     impl Tracker for MockTracker {
-        fn list_issues(
-            &self,
-            _label: &str,
-            _limit: usize,
-        ) -> Result<Vec<crate::issues::TrackedIssue>> {
+        fn list_issues(&self, _label: &str, _limit: usize) -> Result<Vec<crate::TrackedIssue>> {
             unimplemented!("apply_plan does not call list_issues")
         }
         fn create_issue(&self, title: &str, _body: &str, _labels: &[String]) -> Result<u64> {

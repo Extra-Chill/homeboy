@@ -15,6 +15,7 @@ pub use homeboy_core as core;
 // Re-exported as `runner` so CLI call sites reach it via `crate::runner::*` /
 // `homeboy::runner::*` and register its behavior with core at startup.
 pub use homeboy_fuzz as fuzz;
+pub use homeboy_issues as issues;
 pub use homeboy_runner as runner;
 
 // Re-export the `log_status!` macro and is_zero serde helpers from homeboy-core
