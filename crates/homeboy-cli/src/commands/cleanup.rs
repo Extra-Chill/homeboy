@@ -608,7 +608,7 @@ fn remote_lab_workspace_categories(
 ) -> homeboy::core::Result<Vec<CleanupInventoryCategory>> {
     let mut categories = Vec::new();
     for status in runner::statuses()? {
-        if status.runner_id == "local" || !status.connected {
+        if !remote_workspace_cleanup_connected(&status) {
             categories.push(CleanupInventoryCategory {
                 category: "remote_lab_workspaces",
                 canonical_cleanup_command: REMOTE_LAB_WORKSPACES_METADATA
@@ -664,6 +664,10 @@ fn remote_lab_workspace_categories(
         categories.push(remote_workspace_category(output, apply)?);
     }
     Ok(categories)
+}
+
+fn remote_workspace_cleanup_connected(status: &runner::RunnerStatusReport) -> bool {
+    status.runner_id != "local" && status.is_connected()
 }
 
 fn remote_workspace_category(
@@ -958,6 +962,7 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use homeboy::core::runners::{RunnerActiveJobState, RunnerSessionState, RunnerStatusReport};
     use serde_json::json;
 
     use crate::cli_surface::{Cli, Commands};
@@ -1095,6 +1100,42 @@ mod tests {
             assert_eq!(
                 metadata.canonical_cleanup_command(true),
                 format!("homeboy cleanup --include {include_arg} --apply")
+            );
+        }
+    }
+
+    #[test]
+    fn remote_workspace_cleanup_uses_authoritative_runner_session_state() {
+        let cases = [
+            (RunnerSessionState::Connected, false, true),
+            (RunnerSessionState::Disconnected, true, false),
+            (RunnerSessionState::Recorded, true, false),
+        ];
+
+        for (state, connected, expected) in cases {
+            let report = RunnerStatusReport {
+                runner_id: "lab".to_string(),
+                connected,
+                state,
+                session: None,
+                stale_daemon: None,
+                daemon_freshness: None,
+                active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
+                stale_runner_jobs: Vec::new(),
+                active_job_count: 0,
+                stale_runner_job_count: 0,
+                active_job_state: RunnerActiveJobState::NotQueried,
+                active_job_source: None,
+                active_job_error: None,
+                session_path: "/tmp/lab.json".to_string(),
+            };
+
+            assert_eq!(
+                remote_workspace_cleanup_connected(&report),
+                expected,
+                "state={:?}",
+                report.state
             );
         }
     }
