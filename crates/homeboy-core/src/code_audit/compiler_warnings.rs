@@ -7,44 +7,19 @@
 
 use std::path::Path;
 
+use super::compiler_warning_provider::AuditCompilerWarning;
 use super::{AuditFinding, Finding, Severity};
-use crate::extension::{
-    extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
-    CompilerWarningContract, ExtensionManifest,
-};
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct CompilerWarning {
-    code: String,
-    message: String,
-    file: String,
-    #[serde(rename = "line")]
-    _line: usize,
-    #[serde(default)]
-    suggestion: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct CompilerWarningEnvelope {
-    #[serde(default)]
-    warnings: Vec<CompilerWarning>,
-}
 
 /// Run compiler checks and return findings for any warnings detected.
 pub fn run(root: &Path) -> Vec<Finding> {
-    extensions_for_compiler_warning_contract(root, CompilerWarningContract::Warnings)
-        .into_iter()
-        .flat_map(|extension| run_extension_compiler_warnings(&extension, root))
-        .collect()
+    warnings_to_findings(super::compiler_warning_provider::compiler_warnings_for_root(root))
 }
 
-fn run_extension_compiler_warnings(extension: &ExtensionManifest, root: &Path) -> Vec<Finding> {
-    let Some(envelope) = run_compiler_warning_script(extension, root) else {
-        return Vec::new();
-    };
-
-    envelope
-        .warnings
+/// Map the raw compiler warnings from the provider into audit findings, dropping
+/// warnings with empty or absolute file paths (which can't be attributed to a
+/// component-relative source file).
+fn warnings_to_findings(warnings: Vec<AuditCompilerWarning>) -> Vec<Finding> {
+    warnings
         .into_iter()
         .filter(|warning| !warning.file.is_empty() && !warning.file.starts_with('/'))
         .map(|warning| Finding {
@@ -60,90 +35,54 @@ fn run_extension_compiler_warnings(extension: &ExtensionManifest, root: &Path) -
         .collect()
 }
 
-fn run_compiler_warning_script(
-    extension: &ExtensionManifest,
-    root: &Path,
-) -> Option<CompilerWarningEnvelope> {
-    let input = serde_json::json!({
-        "root": root,
-    });
-    let stdout = match run_compiler_warning_contract_script(
-        extension,
-        CompilerWarningContract::Warnings,
-        root,
-        &input,
-    ) {
-        Ok(Some(stdout)) => stdout,
-        Ok(None) => return None,
-        Err(error) => {
-            crate::log_status!("audit", "{}", error);
-            return None;
-        }
-    };
-    serde_json::from_str(&stdout).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::TempDir;
 
-    fn write_executable(path: &Path, content: &str) {
-        fs::write(path, content).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(path, perms).unwrap();
+    fn warning(
+        code: &str,
+        message: &str,
+        file: &str,
+        suggestion: Option<&str>,
+    ) -> AuditCompilerWarning {
+        AuditCompilerWarning {
+            code: code.to_string(),
+            message: message.to_string(),
+            file: file.to_string(),
+            suggestion: suggestion.map(str::to_string),
         }
     }
 
     #[test]
-    fn run_uses_extension_compiler_warning_script() {
-        crate::test_support::with_isolated_home(|home| {
-            let extension_dir = home.path().join(".config/homeboy/extensions/example");
-            fs::create_dir_all(extension_dir.join("scripts")).unwrap();
-            fs::write(
-                extension_dir.join("example.json"),
-                r#"{
-                    "name": "Example",
-                    "version": "1.0.0",
-                    "scripts": { "compiler_warnings": "scripts/warnings.sh" }
-                }"#,
-            )
-            .unwrap();
-            write_executable(
-                &extension_dir.join("scripts/warnings.sh"),
-                r#"#!/usr/bin/env bash
-cat >/dev/null
-printf '{"warnings":[{"code":"unused_imports","message":"unused import","file":"src/lib.rs","line":3,"suggestion":"Remove import"}]}'
-"#,
-            );
+    fn maps_provider_warnings_into_findings() {
+        let findings = warnings_to_findings(vec![warning(
+            "unused_imports",
+            "unused import",
+            "src/lib.rs",
+            Some("Remove import"),
+        )]);
 
-            let root = TempDir::new().expect("temp dir");
-            let findings = run(root.path());
-
-            assert_eq!(findings.len(), 1);
-            assert_eq!(findings[0].file, "src/lib.rs");
-            assert_eq!(findings[0].kind, AuditFinding::CompilerWarning);
-            assert_eq!(findings[0].description, "[unused_imports] unused import");
-            assert_eq!(findings[0].suggestion, "Remove import");
-        });
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].file, "src/lib.rs");
+        assert_eq!(findings[0].kind, AuditFinding::CompilerWarning);
+        assert_eq!(findings[0].severity, Severity::Warning);
+        assert_eq!(findings[0].description, "[unused_imports] unused import");
+        assert_eq!(findings[0].suggestion, "Remove import");
     }
 
     #[test]
-    fn run_returns_no_findings_without_extension_contract() {
-        crate::test_support::with_isolated_home(|_| {
-            let dir = TempDir::new().expect("temp dir");
-            fs::write(
-                dir.path().join("Cargo.toml"),
-                "[package]\nname = \"test-warn\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-            )
-            .unwrap();
+    fn drops_absolute_and_empty_paths_and_defaults_suggestion() {
+        let findings = warnings_to_findings(vec![
+            warning("abs", "absolute path", "/etc/passwd", None),
+            warning("empty", "empty path", "", None),
+            warning("dead_code", "never used", "src/x.rs", None),
+        ]);
 
-            assert!(run(dir.path()).is_empty());
-        });
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].file, "src/x.rs");
+        assert_eq!(
+            findings[0].suggestion,
+            "Address compiler warning: dead_code"
+        );
     }
 }

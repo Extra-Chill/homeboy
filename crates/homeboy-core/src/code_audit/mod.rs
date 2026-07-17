@@ -18,6 +18,7 @@ pub mod codebase_map;
 mod comment_blocks;
 mod comment_hygiene;
 pub mod compare;
+pub mod compiler_warning_provider;
 mod compiler_warnings;
 pub mod component_provider;
 mod convention_membership;
