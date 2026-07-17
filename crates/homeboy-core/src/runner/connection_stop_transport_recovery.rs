@@ -29,7 +29,6 @@ pub(crate) fn disconnect_with_session(
     let promotion_lease =
         crate::runtime_promotion::acquire("runner daemon disconnect", runner_id.to_string())?;
     promotion_lease.assert_generation()?;
-    let session_path = session_path(runner_id)?;
     let session = read_session(runner_id)?;
     if let Some(expected_session) = expected_session {
         if !session.as_ref().is_some_and(|current_session| {
@@ -46,7 +45,15 @@ pub(crate) fn disconnect_with_session(
         }
     }
     if let Some(session) = &session {
-        if session.mode == RunnerTunnelMode::DirectSsh {
+        let ownership = read_ownership(runner_id)?;
+        let owns_daemon = ownership.as_ref().map_or(true, |owner| {
+            same_remote_daemon_ownership(runner_id, session, owner)
+                && owner.controller_id == session.controller_id
+        });
+        if session.mode == RunnerTunnelMode::DirectSsh
+            && owns_daemon
+            && !has_live_peer_session(session)?
+        {
             disconnect_remote_daemon(session, force).map_err(|err| {
                 Error::validation_invalid_argument(
                     "disconnect",
@@ -55,24 +62,18 @@ pub(crate) fn disconnect_with_session(
                     Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
                 )
             })?;
+            remove_ownership(runner_id)?;
         }
         if let Some(pid) = session.tunnel_pid {
             terminate_pid(pid);
         }
     }
-    if session_path.exists() {
-        std::fs::remove_file(&session_path).map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some(format!("delete {}", session_path.display())),
-            )
-        })?;
-    }
+    remove_session(runner_id)?;
     Ok(RunnerDisconnectReport {
         runner_id: runner_id.to_string(),
         disconnected: session.is_some(),
         session,
-        session_path: session_path.display().to_string(),
+        session_path: session_path(runner_id)?.display().to_string(),
     })
 }
 

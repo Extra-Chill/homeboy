@@ -51,6 +51,14 @@ pub fn runner_session_file(id: &str) -> Result<PathBuf> {
     Ok(runner_sessions_dir()?.join(format!("{}.json", id)))
 }
 
+/// Controller-local runner connection state. The runner-level file remains the
+/// lease record for the remote daemon; local tunnels belong to one controller.
+pub fn runner_controller_session_file(id: &str, controller_id: &str) -> Result<PathBuf> {
+    Ok(runner_sessions_dir()?
+        .join(sanitize_path_segment(id))
+        .join(format!("{}.json", sanitize_path_segment(controller_id))))
+}
+
 /// Controller-owned lease evidence retained after an ephemeral runner session
 /// or remote daemon state file disappears.
 pub(crate) fn runner_lease_evidence_file(runner_id: &str, lease_id: &str) -> Result<PathBuf> {

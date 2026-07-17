@@ -23,6 +23,7 @@ use crate::http_api::RunSummary;
 use crate::paths;
 use crate::server::{self, Server, SshClient};
 
+use super::broker_http;
 use super::session::{
     ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
     RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
@@ -30,9 +31,8 @@ use super::session::{
     RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
     RunnerTunnelMode,
 };
-use super::broker_http;
-use crate::broker_auth;
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
+use crate::broker_auth;
 
 const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 const REMOTE_LEASELESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -273,7 +273,7 @@ pub fn connect_with_orphan_adoption(
             mode: RunnerTunnelMode::DirectSsh,
             role: RunnerSessionRole::Controller,
             server_id: Some(server_id.clone()),
-            controller_id: None,
+            controller_id: Some(controller_id()),
             broker_url: None,
             remote_daemon_address: Some(replacement.address.clone()),
             local_port: None,
@@ -344,7 +344,7 @@ pub fn connect_with_orphan_adoption(
         mode: RunnerTunnelMode::DirectSsh,
         role: RunnerSessionRole::Controller,
         server_id: Some(server_id),
-        controller_id: None,
+        controller_id: Some(controller_id()),
         broker_url: None,
         remote_daemon_address: Some(daemon.address),
         local_port: Some(local_port),
@@ -369,6 +369,12 @@ pub fn connect_with_orphan_adoption(
             session.tunnel_pid,
             session_store::terminate_pid,
         ));
+    }
+    if !read_ownership(runner_id)?
+        .as_ref()
+        .is_some_and(session_is_live)
+    {
+        write_ownership(&session)?;
     }
 
     Ok((
