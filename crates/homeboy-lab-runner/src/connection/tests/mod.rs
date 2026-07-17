@@ -213,6 +213,7 @@ pub(super) fn remote_daemon_status_for_test_with_reason(
         fresh,
         reachable,
         active_jobs,
+        typed_unresolved_jobs: None,
         endpoint_probe_error: None,
         termination_evidence: None,
     }

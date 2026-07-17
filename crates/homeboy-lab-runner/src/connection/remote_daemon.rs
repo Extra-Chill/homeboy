@@ -187,6 +187,10 @@ pub(super) struct RemoteDaemonStatus {
     pub(super) fresh: bool,
     pub(super) reachable: bool,
     pub(super) active_jobs: usize,
+    /// The typed `/jobs` view is independently required before replacing a
+    /// reachable stale daemon. `None` means the endpoint was unavailable or
+    /// malformed, which must fail closed for replacement.
+    pub(super) typed_unresolved_jobs: Option<usize>,
     pub(super) endpoint_probe_error: Option<String>,
     pub(super) termination_evidence: Option<homeboy_core::daemon::DaemonTerminationEvidence>,
 }
@@ -297,12 +301,14 @@ pub(super) fn unavailable_recovery_freshness(error: impl Into<String>) -> Daemon
 pub(super) enum RemoteDaemonConnectAction {
     Reattach,
     Start,
+    ReplaceIdleStale,
 }
 
 pub(super) fn ensure_remote_daemon(
     client: &SshClient,
     homeboy: &str,
     previous_session: Option<&RunnerSession>,
+    configured_identity: &str,
     orphan_lease_id: Option<&str>,
     confirmed_no_pid_job_ids: &[uuid::Uuid],
 ) -> std::result::Result<RemoteDaemon, String> {
@@ -329,7 +335,7 @@ pub(super) fn ensure_remote_daemon(
     match remote_daemon_connect_action_with_controller_identity(
         previous_session,
         &status,
-        &homeboy_core::build_identity::current().display,
+        configured_identity,
     )? {
         RemoteDaemonConnectAction::Reattach => {
             let mut daemon = status.daemon.ok_or_else(|| {
@@ -339,6 +345,21 @@ pub(super) fn ensure_remote_daemon(
             return Ok(daemon);
         }
         RemoteDaemonConnectAction::Start => return remote_daemon_ensure_running(client, homeboy),
+        RemoteDaemonConnectAction::ReplaceIdleStale => {
+            let daemon = status.daemon.as_ref().expect("replacement requires daemon");
+            let lease_id = daemon
+                .lease_id
+                .as_deref()
+                .expect("replacement requires lease");
+            remote_daemon_force_stop(client, homeboy, lease_id)?;
+            let replacement = remote_daemon_ensure_running(client, homeboy)?;
+            return verify_remote_daemon_replacement(
+                client,
+                homeboy,
+                &replacement,
+                configured_identity,
+            );
+        }
     }
 }
 
@@ -357,7 +378,7 @@ pub(super) fn remote_daemon_connect_action(
 pub(super) fn remote_daemon_connect_action_with_controller_identity(
     previous_session: Option<&RunnerSession>,
     status: &RemoteDaemonStatus,
-    controller_identity: &str,
+    expected_identity: &str,
 ) -> std::result::Result<RemoteDaemonConnectAction, String> {
     let Some(daemon) = status.daemon.as_ref() else {
         if status.active_jobs > 0 {
@@ -411,10 +432,22 @@ pub(super) fn remote_daemon_connect_action_with_controller_identity(
         }
     }
 
-    // Retain a live daemon across version/build/runtime drift. The tunnel's
-    // health endpoint must still prove this exact lease and PID before a
-    // session is persisted.
+    // A lease-less freshness report ordinarily prevents replacement. The one
+    // bounded exception is an idle daemon whose identity differs from the
+    // configured executable and whose typed `/jobs` endpoint independently
+    // proves no active or unresolved work. The stop itself remains lease-bound
+    // through Homeboy's daemon lifecycle command.
     if !status.fresh {
+        if status.active_jobs == 0
+            && status.typed_unresolved_jobs == Some(0)
+            && status.endpoint_probe_error.is_none()
+            && daemon
+                .build_identity
+                .as_deref()
+                .is_some_and(|identity| identity.trim() != expected_identity.trim())
+        {
+            return Ok(RemoteDaemonConnectAction::ReplaceIdleStale);
+        }
         return Ok(RemoteDaemonConnectAction::Reattach);
     }
 
@@ -431,9 +464,9 @@ pub(super) fn remote_daemon_connect_action_with_controller_identity(
                 "remote daemon has {} active job(s) but its reachable endpoint did not provide a version; refusing reattachment or replacement",
                 status.active_jobs
             ))?;
-            if daemon_identity.trim() != controller_identity.trim() {
+            if daemon_identity.trim() != expected_identity.trim() {
                 return Err(format!(
-                    "remote daemon has {} active job(s) under reachable lease `{}` (PID {}) but build identity `{daemon_identity}` / version `{daemon_version}` does not match this controller `{controller_identity}`; refusing replacement. Run a controller pinned to `{daemon_identity}` and retry `homeboy runner connect <runner-id>` to reattach this exact lease.",
+                    "remote daemon has {} active job(s) under reachable lease `{}` (PID {}) but build identity `{daemon_identity}` / version `{daemon_version}` does not match this configured runner binary `{expected_identity}`; refusing replacement. Run a controller pinned to `{daemon_identity}` and retry `homeboy runner connect <runner-id>` to reattach this exact lease.",
                     status.active_jobs,
                     daemon.lease_id.as_deref().unwrap_or("unavailable"),
                     daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable"),
@@ -526,6 +559,7 @@ pub(super) fn remote_daemon_status(
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             active_jobs: remote_daemon_active_jobs(&data),
+            typed_unresolved_jobs: None,
             endpoint_probe_error: None,
             termination_evidence,
         });
@@ -544,6 +578,7 @@ pub(super) fn remote_daemon_status(
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             active_jobs: remote_daemon_active_jobs(&data),
+            typed_unresolved_jobs: None,
             endpoint_probe_error: None,
             termination_evidence,
         });
@@ -558,6 +593,7 @@ pub(super) fn remote_daemon_status(
             .and_then(Value::as_bool)
             .unwrap_or(false),
         active_jobs: remote_daemon_active_jobs(&data),
+        typed_unresolved_jobs: None,
         endpoint_probe_error: None,
         termination_evidence,
     })
@@ -617,6 +653,42 @@ pub(super) fn probe_remote_daemon_endpoint(client: &SshClient, status: &mut Remo
                 .to_string(),
         );
     }
+    let command = format!(
+        "curl --fail --silent --show-error --max-time 2 {}/jobs",
+        shell::quote_arg(&format!("http://{}", daemon.address))
+    );
+    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+    if !output.success {
+        status.endpoint_probe_error = Some(command_failure_message(
+            "remote daemon typed job probe failed",
+            &output,
+        ));
+        return;
+    }
+    let body: Value = match parse_json_from_mixed_stdout(&output.stdout) {
+        Ok(body) => body,
+        Err(error) => {
+            status.endpoint_probe_error = Some(format!(
+                "remote daemon typed job probe returned invalid JSON: {error}"
+            ));
+            return;
+        }
+    };
+    let jobs = body
+        .pointer("/data/body")
+        .or_else(|| body.get("body"))
+        .unwrap_or(&body);
+    let Some(active) = jobs.get("active_runner_jobs").and_then(Value::as_array) else {
+        status.endpoint_probe_error =
+            Some("remote daemon typed job probe did not return active_runner_jobs".to_string());
+        return;
+    };
+    let Some(stale) = jobs.get("stale_runner_jobs").and_then(Value::as_array) else {
+        status.endpoint_probe_error =
+            Some("remote daemon typed job probe did not return stale_runner_jobs".to_string());
+        return;
+    };
+    status.typed_unresolved_jobs = Some(active.len().saturating_add(stale.len()));
 }
 
 fn remote_daemon_from_state(state: &Value) -> RemoteDaemon {
@@ -695,6 +767,88 @@ pub(super) fn remote_daemon_ensure_running(
         build_identity: None,
         inspected_freshness: None,
     })
+}
+
+pub(super) fn remote_daemon_force_stop(
+    client: &SshClient,
+    homeboy: &str,
+    lease_id: &str,
+) -> std::result::Result<(), String> {
+    let command = format!(
+        "{} daemon stop --force --lease-id {}",
+        shell::quote_arg(homeboy),
+        shell::quote_arg(lease_id),
+    );
+    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+    if !output.success {
+        return Err(command_failure_message(
+            "remote bounded stale-daemon replacement stop failed",
+            &output,
+        ));
+    }
+    let envelope = parse_envelope(&output.stdout).map_err(|error| {
+        format!("remote bounded stale-daemon replacement stop returned invalid JSON: {error}")
+    })?;
+    if !envelope.success {
+        return Err(
+            "remote bounded stale-daemon replacement stop returned an error envelope".to_string(),
+        );
+    }
+    if envelope
+        .data
+        .as_ref()
+        .and_then(|data| data.get("action"))
+        .and_then(Value::as_str)
+        != Some("stop")
+    {
+        return Err(
+            "remote bounded stale-daemon replacement stop returned an unexpected response"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn verify_remote_daemon_replacement(
+    client: &SshClient,
+    homeboy: &str,
+    replacement: &RemoteDaemon,
+    configured_identity: &str,
+) -> std::result::Result<RemoteDaemon, String> {
+    let mut status = remote_daemon_status(client, homeboy)?;
+    probe_remote_daemon_endpoint(client, &mut status);
+    let daemon = status.daemon.ok_or_else(|| {
+        "remote stale-daemon replacement re-probe returned no daemon state".to_string()
+    })?;
+    if !status.fresh || !status.reachable {
+        return Err(
+            "remote stale-daemon replacement re-probe did not prove a fresh reachable daemon"
+                .to_string(),
+        );
+    }
+    if status.endpoint_probe_error.is_some() {
+        return Err(format!(
+            "remote stale-daemon replacement endpoint re-probe failed: {}",
+            status.endpoint_probe_error.unwrap_or_default()
+        ));
+    }
+    if daemon.lease_id != replacement.lease_id
+        || daemon.pid != replacement.pid
+        || daemon.address != replacement.address
+    {
+        return Err(
+            "remote stale-daemon replacement ownership changed before re-probe; refusing to persist a different daemon"
+                .to_string(),
+        );
+    }
+    if daemon.build_identity.as_deref().map(str::trim) != Some(configured_identity.trim()) {
+        return Err(format!(
+            "remote stale-daemon replacement identity `{}` does not match configured runner binary `{}`",
+            daemon.build_identity.as_deref().unwrap_or("unavailable"),
+            configured_identity,
+        ));
+    }
+    Ok(daemon)
 }
 
 fn remote_daemon_adopt_orphan(

@@ -295,6 +295,7 @@ pub fn connect_with_orphan_adoption(
         &client,
         homeboy,
         previous_session.as_ref(),
+        &identity.display,
         orphan_lease_id,
         confirmed_no_pid_job_ids,
     );
