@@ -17,6 +17,7 @@ pub mod exec_context;
 pub mod extension_contract_producer;
 pub mod fuzz_config;
 pub mod manifest_action_config;
+pub mod manifest_capabilities;
 pub mod manifest_capability_config;
 pub mod manifest_deploy_config;
 pub mod manifest_test_config;
