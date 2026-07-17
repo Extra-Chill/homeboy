@@ -142,6 +142,19 @@ fn classify_vacuous_test(
     );
 
     if has_product_ref {
+        // A product symbol appearing in the body is not enough: naming a product
+        // function in a type-signature binding (`let f: fn(..) = product_fn;`) or
+        // calling it only to discard the result (`let _ = product_fn(..);`) proves
+        // nothing at runtime beyond what the compiler already guarantees. Such
+        // tests reference product code without exercising it, so they slip past
+        // the reference check above. Flag them when there is no assertion and the
+        // body contains nothing but signature-bindings / discarded calls.
+        if !has_assertion && is_signature_or_discard_only(&uncommented) {
+            return Some(
+                "it only names product code in a signature binding or discarded call without asserting on behavior"
+                    .to_string(),
+            );
+        }
         return None;
     }
 
@@ -197,6 +210,54 @@ fn contains_word_call(haystack: &str, needle: &str) -> bool {
     Regex::new(&pattern)
         .ok()
         .is_some_and(|re| re.is_match(haystack))
+}
+
+/// Return true when a comment-stripped test body only *names* product code
+/// without observing any outcome from it.
+///
+/// This recognizes the two no-op shapes that reference a product symbol yet
+/// prove nothing at runtime:
+///
+/// * a function-pointer signature binding — `let f: fn(..) [-> ..] = product_fn;`
+///   followed by an optional `let _ = f;` discard, and
+/// * a discarded call — `let _ = product_fn(..);` (result never inspected).
+///
+/// It is deliberately conservative: any statement that is not one of those
+/// no-op shapes (a real `let name = value;` binding whose value is later used, a
+/// method chain, a control-flow construct, etc.) makes the body non-vacuous so
+/// legitimate tests are never flagged. The caller only reaches this after
+/// confirming the body has no assertion.
+fn is_signature_or_discard_only(body: &str) -> bool {
+    let statements: Vec<&str> = body
+        .split(';')
+        .map(str::trim)
+        .filter(|stmt| !stmt.is_empty())
+        .collect();
+
+    if statements.is_empty() {
+        return false;
+    }
+
+    let fn_pointer_binding = Regex::new(r"^let\s+\w+\s*:\s*fn\s*\(").unwrap();
+    let discard_binding = Regex::new(r"^let\s+_\w*\s*=").unwrap();
+
+    let mut saw_no_op_reference = false;
+    for stmt in statements {
+        if fn_pointer_binding.is_match(stmt) {
+            saw_no_op_reference = true;
+            continue;
+        }
+        if discard_binding.is_match(stmt) {
+            // `let _ = something(..);` or `let _ = ident;` — result discarded.
+            saw_no_op_reference = true;
+            continue;
+        }
+        // Any other statement (real binding, chained call, control flow) means
+        // the test does more than name product code; leave it alone.
+        return false;
+    }
+
+    saw_no_op_reference
 }
 
 /// Collect product symbols imported from the resolved package via `use` lines.
@@ -552,6 +613,69 @@ fn parse_json() {
     #[test]
     fn classify_vacuous_test_accepts_product_reference_marker() {
         let body = "let result = crate::run();\nassert!(result);";
+        assert_eq!(
+            classify_vacuous_test(body, &HashSet::new(), &HashSet::new(), &policy(), None),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_vacuous_test_flags_fn_pointer_signature_binding() {
+        let body = r#"
+            let edit_fn: fn(&str, &str, usize, &str) -> Result<EditResult> = crate::edit_replace_line;
+            let _ = edit_fn;
+        "#;
+        assert_eq!(
+            classify_vacuous_test(body, &HashSet::new(), &HashSet::new(), &policy(), None),
+            Some(
+                "it only names product code in a signature binding or discarded call without asserting on behavior"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn classify_vacuous_test_flags_discarded_product_call() {
+        let body = "let _ = crate::login(credentials);";
+        assert_eq!(
+            classify_vacuous_test(body, &HashSet::new(), &HashSet::new(), &policy(), None),
+            Some(
+                "it only names product code in a signature binding or discarded call without asserting on behavior"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn classify_vacuous_test_keeps_discarded_call_when_it_asserts() {
+        // A test that discards one call but still asserts on behavior is real.
+        let body = "let _ = crate::warm_cache();\nlet value = crate::run();\nassert_eq!(value, 1);";
+        assert_eq!(
+            classify_vacuous_test(body, &HashSet::new(), &HashSet::new(), &policy(), None),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_vacuous_test_keeps_real_product_call_with_bound_result() {
+        // Binds the result of a product call and inspects it — not a no-op even
+        // though it shares the `let name = ...` shape.
+        let body = "let value = crate::run();\nassert_eq!(value, 1);";
+        assert_eq!(
+            classify_vacuous_test(body, &HashSet::new(), &HashSet::new(), &policy(), None),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_vacuous_test_keeps_fn_pointer_binding_that_invokes_it() {
+        // Signature binding is fine when the bound pointer is actually called and
+        // its outcome asserted.
+        let body = r#"
+            let edit_fn: fn(&str) -> Result<()> = crate::edit_replace_line;
+            let result = edit_fn("x");
+            assert!(result.is_ok());
+        "#;
         assert_eq!(
             classify_vacuous_test(body, &HashSet::new(), &HashSet::new(), &policy(), None),
             None
