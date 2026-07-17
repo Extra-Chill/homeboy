@@ -217,6 +217,7 @@ pub mod source_snapshot;
 pub mod stack;
 pub mod stream_capture;
 pub mod structured_sidecar;
+pub mod tag_gap;
 pub mod top_n;
 pub mod trace_compare;
 pub mod trace_experiment;

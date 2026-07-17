@@ -432,8 +432,8 @@ fn execute_build_component(
 
     // Warn when HEAD is ahead of the latest tag — the build will include
     // unreleased commits that won't be deployed unless using `deploy --head`.
-    if let Some(gap) = crate::deploy::provenance::detect_tag_gap(comp) {
-        crate::deploy::provenance::warn_tag_gap(&comp.id, &gap, "build");
+    if let Some(gap) = crate::tag_gap::detect_tag_gap(comp) {
+        crate::tag_gap::warn_tag_gap(&comp.id, &gap, "build");
         log_status!(
             "build",
             "Build uses current working tree. To deploy these commits: use `deploy --head` or run `homeboy release`."
