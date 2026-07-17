@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::observation::ArtifactViewerLink;
+use homeboy_observation_contract::ArtifactViewerLink;
 
 /// Viewer pointers shared by bench artifact records and the compact
 /// artifact index. Embedded via `#[serde(flatten)]` so the on-wire JSON

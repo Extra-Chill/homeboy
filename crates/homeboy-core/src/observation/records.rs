@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::context::RunContext;
+pub use homeboy_observation_contract::{ArtifactRecord, ArtifactViewerLink};
 
 #[path = "finding_records.rs"]
 mod finding_records;
@@ -89,38 +90,6 @@ pub struct RunListFilter {
     pub limit: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ArtifactRecord {
-    pub id: String,
-    pub run_id: String,
-    pub kind: String,
-    #[serde(rename = "type", default = "default_artifact_type")]
-    pub artifact_type: String,
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub public_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub viewer_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub viewer_links: Vec<ArtifactViewerLink>,
-    pub sha256: Option<String>,
-    pub size_bytes: Option<i64>,
-    pub mime: Option<String>,
-    #[serde(default)]
-    pub metadata_json: serde_json::Value,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ArtifactViewerLink {
-    pub kind: String,
-    pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replay: Option<serde_json::Value>,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArtifactCleanupFilter {
     pub created_before: Option<String>,
@@ -139,10 +108,6 @@ pub struct ArtifactCleanupCandidateRecord {
     pub component_id: Option<String>,
     pub run_started_at: String,
     pub run_status: String,
-}
-
-fn default_artifact_type() -> String {
-    "file".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

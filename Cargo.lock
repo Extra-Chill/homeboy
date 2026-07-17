@@ -847,6 +847,7 @@ dependencies = [
  "homeboy-lab-contract",
  "homeboy-lab-runner-contract",
  "homeboy-lifecycle-contract",
+ "homeboy-observation-contract",
  "homeboy-output",
  "homeboy-paths",
  "homeboy-process",
@@ -983,6 +984,14 @@ dependencies = [
 
 [[package]]
 name = "homeboy-lifecycle-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "homeboy-observation-contract"
 version = "0.1.0"
 dependencies = [
  "serde",

@@ -1,0 +1,17 @@
+[package]
+name = "homeboy-observation-contract"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Shared observation record types for homeboy. Behavior-free data (artifact records + viewer links) that both homeboy-core's observation store and consumers like the extension bench report layer depend on, so they can carry observation records without depending on the observation store."
+repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
+
+[lib]
+name = "homeboy_observation_contract"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

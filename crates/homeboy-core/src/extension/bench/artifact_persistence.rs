@@ -16,7 +16,8 @@ use crate::engine::run_dir::{self, RunDir};
 use crate::extension::bench::{
     BenchArtifact, BenchDiagnostic, BenchDiagnosticSource, BenchResults, BenchRunWorkflowResult,
 };
-use crate::observation::{finding_records_from_budget, ActiveObservation, ArtifactRecord};
+use crate::observation::{finding_records_from_budget, ActiveObservation};
+use homeboy_observation_contract::ArtifactRecord;
 
 /// Persist every bench artifact referenced by `workflow`'s results into the
 /// observation store, rewrite the results file with the recorded links, record
