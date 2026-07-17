@@ -2,6 +2,14 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.25.0] - 2026-07-17
+
+### Added
+- add extension discovery composition metadata
+
+### Changed
+- share runner sidecar adapter loading
+
 ## [1.23.10] - 2026-07-16
 
 ### Fixed
