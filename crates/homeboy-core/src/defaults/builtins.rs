@@ -13,30 +13,6 @@ struct ExtensionProvidedDefaults {
     version_candidates: Vec<VersionCandidateConfig>,
     test_drift: TestDriftConfig,
     direct_test_file_suffixes: Vec<String>,
-    /// Optional code-audit detector defaults supplied by an external defaults
-    /// file. Core's bundled asset leaves these empty so framework-specific
-    /// constants, regexes, and tracker hosts live outside core (#2240).
-    #[serde(default)]
-    detector_profile: DetectorProfileDefaults,
-}
-
-/// Extension-provided code-audit detector defaults. Empty by default so a
-/// truly generic core (or an external defaults file that omits the section)
-/// carries no framework-specific detection literals.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub(crate) struct DetectorProfileDefaults {
-    #[serde(default)]
-    pub version_guard_constants: Vec<String>,
-    #[serde(default)]
-    pub version_guard_regexes: Vec<String>,
-    /// Language tokens whose files are eligible for version-compare guard
-    /// scanning. `version_compare(...)` syntax is ecosystem-specific (e.g.
-    /// PHP), so the concrete token set is extension-provided rather than baked
-    /// into core (#2240 / #6759).
-    #[serde(default)]
-    pub version_guard_languages: Vec<String>,
-    #[serde(default)]
-    pub tracker_reference_regexes: Vec<String>,
 }
 
 fn extension_provided_defaults() -> &'static ExtensionProvidedDefaults {
@@ -99,10 +75,6 @@ pub(crate) fn extension_provided_direct_test_file_suffixes() -> Vec<String> {
     extension_provided_defaults()
         .direct_test_file_suffixes
         .clone()
-}
-
-pub(crate) fn extension_provided_detector_profile() -> DetectorProfileDefaults {
-    extension_provided_defaults().detector_profile.clone()
 }
 
 pub(super) fn default_deploy() -> DeployConfig {
@@ -202,18 +174,6 @@ mod tests {
         assert!(suffixes.contains(&".test.js".to_string()));
         assert!(suffixes.contains(&".spec.tsx".to_string()));
         assert!(suffixes.contains(&"_test.rs".to_string()));
-    }
-
-    #[test]
-    fn core_detector_profile_fallback_is_empty() {
-        let profile = extension_provided_detector_profile();
-
-        assert!(profile.version_guard_constants.is_empty());
-        assert!(profile.version_guard_regexes.is_empty());
-        // No ecosystem language token (e.g. "php") baked into core — the
-        // version-guard language set is extension-provided (#2240 / #6759).
-        assert!(profile.version_guard_languages.is_empty());
-        assert!(profile.tracker_reference_regexes.is_empty());
     }
 
     #[test]

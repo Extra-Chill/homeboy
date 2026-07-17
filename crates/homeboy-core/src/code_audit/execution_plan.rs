@@ -1,11 +1,23 @@
 use super::AuditFinding;
-use crate::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus};
+
+/// One detector-family entry in the audit execution plan: the step id and
+/// whether that family runs for the selected profile/filters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuditPlanStep {
+    id: String,
+    enabled: bool,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AuditExecutionPlan {
     /// Authoritative detector-family execution contract. `run_*` helpers below
     /// derive from this plan so callers do not maintain parallel selector state.
-    pub(crate) plan: HomeboyPlan,
+    ///
+    /// This is a code_audit-internal selection list, not a `HomeboyPlan`: audit
+    /// only ever needs each detector family's id and enabled/disabled state, so
+    /// it tracks exactly that rather than depending on the generic plan type
+    /// (which carries gate/proof/artifact machinery audit never uses).
+    steps: Vec<AuditPlanStep>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -538,28 +550,24 @@ impl AuditExecutionPlan {
         })
     }
 
-    fn from_enabled_families(mode: &str, is_enabled: impl Fn(&DetectorDescriptor) -> bool) -> Self {
-        let steps: Vec<PlanStep> = DETECTOR_DESCRIPTORS
+    fn from_enabled_families(
+        _mode: &str,
+        is_enabled: impl Fn(&DetectorDescriptor) -> bool,
+    ) -> Self {
+        let steps: Vec<AuditPlanStep> = DETECTOR_DESCRIPTORS
             .iter()
             .map(|family| detector_step(family.id, is_enabled(family)))
             .collect();
 
-        Self {
-            plan: HomeboyPlan::builder_for_description(PlanKind::Audit, "audit execution")
-                .mode(mode)
-                .steps(steps)
-                .summarize_disabled_as_skipped()
-                .build(),
-        }
+        Self { steps }
     }
 
     pub(crate) fn detector_enabled(&self, id: &str) -> bool {
         let step_id = detector_step_id(id);
-        self.plan
-            .steps
+        self.steps
             .iter()
             .find(|step| step.id == step_id)
-            .is_some_and(|step| step.status == PlanStepStatus::Ready)
+            .is_some_and(|step| step.enabled)
     }
 
     pub(crate) fn requires_discovery(&self) -> bool {
@@ -577,24 +585,11 @@ fn detector_step_id(name: &str) -> String {
     format!("audit.{name}")
 }
 
-fn detector_step(name: &str, enabled: bool) -> PlanStep {
-    let builder = PlanStep::builder(
-        detector_step_id(name),
-        format!("audit.detector.{name}"),
-        if enabled {
-            PlanStepStatus::Ready
-        } else {
-            PlanStepStatus::Disabled
-        },
-    )
-    .label(name.replace('_', " "));
-
-    if enabled {
-        builder
-    } else {
-        builder.skip_reason("filtered")
+fn detector_step(name: &str, enabled: bool) -> AuditPlanStep {
+    AuditPlanStep {
+        id: detector_step_id(name),
+        enabled,
     }
-    .build()
 }
 
 fn family_enabled(

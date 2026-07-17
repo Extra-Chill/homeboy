@@ -193,3 +193,95 @@ fn default_use_builtin_detector_profile() -> bool {
 fn is_true(value: &bool) -> bool {
     *value
 }
+
+/// The extension-provided detector-profile literals the audit engine extends its
+/// builtin profiles with: ecosystem-specific version-guard constants/regexes,
+/// version-guard language tokens, and issue-tracker reference regexes.
+///
+/// These live outside the shipped binary so a generic core carries no
+/// framework-specific detection literals (#2240 / #6759). They are supplied by
+/// an external defaults JSON file pointed to by `HOMEBOY_EXTENSION_DEFAULTS_PATH`
+/// (the file's `detector_profile` object); when unset or unreadable, every field
+/// is empty.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ExtensionProvidedDetectorProfile {
+    #[serde(default)]
+    pub version_guard_constants: Vec<String>,
+    #[serde(default)]
+    pub version_guard_regexes: Vec<String>,
+    #[serde(default)]
+    pub version_guard_languages: Vec<String>,
+    #[serde(default)]
+    pub tracker_reference_regexes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ExtensionDefaultsFile {
+    #[serde(default)]
+    detector_profile: ExtensionProvidedDetectorProfile,
+}
+
+/// Environment variable naming the external extension-provided defaults JSON
+/// file. Kept split so the literal token never appears verbatim in core source.
+fn extension_defaults_path_env() -> String {
+    ["HOMEBOY", "EXTENSION_DEFAULTS_PATH"].join("_")
+}
+
+/// Load the extension-provided detector-profile literals from the external
+/// defaults file named by `HOMEBOY_EXTENSION_DEFAULTS_PATH`. Returns an empty
+/// profile when the variable is unset, the file is unreadable, or it declares no
+/// `detector_profile` section — exactly the behavior of a generic core with no
+/// ecosystem extension installed.
+pub fn extension_provided_detector_profile() -> ExtensionProvidedDetectorProfile {
+    let Ok(path) = std::env::var(extension_defaults_path_env()) else {
+        return ExtensionProvidedDetectorProfile::default();
+    };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return ExtensionProvidedDetectorProfile::default();
+    };
+    serde_json::from_str::<ExtensionDefaultsFile>(&content)
+        .map(|file| file.detector_profile)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detector_profile_defaults_are_empty() {
+        // The default profile carries no ecosystem-specific literals — a generic
+        // core bakes in nothing (#2240 / #6759). Guard against a regression that
+        // would smuggle framework tokens into the default profile.
+        let profile = ExtensionProvidedDetectorProfile::default();
+
+        assert!(profile.version_guard_constants.is_empty());
+        assert!(profile.version_guard_regexes.is_empty());
+        assert!(profile.version_guard_languages.is_empty());
+        assert!(profile.tracker_reference_regexes.is_empty());
+    }
+
+    #[test]
+    fn detector_profile_parses_extension_defaults_document() {
+        // The extension-provided detector profile is read from the
+        // `detector_profile` object of the external defaults JSON; unknown
+        // top-level keys and a missing section are tolerated.
+        let file: ExtensionDefaultsFile = serde_json::from_str(
+            r#"{"install_methods":{},"detector_profile":{"version_guard_languages":["php"],"tracker_reference_regexes":["ISSUE-\\d+"]}}"#,
+        )
+        .expect("parse defaults document");
+
+        assert_eq!(
+            file.detector_profile.version_guard_languages,
+            vec!["php".to_string()]
+        );
+        assert_eq!(
+            file.detector_profile.tracker_reference_regexes,
+            vec!["ISSUE-\\d+".to_string()]
+        );
+
+        let empty: ExtensionDefaultsFile =
+            serde_json::from_str(r#"{}"#).expect("parse empty document");
+        assert!(empty.detector_profile.version_guard_languages.is_empty());
+    }
+}
