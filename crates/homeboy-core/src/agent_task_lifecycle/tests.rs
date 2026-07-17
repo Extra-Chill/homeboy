@@ -667,7 +667,7 @@ fn detached_handoff_persists_redacted_submission_intent_before_broker_ack() {
         );
         assert_eq!(
             pending.metadata["runner_submission_intent"]["submission_key"],
-            "agent-task:intent-before-post"
+            "agent-task:homeboy-lab:intent-before-post"
         );
         assert_eq!(pending.metadata["phase"], "waiting_for_runner_capacity");
         assert!(!serde_json::to_string(&pending)

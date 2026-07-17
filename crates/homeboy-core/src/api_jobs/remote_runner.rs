@@ -19,6 +19,12 @@ use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
 use homeboy_lab_runner_contract::{RunnerMutationArtifacts, RunnerResourceMetrics};
 
+/// Broker metadata is durable queue input. Keep command-file payloads bounded
+/// before they can be persisted or decoded by a worker.
+const MAX_COMMAND_ASSET_COUNT: usize = 16;
+const MAX_COMMAND_ASSET_BASE64_BYTES: usize = 1_400_000;
+const MAX_COMMAND_ASSETS_BASE64_BYTES: usize = 4_200_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobArtifactMetadata {
     pub id: String,
@@ -233,6 +239,58 @@ impl RemoteRunnerJobRequest {
         public
     }
 
+    fn validate_command_assets(&self) -> Result<()> {
+        let Some(assets) = self
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("command_assets"))
+            .and_then(|assets| assets.get("assets"))
+            .and_then(Value::as_array)
+        else {
+            return Ok(());
+        };
+        if assets.len() > MAX_COMMAND_ASSET_COUNT {
+            return Err(Error::validation_invalid_argument(
+                "metadata.command_assets",
+                "remote runner job has too many command assets",
+                None,
+                None,
+            ));
+        }
+        let mut total = 0usize;
+        for asset in assets {
+            let encoded = asset
+                .get("content_base64")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "metadata.command_assets",
+                        "remote runner command asset is missing base64 content",
+                        None,
+                        None,
+                    )
+                })?;
+            if encoded.len() > MAX_COMMAND_ASSET_BASE64_BYTES {
+                return Err(Error::validation_invalid_argument(
+                    "metadata.command_assets",
+                    "remote runner command asset exceeds the size limit",
+                    None,
+                    None,
+                ));
+            }
+            total = total.saturating_add(encoded.len());
+        }
+        if total > MAX_COMMAND_ASSETS_BASE64_BYTES {
+            return Err(Error::validation_invalid_argument(
+                "metadata.command_assets",
+                "remote runner command assets exceed the aggregate size limit",
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     fn dispatch_request(&self) -> Self {
         let mut request = self.clone();
         let secret_names = request.secret_env_plan.secret_env_names();
@@ -370,6 +428,7 @@ impl JobStore {
                 None,
             ));
         }
+        request.validate_command_assets()?;
         let secret_env_plan = request.normalize();
         super::with_runner_job_preparation(|p| {
             p.validate_lab_runner_workload_dispatch(
@@ -393,6 +452,7 @@ impl JobStore {
                     .as_ref()
                     .and_then(|remote| remote.request.submission_key())
                     == Some(submission_key)
+                    && stored.job.target_runner_id.as_deref() == Some(request.runner_id.as_str())
             }) {
                 return Ok(existing.job.clone());
             }

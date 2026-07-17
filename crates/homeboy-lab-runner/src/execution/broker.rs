@@ -79,7 +79,8 @@ pub(super) fn exec_via_reverse_broker(
         metadata: Some({
             let mut metadata = runner_exec_request_metadata(run_id.as_deref(), "reverse_broker");
             if let Some(run_id) = run_id.as_deref() {
-                metadata["submission_key"] = serde_json::json!(format!("agent-task:{run_id}"));
+                metadata["submission_key"] =
+                    serde_json::json!(format!("agent-task:{}:{run_id}", runner.id));
             }
             metadata
         }),
@@ -350,29 +351,127 @@ fn durable_command_assets(
     command: &[String],
     plan: Option<&PathMaterializationPlan>,
 ) -> Result<Vec<serde_json::Value>> {
+    const MAX_COMMAND_ASSET_BYTES: u64 = 1_048_576;
+    const MAX_COMMAND_ASSETS_BYTES: u64 = 3_145_728;
     let Some(plan) = plan else {
         return Ok(Vec::new());
     };
     command
         .iter()
         .filter_map(|argument| argument.strip_prefix('@').map(|path| (argument, path)))
-        .filter_map(|(argument, remote_path)| {
+        .map(|(argument, remote_path)| {
             let entry = plan
                 .entries
                 .iter()
-                .find(|entry| remote_path.starts_with(&entry.remote_path))?;
-            let local = Path::new(entry.local_path.as_deref()?);
+                .find(|entry| {
+                    remote_path == entry.remote_path
+                        || remote_path
+                            .strip_prefix(&entry.remote_path)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "command",
+                        "file-backed command argument is outside the materialization plan",
+                        Some(argument.to_string()),
+                        None,
+                    )
+                })?;
+            let local = Path::new(entry.local_path.as_deref().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "path_materialization_plan",
+                    "command asset materialization entry has no local path",
+                    Some(entry.remote_path.clone()),
+                    None,
+                )
+            })?);
             let source = if local.is_file() {
+                if remote_path != entry.remote_path {
+                    return Err(Error::validation_invalid_argument(
+                        "command",
+                        "file-backed command argument does not match its materialized file",
+                        Some(argument.to_string()),
+                        None,
+                    ));
+                }
                 local.to_path_buf()
             } else {
-                local.join(
-                    remote_path
-                        .strip_prefix(&entry.remote_path)?
-                        .trim_start_matches('/'),
-                )
+                let relative = remote_path
+                    .strip_prefix(&entry.remote_path)
+                    .unwrap_or_default()
+                    .trim_start_matches('/');
+                let relative = Path::new(relative);
+                if relative
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "command",
+                        "file-backed command argument has an unsafe materialized path",
+                        Some(argument.to_string()),
+                        None,
+                    ));
+                }
+                local.join(relative)
             };
-            source.is_file().then_some((argument, remote_path, source))
+            if !source.is_file() {
+                return Ok(None);
+            }
+            let source = source.canonicalize().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("canonicalize command asset {}", source.display())),
+                )
+            })?;
+            let local = local.canonicalize().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "canonicalize materialization root {}",
+                        local.display()
+                    )),
+                )
+            })?;
+            if !source.starts_with(&local) {
+                return Err(Error::validation_invalid_argument(
+                    "command",
+                    "file-backed command argument resolves outside the materialization root",
+                    Some(argument.to_string()),
+                    None,
+                ));
+            }
+            Ok(Some((argument, remote_path, source)))
         })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .map({
+            let mut total = 0u64;
+            move |(argument, remote_path, source)| {
+                let size = std::fs::metadata(&source)
+                    .map_err(|err| {
+                        Error::internal_io(
+                            err.to_string(),
+                            Some(format!("stat command asset {}", source.display())),
+                        )
+                    })?
+                    .len();
+                if size > MAX_COMMAND_ASSET_BYTES
+                    || total.saturating_add(size) > MAX_COMMAND_ASSETS_BYTES
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "command",
+                        "file-backed command assets exceed the size limit",
+                        Some(argument.to_string()),
+                        None,
+                    ));
+                }
+                total += size;
+                Ok((argument, remote_path, source))
+            }
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
         .map(|(argument, remote_path, source)| {
             let content = std::fs::read(&source).map_err(|err| {
                 Error::internal_io(

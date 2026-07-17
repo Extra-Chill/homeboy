@@ -669,7 +669,7 @@ pub fn record_lab_offload_submission_intent(
     let run_id = sanitize_run_id(run_id);
     let _lock = LabHandoffLock::lock(&run_id)?;
     let mut record = store::read_record(&run_id)?;
-    let submission_key = format!("agent-task:{run_id}");
+    let submission_key = format!("agent-task:{runner_id}:{run_id}");
     let metadata = record.ensure_metadata_object();
     metadata.insert(
         "runner_submission_intent".to_string(),

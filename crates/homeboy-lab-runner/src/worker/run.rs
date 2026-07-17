@@ -266,7 +266,8 @@ fn run_once_output(
     // before handing the claimed job directly to the local runtime.
     let capability_preflight = reverse_worker_capability_preflight(&claim.request);
     let mut execution_envelope = claim.request.execution_envelope();
-    materialize_command_assets(&claim.job.id.to_string(), &mut execution_envelope)?;
+    let _command_assets =
+        materialize_command_assets(&claim.job.id.to_string(), &mut execution_envelope)?;
     materialize_snapshot_git_baseline(&execution_envelope)?;
     // Shared finisher so the exec-error and exec-success paths submit their
     // terminal job result through identical broker plumbing (#5091).
@@ -431,10 +432,18 @@ fn materialize_snapshot_git_baseline(envelope: &RunnerExecutionEnvelope) -> Resu
 /// Materialize broker-owned command files in the worker's durable data root and
 /// rewrite their argv entries before execution. The request body survives broker
 /// restart; controller temporary files are never consulted after claim.
+struct CommandAssetDirectory(std::path::PathBuf);
+
+impl Drop for CommandAssetDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn materialize_command_assets(
     job_id: &str,
     envelope: &mut homeboy_core::runner_execution_envelope::RunnerExecutionEnvelope,
-) -> homeboy_core::error::Result<()> {
+) -> homeboy_core::error::Result<Option<CommandAssetDirectory>> {
     use base64::Engine;
     use sha2::{Digest, Sha256};
 
@@ -444,7 +453,7 @@ fn materialize_command_assets(
         .and_then(|value| value.get("assets"))
         .and_then(serde_json::Value::as_array)
     else {
-        return Ok(());
+        return Ok(None);
     };
     let root = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
@@ -454,19 +463,34 @@ fn materialize_command_assets(
         .unwrap_or_else(std::env::temp_dir)
         .join("homeboy/reverse-runner-jobs")
         .join(job_id);
+    // A claim id is broker-issued, but reject a pre-existing directory rather
+    // than following any local symlink or reusing a prior worker's plaintext.
+    if root.exists() {
+        std::fs::remove_dir_all(&root).map_err(|err| {
+            homeboy_core::error::Error::internal_io(
+                err.to_string(),
+                Some(format!(
+                    "remove stale command asset root {}",
+                    root.display()
+                )),
+            )
+        })?;
+    }
     std::fs::create_dir_all(&root).map_err(|err| {
         homeboy_core::error::Error::internal_io(
             err.to_string(),
             Some(format!("create command asset root {}", root.display())),
         )
     })?;
+    restrict_command_asset_permissions(&root, 0o700)?;
     let command = envelope
         .dispatch
         .as_mut()
         .map(|dispatch| &mut dispatch.command);
     let Some(command) = command else {
-        return Ok(());
+        return Ok(Some(CommandAssetDirectory(root)));
     };
+    let mut total_bytes = 0usize;
     for (index, asset) in assets.iter().enumerate() {
         let argument = asset
             .get("argument")
@@ -480,6 +504,14 @@ fn materialize_command_assets(
             .ok_or_else(|| {
                 homeboy_core::error::Error::internal_json("command asset missing content", None)
             })?;
+        if encoded.len() > 1_400_000 {
+            return Err(homeboy_core::error::Error::validation_invalid_argument(
+                "metadata.command_assets",
+                "remote runner command asset exceeds the size limit",
+                None,
+                None,
+            ));
+        }
         let content = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .map_err(|err| {
@@ -488,6 +520,15 @@ fn materialize_command_assets(
                     Some("decode command asset".to_string()),
                 )
             })?;
+        total_bytes = total_bytes.saturating_add(content.len());
+        if content.len() > 1_048_576 || total_bytes > 3_145_728 {
+            return Err(homeboy_core::error::Error::validation_invalid_argument(
+                "metadata.command_assets",
+                "remote runner command assets exceed the size limit",
+                None,
+                None,
+            ));
+        }
         let digest = format!("{:x}", Sha256::digest(&content));
         if asset.get("sha256").and_then(serde_json::Value::as_str) != Some(digest.as_str()) {
             return Err(homeboy_core::error::Error::internal_json(
@@ -496,16 +537,47 @@ fn materialize_command_assets(
             ));
         }
         let path = root.join(format!("asset-{index}"));
-        std::fs::write(&path, content).map_err(|err| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|err| {
+                homeboy_core::error::Error::internal_io(
+                    err.to_string(),
+                    Some(format!("write command asset {}", path.display())),
+                )
+            })?;
+        use std::io::Write;
+        file.write_all(&content).map_err(|err| {
             homeboy_core::error::Error::internal_io(
                 err.to_string(),
                 Some(format!("write command asset {}", path.display())),
             )
         })?;
+        restrict_command_asset_permissions(&path, 0o600)?;
         for value in command.iter_mut().filter(|value| *value == argument) {
             *value = format!("@{}", path.display());
         }
     }
+    Ok(Some(CommandAssetDirectory(root)))
+}
+
+#[cfg(unix)]
+fn restrict_command_asset_permissions(path: &std::path::Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!(
+                "restrict command asset permissions {}",
+                path.display()
+            )),
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn restrict_command_asset_permissions(_: &std::path::Path, _: u32) -> Result<()> {
     Ok(())
 }
 
