@@ -11,6 +11,8 @@
 
 pub mod action_types;
 pub mod autofix_config;
+pub mod capability;
+pub use capability::ExtensionCapability;
 pub mod ci_config;
 pub mod core_compat;
 pub mod exec_context;
