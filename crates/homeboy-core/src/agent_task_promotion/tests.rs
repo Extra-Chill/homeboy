@@ -222,7 +222,7 @@ fn recovered_runner_aggregate(
 }
 
 #[test]
-fn bridge_reconciliation_projects_recovered_finalized_bytes_for_local_promotion_idempotently() {
+fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_idempotently() {
     crate::test_support::with_isolated_home(|_| {
         let run_id = "recovered-typed-lab-run";
         let task_id = "implement";
@@ -259,6 +259,30 @@ fn bridge_reconciliation_projects_recovered_finalized_bytes_for_local_promotion_
                             "executor_artifact_finalized": true,
                             "source_provenance": { "runner_id": "homeboy-lab" }
                         }
+                    }, {
+                        "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                        "id": "transcript",
+                        "kind": "transcript",
+                        "path": "/home/runner/.homeboy/executor-finalized/transcript.json",
+                        "size_bytes": 10,
+                        "sha256": "a".repeat(64),
+                        "metadata": { "executor_artifact_finalized": true }
+                    }, {
+                        "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                        "id": "result",
+                        "kind": "result",
+                        "path": "/home/runner/.homeboy/executor-finalized/result.json",
+                        "size_bytes": 10,
+                        "sha256": "b".repeat(64),
+                        "metadata": { "executor_artifact_finalized": true }
+                    }, {
+                        "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                        "id": "runtime-log",
+                        "kind": "runtime-log",
+                        "path": "/home/runner/.homeboy/executor-finalized/runtime.log",
+                        "size_bytes": 10,
+                        "sha256": "c".repeat(64),
+                        "metadata": { "executor_artifact_finalized": true }
                     }],
                     "typed_artifacts": [{
                         "name": "patch",
@@ -286,18 +310,12 @@ fn bridge_reconciliation_projects_recovered_finalized_bytes_for_local_promotion_
             .to_string(),
         )
         .expect("recovered aggregate");
-        let identity = AgentTaskDispatchIdentity {
-            runner_id: "homeboy-lab".to_string(),
-            runner_job_id: "job-recovered".to_string(),
-            ..Default::default()
-        };
-
         crate::runner::mirror_agent_task_run_plan_aggregate(
             "@runner-plan.json",
             run_id,
             aggregate.clone(),
             None,
-            Some(&identity),
+            None,
         )
         .expect("bridge reconciliation");
         crate::runner::mirror_agent_task_run_plan_aggregate(
@@ -305,19 +323,25 @@ fn bridge_reconciliation_projects_recovered_finalized_bytes_for_local_promotion_
             run_id,
             aggregate.clone(),
             None,
-            Some(&identity),
+            None,
         )
         .expect("idempotent bridge reconciliation");
 
         let store = crate::observation::ObservationStore::open_initialized().expect("store");
         let artifacts = store.list_artifacts(run_id).expect("projected artifacts");
-        assert_eq!(artifacts.len(), 1);
-        assert_eq!(artifacts[0].artifact_type, "file");
-        assert_eq!(artifacts[0].metadata_json["agent_task"]["task_id"], task_id);
+        assert_eq!(artifacts.len(), 4);
+        let patch = artifacts
+            .iter()
+            .find(|artifact| artifact.artifact_type == "file")
+            .expect("projected patch");
+        assert_eq!(patch.metadata_json["agent_task"]["task_id"], task_id);
         assert_eq!(
-            artifacts[0].metadata_json["agent_task"]["logical_artifact_id"],
+            patch.metadata_json["agent_task"]["logical_artifact_id"],
             artifact_id
         );
+        let record = crate::agent_task_lifecycle::status(run_id).expect("recovered status");
+        assert_eq!(record.metadata["runner_id"], "homeboy-lab");
+        assert_eq!(record.metadata["artifact_projection"]["status"], "complete");
 
         let temp = tempfile::tempdir().expect("promotion tempdir");
         let mut provider = FakePromotionWorkspaceProvider {
@@ -343,7 +367,7 @@ fn bridge_reconciliation_projects_recovered_finalized_bytes_for_local_promotion_
             &mut provider,
         )
         .expect("promote recovered controller projection");
-        assert_eq!(report.patch_artifact.path, artifacts[0].path);
+        assert_eq!(report.patch_artifact.path, patch.path);
         assert_eq!(
             provider.applied_patch_contents,
             vec![VALID_PATCH.to_string()]
