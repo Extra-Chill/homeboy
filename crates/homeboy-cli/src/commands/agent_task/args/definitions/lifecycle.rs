@@ -182,6 +182,14 @@ pub struct PromoteArgs {
     pub gates: VerifyGateArgs,
 }
 #[derive(Args, Debug)]
+pub struct AdoptArgs {
+    /// Existing durable run id or cook id whose recipe owns the candidate lifecycle.
+    pub run_or_cook_id: String,
+    /// Immutable commit revision in the recorded source worktree.
+    #[arg(long, value_name = "SHA")]
+    pub candidate_ref: String,
+}
+#[derive(Args, Debug)]
 pub struct FinalizePrArgs {
     #[arg(long, value_name = "ID")]
     pub run_id: String,

@@ -103,8 +103,13 @@ an exhausted run records which budget stopped further execution.
 | `fanout submit-batch\|status\|artifacts` | Submit and inspect durable batches of independent `AgentTaskPlan` tasks. |
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
+| `adopt <run-or-cook-id> --candidate-ref <sha>` | Adopt an immutable commit candidate through the recorded cook gates and finalization policy. |
 | `finalize-pr` | Finalize a green cook run into a review-ready pull request. |
 | `gate-feedback` | Convert deterministic gate results into a cook retry or stop decision. |
+
+`adopt` accepts only immutable commits from the recorded cook source workspace.
+Use `promote` for patch-artifact candidates; it remains the controller-owned
+patch-artifact ingestion and gate path.
 
 `finalize-pr` is the core-owned publication boundary for external runtimes. Its
 `homeboy/agent-task-pr-finalization/v1` report keeps the legacy top-level

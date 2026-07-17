@@ -322,6 +322,29 @@ pub(super) fn promote_with_provider_and_checkpoint(
         );
     }
 
+    // Adoption supplies an immutable commit candidate. It intentionally bypasses
+    // provider artifact selection, but still uses the ordinary promotion/gates
+    // implementation and durable checkpoint.
+    if options.candidate_ref.is_some() {
+        let committed_patch = committed_changes_patch(&options)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "candidate_ref",
+                "candidate revision contains no changes after the recorded task base",
+                options.candidate_ref.clone(),
+                None,
+            )
+        })?;
+        return promote_committed_changes(
+            &options,
+            provider,
+            checkpoint,
+            &source_kind,
+            &outcome,
+            None,
+            committed_patch,
+        );
+    }
+
     let artifact = match select_patch_artifact(&outcome, options.artifact_id.as_deref()) {
         Ok(artifact) => artifact,
         Err(error) if options.artifact_id.is_none() && !outcome_has_patch_artifacts(&outcome) => {

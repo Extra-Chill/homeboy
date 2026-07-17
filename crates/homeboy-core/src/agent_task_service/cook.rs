@@ -109,6 +109,132 @@ pub struct AgentTaskCookReport {
     pub stop_reason: Option<String>,
 }
 
+/// Adopt an externally prepared immutable commit into a durable cook. The
+/// source recipe remains authoritative for repository, base, gates, and
+/// finalization policy; adoption only replaces provider artifact harvesting.
+pub fn adopt_cook_candidate(
+    cook_or_run_id: &str,
+    candidate_ref: &str,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    let record = agent_task_lifecycle::status(cook_or_run_id)?;
+    let cook_id = record
+        .metadata
+        .get("cook_id")
+        .and_then(Value::as_str)
+        .unwrap_or(cook_or_run_id);
+    let recipe = super::load_recipe(cook_id)?;
+    let options = super::reconstruct_options(&recipe)?;
+    let run_id = record.run_id.clone();
+    let plan = agent_task_lifecycle::load_plan(&run_id)?;
+    let source_request = plan.tasks.first().cloned().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "run_id",
+            "candidate adoption requires a cook run with one source task",
+            Some(run_id.clone()),
+            None,
+        )
+    })?;
+    if plan.tasks.len() != 1 {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "candidate adoption supports one task per cook",
+            Some(run_id),
+            None,
+        ));
+    }
+    let (source, source_path) = promotion_source(&record.run_id)?;
+    let promotion = promote_with_checkpoint(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some(record.run_id.clone()),
+            source_path,
+            source_worktree_path: options.source_worktree_path.clone(),
+            base_ref: Some(options.base.clone()),
+            task_base_sha: options.task_base_sha.clone(),
+            candidate_ref: Some(candidate_ref.to_string()),
+            to_worktree: options.to_worktree.clone(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: options.gates.clone(),
+            provider_command: options.provider_command.clone(),
+            provider_invocation: options.provider_invocation.clone(),
+        },
+        |checkpoint| {
+            let checkpoint = serde_json::to_value(checkpoint).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize adopted candidate checkpoint".to_string()),
+                )
+            })?;
+            agent_task_lifecycle::record_promotion(&record.run_id, checkpoint).map(|_| ())
+        },
+    )?;
+    let mut promotion_value = serde_json::to_value(&promotion)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    promotion_value["provenance"]["adoption"] = serde_json::json!({
+        "source_run_id": record.run_id,
+        "candidate_ref": candidate_ref,
+        "source_worktree_path": options.source_worktree_path,
+        "recorded_task_base": options.task_base_sha,
+    });
+    agent_task_lifecycle::record_promotion(&record.run_id, promotion_value)?;
+    let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
+        source_request,
+        promotion_report: promotion.clone(),
+        attempt: 1,
+        max_attempts: options.max_attempts,
+        source_run_id: Some(record.run_id.clone()),
+        current_diff: String::new(),
+        metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
+    });
+    let attempt = AgentTaskCookAttemptReport {
+        attempt: 1,
+        run_id: record.run_id.clone(),
+        run_state: format!("{:?}", record.state),
+        aggregate_path: record.aggregate_path.clone(),
+        promotion: Some(promotion.clone()),
+        feedback: Some(feedback.clone()),
+    };
+    if feedback.status != AgentTaskCookLoopStatus::GreenCompleted {
+        return Ok(cook_report(
+            cook_id.to_string(),
+            "gate_failed",
+            vec![attempt],
+            None,
+            Some("adopted candidate did not pass the original deterministic gates".to_string()),
+            1,
+        ));
+    }
+    if options.no_finalize {
+        return Ok(cook_report(
+            cook_id.to_string(),
+            "green_no_finalize",
+            vec![attempt],
+            None,
+            Some(
+                "adopted candidate passed deterministic gates; recipe skips finalization"
+                    .to_string(),
+            ),
+            0,
+        ));
+    }
+    let finalization = finalize_or_load_cook_pr(&options, &record.run_id, &promotion)?;
+    let status = finalization["status"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    let exit_code = if status == "review_ready" { 0 } else { 1 };
+    Ok(cook_report(
+        cook_id.to_string(),
+        &status,
+        vec![attempt],
+        Some(finalization),
+        None,
+        exit_code,
+    ))
+}
+
 /// A bounded collection of independently durable cooks. Each cook retains the
 /// same dispatch, retry, promotion, and lifecycle path as `run_cook`.
 #[derive(Debug, Clone)]
@@ -1318,6 +1444,7 @@ fn promote_attempt(
             source_worktree_path: options.source_worktree_path.clone(),
             base_ref: Some(options.base.clone()),
             task_base_sha: options.task_base_sha.clone(),
+            candidate_ref: None,
             to_worktree: options.to_worktree.clone(),
             task_id: None,
             artifact_id: None,

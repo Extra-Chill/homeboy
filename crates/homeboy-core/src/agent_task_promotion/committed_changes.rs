@@ -33,7 +33,28 @@ pub(crate) fn committed_changes_patch(
     else {
         return Ok(None);
     };
-    let changed_files = git_lines(worktree_path, &["diff", "--name-only", &base_ref, "HEAD"])?;
+    if options.candidate_ref.is_some() {
+        ensure_clean_source(worktree_path)?;
+    }
+    let candidate = resolve_candidate(worktree_path, options.candidate_ref.as_deref())?;
+    let is_ancestor = Command::new("git")
+        .args(["merge-base", "--is-ancestor", &base_ref, &candidate])
+        .current_dir(worktree_path)
+        .status()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?
+        .success();
+    if !is_ancestor {
+        return Err(Error::validation_invalid_argument(
+            "candidate_ref",
+            "candidate revision is not descended from the recorded task base",
+            Some(candidate),
+            None,
+        ));
+    }
+    let changed_files = git_lines(
+        worktree_path,
+        &["diff", "--name-only", &base_ref, &candidate],
+    )?;
     if changed_files.is_empty() {
         return Ok(None);
     }
@@ -45,13 +66,13 @@ pub(crate) fn committed_changes_patch(
             "--full-index",
             "--find-renames",
             &base_ref,
-            "HEAD",
+            &candidate,
         ],
     )?;
     if patch.trim().is_empty() {
         return Ok(None);
     }
-    let commit_range = format!("{base_ref}..HEAD");
+    let commit_range = format!("{base_ref}..{candidate}");
     let commits = committed_change_evidence(worktree_path, &commit_range)?;
     if commits.is_empty() {
         return Ok(None);
@@ -76,6 +97,36 @@ pub(crate) fn committed_changes_patch(
         commit_range,
         commits,
     }))
+}
+
+fn ensure_clean_source(cwd: &Path) -> Result<()> {
+    let status = git_stdout(cwd, &["status", "--porcelain"])?;
+    if status.trim().is_empty() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "source_worktree",
+        "candidate source worktree is dirty; refusing to derive an ambiguous commit candidate",
+        Some(cwd.display().to_string()),
+        None,
+    ))
+}
+
+fn resolve_candidate(cwd: &Path, requested: Option<&str>) -> Result<String> {
+    let candidate = requested.unwrap_or("HEAD");
+    git_stdout(
+        cwd,
+        &["rev-parse", "--verify", &format!("{candidate}^{{commit}}")],
+    )
+    .map(|value| value.trim().to_string())
+    .map_err(|_| {
+        Error::validation_invalid_argument(
+            "candidate_ref",
+            "candidate revision is not present in the recorded source repository",
+            Some(candidate.to_string()),
+            None,
+        )
+    })
 }
 
 fn committed_changes_patch_path(
