@@ -423,20 +423,20 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live authenticated server; run locally with `cargo test -- --ignored`"]
     fn test_login() {
         let credentials = HashMap::new();
         let _ = login("homeboy-auth-test", credentials);
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live authenticated server; run locally with `cargo test -- --ignored`"]
     fn test_logout() {
         let _ = logout("homeboy-auth-test");
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_set() {
         let result = set("homeboy-auth-test", "token", "secret-value").expect("store value");
 
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_get() {
         set("homeboy-auth-test", "token", "secret-value").expect("store value");
         let result = get("homeboy-auth-test", "token", true).expect("read value");
@@ -458,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_remove() {
         set("homeboy-auth-test", "token", "secret-value").expect("store value");
         let result = remove("homeboy-auth-test", "token").expect("remove value");
@@ -467,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live authenticated server; run locally with `cargo test -- --ignored`"]
     fn test_status() {
         let _ = status("homeboy-auth-test");
     }
