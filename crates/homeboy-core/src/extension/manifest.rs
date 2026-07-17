@@ -27,6 +27,10 @@ pub use super::manifest_config::{
     AutofixVerifyConfig, TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
     TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
 };
+pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
+pub use homeboy_extension_contract::ci_config::{
+    CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec,
+};
 pub use homeboy_extension_contract::fuzz_config::{FuzzConfig, FuzzWorkloadConfig};
 pub use homeboy_extension_contract::manifest_action_config::{
     ActionConfig, InputConfig, RuntimeConfig, SelectOption, SettingConfig,
@@ -38,11 +42,6 @@ pub use homeboy_extension_contract::manifest_toolchain_config::{
     LintConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig, SinceTagConfig,
     SourceSnapshotConfig, TestChangedFileExclusiveEnv, TestChangedFileRouting,
     TestChangedFileRoutingStrategy, TestConfig, VersionPatternConfig,
-};
-mod ci_config;
-pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
-pub use ci_config::{
-    CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec,
 };
 pub use homeboy_extension_contract::DeployArchiveInstallPolicy;
 pub use homeboy_extension_contract::{TestPassthroughFilter, TestPassthroughFilterStrategy};
