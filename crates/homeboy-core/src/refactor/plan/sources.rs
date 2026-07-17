@@ -1002,12 +1002,6 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_refactor_sources() {
-        let _collect: fn(RefactorSourceRequest) -> crate::Result<RefactorSourceRun> =
-            collect_refactor_sources;
-    }
-
-    #[test]
     fn normalize_sources_orders_known_sources() {
         let normalized =
             normalize_sources(&["test".to_string(), "audit".to_string(), "lint".to_string()])

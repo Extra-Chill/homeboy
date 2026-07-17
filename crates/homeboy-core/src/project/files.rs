@@ -649,13 +649,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_stdin() {
-        let read_stdin_fn: fn() -> Result<String> = read_stdin;
-
-        let _ = read_stdin_fn;
-    }
-
-    #[test]
     fn test_list() {
         let entries = parse_ls_output(
             "-rw-r--r--  1 user group 12 Jan  1 00:00 file.txt\n",
@@ -665,27 +658,6 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, "/tmp/file.txt");
         assert_eq!(entries[0].size, Some(12));
-    }
-
-    #[test]
-    fn test_write() {
-        let write_fn: fn(&str, &str, &str) -> Result<WriteResult> = write;
-
-        let _ = write_fn;
-    }
-
-    #[test]
-    fn test_delete() {
-        let delete_fn: fn(&str, &str, bool) -> Result<DeleteResult> = delete;
-
-        let _ = delete_fn;
-    }
-
-    #[test]
-    fn test_rename() {
-        let rename_fn: fn(&str, &str, &str) -> Result<RenameResult> = rename;
-
-        let _ = rename_fn;
     }
 
     #[test]
@@ -703,13 +675,6 @@ mod tests {
         assert_eq!(matches[0].file, "/tmp/file.txt");
         assert_eq!(matches[0].line, 3);
         assert_eq!(matches[0].content, "needle");
-    }
-
-    #[test]
-    fn test_download() {
-        let download_fn: fn(&str, &str, &str, bool) -> Result<DownloadResult> = download;
-
-        let _ = download_fn;
     }
 
     #[test]

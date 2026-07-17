@@ -126,9 +126,4 @@ mod tests {
             assert!(result.repaired_source_metadata.is_empty());
         });
     }
-
-    #[test]
-    fn test_exec_tool() {
-        let _exec_tool: fn(&str, Option<&str>, &[String]) -> Result<i32> = exec_tool;
-    }
 }
