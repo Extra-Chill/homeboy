@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::observation::ArtifactViewerLink;
+use homeboy_lifecycle_contract::ArtifactViewerLink;
 
 /// Viewer pointers shared by bench artifact records and the compact
 /// artifact index. Embedded via `#[serde(flatten)]` so the on-wire JSON
@@ -62,5 +62,5 @@ pub struct BenchArtifact {
 }
 
 #[cfg(test)]
-#[path = "../../../../../tests/core/extension/bench/artifact_test.rs"]
+#[path = "bench_artifact_test.rs"]
 mod artifact_test;

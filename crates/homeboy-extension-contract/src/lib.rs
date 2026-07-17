@@ -11,9 +11,11 @@
 
 pub mod action_types;
 pub mod autofix_config;
+pub mod bench_artifact;
 pub mod bench_diagnostics;
 pub mod bench_result;
 pub mod capability;
+pub use bench_artifact::{BenchArtifact, BenchArtifactViewer, BenchPreviewLifecycleMetadata};
 pub use bench_diagnostics::{
     BenchDiagnostic, BenchDiagnosticSource, BenchPhaseEvent, BenchPhaseFailureClassification,
     BenchPhaseSummary,

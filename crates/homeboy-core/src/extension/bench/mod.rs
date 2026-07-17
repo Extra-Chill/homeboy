@@ -20,7 +20,7 @@
 //! See `docs/commands/bench.md` for the end-user view.
 
 pub mod aggregation;
-pub mod artifact;
+pub use homeboy_extension_contract::bench_artifact as artifact;
 pub mod artifact_persistence;
 pub(crate) mod artifact_validation;
 pub mod baseline;
@@ -46,7 +46,6 @@ use crate::component::Component;
 use crate::extension::{ExtensionCapability, ExtensionExecutionContext};
 
 pub use aggregation::aggregate_runs;
-pub use artifact::BenchArtifact;
 pub use artifact_persistence::{
     apply_recorded_bench_artifact_links, record_bench_observation_artifacts, record_if_exists,
     record_memory_timeline_artifacts,
@@ -59,6 +58,7 @@ pub use baseline::{
 pub use diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
 pub use distribution::BenchRunDistribution;
 pub use gate::{evaluate_gates, normalized_gate_results, BenchGate, BenchGateOp, BenchGateResult};
+pub use homeboy_extension_contract::bench_artifact::BenchArtifact;
 pub use metric_policy_preset::{BenchMetricPolicyPreset, BenchMetricPolicyPresetKind};
 pub use metrics::MetricDelta;
 pub use parsing::{
