@@ -1,7 +1,7 @@
-use homeboy_core::agent_tasks::lifecycle::{
+use homeboy_agents::agent_tasks::lifecycle::{
     record_completed_run, record_promotion, run_id_for_aggregate_path, status,
 };
-use homeboy_core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
+use homeboy_agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use serde_json::json;
 
 struct EnvironmentGuard {

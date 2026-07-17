@@ -1,8 +1,8 @@
-use homeboy_core::agent_task_lifecycle::{
+use homeboy_agents::agent_task_lifecycle::{
     record_detached_lab_run, record_lab_offload_planned, status, DetachedLabRunRecord,
     LabOffloadProxyPlan,
 };
-use homeboy_core::agent_task_service::{
+use homeboy_agents::agent_task_service::{
     discover_runs, reconcile_stale_active_runs, AgentTaskDiscoveryFilter, AgentTaskLiveness,
 };
 
@@ -87,7 +87,7 @@ fn controller_handoff_remains_resolvable_and_reconciles_when_unaccepted() {
         status("unaccepted-handoff")
             .expect("terminal controller record")
             .state,
-        homeboy_core::agent_task_lifecycle::AgentTaskRunState::Cancelled
+        homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Cancelled
     );
 
     record_lab_offload_planned(LabOffloadProxyPlan {

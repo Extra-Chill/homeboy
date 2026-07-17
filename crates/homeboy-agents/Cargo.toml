@@ -33,3 +33,6 @@ tempfile = "3.14"
 
 [dev-dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
+
+[features]
+test-support = []

@@ -716,7 +716,7 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_secret_source(source, "PROVIDER_ACCESS_TOKEN", &mut cache),
+            resolve_secret_source(&source, "PROVIDER_ACCESS_TOKEN", &mut cache),
             Some("access-token".to_string())
         );
 
@@ -725,7 +725,7 @@ mod tests {
             ..source.clone()
         };
         assert_eq!(
-            numeric_resolve_secret_source(source, "PROVIDER_EXPIRES_AT", &mut cache),
+            resolve_secret_source(&numeric_source, "PROVIDER_EXPIRES_AT", &mut cache),
             Some("12345".to_string())
         );
 
@@ -734,7 +734,7 @@ mod tests {
             ..source
         };
         assert_eq!(
-            bool_resolve_secret_source(source, "PROVIDER_FEDRAMP", &mut cache),
+            resolve_secret_source(&bool_source, "PROVIDER_FEDRAMP", &mut cache),
             Some("false".to_string())
         );
     }
@@ -867,7 +867,7 @@ mod tests {
         let mut cache = HashMap::new();
 
         assert_eq!(
-            resolve_secret_source(source, "EXAMPLE_PROVIDER_FEDRAMP", &mut cache),
+            resolve_secret_source(&source, "EXAMPLE_PROVIDER_FEDRAMP", &mut cache),
             Some("false".to_string())
         );
     }
@@ -903,7 +903,7 @@ mod tests {
         let mut cache = HashMap::new();
 
         assert_eq!(
-            resolve_secret_source(source, "EXAMPLE_PROVIDER_EXPIRES_AT", &mut cache),
+            resolve_secret_source(&source, "EXAMPLE_PROVIDER_EXPIRES_AT", &mut cache),
             Some("4102444800".to_string())
         );
     }
