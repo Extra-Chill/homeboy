@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::{json, Value};
 
@@ -23,7 +24,8 @@ pub(crate) use super::patch::{normalize_promotion_patch, validate_artifact_conte
 use super::types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport, AgentTaskPromotionNotification,
     AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
-    AgentTaskPromotionStatus, AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    AgentTaskPromotionStatus, AgentTaskPromotionTarget, AgentTaskPromotionVerifiedBase,
+    AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 
 mod gate_run;
@@ -96,6 +98,7 @@ pub fn resume_promoted_patch(
         &normalized_patch.content,
     )?];
     let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
+    let verified_base = capture_declared_base(target_path, options.base_ref.as_deref())?;
     let gates = run_promotion_gates(&options, &mut provider, target_path)?;
     let target =
         AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), Some(target_path));
@@ -122,6 +125,7 @@ pub fn resume_promoted_patch(
         command_evidence,
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
+        verified_base,
         provenance: json!({
             "source_schema": outcome.schema,
             "artifact_metadata": artifact.metadata,
@@ -371,6 +375,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
             command_evidence: Vec::new(),
             deterministic_gates: Vec::new(),
             gate_results: Vec::new(),
+            verified_base: None,
             provenance: json!({
                 "source_schema": outcome.schema,
                 "artifact_metadata": artifact.metadata,
@@ -431,11 +436,16 @@ pub(super) fn promote_with_provider_and_checkpoint(
             artifact.metadata.clone(),
         ))?;
     }
-    let gates = if let Some(worktree_path) = applied_worktree_path.as_deref() {
-        run_promotion_gates(&options, provider, worktree_path)?
+    let verified_base = if let Some(worktree_path) = applied_worktree_path.as_deref() {
+        let verified_base = capture_declared_base(worktree_path, options.base_ref.as_deref())?;
+        (
+            run_promotion_gates(&options, provider, worktree_path)?,
+            verified_base,
+        )
     } else {
-        PromotionGateRun::without_gates(options.dry_run)
+        (PromotionGateRun::without_gates(options.dry_run), None)
     };
+    let (gates, verified_base) = verified_base;
     let operator_notification = promotion_notification(gates.status, &target);
     let candidate = if gates.status == AgentTaskPromotionStatus::Applied {
         applied_worktree_path
@@ -464,6 +474,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
         command_evidence,
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
+        verified_base,
         provenance: json!({
             "source_schema": outcome.schema,
             "artifact_metadata": artifact.metadata,
@@ -608,6 +619,72 @@ fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+#[cfg(test)]
+mod declared_base_tests {
+    use super::*;
+
+    fn git(path: &Path, args: &[&str]) {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .status()
+            .expect("git runs")
+            .success());
+    }
+
+    fn git_output(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn declared_base_capture_is_immune_to_unrelated_fetch_head_activity() {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "-b", "main"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test"]);
+        std::fs::write(repo.path().join("base"), "base").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "main"]);
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "--bare"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(repo.path(), &["push", "-u", "origin", "main"]);
+        let main_sha = git_output(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "-b", "other"]);
+        std::fs::write(repo.path().join("other"), "other").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "other"]);
+        git(repo.path(), &["push", "origin", "other"]);
+        git(repo.path(), &["checkout", "main"]);
+
+        let captured = capture_declared_base(repo.path(), Some("main"))
+            .expect("capture main")
+            .expect("declared base");
+        git(repo.path(), &["fetch", "origin", "refs/heads/other"]);
+
+        assert_eq!(captured.base, "main");
+        assert_eq!(captured.sha, main_sha);
+        assert!(git_output(
+            repo.path(),
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/homeboy/promotion/base"
+            ],
+        )
+        .is_empty());
+    }
+}
+
 fn promote_committed_changes(
     options: &AgentTaskPromotionOptions,
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
@@ -668,11 +745,13 @@ fn promote_committed_changes(
                 .unwrap_or(Value::Null),
         ))?;
     }
-    let gates = if let Some(path) = applied_worktree_path.as_deref() {
-        run_promotion_gates(options, provider, path)?
+    let verified_base = if let Some(path) = applied_worktree_path.as_deref() {
+        let verified_base = capture_declared_base(path, options.base_ref.as_deref())?;
+        (run_promotion_gates(options, provider, path)?, verified_base)
     } else {
-        PromotionGateRun::without_gates(options.dry_run)
+        (PromotionGateRun::without_gates(options.dry_run), None)
     };
+    let (gates, verified_base) = verified_base;
     let operator_notification = promotion_notification(gates.status, &target);
 
     Ok(AgentTaskPromotionReport {
@@ -691,6 +770,7 @@ fn promote_committed_changes(
         command_evidence,
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
+        verified_base,
         provenance: json!({
             "source_schema": outcome.schema,
             "artifact_metadata": artifact.map(|artifact| artifact.metadata.clone()).unwrap_or(Value::Null),
@@ -836,6 +916,82 @@ fn promotion_source(
     }
 }
 
+fn capture_declared_base(
+    worktree_path: &Path,
+    base_ref: Option<&str>,
+) -> Result<Option<AgentTaskPromotionVerifiedBase>> {
+    let Some(base_ref) = base_ref.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let observed = Command::new("git")
+        .args([
+            "ls-remote",
+            "--heads",
+            "origin",
+            &format!("refs/heads/{base_ref}"),
+        ])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !observed.status.success() {
+        return Err(Error::validation_invalid_argument(
+            "base_ref",
+            format!(
+                "could not capture declared base `{base_ref}` before promotion gates: {}",
+                String::from_utf8_lossy(&observed.stderr).trim()
+            ),
+            None,
+            None,
+        ));
+    }
+    let sha = String::from_utf8_lossy(&observed.stdout)
+        .split_whitespace()
+        .next()
+        .filter(|sha| !sha.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "base_ref",
+                format!(
+                    "declared base `{base_ref}` was not found on origin before promotion gates"
+                ),
+                None,
+                None,
+            )
+        })?
+        .to_string();
+    let fetch = Command::new("git")
+        .args([
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "origin",
+            &sha,
+        ])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !fetch.status.success() {
+        return Err(Error::validation_invalid_argument("base_ref", format!("could not materialize observed declared base `{base_ref}` at {sha}; retry promotion: {}", String::from_utf8_lossy(&fetch.stderr).trim()), None, None));
+    }
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", &format!("{sha}^{{commit}}")])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !output.status.success() {
+        return Err(Error::validation_invalid_argument(
+            "base_ref",
+            format!("could not resolve declared base `{base_ref}` before promotion gates"),
+            None,
+            None,
+        ));
+    }
+    Ok(Some(AgentTaskPromotionVerifiedBase {
+        base: base_ref.to_string(),
+        sha: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    }))
+}
+
 fn status_for_report(dry_run: bool, has_gate_failure: bool) -> AgentTaskPromotionStatus {
     if dry_run {
         AgentTaskPromotionStatus::DryRun
@@ -861,13 +1017,11 @@ fn promotion_notification(
         AgentTaskPromotionStatus::Applied => AgentTaskPromotionNotification {
             status: "completed".to_string(),
             message: format!(
-                "patch promoted into {}; verify and finalize from {}",
+                "patch promoted into {}; finalize from {} using the verified_base_sha recorded in this promotion report",
                 target.worktree, target_path
             ),
             resumable_blocker: None,
-            next_command: Some(format!(
-                "homeboy agent-task finalize-pr --run-id <run-id> --path {target_path} --title <title> --commit-message <message>"
-            )),
+            next_command: None,
         },
         AgentTaskPromotionStatus::GateFailed => AgentTaskPromotionNotification {
             status: "blocked".to_string(),
@@ -920,6 +1074,7 @@ fn post_apply_report(
         command_evidence,
         deterministic_gates: Vec::new(),
         gate_results: Vec::new(),
+        verified_base: None,
         provenance: json!({
             "source_schema": source_schema,
             "artifact_metadata": artifact_metadata,

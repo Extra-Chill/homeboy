@@ -23,6 +23,11 @@ struct MockBackend {
     branch: String,
     changed_files: Vec<String>,
     candidate_state: Option<AgentTaskPrCandidateState>,
+    resolved_base: Option<AgentTaskPrResolvedBase>,
+    publication_base_sha: Option<String>,
+    candidate_base_sha: Option<String>,
+    pr_lookup_complete: bool,
+    publication_observed_after_pr_lookup: bool,
     existing_pr: Option<AgentTaskPrRef>,
     create_error: bool,
     push_error: bool,
@@ -113,9 +118,10 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
     fn candidate_state(
         &mut self,
         _path: &str,
-        _base: &AgentTaskPrResolvedBase,
+        base: &AgentTaskPrResolvedBase,
         _head: &str,
     ) -> Result<AgentTaskPrCandidateState> {
+        self.candidate_base_sha = Some(base.sha.clone());
         Ok(self.candidate_state.clone().unwrap_or_else(|| {
             if self.changed_files.is_empty() {
                 AgentTaskPrCandidateState::Equivalent
@@ -125,6 +131,35 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
                 }
             }
         }))
+    }
+
+    fn resolve_base(&mut self, _path: &str, base: &str) -> Result<AgentTaskPrResolvedBase> {
+        Ok(self
+            .resolved_base
+            .clone()
+            .unwrap_or_else(|| AgentTaskPrResolvedBase {
+                reference: base.to_string(),
+                sha: String::new(),
+            }))
+    }
+
+    fn resolve_verified_base(
+        &mut self,
+        _path: &str,
+        verified_base_sha: &str,
+    ) -> Result<AgentTaskPrResolvedBase> {
+        Ok(self
+            .resolved_base
+            .clone()
+            .unwrap_or_else(|| AgentTaskPrResolvedBase {
+                reference: verified_base_sha.to_string(),
+                sha: verified_base_sha.to_string(),
+            }))
+    }
+
+    fn publication_base_sha(&mut self, _path: &str, _base: &str) -> Result<Option<String>> {
+        self.publication_observed_after_pr_lookup = self.pr_lookup_complete;
+        Ok(self.publication_base_sha.clone())
     }
 
     fn commit_all(&mut self, _path: &str, _message: &str) -> Result<()> {
@@ -148,6 +183,7 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         _base: &str,
         _head: &str,
     ) -> Result<Option<AgentTaskPrRef>> {
+        self.pr_lookup_complete = true;
         Ok(self.existing_pr.clone())
     }
 
@@ -255,6 +291,145 @@ fn creates_new_pr_after_green_gates() {
     assert!(report.finalization_outcome.committed);
     assert!(report.finalization_outcome.pushed);
     assert!(report.finalization_outcome.published);
+}
+
+#[test]
+fn finalization_pins_verified_base_when_base_advances_before_publication() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        resolved_base: Some(AgentTaskPrResolvedBase {
+            reference: "refs/homeboy/finalization/base/main".to_string(),
+            sha: "verified-base".to_string(),
+        }),
+        publication_base_sha: Some("advanced-base".to_string()),
+        ..Default::default()
+    };
+
+    let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
+
+    assert_eq!(backend.candidate_base_sha.as_deref(), Some("verified-base"));
+    assert!(backend.created);
+    assert!(backend.publication_observed_after_pr_lookup);
+    assert_eq!(
+        report
+            .publication_intent
+            .target
+            .verified_base_sha
+            .as_deref(),
+        Some("verified-base")
+    );
+    assert_eq!(
+        report
+            .publication_intent
+            .target
+            .publication_base_sha
+            .as_deref(),
+        Some("advanced-base")
+    );
+    assert!(backend
+        .last_body
+        .contains("Verified finalization base: main at verified-base"));
+    assert!(backend
+        .last_body
+        .contains("Base advanced after verification"));
+    assert!(backend
+        .last_body
+        .contains("publication observed advanced-base"));
+}
+
+#[test]
+fn finalization_records_unchanged_live_base_before_publication() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        resolved_base: Some(AgentTaskPrResolvedBase {
+            reference: "refs/homeboy/finalization/base/main".to_string(),
+            sha: "verified-base".to_string(),
+        }),
+        publication_base_sha: Some("verified-base".to_string()),
+        ..Default::default()
+    };
+
+    let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
+
+    assert!(backend.publication_observed_after_pr_lookup);
+    assert_eq!(
+        report
+            .publication_intent
+            .target
+            .verified_base_sha
+            .as_deref(),
+        Some("verified-base")
+    );
+    assert_eq!(
+        report
+            .publication_intent
+            .target
+            .publication_base_sha
+            .as_deref(),
+        Some("verified-base")
+    );
+    assert!(backend
+        .last_body
+        .contains("Base unchanged since verification: main remains at verified-base."));
+}
+
+#[test]
+fn finalization_reports_unavailable_live_base_observation() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        resolved_base: Some(AgentTaskPrResolvedBase {
+            reference: "refs/homeboy/finalization/base/main".to_string(),
+            sha: "verified-base".to_string(),
+        }),
+        ..Default::default()
+    };
+
+    let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
+
+    assert!(backend.publication_observed_after_pr_lookup);
+    assert_eq!(report.publication_intent.target.publication_base_sha, None);
+    assert!(backend
+        .last_body
+        .contains("Base observation unavailable immediately before publication"));
+}
+
+#[test]
+fn finalization_rejects_candidate_behind_pinned_base_before_publication() {
+    let mut backend = MockBackend {
+        resolved_base: Some(AgentTaskPrResolvedBase {
+            reference: "refs/homeboy/finalization/base/main".to_string(),
+            sha: "verified-base".to_string(),
+        }),
+        publication_base_sha: Some("advanced-base".to_string()),
+        candidate_state: Some(AgentTaskPrCandidateState::Invalid {
+            diagnostic: "HEAD is behind the pinned base".to_string(),
+        }),
+        ..Default::default()
+    };
+
+    let error = finalize_pr_with_backend(options(), &mut backend).expect_err("behind candidate");
+
+    assert!(error.message.contains("behind the pinned base"));
+    assert_eq!(backend.candidate_base_sha.as_deref(), Some("verified-base"));
+    assert!(!backend.committed);
+    assert!(!backend.pushed);
+    assert!(!backend.created);
+}
+
+#[test]
+fn finalization_requires_an_explicit_verified_base_snapshot() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.verified_base_sha = None;
+
+    let error = finalize_pr_with_backend(finalization_options, &mut backend)
+        .expect_err("missing snapshot is rejected");
+
+    assert!(error.message.contains("immutable base SHA"));
+    assert!(!backend.created);
 }
 
 #[test]
@@ -1222,6 +1397,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
         path: "/repo".to_string(),
         run_id: "cook-3678".to_string(),
         base: "main".to_string(),
+        verified_base_sha: Some("verified-base".to_string()),
         head: None,
         title: "Cook issue #3678".to_string(),
         commit_message: "finalize cook loop PR plumbing".to_string(),

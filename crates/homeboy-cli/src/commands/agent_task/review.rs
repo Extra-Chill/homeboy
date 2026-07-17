@@ -222,7 +222,7 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         source_run_id: source_run_id.clone(),
         source_path,
         source_worktree_path: None,
-        base_ref: None,
+        base_ref: Some(args.base),
         task_base_sha: None,
         to_worktree: args.to_worktree,
         task_id: args.task_id,
@@ -395,6 +395,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         path: args.path,
         run_id: args.run_id,
         base: args.base,
+        verified_base_sha: args.verified_base_sha,
         head: args.head,
         title: args.title,
         commit_message: args.commit_message,
@@ -772,6 +773,7 @@ fn promotion_handoff(report: &AgentTaskPromotionReport, to_worktree: &str) -> Va
         .get("worktree_path")
         .and_then(Value::as_str)
         .unwrap_or(to_worktree);
+    let verified_base = report.verified_base.as_ref();
     let mut next_actions = Vec::new();
     if report.status.gate_failed() {
         next_actions.push(
@@ -795,9 +797,10 @@ fn promotion_handoff(report: &AgentTaskPromotionReport, to_worktree: &str) -> Va
             "pr_opened": false
         },
         "boundary": report.status.handoff_boundary(),
-        "finalize_command": format!(
-            "homeboy agent-task finalize-pr --run-id <run-id> --path {finalize_path} --title <title> --commit-message <message>"
-        ),
+        "finalize_command": verified_base.map(|verified_base| format!(
+            "homeboy agent-task finalize-pr --run-id <run-id> --path {finalize_path} --base {} --verified-base-sha {} --title <title> --commit-message <message>",
+            verified_base.base, verified_base.sha
+        )),
         "next_actions": next_actions
     })
 }
@@ -1002,6 +1005,12 @@ mod tests {
             command_evidence: Vec::<AgentTaskPromotionCommandReport>::new(),
             deterministic_gates: Vec::new(),
             gate_results: Vec::new(),
+            verified_base: Some(
+                homeboy::core::agent_tasks::promotion::AgentTaskPromotionVerifiedBase {
+                    base: "release".to_string(),
+                    sha: "0123456789012345678901234567890123456789".to_string(),
+                },
+            ),
             provenance: serde_json::json!({ "worktree_path": "/Users/user/Developer/homeboy@fix-runtime" }),
             operator_notification: AgentTaskPromotionNotification {
                 status: "completed".to_string(),
@@ -1021,6 +1030,12 @@ mod tests {
             .as_str()
             .expect("finalize command")
             .contains("--path /Users/user/Developer/homeboy@fix-runtime"));
+        assert!(handoff["finalize_command"]
+            .as_str()
+            .expect("finalize command")
+            .contains(
+                "--base release --verified-base-sha 0123456789012345678901234567890123456789"
+            ));
     }
 
     #[test]

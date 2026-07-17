@@ -61,9 +61,18 @@ pub struct AgentTaskPromotionReport {
     pub deterministic_gates: Vec<AgentTaskGateReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gate_results: Vec<HomeboyGateResult>,
+    /// Declared base branch snapshot captured immediately before promotion gates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_base: Option<AgentTaskPromotionVerifiedBase>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub provenance: Value,
     pub operator_notification: AgentTaskPromotionNotification,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPromotionVerifiedBase {
+    pub base: String,
+    pub sha: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

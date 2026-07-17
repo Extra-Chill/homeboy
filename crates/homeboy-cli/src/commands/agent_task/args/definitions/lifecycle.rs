@@ -88,6 +88,9 @@ pub struct PromoteArgs {
     pub source: String,
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: String,
+    /// Declared base branch resolved immediately before promotion gates run.
+    #[arg(long, default_value = "main", value_name = "BRANCH")]
+    pub base: String,
     #[arg(long, value_name = "COMMAND")]
     pub provider_command: Option<String>,
     #[arg(
@@ -113,6 +116,9 @@ pub struct FinalizePrArgs {
     pub path: String,
     #[arg(long, default_value = "main", value_name = "BRANCH")]
     pub base: String,
+    /// Immutable base commit SHA recorded before the declared verification gates ran.
+    #[arg(long, value_name = "SHA")]
+    pub verified_base_sha: Option<String>,
     #[arg(long, value_name = "BRANCH")]
     pub head: Option<String>,
     #[arg(long, value_name = "TEXT")]
