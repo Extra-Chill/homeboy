@@ -1,9 +1,13 @@
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use tempfile::TempDir;
+
+use crate::api_jobs::{Job, JobEventKind, JobStore, RemoteRunnerJobRequest, RemoteRunnerJobResult};
 
 static SHARED_EMPTY_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_COMMITTED_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
@@ -712,4 +716,202 @@ pub fn serve_public_artifact_base_once(status: u16) -> String {
         .expect("write public artifact response");
     });
     format!("http://{addr}/homeboy")
+}
+
+/// A minimal in-process implementation of Homeboy's public reverse-broker HTTP
+/// contract. It is intentionally owned by core test support so binary tests and
+/// runner tests exercise the same persisted broker behavior.
+pub struct ReverseBrokerFixture {
+    pub store: JobStore,
+    runner_id: String,
+    broker_url: String,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ReverseBrokerFixture {
+    pub fn start(runner_id: impl Into<String>) -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let runner_id = runner_id.into();
+        let store = JobStore::default();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind reverse broker fixture");
+        listener
+            .set_nonblocking(true)
+            .expect("make reverse broker fixture nonblocking");
+        let broker_url = format!("http://{}", listener.local_addr().expect("broker address"));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = Arc::clone(&shutdown);
+        let thread_store = store.clone();
+        let thread_runner_id = runner_id.clone();
+        let handle = std::thread::spawn(move || {
+            while !thread_shutdown.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("make reverse broker fixture stream blocking");
+                        let request = read_broker_request(&mut stream);
+                        let response = handle_reverse_broker_request(
+                            &thread_store,
+                            &thread_runner_id,
+                            request,
+                        );
+                        write_broker_response(&mut stream, response);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("accept reverse broker fixture request: {error}"),
+                }
+            }
+        });
+        Self {
+            store,
+            runner_id,
+            broker_url,
+            shutdown,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn url(&self) -> &str {
+        &self.broker_url
+    }
+
+    pub fn runner_id(&self) -> &str {
+        &self.runner_id
+    }
+
+    pub fn enqueue(&self, request: RemoteRunnerJobRequest) -> Job {
+        self.store
+            .submit_remote_runner_job(request)
+            .expect("enqueue reverse broker fixture job")
+    }
+
+    pub fn jobs(&self) -> Vec<Job> {
+        self.store.list()
+    }
+}
+
+impl Drop for ReverseBrokerFixture {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        self.shutdown.store(true, Ordering::SeqCst);
+        // Wake the nonblocking accept loop before joining it.
+        let _ = TcpStream::connect(self.broker_url.trim_start_matches("http://"));
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("reverse broker fixture joins");
+        }
+    }
+}
+
+struct ReverseBrokerRequest {
+    method: String,
+    path: String,
+    body: serde_json::Value,
+}
+
+fn read_broker_request(stream: &mut TcpStream) -> ReverseBrokerRequest {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    let header_end = loop {
+        let read = stream.read(&mut chunk).expect("read broker request");
+        assert_ne!(read, 0, "broker request closed before headers");
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index;
+        }
+    };
+    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+    let mut request_line = headers.lines().next().expect("broker request line").split_whitespace();
+    let method = request_line.next().expect("broker request method").to_string();
+    let path = request_line.next().expect("broker request path").to_string();
+    let content_length = headers
+        .lines()
+        .find_map(|line| line.split_once(':').filter(|(name, _)| name.eq_ignore_ascii_case("content-length")).and_then(|(_, value)| value.trim().parse::<usize>().ok()))
+        .unwrap_or(0);
+    let body_start = header_end + 4;
+    while buffer.len() < body_start + content_length {
+        let read = stream.read(&mut chunk).expect("read broker request body");
+        assert_ne!(read, 0, "broker request closed before body");
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    let body = if content_length == 0 {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&buffer[body_start..body_start + content_length])
+            .expect("parse broker request JSON")
+    };
+    ReverseBrokerRequest { method, path, body }
+}
+
+fn handle_reverse_broker_request(
+    store: &JobStore,
+    runner_id: &str,
+    request: ReverseBrokerRequest,
+) -> serde_json::Value {
+    use serde_json::json;
+
+    let ok = |body| json!({ "success": true, "data": { "body": body } });
+    if request.method == "POST" && request.path == "/runner/sessions" {
+        return ok(json!({ "registered": true }));
+    }
+    if request.method == "POST" && request.path == "/runner/jobs" {
+        let submitted: RemoteRunnerJobRequest = serde_json::from_value(request.body)
+            .expect("parse reverse broker job submission");
+        let job = store.submit_remote_runner_job(submitted).expect("submit broker job");
+        return ok(json!({ "job": job }));
+    }
+    if request.method == "POST" && request.path == "/runner/jobs/claim" {
+        let claim = store
+            .claim_remote_runner_job(runner_id, None, 30_000, None)
+            .expect("claim broker job");
+        return ok(json!({ "claim": claim }));
+    }
+    if request.method == "GET" {
+        if let Some(job_id) = request.path.strip_prefix("/jobs/") {
+            let job = store.get(uuid::Uuid::parse_str(job_id).expect("broker job id")).expect("broker job");
+            return ok(json!({ "job": job }));
+        }
+    }
+    if let Some(job_id) = request.path.strip_prefix("/runner/jobs/") {
+        let (job_id, action) = job_id.split_once('/').unwrap_or((job_id, ""));
+        let job_id = uuid::Uuid::parse_str(job_id).expect("broker job id");
+        if request.method == "GET" && action.is_empty() {
+            return ok(json!({ "job": store.get(job_id).expect("broker job") }));
+        }
+        let claim_id = request.body["claim_id"].as_str().expect("broker claim id");
+        let result = match action {
+            "events" => store.append_remote_runner_event(
+                job_id, runner_id, claim_id, JobEventKind::Progress,
+                request.body["message"].as_str().map(ToString::to_string),
+                request.body.get("data").cloned(),
+            ).map(|event| json!({ "event": event })),
+            "heartbeat" => store.renew_remote_runner_claim(job_id, runner_id, claim_id, 30_000)
+                .map(|job| json!({ "job": job })),
+            "finish" => store.finish_remote_runner_job(
+                job_id, runner_id, claim_id,
+                serde_json::from_value::<RemoteRunnerJobResult>(request.body["result"].clone())
+                    .expect("parse broker finish result"),
+            ).map(|job| json!({ "job": job })),
+            _ => Err(crate::error::Error::internal_unexpected("unknown reverse broker fixture path")),
+        };
+        return match result {
+            Ok(body) => ok(body),
+            Err(error) => json!({ "success": false, "error": { "message": error.message } }),
+        };
+    }
+    json!({ "success": false, "error": { "message": "unknown reverse broker fixture path" } })
+}
+
+fn write_broker_response(stream: &mut TcpStream, body: serde_json::Value) {
+    let body = body.to_string();
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    )
+    .expect("write broker response");
 }
