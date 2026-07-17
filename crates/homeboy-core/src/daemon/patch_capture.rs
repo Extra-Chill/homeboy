@@ -6,11 +6,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::agent_task_lifecycle::RunDispatchIdentity;
 use crate::error::{Error, Result};
 use crate::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use crate::paths;
 use crate::source_snapshot::SourceSnapshot;
+
+/// Local `(run_id, runner_id)` identity for a captured patch run. Kept local to
+/// the daemon patch-capture path so core does not depend on the agent-task
+/// subsystem for this trivial borrow pair.
+struct RunDispatchIdentity<'a> {
+    run_id: &'a str,
+    runner_id: &'a str,
+}
 
 const PATCH_CAPTURE_EXCLUDES: &[&str] = &[
     ".git",
