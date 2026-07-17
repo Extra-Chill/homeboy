@@ -336,7 +336,7 @@ impl PlanBuilder {
         self
     }
 
-    pub(crate) fn policy_value(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+    pub fn policy_value(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.plan.policy.insert(key.into(), value);
         self
     }
@@ -438,7 +438,7 @@ impl PlanStepBuilder {
         self
     }
 
-    pub(crate) fn output_value(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+    pub fn output_value(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.step.outputs.insert(key.into(), value);
         self
     }

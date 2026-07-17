@@ -164,10 +164,6 @@ pub mod performance_hotspots;
 // re-export keeps the existing crate::phase_timing path working.
 pub use homeboy_engine_primitives::phase_timing;
 pub mod plan;
-pub mod preview_client;
-pub mod preview_ingress;
-#[cfg(test)]
-mod preview_ingress_tests;
 // process moved to the internal `homeboy-process` crate. Re-exported so existing
 // `crate::process::*` call sites keep working unchanged.
 pub use homeboy_process as process;

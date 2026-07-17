@@ -1,8 +1,8 @@
 use std::fs;
 use std::sync::Arc;
 
-use crate::error::{Error, Result};
-use crate::paths;
+use homeboy_core::error::{Error, Result};
+use homeboy_core::paths;
 
 use super::types::{
     PreviewClientSessions, PreviewIngressFailure, PreviewIngressRoute,

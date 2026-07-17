@@ -28,7 +28,7 @@ use headers::{
     cors_headers, decode_body, forward_request_headers, local_request_url, response_headers,
 };
 
-use crate::{Error, Result};
+use homeboy_core::{Error, Result};
 
 pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
     validate_start_spec(&spec)?;
@@ -50,7 +50,7 @@ pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
     }
 
     let stop = Arc::new(AtomicBool::new(false));
-    crate::process::install_shutdown_handler(stop.clone(), "preview client")?;
+    homeboy_core::process::install_shutdown_handler(stop.clone(), "preview client")?;
     let client = Client::builder()
         .timeout(Duration::from_secs(spec.poll_timeout_secs.max(1) + 5))
         .build()
@@ -576,7 +576,7 @@ mod tests {
         })
         .expect_err("wildcard host should fail");
 
-        assert_eq!(err.code, crate::ErrorCode::ValidationInvalidArgument);
+        assert_eq!(err.code, homeboy_core::ErrorCode::ValidationInvalidArgument);
         assert!(err.message.contains("exactly one public host"));
     }
 

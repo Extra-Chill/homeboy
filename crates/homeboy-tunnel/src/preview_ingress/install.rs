@@ -1,5 +1,7 @@
-use crate::error::{Error, Result};
-use crate::plan::{HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepStatus, PlanValues};
+use homeboy_core::error::{Error, Result};
+use homeboy_core::plan::{
+    HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepStatus, PlanValues,
+};
 
 use super::types::{
     PreviewIngressInstallCheck, PreviewIngressInstallCheckStatus, PreviewIngressInstallOptions,
