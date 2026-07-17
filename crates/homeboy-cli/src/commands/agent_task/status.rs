@@ -1089,7 +1089,7 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         "execution_location": execution_location(record),
         "queue_visibility": queue_visibility(record),
         "execution_budget": plan.as_ref().map(|plan| &plan.options.execution_budget),
-        "liveness": liveness_summary(record),
+        "liveness": liveness_summary(record, run_id),
         "full_command": format!("homeboy agent-task status {run_id} --full"),
     });
 
@@ -1126,7 +1126,7 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
     summary
 }
 
-fn liveness_summary(record: &Value) -> Value {
+fn liveness_summary(record: &Value, run_id: &str) -> Value {
     let metadata = record.get("metadata").unwrap_or(&Value::Null);
     let provider_handle_count = record
         .get("provider_handles")
@@ -1140,9 +1140,13 @@ fn liveness_summary(record: &Value) -> Value {
         .get("runner_job_id")
         .and_then(Value::as_str)
         .filter(|job_id| !job_id.trim().is_empty());
+    let terminal = record
+        .get("state")
+        .and_then(Value::as_str)
+        .is_some_and(|state| matches!(state, "succeeded" | "failed" | "cancelled"));
 
     json!({
-        "status": if stale { "stale" } else { "active" },
+        "status": if terminal { "terminal" } else if stale { "stale" } else { "active" },
         "heartbeat_last_seen_at": record.pointer("/lifecycle/heartbeat/last_seen_at"),
         "runner_job_status": metadata.get("runner_job_status"),
         "runner_job_last_seen_at": metadata.get("runner_job_last_seen_at"),
@@ -1152,10 +1156,12 @@ fn liveness_summary(record: &Value) -> Value {
             "runner_job_id": runner_job_id,
         },
         "stale_reason": metadata.get("stale_running_reason"),
-        "next_action": if stale {
-            "homeboy agent-task active --reconcile"
+        "next_action": if terminal {
+            format!("homeboy agent-task review {run_id}")
+        } else if stale {
+            "homeboy agent-task active --reconcile".to_string()
         } else {
-            "homeboy agent-task status <run-id> --full"
+            "homeboy agent-task status <run-id> --full".to_string()
         },
     })
 }
@@ -1719,6 +1725,11 @@ mod tests {
         assert_eq!(
             summary["queue_visibility"]["commands"][0],
             "homeboy agent-task list"
+        );
+        assert_eq!(summary["liveness"]["status"], "terminal");
+        assert_eq!(
+            summary["liveness"]["next_action"],
+            "homeboy agent-task review agent-task-run-1"
         );
         assert!(summary["queue_visibility"]["concurrency_note"]
             .as_str()
