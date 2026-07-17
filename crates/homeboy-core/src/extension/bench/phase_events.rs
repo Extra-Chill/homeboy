@@ -3,65 +3,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::parsing::BenchResults;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct BenchPhaseEvent {
-    /// Generic phase identifier. Core treats this as a label, not a closed
-    /// enum, so extensions can model their own lifecycle.
-    pub phase: String,
-    /// Event status, for example `started`, `heartbeat`, `completed`,
-    /// `failed`, or `timeout`.
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub t_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub diagnostics: BTreeMap<String, serde_json::Value>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub payload: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct BenchPhaseSummary {
-    pub phase: String,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub first_t_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_t_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "is_zero_usize")]
-    pub heartbeat_count: usize,
-    #[serde(default, skip_serializing_if = "is_zero_usize")]
-    pub diagnostic_count: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct BenchPhaseFailureClassification {
-    /// `timeout` or `failure` for classified terminal events.
-    pub kind: String,
-    pub phase: String,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
+pub use homeboy_extension_contract::bench_diagnostics::{
+    BenchPhaseEvent, BenchPhaseFailureClassification, BenchPhaseSummary,
+};
 
 pub fn evaluate_phase_events(results: &mut BenchResults) {
     results.phase_summaries = summarize_phase_events(&results.phase_events);
