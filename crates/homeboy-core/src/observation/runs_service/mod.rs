@@ -136,7 +136,21 @@ pub struct TerminalRunRetentionOutcome {
     pub dry_run: bool,
     pub older_than_days: i64,
     pub candidate_run_ids: Vec<String>,
+    pub artifact_cleanup: Vec<PersistedArtifactCleanupOutcome>,
+    pub lifecycle_directories: Vec<TerminalRunLifecycleDirectory>,
+    pub skipped_run_ids: Vec<String>,
     pub removed_run_count: usize,
+}
+
+/// A controller-owned lifecycle directory that is retained or removed with its
+/// terminal observation row. Persisted artifact bytes remain owned by the
+/// existing persisted-artifact cleanup path.
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalRunLifecycleDirectory {
+    pub run_id: String,
+    pub path: PathBuf,
+    pub exists: bool,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -173,9 +187,9 @@ pub use runner_evidence::{
     RunnerConnectionInfo, RunnerEvidenceProvider, StaleRunnerJobInfo,
 };
 
-/// Safe, bounded retention of terminal observation rows. Artifact byte cleanup
-/// remains a separate explicit operation because artifact roots may have their
-/// own evidence-retention policy.
+/// Safe, bounded retention of terminal observation rows, registered local
+/// artifact bytes, and controller-owned lifecycle directories. Artifact path
+/// validation remains owned by the persisted-artifact cleanup implementation.
 pub fn retain_terminal_runs(
     options: TerminalRunRetentionOptions,
 ) -> Result<TerminalRunRetentionOutcome> {
@@ -190,15 +204,157 @@ pub fn retain_terminal_runs(
     let finished_before = (Utc::now() - Duration::days(options.older_than_days)).to_rfc3339();
     let mut store = ObservationStore::open_initialized()?;
     let candidate_run_ids = store.terminal_run_ids_before(&finished_before, options.limit)?;
+    let mut artifact_cleanup = Vec::new();
+    let mut lifecycle_directories = Vec::new();
+    let mut removable_run_ids = Vec::new();
+    let mut skipped_run_ids = Vec::new();
+    for run_id in &candidate_run_ids {
+        let artifacts = cleanup_persisted_artifacts(PersistedArtifactCleanupOptions {
+            apply: false,
+            older_than_days: 0,
+            run_id: Some(run_id.clone()),
+            kind: None,
+            artifact_type: None,
+            run_kind: None,
+            component_id: None,
+            limit: 10_000,
+            terminal_only: true,
+        })?;
+        let lifecycle_directory = terminal_run_lifecycle_directory(&store, run_id)?;
+        let blocked = artifacts
+            .rows
+            .iter()
+            .any(|row| row.action == "skip" && row.exists);
+        artifact_cleanup.push(artifacts);
+        if blocked {
+            skipped_run_ids.push(run_id.clone());
+        } else {
+            removable_run_ids.push(run_id.clone());
+            if let Some(directory) = lifecycle_directory {
+                lifecycle_directories.push(directory);
+            }
+        }
+    }
     if options.apply {
-        store.delete_terminal_runs(&candidate_run_ids)?;
+        // Revalidate and remove artifact bytes before deleting any provenance.
+        // A blocked resource leaves the terminal run record and lifecycle root intact.
+        for run_id in &removable_run_ids {
+            let artifacts = cleanup_persisted_artifacts(PersistedArtifactCleanupOptions {
+                apply: false,
+                older_than_days: 0,
+                run_id: Some(run_id.clone()),
+                kind: None,
+                artifact_type: None,
+                run_kind: None,
+                component_id: None,
+                limit: 10_000,
+                terminal_only: true,
+            })?;
+            if artifacts
+                .rows
+                .iter()
+                .any(|row| row.action == "skip" && row.exists)
+            {
+                skipped_run_ids.push(run_id.clone());
+                continue;
+            }
+            let records = store.list_artifacts(run_id)?;
+            let artifact_root = crate::artifacts::root()?;
+            for row in artifacts.rows.iter().filter(|row| row.action == "remove") {
+                let artifact = records
+                    .iter()
+                    .find(|artifact| artifact.id == row.artifact_id)
+                    .ok_or_else(|| {
+                        Error::internal_unexpected("retention artifact disappeared before deletion")
+                    })?;
+                remove_persisted_artifact_record_bytes(artifact, &artifact_root)?;
+            }
+        }
+        for directory in &lifecycle_directories {
+            if skipped_run_ids.contains(&directory.run_id) {
+                continue;
+            }
+            if directory.exists {
+                fs::remove_dir_all(&directory.path).map_err(|error| {
+                    Error::internal_io(
+                        error.to_string(),
+                        Some(format!(
+                            "remove terminal run lifecycle directory {}",
+                            directory.path.display()
+                        )),
+                    )
+                })?;
+            }
+        }
+        let retained = skipped_run_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        let deleted = removable_run_ids
+            .iter()
+            .filter(|run_id| !retained.contains(run_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        store.delete_terminal_runs(&deleted)?;
     }
     Ok(TerminalRunRetentionOutcome {
         dry_run: !options.apply,
         older_than_days: options.older_than_days,
-        removed_run_count: usize::from(options.apply) * candidate_run_ids.len(),
+        removed_run_count: if options.apply {
+            removable_run_ids
+                .len()
+                .saturating_sub(skipped_run_ids.len())
+        } else {
+            0
+        },
         candidate_run_ids,
+        artifact_cleanup,
+        lifecycle_directories,
+        skipped_run_ids,
     })
+}
+
+fn terminal_run_lifecycle_directory(
+    store: &ObservationStore,
+    run_id: &str,
+) -> Result<Option<TerminalRunLifecycleDirectory>> {
+    let Some(run) = store.get_run(run_id)? else {
+        return Ok(None);
+    };
+    if run.kind != "agent-task" {
+        return Ok(None);
+    }
+
+    let root = crate::paths::homeboy_data()?.join("agent-task-runs");
+    let path = root.join(crate::paths::sanitize_path_segment(run_id));
+    let exists = path.exists();
+    let size_bytes = if exists { path_size_bytes(&path)? } else { 0 };
+    Ok(Some(TerminalRunLifecycleDirectory {
+        run_id: run_id.to_string(),
+        path,
+        exists,
+        size_bytes,
+    }))
+}
+
+fn path_size_bytes(path: &Path) -> Result<u64> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(metadata.len());
+    }
+    fs::read_dir(path)
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+        })?
+        .try_fold(metadata.len(), |total, entry| {
+            Ok(total
+                + path_size_bytes(
+                    &entry
+                        .map_err(|error| Error::internal_io(error.to_string(), None))?
+                        .path(),
+                )?)
+        })
 }
 
 #[cfg(test)]

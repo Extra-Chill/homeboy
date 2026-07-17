@@ -141,7 +141,23 @@ fn apply_persisted_artifact_cleanup(
     artifact: &ArtifactRecord,
     artifact_root: &Path,
 ) -> Result<()> {
+    remove_persisted_artifact_record_bytes(artifact, artifact_root)?;
+    store.delete_artifact_record(&artifact.id)?;
+    Ok(())
+}
+
+pub fn remove_persisted_artifact_record_bytes(
+    artifact: &ArtifactRecord,
+    artifact_root: &Path,
+) -> Result<()> {
     let path = persisted_artifact_path_from_record(artifact_root, &artifact.path);
+    remove_persisted_artifact_bytes(&path, artifact_root)
+}
+
+/// Remove one local persisted artifact after the caller has selected it from a
+/// validated cleanup plan. This deliberately leaves its database record for a
+/// higher-level lifecycle transaction to remove with its owning run.
+pub fn remove_persisted_artifact_bytes(path: &Path, artifact_root: &Path) -> Result<()> {
     if let Some(metadata) = symlink_metadata_if_exists(&path)? {
         if metadata.file_type().is_symlink() || !path_is_within_root(&path, artifact_root) {
             return Err(Error::validation_invalid_argument(
@@ -157,7 +173,6 @@ fn apply_persisted_artifact_cleanup(
             fs::remove_file(&path).map_err(|err| persisted_artifact_remove_error(&path, err))?;
         }
     }
-    store.delete_artifact_record(&artifact.id)?;
     Ok(())
 }
 

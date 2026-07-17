@@ -51,17 +51,43 @@ fn require_run_returns_validation_error_for_missing_run() {
 }
 
 #[test]
-fn terminal_retention_is_dry_run_by_default_and_deletes_dependent_records_on_apply() {
+fn terminal_retention_is_dry_run_by_default_and_deletes_owned_lifecycle_on_apply() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();
         let store = ObservationStore::open_initialized().expect("store");
-        let terminal = store.start_run(sample_run("bench")).expect("terminal run");
+        let terminal = store
+            .start_run(sample_run("agent-task"))
+            .expect("terminal run");
         store
             .finish_run(&terminal.id, RunStatus::Pass, None)
             .expect("finish run");
         store
             .record_url_artifact(&terminal.id, "report", "https://example.test/report")
             .expect("artifact");
+        let artifact_path = crate::artifacts::root()
+            .expect("artifact root")
+            .join(&terminal.id)
+            .join("report.json");
+        std::fs::create_dir_all(artifact_path.parent().expect("artifact parent"))
+            .expect("artifact parent");
+        std::fs::write(&artifact_path, "{}").expect("artifact bytes");
+        let local_artifact = store
+            .record_artifact(&terminal.id, "local_report", &artifact_path)
+            .expect("local artifact");
+        let recorded_artifact_path = {
+            let path = std::path::PathBuf::from(&local_artifact.path);
+            if path.is_absolute() {
+                path
+            } else {
+                crate::artifacts::root().expect("artifact root").join(path)
+            }
+        };
+        let lifecycle_dir = crate::paths::homeboy_data()
+            .expect("homeboy data")
+            .join("agent-task-runs")
+            .join(&terminal.id);
+        std::fs::create_dir_all(&lifecycle_dir).expect("lifecycle directory");
+        std::fs::write(lifecycle_dir.join("plan.json"), "{}").expect("lifecycle evidence");
         let active = store.start_run(sample_run("trace")).expect("active run");
         let path = store.status().expect("status").path;
         drop(store);
@@ -79,6 +105,11 @@ fn terminal_retention_is_dry_run_by_default_and_deletes_dependent_records_on_app
         })
         .expect("dry run");
         assert_eq!(dry.candidate_run_ids, vec![terminal.id.clone()]);
+        assert_eq!(dry.artifact_cleanup.len(), 1);
+        assert_eq!(dry.lifecycle_directories.len(), 1);
+        assert!(dry.lifecycle_directories[0].exists);
+        assert!(lifecycle_dir.exists());
+        assert!(recorded_artifact_path.exists());
 
         let applied = retain_terminal_runs(TerminalRunRetentionOptions {
             apply: true,
@@ -96,6 +127,8 @@ fn terminal_retention_is_dry_run_by_default_and_deletes_dependent_records_on_app
             .list_artifacts(&terminal.id)
             .expect("artifact read")
             .is_empty());
+        assert!(!lifecycle_dir.exists());
+        assert!(!recorded_artifact_path.exists());
         assert!(store.get_run(&active.id).expect("active read").is_some());
     });
 }
