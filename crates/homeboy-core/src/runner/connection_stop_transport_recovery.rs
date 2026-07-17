@@ -135,7 +135,7 @@ pub(super) fn disconnect_remote_daemon(
             response_body_excerpt(&body)
         ));
     }
-    Ok(())
+    verify_remote_daemon_stopped(session)
 }
 
 fn response_body_excerpt(body: &str) -> String {
@@ -154,36 +154,25 @@ pub(super) fn recover_remote_daemon_stop_after_transport_error(
     session: &RunnerSession,
     transport_error: &str,
 ) -> std::result::Result<(), String> {
-    let runner = load(&session.runner_id).map_err(|error| {
-        format!(
-            "re-probe runner after stop transport error: {}",
-            error.message
-        )
-    })?;
-    let homeboy =
-        remote_runner_homeboy_path(&runner, "runner disconnect re-probe").map_err(|error| {
-            format!(
-                "re-probe daemon after stop transport error: {}",
-                error.message
-            )
-        })?;
+    verify_remote_daemon_stopped(session).map_err(|error| format!("{transport_error}; {error}"))
+}
+
+/// A lifecycle stop acknowledgement alone is not proof that the daemon exited.
+/// Verify the exact recorded owner before reconnect can create a new session,
+/// otherwise it could reattach the stale lease it was meant to rotate.
+fn verify_remote_daemon_stopped(session: &RunnerSession) -> std::result::Result<(), String> {
+    let runner = load(&session.runner_id)
+        .map_err(|error| format!("re-probe runner after daemon stop: {}", error.message))?;
+    let homeboy = remote_runner_homeboy_path(&runner, "runner disconnect stop verification")
+        .map_err(|error| format!("re-probe daemon after stop: {}", error.message))?;
     let lease_id = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
-        "re-probe daemon after stop transport error: persisted daemon lease is unavailable"
-            .to_string()
+        "re-probe daemon after stop: persisted daemon lease is unavailable".to_string()
     })?;
     let (_, _, client) = remote_daemon::resolve_ssh_runner(&runner)
-        .map_err(|error| {
-            format!(
-                "re-probe daemon after stop transport error: {}",
-                error.message
-            )
-        })?
-        .ok_or_else(|| {
-            "re-probe daemon after stop transport error: runner is not SSH-backed".to_string()
-        })?;
-    let status = remote_daemon::remote_daemon_status(&client, homeboy).map_err(|error| {
-        format!("{transport_error}; authoritative daemon re-probe failed: {error}")
-    })?;
+        .map_err(|error| format!("re-probe daemon after stop: {}", error.message))?
+        .ok_or_else(|| "re-probe daemon after stop: runner is not SSH-backed".to_string())?;
+    let status = remote_daemon::remote_daemon_status(&client, homeboy)
+        .map_err(|error| format!("authoritative daemon re-probe after stop failed: {error}"))?;
     let fallback_command =
         remote_lease_bound_stop_recovery_command(session, runner.server_id.as_deref(), homeboy);
 
@@ -193,7 +182,7 @@ pub(super) fn recover_remote_daemon_stop_after_transport_error(
         || execute_remote_lease_bound_daemon_stop(&client, homeboy, lease_id),
         || remote_daemon::remote_daemon_status(&client, homeboy),
     )
-    .map_err(|error| format!("{transport_error}; {error}. Recovery: {fallback_command}"))
+    .map_err(|error| format!("{error}. Recovery: {fallback_command}"))
 }
 
 pub(super) fn complete_stop_transport_recovery<Stop, Probe>(
@@ -427,11 +416,17 @@ mod tests {
                 stop_called = true;
                 Ok(())
             },
-            || Ok(stopped),
+            || Ok(stopped.clone()),
         )
         .expect("exact live owner is stopped through bounded SSH fallback");
 
         assert!(stop_called);
+        assert_eq!(
+            remote_daemon::remote_daemon_connect_action(Some(&session), &stopped)
+                .expect("the stopped lease is replaced on reconnect"),
+            remote_daemon::RemoteDaemonConnectAction::Start,
+            "refresh must start a replacement rather than reattach the stale lease"
+        );
     }
 
     #[test]
