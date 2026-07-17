@@ -1,0 +1,16 @@
+[package]
+name = "homeboy-extension-contract"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Pure serializable data types for the homeboy extension system (manifest/deploy/test/sidecar config contracts)"
+repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
+
+[lib]
+name = "homeboy_extension_contract"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }

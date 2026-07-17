@@ -808,6 +808,7 @@ dependencies = [
  "homeboy-cli-contract",
  "homeboy-engine-primitives",
  "homeboy-error",
+ "homeboy-extension-contract",
  "homeboy-finding",
  "homeboy-lab-contract",
  "homeboy-output",
@@ -856,6 +857,13 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "homeboy-extension-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

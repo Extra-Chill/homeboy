@@ -24,9 +24,7 @@ mod maintenance;
 mod manifest;
 mod manifest_action_config;
 mod manifest_config;
-mod manifest_deploy_config;
 mod manifest_sidecar;
-mod manifest_test_config;
 mod refactor_protocol;
 mod registry;
 mod repair;
@@ -75,6 +73,7 @@ pub use fingerprint::{
     run_fingerprint_script, AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker,
     FingerprintOutput, HookRef, UnusedParam,
 };
+pub use homeboy_extension_contract::{DeployArchiveInstallPolicy, DeployRequiredHeader};
 pub use invocation_context::ResolvedExtensionInvocationContext;
 pub use lifecycle::source_metadata::resolve_source_url;
 pub use lifecycle::source_metadata::SourceMetadataRepair;
@@ -110,7 +109,6 @@ pub use manifest::{
     EXTENSION_CONTRACT_PRODUCER_SCHEMA, EXTENSION_MATERIALIZATION_SOURCE_SCHEMA,
     NOTIFICATION_TRANSPORT_SCHEMA,
 };
-pub use manifest_deploy_config::{DeployArchiveInstallPolicy, DeployRequiredHeader};
 pub use refactor_protocol::{
     run_refactor_script, run_refactor_script_result, AdjustedItem, ParsedItem,
     RefactorScriptFailure, RefactorScriptFailureKind, RelatedTests, ResolvedImports,
