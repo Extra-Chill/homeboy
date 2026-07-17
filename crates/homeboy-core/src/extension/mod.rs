@@ -39,8 +39,8 @@ mod validation;
 
 pub use capability::{
     build_scenario_runner, extract_component_extension_settings, path_list_env_value,
-    resolve_execution_context, resolve_extension_for_capability, ExtensionCapability,
-    ExtensionExecutionContext, ScenarioRunnerOptions,
+    resolve_execution_context, resolve_extension_for_capability, ExtensionExecutionContext,
+    ScenarioRunnerOptions,
 };
 pub(crate) use capability::{
     extension_guidance_hints, has_linked_extension_for_capability,
@@ -55,6 +55,7 @@ pub use homeboy_extension_contract::core_compat::{
     validate_core_compatibility, CoreCompatibilityReport, CORE_COMPAT_REMEDIATION_COMMAND,
     CORE_INCOMPATIBLE_DIAGNOSTIC,
 };
+pub use homeboy_extension_contract::ExtensionCapability;
 
 pub(crate) use execution::{build_settings_json_from_manifest, execute_action};
 pub use execution::{
