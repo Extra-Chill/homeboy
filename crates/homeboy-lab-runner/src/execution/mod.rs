@@ -756,6 +756,13 @@ pub(crate) fn exec_with_status_snapshot(
     );
     let requested_setting_keys = requested_setting_keys_for_command(&options.command);
     let accepted_extension_settings = options.accepted_extension_settings.clone();
+    // Extension parity uses daemon-backed runner commands. Recover the direct
+    // session before that preparation so admission cannot fail before `/exec`.
+    let connected = if should_force_diagnostic_ssh(&runner, &options) {
+        None
+    } else {
+        Some(execution_status(runner_id, status_snapshot)?)
+    };
 
     let extension_parity_plan = plan_extension_parity(
         runner_id,
@@ -810,7 +817,7 @@ pub(crate) fn exec_with_status_snapshot(
         );
     }
 
-    let connected = execution_status(runner_id, status_snapshot)?;
+    let connected = connected.expect("diagnostic SSH returned before daemon admission");
     if refuses_stale_daemon_execution(&options, &connected) {
         return Err(Error::validation_invalid_argument(
             "runner",
