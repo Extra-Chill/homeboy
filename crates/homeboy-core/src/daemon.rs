@@ -36,6 +36,7 @@ mod control;
 mod patch_capture;
 mod remote_runner;
 pub mod runner_exec_driver;
+pub mod runner_workspace_root;
 pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
@@ -1572,12 +1573,12 @@ fn resolve_runner_workspace_path(
     requested_path: &str,
     request_workspace_root: Option<&str>,
 ) -> Result<PathBuf> {
-    let loaded_runner;
+    let resolved_root;
     let workspace_root = match request_workspace_root.filter(|root| !root.trim().is_empty()) {
         Some(root) => root,
         None => {
-            loaded_runner = crate::runner::load(runner_id)?;
-            loaded_runner.workspace_root.as_deref().ok_or_else(|| {
+            resolved_root = runner_workspace_root::runner_workspace_root(runner_id);
+            resolved_root.as_deref().ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "workspace_root",
                     format!("runner `{runner_id}` file API requires workspace_root"),
