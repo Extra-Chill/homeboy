@@ -522,6 +522,38 @@ fn managed_run_plan_handoff_does_not_require_a_second_controller_session() {
 }
 
 #[test]
+fn managed_promotion_handoff_does_not_require_runner_side_artifact_hydration() {
+    let _env = EnvGuard::set_many(&[
+        (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
+        (homeboy::core::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
+        (
+            homeboy::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV,
+            Some("1"),
+        ),
+        (homeboy::core::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
+    ]);
+    let normalized = vec![
+        "homeboy".to_string(),
+        "--runner".to_string(),
+        "homeboy-lab".to_string(),
+        "--placement".to_string(),
+        "lab".to_string(),
+        "agent-task".to_string(),
+        "promote".to_string(),
+        "agent-task-preserved-run".to_string(),
+        "--to-worktree".to_string(),
+        "homeboy@fix-preserved-candidate".to_string(),
+    ];
+    let cli = Cli::parse_from(&normalized);
+
+    assert_eq!(
+        route_after_parse(&cli, &normalized, None)
+            .expect("managed promotion must execute on its authorized runner"),
+        None
+    );
+}
+
+#[test]
 fn unmanaged_explicit_lab_handoff_keeps_runner_connection_requirements() {
     let _env = EnvGuard::set_many(&[
         (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),

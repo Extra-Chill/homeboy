@@ -26,15 +26,12 @@ pub fn route_after_parse(
     normalized_args: &[String],
     output_file: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
-    // A managed runner executes the controller-selected command once. A
-    // materialized run-plan is the one explicit-placement exception: it is the
-    // controller's provider handoff, not a new dispatch from the runner.
+    // A managed runner executes the controller-selected command once. Its argv
+    // retains the controller's explicit placement for provenance, but must not
+    // recursively route back through a runner-side controller daemon.
     let managed_runner_placement =
         crate::commands::utils::resource_policy::is_managed_runner_placement_context();
-    if (cli.placement == homeboy::cli_surface::Placement::Auto
-        && (lab_routing::is_lab_offload_subprocess() || managed_runner_placement))
-        || (managed_runner_placement && is_managed_agent_task_run_plan(cli))
-    {
+    if lab_routing::is_lab_offload_subprocess() || managed_runner_placement {
         return Ok(None);
     }
 
@@ -257,15 +254,6 @@ pub fn route_after_parse(
             Ok(Some(output.exit_code))
         }
     }
-}
-
-fn is_managed_agent_task_run_plan(cli: &Cli) -> bool {
-    matches!(
-        &cli.command,
-        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-            command: crate::commands::agent_task::AgentTaskCommand::RunPlan(_),
-        })
-    )
 }
 
 /// Fanout keeps durable batch state, worktree ownership, artifact ingestion,
