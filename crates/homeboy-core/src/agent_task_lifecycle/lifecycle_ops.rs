@@ -739,7 +739,10 @@ pub fn reconcile_active_runner_handoffs() -> Result<usize> {
     let now = chrono::Utc::now();
     let mut accepted_run_ids = Vec::new();
     let mut expired_run_ids = Vec::new();
-    for record in list_records()? {
+    // Scan the stored snapshot so this operation owns and reports its expiry
+    // mutations. `list_records` refreshes through `status`, which also expires
+    // pending handoffs as a user-visible read-side convergence guarantee.
+    for record in store::read_records()? {
         if record.state == AgentTaskRunState::Running
             && record.runner_id().is_some()
             && record.runner_job_id().is_some()
