@@ -4,6 +4,34 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.290.0] - 2026-07-17
+
+### Added
+- incrementally materialize workspace snapshots
+
+### Changed
+- move bench artifact types + ArtifactViewerLink to contract crates
+- Preserve authoritative runner status through Lab offload
+- move bench diagnostic + phase-event types to homeboy-extension-contract
+- Bind daemon-stop recovery to the authoritative lease
+- move TransformRule/TransformSet to homeboy-refactor-contract
+- relocate fix_local_permissions out of deploy — fully severs extension build -> deploy
+- relocate observation timeline into homeboy-lifecycle-contract
+- sever bench-matrix and lab-workspace-provenance agent edges
+- Adopt existing commits as agent-task candidates
+- Preserve runner identity through Lab cook handoff
+- relocate tag-gap provenance out of deploy so extension build stops depending on deploy
+
+### Fixed
+- remove duplicate candidate_ref in AgentTaskPromotionOptions test initializers
+- add candidate_ref to AgentTaskPromotionOptions test initializers
+- use product build identity
+- gate stale daemon replacement on typed work evidence
+- preserve durable cook identity across admission retries
+- expose typed agent task execution states
+- verify no-op cook candidates
+- keep Lab run plans local
+
 ## [0.289.3] - 2026-07-17
 
 ### Changed
