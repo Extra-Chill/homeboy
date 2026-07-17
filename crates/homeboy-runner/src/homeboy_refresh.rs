@@ -14,11 +14,12 @@ use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::output::MergeOutput;
 
 use super::connection::{active_jobs_before_daemon_replacement, disconnect_with_session};
+use super::execution::exec_with_status_snapshot;
 use super::{
-    connect_with_orphan_adoption, exec, exec_with_status_snapshot, load,
-    materialize_runner_extension_with_env, merge, normalize_runner_command_env_for_homeboy_path,
-    plan_controller_snapshot_extension, RunnerCapabilityPreflight, RunnerExecOptions,
-    RunnerExecOutput, RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
+    connect_with_orphan_adoption, exec, load, materialize_runner_extension_with_env, merge,
+    normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
+    RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput,
+    RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
     RunnerFileTransfer, RunnerKind,
 };
 
