@@ -8,8 +8,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use homeboy_core::agent_runtime_manifest::AgentRuntimeDiscoveryDiagnostic;
-use crate::agent_task::{
+pub(crate) use crate::agent_task::{
     AgentTaskArtifact, AgentTaskArtifactsPathProvenance, AgentTaskDiagnostic, AgentTaskEvidenceRef,
     AgentTaskExecutionState, AgentTaskExecutorRequest, AgentTaskFailureClassification,
     AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AgentTaskTypedArtifact,
@@ -25,15 +24,17 @@ use crate::agent_task_secrets::{
     AgentTaskSecretResolutionError,
 };
 use crate::agent_task_timeout::timeout_with_grace;
-use homeboy_core::command_invocation::CommandInvocation;
+use homeboy_core::agent_runtime_manifest::AgentRuntimeDiscoveryDiagnostic;
+pub(crate) use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::engine::shell;
-use homeboy_core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
+pub(crate) use homeboy_core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
 use homeboy_core::{agent_runtime_manifest, component, defaults, extension, Error};
 
 pub(crate) mod artifact_finalization;
 mod catalog;
 pub(crate) mod command_runner;
 mod config_preflight;
+mod discovery;
 mod executor;
 mod fixtures;
 mod outcome_normalization;
@@ -73,6 +74,10 @@ pub(crate) use types::wildcard_match;
 pub use types::*;
 use types::{default_metadata, is_empty_metadata};
 pub use workspace_types::*;
+
+// AgentTaskProviderRunnerSource lives in the below-core contract (core reads its
+// git ref); re-export it here so agent-side consumers keep the same path.
+pub use homeboy_agents_contract::AgentTaskProviderRunnerSource;
 
 #[cfg(test)]
 use catalog::{

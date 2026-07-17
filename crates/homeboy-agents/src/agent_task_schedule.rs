@@ -638,8 +638,8 @@ mod defaults {
     }
 }
 
-pub use homeboy_core::agent_task_config::*;
 pub use aggregate::*;
 pub use cancellation::*;
 pub use defaults::*;
+pub use homeboy_core::agent_task_config::*;
 pub use plan::*;

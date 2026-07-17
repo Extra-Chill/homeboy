@@ -896,9 +896,10 @@ pub(crate) fn project_terminal_artifacts(
                                             )
                                         })?
                                         .len();
-                                    let actual_sha256 = homeboy_core::artifact_metadata::sha256_file(
-                                        &download.output_path,
-                                    )?;
+                                    let actual_sha256 =
+                                        homeboy_core::artifact_metadata::sha256_file(
+                                            &download.output_path,
+                                        )?;
                                     if actual_size != expected_size
                                         || actual_sha256 != expected_sha256
                                     {

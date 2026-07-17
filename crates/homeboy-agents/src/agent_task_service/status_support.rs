@@ -330,8 +330,8 @@ fn hydrate_file_evidence_ref(uri: &str) -> Result<HydratedContent> {
 }
 
 fn hydrate_local_path_evidence_ref(path: &Path) -> Result<HydratedContent> {
-    let metadata =
-        fs::metadata(path).map_err(|error| homeboy_core::Error::internal_io(error.to_string(), None))?;
+    let metadata = fs::metadata(path)
+        .map_err(|error| homeboy_core::Error::internal_io(error.to_string(), None))?;
     if !metadata.is_file() {
         return Err(homeboy_core::Error::validation_invalid_argument(
             "evidence_ref",
@@ -341,8 +341,8 @@ fn hydrate_local_path_evidence_ref(path: &Path) -> Result<HydratedContent> {
         ));
     }
 
-    let bytes =
-        fs::read(path).map_err(|error| homeboy_core::Error::internal_io(error.to_string(), None))?;
+    let bytes = fs::read(path)
+        .map_err(|error| homeboy_core::Error::internal_io(error.to_string(), None))?;
     let truncated = bytes.len() > EVIDENCE_TEXT_LIMIT;
     let visible = &bytes[..bytes.len().min(EVIDENCE_TEXT_LIMIT)];
     let text = String::from_utf8_lossy(visible);

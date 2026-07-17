@@ -42,11 +42,11 @@ mod lifecycle_record_ops;
 mod records;
 pub mod runner_continuation;
 
-pub use homeboy_core::controller_runtime::ControllerRuntimePruneResult;
 pub use artifact_materialization::*;
 pub use cancellation::*;
 pub use failure_recording::*;
 pub use health::*;
+pub use homeboy_core::controller_runtime::ControllerRuntimePruneResult;
 pub use lifecycle_ops::*;
 pub use lifecycle_record_ops::cook_attempt_run_id;
 pub use records::*;

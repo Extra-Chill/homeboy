@@ -10,7 +10,7 @@ const MAX_GITHUB_MARKDOWN_BODY_BYTES: usize = 60_000;
 const TRUNCATION_NOTICE: &str =
     "\n\n---\n\n_Additional output omitted by Homeboy to keep the GitHub body bounded._\n";
 
-pub(crate) struct GhBodyFile {
+pub struct GhBodyFile {
     file: NamedTempFile,
     path: String,
 }
@@ -22,7 +22,7 @@ impl GhBodyFile {
     }
 }
 
-pub(crate) fn push_markdown_body_file_arg(
+pub fn push_markdown_body_file_arg(
     args: &mut Vec<String>,
     body_files: &mut Vec<GhBodyFile>,
     flag: &str,

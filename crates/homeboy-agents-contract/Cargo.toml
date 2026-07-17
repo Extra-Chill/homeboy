@@ -1,0 +1,15 @@
+[package]
+name = "homeboy-agents-contract"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Shared agent-task provider data types (executor providers, workspace/runtime contracts, secret requirements, command invocation). Sits below homeboy-core so both core and homeboy-agents reference them without a cycle."
+publish = false
+
+[lib]
+name = "homeboy_agents_contract"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

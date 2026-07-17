@@ -184,8 +184,9 @@ pub(crate) fn finalize_provider_file_artifacts(
                 Err(error) if is_legacy_outside_root(&error) => {
                     artifact.size_bytes = None;
                     artifact.sha256 = None;
-                    artifact.mime =
-                        homeboy_core::artifact_metadata::content_type_from_path(Path::new(&declared));
+                    artifact.mime = homeboy_core::artifact_metadata::content_type_from_path(
+                        Path::new(&declared),
+                    );
                     ensure_metadata(artifact)
                         .insert("executor_artifact_finalized".to_string(), json!(false));
                     ensure_metadata(artifact).insert("review_only".to_string(), json!(true));
@@ -719,7 +720,9 @@ mod tests {
 
             let artifact = &value.artifacts[0];
             let persisted = Path::new(artifact.path.as_deref().expect("persisted path"));
-            assert!(persisted.starts_with(homeboy_core::paths::artifact_root().expect("store root")));
+            assert!(
+                persisted.starts_with(homeboy_core::paths::artifact_root().expect("store root"))
+            );
             assert_eq!(
                 fs::read(persisted).expect("persisted bytes"),
                 b"verified patch bytes"
@@ -727,7 +730,10 @@ mod tests {
             assert_eq!(artifact.size_bytes, Some(20));
             assert_eq!(
                 artifact.sha256,
-                Some(homeboy_core::artifact_metadata::sha256_file(persisted).expect("persisted hash"))
+                Some(
+                    homeboy_core::artifact_metadata::sha256_file(persisted)
+                        .expect("persisted hash")
+                )
             );
         });
     }

@@ -215,7 +215,8 @@ mod tests {
             let source = tempfile::NamedTempFile::new().expect("source");
             fs::write(source.path(), bytes).expect("write source");
             let artifact = artifact(bytes);
-            let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+            let store =
+                homeboy_core::observation::ObservationStore::open_initialized().expect("store");
             store
                 .upsert_imported_run(&homeboy_core::observation::RunRecord {
                     id: "local".to_string(),

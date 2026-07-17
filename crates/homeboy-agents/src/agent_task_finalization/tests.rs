@@ -1,11 +1,6 @@
 #![cfg(test)]
 
 use super::*;
-use homeboy_core::run_lifecycle_record::{
-    ArtifactRetentionLifecycle, ArtifactRetentionStatus, CleanupLifecycle, CleanupState,
-    ExternalRuntimeId, FinalizationLifecycle, FinalizationState, ProviderRuntimeLifecycle,
-    ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
-};
 use crate::{
     agent_task::{
         AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest,
@@ -15,6 +10,11 @@ use crate::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals, AgentTaskPlan,
         AgentTaskProgressEvent, AgentTaskQueueStatus, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
     },
+};
+use homeboy_core::run_lifecycle_record::{
+    ArtifactRetentionLifecycle, ArtifactRetentionStatus, CleanupLifecycle, CleanupState,
+    ExternalRuntimeId, FinalizationLifecycle, FinalizationState, ProviderRuntimeLifecycle,
+    ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
 };
 use std::process::Command;
 
@@ -938,7 +938,10 @@ fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
         let after = crate::agent_task_lifecycle::status(&record.run_id)
             .expect("obsolete record remains readable");
 
-        assert_eq!(error.code, homeboy_core::ErrorCode::ValidationInvalidArgument);
+        assert_eq!(
+            error.code,
+            homeboy_core::ErrorCode::ValidationInvalidArgument
+        );
         assert_eq!(before, after);
         assert!(!backend.committed);
         assert!(!backend.pushed);

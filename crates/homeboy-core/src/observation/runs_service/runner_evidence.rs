@@ -205,7 +205,7 @@ pub fn has_runner_evidence_provider() -> bool {
 
 /// Run `f` against the registered provider, or the no-op provider if none is
 /// registered. Keeps the lock held only for the duration of the call.
-pub(crate) fn with_runner_evidence<T>(f: impl FnOnce(&dyn RunnerEvidenceProvider) -> T) -> T {
+pub fn with_runner_evidence<T>(f: impl FnOnce(&dyn RunnerEvidenceProvider) -> T) -> T {
     let guard = PROVIDER
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

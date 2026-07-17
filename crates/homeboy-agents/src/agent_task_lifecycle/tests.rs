@@ -237,7 +237,8 @@ fn legacy_v1_pin_migration_failures_leave_durable_record_unchanged() {
                 }
             }
             rewrite_record_for_test(&record.run_id, |record| {
-                record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+                record.metadata
+                    [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
                     "originating": {
                         "build_identity": identity,
                         "pinned_executable": legacy,
@@ -290,7 +291,8 @@ fn controller_runtime_retention_keeps_mutable_runs_and_reports_terminal_pins_eli
             let legacy = temporary.path().join(format!("{}-legacy", record.run_id));
             std::fs::write(&legacy, b"corrupted legacy bytes").expect("write legacy pin");
             rewrite_record_for_test(&record.run_id, |record| {
-                record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+                record.metadata
+                    [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
                     "originating": {
                         "build_identity": identity,
                         "pinned_executable": legacy,
@@ -320,7 +322,8 @@ fn controller_runtime_retention_keeps_mutable_runs_and_reports_terminal_pins_eli
                 .as_str()
                 .expect("terminal pin"),
         );
-        let report = homeboy_core::controller_runtime::retention_report().expect("retention report");
+        let report =
+            homeboy_core::controller_runtime::retention_report().expect("retention report");
         assert!(report.retained.contains(&active_pin));
         assert!(report.eligible.contains(&terminal_pin));
         let dry_run = prune_controller_runtime_pins(false).expect("plan pin pruning");
@@ -1351,7 +1354,11 @@ fn runner_terminal_reconciliation_is_idempotent_and_preserves_execution_owner() 
         })
         .expect("running proxy");
         let mut record = status("agent-task-terminal-proxy").expect("status");
-        apply_runner_job_terminal_state(&mut record, homeboy_core::api_jobs::JobStatus::Succeeded, &[]);
+        apply_runner_job_terminal_state(
+            &mut record,
+            homeboy_core::api_jobs::JobStatus::Succeeded,
+            &[],
+        );
         store::write_record(&record).expect("terminal record");
 
         let retry = record_detached_lab_run(DetachedLabRunRecord {
@@ -1387,7 +1394,11 @@ fn terminal_lab_artifact_attachment_skips_missing_controller_plan_and_preserves_
         })
         .expect("running proxy");
         let mut record = status("agent-task-late-artifact").expect("status");
-        apply_runner_job_terminal_state(&mut record, homeboy_core::api_jobs::JobStatus::Succeeded, &[]);
+        apply_runner_job_terminal_state(
+            &mut record,
+            homeboy_core::api_jobs::JobStatus::Succeeded,
+            &[],
+        );
         store::write_record(&record).expect("terminal record");
         std::fs::remove_file(&record.plan_path).expect("remove controller plan");
 
@@ -1419,7 +1430,11 @@ fn terminal_lab_artifact_attachment_refuses_runner_provenance_mismatch() {
         })
         .expect("running proxy");
         let mut record = status("agent-task-late-artifact-mismatch").expect("status");
-        apply_runner_job_terminal_state(&mut record, homeboy_core::api_jobs::JobStatus::Succeeded, &[]);
+        apply_runner_job_terminal_state(
+            &mut record,
+            homeboy_core::api_jobs::JobStatus::Succeeded,
+            &[],
+        );
         store::write_record(&record).expect("terminal record");
 
         let error = record_detached_lab_run(DetachedLabRunRecord {
@@ -1921,7 +1936,11 @@ fn terminal_proxy_reconciliation_hydrates_persisted_nested_result_idempotently()
             "/home/lab/.local/share/homeboy/agent-task-runs/agent-task-persisted-result/plan.json"
                 .to_string();
         store::write_record(&record).expect("runner-local plan projection");
-        apply_runner_job_terminal_state(&mut record, homeboy_core::api_jobs::JobStatus::Succeeded, &[]);
+        apply_runner_job_terminal_state(
+            &mut record,
+            homeboy_core::api_jobs::JobStatus::Succeeded,
+            &[],
+        );
         store::write_record(&record).expect("legacy terminal projection without aggregate");
 
         let mut aggregate = succeeded_aggregate(&test_plan());
@@ -2261,8 +2280,8 @@ fn detached_runner_failure_transitions_parent_and_task_terminal() {
 #[test]
 fn detached_lab_handoff_upgrades_existing_observation_record() {
     with_isolated_home(|_| {
-        let store =
-            homeboy_core::observation::ObservationStore::open_initialized().expect("observation store");
+        let store = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("observation store");
         store
             .upsert_imported_run(&homeboy_core::observation::RunRecord {
                 id: "agent-task-detached".to_string(),
@@ -2428,8 +2447,11 @@ fn terminal_reconciliation_reuses_verified_directly_imported_artifact() {
         )
         .expect("actionable imported patch");
         let output = home.path().join("recovered.patch");
-        homeboy_core::observation::runs_service::copy_local_file_artifact(artifact, Some(output.clone()))
-            .expect("recover patch without runner");
+        homeboy_core::observation::runs_service::copy_local_file_artifact(
+            artifact,
+            Some(output.clone()),
+        )
+        .expect("recover patch without runner");
         assert_eq!(std::fs::read(output).expect("recovered patch bytes"), patch);
     });
 }
@@ -2574,7 +2596,9 @@ fn status_backfills_legacy_runner_provenance_and_mirrors_a_verified_projection_i
             ) -> Result<Option<homeboy_core::observation::RunRecord>> {
                 Ok(None)
             }
-            fn statuses(&self) -> Vec<homeboy_core::observation::runs_service::RunnerConnectionInfo> {
+            fn statuses(
+                &self,
+            ) -> Vec<homeboy_core::observation::runs_service::RunnerConnectionInfo> {
                 Vec::new()
             }
             fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
@@ -2587,7 +2611,10 @@ fn status_backfills_legacy_runner_provenance_and_mirrors_a_verified_projection_i
                 &self,
                 _: &str,
                 _: &str,
-            ) -> Result<(homeboy_core::api_jobs::Job, Vec<homeboy_core::api_jobs::JobEvent>)> {
+            ) -> Result<(
+                homeboy_core::api_jobs::Job,
+                Vec<homeboy_core::api_jobs::JobEvent>,
+            )> {
                 unreachable!()
             }
             fn refresh_mirrored_daemon_evidence(
@@ -2606,7 +2633,8 @@ fn status_backfills_legacy_runner_provenance_and_mirrors_a_verified_projection_i
                 &self,
                 path: &str,
                 output: Option<std::path::PathBuf>,
-            ) -> Result<homeboy_core::observation::runs_service::RemoteArtifactDownloadInfo> {
+            ) -> Result<homeboy_core::observation::runs_service::RemoteArtifactDownloadInfo>
+            {
                 assert_eq!(path, "runner-artifact://local/detached-run/patch");
                 let output_path = output.unwrap_or_else(|| {
                     homeboy_core::paths::artifact_root()
@@ -2672,8 +2700,8 @@ fn status_backfills_legacy_runner_provenance_and_mirrors_a_verified_projection_i
             json!({ "status": "complete" }),
         );
         store::write_record(&legacy).expect("persist legacy record");
-        let observation =
-            homeboy_core::observation::ObservationStore::open_initialized().expect("observation store");
+        let observation = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("observation store");
         for artifact in observation
             .list_artifacts("detached-run")
             .expect("existing projections")
@@ -2769,9 +2797,9 @@ fn controller_leaves_runner_artifact_projection_pending_when_it_cannot_mirror_by
         )
         .expect("runner artifact alias remains available");
         assert_eq!(remote_alias.artifact_type, "remote_file");
-        assert!(homeboy_core::execution_contract::is_remote_runner_artifact_path(
-            &remote_alias.path
-        ));
+        assert!(
+            homeboy_core::execution_contract::is_remote_runner_artifact_path(&remote_alias.path)
+        );
         assert_eq!(
             verified_controller_artifact_projection_path(
                 &submitted.run_id,
@@ -4133,8 +4161,8 @@ fn list_records_skips_malformed_observation_records() {
     with_isolated_home(|_| {
         let plan = test_plan();
         submit_plan(&plan, Some("good-run")).expect("submitted");
-        let store =
-            homeboy_core::observation::ObservationStore::open_initialized().expect("observation store");
+        let store = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("observation store");
         store
             .upsert_imported_run(&homeboy_core::observation::RunRecord {
                 id: "bad-run".to_string(),

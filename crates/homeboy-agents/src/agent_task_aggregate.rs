@@ -7,7 +7,7 @@ use super::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
     AgentTaskFollowUp, AgentTaskOutcome, AgentTaskOutcomeStatus,
 };
-use super::markdown::escape_markdown_table_cell;
+use homeboy_core::markdown::escape_markdown_table_cell;
 
 pub const AGENT_TASK_AGGREGATE_SCHEMA: &str = "homeboy/agent-task-aggregate/v1";
 

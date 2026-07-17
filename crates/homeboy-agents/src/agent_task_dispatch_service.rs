@@ -381,22 +381,24 @@ fn selected_runtime_identity(
         return None;
     }
     let materialization_plan = serde_json::to_value(&plan).ok()?;
-    Some(homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity {
-        runtime_id: plan.runtime_id,
-        provider_id: plan.provider_id,
-        source_selector: plan.source_selector,
-        source_revision,
-        freshness: match plan.freshness {
-            homeboy_core::agent_runtime_manifest::AgentRuntimeFreshness::Pinned => {
-                homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Pinned
-            }
-            homeboy_core::agent_runtime_manifest::AgentRuntimeFreshness::Unverifiable => {
-                homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Unverifiable
-            }
+    Some(
+        homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity {
+            runtime_id: plan.runtime_id,
+            provider_id: plan.provider_id,
+            source_selector: plan.source_selector,
+            source_revision,
+            freshness: match plan.freshness {
+                homeboy_core::agent_runtime_manifest::AgentRuntimeFreshness::Pinned => {
+                    homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Pinned
+                }
+                homeboy_core::agent_runtime_manifest::AgentRuntimeFreshness::Unverifiable => {
+                    homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Unverifiable
+                }
+            },
+            provider: serde_json::to_value(provider).ok()?,
+            materialization_plan,
         },
-        provider: serde_json::to_value(provider).ok()?,
-        materialization_plan,
-    })
+    )
 }
 
 /// Build a controller-owned plan with a durable execution policy when the

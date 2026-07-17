@@ -540,7 +540,10 @@ mod tests {
         .expect("gate report");
         let result: HomeboyGateResult = report.into();
 
-        assert_eq!(result.schema, homeboy_core::gate::HOMEBOY_GATE_RESULT_SCHEMA);
+        assert_eq!(
+            result.schema,
+            homeboy_core::gate::HOMEBOY_GATE_RESULT_SCHEMA
+        );
         assert_eq!(result.id, "gate-4");
         assert_eq!(result.kind, HomeboyGateKind::Command);
         assert_eq!(result.status, HomeboyGateStatus::Failed);

@@ -3,12 +3,14 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+use base64::Engine;
 use homeboy_core::defaults::{self, AgentTaskSecretSource};
 use homeboy_core::keychain;
 use homeboy_core::paths;
-use homeboy_core::secret_env_plan::{resolve_secret_env_names, SecretEnvPlan, SecretEnvValueProvider};
+use homeboy_core::secret_env_plan::{
+    resolve_secret_env_names, SecretEnvPlan, SecretEnvValueProvider,
+};
 use homeboy_core::Error;
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -93,7 +95,10 @@ pub fn map_secret_to_env(
         .expect("single status"))
 }
 
-pub fn set_config_secret(name: &str, value: &str) -> homeboy_core::Result<AgentTaskSecretEnvStatus> {
+pub fn set_config_secret(
+    name: &str,
+    value: &str,
+) -> homeboy_core::Result<AgentTaskSecretEnvStatus> {
     let mut config = AgentTaskSecretConfig::load();
     config.secrets.insert(
         name.to_string(),
@@ -297,11 +302,11 @@ fn resolve_secret_env_with_config_and_fallbacks(
                 config
                     .secrets
                     .get(name)
-                    .and_then(|source| source.resolve(name, &mut bundle_cache))
+                    .and_then(|source| resolve_secret_source(source, name, &mut bundle_cache))
                     .or_else(|| {
-                        fallback_sources
-                            .get(name)
-                            .and_then(|source| source.resolve(name, &mut bundle_cache))
+                        fallback_sources.get(name).and_then(|source| {
+                            resolve_secret_source(source, name, &mut bundle_cache)
+                        })
                     })
             }),
         ],
@@ -383,7 +388,7 @@ fn redacted_source_status(
     AgentTaskSecretEnvSourceStatus {
         origin: origin.to_string(),
         source: source.source.clone(),
-        configured: source.resolve(requested_name, bundle_cache).is_some(),
+        configured: resolve_secret_source(source, requested_name, bundle_cache).is_some(),
     }
 }
 
@@ -423,78 +428,78 @@ impl AgentTaskSecretConfig {
     }
 }
 
-impl AgentTaskSecretSource {
-    fn resolve(
-        &self,
-        requested_name: &str,
-        bundle_cache: &mut HashMap<String, Option<Value>>,
-    ) -> Option<String> {
-        match self.source.as_str() {
-            "config" => self.value.clone(),
-            "env" => env::var(self.env_var.as_deref().unwrap_or(requested_name)).ok(),
-            "json-file" => self.resolve_json_file(requested_name, bundle_cache),
-            "json-file-jwt-expiration" => {
-                self.resolve_json_file_jwt_expiration(requested_name, bundle_cache)
-            }
-            "keychain" => keychain::get(
-                self.scope.as_deref().unwrap_or("agent-task"),
-                self.name.as_deref().unwrap_or(requested_name),
-            )
-            .ok()
-            .flatten(),
-            "keychain-bundle" => self.resolve_keychain_bundle(requested_name, bundle_cache),
-            _ => None,
+fn resolve_secret_source(
+    source: &AgentTaskSecretSource,
+    requested_name: &str,
+    bundle_cache: &mut HashMap<String, Option<Value>>,
+) -> Option<String> {
+    match source.source.as_str() {
+        "config" => source.value.clone(),
+        "env" => env::var(source.env_var.as_deref().unwrap_or(requested_name)).ok(),
+        "json-file" => resolve_secret_source_json_file(source, requested_name, bundle_cache),
+        "json-file-jwt-expiration" => {
+            resolve_secret_source_json_file_jwt_expiration(source, requested_name, bundle_cache)
         }
+        "keychain" => keychain::get(
+            source.scope.as_deref().unwrap_or("agent-task"),
+            source.name.as_deref().unwrap_or(requested_name),
+        )
+        .ok()
+        .flatten(),
+        "keychain-bundle" => {
+            resolve_secret_source_keychain_bundle(source, requested_name, bundle_cache)
+        }
+        _ => None,
     }
+}
 
-    fn resolve_json_file(
-        &self,
-        requested_name: &str,
-        bundle_cache: &mut HashMap<String, Option<Value>>,
-    ) -> Option<String> {
-        let raw_path = self.path.as_deref()?;
-        let path = shellexpand::tilde(raw_path).to_string();
-        let bundle = bundle_cache
-            .entry(format!("json-file\0{path}"))
-            .or_insert_with(|| {
-                fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            })
-            .as_ref()?;
-        let field = self.field.as_deref().unwrap_or(requested_name);
-        bundle_field_value(bundle, field).or_else(|| self.value.clone())
-    }
+fn resolve_secret_source_json_file(
+    source: &AgentTaskSecretSource,
+    requested_name: &str,
+    bundle_cache: &mut HashMap<String, Option<Value>>,
+) -> Option<String> {
+    let raw_path = source.path.as_deref()?;
+    let path = shellexpand::tilde(raw_path).to_string();
+    let bundle = bundle_cache
+        .entry(format!("json-file\0{path}"))
+        .or_insert_with(|| {
+            fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        })
+        .as_ref()?;
+    let field = source.field.as_deref().unwrap_or(requested_name);
+    bundle_field_value(bundle, field).or_else(|| source.value.clone())
+}
 
-    fn resolve_json_file_jwt_expiration(
-        &self,
-        requested_name: &str,
-        bundle_cache: &mut HashMap<String, Option<Value>>,
-    ) -> Option<String> {
-        let token = self.resolve_json_file(requested_name, bundle_cache)?;
-        jwt_expiration(&token).or_else(|| self.value.clone())
-    }
+fn resolve_secret_source_json_file_jwt_expiration(
+    source: &AgentTaskSecretSource,
+    requested_name: &str,
+    bundle_cache: &mut HashMap<String, Option<Value>>,
+) -> Option<String> {
+    let token = resolve_secret_source_json_file(source, requested_name, bundle_cache)?;
+    jwt_expiration(&token).or_else(|| source.value.clone())
+}
 
-    fn resolve_keychain_bundle(
-        &self,
-        requested_name: &str,
-        bundle_cache: &mut HashMap<String, Option<Value>>,
-    ) -> Option<String> {
-        let scope = self.scope.as_deref().unwrap_or("agent-task");
-        let keychain_name = self.name.as_deref().unwrap_or(requested_name);
-        let cache_key = format!("{scope}\0{keychain_name}");
-        let bundle = bundle_cache
-            .entry(cache_key)
-            .or_insert_with(|| {
-                keychain::get(scope, keychain_name)
-                    .ok()
-                    .flatten()
-                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            })
-            .as_ref()?;
-        let field = self.field.as_deref().unwrap_or(requested_name);
-        bundle_field_value(bundle, field)
-    }
+fn resolve_secret_source_keychain_bundle(
+    source: &AgentTaskSecretSource,
+    requested_name: &str,
+    bundle_cache: &mut HashMap<String, Option<Value>>,
+) -> Option<String> {
+    let scope = source.scope.as_deref().unwrap_or("agent-task");
+    let keychain_name = source.name.as_deref().unwrap_or(requested_name);
+    let cache_key = format!("{scope}\0{keychain_name}");
+    let bundle = bundle_cache
+        .entry(cache_key)
+        .or_insert_with(|| {
+            keychain::get(scope, keychain_name)
+                .ok()
+                .flatten()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        })
+        .as_ref()?;
+    let field = source.field.as_deref().unwrap_or(requested_name);
+    bundle_field_value(bundle, field)
 }
 
 fn bundle_field_value(bundle: &Value, field: &str) -> Option<String> {
@@ -711,7 +716,7 @@ mod tests {
         );
 
         assert_eq!(
-            source.resolve("PROVIDER_ACCESS_TOKEN", &mut cache),
+            resolve_secret_source(source, "PROVIDER_ACCESS_TOKEN", &mut cache),
             Some("access-token".to_string())
         );
 
@@ -720,7 +725,7 @@ mod tests {
             ..source.clone()
         };
         assert_eq!(
-            numeric_source.resolve("PROVIDER_EXPIRES_AT", &mut cache),
+            numeric_resolve_secret_source(source, "PROVIDER_EXPIRES_AT", &mut cache),
             Some("12345".to_string())
         );
 
@@ -729,7 +734,7 @@ mod tests {
             ..source
         };
         assert_eq!(
-            bool_source.resolve("PROVIDER_FEDRAMP", &mut cache),
+            bool_resolve_secret_source(source, "PROVIDER_FEDRAMP", &mut cache),
             Some("false".to_string())
         );
     }
@@ -862,7 +867,7 @@ mod tests {
         let mut cache = HashMap::new();
 
         assert_eq!(
-            source.resolve("EXAMPLE_PROVIDER_FEDRAMP", &mut cache),
+            resolve_secret_source(source, "EXAMPLE_PROVIDER_FEDRAMP", &mut cache),
             Some("false".to_string())
         );
     }
@@ -898,7 +903,7 @@ mod tests {
         let mut cache = HashMap::new();
 
         assert_eq!(
-            source.resolve("EXAMPLE_PROVIDER_EXPIRES_AT", &mut cache),
+            resolve_secret_source(source, "EXAMPLE_PROVIDER_EXPIRES_AT", &mut cache),
             Some("4102444800".to_string())
         );
     }

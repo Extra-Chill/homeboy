@@ -273,123 +273,6 @@ fn is_false(value: &bool) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskProviderRunnerReadiness {
-    pub id: String,
-    pub label: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub secret_env: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env_path: Option<AgentTaskProviderEnvPathReadiness>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub executable: Option<AgentTaskProviderExecutableReadiness>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remediation: Option<String>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskProviderEnvPathReadiness {
-    pub env: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<bool>,
-    /// Optional extension-declared canonical root (e.g. a managed source clone
-    /// kept under the runner's homeboy cache). When set, doctor WARNS if the
-    /// env-resolved path does not live under this canonical root, catching
-    /// stale / non-canonical checkout drift before it corrupts results.
-    ///
-    /// Core is runtime-agnostic: it does not know what the canonical path
-    /// represents (a runtime checkout, a toolchain, etc.) — the value is supplied
-    /// entirely by the declaring extension.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canonical_path: Option<String>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskProviderExecutableReadiness {
-    /// Environment variable names that should receive the resolved executable path.
-    /// Existing non-empty env values win before binary candidate discovery.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub env: Vec<String>,
-    /// Ordered executable names or paths to try when env does not already point
-    /// at an executable. Bare names are resolved on PATH; paths are checked as-is.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub candidates: Vec<String>,
-    /// Optional arguments a caller can use to probe the resolved executable version.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub version_command: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub install_hint: Option<String>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AgentTaskProviderResolvedExecutable {
-    pub(super) env: Vec<String>,
-    pub(super) path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AgentTaskProviderExecutableResolutionError {
-    pub(super) readiness_id: String,
-    pub(super) label: String,
-    pub(super) env: Vec<String>,
-    pub(super) candidates: Vec<String>,
-    pub(super) install_hint: Option<String>,
-}
-
-impl AgentTaskProviderExecutableResolutionError {
-    pub(super) fn message(&self) -> String {
-        let mut message = format!(
-            "provider runner executable '{}' is not configured",
-            self.label
-        );
-        if !self.env.is_empty() {
-            message.push_str(&format!("; set one of: {}", self.env.join(", ")));
-        }
-        if !self.candidates.is_empty() {
-            message.push_str(&format!(
-                "; searched candidates: {}",
-                self.candidates.join(", ")
-            ));
-        }
-        if let Some(hint) = self.install_hint.as_deref().filter(|hint| !hint.is_empty()) {
-            message.push_str(&format!("; install hint: {hint}"));
-        }
-        message
-    }
-}
-
-/// A named, extension-declared source checkout that homeboy keeps synced on the
-/// runner. Core treats this generically: it materializes/refreshes a git
-/// checkout to the intended ref/remote. It has no knowledge of what the source
-/// is (a runtime checkout, a CLI, a toolchain) — extensions declare the path/remote/ref.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskProviderRunnerSource {
-    pub id: String,
-    pub label: String,
-    /// Absolute path (or `$HOME`/`~`-prefixed path) of the managed checkout on
-    /// the runner, e.g. a path under the runner's homeboy cache directory.
-    pub path: String,
-    /// Optional canonical remote URL the checkout must track. When set, homeboy
-    /// re-points `origin` if the checkout tracks a different remote (fixing the
-    /// "tracks wrong remote" drift), then fetches and fast-forwards.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_url: Option<String>,
-    /// Optional explicit ref (branch, tag, or sha) to check out and sync to.
-    /// When omitted, homeboy fast-forwards the current branch to its upstream.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remediation: Option<String>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskProviderDependencyFailurePattern {
     pub id: String,
     pub label: String,
@@ -543,4 +426,94 @@ pub(crate) fn wildcard_match(pattern: &str, value: &str) -> bool {
         remainder = &remainder[index + part.len()..];
     }
     !anchored_end || value.ends_with(parts[parts.len() - 1])
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderRunnerReadiness {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_path: Option<AgentTaskProviderEnvPathReadiness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<AgentTaskProviderExecutableReadiness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderEnvPathReadiness {
+    pub env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<bool>,
+    /// Optional extension-declared canonical root (e.g. a managed source clone
+    /// kept under the runner's homeboy cache). When set, doctor WARNS if the
+    /// env-resolved path does not live under this canonical root, catching
+    /// stale / non-canonical checkout drift before it corrupts results.
+    ///
+    /// Core is runtime-agnostic: it does not know what the canonical path
+    /// represents (a runtime checkout, a toolchain, etc.) — the value is supplied
+    /// entirely by the declaring extension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_path: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderExecutableReadiness {
+    /// Environment variable names that should receive the resolved executable path.
+    /// Existing non-empty env values win before binary candidate discovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    /// Ordered executable names or paths to try when env does not already point
+    /// at an executable. Bare names are resolved on PATH; paths are checked as-is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+    /// Optional arguments a caller can use to probe the resolved executable version.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_hint: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AgentTaskProviderResolvedExecutable {
+    pub(super) env: Vec<String>,
+    pub(super) path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AgentTaskProviderExecutableResolutionError {
+    pub(super) readiness_id: String,
+    pub(super) label: String,
+    pub(super) env: Vec<String>,
+    pub(super) candidates: Vec<String>,
+    pub(super) install_hint: Option<String>,
+}
+
+impl AgentTaskProviderExecutableResolutionError {
+    pub(super) fn message(&self) -> String {
+        let mut message = format!(
+            "provider runner executable '{}' is not configured",
+            self.label
+        );
+        if !self.env.is_empty() {
+            message.push_str(&format!("; set one of: {}", self.env.join(", ")));
+        }
+        if !self.candidates.is_empty() {
+            message.push_str(&format!(
+                "; searched candidates: {}",
+                self.candidates.join(", ")
+            ));
+        }
+        if let Some(hint) = self.install_hint.as_deref().filter(|hint| !hint.is_empty()) {
+            message.push_str(&format!("; install hint: {hint}"));
+        }
+        message
+    }
 }

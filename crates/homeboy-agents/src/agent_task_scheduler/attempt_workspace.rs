@@ -49,7 +49,9 @@ impl HarvestExecutionContext {
         self.source_snapshot.is_some() || self.lab_offload.is_some()
     }
 
-    fn source_snapshot(&self) -> Result<homeboy_core::source_snapshot::SourceSnapshot, HarvestError> {
+    fn source_snapshot(
+        &self,
+    ) -> Result<homeboy_core::source_snapshot::SourceSnapshot, HarvestError> {
         self.source_snapshot.clone().ok_or_else(|| {
             snapshot_harvest_error("is missing source snapshot transport metadata".to_string())
         })
@@ -158,16 +160,17 @@ pub(super) fn prepare_committed_harvest(
     } else if snapshot_signaled {
         let source_snapshot = context.source_snapshot()?;
         let lab_offload = context.lab_offload()?;
-        let provenance = homeboy_core::lab_workspace_provenance::with_lab_workspace_provenance(|p| {
-            p.verify_lab_workspace(
-                &root.display().to_string(),
-                root,
-                source_snapshot,
-                lab_offload,
-                is_repository,
-            )
-        })
-        .map_err(snapshot_harvest_error)?;
+        let provenance =
+            homeboy_core::lab_workspace_provenance::with_lab_workspace_provenance(|p| {
+                p.verify_lab_workspace(
+                    &root.display().to_string(),
+                    root,
+                    source_snapshot,
+                    lab_offload,
+                    is_repository,
+                )
+            })
+            .map_err(snapshot_harvest_error)?;
         if is_repository {
             // git-root verification is folded into verify_lab_workspace above via
             // require_git_root = is_repository.

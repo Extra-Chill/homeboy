@@ -182,7 +182,10 @@ mod plan_projection_tests {
         let decoded: AgentTaskPlan = serde_json::from_str(&raw).expect("legacy plan decodes");
         let projected = AgentTaskPlan::from_homeboy_plan(decoded.homeboy_plan.clone());
 
-        assert_eq!(decoded.homeboy_plan.kind, homeboy_core::plan::PlanKind::AgentTask);
+        assert_eq!(
+            decoded.homeboy_plan.kind,
+            homeboy_core::plan::PlanKind::AgentTask
+        );
         assert_eq!(projected.schema, AGENT_TASK_PLAN_SCHEMA);
         assert_eq!(projected.plan_id, plan.plan_id);
         assert_eq!(projected.group_key, plan.group_key);

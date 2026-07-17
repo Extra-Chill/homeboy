@@ -67,7 +67,7 @@ pub struct AgentRuntimeManifest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AgentRuntimeMaterializationContract {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub source_roots: Vec<Value>,
+    pub source_roots: Vec<homeboy_agents_contract::AgentTaskProviderRunnerSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<AgentRuntimeMaterializationDependency>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -255,7 +255,7 @@ pub struct AgentRuntimeMaterializationPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub source_roots: Vec<Value>,
+    pub source_roots: Vec<homeboy_agents_contract::AgentTaskProviderRunnerSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<AgentRuntimeMaterializationDependency>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -301,7 +301,7 @@ impl Default for AgentRuntimeFreshness {
     }
 }
 
-pub(crate) fn runtime_materialization_plan(
+pub fn runtime_materialization_plan(
     manifest: &AgentRuntimeManifest,
     provider_id: impl Into<String>,
 ) -> AgentRuntimeMaterializationPlan {

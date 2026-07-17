@@ -608,7 +608,10 @@ mod remote_base_tests {
             let error = RealAgentTaskPrFinalizationBackend
                 .resolve_verified_base(repo.path().to_str().unwrap(), snapshot)
                 .expect_err("invalid snapshot is rejected");
-            assert_eq!(error.code, homeboy_core::ErrorCode::ValidationInvalidArgument);
+            assert_eq!(
+                error.code,
+                homeboy_core::ErrorCode::ValidationInvalidArgument
+            );
         }
     }
 
@@ -663,7 +666,10 @@ mod remote_base_tests {
         let error = RealAgentTaskPrFinalizationBackend
             .resolve_verified_base(clone.path().to_str().unwrap(), &unavailable)
             .expect_err("unavailable exact snapshot is rejected");
-        assert_eq!(error.code, homeboy_core::ErrorCode::ValidationInvalidArgument);
+        assert_eq!(
+            error.code,
+            homeboy_core::ErrorCode::ValidationInvalidArgument
+        );
     }
 
     #[test]

@@ -746,6 +746,7 @@ dependencies = [
  "chrono",
  "fs4",
  "glob",
+ "homeboy-agents-contract",
  "homeboy-core",
  "homeboy-error",
  "homeboy-lab-contract",
@@ -755,10 +756,19 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_json_path",
  "sha2",
  "shellexpand",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "homeboy-agents-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -860,6 +870,7 @@ dependencies = [
  "glob",
  "glob-match",
  "heck",
+ "homeboy-agents-contract",
  "homeboy-audit-contract",
  "homeboy-cli-contract",
  "homeboy-code-audit",

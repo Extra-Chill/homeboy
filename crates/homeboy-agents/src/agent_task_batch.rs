@@ -473,9 +473,11 @@ mod tests {
         // module's own tests and raced `with_isolated_home` users elsewhere.
         let _home = homeboy_core::test_support::HomeGuard::new();
         let plan = AgentTaskPlan::new("fanout/routes", vec![request("a"), request("b")]);
-        let route =
-            homeboy_core::notification_route::NotificationRoute::new("extension", "opaque-parent-route")
-                .expect("route");
+        let route = homeboy_core::notification_route::NotificationRoute::new(
+            "extension",
+            "opaque-parent-route",
+        )
+        .expect("route");
 
         let batch = homeboy_core::notification_route::with_current(Some(route), || {
             submit_plan_batch(&plan, Some("batch-routes")).expect("batch submitted")

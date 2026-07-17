@@ -20,9 +20,8 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
     fn recovered_terminal_agent_task_job(&self, run_id: &str) -> Option<RecoveredTerminalJob> {
         let result = agent_task_service::terminal_run_result(run_id).ok()??;
         let status = match result.value.status {
-            AgentTaskAggregateStatus::Succeeded | AgentTaskAggregateStatus::CandidateRecoverable => {
-                JobStatus::Succeeded
-            }
+            AgentTaskAggregateStatus::Succeeded
+            | AgentTaskAggregateStatus::CandidateRecoverable => JobStatus::Succeeded,
             AgentTaskAggregateStatus::Cancelled => JobStatus::Cancelled,
             AgentTaskAggregateStatus::PartialRecoverable
             | AgentTaskAggregateStatus::PartialFailure
@@ -68,7 +67,5 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
 /// recover terminal jobs from durable agent-task runs without depending on the
 /// agent-task subsystem.
 pub fn register() {
-    register_agent_task_terminal_recovery_provider(Box::new(
-        AgentTaskTerminalRecoveryProviderImpl,
-    ));
+    register_agent_task_terminal_recovery_provider(Box::new(AgentTaskTerminalRecoveryProviderImpl));
 }

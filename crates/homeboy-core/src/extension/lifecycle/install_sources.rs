@@ -8,9 +8,9 @@
 use serde::Deserialize;
 use std::path::Path;
 
-use crate::extension_provider_discovery::validate_installed_extension_provider_discovery;
 use crate::config::{self, from_str};
 use crate::error::{Error, Result};
+use crate::extension_provider_discovery::validate_installed_extension_provider_discovery;
 use crate::git;
 use crate::paths;
 use homeboy_engine_primitives::local_files;

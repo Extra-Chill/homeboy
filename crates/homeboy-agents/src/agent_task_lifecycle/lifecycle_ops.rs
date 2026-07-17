@@ -502,7 +502,8 @@ fn migrate_record_controller_runtime(record: &mut AgentTaskRunRecord) -> Result<
     };
     let migrated = homeboy_core::controller_runtime::migrate_legacy_pin(runtime)?;
     if &migrated != runtime {
-        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = migrated;
+        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
+            migrated;
         store::write_record(record)?;
     }
     Ok(())
@@ -528,7 +529,8 @@ pub fn recover_controller_runtime(
         })?;
     let recovered = homeboy_core::controller_runtime::recover_pin(runtime, artifact, source)?;
     // The new pin is verified before this single-record durable mutation.
-    record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = recovered.clone();
+    record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
+        recovered.clone();
     store::write_record(&record)?;
     Ok(recovered)
 }
@@ -1328,9 +1330,9 @@ fn transport_proxy_runner_id(record: &AgentTaskRunRecord) -> Option<String> {
             .metadata
             .get("runner_execution_record")
             .and_then(|value| {
-                serde_json::from_value::<homeboy_core::runner_execution_envelope::RunnerExecutionRecord>(
-                    value.clone(),
-                )
+                serde_json::from_value::<
+                    homeboy_core::runner_execution_envelope::RunnerExecutionRecord,
+                >(value.clone())
                 .ok()
             })
             .map(|execution| execution.runner_id)
@@ -1344,9 +1346,9 @@ fn transport_proxy_runner_job_id(record: &AgentTaskRunRecord) -> Option<String> 
             .metadata
             .get("runner_execution_record")
             .and_then(|value| {
-                serde_json::from_value::<homeboy_core::runner_execution_envelope::RunnerExecutionRecord>(
-                    value.clone(),
-                )
+                serde_json::from_value::<
+                    homeboy_core::runner_execution_envelope::RunnerExecutionRecord,
+                >(value.clone())
                 .ok()
             })
             .and_then(|execution| execution.job_id)
@@ -1688,7 +1690,9 @@ pub(crate) fn apply_runner_job_terminal_state(
         homeboy_core::api_jobs::JobStatus::Cancelled => {
             (AgentTaskRunState::Cancelled, AgentTaskState::Cancelled)
         }
-        homeboy_core::api_jobs::JobStatus::Failed => (AgentTaskRunState::Failed, AgentTaskState::Failed),
+        homeboy_core::api_jobs::JobStatus::Failed => {
+            (AgentTaskRunState::Failed, AgentTaskState::Failed)
+        }
         _ => return,
     };
     record.updated_at = Some(now_timestamp());

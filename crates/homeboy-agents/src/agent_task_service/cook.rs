@@ -1802,9 +1802,10 @@ mod tests {
         );
         let retry_attempt = cook_attempt_harvest_context(&context);
         match prior {
-            Some(value) => {
-                std::env::set_var(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV, value)
-            }
+            Some(value) => std::env::set_var(
+                homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+                value,
+            ),
             None => std::env::remove_var(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV),
         }
 

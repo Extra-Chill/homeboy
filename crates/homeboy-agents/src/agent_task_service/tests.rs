@@ -7,6 +7,7 @@ use crate::agent_task::{
     AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_OUTCOME_SCHEMA,
     AGENT_TASK_REQUEST_SCHEMA,
 };
+use crate::agent_task_lifecycle;
 use crate::agent_task_lifecycle::{status as lifecycle_status, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
 use crate::agent_task_scheduler::{
@@ -15,7 +16,7 @@ use crate::agent_task_scheduler::{
 };
 use homeboy_core::run_lifecycle_record::RunExecutionState;
 use homeboy_core::test_support::with_isolated_home;
-use crate::agent_task_lifecycle, homeboy_core::{worktree};
+use homeboy_core::worktree;
 use serde_json::Value;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -960,7 +961,10 @@ fn create_git_repo(path: &Path) {
         path,
         &["config", "user.email", "homeboy@example.com"],
     );
-    homeboy_core::test_support::run_git_fixture_command(path, &["config", "user.name", "Homeboy Test"]);
+    homeboy_core::test_support::run_git_fixture_command(
+        path,
+        &["config", "user.name", "Homeboy Test"],
+    );
     std::fs::write(path.join("README.md"), "initial\n").expect("readme");
     homeboy_core::test_support::run_git_fixture_command(path, &["add", "."]);
     homeboy_core::test_support::run_git_fixture_command(path, &["commit", "-q", "-m", "initial"]);

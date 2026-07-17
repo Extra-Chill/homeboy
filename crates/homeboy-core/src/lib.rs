@@ -54,7 +54,7 @@ pub mod artifact_dom_boxes;
 pub mod artifact_inputs;
 pub mod artifact_links;
 pub mod artifact_manifest;
-pub(crate) mod artifact_metadata;
+pub mod artifact_metadata;
 pub mod artifact_origin;
 pub mod artifact_postprocess;
 pub mod artifact_preview;

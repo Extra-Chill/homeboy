@@ -208,7 +208,10 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
 fn cancel_runner_job(
     runner_id: &str,
     runner_job_id: &str,
-) -> Result<(homeboy_core::api_jobs::Job, Vec<homeboy_core::api_jobs::JobEvent>)> {
+) -> Result<(
+    homeboy_core::api_jobs::Job,
+    Vec<homeboy_core::api_jobs::JobEvent>,
+)> {
     #[cfg(test)]
     if let Some(result) = test_cancel_hook::take(runner_id, runner_job_id) {
         return result;
@@ -225,7 +228,13 @@ pub(super) mod test_cancel_hook {
     use std::cell::RefCell;
 
     type CancelHook = Box<
-        dyn FnMut(&str, &str) -> Result<(homeboy_core::api_jobs::Job, Vec<homeboy_core::api_jobs::JobEvent>)>,
+        dyn FnMut(
+            &str,
+            &str,
+        ) -> Result<(
+            homeboy_core::api_jobs::Job,
+            Vec<homeboy_core::api_jobs::JobEvent>,
+        )>,
     >;
 
     thread_local! {
@@ -248,7 +257,12 @@ pub(super) mod test_cancel_hook {
     pub(super) fn take(
         runner_id: &str,
         runner_job_id: &str,
-    ) -> Option<Result<(homeboy_core::api_jobs::Job, Vec<homeboy_core::api_jobs::JobEvent>)>> {
+    ) -> Option<
+        Result<(
+            homeboy_core::api_jobs::Job,
+            Vec<homeboy_core::api_jobs::JobEvent>,
+        )>,
+    > {
         HOOK.with(|cell| {
             cell.borrow_mut()
                 .as_mut()

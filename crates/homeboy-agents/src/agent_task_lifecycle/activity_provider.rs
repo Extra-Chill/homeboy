@@ -7,6 +7,7 @@
 
 use serde_json::Value;
 
+use crate::agent_task_lifecycle::{self, AgentTaskRunRecord};
 use homeboy_core::activity::agent_task_provider::{
     register_activity_agent_task_provider, ActivityAgentTaskProvider,
 };
@@ -14,7 +15,6 @@ use homeboy_core::activity::{
     is_active, is_failure, ActivityCrossRefs, ActivityEvidenceRef, ActivityItem,
     ActivityNextAction, ActivityRunnerRefs, ActivityState,
 };
-use crate::agent_task_lifecycle::{self, AgentTaskRunRecord};
 use homeboy_core::run_lifecycle_record::RunExecutionState;
 use homeboy_core::Result;
 

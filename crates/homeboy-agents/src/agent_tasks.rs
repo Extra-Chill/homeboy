@@ -128,7 +128,7 @@ pub use super::agent_task_secrets::{
     resolve_secret_env_plan, secret_env_plan_status, secret_env_status,
     secret_env_status_with_fallbacks, AgentTaskSecretEnvStatus,
 };
-pub use super::secret_env_plan::{
+pub use homeboy_core::secret_env_plan::{
     SecretEnvCredentialSource, SecretEnvPlan, SecretEnvProviderCredentialMapping,
     SecretEnvRedactionPolicy, SECRET_ENV_PLAN_SCHEMA,
 };
@@ -269,7 +269,7 @@ pub mod lifecycle {
 
 /// Durable agent-task loop controller state, events, and policy.
 pub mod loop_controller {
-    pub use super::super::agent_task_loop_controller::{
+    pub use crate::agent_task_loop_controller::{
         apply_external_event, controller_status, controller_status_diagnostics,
         controller_status_report, create_controller, list_controllers, load_controller,
         write_controller, AgentTaskGateBundle, AgentTaskGateBundleCheck,
@@ -312,7 +312,7 @@ pub mod promotion {
 
 /// Executor provider contracts used by extensions and routing.
 pub mod provider {
-    pub use super::super::agent_task_provider::{
+    pub use crate::agent_task_provider::{
         default_backend, default_backend_for_component, dependency_failure_patterns,
         provider_capability_contract, provider_requires_cwd_git_checkout,
         provider_runner_readiness_contracts, provider_runner_secret_env_for_plan,
@@ -330,7 +330,7 @@ pub mod provider {
         ProviderResolution, WorkspaceMaterializationSpec, WorkspaceMountSpec,
         AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA, AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
     };
-    pub use super::super::agent_task_provider::{
+    pub use crate::agent_task_provider::{
         probe_provider_executor_resolves, provider_runner_secret_env_for_plan_with_providers,
         provider_secret_sources_for_plan_with_providers, ProviderExecutorResolution,
     };

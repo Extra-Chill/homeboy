@@ -93,7 +93,7 @@ impl AgentTaskProviderCatalog {
 }
 
 fn discover_provider_catalog() -> AgentTaskProviderCatalog {
-    let catalog = agent_runtime_manifest::discover_agent_task_executor_provider_catalog();
+    let catalog = super::discovery::discover_agent_task_executor_provider_catalog();
     let version = provider_catalog_version(&catalog.providers, &catalog.diagnostics);
     AgentTaskProviderCatalog {
         providers: catalog.providers,
@@ -184,7 +184,9 @@ pub fn default_backend() -> homeboy_core::Result<Option<String>> {
     default_backend_from_policy(None)
 }
 
-pub fn default_backend_for_component(component_id: Option<&str>) -> homeboy_core::Result<Option<String>> {
+pub fn default_backend_for_component(
+    component_id: Option<&str>,
+) -> homeboy_core::Result<Option<String>> {
     default_backend_from_policy(component_id)
 }
 

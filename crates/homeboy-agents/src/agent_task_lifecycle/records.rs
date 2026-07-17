@@ -223,7 +223,8 @@ impl AgentTaskRunRecord {
     }
 
     pub(crate) fn owner_process_is_running(&self) -> bool {
-        self.owner_pid().is_some_and(homeboy_core::process::pid_is_running)
+        self.owner_pid()
+            .is_some_and(homeboy_core::process::pid_is_running)
     }
 
     pub(crate) fn owner_pid(&self) -> Option<u32> {

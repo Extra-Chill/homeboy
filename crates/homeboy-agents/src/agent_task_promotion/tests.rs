@@ -48,7 +48,10 @@ fn configured_promotion_preflight_rejects_missing_provider_before_dispatch() {
     )
     .expect_err("missing managed provider must fail preflight");
 
-    assert_eq!(error.code, homeboy_core::ErrorCode::ValidationInvalidArgument);
+    assert_eq!(
+        error.code,
+        homeboy_core::ErrorCode::ValidationInvalidArgument
+    );
     assert!(error
         .message
         .contains("no worktree providers are configured"));

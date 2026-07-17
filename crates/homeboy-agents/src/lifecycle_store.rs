@@ -11,11 +11,11 @@ use super::{
     AgentTaskRunState,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
-use crate::engine::local_files::{
+use homeboy_core::engine::local_files::{
     write_json_file as write_json, write_json_file_owner_only as write_private_json,
 };
-use crate::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
-use crate::{build_identity, paths, Error, ErrorCode, Result};
+use homeboy_core::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
+use homeboy_core::{build_identity, paths, Error, ErrorCode, Result};
 
 #[cfg(test)]
 static FAIL_NEXT_RECORD_WRITE: AtomicBool = AtomicBool::new(false);
@@ -23,7 +23,7 @@ static FAIL_NEXT_RECORD_WRITE: AtomicBool = AtomicBool::new(false);
 static INTERRUPT_AFTER_TERMINAL_COMMIT: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn write_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> {
-    crate::config::with_config_lock(|| {
+    homeboy_core::config::with_config_lock(|| {
         let mut plan = plan.clone();
         migrate_execution_budget(&mut plan)?;
         let path = run_dir(run_id)?.join("plan.json");
@@ -62,7 +62,7 @@ pub(super) fn controller_plan_path(run_id: &str) -> Result<PathBuf> {
 /// identity. `AgentTaskRunRecord::plan_path` can be runner-local transport
 /// evidence after a Lab projection and is never controller execution authority.
 pub(super) fn read_controller_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
-    crate::config::with_config_lock(|| {
+    homeboy_core::config::with_config_lock(|| {
         let path = controller_plan_path(run_id)?;
         let mut plan = read_controller_plan(run_id)?;
         if migrate_execution_budget(&mut plan)? {
@@ -128,7 +128,7 @@ pub(super) fn mutate_record(
     run_id: &str,
     mutate: impl FnOnce(&mut AgentTaskRunRecord) -> bool,
 ) -> Result<Option<AgentTaskRunRecord>> {
-    crate::config::with_config_lock(|| {
+    homeboy_core::config::with_config_lock(|| {
         let mut record = read_record(run_id)?;
         if !mutate(&mut record) {
             return Ok(None);
