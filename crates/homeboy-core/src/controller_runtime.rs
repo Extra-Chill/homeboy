@@ -1000,6 +1000,63 @@ mod tests {
         assert!(validate_pin(&runtime).is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn installed_generation_switch_publishes_b_and_retains_a_pin() {
+        use std::os::unix::fs::PermissionsExt;
+
+        crate::test_support::with_isolated_home(|_| {
+            let temporary = tempfile::tempdir().expect("temporary executable directory");
+            let generation_a = temporary.path().join("homeboy-a");
+            let generation_b = temporary.path().join("homeboy-b");
+            for (path, identity) in [
+                (&generation_a, "homeboy 0.1.0+generation-a"),
+                (&generation_b, "homeboy 0.1.0+generation-b"),
+            ] {
+                let identity = serde_json::to_string(identity).expect("serialize identity");
+                fs::write(
+                    path,
+                    format!(
+                        "#!/bin/sh\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{{\"data\":{{\"display\":{identity}}}}}'\n  exit 0\nfi\nexit 1\n"
+                    ),
+                )
+                .expect("write generation executable");
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+                    .expect("make generation executable");
+            }
+
+            let runtime_a = activate_installed_generation(&generation_a)
+                .expect("activate installed generation A");
+            let runtime_b = activate_installed_generation(&generation_b)
+                .expect("activate installed generation B");
+
+            assert_eq!(
+                runtime_a["originating"]["build_identity"],
+                "homeboy 0.1.0+generation-a"
+            );
+            assert_eq!(
+                runtime_b["originating"]["build_identity"],
+                "homeboy 0.1.0+generation-b"
+            );
+            validate_pin(&runtime_a).expect("generation A pin remains valid");
+            validate_pin(&runtime_b).expect("generation B pin is valid");
+
+            let active: Value = serde_json::from_str(
+                &fs::read_to_string(
+                    runtime_root()
+                        .expect("runtime root")
+                        .join(ACTIVE_GENERATION_FILE),
+                )
+                .expect("read active generation"),
+            )
+            .expect("parse active generation");
+            assert_eq!(
+                active["originating"]["build_identity"],
+                "homeboy 0.1.0+generation-b"
+            );
+        });
+    }
+
     #[test]
     fn admission_replaces_a_stale_active_generation_with_the_submitting_runtime() {
         crate::test_support::with_isolated_home(|_| {

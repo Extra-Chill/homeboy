@@ -390,51 +390,6 @@ fn active_pinned_run_does_not_block_controller_promotion() {
     });
 }
 
-#[cfg(unix)]
-#[test]
-fn post_install_generation_switch_pins_new_cooks_to_b_and_retains_a() {
-    use std::os::unix::fs::PermissionsExt;
-
-    with_isolated_home(|_| {
-        let temporary = tempfile::tempdir().expect("temporary executable directory");
-        let generation_a = temporary.path().join("homeboy-a");
-        let generation_b = temporary.path().join("homeboy-b");
-        for (path, identity) in [
-            (&generation_a, "homeboy 0.1.0+generation-a"),
-            (&generation_b, "homeboy 0.1.0+generation-b"),
-        ] {
-            std::fs::write(path, format!("#!/bin/sh\nprintf '{identity}\\n'\n"))
-                .expect("write generation executable");
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-                .expect("make generation executable");
-        }
-
-        crate::controller_runtime::activate_installed_generation(&generation_a)
-            .expect("activate installed generation A");
-        let record_a = submit_plan(&test_plan(), Some("generation-a-cook"))
-            .expect("generation A cook is admitted");
-
-        crate::controller_runtime::activate_installed_generation(&generation_b)
-            .expect("activate installed generation B");
-        let record_b = submit_plan(&test_plan(), Some("generation-b-cook"))
-            .expect("generation B cook is admitted");
-
-        assert_eq!(
-            record_a.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
-                ["originating"]["build_identity"],
-            "homeboy 0.1.0+generation-a"
-        );
-        assert_eq!(
-            record_b.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
-                ["originating"]["build_identity"],
-            "homeboy 0.1.0+generation-b"
-        );
-        assert!(pinned_runtime_for_mutation(&record_a.run_id)
-            .expect("generation A runtime remains verified")
-            .is_some());
-    });
-}
-
 #[test]
 fn pinned_runtime_recovery_retains_the_existing_lab_proxy_identity() {
     with_isolated_home(|_| {
