@@ -132,6 +132,7 @@ mod provider_rotation_tests {
     fn enable_rotation(plan: &mut AgentTaskPlan) {
         plan.options.execution_budget = AgentTaskExecutionBudget {
             version: AgentTaskExecutionBudget::VERSION,
+            deadline_unix_ms: None,
             max_provider_executions: 10,
             max_same_provider_retries: 0,
             max_provider_rotations: 10,
@@ -164,6 +165,7 @@ mod provider_rotation_tests {
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         plan.options.execution_budget = AgentTaskExecutionBudget {
             version: AgentTaskExecutionBudget::VERSION,
+            deadline_unix_ms: None,
             max_provider_executions: 1,
             max_same_provider_retries: 0,
             max_provider_rotations: 1,
@@ -467,6 +469,7 @@ mod provider_rotation_tests {
         let mut plan = plan_with_tasks(1);
         plan.options.execution_budget = AgentTaskExecutionBudget {
             version: AgentTaskExecutionBudget::VERSION,
+            deadline_unix_ms: None,
             max_provider_executions: 1,
             max_same_provider_retries: 0,
             max_provider_rotations: 0,

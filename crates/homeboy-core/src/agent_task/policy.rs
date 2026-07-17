@@ -157,6 +157,11 @@ pub struct AgentTaskLimits {
     pub timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_runtime_ms: Option<u64>,
+    /// Absolute UTC Unix timestamp inherited from the plan execution budget.
+    /// Providers and remote runners use its remaining time rather than starting
+    /// another lifecycle-local timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_deadline_unix_ms: Option<u64>,
     /// Per-attempt liveness deadline: if the provider produces no
     /// stdout/stderr progress within this window, the attempt is killed and
     /// classified as stalled/rate_limited so rotation can advance.

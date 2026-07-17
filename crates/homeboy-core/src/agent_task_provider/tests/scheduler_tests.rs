@@ -300,6 +300,29 @@ fn provider_timeout_returns_structured_outcome() {
 }
 
 #[test]
+fn expired_execution_deadline_returns_typed_outcome_without_spawning_provider() {
+    let (mut request, provider) = request("task-deadline", "missing-provider-command".to_string());
+    request.limits.execution_deadline_unix_ms = Some(0);
+
+    let outcome = run_provider_command(&request, &provider, None);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Timeout)
+    );
+    assert_eq!(
+        outcome.diagnostics[0].class,
+        "agent_task.execution_deadline_exceeded"
+    );
+    assert_eq!(
+        outcome.diagnostics[0].data["completed_phase"],
+        "provider_execution"
+    );
+    assert_eq!(outcome.diagnostics[0].data["remaining_budget_ms"], 0);
+}
+
+#[test]
 fn provider_default_timeout_returns_structured_outcome_without_explicit_timeout() {
     let _lock = DEFAULT_TIMEOUT_ENV_LOCK
         .lock()
