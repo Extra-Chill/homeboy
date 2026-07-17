@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::gate::HomeboyGateResult;
 
+pub mod loop_spec_validation;
 mod validation;
 pub use validation::{
     gate_scope_label, gate_status_label, is_ci_equivalent_gate, proof_runner_label,
@@ -484,6 +485,7 @@ mod tests {
 
     #[test]
     fn proof_validation_accepts_successful_command_envelope_data() {
+        crate::agent_task_controller_service::loop_spec_validation_provider::register();
         let report = validate_proof_value(json!({
             "success": true,
             "data": valid_materialized_spec()
@@ -495,6 +497,7 @@ mod tests {
 
     #[test]
     fn proof_validation_accepts_successful_command_envelope_value() {
+        crate::agent_task_controller_service::loop_spec_validation_provider::register();
         let report = validate_proof_value(json!({
             "success": true,
             "value": valid_materialized_spec()
@@ -531,6 +534,9 @@ mod tests {
 
     #[test]
     fn proof_validation_accepts_materialized_controller_gates_and_metrics() {
+        // Loop-spec validation runs through the agent-task provider hook; register
+        // it so proof validation can validate the materialized spec.
+        crate::agent_task_controller_service::loop_spec_validation_provider::register();
         let report = validate_proof_value(json!({
             "schema": "homeboy/agent-task-loop-spec-materialization/v1",
             "spec": {
@@ -563,6 +569,9 @@ mod tests {
 
     #[test]
     fn proof_validation_rejects_undeclared_materialized_controller_gate() {
+        // Loop-spec validation runs through the agent-task provider hook; register
+        // it so proof validation can validate the materialized spec.
+        crate::agent_task_controller_service::loop_spec_validation_provider::register();
         let report = validate_proof_value(json!({
             "schema": "homeboy/agent-task-loop-spec-materialization/v1",
             "spec": {

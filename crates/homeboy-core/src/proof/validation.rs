@@ -1,7 +1,5 @@
 use serde_json::Value;
 
-use crate::agent_task_controller_service::{validate_loop_spec, AgentTaskRepoLoopSpec};
-use crate::agent_task_repo_loop_compile::validate_repo_loop_artifact_references;
 use crate::artifact_address::validated_public_url;
 use crate::gate::{HomeboyGateResult, HomeboyGateStatus};
 
@@ -214,27 +212,11 @@ fn validate_materialized_loop_spec(
         ));
         return;
     };
-    let Ok(spec) = serde_json::from_value::<AgentTaskRepoLoopSpec>(spec.clone()) else {
-        diagnostics.push(diagnostic(
-            "invalid_loop_spec_json",
-            "materialized controller spec does not match the loop spec schema",
-            path("/spec"),
-        ));
-        return;
-    };
-    if let Err(error) = validate_loop_spec(&spec) {
-        diagnostics.push(diagnostic(
-            "invalid_controller_loop_spec",
-            error.message,
-            path("/spec"),
-        ));
-    }
-    if let Err(error) = validate_repo_loop_artifact_references(&spec) {
-        diagnostics.push(diagnostic(
-            "invalid_artifact_references",
-            error.message,
-            path("/spec"),
-        ));
+    // Loop-spec schema + rule validation is agent-task behavior, delegated
+    // through the loop-spec validation hook so proof validation does not depend
+    // on the agent-task subsystem.
+    for finding in crate::proof::loop_spec_validation::validate_materialized_loop_spec(spec) {
+        diagnostics.push(diagnostic(finding.code, finding.message, path("/spec")));
     }
 }
 

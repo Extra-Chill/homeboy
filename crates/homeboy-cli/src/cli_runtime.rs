@@ -172,6 +172,10 @@ impl CliRuntime {
         // records without core depending on the agent-task subsystem. (This is
         // the seam that lets agent-task become its own crate.)
         crate::core::agent_task_lifecycle::controller_pin_reference_provider::register();
+        // Register the loop-spec validation provider so core's proof validator
+        // can validate a materialized agent-task loop-spec artifact without
+        // depending on the agent-task subsystem.
+        crate::core::agent_task_controller_service::loop_spec_validation_provider::register();
         // Register the command-label resolver so core::runner can map dispatched
         // argv to a hot-command label without depending on the full CLI parser.
         crate::runner::set_command_label_resolver(|argv| {
