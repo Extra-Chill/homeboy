@@ -1250,6 +1250,7 @@ fn empty_patch_runs_public_and_private_gates_against_pinned_candidate() {
             task_base_sha: None,
             to_worktree: "repo@candidate".to_string(),
             task_id: None,
+            candidate_ref: None,
             artifact_id: None,
             dry_run: false,
             gates: VerifyGateOptions {
@@ -1305,6 +1306,7 @@ fn empty_patch_failing_gate_is_reported_against_pinned_candidate() {
             task_base_sha: None,
             to_worktree: "repo@candidate".to_string(),
             task_id: None,
+            candidate_ref: None,
             artifact_id: None,
             dry_run: false,
             gates: VerifyGateOptions {
