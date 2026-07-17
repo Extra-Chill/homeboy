@@ -1258,6 +1258,7 @@ mod tests {
                 active_job_state: RunnerActiveJobState::NotQueried,
                 active_job_source: None,
                 active_job_error: None,
+                active_job_recovery_evidence: None,
                 session_path: "/tmp/lab.json".to_string(),
             };
 
