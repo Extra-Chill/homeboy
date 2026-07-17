@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use clap::{Args, Subcommand, ValueEnum};
 use homeboy::core::cleanup::{
@@ -61,6 +62,7 @@ pub enum CleanupCategoryArg {
     RemoteLabWorkspaces,
     RuntimeTmp,
     ControllerScratch,
+    SharedCargoTargets,
 }
 
 #[derive(Subcommand)]
@@ -203,6 +205,8 @@ pub struct CleanupRetentionManifest {
     pub schema: &'static str,
     pub terminal_run_days: i64,
     pub runtime_tmp_days: u64,
+    pub shared_store_days: u64,
+    pub shared_store_max_bytes: u64,
     pub limit: i64,
     pub terminal_run_guard: bool,
 }
@@ -311,6 +315,14 @@ const CONTROLLER_SCRATCH_METADATA: CleanupInventoryCategoryMetadata =
         include_arg: "controller-scratch",
         dry_run_command: "homeboy cleanup --include controller-scratch",
         apply_command: "homeboy cleanup --include controller-scratch --apply",
+    };
+
+const SHARED_CARGO_TARGETS_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "shared_cargo_targets",
+        include_arg: "shared-cargo-targets",
+        dry_run_command: "homeboy cleanup --include shared-cargo-targets",
+        apply_command: "homeboy cleanup --include shared-cargo-targets --apply",
     };
 
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
@@ -476,6 +488,27 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         )?);
     }
 
+    if selected.includes(CleanupCategoryArg::SharedCargoTargets) {
+        let output = cleanup::cleanup_shared_cargo_targets(cleanup::CargoTargetCleanupOptions {
+            root: None,
+            apply,
+            older_than: Duration::from_secs(configured.shared_store_days.saturating_mul(86_400)),
+            max_bytes: configured.shared_store_max_bytes,
+            limit: usize::try_from(limit).unwrap_or(usize::MAX),
+            now: std::time::SystemTime::now(),
+        })?;
+        categories.push(category_from_output(
+            SHARED_CARGO_TARGETS_METADATA,
+            apply,
+            output.candidate_count,
+            output.applied_count,
+            output.skipped_count,
+            output.candidates.iter().map(|store| store.size_bytes).sum(),
+            output.reclaimed_bytes,
+            output,
+        )?);
+    }
+
     let candidate_count = categories
         .iter()
         .map(|category| category.candidate_count)
@@ -510,6 +543,8 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             schema: "homeboy/retention-manifest/v1",
             terminal_run_days,
             runtime_tmp_days: configured.runtime_tmp_days,
+            shared_store_days: configured.shared_store_days,
+            shared_store_max_bytes: configured.shared_store_max_bytes,
             limit,
             terminal_run_guard: true,
         },
@@ -1215,6 +1250,13 @@ mod tests {
                 "runtime-tmp",
                 "homeboy self cleanup-runtime-tmp",
                 "homeboy self cleanup-runtime-tmp --apply",
+            ),
+            (
+                SHARED_CARGO_TARGETS_METADATA,
+                "shared_cargo_targets",
+                "shared-cargo-targets",
+                "homeboy cleanup --include shared-cargo-targets",
+                "homeboy cleanup --include shared-cargo-targets --apply",
             ),
         ];
 

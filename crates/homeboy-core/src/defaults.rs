@@ -162,6 +162,10 @@ pub struct RetentionConfig {
     pub runtime_tmp_days: u64,
     #[serde(default = "default_retention_limit")]
     pub limit: i64,
+    #[serde(default = "default_shared_store_retention_days")]
+    pub shared_store_days: u64,
+    #[serde(default = "default_shared_store_max_bytes")]
+    pub shared_store_max_bytes: u64,
 }
 
 impl Default for RetentionConfig {
@@ -170,6 +174,8 @@ impl Default for RetentionConfig {
             terminal_run_days: default_terminal_run_retention_days(),
             runtime_tmp_days: default_runtime_tmp_retention_days(),
             limit: default_retention_limit(),
+            shared_store_days: default_shared_store_retention_days(),
+            shared_store_max_bytes: default_shared_store_max_bytes(),
         }
     }
 }
@@ -184,6 +190,14 @@ fn default_runtime_tmp_retention_days() -> u64 {
 
 fn default_retention_limit() -> i64 {
     1000
+}
+
+fn default_shared_store_retention_days() -> u64 {
+    30
+}
+
+fn default_shared_store_max_bytes() -> u64 {
+    20 * 1024 * 1024 * 1024
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
