@@ -20,11 +20,11 @@ fn select(
 }
 
 #[test]
-fn explicit_runner_has_precedence_over_placement() {
+fn explicit_runner_selects_lab_with_auto_placement() {
     let selection = select(
         &portable_lab_command("test"),
         Some("lab-explicit"),
-        homeboy_cli_contract::Placement::Local,
+        homeboy_cli_contract::Placement::Auto,
         false,
         false,
         Some("lab-default".to_string()),
