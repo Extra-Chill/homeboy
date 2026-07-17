@@ -780,6 +780,10 @@ jobs:
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
 
+      - name: Restore recovery cargo-dist overlay
+        if: needs.prepare.outputs.recovery-release == 'true'
+        run: git restore --source=HEAD -- Cargo.toml
+
       - name: Upload dist-manifest.json
         uses: actions/upload-artifact@v4
         with:
