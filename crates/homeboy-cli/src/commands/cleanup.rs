@@ -55,6 +55,7 @@ pub struct CleanupArgs {
 pub enum CleanupCategoryArg {
     RepoArtifacts,
     TaskWorktrees,
+    TerminalRuns,
     PersistedRunArtifacts,
     RunnerDownloads,
     RemoteLabWorkspaces,
@@ -274,6 +275,13 @@ const PERSISTED_RUN_ARTIFACTS_METADATA: CleanupInventoryCategoryMetadata =
         apply_command: "homeboy runs artifact cleanup-persisted --apply",
     };
 
+const TERMINAL_RUNS_METADATA: CleanupInventoryCategoryMetadata = CleanupInventoryCategoryMetadata {
+    category: "terminal_runs",
+    include_arg: "terminal-runs",
+    dry_run_command: "homeboy runs retention",
+    apply_command: "homeboy runs retention --apply",
+};
+
 pub(crate) const RUNNER_DOWNLOADS_METADATA: CleanupInventoryCategoryMetadata =
     CleanupInventoryCategoryMetadata {
         category: "runner_downloads",
@@ -353,6 +361,30 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             allow_unmerged_branches: false,
         })?;
         categories.push(task_worktrees_category(output, apply)?);
+    }
+
+    if selected.includes(CleanupCategoryArg::TerminalRuns) {
+        let output =
+            runs_service::retain_terminal_runs(runs_service::TerminalRunRetentionOptions {
+                apply,
+                older_than_days: terminal_run_days,
+                limit,
+            })?;
+        let lifecycle_bytes = output
+            .lifecycle_directories
+            .iter()
+            .map(|directory| directory.size_bytes)
+            .sum();
+        categories.push(category_from_output(
+            TERMINAL_RUNS_METADATA,
+            apply,
+            output.candidate_run_ids.len(),
+            output.removed_run_count,
+            output.skipped_run_ids.len(),
+            lifecycle_bytes,
+            if apply { lifecycle_bytes } else { 0 },
+            output,
+        )?);
     }
 
     if selected.includes(CleanupCategoryArg::PersistedRunArtifacts) {
@@ -1155,6 +1187,13 @@ mod tests {
                 "task-worktrees",
                 "homeboy worktree cleanup --dry-run --cleanup-branches",
                 "homeboy worktree cleanup --cleanup-branches",
+            ),
+            (
+                TERMINAL_RUNS_METADATA,
+                "terminal_runs",
+                "terminal-runs",
+                "homeboy runs retention",
+                "homeboy runs retention --apply",
             ),
             (
                 PERSISTED_RUN_ARTIFACTS_METADATA,

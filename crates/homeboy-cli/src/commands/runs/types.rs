@@ -207,6 +207,9 @@ pub struct RunsRetentionOutput {
     pub dry_run: bool,
     pub older_than_days: i64,
     pub candidate_run_ids: Vec<String>,
+    pub artifact_cleanup: Vec<runs_service::PersistedArtifactCleanupOutcome>,
+    pub lifecycle_directories: Vec<runs_service::TerminalRunLifecycleDirectory>,
+    pub skipped_run_ids: Vec<String>,
     pub removed_run_count: usize,
 }
 
