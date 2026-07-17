@@ -136,11 +136,6 @@ mod tests {
     use std::thread;
 
     #[test]
-    fn test_run() {
-        get_returns_status_headers_and_json_body();
-    }
-
-    #[test]
     fn get_returns_status_headers_and_json_body() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

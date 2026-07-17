@@ -198,16 +198,6 @@ mod tests {
     }
 
     #[test]
-    fn test_save_manifest() {
-        let _save_manifest: fn(&ExtensionManifest) -> Result<()> = save_manifest;
-    }
-
-    #[test]
-    fn test_merge() {
-        let _merge: fn(Option<&str>, &str, &[String]) -> Result<MergeOutput> = merge;
-    }
-
-    #[test]
     fn test_is_extension_linked() {
         crate::test_support::with_isolated_home(|_| {
             assert!(!is_extension_linked("missing-extension"));
