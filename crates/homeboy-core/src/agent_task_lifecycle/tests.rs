@@ -12,9 +12,10 @@ use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
-use crate::api_jobs::{JobEvent, JobEventKind};
+use crate::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
 use crate::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
+use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
 fn fake_controller_artifact(path: &std::path::Path, identity: &str, marker: &str) -> String {
@@ -689,6 +690,99 @@ fn detached_handoff_persists_redacted_submission_intent_before_broker_ack() {
             accepted.metadata["runner_submission_intent"]["runner_job_id"],
             "job-replayed"
         );
+    });
+}
+
+#[derive(Clone)]
+struct IntentReplayProvider {
+    store: JobStore,
+    submitted: Arc<Mutex<Vec<uuid::Uuid>>>,
+    fail_after_accept_once: Arc<Mutex<bool>>,
+}
+
+impl RunnerContinuationProvider for IntentReplayProvider {
+    fn runner_job_log_snapshot(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+    ) -> Result<crate::api_jobs::RunnerJobLogSnapshot> {
+        Err(Error::internal_unexpected("not used by submission reconciliation"))
+    }
+
+    fn is_runner_connected(&self, _runner_id: &str) -> bool { true }
+    fn runner_exists(&self, _runner_id: &str) -> bool { true }
+
+    fn run_continuation_exec(
+        &self,
+        _runner_id: &str,
+        _cwd: &str,
+        _command: &[String],
+        _run_id: &str,
+    ) -> Result<i32> {
+        Err(Error::internal_unexpected("not used by submission reconciliation"))
+    }
+
+    fn submit_reverse_broker_job(
+        &self,
+        _runner_id: &str,
+        request: RemoteRunnerJobRequest,
+    ) -> Result<Job> {
+        let job = self.store.submit_remote_runner_job(request)?;
+        self.submitted.lock().expect("submission log").push(job.id);
+        let mut fail = self.fail_after_accept_once.lock().expect("fault flag");
+        if std::mem::take(&mut *fail) {
+            return Err(Error::internal_unexpected("injected post-accept pre-ack crash"));
+        }
+        Ok(job)
+    }
+}
+
+#[test]
+fn detached_cook_intent_reconciliation_converges_both_crash_windows_without_secret_leakage() {
+    with_isolated_home(|_| {
+        let store = JobStore::default();
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let fail_after_accept_once = Arc::new(Mutex::new(false));
+        register_runner_continuation_provider(Box::new(IntentReplayProvider {
+            store: store.clone(),
+            submitted: Arc::clone(&submitted),
+            fail_after_accept_once: Arc::clone(&fail_after_accept_once),
+        }));
+        let command = vec!["homeboy".to_string(), "agent-task".to_string(), "cook".to_string()];
+
+        for (run_id, post_accept_fault) in [("fault-after-intent", false), ("fault-after-post", true)] {
+            record_lab_offload_planned(LabOffloadProxyPlan {
+                run_id,
+                runner_id: "homeboy-lab",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+                durable_plan: None,
+            }).expect("record Lab admission");
+            record_lab_offload_submission_intent(
+                run_id,
+                "homeboy-lab",
+                "/runner/workspace/homeboy",
+                &command,
+                &["HOMEBOY_TEST_REVERSE_SECRET".to_string()],
+            ).expect("persist redacted pre-submit intent");
+
+            if post_accept_fault {
+                *fail_after_accept_once.lock().expect("fault flag") = true;
+                assert!(!reconcile_pending_runner_submission_intent(run_id).expect("fault is retained"));
+            }
+            assert!(reconcile_pending_runner_submission_intent(run_id).expect("replay intent"));
+            assert!(!reconcile_pending_runner_submission_intent(run_id).expect("duplicate wake"));
+            let record = status(run_id).expect("accepted lifecycle");
+            assert_eq!(record.metadata["runner_submission_intent"]["state"], "accepted");
+            assert!(!serde_json::to_string(&record).expect("record JSON").contains("secret-value"));
+        }
+
+        let submitted = submitted.lock().expect("submission log");
+        assert_eq!(submitted.len(), 3, "post-accept replay reuses the broker submission key");
+        assert_eq!(submitted[1], submitted[2]);
+        let persisted = serde_json::to_string(&store.get(submitted[0]).expect("broker job"))
+            .expect("broker JSON");
+        assert!(!persisted.contains("secret-value"));
     });
 }
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::runner::lab_selection::allows_detached_reverse_capacity_queue;
+use crate::lab_selection::allows_detached_reverse_capacity_queue;
 
 fn select(
     command: &LabOffloadCommand,

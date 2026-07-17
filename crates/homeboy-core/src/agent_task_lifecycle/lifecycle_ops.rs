@@ -363,7 +363,7 @@ where
 
     let mut record = AgentTaskRunRecord {
         schema: schemas::RUN.to_string(),
-        run_id,
+        run_id: run_id.clone(),
         plan_id: plan.plan_id.clone(),
         state: AgentTaskRunState::Queued,
         submitted_at: now_timestamp(),
