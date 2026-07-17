@@ -18,6 +18,9 @@ homepage = "https://github.com/Extra-Chill/homeboy"
 exclude = ["/artifacts/"]
 publish = false
 
+[package.metadata.dist]
+dist = true
+
 [lib]
 name = "homeboy"
 path = "src/lib.rs"
