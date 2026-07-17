@@ -439,7 +439,7 @@ pub fn read_source_revision(extension_id: &str) -> Option<String> {
     }
 
     // Try .git first (single-extension repos and linked extensions)
-    if let Some(rev) = git::short_head_revision(&extension_dir) {
+    if let Some(rev) = git::head_sha(&extension_dir) {
         return Some(rev);
     }
 

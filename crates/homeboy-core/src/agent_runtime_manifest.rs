@@ -61,6 +61,8 @@ pub struct AgentRuntimeManifest {
     pub extension_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
 }
@@ -245,6 +247,14 @@ pub struct AgentRuntimeMaterializationPlan {
     /// identity rather than repeating ambient runtime discovery.
     #[serde(default)]
     pub selected_identity: AgentRuntimeSelectedIdentity,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_selector: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    #[serde(default)]
+    pub freshness: AgentRuntimeFreshness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -281,8 +291,22 @@ fn default_runtime_freshness() -> String {
     "unverifiable".to_string()
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRuntimeFreshness {
+    Pinned,
+    Unverifiable,
+}
+
+impl Default for AgentRuntimeFreshness {
+    fn default() -> Self {
+        Self::Unverifiable
+    }
+}
+
 pub(crate) fn runtime_materialization_plan(
     manifest: &AgentRuntimeManifest,
+    provider_id: impl Into<String>,
 ) -> AgentRuntimeMaterializationPlan {
     let mut env_passthrough = manifest.materialization.env_passthrough.clone();
     env_passthrough.sort();
@@ -320,6 +344,12 @@ pub(crate) fn runtime_materialization_plan(
             revision,
             freshness: freshness.to_string(),
         },
+        provider_id: provider_id.into(),
+        source_selector: runtime_source_description(manifest),
+        source_revision: manifest.source_revision.clone(),
+        // A controller-selected revision is not freshness evidence. Only a
+        // materializer that verifies the selected object may report it current.
+        freshness: AgentRuntimeFreshness::Unverifiable,
         runtime_path: manifest.runtime_path.clone(),
         source_roots,
         dependencies: manifest.materialization.dependencies.clone(),
@@ -528,6 +558,15 @@ fn load_standalone_agent_runtime_manifest(
     manifest.extension_id = None;
     manifest.extension_path = None;
     manifest.runtime_path = Some(path.to_string_lossy().to_string());
+    manifest.source_revision = crate::git::head_sha(path);
+    if let Some(diagnostic) = mutable_runtime_source_diagnostic(
+        &manifest.id,
+        None,
+        manifest.runtime_path.as_deref(),
+        &manifest.materialization,
+    ) {
+        return StandaloneAgentRuntimeManifestLoad::Invalid(diagnostic);
+    }
     if let Some(diagnostic) = agent_runtime_core_incompatible_diagnostic(
         &manifest.id,
         None,
@@ -560,6 +599,23 @@ pub(crate) fn discover_agent_runtime_catalog_from_extensions(
                 diagnostics.push(diagnostic);
                 continue;
             }
+            let materialization: AgentRuntimeMaterializationContract = serde_json::from_value(
+                runtime
+                    .extra
+                    .get("materialization")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            )
+            .unwrap_or_default();
+            if let Some(diagnostic) = mutable_runtime_source_diagnostic(
+                &runtime.id,
+                Some(&extension.id),
+                extension.extension_path.as_deref(),
+                &materialization,
+            ) {
+                diagnostics.push(diagnostic);
+                continue;
+            }
             let provider_catalog = parse_agent_task_executor_provider_catalog(
                 &runtime.agent_task_executors,
                 &runtime.id,
@@ -577,18 +633,13 @@ pub(crate) fn discover_agent_runtime_catalog_from_extensions(
                 label: runtime.label.clone(),
                 agent_task_executors: providers,
                 config_path_fields: runtime.config_path_fields.clone(),
-                materialization: serde_json::from_value(
-                    runtime
-                        .extra
-                        .get("materialization")
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                )
-                .unwrap_or_default(),
+                materialization,
                 extension_id: Some(extension.id.clone()),
                 requires: runtime_requires(runtime, extension),
                 extension_path: extension.extension_path.clone(),
                 runtime_path: extension.extension_path.clone(),
+                source_revision: extension::read_source_revision(&extension.id)
+                    .filter(|revision| is_immutable_revision(revision)),
                 extra: runtime
                     .extra
                     .clone()
@@ -602,6 +653,37 @@ pub(crate) fn discover_agent_runtime_catalog_from_extensions(
         manifests: runtime_manifests,
         diagnostics,
     }
+}
+
+fn mutable_runtime_source_diagnostic(
+    runtime_id: &str,
+    extension_id: Option<&str>,
+    path: Option<&str>,
+    materialization: &AgentRuntimeMaterializationContract,
+) -> Option<AgentRuntimeDiscoveryDiagnostic> {
+    let source = materialization.source_roots.iter().find(|source| {
+        source
+            .git_ref
+            .as_deref()
+            .is_some_and(|git_ref| !is_immutable_revision(git_ref))
+    })?;
+    Some(AgentRuntimeDiscoveryDiagnostic {
+        class: "agent_runtime_manifest.mutable_ref".to_string(),
+        message: format!(
+            "Agent runtime '{}' source '{}' declares mutable git_ref '{}'. Materialization requires an immutable commit revision.",
+            runtime_id,
+            source.id,
+            source.git_ref.as_deref().unwrap_or_default(),
+        ),
+        runtime_id: Some(runtime_id.to_string()),
+        extension_id: extension_id.map(str::to_string),
+        path: path.map(str::to_string),
+    })
+}
+
+pub(crate) fn is_immutable_revision(value: &str) -> bool {
+    let value = value.trim();
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn runtime_requires(
@@ -666,37 +748,12 @@ pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorP
 pub(crate) fn discover_agent_task_executor_provider_catalog(
 ) -> AgentTaskExecutorProviderDiscoveryCatalog {
     let catalog = discover_agent_runtime_catalog();
-    let mut providers = agent_task_executor_providers_from_runtime_manifests(catalog.manifests);
     let mut diagnostics = catalog.diagnostics;
-    providers.sort_by(|left, right| left.id.cmp(&right.id));
-    let mut selected = Vec::new();
-    let mut candidates = providers.into_iter().peekable();
-    while let Some(provider) = candidates.next() {
-        let id = provider.id.clone();
-        let mut collisions = vec![provider];
-        while candidates
-            .peek()
-            .is_some_and(|candidate| candidate.id == id)
-        {
-            collisions.push(candidates.next().expect("peeked provider candidate"));
-        }
-        if collisions.len() == 1 {
-            selected.push(collisions.pop().expect("single provider candidate"));
-            continue;
-        }
-        diagnostics.push(AgentRuntimeDiscoveryDiagnostic {
-            class: "agent_task_executor_provider.conflict".to_string(),
-            message: format!(
-                "Provider id '{id}' is declared by multiple runtime sources: {}. Select one source explicitly before dispatching.",
-                collisions.iter().map(|provider| format!("{}:{}", provider.runtime_id.as_deref().unwrap_or("unknown"), provider.extension_id.as_deref().unwrap_or("standalone"))).collect::<Vec<_>>().join(", ")
-            ),
-            runtime_id: None,
-            extension_id: None,
-            path: None,
-        });
-    }
     AgentTaskExecutorProviderDiscoveryCatalog {
-        providers: selected,
+        providers: reject_duplicate_provider_ids(
+            agent_task_executor_providers_from_runtime_manifests(catalog.manifests),
+            &mut diagnostics,
+        ),
         diagnostics,
     }
 }
@@ -713,8 +770,7 @@ fn agent_task_executor_providers_from_runtime_manifests(
 ) -> Vec<AgentTaskExecutorProvider> {
     let mut providers = Vec::new();
     for runtime_manifest in runtime_manifests {
-        let materialization_plan = runtime_materialization_plan(&runtime_manifest);
-        for mut provider in runtime_manifest.agent_task_executors {
+        for mut provider in runtime_manifest.agent_task_executors.clone() {
             normalize_agent_task_executor_provider_invocation(&mut provider);
             provider.extension_id = runtime_manifest.extension_id.clone();
             provider.extension_path = runtime_manifest.extension_path.clone();
@@ -723,6 +779,8 @@ fn agent_task_executor_providers_from_runtime_manifests(
             }
             provider.runtime_id = Some(runtime_manifest.id.clone());
             provider.runtime_path = runtime_manifest.runtime_path.clone();
+            let materialization_plan =
+                runtime_materialization_plan(&runtime_manifest, &provider.id);
             if let Ok(value) = serde_json::to_value(&materialization_plan) {
                 provider
                     .extra
@@ -732,6 +790,50 @@ fn agent_task_executor_providers_from_runtime_manifests(
         }
     }
     providers
+}
+
+fn reject_duplicate_provider_ids(
+    providers: Vec<AgentTaskExecutorProvider>,
+    diagnostics: &mut Vec<AgentRuntimeDiscoveryDiagnostic>,
+) -> Vec<AgentTaskExecutorProvider> {
+    let mut by_id = BTreeMap::<String, Vec<AgentTaskExecutorProvider>>::new();
+    for provider in providers {
+        by_id.entry(provider.id.clone()).or_default().push(provider);
+    }
+
+    by_id
+        .into_iter()
+        .filter_map(|(id, providers)| {
+            if providers.len() == 1 {
+                return providers.into_iter().next();
+            }
+            let sources = providers
+                .iter()
+                .map(|provider| {
+                    format!(
+                        "runtime:{} source:{}",
+                        provider.runtime_id.as_deref().unwrap_or("<unknown>"),
+                        provider
+                            .extension_id
+                            .as_deref()
+                            .unwrap_or("standalone")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            diagnostics.push(AgentRuntimeDiscoveryDiagnostic {
+                class: "agent_task_executor_provider.id_conflict".to_string(),
+                message: format!(
+                    "Agent-task provider id '{}' is declared by multiple sources: {}. Select one source explicitly before dispatching this provider.",
+                    id, sources
+                ),
+                runtime_id: None,
+                extension_id: None,
+                path: None,
+            });
+            None
+        })
+        .collect()
 }
 
 fn normalize_agent_task_executor_provider_invocation(provider: &mut AgentTaskExecutorProvider) {
@@ -945,7 +1047,7 @@ mod tests {
                         "label": "Example Runtime Source",
                         "path": "~/.cache/homeboy/example-runtime",
                         "remote_url": "https://example.com/runtime.git",
-                        "git_ref": "main"
+                        "git_ref": "0123456789abcdef0123456789abcdef01234567"
                     }],
                     "dependencies": [{
                         "id": "example-runtime-package",
@@ -1003,7 +1105,7 @@ mod tests {
         );
         assert_eq!(manifests[0].agent_task_executors[0].backend, "example");
         assert!(!manifests[0].extra.contains_key("materialization"));
-        let materialization_plan = runtime_materialization_plan(&manifests[0]);
+        let materialization_plan = runtime_materialization_plan(&manifests[0], "example.default");
         assert_eq!(
             materialization_plan.schema,
             AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA
@@ -1049,6 +1151,13 @@ mod tests {
             manifests[0].runtime_path.as_deref(),
             Some("/extensions/runtime-extension")
         );
+        let providers = agent_task_executor_providers_from_runtime_manifests(manifests.clone());
+        let provider_plan: AgentRuntimeMaterializationPlan =
+            serde_json::from_value(providers[0].extra["runtime_materialization_plan"].clone())
+                .expect("provider materialization plan");
+        assert_eq!(provider_plan.runtime_id, "example-runtime");
+        assert_eq!(provider_plan.provider_id, "example.default");
+        assert_eq!(provider_plan.freshness, AgentRuntimeFreshness::Unverifiable);
         assert_eq!(manifests[0].extra["runtime_metadata"]["owner"], "extension");
         assert_eq!(
             serde_json::to_value(&manifests[0]).expect("runtime export")["runtime_metadata"]
@@ -1151,7 +1260,8 @@ mod tests {
                 provider.provider_defaults["example-provider"]["secret_env"][0],
                 "EXAMPLE_RUNTIME_REFRESH_TOKEN"
             );
-            let materialization_plan = runtime_materialization_plan(&manifests[0]);
+            let materialization_plan =
+                runtime_materialization_plan(&manifests[0], "standalone-example.default");
             assert_eq!(
                 materialization_plan.env_passthrough,
                 vec!["STANDALONE_RUNTIME_HOME".to_string()]
@@ -1489,19 +1599,84 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_provider_ids_fail_closed_with_source_diagnostics() {
+        let first: AgentTaskExecutorProvider =
+            serde_json::from_value(provider_json("shared", "one")).expect("first provider");
+        let second: AgentTaskExecutorProvider =
+            serde_json::from_value(provider_json("shared", "two")).expect("second provider");
+        let mut diagnostics = Vec::new();
+
+        let providers = reject_duplicate_provider_ids(vec![first, second], &mut diagnostics);
+
+        assert!(providers.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].class,
+            "agent_task_executor_provider.id_conflict"
+        );
+        assert!(diagnostics[0].message.contains("shared"));
+    }
+
+    #[test]
+    fn mutable_runtime_source_ref_is_rejected() {
+        let mut extension = extension("runtime-extension");
+        extension.agent_runtimes.push(
+            serde_json::from_value(json!({
+                "id": "example-runtime",
+                "materialization": {
+                    "source_roots": [{
+                        "id": "example-source",
+                        "label": "Example source",
+                        "path": "/tmp/example-source",
+                        "git_ref": "main"
+                    }]
+                },
+                "agent_task_executors": [provider_json("example.default", "example")]
+            }))
+            .expect("runtime manifest"),
+        );
+
+        let catalog = discover_agent_runtime_catalog_from_extensions(&[extension]);
+
+        assert!(catalog.manifests.is_empty());
+        assert_eq!(
+            catalog.diagnostics[0].class,
+            "agent_runtime_manifest.mutable_ref"
+        );
+        assert!(catalog.diagnostics[0].message.contains("main"));
+    }
+
+    #[test]
+    fn existing_materialization_plans_deserialize_as_unverifiable() {
+        let plan: AgentRuntimeMaterializationPlan = serde_json::from_value(json!({
+            "schema": AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA,
+            "runtime_id": "existing-runtime"
+        }))
+        .expect("existing materialization plan");
+
+        assert!(plan.provider_id.is_empty());
+        assert_eq!(plan.freshness, AgentRuntimeFreshness::Unverifiable);
+    }
+
+    #[test]
     fn sample_runtime_materialization_fixture_is_plain_data() {
         let manifest: AgentRuntimeManifest = serde_json::from_str(include_str!(
             "../../../tests/fixtures/sample_runtime_materialization_manifest.json"
         ))
         .expect("sample runtime fixture parses");
 
-        let materialization_plan = runtime_materialization_plan(&manifest);
+        let materialization_plan = runtime_materialization_plan(&manifest, "sample.default");
 
         assert_eq!(manifest.id, "sample-runtime");
         assert_eq!(materialization_plan.runtime_id, "sample-runtime");
         assert_eq!(
             materialization_plan.selected_identity.freshness,
             "unverifiable"
+        );
+        assert_eq!(materialization_plan.provider_id, "sample.default");
+        assert_eq!(
+            materialization_plan.freshness,
+            AgentRuntimeFreshness::Unverifiable
         );
         assert_eq!(materialization_plan.source_roots[0].id, "sample-runtime");
         assert_eq!(

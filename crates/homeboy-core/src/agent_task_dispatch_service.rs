@@ -16,7 +16,7 @@ use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, default_backend_for_component,
     enforce_runtime_preflight_checks_for_plan, preflight_plan_provider_config_with_providers,
-    AgentTaskProviderCatalog,
+    resolve_provider_for_backend, AgentTaskProviderCatalog, ProviderResolution,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskProviderRotationPolicy,
@@ -315,6 +315,7 @@ pub fn controller_resolved_execution_policy(
     request: &AgentTaskDispatchRequest,
 ) -> ResolvedAgentTaskProviderPolicy {
     let rotation = crate::defaults::load_config().agent_task.rotation;
+    let runtime_identity = selected_runtime_identity(request);
     ResolvedAgentTaskProviderPolicy {
         backend: request.backend.clone(),
         selector: request.selector.clone(),
@@ -328,7 +329,45 @@ pub fn controller_resolved_execution_policy(
             .and_then(|policy| policy.liveness_timeout_ms),
         rotation,
         rotation_starts_with_first_entry: true,
+        runtime_identity,
     }
+}
+
+fn selected_runtime_identity(
+    request: &AgentTaskDispatchRequest,
+) -> Option<crate::agent_task_config::ResolvedAgentTaskRuntimeIdentity> {
+    let catalog = AgentTaskProviderCatalog::discover();
+    let ProviderResolution::Resolved(provider) = resolve_provider_for_backend(
+        catalog.providers(),
+        &request.backend,
+        request.selector.as_deref(),
+    ) else {
+        return None;
+    };
+    let plan = provider.extra.get("runtime_materialization_plan")?;
+    let plan: crate::agent_runtime_manifest::AgentRuntimeMaterializationPlan =
+        serde_json::from_value(plan.clone()).ok()?;
+    let source_revision = plan.source_revision.clone()?;
+    if !crate::agent_runtime_manifest::is_immutable_revision(&source_revision) {
+        return None;
+    }
+    let materialization_plan = serde_json::to_value(&plan).ok()?;
+    Some(crate::agent_task_config::ResolvedAgentTaskRuntimeIdentity {
+        runtime_id: plan.runtime_id,
+        provider_id: plan.provider_id,
+        source_selector: plan.source_selector,
+        source_revision,
+        freshness: match plan.freshness {
+            crate::agent_runtime_manifest::AgentRuntimeFreshness::Pinned => {
+                crate::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Pinned
+            }
+            crate::agent_runtime_manifest::AgentRuntimeFreshness::Unverifiable => {
+                crate::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Unverifiable
+            }
+        },
+        provider: serde_json::to_value(provider).ok()?,
+        materialization_plan,
+    })
 }
 
 /// Build a controller-owned plan with a durable execution policy when the

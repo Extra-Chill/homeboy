@@ -351,6 +351,7 @@ mod tests {
             rotation_starts_with_first_entry: false,
             retry: Default::default(),
             liveness_timeout_ms: None,
+            runtime_identity: None,
         });
 
         let request = dispatch_service::resolve_dispatch_request_with_default(args.into(), |_| {
