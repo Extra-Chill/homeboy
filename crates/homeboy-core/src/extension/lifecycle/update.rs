@@ -55,7 +55,7 @@ pub fn update(extension_id: &str, force: bool) -> Result<UpdateResult> {
             git::short_head_revision(&extension_dir),
         );
 
-        run_setup_if_configured(extension_id);
+        run_setup_if_configured(extension_id)?;
 
         return Ok(UpdateResult {
             extension_id: extension_id.to_string(),
@@ -70,8 +70,6 @@ pub fn update(extension_id: &str, force: bool) -> Result<UpdateResult> {
     }
 
     update_extracted_extension(extension_id, &extension_dir, &source_url)?;
-
-    run_setup_if_configured(extension_id);
 
     Ok(UpdateResult {
         extension_id: extension_id.to_string(),
@@ -106,7 +104,8 @@ fn update_extracted_extension(
         }
     }
 
-    git::clone_repo(source_url, &clone_dir)?;
+    let requested_ref = read_source_requested_ref(extension_dir);
+    git::clone_repo_at_ref(source_url, &clone_dir, requested_ref.as_deref())?;
     let source_revision = git::short_head_revision(&clone_dir);
 
     let result = resolve_cloned_extension(&clone_dir, extension_id, &staged_dir, source_url);
@@ -116,9 +115,16 @@ fn update_extracted_extension(
     result?;
 
     write_source_metadata(&staged_dir, source_url, source_revision);
+    write_requested_source_ref(&staged_dir, requested_ref.as_deref());
 
     rename_dir(extension_dir, &backup_dir)?;
     if let Err(err) = rename_dir(&staged_dir, extension_dir) {
+        let _ = rename_dir(&backup_dir, extension_dir);
+        return Err(err);
+    }
+
+    if let Err(err) = run_setup_if_configured(extension_id) {
+        let _ = std::fs::remove_dir_all(extension_dir);
         let _ = rename_dir(&backup_dir, extension_dir);
         return Err(err);
     }
@@ -146,6 +152,26 @@ pub(crate) fn write_source_metadata(
         metadata_dir.join(source_metadata_file(extension_dir, "url")),
         source_url,
     );
+}
+
+/// Persist the user-requested source ref separately from the resolved revision.
+/// Extracted monorepo installs discard `.git`, so this is the only durable
+/// input that lets a later update preserve a branch, tag, or commit pin.
+pub(crate) fn write_requested_source_ref(extension_dir: &Path, requested_ref: Option<&str>) {
+    let path = source_metadata_dir(extension_dir)
+        .join(source_metadata_file(extension_dir, "requested-ref"));
+    match requested_ref.filter(|value| !value.trim().is_empty()) {
+        Some(value) => {
+            let _ = std::fs::write(path, value);
+        }
+        None => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+pub(crate) fn read_source_requested_ref(extension_dir: &Path) -> Option<String> {
+    read_source_metadata_value(extension_dir, "requested-ref")
 }
 
 pub fn read_source_url(extension_dir: &Path) -> Option<String> {
@@ -243,15 +269,15 @@ fn is_generated_extension_metadata_path(path: &str, extension_rel: Option<&str>)
     })
 }
 
-pub(crate) fn run_setup_if_configured(extension_id: &str) {
-    if let Ok(extension) = load_extension(extension_id) {
-        if extension
-            .runtime()
-            .is_some_and(|r| r.setup_command.is_some())
-        {
-            let _ = super::super::execution::run_setup(extension_id);
-        }
+pub(crate) fn run_setup_if_configured(extension_id: &str) -> Result<()> {
+    let extension = load_extension(extension_id)?;
+    if extension
+        .runtime()
+        .is_some_and(|r| r.setup_command.is_some())
+    {
+        super::super::execution::run_setup(extension_id)?;
     }
+    Ok(())
 }
 
 fn update_linked_extension(
@@ -322,7 +348,7 @@ fn update_linked_extension(
         }
     };
     install_linked_shared_assets(&source_dir, extension_dir, None)?;
-    run_setup_if_configured(extension_id);
+    run_setup_if_configured(extension_id)?;
     let url = format!("linked:{}", source_dir.display());
     let new_branch = git::current_branch(&git_root);
     let new_source_revision = git::short_head_revision(&git_root);

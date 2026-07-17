@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use super::execution::run_setup;
 use super::lifecycle::{
     derive_id_from_url, install_linked_shared_assets, is_git_url, rename_dir,
-    resolve_cloned_extension, slugify_id, write_source_metadata,
+    resolve_cloned_extension, slugify_id, write_requested_source_ref, write_source_metadata,
 };
 use super::manifest::ExtensionManifest;
 
@@ -89,6 +89,7 @@ fn replace_from_url(
     result?;
 
     write_source_metadata(&staged_dir, url, source_revision.clone());
+    write_requested_source_ref(&staged_dir, revision);
 
     let old_path = installed_source_path(&extension_dir);
     move_existing_install(&extension_dir, &backup_dir)?;
@@ -165,6 +166,7 @@ fn replace_from_path(
         let _ = restore_existing_install(&backup_dir, &extension_dir);
         return Err(err);
     }
+    write_requested_source_ref(&extension_dir, requested_revision);
 
     run_setup_or_restore(&extension_id, &extension_dir, &backup_dir)?;
     validate_agent_runtime_discovery_or_restore(&extension_id, &extension_dir, &backup_dir)?;

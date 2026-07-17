@@ -323,6 +323,7 @@ pub(crate) use install_sources::{
 mod update;
 #[cfg(test)]
 use update::is_extension_update_workdir_clean;
+pub(crate) use update::write_requested_source_ref;
 pub(crate) use update::write_source_metadata;
 pub use update::{
     check_update_available, read_source_revision, read_source_url, update, UpdateAvailable,
@@ -1407,6 +1408,29 @@ exec '{}' "$@"
     }
 
     #[test]
+    fn install_fails_when_setup_fails_and_removes_unready_extension() {
+        with_isolated_home(|home| {
+            let source = home.path().join("source-repo");
+            let extension_dir = source.join("wordpress");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join("wordpress.json"),
+                r#"{"name":"wordpress","version":"1.0.0","executable":{"runtime":{"setup_command":"exit 23"}}}"#,
+            )
+            .expect("extension manifest");
+
+            let _err = install(&extension_dir.to_string_lossy(), Some("wordpress"))
+                .expect_err("failed setup must fail installation");
+
+            assert!(
+                std::fs::symlink_metadata(home.path().join(".config/homeboy/extensions/wordpress"))
+                    .is_err(),
+                "failed setup must not leave an installed-but-unready extension"
+            );
+        });
+    }
+
+    #[test]
     fn test_install_with_revision() {
         with_isolated_home(|home| {
             let home = home.path();
@@ -1478,6 +1502,45 @@ exec '{}' "$@"
             assert_eq!(
                 result.source_revision.as_deref(),
                 Some(branch_revision.as_str())
+            );
+        });
+    }
+
+    #[test]
+    fn extracted_update_preserves_requested_commit_pin() {
+        with_isolated_home(|home| {
+            let source = home.path().join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            let remote = match prepare_git_extension_repo(&source, "wordpress") {
+                Some(remote) => remote,
+                None => return,
+            };
+            let pinned_revision = match git_output(&source, &["rev-parse", "--short", "HEAD"]) {
+                Some(revision) => revision,
+                None => return,
+            };
+            write_extension_fixture_with_version(&source, "wordpress", "2.0.0");
+            assert!(commit_all(&source, "default branch update"));
+            assert!(run_git(&source, &["push", "origin", "HEAD"]));
+            let remote_url = remote.path().join("extension.git");
+
+            install_with_revision(
+                &remote_url.to_string_lossy(),
+                Some("wordpress"),
+                Some(&pinned_revision),
+            )
+            .expect("install pinned extracted extension");
+            update("wordpress", false).expect("update pinned extracted extension");
+
+            assert_eq!(load_extension("wordpress").unwrap().version, "1.0.0");
+            assert_eq!(
+                fs::read_to_string(
+                    home.path()
+                        .join(".config/homeboy/extensions/wordpress/.source-requested-ref"),
+                )
+                .unwrap()
+                .trim(),
+                pinned_revision
             );
         });
     }
@@ -1565,6 +1628,10 @@ exec '{}' "$@"
                 Some("fixture-b"),
             )
             .expect("install linked fixture-b extension");
+            // Install now runs setup, so restore the fixture checkout to the
+            // clean state required by this update-path test.
+            fs::remove_file(source.join("fixture-a/setup-count.txt")).expect("clear setup output");
+            fs::remove_file(source.join("fixture-b/setup-count.txt")).expect("clear setup output");
 
             let bin_dir = home.join("bin");
             let pull_count_file = home.join("pull-count");
