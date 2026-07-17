@@ -51,6 +51,15 @@ pub trait LabWorkspaceProvenanceProvider: Send + Sync {
         snapshot: SourceSnapshot,
         lab: serde_json::Value,
     ) -> std::result::Result<String, String>;
+
+    /// Verify a lab-materialized workspace using the lab-offload and
+    /// source-snapshot metadata carried in the process environment (the
+    /// `verify_lab_workspace_from_env` check used by trace canonicality).
+    fn verify_lab_workspace_from_env(
+        &self,
+        expected_remote_component_path: &str,
+        materialized_workspace_path: &Path,
+    ) -> std::result::Result<LabWorkspaceProvenanceInfo, String>;
 }
 
 /// Default provider used when no runner layer is registered. The verification
@@ -80,6 +89,14 @@ impl LabWorkspaceProvenanceProvider for NoopLabWorkspaceProvenanceProvider {
         _snapshot: SourceSnapshot,
         _lab: serde_json::Value,
     ) -> std::result::Result<String, String> {
+        Err(NO_PROVIDER.to_string())
+    }
+
+    fn verify_lab_workspace_from_env(
+        &self,
+        _expected_remote_component_path: &str,
+        _materialized_workspace_path: &Path,
+    ) -> std::result::Result<LabWorkspaceProvenanceInfo, String> {
         Err(NO_PROVIDER.to_string())
     }
 }

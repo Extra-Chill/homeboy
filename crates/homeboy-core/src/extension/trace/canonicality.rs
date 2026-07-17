@@ -5,9 +5,11 @@ use crate::component::Component;
 use crate::error::{ErrorCode, Result};
 use crate::extension::manifest_config::TraceToolchainProvenanceConfig;
 use crate::extension::ExtensionExecutionContext;
+use crate::agent_task_scheduler::lab_workspace_provenance::{
+    with_lab_workspace_provenance, LabWorkspaceProvenanceInfo,
+};
 #[cfg(test)]
 use crate::runner::verify_lab_workspace;
-use crate::runner::verify_lab_workspace_from_env;
 #[cfg(test)]
 use crate::source_snapshot::SourceSnapshot;
 
@@ -409,12 +411,10 @@ fn check_managed_lab_snapshot(
     reasons: &mut Vec<String>,
 ) -> Option<TraceCanonicalCheck> {
     let expected_remote_component_path = expected_remote_component_path?;
-    verified_lab_snapshot_check(
-        target,
-        path,
-        verify_lab_workspace_from_env(expected_remote_component_path, path),
-        reasons,
-    )
+    let provenance = with_lab_workspace_provenance(|provider| {
+        provider.verify_lab_workspace_from_env(expected_remote_component_path, path)
+    });
+    verified_lab_snapshot_check(target, path, provenance, reasons)
 }
 
 #[cfg(test)]
@@ -426,18 +426,22 @@ fn validate_managed_lab_snapshot(
     lab: serde_json::Value,
     reasons: &mut Vec<String>,
 ) -> Option<TraceCanonicalCheck> {
-    verified_lab_snapshot_check(
-        target,
-        path,
-        verify_lab_workspace(expected_remote_component_path, path, snapshot, lab),
-        reasons,
-    )
+    let provenance = verify_lab_workspace(expected_remote_component_path, path, snapshot, lab).map(
+        |provenance| LabWorkspaceProvenanceInfo {
+            source_revision: provenance.source_revision,
+            materialization_mode: provenance.materialization_mode,
+            runner_id: provenance.runner_id,
+            workspace_identity: provenance.workspace_identity,
+            snapshot_hash: provenance.snapshot_hash,
+        },
+    );
+    verified_lab_snapshot_check(target, path, provenance, reasons)
 }
 
 fn verified_lab_snapshot_check(
     target: &str,
     path: &Path,
-    provenance: std::result::Result<crate::runner::VerifiedLabWorkspaceProvenance, String>,
+    provenance: std::result::Result<LabWorkspaceProvenanceInfo, String>,
     reasons: &mut Vec<String>,
 ) -> Option<TraceCanonicalCheck> {
     match provenance {
@@ -1027,6 +1031,7 @@ mod tests {
 
     #[test]
     fn canonical_trace_accepts_lab_dispatch_environment_for_remapped_workspace() {
+        crate::runner::register_lab_workspace_provenance_provider();
         let (_source, remote, snapshot, lab) = lab_snapshot_fixture();
         let mut env = crate::runner::build_lab_offload_env(&lab);
         env.insert(

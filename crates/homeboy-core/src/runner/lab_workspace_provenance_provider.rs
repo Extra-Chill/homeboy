@@ -60,6 +60,24 @@ impl LabWorkspaceProvenanceProvider for LabWorkspaceProvenance {
             lab,
         )
     }
+
+    fn verify_lab_workspace_from_env(
+        &self,
+        expected_remote_component_path: &str,
+        materialized_workspace_path: &Path,
+    ) -> std::result::Result<LabWorkspaceProvenanceInfo, String> {
+        let provenance = super::workspace::verify_lab_workspace_from_env(
+            expected_remote_component_path,
+            materialized_workspace_path,
+        )?;
+        Ok(LabWorkspaceProvenanceInfo {
+            source_revision: provenance.source_revision,
+            materialization_mode: provenance.materialization_mode,
+            runner_id: provenance.runner_id,
+            workspace_identity: provenance.workspace_identity,
+            snapshot_hash: provenance.snapshot_hash,
+        })
+    }
 }
 
 /// Register the lab-workspace provenance provider with core. Called once at
