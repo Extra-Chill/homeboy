@@ -202,24 +202,7 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
 }
 
 fn validate_rig_spec_file(path: &Path, source_root: &Path, rig_id: &str) -> Result<()> {
-    let value = match materialize_rig_spec(path, source_root)? {
-        Some(value) => value,
-        None => {
-            let content = fs::read_to_string(path).map_err(|e| {
-                Error::internal_io(
-                    e.to_string(),
-                    Some(format!("read rig spec {}", path.display())),
-                )
-            })?;
-            serde_json::from_str(&content).map_err(|e| {
-                Error::validation_invalid_json(
-                    e,
-                    Some(format!("parse rig spec {}", path.display())),
-                    Some(content.chars().take(200).collect()),
-                )
-            })?
-        }
-    };
+    let value = materialize_rig_spec(path, source_root)?;
     let mut spec: RigSpec = serde_json::from_value(value).map_err(|e| {
         Error::rig_schema_unsupported(
             e.to_string(),
@@ -253,35 +236,66 @@ pub(crate) fn write_rig_config_from_source(
     target: &Path,
     source_root: &Path,
 ) -> Result<bool> {
-    match materialize_rig_spec(source, source_root)? {
-        Some(value) => {
-            let content = serde_json::to_string_pretty(&value).map_err(|e| {
-                Error::internal_json(
-                    e.to_string(),
-                    Some("serialize materialized rig spec".into()),
-                )
-            })?;
-            fs::write(target, format!("{}\n", content)).map_err(|e| {
-                Error::internal_io(e.to_string(), Some("write materialized rig spec".into()))
-            })?;
-            Ok(true)
-        }
-        None => {
-            link_or_copy_file(source, target)?;
-            Ok(false)
-        }
+    let source_value = read_json_value(source)?;
+    if source_value.get(EXTENDS_FIELD).is_none() {
+        link_or_copy_file(source, target)?;
+        return Ok(false);
     }
+
+    let value = materialize_rig_spec_value(source, source_root, source_value, &mut Vec::new())?;
+    let content = serde_json::to_string_pretty(&value).map_err(|e| {
+        Error::internal_json(
+            e.to_string(),
+            Some("serialize materialized rig spec".into()),
+        )
+    })?;
+    fs::write(target, format!("{}\n", content)).map_err(|e| {
+        Error::internal_io(e.to_string(), Some("write materialized rig spec".into()))
+    })?;
+    Ok(true)
 }
 
-pub(crate) fn materialize_rig_spec(
-    path: &Path,
-    source_root: &Path,
-) -> Result<Option<serde_json::Value>> {
-    let value = read_json_value(path)?;
-    if value.get(EXTENDS_FIELD).is_none() {
-        return Ok(None);
+/// Return the default boundary for a standalone rig materialization request.
+///
+/// The conventional `rigs/<id>/rig.json` layout inherits templates from its
+/// package root. Other layouts are bounded by the rig directory.
+pub fn default_materialize_source_root(path: &Path) -> PathBuf {
+    if path.file_name().map_or(true, |name| name != "rig.json") {
+        return path.parent().unwrap_or(path).to_path_buf();
     }
-    materialize_rig_spec_value(path, source_root, value, &mut Vec::new()).map(Some)
+    let Some(rig_directory) = path.parent() else {
+        return path.to_path_buf();
+    };
+    let Some(rigs_directory) = rig_directory.parent() else {
+        return rig_directory.to_path_buf();
+    };
+    if rigs_directory
+        .file_name()
+        .is_some_and(|name| name == "rigs")
+    {
+        return rigs_directory
+            .parent()
+            .unwrap_or(rigs_directory)
+            .to_path_buf();
+    }
+    rig_directory.to_path_buf()
+}
+
+/// Read and normalize a rig spec using the conventional source-root boundary.
+///
+/// Downstream package tooling should use this entry point unless it has an
+/// explicit source-root policy of its own.
+pub fn materialize_rig_spec_with_default_source_root(path: &Path) -> Result<serde_json::Value> {
+    materialize_rig_spec(path, &default_materialize_source_root(path))
+}
+
+/// Read and normalize a rig spec, resolving its local `extends` chain.
+///
+/// `source_root` bounds inherited template paths. The result contains neither
+/// `extends` nor array merge directives and uses the install merge semantics.
+pub fn materialize_rig_spec(path: &Path, source_root: &Path) -> Result<serde_json::Value> {
+    let value = read_json_value(path)?;
+    materialize_rig_spec_value(path, source_root, value, &mut Vec::new())
 }
 
 fn materialize_rig_spec_value(
@@ -599,8 +613,16 @@ fn merge_json(
 ) -> Result<()> {
     match overlay {
         serde_json::Value::Object(overlay) => {
-            if target.is_array() && overlay.keys().any(|key| key.starts_with('$')) {
-                merge_array_directive(target, overlay, source_path, field_path)?;
+            if overlay.keys().any(|key| key.starts_with('$')) {
+                if target.is_array() {
+                    merge_array_directive(target, overlay, source_path, field_path)?;
+                } else {
+                    return Err(extends_merge_error(
+                        source_path,
+                        field_path,
+                        "Rig extends array merge directives must override an inherited array",
+                    ));
+                }
             } else if let serde_json::Value::Object(target) = target {
                 for (key, value) in overlay {
                     let child_path = if field_path.is_empty() {
@@ -611,6 +633,16 @@ fn merge_json(
                     match target.get_mut(&key) {
                         Some(existing) => merge_json(existing, value, source_path, &child_path)?,
                         None => {
+                            if value
+                                .as_object()
+                                .is_some_and(|value| value.keys().any(|key| key.starts_with('$')))
+                            {
+                                return Err(extends_merge_error(
+                                    source_path,
+                                    &child_path,
+                                    "Rig extends array merge directives must override an inherited array",
+                                ));
+                            }
                             target.insert(key, value);
                         }
                     }

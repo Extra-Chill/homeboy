@@ -219,24 +219,9 @@ fn discovered_from_path(
 /// (`{ "$append": [...] }` / `{ "$merge_by": "label", "entries": [...] }`).
 /// Validating the raw child against the full schema would reject those, so when
 /// a spec declares `extends` we materialize it first (merging templates and
-/// stripping directives) and validate the resolved spec. Specs without
-/// `extends` keep the identical raw-parse schema gate so malformed specs still
-/// fail discovery with the same error shape.
+/// stripping directives) and validate the resolved spec.
 fn parse_discovered_rig_spec(path: &Path, source_root: &Path) -> Result<super::RigSpec> {
-    let value = match super::install::materialize_rig_spec(path, source_root)? {
-        Some(materialized) => materialized,
-        None => {
-            let content = fs::read_to_string(path)
-                .map_err(|e| Error::internal_io(e.to_string(), Some("read rig spec".into())))?;
-            serde_json::from_str(&content).map_err(|e| {
-                Error::validation_invalid_json(
-                    e,
-                    Some(format!("parse rig spec {}", path.display())),
-                    Some(content.chars().take(200).collect()),
-                )
-            })?
-        }
-    };
+    let value = super::install::materialize_rig_spec(path, source_root)?;
 
     serde_json::from_value(value).map_err(|e| {
         Error::validation_invalid_argument(

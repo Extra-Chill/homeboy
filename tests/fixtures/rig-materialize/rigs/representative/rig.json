@@ -1,0 +1,24 @@
+{
+  "extends": "../../templates/base.json",
+  "id": "representative",
+  "settings": {
+    "mode": "derived"
+  },
+  "labels": {
+    "$append": ["derived"]
+  },
+  "steps": {
+    "$merge_by": "id",
+    "entries": [
+      {
+        "id": "build",
+        "command": "build-fast",
+        "metadata": { "timeout": 60 }
+      },
+      {
+        "id": "lint",
+        "command": "lint"
+      }
+    ]
+  }
+}

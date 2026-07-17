@@ -13,9 +13,9 @@ use homeboy::core::runners;
 
 use self::output::{
     RigAppOutput, RigCheckOutput, RigDownOutput, RigInstallOutput, RigInstalledStackSummary,
-    RigInstalledSummary, RigListOutput, RigReleaseLockOutput, RigRepairOutput, RigRunOutput,
-    RigShowOutput, RigSourceSummary, RigStatusOutput, RigSummary, RigSyncOutput, RigUpOutput,
-    RigUpPlanOutput, RigUpPlanStep, RigUpdateOutput,
+    RigInstalledSummary, RigListOutput, RigMaterializeOutput, RigReleaseLockOutput,
+    RigRepairOutput, RigRunOutput, RigShowOutput, RigSourceSummary, RigStatusOutput, RigSummary,
+    RigSyncOutput, RigUpOutput, RigUpPlanOutput, RigUpPlanStep, RigUpdateOutput,
 };
 use super::bench::RigRunBenchOptions;
 use super::utils::args::SettingArgs;
@@ -131,6 +131,14 @@ enum RigCommand {
     Show {
         /// Rig ID
         rig_id: String,
+    },
+    /// Read and normalize a rig spec, resolving its local inheritance chain.
+    Materialize {
+        /// Path to a rig.json file
+        rig_path: std::path::PathBuf,
+        /// Directory that inherited templates must remain within. Defaults to the package root for rigs/<id>/rig.json, otherwise the rig directory.
+        #[arg(long)]
+        source_root: Option<std::path::PathBuf>,
     },
     /// Materialize a rig: run its `up` pipeline
     Up {
@@ -349,6 +357,10 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
     match args.command {
         RigCommand::List => list(),
         RigCommand::Show { rig_id } => show(&rig_id),
+        RigCommand::Materialize {
+            rig_path,
+            source_root,
+        } => materialize(&rig_path, source_root.as_deref()),
         RigCommand::Up { rig_id, dry_run } => up(&rig_id, dry_run),
         RigCommand::Check { target, id, path } => check(&target, id.as_deref(), path.as_deref()),
         RigCommand::Lint {
@@ -377,6 +389,23 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Sources { command } => sources::run(command),
         RigCommand::App { command } => app(command),
     }
+}
+
+fn materialize(
+    rig_path: &std::path::Path,
+    source_root: Option<&std::path::Path>,
+) -> CmdResult<RigCommandOutput> {
+    let rig = match source_root {
+        Some(source_root) => rig::materialize_rig_spec(rig_path, source_root)?,
+        None => rig::materialize_rig_spec_with_default_source_root(rig_path)?,
+    };
+    Ok((
+        RigCommandOutput::Materialize(RigMaterializeOutput {
+            command: "rig.materialize",
+            rig,
+        }),
+        0,
+    ))
 }
 
 fn package(command: RigPackageCommand) -> CmdResult<RigCommandOutput> {
@@ -1285,6 +1314,55 @@ mod tests {
         assert_eq!(id.as_deref(), Some("alpha"));
         assert!(!all);
         assert_eq!(format, None);
+    }
+
+    #[test]
+    fn materialize_defaults_to_the_package_root_for_standard_rig_layouts() {
+        let package = tempfile::TempDir::new().expect("package");
+        let rig_path = package.path().join("rigs/example/rig.json");
+        fs::create_dir_all(rig_path.parent().expect("rig directory"))
+            .expect("create rig directory");
+        fs::create_dir_all(package.path().join("templates")).expect("create templates");
+        fs::write(
+            package.path().join("templates/base.json"),
+            r#"{ "settings": { "inherited": true } }"#,
+        )
+        .expect("write template");
+        fs::write(
+            &rig_path,
+            r#"{ "extends": "../../templates/base.json", "id": "example" }"#,
+        )
+        .expect("write rig");
+
+        assert_eq!(
+            rig::default_materialize_source_root(&rig_path),
+            package.path()
+        );
+        let (output, exit_code) = materialize(&rig_path, None).expect("materialize rig");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            serde_json::to_value(output).expect("serialize output"),
+            serde_json::json!({
+                "variant": "materialize",
+                "payload": {
+                    "command": "rig.materialize",
+                    "rig": {
+                        "id": "example",
+                        "settings": { "inherited": true }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn materialize_defaults_to_the_rig_directory_for_non_package_paths() {
+        let rig_path = std::path::Path::new("custom/rig.json");
+        assert_eq!(
+            rig::default_materialize_source_root(rig_path),
+            std::path::PathBuf::from("custom")
+        );
     }
 
     #[test]

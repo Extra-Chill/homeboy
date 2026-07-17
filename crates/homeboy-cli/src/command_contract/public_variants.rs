@@ -256,6 +256,13 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
     },
     PublicOutputVariantContract {
         command: "rig",
+        variant: "materialize",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("materialize"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "rig",
         variant: "up",
         discriminator_field: Some("variant"),
         discriminator_value: Some("up"),

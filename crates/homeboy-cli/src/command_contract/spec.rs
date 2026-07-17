@@ -514,7 +514,7 @@ const PROJECT_MUTATING_PATHS: &[&str] = &[
 ];
 const COMPONENT_MUTATING_PATHS: &[&str] = &["create", "set", "delete", "rename", "setup"];
 const COMPONENT_GUARDED_PATHS: &[&str] = &["reconcile", "artifacts"];
-const RIG_STATIC_LINT_PATHS: &[&str] = &["lint", "package lint"];
+const RIG_STATIC_LINT_PATHS: &[&str] = &["lint", "package lint", "materialize"];
 
 const DEPS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     DEPS_MUTATING_PATHS,
