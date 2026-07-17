@@ -191,7 +191,7 @@ fn manifest_parses_declared_structured_sidecars() {
     }))
     .unwrap();
 
-    let sidecars = manifest.structured_sidecars();
+    let sidecars = super::manifest::structured_sidecars(&manifest);
     assert_eq!(sidecars.len(), 7);
     assert_eq!(sidecars[0].name, "findings");
     assert_eq!(sidecars[0].path, "findings.json");
@@ -292,15 +292,15 @@ fn structured_sidecar_schema_versions_come_from_top_level_contract() {
     .unwrap();
 
     assert_eq!(
-        manifest.structured_sidecar_schema_version("findings"),
+        super::manifest::structured_sidecar_schema_version(&manifest, "findings"),
         Some("2")
     );
     assert_eq!(
-        manifest.structured_sidecar_schema_version("lint.findings"),
+        super::manifest::structured_sidecar_schema_version(&manifest, "lint.findings"),
         Some("v1")
     );
     assert_eq!(
-        manifest.structured_sidecar_schema_version("test.failures"),
+        super::manifest::structured_sidecar_schema_version(&manifest, "test.failures"),
         None
     );
 }
@@ -315,7 +315,7 @@ fn missing_sidecar_declarations_have_no_structured_contract() {
     }))
     .unwrap();
 
-    assert!(manifest.structured_sidecars().is_empty());
+    assert!(super::manifest::structured_sidecars(&manifest).is_empty());
 }
 
 #[test]
