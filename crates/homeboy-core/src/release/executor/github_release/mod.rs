@@ -46,4 +46,6 @@ pub(crate) use repair::{
     github_release_repair_commands_with_proxy, GitHubReleaseRepairCommands,
 };
 #[cfg(test)]
-pub(crate) use results::{create_failed_result, not_created_result, upload_failed_result};
+pub(crate) use results::{
+    create_failed_result, not_created_result, upload_failed_result, upload_success_result,
+};
