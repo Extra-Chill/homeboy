@@ -132,11 +132,15 @@ fn render_status_summary(payload: &Value) -> Option<String> {
 }
 
 fn is_transport_proxy(payload: &Value) -> bool {
-    string_value(payload, &["metadata", "kind"])
-        .is_some_and(|kind| kind.ends_with("_controller_proxy"))
+    payload.get("transport_recovery").is_some()
+        || string_value(payload, &["metadata", "kind"])
+            .is_some_and(|kind| kind.ends_with("_controller_proxy"))
 }
 
 fn transport_proxy_next_action(payload: &Value) -> Option<String> {
+    if let Some(command) = string_value(payload, &["transport_recovery", "command"]) {
+        return Some(command.to_string());
+    }
     if !is_transport_proxy(payload) {
         return None;
     }
@@ -850,6 +854,25 @@ mod tests {
 
         assert!(!summary.contains("homeboy agent-task run homeboy-transport"));
         assert!(summary.contains("Next: homeboy runner connect runner-transport-42"));
+    }
+
+    #[test]
+    fn status_summary_uses_authoritative_transport_recovery_guidance() {
+        let payload = json!({
+            "run_id": "homeboy-transport",
+            "state": "queued",
+            "tasks": [{ "task_id": "homeboy-transport" }],
+            "artifact_refs": [],
+            "transport_recovery": {
+                "condition": "runner_busy_waiting_for_capacity",
+                "command": "homeboy runner status runner-transport-42"
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(summary.contains("Next: homeboy runner status runner-transport-42"));
+        assert!(!summary.contains("homeboy runner connect runner-transport-42"));
     }
 
     #[test]

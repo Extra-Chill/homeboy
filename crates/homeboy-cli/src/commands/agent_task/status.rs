@@ -14,6 +14,9 @@ use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::core::agent_tasks::service as agent_task_service;
 use homeboy::core::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
+use homeboy::core::runners::{
+    self as runner, RunnerRecoveryState, RunnerSessionState, RunnerStatusReport,
+};
 
 use super::super::CmdResult;
 use super::args::{
@@ -62,6 +65,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     }
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
+    attach_transport_proxy_recovery_guidance(&mut value, &args.run_id);
     if args.full {
         attach_agent_task_status_actionable(&mut value, &args.run_id);
         return Ok((value, 0));
@@ -217,60 +221,184 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
 }
 
 fn transport_proxy_recovery_command(value: &Value) -> Option<String> {
-    let kind = value.pointer("/metadata/kind").and_then(Value::as_str)?;
+    value
+        .get("transport_recovery")
+        .and_then(|recovery| recovery.get("command"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn attach_transport_proxy_recovery_guidance(value: &mut Value, run_id: &str) {
+    let Some(kind) = value.pointer("/metadata/kind").and_then(Value::as_str) else {
+        return;
+    };
     if !kind.ends_with("_controller_proxy") {
-        return None;
+        return;
     }
-    let runner_id = value
-        .pointer("/metadata/runner_id")
-        .and_then(Value::as_str)?;
+    let runner_id = value.pointer("/metadata/runner_id").and_then(Value::as_str);
+    let Some(runner_id) = runner_id else {
+        return;
+    };
     let job_id = value
         .pointer("/metadata/runner_job_id")
         .or_else(|| value.pointer("/metadata/runner_execution_record/job_id"))
         .and_then(Value::as_str);
-    Some(match job_id {
-        Some(job_id) => format!("homeboy runner job logs {runner_id} {job_id} --follow"),
-        None => value
-            .get("run_id")
-            .and_then(Value::as_str)
-            .map(|run_id| format!("homeboy agent-task run {run_id}"))
-            .unwrap_or_else(|| format!("homeboy runner connect {runner_id}")),
-    })
+    let status = runner::status(runner_id).ok();
+    let guidance =
+        transport_proxy_recovery_guidance_for_status(run_id, runner_id, job_id, status.as_ref());
+    if let Value::Object(map) = value {
+        map.insert("transport_recovery".to_string(), guidance);
+    }
+}
+
+fn transport_proxy_recovery_guidance_for_status(
+    run_id: &str,
+    runner_id: &str,
+    job_id: Option<&str>,
+    status: Option<&RunnerStatusReport>,
+) -> Value {
+    let (condition, command) = match status.map(RunnerStatusReport::recovery_state) {
+        Some(RunnerRecoveryState::Disconnected) => (
+            "runner_disconnected",
+            format!("homeboy runner connect {runner_id}"),
+        ),
+        Some(RunnerRecoveryState::StaleDaemon { active_job_count }) if active_job_count > 0 => (
+            "stale_daemon_waiting_for_drain",
+            format!("homeboy runner status {runner_id}"),
+        ),
+        Some(RunnerRecoveryState::StaleDaemon { .. }) => (
+            "stale_daemon",
+            status
+                .and_then(|status| status.stale_daemon.as_ref())
+                .and_then(|warning| warning.recovery_commands.first())
+                .cloned()
+                .unwrap_or_else(|| format!("homeboy runner status {runner_id}")),
+        ),
+        Some(RunnerRecoveryState::Busy { .. }) if job_id.is_none() => (
+            "runner_busy_waiting_for_capacity",
+            format!("homeboy runner status {runner_id}"),
+        ),
+        Some(_) if job_id.is_none() => (
+            "controller_proxy_without_runner_job",
+            format!("homeboy agent-task run {run_id}"),
+        ),
+        Some(_) => (
+            "runner_job_recorded",
+            format!(
+                "homeboy runner job logs {runner_id} {} --follow",
+                job_id.unwrap()
+            ),
+        ),
+        None => (
+            "runner_status_unavailable",
+            format!("homeboy runner status {runner_id}"),
+        ),
+    };
+    json!({ "condition": condition, "runner_id": runner_id, "runner_job_id": job_id, "command": command })
 }
 
 #[cfg(test)]
 mod transport_proxy_tests {
     use super::*;
+    use homeboy::core::runners::{RunnerActiveJobState, RunnerStaleDaemonWarning};
 
-    #[test]
-    fn transport_proxy_recovery_action_uses_runner_identity_not_provider_backend() {
-        let value = json!({
-            "metadata": {
-                "kind": "remote_controller_proxy",
-                "runner_id": "runner-transport-42",
-                "runner_execution_record": { "job_id": "job-42" }
-            }
-        });
-
-        assert_eq!(
-            transport_proxy_recovery_command(&value),
-            Some("homeboy runner job logs runner-transport-42 job-42 --follow".to_string())
-        );
+    fn runner_status(
+        state: RunnerSessionState,
+        active_job_count: usize,
+        stale_daemon: bool,
+    ) -> RunnerStatusReport {
+        RunnerStatusReport {
+            runner_id: "runner-transport-42".to_string(),
+            connected: state == RunnerSessionState::Connected,
+            state,
+            session: None,
+            stale_daemon: stale_daemon.then(|| {
+                RunnerStaleDaemonWarning::new(
+                    "runner-transport-42",
+                    "old".to_string(),
+                    "current".to_string(),
+                    None,
+                    None,
+                )
+            }),
+            daemon_freshness: None,
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: None,
+            active_job_error: None,
+            session_path: "/tmp/runner-session.json".to_string(),
+        }
     }
 
     #[test]
-    fn unbound_transport_proxy_recovery_action_resumes_the_durable_run() {
-        let value = json!({
-            "run_id": "agent-task-proxy-42",
-            "metadata": {
-                "kind": "lab_offload_controller_proxy",
-                "runner_id": "homeboy-lab"
-            }
-        });
+    fn transport_proxy_guidance_uses_authoritative_runner_states() {
+        let disconnected = runner_status(RunnerSessionState::Disconnected, 0, false);
+        let busy = runner_status(RunnerSessionState::Connected, 1, false);
+        let idle = runner_status(RunnerSessionState::Connected, 0, false);
+        let stale = runner_status(RunnerSessionState::Connected, 0, true);
 
+        let cases = [
+            (
+                transport_proxy_recovery_guidance_for_status(
+                    "agent-task-proxy-42",
+                    "runner-transport-42",
+                    None,
+                    Some(&disconnected),
+                ),
+                "runner_disconnected",
+                "homeboy runner connect runner-transport-42",
+            ),
+            (
+                transport_proxy_recovery_guidance_for_status(
+                    "agent-task-proxy-42",
+                    "runner-transport-42",
+                    None,
+                    Some(&busy),
+                ),
+                "runner_busy_waiting_for_capacity",
+                "homeboy runner status runner-transport-42",
+            ),
+            (
+                transport_proxy_recovery_guidance_for_status(
+                    "agent-task-proxy-42",
+                    "runner-transport-42",
+                    None,
+                    Some(&idle),
+                ),
+                "controller_proxy_without_runner_job",
+                "homeboy agent-task run agent-task-proxy-42",
+            ),
+            (
+                transport_proxy_recovery_guidance_for_status(
+                    "agent-task-proxy-42",
+                    "runner-transport-42",
+                    None,
+                    Some(&stale),
+                ),
+                "stale_daemon",
+                stale.stale_daemon.as_ref().unwrap().recovery_commands[0].as_str(),
+            ),
+        ];
+
+        for (guidance, condition, command) in cases {
+            assert_eq!(guidance["condition"], condition);
+            assert_eq!(guidance["command"], command);
+        }
+
+        let recorded_job = transport_proxy_recovery_guidance_for_status(
+            "agent-task-proxy-42",
+            "runner-transport-42",
+            Some("job-42"),
+            Some(&busy),
+        );
+        assert_eq!(recorded_job["condition"], "runner_job_recorded");
         assert_eq!(
-            transport_proxy_recovery_command(&value),
-            Some("homeboy agent-task run agent-task-proxy-42".to_string())
+            recorded_job["command"],
+            "homeboy runner job logs runner-transport-42 job-42 --follow"
         );
     }
 }
@@ -1097,6 +1225,9 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         if !diagnostic.is_null() {
             summary["diagnostic_summary"] = diagnostic.clone();
         }
+    }
+    if let Some(recovery) = record.get("transport_recovery") {
+        summary["transport_recovery"] = recovery.clone();
     }
     if let Some(failure_reasons) = record.get("failure_reasons") {
         if failure_reasons
