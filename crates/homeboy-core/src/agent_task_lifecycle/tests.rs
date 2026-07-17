@@ -706,11 +706,17 @@ impl RunnerContinuationProvider for IntentReplayProvider {
         _runner_id: &str,
         _job_id: &str,
     ) -> Result<crate::api_jobs::RunnerJobLogSnapshot> {
-        Err(Error::internal_unexpected("not used by submission reconciliation"))
+        Err(Error::internal_unexpected(
+            "not used by submission reconciliation",
+        ))
     }
 
-    fn is_runner_connected(&self, _runner_id: &str) -> bool { true }
-    fn runner_exists(&self, _runner_id: &str) -> bool { true }
+    fn is_runner_connected(&self, _runner_id: &str) -> bool {
+        true
+    }
+    fn runner_exists(&self, _runner_id: &str) -> bool {
+        true
+    }
 
     fn run_continuation_exec(
         &self,
@@ -719,7 +725,9 @@ impl RunnerContinuationProvider for IntentReplayProvider {
         _command: &[String],
         _run_id: &str,
     ) -> Result<i32> {
-        Err(Error::internal_unexpected("not used by submission reconciliation"))
+        Err(Error::internal_unexpected(
+            "not used by submission reconciliation",
+        ))
     }
 
     fn submit_reverse_broker_job(
@@ -731,7 +739,9 @@ impl RunnerContinuationProvider for IntentReplayProvider {
         self.submitted.lock().expect("submission log").push(job.id);
         let mut fail = self.fail_after_accept_once.lock().expect("fault flag");
         if std::mem::take(&mut *fail) {
-            return Err(Error::internal_unexpected("injected post-accept pre-ack crash"));
+            return Err(Error::internal_unexpected(
+                "injected post-accept pre-ack crash",
+            ));
         }
         Ok(job)
     }
@@ -748,37 +758,56 @@ fn detached_cook_intent_reconciliation_converges_both_crash_windows_without_secr
             submitted: Arc::clone(&submitted),
             fail_after_accept_once: Arc::clone(&fail_after_accept_once),
         }));
-        let command = vec!["homeboy".to_string(), "agent-task".to_string(), "cook".to_string()];
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
 
-        for (run_id, post_accept_fault) in [("fault-after-intent", false), ("fault-after-post", true)] {
+        for (run_id, post_accept_fault) in
+            [("fault-after-intent", false), ("fault-after-post", true)]
+        {
             record_lab_offload_planned(LabOffloadProxyPlan {
                 run_id,
                 runner_id: "homeboy-lab",
                 remote_workspace: "/runner/workspace/homeboy",
                 remote_command: &command,
                 durable_plan: None,
-            }).expect("record Lab admission");
+            })
+            .expect("record Lab admission");
             record_lab_offload_submission_intent(
                 run_id,
                 "homeboy-lab",
                 "/runner/workspace/homeboy",
                 &command,
                 &["HOMEBOY_TEST_REVERSE_SECRET".to_string()],
-            ).expect("persist redacted pre-submit intent");
+            )
+            .expect("persist redacted pre-submit intent");
 
             if post_accept_fault {
                 *fail_after_accept_once.lock().expect("fault flag") = true;
-                assert!(!reconcile_pending_runner_submission_intent(run_id).expect("fault is retained"));
+                assert!(
+                    !reconcile_pending_runner_submission_intent(run_id).expect("fault is retained")
+                );
             }
             assert!(reconcile_pending_runner_submission_intent(run_id).expect("replay intent"));
             assert!(!reconcile_pending_runner_submission_intent(run_id).expect("duplicate wake"));
             let record = status(run_id).expect("accepted lifecycle");
-            assert_eq!(record.metadata["runner_submission_intent"]["state"], "accepted");
-            assert!(!serde_json::to_string(&record).expect("record JSON").contains("secret-value"));
+            assert_eq!(
+                record.metadata["runner_submission_intent"]["state"],
+                "accepted"
+            );
+            assert!(!serde_json::to_string(&record)
+                .expect("record JSON")
+                .contains("secret-value"));
         }
 
         let submitted = submitted.lock().expect("submission log");
-        assert_eq!(submitted.len(), 3, "post-accept replay reuses the broker submission key");
+        assert_eq!(
+            submitted.len(),
+            3,
+            "post-accept replay reuses the broker submission key"
+        );
         assert_eq!(submitted[1], submitted[2]);
         let persisted = serde_json::to_string(&store.get(submitted[0]).expect("broker job"))
             .expect("broker JSON");

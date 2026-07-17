@@ -1,12 +1,15 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use homeboy_core::api_jobs::{Job, JobStatus, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::redaction::redact_argv;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use reqwest::blocking::Client;
+use sha2::{Digest, Sha256};
 
 use super::super::broker_http;
 use super::super::evidence::mirror_reverse_broker_evidence;
@@ -59,7 +62,7 @@ pub(super) fn exec_via_reverse_broker(
     )?;
     let redaction_env = env.clone();
     let redaction_secret_env_names = secret_env_names.clone();
-    let request = RemoteRunnerJobRequest {
+    let mut request = RemoteRunnerJobRequest {
         runner_id: runner.id.clone(),
         project_id,
         operation: "runner.exec".to_string(),
@@ -89,6 +92,16 @@ pub(super) fn exec_via_reverse_broker(
         }),
         require_paths: require_paths.clone(),
     };
+    let command_assets = durable_command_assets(&command, path_materialization_plan.as_ref())?;
+    if !command_assets.is_empty() {
+        request
+            .metadata
+            .as_mut()
+            .expect("reverse broker request metadata")["command_assets"] = serde_json::json!({
+            "schema": "homeboy/reverse-runner-command-assets/v1",
+            "assets": command_assets,
+        });
+    }
     let broker_token = homeboy_core::broker_auth::broker_submit_token_for_runner(&runner.id)?;
     let data = broker_http::post_json(
         &client,
@@ -329,4 +342,50 @@ pub(super) fn exec_via_reverse_broker(
         },
         exit_code,
     ))
+}
+
+/// Preserve file-backed argv values past controller cleanup. Values are content
+/// addressed and stored only in the broker request, never in controller tempdirs.
+fn durable_command_assets(
+    command: &[String],
+    plan: Option<&PathMaterializationPlan>,
+) -> Result<Vec<serde_json::Value>> {
+    let Some(plan) = plan else {
+        return Ok(Vec::new());
+    };
+    command
+        .iter()
+        .filter_map(|argument| argument.strip_prefix('@').map(|path| (argument, path)))
+        .filter_map(|(argument, remote_path)| {
+            let entry = plan
+                .entries
+                .iter()
+                .find(|entry| remote_path.starts_with(&entry.remote_path))?;
+            let local = Path::new(entry.local_path.as_deref()?);
+            let source = if local.is_file() {
+                local.to_path_buf()
+            } else {
+                local.join(
+                    remote_path
+                        .strip_prefix(&entry.remote_path)?
+                        .trim_start_matches('/'),
+                )
+            };
+            source.is_file().then_some((argument, remote_path, source))
+        })
+        .map(|(argument, remote_path, source)| {
+            let content = std::fs::read(&source).map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(format!("read command asset {}", source.display())),
+                )
+            })?;
+            Ok(serde_json::json!({
+                "argument": argument,
+                "remote_path": remote_path,
+                "sha256": format!("{:x}", Sha256::digest(&content)),
+                "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
+            }))
+        })
+        .collect()
 }

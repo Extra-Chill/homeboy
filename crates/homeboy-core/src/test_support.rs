@@ -825,12 +825,26 @@ fn read_broker_request(stream: &mut TcpStream) -> ReverseBrokerRequest {
         }
     };
     let headers = String::from_utf8_lossy(&buffer[..header_end]);
-    let mut request_line = headers.lines().next().expect("broker request line").split_whitespace();
-    let method = request_line.next().expect("broker request method").to_string();
-    let path = request_line.next().expect("broker request path").to_string();
+    let mut request_line = headers
+        .lines()
+        .next()
+        .expect("broker request line")
+        .split_whitespace();
+    let method = request_line
+        .next()
+        .expect("broker request method")
+        .to_string();
+    let path = request_line
+        .next()
+        .expect("broker request path")
+        .to_string();
     let content_length = headers
         .lines()
-        .find_map(|line| line.split_once(':').filter(|(name, _)| name.eq_ignore_ascii_case("content-length")).and_then(|(_, value)| value.trim().parse::<usize>().ok()))
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        })
         .unwrap_or(0);
     let body_start = header_end + 4;
     while buffer.len() < body_start + content_length {
@@ -859,9 +873,11 @@ fn handle_reverse_broker_request(
         return ok(json!({ "registered": true }));
     }
     if request.method == "POST" && request.path == "/runner/jobs" {
-        let submitted: RemoteRunnerJobRequest = serde_json::from_value(request.body)
-            .expect("parse reverse broker job submission");
-        let job = store.submit_remote_runner_job(submitted).expect("submit broker job");
+        let submitted: RemoteRunnerJobRequest =
+            serde_json::from_value(request.body).expect("parse reverse broker job submission");
+        let job = store
+            .submit_remote_runner_job(submitted)
+            .expect("submit broker job");
         return ok(json!({ "job": job }));
     }
     if request.method == "POST" && request.path == "/runner/jobs/claim" {
@@ -872,7 +888,9 @@ fn handle_reverse_broker_request(
     }
     if request.method == "GET" {
         if let Some(job_id) = request.path.strip_prefix("/jobs/") {
-            let job = store.get(uuid::Uuid::parse_str(job_id).expect("broker job id")).expect("broker job");
+            let job = store
+                .get(uuid::Uuid::parse_str(job_id).expect("broker job id"))
+                .expect("broker job");
             return ok(json!({ "job": job }));
         }
     }
@@ -884,19 +902,31 @@ fn handle_reverse_broker_request(
         }
         let claim_id = request.body["claim_id"].as_str().expect("broker claim id");
         let result = match action {
-            "events" => store.append_remote_runner_event(
-                job_id, runner_id, claim_id, JobEventKind::Progress,
-                request.body["message"].as_str().map(ToString::to_string),
-                request.body.get("data").cloned(),
-            ).map(|event| json!({ "event": event })),
-            "heartbeat" => store.renew_remote_runner_claim(job_id, runner_id, claim_id, 30_000)
+            "events" => store
+                .append_remote_runner_event(
+                    job_id,
+                    runner_id,
+                    claim_id,
+                    JobEventKind::Progress,
+                    request.body["message"].as_str().map(ToString::to_string),
+                    request.body.get("data").cloned(),
+                )
+                .map(|event| json!({ "event": event })),
+            "heartbeat" => store
+                .renew_remote_runner_claim(job_id, runner_id, claim_id, 30_000)
                 .map(|job| json!({ "job": job })),
-            "finish" => store.finish_remote_runner_job(
-                job_id, runner_id, claim_id,
-                serde_json::from_value::<RemoteRunnerJobResult>(request.body["result"].clone())
-                    .expect("parse broker finish result"),
-            ).map(|job| json!({ "job": job })),
-            _ => Err(crate::error::Error::internal_unexpected("unknown reverse broker fixture path")),
+            "finish" => store
+                .finish_remote_runner_job(
+                    job_id,
+                    runner_id,
+                    claim_id,
+                    serde_json::from_value::<RemoteRunnerJobResult>(request.body["result"].clone())
+                        .expect("parse broker finish result"),
+                )
+                .map(|job| json!({ "job": job })),
+            _ => Err(crate::error::Error::internal_unexpected(
+                "unknown reverse broker fixture path",
+            )),
         };
         return match result {
             Ok(body) => ok(body),
