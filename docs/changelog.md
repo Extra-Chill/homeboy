@@ -4,6 +4,50 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.288.11] - 2026-07-17
+
+### Changed
+- self-register Runner as a config entity
+- Recover legacy controller runtime pins
+- route daemon file-API workspace-root lookup through a hook
+- Restore runtime manifest compilation
+- relocate broker auth from runner into core
+- invert audit fingerprint-script fallback behind a provider hook
+- Add canonical rig materialization contract
+- Make runtime catalog identity authoritative
+- route daemon /exec runner process driver through a hook
+- reuse generic cook batch scheduler
+- invert audit component resolution behind a provider hook
+- Keep cleanup categories independent outside Git checkouts
+- import grammar directly from engine-primitives in audit signature extraction
+- Activate the installed controller generation after upgrade
+- route trace canonicality lab-workspace check through the provenance hook
+- invert audit fixability planning behind a provider hook
+- Recover controller-retained agent task artifacts
+- move signature extraction into code_audit to break refactor cycle
+- Make controller runtime pins immutable and recoverable
+- relocate remote-shell env helpers into engine-primitives
+- route hygiene workspace snapshot through a hook
+- Continue controller actions through Lab replay
+- Resume detached Lab cook finalization
+- Recover legacy patches through canonical runner artifacts
+
+### Fixed
+- Fix committed NoOp candidate finalization
+- scope runner recovery to actionable patches
+- make resolved runtime catalog authoritative
+- baseline dirty Cook candidates before dispatch
+- recover cargo-dist releases
+- support private binary recovery
+- Fix remote Lab cleanup connection resolution
+- verify refreshed runner daemon rotation
+- Fix stale runner daemon recovery
+- scope release recovery concurrency by tag
+- green the default code_audit test tier
+- Fix managed Lab runner handoff routing
+- fix(agent-task): pin verified base snapshots
+- refresh idle stale runner daemons
+
 ## [0.288.10] - 2026-07-17
 
 ### Changed
