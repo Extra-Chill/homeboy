@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::lab_contract::{LabRoutingPolicy, RunnerWorkloadCapability};
+use crate::lab_contract::{LabRoutingPolicy, LabRunnerWorkloadCapability};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CommandExecutionPlan {
@@ -124,7 +124,7 @@ pub struct LabRoutePlan {
     pub workspace_policy: CommandWorkspacePolicy,
     pub output_contract: CommandOutputContract,
     pub required_extensions: Vec<String>,
-    pub required_capabilities: Vec<RunnerWorkloadCapability>,
+    pub required_capabilities: Vec<LabRunnerWorkloadCapability>,
     /// Routing-policy flags shared across the Lab command layers. Flattened so
     /// the serialized shape keeps `default_lab_offload`, `infer_source_path_tools`,
     /// `release_gate`, and `requires_extension_parity` as top-level keys.

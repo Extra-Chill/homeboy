@@ -48,7 +48,7 @@ use crate::resolve_lab_runner_hint;
 use homeboy_core::agent_task_lifecycle;
 use homeboy_core::agent_tasks::provider::provider_runner_source_contracts;
 use homeboy_core::engine::shell;
-use homeboy_core::lab_contract::RunnerWorkload;
+use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use homeboy_core::redaction::{redact_argv, redact_argv_display, RedactionPolicy};
 use homeboy_core::runner_execution_envelope::PathMaterializationPlan;
@@ -120,8 +120,8 @@ use super::super::{
 pub(super) use inner::accepted_runner_job_id_with;
 
 use super::super::workload::{
-    build_runner_workload_for_dispatched_command, runner_workload_agent_task_from_command,
-    RunnerWorkloadBuildInput,
+    build_lab_runner_workload_for_dispatched_command, lab_runner_workload_agent_task_from_command,
+    LabRunnerWorkloadBuildInput,
 };
 use super::agent_task_bridge::{
     agent_task_dispatch_run_isolation_token, ensure_agent_task_lifecycle_identity_with,

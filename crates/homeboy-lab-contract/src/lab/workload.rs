@@ -6,55 +6,55 @@ use super::labels::{
     RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL,
 };
 
-pub const RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
+pub const LAB_RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkload {
+pub struct LabRunnerWorkload {
     pub schema: String,
     pub workload_id: String,
-    pub kind: RunnerWorkloadKind,
+    pub kind: LabRunnerWorkloadKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_task: Option<RunnerWorkloadAgentTask>,
+    pub agent_task: Option<LabRunnerWorkloadAgentTask>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notification_route: Option<crate::notification_route::NotificationRoute>,
-    pub workspace_mappings: RunnerWorkloadWorkspaceMappings,
-    pub required_capabilities: Vec<RunnerWorkloadCapability>,
-    pub required_secrets: RunnerWorkloadSecrets,
+    pub workspace_mappings: LabRunnerWorkloadWorkspaceMappings,
+    pub required_capabilities: Vec<LabRunnerWorkloadCapability>,
+    pub required_secrets: LabRunnerWorkloadSecrets,
     pub required_extensions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_extension_revisions: Vec<RunnerWorkloadExtensionRevision>,
-    pub mutation_policy: RunnerWorkloadMutationPolicy,
-    pub assignment: RunnerWorkloadAssignment,
-    pub state: RunnerWorkloadState,
-    pub result_refs: RunnerWorkloadResultRefs,
+    pub required_extension_revisions: Vec<LabRunnerWorkloadExtensionRevision>,
+    pub mutation_policy: LabRunnerWorkloadMutationPolicy,
+    pub assignment: LabRunnerWorkloadAssignment,
+    pub state: LabRunnerWorkloadState,
+    pub result_refs: LabRunnerWorkloadResultRefs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadExtensionRevision {
+pub struct LabRunnerWorkloadExtensionRevision {
     pub extension_id: String,
     pub source_revision: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadKind {
+pub struct LabRunnerWorkloadKind {
     pub command_label: String,
-    pub command_family: RunnerWorkloadCommandFamily,
+    pub command_family: LabRunnerWorkloadCommandFamily,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadAgentTask {
+pub struct LabRunnerWorkloadAgentTask {
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_provider_policy: Option<crate::agent_task_config::ResolvedAgentTaskProviderPolicy>,
-    pub dispatch_kind: RunnerWorkloadAgentTaskDispatchKind,
-    pub lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
+    pub dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind,
+    pub lifecycle_mirror_policy: LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RunnerWorkloadAgentTaskDispatchKind {
+pub enum LabRunnerWorkloadAgentTaskDispatchKind {
     Cook,
     Dispatch,
     RunPlan,
@@ -62,14 +62,14 @@ pub enum RunnerWorkloadAgentTaskDispatchKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RunnerWorkloadAgentTaskLifecycleMirrorPolicy {
+pub enum LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy {
     None,
     RunPlanAggregate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RunnerWorkloadCommandFamily {
+pub enum LabRunnerWorkloadCommandFamily {
     AgentTask,
     Quality,
     Workspace,
@@ -78,48 +78,48 @@ pub enum RunnerWorkloadCommandFamily {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadWorkspaceMappings {
+pub struct LabRunnerWorkloadWorkspaceMappings {
     pub source_path_mode: String,
     pub workspace_mode_policy: String,
     pub mapping_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadCapability {
+pub struct LabRunnerWorkloadCapability {
     pub name: String,
     pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadSecrets {
+pub struct LabRunnerWorkloadSecrets {
     pub categories: Vec<String>,
     #[serde(default)]
     pub secret_env_plan: crate::secret_env_plan::SecretEnvPlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadMutationPolicy {
+pub struct LabRunnerWorkloadMutationPolicy {
     pub capture_patch: bool,
     pub mutation_flag: Option<String>,
     pub allow_dirty_lab_workspace: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadAssignment {
+pub struct LabRunnerWorkloadAssignment {
     pub runner_id: Option<String>,
     pub runner_mode: Option<String>,
     pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadState {
+pub struct LabRunnerWorkloadState {
     pub status: String,
     pub remote_workspace: Option<String>,
     pub fallback_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadResultRefs {
+pub struct LabRunnerWorkloadResultRefs {
     pub plan_id: String,
     pub proof_id: Option<String>,
     pub workspace_mapping_ref: Option<String>,
@@ -128,11 +128,11 @@ pub struct RunnerWorkloadResultRefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<RunnerWorkloadArtifactRef>,
+    pub artifacts: Vec<LabRunnerWorkloadArtifactRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadArtifactRef {
+pub struct LabRunnerWorkloadArtifactRef {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -142,7 +142,7 @@ pub struct RunnerWorkloadArtifactRef {
     pub url: Option<String>,
 }
 
-impl RunnerWorkloadCommandFamily {
+impl LabRunnerWorkloadCommandFamily {
     pub fn from_command_label(label: &str) -> Self {
         match label {
             label if label.starts_with("agent-task") => Self::AgentTask,

@@ -102,7 +102,7 @@ pub(super) fn exec(
             required_extensions: Vec::new(),
             accepted_extension_settings: Vec::new(),
             require_paths,
-            runner_workload: None,
+            lab_runner_workload: None,
             run_id: validated_run_id.clone(),
             detach_after_handoff: false,
             mirror_evidence: true,

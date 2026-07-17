@@ -125,8 +125,8 @@ pub(crate) fn run_runner_resident_lab_offload(
         &remapped_args,
         Default::default(),
     )?;
-    let mut runner_workload = build_runner_workload_for_dispatched_command(
-        RunnerWorkloadBuildInput {
+    let mut lab_runner_workload = build_lab_runner_workload_for_dispatched_command(
+        LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &contract,
             capture_patch: request.capture_patch,
@@ -143,16 +143,17 @@ pub(crate) fn run_runner_resident_lab_offload(
         },
         &command,
     );
-    runner_workload.agent_task =
-        runner_workload_agent_task_from_command(&command, agent_task_run_id.as_deref());
-    runner_workload.required_secrets.secret_env_plan = secret_env_handoff.secret_env_plan.clone();
+    lab_runner_workload.agent_task =
+        lab_runner_workload_agent_task_from_command(&command, agent_task_run_id.as_deref());
+    lab_runner_workload.required_secrets.secret_env_plan =
+        secret_env_handoff.secret_env_plan.clone();
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
     let path_remaps = path_remaps_from_materialization_plan(
         &path_materialization_plan,
         Some((&source_path, runner_workspace_root)),
     );
     lab_metadata["runner_workload"] =
-        serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
+        serde_json::to_value(&lab_runner_workload).unwrap_or(serde_json::json!(null));
 
     let (mirror_evidence, print_handoff) =
         runner_resident_exec_noise_policy(request.read_only_polling);
@@ -171,7 +172,7 @@ pub(crate) fn run_runner_resident_lab_offload(
         accepted_extension_settings: Vec::new(),
         secret_preflight_args: remapped_args,
         agent_task_run_id,
-        runner_workload: Some(runner_workload),
+        lab_runner_workload: Some(lab_runner_workload),
         lab_metadata,
         env_resolution_layers: vec![LabEnvResolutionLayer {
             source: SECRET_ENV_PLAN_ENV_DELTA_SOURCE,

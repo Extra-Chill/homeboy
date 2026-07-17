@@ -328,7 +328,7 @@ fn attach_handoff_metadata(metadata: &mut serde_json::Value, stdout: &str) {
         return;
     };
     if value.get("schema").and_then(serde_json::Value::as_str)
-        != Some(crate::lab_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA)
+        != Some(crate::lab_contract::LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA)
     {
         return;
     }

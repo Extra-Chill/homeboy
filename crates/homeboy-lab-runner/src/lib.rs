@@ -168,7 +168,7 @@ pub use offload_changed_since::{
 };
 pub use offload_metadata::{
     lab_offload_metadata, lab_offload_metadata_with_workspace_mapping,
-    lab_offload_metadata_with_workspace_mapping_and_runner_workload,
+    lab_offload_metadata_with_workspace_mapping_and_lab_runner_workload,
 };
 pub(crate) use resource_metrics::RunnerCommandProgressSink;
 pub use resource_metrics::{
@@ -176,9 +176,9 @@ pub use resource_metrics::{
 };
 pub use runtime_materialization_status::{RunnerBinarySource, RuntimeMaterializationStatus};
 pub use session::{
-    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
-    RunnerArtifactRef, RunnerAvailability, RunnerChangedRuntimePath, RunnerConnectReport,
-    RunnerDisconnectReport, RunnerFailureKind, RunnerHandoff, RunnerJob,
+    LabRunnerHandoff, ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource,
+    RunnerActiveJobState, RunnerArtifactRef, RunnerAvailability, RunnerChangedRuntimePath,
+    RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind, RunnerJob,
     RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner,
     RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult,
     RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,

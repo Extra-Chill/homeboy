@@ -8,7 +8,7 @@ use crate::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_
 use homeboy_core::api_jobs::{Job, JobEvent, JobStatus, RunnerJobLifecycleMetadata};
 use homeboy_core::engine::command::CommandCaptureMetadata;
 use homeboy_core::error::{Error, ErrorCode, Result};
-use homeboy_core::lab_contract::{run_location_index_path, RunnerWorkload};
+use homeboy_core::lab_contract::{run_location_index_path, LabRunnerWorkload};
 use homeboy_core::redaction::redact_argv;
 use homeboy_core::source_snapshot::SourceSnapshot;
 
@@ -39,7 +39,7 @@ pub(super) fn exec_via_daemon(
     source_snapshot_override: Option<SourceSnapshot>,
     path_materialization_plan: Option<PathMaterializationPlan>,
     require_paths: Vec<String>,
-    runner_workload: Option<RunnerWorkload>,
+    lab_runner_workload: Option<LabRunnerWorkload>,
     run_id: Option<String>,
     detach_after_handoff: bool,
     mirror_evidence: bool,
@@ -89,7 +89,7 @@ pub(super) fn exec_via_daemon(
         "source_snapshot": source_snapshot.clone(),
         "path_materialization_plan": path_materialization_plan.clone(),
         "require_paths": require_paths.clone(),
-        "runner_workload": runner_workload.clone(),
+        "runner_workload": lab_runner_workload.clone(),
         "metadata": runner_exec_request_metadata(run_id.as_deref(), "daemon"),
         "lifecycle": lifecycle,
     });
@@ -231,7 +231,7 @@ pub(super) fn exec_via_daemon(
     };
     append_agent_task_lifecycle_workload_event(
         &mut events,
-        runner_workload.as_ref(),
+        lab_runner_workload.as_ref(),
         &runner.id,
         &job_id,
     )?;
@@ -254,7 +254,7 @@ pub(super) fn exec_via_daemon(
             &events,
             &result,
             run_id.as_deref(),
-            runner_workload
+            lab_runner_workload
                 .as_ref()
                 .and_then(|workload| workload.notification_route.as_ref()),
         )?
@@ -286,12 +286,12 @@ pub(super) fn exec_via_daemon(
     );
     let provenance_extensions = required_extensions_for_command(
         &command,
-        &super::super::workload::merge_runner_workload_required_extensions(
+        &super::super::workload::merge_lab_runner_workload_required_extensions(
             Vec::new(),
-            runner_workload.as_ref(),
+            lab_runner_workload.as_ref(),
         ),
     );
-    let handoff = runner_handoff(
+    let handoff = lab_runner_handoff(
         runner,
         "daemon",
         Some(runner_job.clone()),
@@ -413,7 +413,7 @@ pub(super) fn detached_handoff_output(
         mirror_run_id.as_deref(),
         DaemonJobHandoffState::InFlight,
     );
-    let envelope = homeboy_core::lab_contract::RunnerHandoffEnvelope::detached_lab_offload(
+    let envelope = homeboy_core::lab_contract::LabRunnerHandoffEnvelope::detached_lab_offload(
         &runner.id,
         &job_id,
         cwd.clone(),
@@ -441,7 +441,7 @@ pub(super) fn detached_handoff_output(
         sha256: None,
         transport: Some(transport.to_string()),
     });
-    let handoff = runner_handoff(
+    let handoff = lab_runner_handoff(
         runner,
         transport,
         Some(runner_job.clone()),
@@ -933,7 +933,7 @@ pub(crate) fn result_event_data(events: &[JobEvent]) -> Option<Value> {
 
 fn append_agent_task_lifecycle_workload_event(
     events: &mut Vec<JobEvent>,
-    runner_workload: Option<&RunnerWorkload>,
+    lab_runner_workload: Option<&LabRunnerWorkload>,
     runner_id: &str,
     runner_job_id: &str,
 ) -> Result<()> {
@@ -941,7 +941,7 @@ fn append_agent_task_lifecycle_workload_event(
         return Ok(());
     };
     let Some(event) = agent_task_run_plan_lifecycle_event_from_workload_result(
-        runner_workload,
+        lab_runner_workload,
         runner_id,
         runner_job_id,
         &result,

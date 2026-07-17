@@ -15,7 +15,7 @@ use homeboy_core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
 use homeboy_core::engine::command::CommandCaptureMetadata;
 use homeboy_core::env_materialization_plan::EnvMaterializationPlan;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::lab_contract::RunnerWorkload;
+use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
 use homeboy_core::runner_execution_envelope::{
     BinaryProvenance, ExtensionProvenance, OrchestrationTargetProvenance, PathMaterializationEntry,
@@ -28,9 +28,9 @@ use homeboy_core::source_snapshot::SourceSnapshot;
 
 use super::resource_metrics::RunnerResourceMetrics;
 use super::{
-    select_runner_transport, status, Runner, RunnerActiveJobSource, RunnerActiveJobState,
-    RunnerCapabilityPreflight, RunnerHandoff, RunnerJob, RunnerKind, RunnerMutationArtifacts,
-    RunnerResult, RunnerSession, RunnerStatusReport, RunnerTransport,
+    select_runner_transport, status, LabRunnerHandoff, Runner, RunnerActiveJobSource,
+    RunnerActiveJobState, RunnerCapabilityPreflight, RunnerJob, RunnerKind,
+    RunnerMutationArtifacts, RunnerResult, RunnerSession, RunnerStatusReport, RunnerTransport,
 };
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
@@ -134,7 +134,7 @@ pub struct RunnerExecOptions {
     pub required_extensions: Vec<String>,
     pub accepted_extension_settings: Vec<String>,
     pub require_paths: Vec<String>,
-    pub runner_workload: Option<RunnerWorkload>,
+    pub lab_runner_workload: Option<LabRunnerWorkload>,
     pub run_id: Option<String>,
     pub detach_after_handoff: bool,
     pub mirror_evidence: bool,
@@ -161,7 +161,7 @@ impl Default for RunnerExecOptions {
             required_extensions: Vec::new(),
             accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
-            runner_workload: None,
+            lab_runner_workload: None,
             run_id: None,
             detach_after_handoff: false,
             mirror_evidence: true,
@@ -297,7 +297,7 @@ pub struct RunnerExecOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_result: Option<RunnerResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub handoff: Option<RunnerHandoff>,
+    pub handoff: Option<LabRunnerHandoff>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<RunnerExecDiagnostics>,
 }
@@ -739,8 +739,8 @@ pub(crate) fn exec_with_status_snapshot(
     let runner = plan.runner.clone();
     let cwd = plan.cwd.clone();
     let request_env = plan.env.clone();
-    super::workload::validate_runner_workload_dispatch(
-        options.runner_workload.as_ref(),
+    super::workload::validate_lab_runner_workload_dispatch(
+        options.lab_runner_workload.as_ref(),
         runner_id,
         Some(&cwd),
         &options.command,
@@ -749,9 +749,9 @@ pub(crate) fn exec_with_status_snapshot(
     )?;
     let required_extensions = required_extensions_for_command(
         &options.command,
-        &super::workload::merge_runner_workload_required_extensions(
+        &super::workload::merge_lab_runner_workload_required_extensions(
             options.required_extensions.clone(),
-            options.runner_workload.as_ref(),
+            options.lab_runner_workload.as_ref(),
         ),
     );
     let requested_setting_keys = requested_setting_keys_for_command(&options.command);
@@ -788,9 +788,9 @@ pub(crate) fn exec_with_status_snapshot(
     // top-level executable when the caller did not supply an explicit one, so
     // remote dispatch always validates that the runner can satisfy the command
     // before starting execution instead of failing mid-run (#5093, #5422).
-    let capability_preflight = super::workload::merge_runner_workload_capability_preflight(
+    let capability_preflight = super::workload::merge_lab_runner_workload_capability_preflight(
         remote_execution_preflight(&options.command, options.capability_preflight.as_ref()),
-        options.runner_workload.as_ref(),
+        options.lab_runner_workload.as_ref(),
     )?;
     let run_capability_preflight = |runner: &Runner| -> Result<()> {
         preflight_runner_capability_plan(runner, capability_preflight.as_ref(), &request_env)
@@ -841,7 +841,7 @@ pub(crate) fn exec_with_status_snapshot(
                 Some(plan.source_snapshot),
                 options.path_materialization_plan,
                 options.require_paths,
-                options.runner_workload,
+                options.lab_runner_workload,
                 options.run_id,
                 options.detach_after_handoff,
                 options.mirror_evidence,
@@ -866,7 +866,7 @@ pub(crate) fn exec_with_status_snapshot(
                 Some(plan.source_snapshot),
                 options.path_materialization_plan,
                 options.require_paths,
-                options.runner_workload,
+                options.lab_runner_workload,
                 options.run_id,
                 options.detach_after_handoff,
                 options.mirror_evidence,

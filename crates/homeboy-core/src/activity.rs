@@ -786,7 +786,7 @@ mod runner_sessions {
 mod tests {
     use super::*;
     use crate::agent_task_lifecycle::{
-        reconcile_active_runner_handoffs, record_lab_offload_planned, rewrite_record_for_test,
+        reconcile_active_lab_runner_handoffs, record_lab_offload_planned, rewrite_record_for_test,
         status, AgentTaskRunState, LabOffloadProxyPlan,
     };
     use crate::api_jobs::JobStatus;
@@ -985,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn active_handoff_reconciliation_expires_a_busy_runner_handoff_idempotently() {
+    fn active_handoff_reconciliation_expires_a_busy_lab_runner_handoff_idempotently() {
         with_isolated_home(|_| {
             let command = vec![
                 "homeboy".to_string(),
@@ -1007,7 +1007,7 @@ mod tests {
             .expect("expire unbound handoff");
 
             assert_eq!(
-                reconcile_active_runner_handoffs().expect("reconcile expired handoff"),
+                reconcile_active_lab_runner_handoffs().expect("reconcile expired handoff"),
                 1
             );
             let expired = status("busy-runner-expired-handoff").expect("expired handoff status");
@@ -1020,7 +1020,7 @@ mod tests {
             assert_eq!(expired.metadata["retryable"], true);
 
             assert_eq!(
-                reconcile_active_runner_handoffs().expect("idempotent handoff reconciliation"),
+                reconcile_active_lab_runner_handoffs().expect("idempotent handoff reconciliation"),
                 0
             );
             assert_eq!(

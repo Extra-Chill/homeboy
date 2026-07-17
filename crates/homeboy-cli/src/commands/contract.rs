@@ -13,10 +13,10 @@ use crate::command_contract::{
     CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
     CommandRawOutputMode, CommandResponseMode, CommandStdoutMode, ContractConstantsOutput,
     ContractRegistryEntry, ARTIFACT_POSTPROCESS_SCHEMA, COMMAND_SPECS,
+    LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA, LAB_RUNNER_WORKLOAD_SCHEMA,
     PUBLIC_OUTPUT_VARIANT_CONTRACTS, RUNNER_ARTIFACT_MANIFEST_FILE,
     RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
-    RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUNNER_HANDOFF_ENVELOPE_SCHEMA, RUNNER_WORKLOAD_SCHEMA,
-    RUN_LOCATION_INDEX_SCHEMA,
+    RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUN_LOCATION_INDEX_SCHEMA,
 };
 use crate::commands::{adapter, CmdResult, GlobalArgs};
 use crate::core::artifact_ref::{validate_reviewer_facing_artifact_ref, ArtifactReference};
@@ -941,7 +941,7 @@ fn contract_schema_catalog() -> ContractSchemaCatalog {
                 example: artifact_postprocess_example(),
             },
             ContractSchemaEntry {
-                id: RUNNER_WORKLOAD_SCHEMA,
+                id: LAB_RUNNER_WORKLOAD_SCHEMA,
                 version: 1,
                 description: "Runner-resident workload request consumed by Lab runners.",
                 fields: vec![
@@ -998,10 +998,10 @@ fn contract_schema_catalog() -> ContractSchemaCatalog {
                     "state",
                     "result_refs",
                 ],
-                example: runner_workload_example(),
+                example: lab_runner_workload_example(),
             },
             ContractSchemaEntry {
-                id: RUNNER_HANDOFF_ENVELOPE_SCHEMA,
+                id: LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA,
                 version: 1,
                 description: "Detached Lab offload handoff envelope returned to the controller.",
                 fields: vec![
@@ -1056,7 +1056,7 @@ fn contract_schema_catalog() -> ContractSchemaCatalog {
                     "evidence",
                     "follow_commands",
                 ],
-                example: runner_handoff_example(),
+                example: lab_runner_handoff_example(),
             },
             ContractSchemaEntry {
                 id: RUN_LOCATION_INDEX_SCHEMA,
@@ -1257,9 +1257,9 @@ fn artifact_postprocess_example() -> Value {
     })
 }
 
-fn runner_workload_example() -> Value {
+fn lab_runner_workload_example() -> Value {
     json!({
-        "schema": RUNNER_WORKLOAD_SCHEMA,
+        "schema": LAB_RUNNER_WORKLOAD_SCHEMA,
         "workload_id": "workload-1",
         "kind": { "command_label": "test", "command_family": "quality" },
         "workspace_mappings": {
@@ -1287,9 +1287,9 @@ fn runner_workload_example() -> Value {
     })
 }
 
-fn runner_handoff_example() -> Value {
+fn lab_runner_handoff_example() -> Value {
     json!({
-        "schema": RUNNER_HANDOFF_ENVELOPE_SCHEMA,
+        "schema": LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA,
         "status": "succeeded",
         "execution_location": "runner:runner-1",
         "identity": {
@@ -1697,7 +1697,7 @@ fn display_path(path: &Path) -> String {
 /// lab-contract type layer carries no upward dependency on core's runner
 /// execution / run-outcome envelopes.
 fn handoff_runner_execution_record(
-    handoff: &crate::command_contract::RunnerHandoffEnvelope,
+    handoff: &crate::command_contract::LabRunnerHandoffEnvelope,
 ) -> RunnerExecutionRecord {
     let record = if handoff.status == "running" {
         RunnerExecutionRecord::in_flight(
@@ -1741,7 +1741,7 @@ fn handoff_runner_execution_record(
 
 /// Project a runner handoff envelope into a core `RunOutcomeEnvelope`.
 fn handoff_run_outcome_envelope(
-    handoff: &crate::command_contract::RunnerHandoffEnvelope,
+    handoff: &crate::command_contract::LabRunnerHandoffEnvelope,
 ) -> RunOutcomeEnvelope {
     RunOutcomeEnvelope::from_runner_execution_record(&handoff_runner_execution_record(handoff))
 }
@@ -1862,7 +1862,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .any(|contract| contract["id"] == RUNNER_WORKLOAD_SCHEMA));
+            .any(|contract| contract["id"] == LAB_RUNNER_WORKLOAD_SCHEMA));
         assert!(catalog["contracts"]
             .as_array()
             .unwrap()
@@ -2110,9 +2110,9 @@ mod tests {
     }
 
     #[test]
-    fn runner_handoff_sample_projects_to_execution_record_and_outcome_refs() {
-        let handoff: crate::command_contract::RunnerHandoffEnvelope =
-            serde_json::from_value(runner_handoff_example()).expect("runner handoff sample");
+    fn lab_runner_handoff_sample_projects_to_execution_record_and_outcome_refs() {
+        let handoff: crate::command_contract::LabRunnerHandoffEnvelope =
+            serde_json::from_value(lab_runner_handoff_example()).expect("runner handoff sample");
 
         let record = handoff_runner_execution_record(&handoff);
         let outcome = handoff_run_outcome_envelope(&handoff);

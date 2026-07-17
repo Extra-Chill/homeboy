@@ -10,7 +10,7 @@ use super::types::{Job, JobEvent, JobEventKind, JobStatus};
 use crate::engine::command::CommandCaptureMetadata;
 use crate::env_materialization_plan::EnvMaterializationPlan;
 use crate::error::{Error, Result};
-use crate::lab_contract::RunnerWorkload;
+use crate::lab_contract::LabRunnerWorkload;
 use crate::runner_execution_envelope::{
     PathMaterializationPlan, RunnerExecutionDispatch, RunnerExecutionEnvelope,
     RunnerExecutionLifecycle, RunnerExecutionMutationPolicy, RunnerExecutionResultRefs,
@@ -80,8 +80,12 @@ pub struct RemoteRunnerJobRequest {
     pub path_materialization_plan: Option<PathMaterializationPlan>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_paths: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runner_workload: Option<RunnerWorkload>,
+    #[serde(
+        rename = "runner_workload",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub lab_runner_workload: Option<LabRunnerWorkload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<RunnerJobLifecycleMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,7 +95,7 @@ pub struct RemoteRunnerJobRequest {
 impl RemoteRunnerJobRequest {
     pub(crate) fn normalize(&mut self) -> SecretEnvPlan {
         let mut base_plan = self
-            .runner_workload
+            .lab_runner_workload
             .as_ref()
             .map(|workload| workload.required_secrets.secret_env_plan.clone())
             .filter(|plan| *plan != SecretEnvPlan::default());
@@ -121,7 +125,7 @@ impl RemoteRunnerJobRequest {
         let mut request = self.clone();
         let secret_env_plan = request.normalize();
         let envelope_id = request
-            .runner_workload
+            .lab_runner_workload
             .as_ref()
             .map(|workload| workload.workload_id.clone())
             .or_else(|| {
@@ -141,9 +145,9 @@ impl RemoteRunnerJobRequest {
                 format!("remote-runner:{}:{}", request.runner_id, request.operation)
             });
         let mut envelope = request
-            .runner_workload
+            .lab_runner_workload
             .clone()
-            .map(RunnerExecutionEnvelope::from_runner_workload)
+            .map(RunnerExecutionEnvelope::from_lab_runner_workload)
             .unwrap_or_else(|| {
                 RunnerExecutionEnvelope::planned(&envelope_id, "remote_runner_job_request")
             });
@@ -188,7 +192,7 @@ impl RemoteRunnerJobRequest {
                 .or_else(|| metadata_run_id(&envelope.metadata));
         }
         if envelope.result_refs.artifacts.is_empty() {
-            if let Some(workload) = envelope.runner_workload.as_ref() {
+            if let Some(workload) = envelope.lab_runner_workload.as_ref() {
                 envelope.result_refs = RunnerExecutionResultRefs {
                     artifacts: workload.result_refs.artifacts.clone(),
                     ..envelope.result_refs.clone()
@@ -224,7 +228,7 @@ impl RemoteRunnerJobRequest {
             .and_then(|lifecycle| non_empty_string(lifecycle.durable_run_id.as_deref()))
             .or_else(|| self.metadata.as_ref().and_then(metadata_run_id));
         let agent_task_run_id = self
-            .runner_workload
+            .lab_runner_workload
             .as_ref()
             .and_then(|workload| workload.agent_task.as_ref())
             .and_then(|agent_task| non_empty_string(Some(agent_task.run_id.as_str())))
@@ -341,8 +345,8 @@ impl JobStore {
         }
         let secret_env_plan = request.normalize();
         super::with_runner_job_preparation(|p| {
-            p.validate_runner_workload_dispatch(
-                request.runner_workload.as_ref(),
+            p.validate_lab_runner_workload_dispatch(
+                request.lab_runner_workload.as_ref(),
                 &request.runner_id,
                 request.cwd.as_deref(),
                 &request.command,

@@ -781,7 +781,7 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
 /// a read model (such as activity) projects lifecycle state. A controller wait
 /// expiry is not terminal after a runner job is recorded: the runner daemon
 /// remains the authority until it reports a terminal job result.
-pub fn reconcile_active_runner_handoffs() -> Result<usize> {
+pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
     let now = chrono::Utc::now();
     let mut accepted_run_ids = Vec::new();
     let mut expired_run_ids = Vec::new();

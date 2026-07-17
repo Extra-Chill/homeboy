@@ -67,8 +67,8 @@ pub(super) fn exec_worker_local_with_process_output(
     })?;
     let run_id_hint =
         apply_explicit_runner_exec_run_id_env(&mut plan.env, options.run_id.as_deref());
-    super::super::workload::validate_runner_workload_dispatch(
-        options.runner_workload.as_ref(),
+    super::super::workload::validate_lab_runner_workload_dispatch(
+        options.lab_runner_workload.as_ref(),
         runner_id,
         Some(&plan.cwd),
         &options.command,
@@ -77,9 +77,9 @@ pub(super) fn exec_worker_local_with_process_output(
     )?;
     let required_extensions = required_extensions_for_command(
         &options.command,
-        &super::super::workload::merge_runner_workload_required_extensions(
+        &super::super::workload::merge_lab_runner_workload_required_extensions(
             options.required_extensions.clone(),
-            options.runner_workload.as_ref(),
+            options.lab_runner_workload.as_ref(),
         ),
     );
     let requested_setting_keys = requested_setting_keys_for_command(&options.command);
@@ -112,10 +112,11 @@ pub(super) fn exec_worker_local_with_process_output(
             raw_exec: options.raw_exec,
         },
     )?;
-    let capability_preflight = super::super::workload::merge_runner_workload_capability_preflight(
-        options.capability_preflight.clone(),
-        options.runner_workload.as_ref(),
-    )?;
+    let capability_preflight =
+        super::super::workload::merge_lab_runner_workload_capability_preflight(
+            options.capability_preflight.clone(),
+            options.lab_runner_workload.as_ref(),
+        )?;
     preflight_worker_local_capability_plan(&plan.runner, capability_preflight.as_ref(), &plan.env)?;
     let output = execute(&plan)?;
     let (mut output, exit_code) = exec_output(

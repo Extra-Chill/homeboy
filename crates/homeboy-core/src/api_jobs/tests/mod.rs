@@ -58,7 +58,7 @@ pub(super) fn remote_runner_request(
         )),
         path_materialization_plan: None,
         require_paths: Vec::new(),
-        runner_workload: None,
+        lab_runner_workload: None,
         lifecycle: None,
         metadata: Some(json!({ "submitted_by": "controller" })),
     }

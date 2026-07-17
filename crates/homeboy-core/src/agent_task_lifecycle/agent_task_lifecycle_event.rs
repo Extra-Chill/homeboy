@@ -1,7 +1,7 @@
 use crate::agent_tasks::scheduler::AgentTaskAggregate;
 use crate::api_jobs::{JobEvent, JobEventKind};
 use crate::lab_contract::{
-    AgentTaskDispatchIdentity, RunnerWorkload, RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
+    AgentTaskDispatchIdentity, LabRunnerWorkload, LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy,
 };
 use crate::{Error, Result};
 
@@ -94,7 +94,7 @@ pub(crate) fn agent_task_run_plan_lifecycle_event_from_persisted_job_events(
     let workload = result
         .pointer("/data/runner_workload")
         .or_else(|| result.get("runner_workload"))
-        .map(|value| serde_json::from_value::<RunnerWorkload>(value.clone()))
+        .map(|value| serde_json::from_value::<LabRunnerWorkload>(value.clone()))
         .transpose()
         .map_err(|error| {
             Error::internal_json(
@@ -154,7 +154,7 @@ pub fn agent_task_run_plan_lifecycle_event_from_value(
 }
 
 pub fn agent_task_run_plan_lifecycle_event_from_workload_result(
-    workload: Option<&RunnerWorkload>,
+    workload: Option<&LabRunnerWorkload>,
     runner_id: &str,
     runner_job_id: &str,
     result: &serde_json::Value,
@@ -163,7 +163,7 @@ pub fn agent_task_run_plan_lifecycle_event_from_workload_result(
         return Ok(None);
     };
     if agent_task.lifecycle_mirror_policy
-        != RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate
+        != LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate
     {
         return Ok(None);
     }
@@ -241,21 +241,21 @@ fn agent_task_aggregate_from_value(value: &serde_json::Value) -> Option<AgentTas
 mod tests {
     use super::*;
     use crate::lab_contract::{
-        RunnerWorkload, RunnerWorkloadAgentTask, RunnerWorkloadAgentTaskDispatchKind,
-        RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
+        LabRunnerWorkload, LabRunnerWorkloadAgentTask, LabRunnerWorkloadAgentTaskDispatchKind,
+        LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy,
     };
 
-    fn workload() -> RunnerWorkload {
+    fn workload() -> LabRunnerWorkload {
         serde_json::from_value(serde_json::json!({
             "schema": "homeboy/runner-workload/v1",
             "workload_id": "lab-agent-task",
             "kind": { "command_label": "agent-task", "command_family": "agent_task" },
-            "agent_task": RunnerWorkloadAgentTask {
+            "agent_task": LabRunnerWorkloadAgentTask {
                 run_id: "controller-run".to_string(),
                 plan_ref: None,
                 resolved_provider_policy: None,
-                dispatch_kind: RunnerWorkloadAgentTaskDispatchKind::RunPlan,
-                lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+                dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
+                lifecycle_mirror_policy: LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
             },
             "workspace_mappings": { "source_path_mode": "snapshot", "workspace_mode_policy": "snapshot", "mapping_ref": null },
             "required_capabilities": [],

@@ -19,7 +19,7 @@ use crate::broker_auth::BrokerScope;
 use crate::build_identity;
 use crate::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
-use crate::lab_contract::RunnerWorkload;
+use crate::lab_contract::LabRunnerWorkload;
 use crate::paths;
 use crate::process::{
     pid_has_environment_value, pid_is_running, terminate_pid_with_sigterm_and_wait,
@@ -391,8 +391,8 @@ struct ExecRequest {
     path_materialization_plan: Option<PathMaterializationPlan>,
     #[serde(default)]
     require_paths: Vec<String>,
-    #[serde(default)]
-    runner_workload: Option<RunnerWorkload>,
+    #[serde(rename = "runner_workload", default)]
+    lab_runner_workload: Option<LabRunnerWorkload>,
     #[serde(default)]
     lifecycle: Option<RunnerJobLifecycleMetadata>,
     #[serde(default)]
@@ -1709,7 +1709,7 @@ fn enqueue_exec_job(
             )
         })?;
     let mut base_plan = request
-        .runner_workload
+        .lab_runner_workload
         .as_ref()
         .map(|workload| workload.required_secrets.secret_env_plan.clone())
         .filter(|plan| *plan != SecretEnvPlan::default());
@@ -1732,8 +1732,8 @@ fn enqueue_exec_job(
     request.secret_env_names = secret_env_plan.secret_env_names();
     request.secret_env_plan = secret_env_plan.clone();
     crate::api_jobs::with_runner_job_preparation(|p| {
-        p.validate_runner_workload_dispatch(
-            request.runner_workload.as_ref(),
+        p.validate_lab_runner_workload_dispatch(
+            request.lab_runner_workload.as_ref(),
             &request.runner_id,
             request.cwd.as_deref(),
             &request.command,
@@ -1764,7 +1764,7 @@ fn enqueue_exec_job(
     let mut lifecycle = request.lifecycle.take();
     let canonical_durable_run_id = exec_request_run_ref_metadata(
         lifecycle.as_ref(),
-        request.runner_workload.as_ref(),
+        request.lab_runner_workload.as_ref(),
         request.metadata.as_ref(),
     )
     .and_then(|metadata| {
@@ -1796,7 +1796,7 @@ fn enqueue_exec_job(
     let operation = "runner.exec".to_string();
     let mut run_ref_metadata = exec_request_run_ref_metadata(
         lifecycle.as_ref(),
-        request.runner_workload.as_ref(),
+        request.lab_runner_workload.as_ref(),
         request.metadata.as_ref(),
     )
     .unwrap_or_else(|| json!({}));
@@ -1948,13 +1948,13 @@ fn enqueue_exec_job(
 
 fn exec_request_run_ref_metadata(
     lifecycle: Option<&RunnerJobLifecycleMetadata>,
-    runner_workload: Option<&RunnerWorkload>,
+    lab_runner_workload: Option<&LabRunnerWorkload>,
     metadata: Option<&serde_json::Value>,
 ) -> Option<serde_json::Value> {
     let durable_run_id = lifecycle
         .and_then(|lifecycle| non_empty_string(lifecycle.durable_run_id.as_deref()))
         .or_else(|| metadata.and_then(metadata_run_id));
-    let agent_task_run_id = runner_workload
+    let agent_task_run_id = lab_runner_workload
         .and_then(|workload| workload.agent_task.as_ref())
         .and_then(|agent_task| non_empty_string(Some(agent_task.run_id.as_str())))
         .or_else(|| {

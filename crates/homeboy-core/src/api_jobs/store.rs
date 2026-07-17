@@ -1764,7 +1764,7 @@ fn recovered_terminal_agent_task_result(stored: &StoredJob) -> Option<RecoveredT
         .remote_runner
         .as_ref()?
         .request
-        .runner_workload
+        .lab_runner_workload
         .as_ref()?
         .agent_task
         .as_ref()?

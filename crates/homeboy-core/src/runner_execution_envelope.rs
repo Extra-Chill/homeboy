@@ -6,7 +6,7 @@ use std::str::FromStr;
 
 use crate::agent_task::{AgentTaskArtifactDeclaration, AgentTaskRequest};
 use crate::env_materialization_plan::EnvMaterializationPlan;
-use crate::lab_contract::{RunnerWorkload, RunnerWorkloadArtifactRef};
+use crate::lab_contract::{LabRunnerWorkload, LabRunnerWorkloadArtifactRef};
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
 
@@ -38,8 +38,12 @@ pub struct RunnerExecutionEnvelope {
     pub envelope_id: String,
     #[serde(default)]
     pub source: RunnerExecutionSource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runner_workload: Option<RunnerWorkload>,
+    #[serde(
+        rename = "runner_workload",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub lab_runner_workload: Option<LabRunnerWorkload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_task: Option<AgentTaskRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -480,7 +484,7 @@ pub struct RunnerExecutionResultRefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<RunnerWorkloadArtifactRef>,
+    pub artifacts: Vec<LabRunnerWorkloadArtifactRef>,
 }
 
 impl RunnerExecutionEnvelope {
@@ -494,7 +498,7 @@ impl RunnerExecutionEnvelope {
                 kind: source_kind.into(),
                 ref_id: Some(envelope_id),
             },
-            runner_workload: None,
+            lab_runner_workload: None,
             agent_task: None,
             secret_env: None,
             env_materialization: None,
@@ -556,7 +560,7 @@ impl RunnerExecutionEnvelope {
         self
     }
 
-    pub fn from_runner_workload(workload: RunnerWorkload) -> Self {
+    pub fn from_lab_runner_workload(workload: LabRunnerWorkload) -> Self {
         let mutation_policy = RunnerExecutionMutationPolicy {
             capture_patch: workload.mutation_policy.capture_patch,
             mutation_flag: workload.mutation_policy.mutation_flag.clone(),
@@ -578,7 +582,7 @@ impl RunnerExecutionEnvelope {
                 kind: "runner_workload".to_string(),
                 ref_id: Some(workload.workload_id.clone()),
             },
-            runner_workload: Some(workload),
+            lab_runner_workload: Some(workload),
             agent_task: None,
             secret_env: None,
             env_materialization: None,
@@ -614,7 +618,7 @@ impl RunnerExecutionEnvelope {
                 kind: "agent_task".to_string(),
                 ref_id: Some(request.task_id.clone()),
             },
-            runner_workload: None,
+            lab_runner_workload: None,
             agent_task: Some(request),
             secret_env: Some(secret_env),
             env_materialization: None,
@@ -667,56 +671,56 @@ mod tests {
         AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::lab_contract::{
-        RunnerWorkloadAssignment, RunnerWorkloadCommandFamily, RunnerWorkloadKind,
-        RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs, RunnerWorkloadSecrets,
-        RunnerWorkloadState, RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
+        LabRunnerWorkloadAssignment, LabRunnerWorkloadCommandFamily, LabRunnerWorkloadKind,
+        LabRunnerWorkloadMutationPolicy, LabRunnerWorkloadResultRefs, LabRunnerWorkloadSecrets,
+        LabRunnerWorkloadState, LabRunnerWorkloadWorkspaceMappings, LAB_RUNNER_WORKLOAD_SCHEMA,
     };
 
     #[test]
-    fn runner_workload_compiles_into_versioned_execution_envelope() {
-        let workload = RunnerWorkload {
-            schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
+    fn lab_runner_workload_compiles_into_versioned_execution_envelope() {
+        let workload = LabRunnerWorkload {
+            schema: LAB_RUNNER_WORKLOAD_SCHEMA.to_string(),
             workload_id: "plan-1.runner_workload".to_string(),
-            kind: RunnerWorkloadKind {
+            kind: LabRunnerWorkloadKind {
                 command_label: "test".to_string(),
-                command_family: RunnerWorkloadCommandFamily::Quality,
+                command_family: LabRunnerWorkloadCommandFamily::Quality,
             },
             agent_task: None,
             notification_route: None,
-            workspace_mappings: RunnerWorkloadWorkspaceMappings {
+            workspace_mappings: LabRunnerWorkloadWorkspaceMappings {
                 source_path_mode: "cwd_or_path_flag".to_string(),
                 workspace_mode_policy: "git".to_string(),
                 mapping_ref: Some("mapping-1".to_string()),
             },
             required_capabilities: Vec::new(),
-            required_secrets: RunnerWorkloadSecrets {
+            required_secrets: LabRunnerWorkloadSecrets {
                 categories: Vec::new(),
                 secret_env_plan: SecretEnvPlan::default(),
             },
             required_extensions: Vec::new(),
             required_extension_revisions: Vec::new(),
-            mutation_policy: RunnerWorkloadMutationPolicy {
+            mutation_policy: LabRunnerWorkloadMutationPolicy {
                 capture_patch: true,
                 mutation_flag: Some("--apply".to_string()),
                 allow_dirty_lab_workspace: false,
             },
-            assignment: RunnerWorkloadAssignment {
+            assignment: LabRunnerWorkloadAssignment {
                 runner_id: Some("runner-a".to_string()),
                 runner_mode: Some("ssh".to_string()),
                 source: Some("default".to_string()),
             },
-            state: RunnerWorkloadState {
+            state: LabRunnerWorkloadState {
                 status: "assigned".to_string(),
                 remote_workspace: Some("/workspace/project".to_string()),
                 fallback_reason: None,
             },
-            result_refs: RunnerWorkloadResultRefs {
+            result_refs: LabRunnerWorkloadResultRefs {
                 plan_id: "plan-1".to_string(),
                 proof_id: Some("proof-1".to_string()),
                 workspace_mapping_ref: Some("mapping-1".to_string()),
                 job_id: Some("job-1".to_string()),
                 mirror_run_id: None,
-                artifacts: vec![RunnerWorkloadArtifactRef {
+                artifacts: vec![LabRunnerWorkloadArtifactRef {
                     id: "artifact-1".to_string(),
                     name: Some("report".to_string()),
                     path: Some("artifacts/report.json".to_string()),
@@ -725,13 +729,13 @@ mod tests {
             },
         };
 
-        let envelope = RunnerExecutionEnvelope::from_runner_workload(workload.clone());
+        let envelope = RunnerExecutionEnvelope::from_lab_runner_workload(workload.clone());
         let encoded = serde_json::to_value(&envelope).expect("serialize envelope");
         let decoded: RunnerExecutionEnvelope =
             serde_json::from_value(encoded).expect("decode envelope");
 
         assert_eq!(decoded.schema, RUNNER_EXECUTION_ENVELOPE_SCHEMA);
-        assert_eq!(decoded.runner_workload, Some(workload));
+        assert_eq!(decoded.lab_runner_workload, Some(workload));
         assert_eq!(decoded.mutation_policy.capture_patch, true);
         assert_eq!(decoded.result_refs.plan_id.as_deref(), Some("plan-1"));
         assert_eq!(decoded.result_refs.job_id.as_deref(), Some("job-1"));

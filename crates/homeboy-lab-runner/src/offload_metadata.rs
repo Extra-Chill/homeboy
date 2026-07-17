@@ -1,6 +1,6 @@
 use homeboy_core::execution_contract::EXECUTION_CONTRACT;
 use homeboy_core::gate::{collect_plan_gate_results, HomeboyGateResult};
-use homeboy_core::lab_contract::RunnerWorkload;
+use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::plan::{HomeboyPlan, PlanStepStatus};
 use homeboy_core::proof::{HomeboyProof, HomeboyProofProvenance, HomeboyProofRunner};
 
@@ -38,7 +38,7 @@ pub fn lab_offload_metadata_with_workspace_mapping(
     fallback_reason: Option<&str>,
     workspace_mapping: Option<&serde_json::Value>,
 ) -> serde_json::Value {
-    lab_offload_metadata_with_workspace_mapping_and_runner_workload(
+    lab_offload_metadata_with_workspace_mapping_and_lab_runner_workload(
         plan,
         source,
         runner_id,
@@ -52,7 +52,7 @@ pub fn lab_offload_metadata_with_workspace_mapping(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn lab_offload_metadata_with_workspace_mapping_and_runner_workload(
+pub fn lab_offload_metadata_with_workspace_mapping_and_lab_runner_workload(
     plan: &HomeboyPlan,
     source: &str,
     runner_id: Option<&str>,
@@ -61,7 +61,7 @@ pub fn lab_offload_metadata_with_workspace_mapping_and_runner_workload(
     remote_workspace: Option<&str>,
     fallback_reason: Option<&str>,
     workspace_mapping: Option<&serde_json::Value>,
-    runner_workload: Option<&RunnerWorkload>,
+    lab_runner_workload: Option<&LabRunnerWorkload>,
 ) -> serde_json::Value {
     let sync_mode = plan_step_input_string(plan, "lab.sync_workspace", "mode");
     let gate_results = collect_plan_gate_results(plan);
@@ -93,7 +93,7 @@ pub fn lab_offload_metadata_with_workspace_mapping_and_runner_workload(
         "proof": proof,
         "patch_captured": plan_has_step(plan, "lab.apply_patch"),
         "workspace_mapping": workspace_mapping,
-        "runner_workload": runner_workload,
+        "runner_workload": lab_runner_workload,
     })
 }
 
@@ -177,15 +177,15 @@ fn plan_has_step(plan: &HomeboyPlan, step_id: &str) -> bool {
 mod tests {
     use super::{
         lab_offload_metadata, lab_offload_metadata_with_workspace_mapping,
-        lab_offload_metadata_with_workspace_mapping_and_runner_workload,
+        lab_offload_metadata_with_workspace_mapping_and_lab_runner_workload,
         LAB_OFFLOAD_METADATA_SCHEMA,
     };
     use homeboy_core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
     use homeboy_core::lab_contract::{
-        RunnerWorkload, RunnerWorkloadAssignment, RunnerWorkloadCommandFamily,
-        RunnerWorkloadExtensionRevision, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
-        RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
-        RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
+        LabRunnerWorkload, LabRunnerWorkloadAssignment, LabRunnerWorkloadCommandFamily,
+        LabRunnerWorkloadExtensionRevision, LabRunnerWorkloadKind, LabRunnerWorkloadMutationPolicy,
+        LabRunnerWorkloadResultRefs, LabRunnerWorkloadSecrets, LabRunnerWorkloadState,
+        LabRunnerWorkloadWorkspaceMappings, LAB_RUNNER_WORKLOAD_SCHEMA,
     };
     use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
     use homeboy_core::proof::{HomeboyProof, HomeboyProofProvenance};
@@ -336,48 +336,48 @@ mod tests {
     }
 
     #[test]
-    fn lab_offload_metadata_records_runner_workload_when_supplied() {
+    fn lab_offload_metadata_records_lab_runner_workload_when_supplied() {
         let plan = lab_plan();
-        let workload = RunnerWorkload {
-            schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
+        let workload = LabRunnerWorkload {
+            schema: LAB_RUNNER_WORKLOAD_SCHEMA.to_string(),
             workload_id: "workload-1".to_string(),
-            kind: RunnerWorkloadKind {
+            kind: LabRunnerWorkloadKind {
                 command_label: "lint".to_string(),
-                command_family: RunnerWorkloadCommandFamily::Quality,
+                command_family: LabRunnerWorkloadCommandFamily::Quality,
             },
             agent_task: None,
             notification_route: None,
-            workspace_mappings: RunnerWorkloadWorkspaceMappings {
+            workspace_mappings: LabRunnerWorkloadWorkspaceMappings {
                 source_path_mode: "cwd_or_path_flag".to_string(),
                 workspace_mode_policy: "changed_since_git_else_snapshot".to_string(),
                 mapping_ref: Some("workspace_mapping".to_string()),
             },
             required_capabilities: Vec::new(),
-            required_secrets: RunnerWorkloadSecrets {
+            required_secrets: LabRunnerWorkloadSecrets {
                 categories: Vec::new(),
                 secret_env_plan: homeboy_core::secret_env_plan::SecretEnvPlan::default(),
             },
             required_extensions: vec!["browser".to_string()],
-            required_extension_revisions: vec![RunnerWorkloadExtensionRevision {
+            required_extension_revisions: vec![LabRunnerWorkloadExtensionRevision {
                 extension_id: "browser".to_string(),
                 source_revision: "abc1234".to_string(),
             }],
-            mutation_policy: RunnerWorkloadMutationPolicy {
+            mutation_policy: LabRunnerWorkloadMutationPolicy {
                 capture_patch: false,
                 mutation_flag: None,
                 allow_dirty_lab_workspace: false,
             },
-            assignment: RunnerWorkloadAssignment {
+            assignment: LabRunnerWorkloadAssignment {
                 runner_id: Some("lab".to_string()),
                 runner_mode: Some("direct_ssh".to_string()),
                 source: Some("explicit".to_string()),
             },
-            state: RunnerWorkloadState {
+            state: LabRunnerWorkloadState {
                 status: "offloaded".to_string(),
                 remote_workspace: Some("/srv/homeboy/app".to_string()),
                 fallback_reason: None,
             },
-            result_refs: RunnerWorkloadResultRefs {
+            result_refs: LabRunnerWorkloadResultRefs {
                 plan_id: plan.id.clone(),
                 proof_id: None,
                 workspace_mapping_ref: Some("workspace_mapping".to_string()),
@@ -387,7 +387,7 @@ mod tests {
             },
         };
 
-        let metadata = lab_offload_metadata_with_workspace_mapping_and_runner_workload(
+        let metadata = lab_offload_metadata_with_workspace_mapping_and_lab_runner_workload(
             &plan,
             "explicit",
             Some("lab"),
@@ -401,7 +401,7 @@ mod tests {
 
         assert_eq!(
             metadata["runner_workload"]["schema"],
-            RUNNER_WORKLOAD_SCHEMA
+            LAB_RUNNER_WORKLOAD_SCHEMA
         );
         assert_eq!(metadata["runner_workload"]["workload_id"], "workload-1");
         assert_eq!(

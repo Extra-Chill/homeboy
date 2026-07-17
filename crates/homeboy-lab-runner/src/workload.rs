@@ -2,12 +2,12 @@ use clap::Parser;
 use homeboy_core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::{
-    RunnerWorkload, RunnerWorkloadAgentTask, RunnerWorkloadAgentTaskDispatchKind,
-    RunnerWorkloadAgentTaskLifecycleMirrorPolicy, RunnerWorkloadAssignment,
-    RunnerWorkloadCapability, RunnerWorkloadCommandFamily, RunnerWorkloadExtensionRevision,
-    RunnerWorkloadKind, RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs,
-    RunnerWorkloadSecrets, RunnerWorkloadState, RunnerWorkloadWorkspaceMappings,
-    RUNNER_WORKLOAD_SCHEMA,
+    LabRunnerWorkload, LabRunnerWorkloadAgentTask, LabRunnerWorkloadAgentTaskDispatchKind,
+    LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy, LabRunnerWorkloadAssignment,
+    LabRunnerWorkloadCapability, LabRunnerWorkloadCommandFamily,
+    LabRunnerWorkloadExtensionRevision, LabRunnerWorkloadKind, LabRunnerWorkloadMutationPolicy,
+    LabRunnerWorkloadResultRefs, LabRunnerWorkloadSecrets, LabRunnerWorkloadState,
+    LabRunnerWorkloadWorkspaceMappings, LAB_RUNNER_WORKLOAD_SCHEMA,
 };
 use homeboy_core::plan::HomeboyPlan;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
@@ -17,7 +17,7 @@ use super::{
     RunnerCapabilityPreflight,
 };
 
-pub(crate) struct RunnerWorkloadBuildInput<'a> {
+pub(crate) struct LabRunnerWorkloadBuildInput<'a> {
     pub plan: &'a HomeboyPlan,
     pub command: &'a LabOffloadCommand,
     pub capture_patch: bool,
@@ -34,53 +34,55 @@ pub(crate) struct RunnerWorkloadBuildInput<'a> {
 }
 
 #[cfg(test)]
-pub(crate) fn build_runner_workload(input: RunnerWorkloadBuildInput<'_>) -> RunnerWorkload {
+pub(crate) fn build_lab_runner_workload(
+    input: LabRunnerWorkloadBuildInput<'_>,
+) -> LabRunnerWorkload {
     let command_label = input.command.hot_label.to_string();
-    build_runner_workload_with_command_label(input, command_label)
+    build_lab_runner_workload_with_command_label(input, command_label)
 }
 
-pub(crate) fn build_runner_workload_for_dispatched_command(
-    input: RunnerWorkloadBuildInput<'_>,
+pub(crate) fn build_lab_runner_workload_for_dispatched_command(
+    input: LabRunnerWorkloadBuildInput<'_>,
     dispatched_command: &[String],
-) -> RunnerWorkload {
+) -> LabRunnerWorkload {
     let identity = dispatched_command_identity(dispatched_command)
-        .unwrap_or_else(|| RunnerWorkloadCommandIdentity::from_label(input.command.hot_label));
-    build_runner_workload_with_command_identity(input, identity)
+        .unwrap_or_else(|| LabRunnerWorkloadCommandIdentity::from_label(input.command.hot_label));
+    build_lab_runner_workload_with_command_identity(input, identity)
 }
 
-fn build_runner_workload_with_command_label(
-    input: RunnerWorkloadBuildInput<'_>,
+fn build_lab_runner_workload_with_command_label(
+    input: LabRunnerWorkloadBuildInput<'_>,
     command_label: String,
-) -> RunnerWorkload {
-    build_runner_workload_with_command_identity(
+) -> LabRunnerWorkload {
+    build_lab_runner_workload_with_command_identity(
         input,
-        RunnerWorkloadCommandIdentity::from_label(&command_label),
+        LabRunnerWorkloadCommandIdentity::from_label(&command_label),
     )
 }
 
-fn build_runner_workload_with_command_identity(
-    input: RunnerWorkloadBuildInput<'_>,
-    identity: RunnerWorkloadCommandIdentity,
-) -> RunnerWorkload {
+fn build_lab_runner_workload_with_command_identity(
+    input: LabRunnerWorkloadBuildInput<'_>,
+    identity: LabRunnerWorkloadCommandIdentity,
+) -> LabRunnerWorkload {
     let workspace_mapping_ref = input.workspace_mapping_ref.map(str::to_string);
     let required_secret_categories = required_secret_categories(&identity.label);
-    RunnerWorkload {
-        schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
+    LabRunnerWorkload {
+        schema: LAB_RUNNER_WORKLOAD_SCHEMA.to_string(),
         workload_id: format!("{}.runner_workload", input.plan.id),
-        kind: RunnerWorkloadKind {
+        kind: LabRunnerWorkloadKind {
             command_label: identity.label,
             command_family: identity.family,
         },
         agent_task: None,
         notification_route: homeboy_core::notification_route::current(),
-        workspace_mappings: RunnerWorkloadWorkspaceMappings {
+        workspace_mappings: LabRunnerWorkloadWorkspaceMappings {
             source_path_mode: source_path_mode_label(input.command.source_path_mode).to_string(),
             workspace_mode_policy: workspace_mode_policy_label(input.command.workspace_mode_policy)
                 .to_string(),
             mapping_ref: workspace_mapping_ref.clone(),
         },
         required_capabilities: required_capabilities(input.command),
-        required_secrets: RunnerWorkloadSecrets {
+        required_secrets: LabRunnerWorkloadSecrets {
             categories: required_secret_categories,
             secret_env_plan: SecretEnvPlan::default(),
         },
@@ -88,22 +90,22 @@ fn build_runner_workload_with_command_identity(
         required_extension_revisions: required_extension_revisions(
             &input.command.required_extensions,
         ),
-        mutation_policy: RunnerWorkloadMutationPolicy {
+        mutation_policy: LabRunnerWorkloadMutationPolicy {
             capture_patch: input.capture_patch,
             mutation_flag: input.mutation_flag.map(str::to_string),
             allow_dirty_lab_workspace: input.allow_dirty_lab_workspace,
         },
-        assignment: RunnerWorkloadAssignment {
+        assignment: LabRunnerWorkloadAssignment {
             runner_id: Some(input.runner_id.to_string()),
             runner_mode: Some(input.runner_mode.to_string()),
             source: Some(input.assignment_source.to_string()),
         },
-        state: RunnerWorkloadState {
+        state: LabRunnerWorkloadState {
             status: input.status.to_string(),
             remote_workspace: input.remote_workspace.map(str::to_string),
             fallback_reason: input.fallback_reason.map(str::to_string),
         },
-        result_refs: RunnerWorkloadResultRefs {
+        result_refs: LabRunnerWorkloadResultRefs {
             plan_id: input.plan.id.clone(),
             proof_id: input.proof_id.map(str::to_string),
             workspace_mapping_ref,
@@ -115,16 +117,16 @@ fn build_runner_workload_with_command_identity(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RunnerWorkloadCommandIdentity {
+struct LabRunnerWorkloadCommandIdentity {
     label: String,
-    family: RunnerWorkloadCommandFamily,
+    family: LabRunnerWorkloadCommandFamily,
 }
 
-impl RunnerWorkloadCommandIdentity {
+impl LabRunnerWorkloadCommandIdentity {
     fn from_label(label: &str) -> Self {
         Self {
             label: label.to_string(),
-            family: RunnerWorkloadCommandFamily::from_command_label(label),
+            family: LabRunnerWorkloadCommandFamily::from_command_label(label),
         }
     }
 }
@@ -135,10 +137,10 @@ impl RunnerWorkloadCommandIdentity {
 /// The actual CLI parse lives in the CLI layer and is invoked through the
 /// `command_label` resolver hook, so core does not depend on the full CLI
 /// parser (`cli_surface::Cli`).
-fn dispatched_command_identity(command: &[String]) -> Option<RunnerWorkloadCommandIdentity> {
+fn dispatched_command_identity(command: &[String]) -> Option<LabRunnerWorkloadCommandIdentity> {
     let argv = cli_argv_from_dispatched_command(command)?;
     let label = super::resolve_command_label(&argv)?;
-    Some(RunnerWorkloadCommandIdentity::from_label(&label))
+    Some(LabRunnerWorkloadCommandIdentity::from_label(&label))
 }
 
 fn cli_argv_from_dispatched_command(command: &[String]) -> Option<Vec<String>> {
@@ -161,39 +163,39 @@ fn is_homeboy_executable(value: &str) -> bool {
         == Some("homeboy")
 }
 
-pub(crate) fn runner_workload_agent_task_from_command(
+pub(crate) fn lab_runner_workload_agent_task_from_command(
     args: &[String],
     run_id: Option<&str>,
-) -> Option<RunnerWorkloadAgentTask> {
+) -> Option<LabRunnerWorkloadAgentTask> {
     let agent_task_index = args.iter().position(|arg| arg == "agent-task")?;
     let action = args.get(agent_task_index + 1)?.as_str();
     match action {
-        "cook" => run_id.map(|run_id| RunnerWorkloadAgentTask {
+        "cook" => run_id.map(|run_id| LabRunnerWorkloadAgentTask {
             run_id: run_id.to_string(),
             plan_ref: None,
             resolved_provider_policy: resolved_provider_policy_from_command(args),
-            dispatch_kind: RunnerWorkloadAgentTaskDispatchKind::Cook,
-            lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
+            dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind::Cook,
+            lifecycle_mirror_policy: LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
         }),
-        "dispatch" => run_id.map(|run_id| RunnerWorkloadAgentTask {
+        "dispatch" => run_id.map(|run_id| LabRunnerWorkloadAgentTask {
             run_id: run_id.to_string(),
             plan_ref: None,
             resolved_provider_policy: resolved_provider_policy_from_command(args),
-            dispatch_kind: RunnerWorkloadAgentTaskDispatchKind::Dispatch,
-            lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
+            dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind::Dispatch,
+            lifecycle_mirror_policy: LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
         }),
         "run-plan" => {
             let plan_ref = option_value_after(args, agent_task_index + 1, "--plan")?;
             let record_run_id = run_id
                 .map(str::to_string)
                 .or_else(|| option_value_after(args, agent_task_index + 1, "--record-run-id"))?;
-            Some(RunnerWorkloadAgentTask {
+            Some(LabRunnerWorkloadAgentTask {
                 run_id: record_run_id,
                 plan_ref: Some(plan_ref),
                 resolved_provider_policy: None,
-                dispatch_kind: RunnerWorkloadAgentTaskDispatchKind::RunPlan,
+                dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
-                    RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+                    LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
             })
         }
         _ => None,
@@ -226,7 +228,7 @@ fn option_value_after(args: &[String], start_index: usize, option: &str) -> Opti
 
 fn required_extension_revisions(
     required_extensions: &[String],
-) -> Vec<RunnerWorkloadExtensionRevision> {
+) -> Vec<LabRunnerWorkloadExtensionRevision> {
     required_extension_revisions_with(
         required_extensions,
         homeboy_core::extension::read_source_revision,
@@ -236,11 +238,11 @@ fn required_extension_revisions(
 fn required_extension_revisions_with(
     required_extensions: &[String],
     mut read_revision: impl FnMut(&str) -> Option<String>,
-) -> Vec<RunnerWorkloadExtensionRevision> {
+) -> Vec<LabRunnerWorkloadExtensionRevision> {
     required_extensions
         .iter()
         .filter_map(|extension_id| {
-            read_revision(extension_id).map(|source_revision| RunnerWorkloadExtensionRevision {
+            read_revision(extension_id).map(|source_revision| LabRunnerWorkloadExtensionRevision {
                 extension_id: extension_id.clone(),
                 source_revision,
             })
@@ -248,8 +250,8 @@ fn required_extension_revisions_with(
         .collect()
 }
 
-pub(crate) fn validate_runner_workload_dispatch(
-    workload: Option<&RunnerWorkload>,
+pub(crate) fn validate_lab_runner_workload_dispatch(
+    workload: Option<&LabRunnerWorkload>,
     runner_id: &str,
     cwd: Option<&str>,
     command: &[String],
@@ -259,27 +261,27 @@ pub(crate) fn validate_runner_workload_dispatch(
     let Some(workload) = workload else {
         return Ok(());
     };
-    validate_runner_workload_dispatch_identity(workload, runner_id, cwd)?;
-    validate_runner_workload_mutation_policy(workload, capture_patch)?;
-    validate_runner_workload_required_secrets(workload, secret_env_plan)?;
-    validate_runner_workload_required_capabilities(workload)?;
-    validate_runner_workload_command_present(command)?;
-    validate_runner_workload_command(workload, command)?;
+    validate_lab_runner_workload_dispatch_identity(workload, runner_id, cwd)?;
+    validate_lab_runner_workload_mutation_policy(workload, capture_patch)?;
+    validate_lab_runner_workload_required_secrets(workload, secret_env_plan)?;
+    validate_lab_runner_workload_required_capabilities(workload)?;
+    validate_lab_runner_workload_command_present(command)?;
+    validate_lab_runner_workload_command(workload, command)?;
     Ok(())
 }
 
-fn validate_runner_workload_dispatch_identity(
-    workload: &RunnerWorkload,
+fn validate_lab_runner_workload_dispatch_identity(
+    workload: &LabRunnerWorkload,
     runner_id: &str,
     cwd: Option<&str>,
 ) -> Result<()> {
-    if workload.schema != RUNNER_WORKLOAD_SCHEMA {
+    if workload.schema != LAB_RUNNER_WORKLOAD_SCHEMA {
         return Err(workload_error(
             "runner_workload.schema",
-            format!("runner workload schema must be `{RUNNER_WORKLOAD_SCHEMA}`"),
+            format!("runner workload schema must be `{LAB_RUNNER_WORKLOAD_SCHEMA}`"),
         ));
     }
-    validate_runner_workload_result_refs(workload)?;
+    validate_lab_runner_workload_result_refs(workload)?;
     if workload.assignment.runner_id.as_deref() != Some(runner_id) {
         return Err(workload_error(
             "runner_workload.assignment.runner_id",
@@ -297,8 +299,8 @@ fn validate_runner_workload_dispatch_identity(
     Ok(())
 }
 
-fn validate_runner_workload_mutation_policy(
-    workload: &RunnerWorkload,
+fn validate_lab_runner_workload_mutation_policy(
+    workload: &LabRunnerWorkload,
     capture_patch: bool,
 ) -> Result<()> {
     if workload.mutation_policy.capture_patch != capture_patch {
@@ -310,8 +312,8 @@ fn validate_runner_workload_mutation_policy(
     Ok(())
 }
 
-fn validate_runner_workload_required_secrets(
-    workload: &RunnerWorkload,
+fn validate_lab_runner_workload_required_secrets(
+    workload: &LabRunnerWorkload,
     secret_env_plan: &SecretEnvPlan,
 ) -> Result<()> {
     let expected = workload.required_secrets.secret_env_plan.secret_env_names();
@@ -333,7 +335,7 @@ fn validate_runner_workload_required_secrets(
     Ok(())
 }
 
-fn validate_runner_workload_required_capabilities(workload: &RunnerWorkload) -> Result<()> {
+fn validate_lab_runner_workload_required_capabilities(workload: &LabRunnerWorkload) -> Result<()> {
     for capability in &workload.required_capabilities {
         if capability.name.trim().is_empty() {
             return Err(workload_error(
@@ -345,7 +347,7 @@ fn validate_runner_workload_required_capabilities(workload: &RunnerWorkload) -> 
     Ok(())
 }
 
-fn validate_runner_workload_command_present(command: &[String]) -> Result<()> {
+fn validate_lab_runner_workload_command_present(command: &[String]) -> Result<()> {
     if command.is_empty() {
         return Err(workload_error(
             "runner_workload.command",
@@ -355,20 +357,23 @@ fn validate_runner_workload_command_present(command: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn validate_runner_workload_command(workload: &RunnerWorkload, command: &[String]) -> Result<()> {
+fn validate_lab_runner_workload_command(
+    workload: &LabRunnerWorkload,
+    command: &[String],
+) -> Result<()> {
     if let Some(dispatched_identity) = dispatched_command_identity(command) {
-        return validate_runner_workload_command_identity(workload, dispatched_identity);
+        return validate_lab_runner_workload_command_identity(workload, dispatched_identity);
     }
 
     // Some direct runner validations use incomplete argv that cannot be parsed
     // as a full CLI invocation. Preserve their strict label validation rather
     // than accepting an unrecognized command.
-    validate_runner_workload_command_fallback(workload, command)
+    validate_lab_runner_workload_command_fallback(workload, command)
 }
 
-fn validate_runner_workload_command_identity(
-    workload: &RunnerWorkload,
-    dispatched_identity: RunnerWorkloadCommandIdentity,
+fn validate_lab_runner_workload_command_identity(
+    workload: &LabRunnerWorkload,
+    dispatched_identity: LabRunnerWorkloadCommandIdentity,
 ) -> Result<()> {
     if dispatched_identity.label != workload.kind.command_label {
         return Err(workload_error(
@@ -380,7 +385,7 @@ fn validate_runner_workload_command_identity(
         ));
     }
 
-    if dispatched_identity.family != RunnerWorkloadCommandFamily::Unknown
+    if dispatched_identity.family != LabRunnerWorkloadCommandFamily::Unknown
         && dispatched_identity.family != workload.kind.command_family
     {
         return Err(workload_error(
@@ -395,8 +400,8 @@ fn validate_runner_workload_command_identity(
     Ok(())
 }
 
-fn validate_runner_workload_command_fallback(
-    workload: &RunnerWorkload,
+fn validate_lab_runner_workload_command_fallback(
+    workload: &LabRunnerWorkload,
     command: &[String],
 ) -> Result<()> {
     let command_args = dispatch_workload_command_args(command);
@@ -414,12 +419,12 @@ fn validate_runner_workload_command_fallback(
     {
         // A differing surface label is only drift when the commands are not the
         // same workload family. Same-family labels (e.g. `test` and `trace`,
-        // both Quality) canonicalize to one runner-workload identity, so a
+        // both Quality) canonicalize to one lab-runner-workload identity, so a
         // labelled dispatch that resolves to the workload's family is a match
         // even when the surface label differs (#7972). When the dispatched
         // family is Unknown we cannot canonicalize, so fall back to strict
         // label matching.
-        let canonical_same_family = dispatched_family != RunnerWorkloadCommandFamily::Unknown
+        let canonical_same_family = dispatched_family != LabRunnerWorkloadCommandFamily::Unknown
             && dispatched_family == workload.kind.command_family;
         if dispatched_label != workload.kind.command_label && !canonical_same_family {
             return Err(workload_error(
@@ -432,7 +437,7 @@ fn validate_runner_workload_command_fallback(
         }
     }
 
-    if dispatched_family != RunnerWorkloadCommandFamily::Unknown
+    if dispatched_family != LabRunnerWorkloadCommandFamily::Unknown
         && dispatched_family != workload.kind.command_family
     {
         return Err(workload_error(
@@ -447,7 +452,7 @@ fn validate_runner_workload_command_fallback(
     Ok(())
 }
 
-fn validate_runner_workload_result_refs(workload: &RunnerWorkload) -> Result<()> {
+fn validate_lab_runner_workload_result_refs(workload: &LabRunnerWorkload) -> Result<()> {
     if workload.result_refs.plan_id.trim().is_empty() {
         return Err(workload_error(
             "runner_workload.result_refs.plan_id",
@@ -522,25 +527,25 @@ fn dispatched_command_label(command_args: &[String], expected_label: &str) -> Op
     Some(positional_parts[..expected_parts.len()].join(" "))
 }
 
-fn runner_workload_command_label_value_option(arg: &str) -> bool {
+fn lab_runner_workload_command_label_value_option(arg: &str) -> bool {
     matches!(arg, "--extension" | "--path")
 }
 
-fn runner_workload_command_label_flag_option(arg: &str) -> bool {
+fn lab_runner_workload_command_label_flag_option(arg: &str) -> bool {
     arg.starts_with("--extension=") || arg.starts_with("--path=")
 }
 
-fn dispatched_command_family(command_args: &[String]) -> RunnerWorkloadCommandFamily {
+fn dispatched_command_family(command_args: &[String]) -> LabRunnerWorkloadCommandFamily {
     let positional_parts = dispatched_positional_command_parts(command_args);
     let max_parts = positional_parts.len().min(3);
     for part_count in (1..=max_parts).rev() {
         let label = positional_parts[..part_count].join(" ");
-        let family = RunnerWorkloadCommandFamily::from_command_label(&label);
-        if family != RunnerWorkloadCommandFamily::Unknown {
+        let family = LabRunnerWorkloadCommandFamily::from_command_label(&label);
+        if family != LabRunnerWorkloadCommandFamily::Unknown {
             return family;
         }
     }
-    RunnerWorkloadCommandFamily::Unknown
+    LabRunnerWorkloadCommandFamily::Unknown
 }
 
 fn dispatched_positional_command_parts(command_args: &[String]) -> Vec<&str> {
@@ -550,11 +555,11 @@ fn dispatched_positional_command_parts(command_args: &[String]) -> Vec<&str> {
         if arg == "--" {
             break;
         }
-        if runner_workload_command_label_value_option(arg) {
+        if lab_runner_workload_command_label_value_option(arg) {
             let _ = iter.next();
             continue;
         }
-        if runner_workload_command_label_flag_option(arg) {
+        if lab_runner_workload_command_label_flag_option(arg) {
             continue;
         }
         if arg.starts_with('-') {
@@ -568,9 +573,9 @@ fn dispatched_positional_command_parts(command_args: &[String]) -> Vec<&str> {
     parts
 }
 
-pub(crate) fn merge_runner_workload_capability_preflight(
+pub(crate) fn merge_lab_runner_workload_capability_preflight(
     preflight: Option<RunnerCapabilityPreflight>,
-    workload: Option<&RunnerWorkload>,
+    workload: Option<&LabRunnerWorkload>,
 ) -> Result<Option<RunnerCapabilityPreflight>> {
     let Some(workload) = workload else {
         return Ok(preflight);
@@ -579,9 +584,9 @@ pub(crate) fn merge_runner_workload_capability_preflight(
     Ok(preflight)
 }
 
-pub(crate) fn merge_runner_workload_required_extensions(
+pub(crate) fn merge_lab_runner_workload_required_extensions(
     mut required_extensions: Vec<String>,
-    workload: Option<&RunnerWorkload>,
+    workload: Option<&LabRunnerWorkload>,
 ) -> Vec<String> {
     if let Some(workload) = workload {
         for extension in &workload.required_extensions {
@@ -597,18 +602,18 @@ fn workload_error(field: &str, message: String) -> Error {
     Error::validation_invalid_argument(field, message, None, None)
 }
 
-pub(crate) fn runner_workload_with_result_refs(
-    mut workload: RunnerWorkload,
+pub(crate) fn lab_runner_workload_with_result_refs(
+    mut workload: LabRunnerWorkload,
     job_id: Option<&str>,
     mirror_run_id: Option<&str>,
     artifacts: &[homeboy_core::api_jobs::JobArtifactMetadata],
-) -> RunnerWorkload {
+) -> LabRunnerWorkload {
     workload.result_refs.job_id = job_id.map(str::to_string);
     workload.result_refs.mirror_run_id = mirror_run_id.map(str::to_string);
     workload.result_refs.artifacts = artifacts
         .iter()
         .map(
-            |artifact| homeboy_core::lab_contract::RunnerWorkloadArtifactRef {
+            |artifact| homeboy_core::lab_contract::LabRunnerWorkloadArtifactRef {
                 id: artifact.id.clone(),
                 name: artifact.name.clone(),
                 path: artifact.path.clone(),
@@ -619,10 +624,10 @@ pub(crate) fn runner_workload_with_result_refs(
     workload
 }
 
-fn required_capabilities(command: &LabOffloadCommand) -> Vec<RunnerWorkloadCapability> {
+fn required_capabilities(command: &LabOffloadCommand) -> Vec<LabRunnerWorkloadCapability> {
     let mut capabilities = Vec::new();
     if command.routing_policy.requires_extension_parity || !command.required_extensions.is_empty() {
-        capabilities.push(RunnerWorkloadCapability {
+        capabilities.push(LabRunnerWorkloadCapability {
             name: "extension_parity".to_string(),
             required: true,
         });
@@ -713,7 +718,7 @@ mod tests {
                 &[],
             ),
             required_extensions: vec!["browser".to_string()],
-            required_capabilities: vec![RunnerWorkloadCapability {
+            required_capabilities: vec![LabRunnerWorkloadCapability {
                 name: "playwright".to_string(),
                 required: true,
             }],
@@ -721,10 +726,10 @@ mod tests {
         }
     }
 
-    fn workload() -> RunnerWorkload {
+    fn workload() -> LabRunnerWorkload {
         let plan = plan();
         let command = command();
-        build_runner_workload(RunnerWorkloadBuildInput {
+        build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: true,
@@ -742,12 +747,12 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_kind_comes_from_dispatched_command_for_lab_shapes() {
+    fn lab_runner_workload_kind_comes_from_dispatched_command_for_lab_shapes() {
         struct Case {
             name: &'static str,
             argv: Vec<&'static str>,
             expected_label: &'static str,
-            expected_family: RunnerWorkloadCommandFamily,
+            expected_family: LabRunnerWorkloadCommandFamily,
         }
 
         let cases = [
@@ -755,7 +760,7 @@ mod tests {
                 name: "review lint component",
                 argv: vec!["/srv/homeboy/bin/homeboy", "review", "lint", "homeboy"],
                 expected_label: "review lint",
-                expected_family: RunnerWorkloadCommandFamily::Quality,
+                expected_family: LabRunnerWorkloadCommandFamily::Quality,
             },
             Case {
                 name: "agent-task cook",
@@ -772,7 +777,7 @@ mod tests {
                     "--no-finalize",
                 ],
                 expected_label: "agent-task cook/run-plan/retry --run",
-                expected_family: RunnerWorkloadCommandFamily::AgentTask,
+                expected_family: LabRunnerWorkloadCommandFamily::AgentTask,
             },
             Case {
                 name: "plain offloaded command",
@@ -783,7 +788,7 @@ mod tests {
                     "wordpress",
                 ],
                 expected_label: "extension update",
-                expected_family: RunnerWorkloadCommandFamily::Unknown,
+                expected_family: LabRunnerWorkloadCommandFamily::Unknown,
             },
             Case {
                 name: "runtime refresh target positional",
@@ -800,14 +805,14 @@ mod tests {
                     "homeboy-lab",
                 ],
                 expected_label: "runtime refresh",
-                expected_family: RunnerWorkloadCommandFamily::Workspace,
+                expected_family: LabRunnerWorkloadCommandFamily::Workspace,
             },
             Case {
                 name: "resident-path command",
                 argv: vec!["/srv/homeboy/bin/homeboy", "agent-task", "status", "run-1"],
                 expected_label:
                     "agent-task run/run-next/status/logs/artifacts/review/list/active/latest",
-                expected_family: RunnerWorkloadCommandFamily::AgentTask,
+                expected_family: LabRunnerWorkloadCommandFamily::AgentTask,
             },
         ];
 
@@ -822,8 +827,8 @@ mod tests {
                 .collect::<Vec<_>>();
 
             register_test_command_label_resolver();
-            let workload = build_runner_workload_for_dispatched_command(
-                RunnerWorkloadBuildInput {
+            let workload = build_lab_runner_workload_for_dispatched_command(
+                LabRunnerWorkloadBuildInput {
                     plan: &plan,
                     command: &command,
                     capture_patch: true,
@@ -873,7 +878,7 @@ mod tests {
     fn runner_core_builds_complete_workload_payload() {
         let plan = plan();
         let command = command();
-        let mut workload = build_runner_workload(RunnerWorkloadBuildInput {
+        let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: true,
@@ -890,12 +895,12 @@ mod tests {
         });
         workload.required_secrets.secret_env_plan = secret_plan(&["HOMEBODY_TRACE_SECRET"]);
 
-        assert_eq!(workload.schema, RUNNER_WORKLOAD_SCHEMA);
+        assert_eq!(workload.schema, LAB_RUNNER_WORKLOAD_SCHEMA);
         assert_eq!(workload.workload_id, "lab_offload.test.runner_workload");
         assert_eq!(workload.kind.command_label, "trace");
         assert_eq!(
             workload.kind.command_family,
-            RunnerWorkloadCommandFamily::Quality
+            LabRunnerWorkloadCommandFamily::Quality
         );
         assert_eq!(
             workload.workspace_mappings.mapping_ref.as_deref(),
@@ -921,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_extension_revisions_pin_installed_required_extensions() {
+    fn lab_runner_workload_extension_revisions_pin_installed_required_extensions() {
         let revisions = required_extension_revisions_with(
             &["browser".to_string(), "missing".to_string()],
             |extension_id| match extension_id {
@@ -936,10 +941,10 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_rejects_dispatch_drift() {
+    fn lab_runner_workload_validation_rejects_dispatch_drift() {
         let plan = plan();
         let command = command();
-        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+        let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: true,
@@ -955,7 +960,7 @@ mod tests {
             proof_id: None,
         });
 
-        validate_runner_workload_dispatch(
+        validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -965,7 +970,7 @@ mod tests {
         )
         .expect("matching dispatch is valid");
 
-        let err = validate_runner_workload_dispatch(
+        let err = validate_lab_runner_workload_dispatch(
             Some(&workload),
             "other-runner",
             Some("/srv/homeboy/work"),
@@ -978,10 +983,10 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_rejects_remote_workspace_mismatch() {
+    fn lab_runner_workload_validation_rejects_remote_workspace_mismatch() {
         let workload = workload();
 
-        let err = validate_runner_workload_dispatch(
+        let err = validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/other-workspace"),
@@ -1001,11 +1006,11 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_rejects_blank_result_refs_plan_id() {
+    fn lab_runner_workload_validation_rejects_blank_result_refs_plan_id() {
         let mut workload = workload();
         workload.result_refs.plan_id = " ".to_string();
 
-        let err = validate_runner_workload_dispatch(
+        let err = validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1018,11 +1023,11 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_rejects_result_refs_plan_id_mismatched_to_workload_id() {
+    fn lab_runner_workload_validation_rejects_result_refs_plan_id_mismatched_to_workload_id() {
         let mut workload = workload();
         workload.result_refs.plan_id = "lab_offload.other".to_string();
 
-        let err = validate_runner_workload_dispatch(
+        let err = validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1035,8 +1040,8 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_rejects_blank_result_refs_artifact_ids() {
-        let workload = runner_workload_with_result_refs(
+    fn lab_runner_workload_validation_rejects_blank_result_refs_artifact_ids() {
+        let workload = lab_runner_workload_with_result_refs(
             workload(),
             Some("job-1"),
             Some("mirror-1"),
@@ -1053,7 +1058,7 @@ mod tests {
             }],
         );
 
-        let err = validate_runner_workload_dispatch(
+        let err = validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1069,10 +1074,10 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_rejects_command_label_drift() {
+    fn lab_runner_workload_validation_rejects_command_label_drift() {
         let plan = plan();
         let command = command();
-        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+        let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: true,
@@ -1092,8 +1097,8 @@ mod tests {
         // `status`) cannot be canonicalized to this `trace` (Quality) workload,
         // so the strict label check still rejects genuine command drift. (A
         // same-family alias like `test` is intentionally accepted — see
-        // `runner_workload_validation_rejects_dispatch_drift`.)
-        let err = validate_runner_workload_dispatch(
+        // `lab_runner_workload_validation_rejects_dispatch_drift`.)
+        let err = validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1106,7 +1111,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_uses_runtime_refresh_command_identity() {
+    fn lab_runner_workload_validation_uses_runtime_refresh_command_identity() {
         let plan = plan();
         let command = command();
         let dispatched_command = [
@@ -1123,8 +1128,8 @@ mod tests {
         ]
         .map(str::to_string);
         register_test_command_label_resolver();
-        let workload = build_runner_workload_for_dispatched_command(
-            RunnerWorkloadBuildInput {
+        let workload = build_lab_runner_workload_for_dispatched_command(
+            LabRunnerWorkloadBuildInput {
                 plan: &plan,
                 command: &command,
                 capture_patch: true,
@@ -1143,7 +1148,7 @@ mod tests {
         );
 
         assert_eq!(workload.kind.command_label, "runtime refresh");
-        validate_runner_workload_dispatch(
+        validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1153,7 +1158,7 @@ mod tests {
         )
         .expect("runtime refresh target positional must not alter the command identity");
 
-        let err = validate_runner_workload_dispatch(
+        let err = validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1168,10 +1173,10 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_rejects_workspace_mapping_reference_drift() {
+    fn lab_runner_workload_validation_rejects_workspace_mapping_reference_drift() {
         let plan = plan();
         let command = command();
-        let mut workload = build_runner_workload(RunnerWorkloadBuildInput {
+        let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: true,
@@ -1188,7 +1193,7 @@ mod tests {
         });
         workload.result_refs.workspace_mapping_ref = Some("workspace_mapping".to_string());
 
-        let err = validate_runner_workload_dispatch(
+        let err = validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1204,10 +1209,10 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_accepts_matching_full_and_short_command_argv() {
+    fn lab_runner_workload_validation_accepts_matching_full_and_short_command_argv() {
         let plan = plan();
         let command = command();
-        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+        let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: true,
@@ -1223,7 +1228,7 @@ mod tests {
             proof_id: None,
         });
 
-        validate_runner_workload_dispatch(
+        validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1233,7 +1238,7 @@ mod tests {
         )
         .expect("matching full argv is valid");
 
-        validate_runner_workload_dispatch(
+        validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1243,7 +1248,7 @@ mod tests {
         )
         .expect("matching short argv is valid");
 
-        validate_runner_workload_dispatch(
+        validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1253,7 +1258,7 @@ mod tests {
         )
         .expect("matching configured homeboy executable argv is valid");
 
-        validate_runner_workload_dispatch(
+        validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1265,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_accepts_nested_review_quality_labels() {
+    fn lab_runner_workload_validation_accepts_nested_review_quality_labels() {
         for label in [
             "review audit",
             "review lint",
@@ -1278,7 +1283,7 @@ mod tests {
             command.hot_label = label;
             command.required_extensions.clear();
             command.required_capabilities.clear();
-            let workload = build_runner_workload(RunnerWorkloadBuildInput {
+            let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
                 plan: &plan,
                 command: &command,
                 capture_patch: false,
@@ -1301,9 +1306,9 @@ mod tests {
 
             assert_eq!(
                 workload.kind.command_family,
-                RunnerWorkloadCommandFamily::Quality
+                LabRunnerWorkloadCommandFamily::Quality
             );
-            validate_runner_workload_dispatch(
+            validate_lab_runner_workload_dispatch(
                 Some(&workload),
                 "lab-a",
                 Some("/srv/homeboy/work"),
@@ -1320,7 +1325,7 @@ mod tests {
             ];
             argv_with_extension.extend(label.split_whitespace().skip(1).map(str::to_string));
             argv_with_extension.push("data-machine".to_string());
-            validate_runner_workload_dispatch(
+            validate_lab_runner_workload_dispatch(
                 Some(&workload),
                 "lab-a",
                 Some("/srv/homeboy/work"),
@@ -1333,11 +1338,11 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_accepts_fanout_cook_batch_command_label() {
+    fn lab_runner_workload_validation_accepts_fanout_cook_batch_command_label() {
         let plan = plan();
         let mut command = command();
         command.hot_label = "agent-task fanout cook-batch";
-        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+        let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: true,
@@ -1353,7 +1358,7 @@ mod tests {
             proof_id: None,
         });
 
-        validate_runner_workload_dispatch(
+        validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1373,10 +1378,10 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_rejects_required_secret_plan_without_named_handoff() {
+    fn lab_runner_workload_validation_rejects_required_secret_plan_without_named_handoff() {
         let plan = plan();
         let command = command();
-        let mut workload = build_runner_workload(RunnerWorkloadBuildInput {
+        let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: true,
@@ -1393,7 +1398,7 @@ mod tests {
         });
         workload.required_secrets.secret_env_plan = secret_plan(&["HOMEBODY_TRACE_SECRET"]);
 
-        let err = validate_runner_workload_dispatch(
+        let err = validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1411,11 +1416,11 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_rejects_wrong_trace_secret_handoff_name() {
+    fn lab_runner_workload_validation_rejects_wrong_trace_secret_handoff_name() {
         let mut workload = workload();
         workload.required_secrets.secret_env_plan = secret_plan(&["HOMEBODY_TRACE_SECRET"]);
 
-        let err = validate_runner_workload_dispatch(
+        let err = validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1433,11 +1438,11 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_rejects_wrong_agent_task_secret_handoff_name() {
+    fn lab_runner_workload_validation_rejects_wrong_agent_task_secret_handoff_name() {
         let plan = plan();
         let mut command = command();
         command.hot_label = "agent-task dispatch";
-        let mut workload = build_runner_workload(RunnerWorkloadBuildInput {
+        let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: true,
@@ -1454,7 +1459,7 @@ mod tests {
         });
         workload.required_secrets.secret_env_plan = secret_plan(&["AGENT_TASK_SECRET"]);
 
-        let err = validate_runner_workload_dispatch(
+        let err = validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1473,11 +1478,11 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_rejects_missing_tunnel_implicit_secret_handoff_name() {
+    fn lab_runner_workload_validation_rejects_missing_tunnel_implicit_secret_handoff_name() {
         let plan = plan();
         let mut command = command();
         command.hot_label = "tunnel preview-client start";
-        let mut workload = build_runner_workload(RunnerWorkloadBuildInput {
+        let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: true,
@@ -1494,7 +1499,7 @@ mod tests {
         });
         workload.required_secrets.secret_env_plan = secret_plan(&["HOMEBOY_PREVIEW_TUNNEL_TOKEN"]);
 
-        let err = validate_runner_workload_dispatch(
+        let err = validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1519,10 +1524,10 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_accepts_required_secret_categories_with_named_handoff() {
+    fn lab_runner_workload_validation_accepts_required_secret_categories_with_named_handoff() {
         let plan = plan();
         let command = command();
-        let mut workload = build_runner_workload(RunnerWorkloadBuildInput {
+        let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: true,
@@ -1539,7 +1544,7 @@ mod tests {
         });
         workload.required_secrets.secret_env_plan = secret_plan(&["HOMEBODY_TRACE_SECRET"]);
 
-        validate_runner_workload_dispatch(
+        validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1551,11 +1556,11 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_validation_accepts_empty_secret_handoff_without_required_categories() {
+    fn lab_runner_workload_validation_accepts_empty_secret_handoff_without_required_categories() {
         let plan = plan();
         let mut command = command();
         command.hot_label = "lint";
-        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+        let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: true,
@@ -1571,7 +1576,7 @@ mod tests {
             proof_id: None,
         });
 
-        validate_runner_workload_dispatch(
+        validate_lab_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
@@ -1583,8 +1588,8 @@ mod tests {
     }
 
     #[test]
-    fn runner_workload_agent_task_contract_extracts_run_plan_lifecycle_fields() {
-        let agent_task = runner_workload_agent_task_from_command(
+    fn lab_runner_workload_agent_task_contract_extracts_run_plan_lifecycle_fields() {
+        let agent_task = lab_runner_workload_agent_task_from_command(
             &[
                 "homeboy".to_string(),
                 "agent-task".to_string(),
@@ -1601,19 +1606,19 @@ mod tests {
         assert_eq!(agent_task.plan_ref.as_deref(), Some("@/runner/plan.json"));
         assert_eq!(
             agent_task.dispatch_kind,
-            RunnerWorkloadAgentTaskDispatchKind::RunPlan
+            LabRunnerWorkloadAgentTaskDispatchKind::RunPlan
         );
         assert_eq!(
             agent_task.lifecycle_mirror_policy,
-            RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate
+            LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate
         );
     }
 
     #[test]
-    fn runner_workload_result_refs_use_actual_artifacts() {
+    fn lab_runner_workload_result_refs_use_actual_artifacts() {
         let plan = plan();
         let command = command();
-        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+        let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: false,
@@ -1628,7 +1633,7 @@ mod tests {
             workspace_mapping_ref: None,
             proof_id: None,
         });
-        let workload = runner_workload_with_result_refs(
+        let workload = lab_runner_workload_with_result_refs(
             workload,
             Some("job-1"),
             Some("mirror-1"),
@@ -1659,7 +1664,7 @@ mod tests {
 
     #[test]
     fn legacy_agent_task_workload_decodes_without_provider_policy() {
-        let agent_task: RunnerWorkloadAgentTask = serde_json::from_value(serde_json::json!({
+        let agent_task: LabRunnerWorkloadAgentTask = serde_json::from_value(serde_json::json!({
             "run_id": "legacy-run",
             "plan_ref": null,
             "dispatch_kind": "cook",

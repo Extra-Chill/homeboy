@@ -92,27 +92,27 @@ fn service_run_loaded_plan_persists_durable_lifecycle() {
 }
 
 #[test]
-fn runner_handoff_materializes_the_run_before_preparation_failure() {
+fn lab_runner_handoff_materializes_the_run_before_preparation_failure() {
     with_isolated_home(|_| {
         let mut plan = test_plan();
         plan.tasks[0]
             .executor
             .secret_env
-            .push("__HOMEBOY_TEST_MISSING_RUNNER_HANDOFF_SECRET__".to_string());
-        std::env::remove_var("__HOMEBOY_TEST_MISSING_RUNNER_HANDOFF_SECRET__");
+            .push("__HOMEBOY_TEST_MISSING_LAB_RUNNER_HANDOFF_SECRET__".to_string());
+        std::env::remove_var("__HOMEBOY_TEST_MISSING_LAB_RUNNER_HANDOFF_SECRET__");
 
         let error = run_loaded_plan(
             plan,
-            Some("controller-proxy-interrupted-runner-handoff"),
+            Some("controller-proxy-interrupted-lab-runner-handoff"),
             SucceedingExecutor,
         )
         .expect_err("runner preparation fails after receiving the durable plan");
-        let record = lifecycle_status("controller-proxy-interrupted-runner-handoff")
+        let record = lifecycle_status("controller-proxy-interrupted-lab-runner-handoff")
             .expect("runner-scoped status resolves from its materialized record");
-        let log = agent_task_lifecycle::logs("controller-proxy-interrupted-runner-handoff")
+        let log = agent_task_lifecycle::logs("controller-proxy-interrupted-lab-runner-handoff")
             .expect("runner-scoped logs resolve from its materialized record");
         let recovery = run_submitted(
-            "controller-proxy-interrupted-runner-handoff".to_string(),
+            "controller-proxy-interrupted-lab-runner-handoff".to_string(),
             SucceedingExecutor,
         )
         .expect("runner-scoped run resolves the materialized terminal record");

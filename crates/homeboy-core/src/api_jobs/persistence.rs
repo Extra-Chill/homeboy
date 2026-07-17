@@ -221,7 +221,7 @@ pub(super) fn stale_after_restart_classification(stored: &StoredJob) -> Value {
     let linked_agent_task_run_id = stored
         .remote_runner
         .as_ref()
-        .and_then(|remote_runner| remote_runner.request.runner_workload.as_ref())
+        .and_then(|remote_runner| remote_runner.request.lab_runner_workload.as_ref())
         .and_then(|workload| workload.agent_task.as_ref())
         .map(|agent_task| agent_task.run_id.trim())
         .filter(|run_id| !run_id.is_empty());

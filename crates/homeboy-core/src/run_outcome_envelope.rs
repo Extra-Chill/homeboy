@@ -123,7 +123,7 @@ impl RunOutcomeEnvelope {
     }
 
     /// Record a runner handoff. Takes the already-extracted primitive fields
-    /// (rather than the runner-owned `RunnerHandoff` type) so this core envelope
+    /// (rather than the runner-owned `LabRunnerHandoff` type) so this core envelope
     /// does not depend on runner.
     pub fn add_handoff(
         &mut self,

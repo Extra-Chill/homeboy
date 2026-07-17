@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::lab_contract::RunnerWorkload;
+use crate::lab_contract::LabRunnerWorkload;
 use crate::secret_env_plan::SecretEnvPlan;
 use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
 
@@ -36,9 +36,9 @@ pub trait RunnerJobPreparationProvider: Send + Sync {
     ) -> SecretEnvPlan;
 
     /// Validate that a workload may be dispatched to the given runner.
-    fn validate_runner_workload_dispatch(
+    fn validate_lab_runner_workload_dispatch(
         &self,
-        workload: Option<&RunnerWorkload>,
+        workload: Option<&LabRunnerWorkload>,
         runner_id: &str,
         cwd: Option<&str>,
         command: &[String],
@@ -69,9 +69,9 @@ impl RunnerJobPreparationProvider for NoopRunnerJobPreparationProvider {
         SecretEnvPlan::from_secret_env_names(names)
     }
 
-    fn validate_runner_workload_dispatch(
+    fn validate_lab_runner_workload_dispatch(
         &self,
-        _workload: Option<&RunnerWorkload>,
+        _workload: Option<&LabRunnerWorkload>,
         _runner_id: &str,
         _cwd: Option<&str>,
         _command: &[String],
@@ -146,7 +146,7 @@ mod tests {
         let noop = NoopRunnerJobPreparationProvider;
         let plan = SecretEnvPlan::from_secret_env_names(Vec::<String>::new());
         assert!(noop
-            .validate_runner_workload_dispatch(
+            .validate_lab_runner_workload_dispatch(
                 None,
                 "runner",
                 None,

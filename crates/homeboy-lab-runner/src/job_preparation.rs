@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use homeboy_core::lab_contract::RunnerWorkload;
+use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
 
@@ -35,16 +35,16 @@ impl RunnerJobPreparationProvider for RunnerJobPreparation {
         )
     }
 
-    fn validate_runner_workload_dispatch(
+    fn validate_lab_runner_workload_dispatch(
         &self,
-        workload: Option<&RunnerWorkload>,
+        workload: Option<&LabRunnerWorkload>,
         runner_id: &str,
         cwd: Option<&str>,
         command: &[String],
         secret_env_plan: &SecretEnvPlan,
         capture_patch: bool,
     ) -> Result<()> {
-        super::workload::validate_runner_workload_dispatch(
+        super::workload::validate_lab_runner_workload_dispatch(
             workload,
             runner_id,
             cwd,

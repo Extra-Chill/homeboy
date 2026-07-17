@@ -592,7 +592,7 @@ pub(super) fn exec_output(
         RunnerExecMode::DiagnosticSsh => "diagnostic_ssh",
     };
     let runner_result = runner_result(None, exit_code, &stdout, &stderr, None, None);
-    let handoff = runner_handoff(runner, transport, None, Some(runner_result.clone()));
+    let handoff = lab_runner_handoff(runner, transport, None, Some(runner_result.clone()));
     let provenance_extensions = required_extensions_for_command(&command, &[]);
     let execution_record = runner_execution_record_for_output(
         runner,

@@ -207,7 +207,7 @@ pub(crate) struct LabDispatchExecutionContext<'a> {
     pub(crate) accepted_extension_settings: Vec<String>,
     pub(crate) secret_preflight_args: Vec<String>,
     pub(crate) agent_task_run_id: Option<String>,
-    pub(crate) runner_workload: Option<RunnerWorkload>,
+    pub(crate) lab_runner_workload: Option<LabRunnerWorkload>,
     pub(crate) lab_metadata: serde_json::Value,
     pub(crate) env_resolution_layers: Vec<LabEnvResolutionLayer>,
     pub(crate) secret_env_handoff: super::super::secrets::LabSecretEnvHandoffPlan,
@@ -260,7 +260,7 @@ fn lab_runner_exec_options(
         required_extensions: context.contract.required_extensions.clone(),
         accepted_extension_settings: context.accepted_extension_settings.clone(),
         require_paths: Vec::new(),
-        runner_workload: context.runner_workload.clone(),
+        lab_runner_workload: context.lab_runner_workload.clone(),
         run_id: context.agent_task_run_id.clone(),
         detach_after_handoff: context.detach_after_handoff,
         mirror_evidence: context.mirror_evidence,
@@ -278,11 +278,11 @@ pub(crate) fn exec_lab_context(
     let remote_cwd = context.remote_cwd.clone();
     let source_path = context.source_path.clone();
     let agent_task_workload = context
-        .runner_workload
+        .lab_runner_workload
         .as_ref()
         .and_then(|workload| workload.agent_task.clone());
     let notification_route = context
-        .runner_workload
+        .lab_runner_workload
         .as_ref()
         .and_then(|workload| workload.notification_route.clone());
 
@@ -1385,8 +1385,8 @@ pub(crate) fn run_lab_offload_inner(
         env_delta,
     )?;
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
-    let mut runner_workload = build_runner_workload_for_dispatched_command(
-        RunnerWorkloadBuildInput {
+    let mut lab_runner_workload = build_lab_runner_workload_for_dispatched_command(
+        LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &contract,
             capture_patch: request.capture_patch,
@@ -1406,12 +1406,13 @@ pub(crate) fn run_lab_offload_inner(
         },
         &command,
     );
-    runner_workload.agent_task =
-        runner_workload_agent_task_from_command(&command, agent_task_run_id.as_deref());
-    runner_workload.required_extensions = runner_required_extensions.clone();
-    runner_workload.required_secrets.secret_env_plan = secret_env_handoff.secret_env_plan.clone();
+    lab_runner_workload.agent_task =
+        lab_runner_workload_agent_task_from_command(&command, agent_task_run_id.as_deref());
+    lab_runner_workload.required_extensions = runner_required_extensions.clone();
+    lab_runner_workload.required_secrets.secret_env_plan =
+        secret_env_handoff.secret_env_plan.clone();
     lab_metadata["runner_workload"] =
-        serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
+        serde_json::to_value(&lab_runner_workload).unwrap_or(serde_json::json!(null));
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
     lab_metadata["declared_dependency_paths_env"] = declared_dependency_paths_env;
     lab_metadata["rig_component_path_overrides"] =
@@ -1462,7 +1463,7 @@ pub(crate) fn run_lab_offload_inner(
         accepted_extension_settings,
         secret_preflight_args: changed_since_preflight.args,
         agent_task_run_id,
-        runner_workload: Some(runner_workload),
+        lab_runner_workload: Some(lab_runner_workload),
         lab_metadata,
         env_resolution_layers: vec![
             LabEnvResolutionLayer {

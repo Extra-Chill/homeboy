@@ -31,7 +31,7 @@ use homeboy_core::api_jobs::JobEventKind;
 use homeboy_core::artifact_manifest::ArtifactManifest;
 use homeboy_core::engine::local_files::write_file_owner_only;
 use homeboy_core::lab_contract::{
-    RunnerWorkloadAgentTask, RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
+    LabRunnerWorkloadAgentTask, LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy,
 };
 use homeboy_core::notification_route::NotificationRoute;
 use homeboy_core::{Error, Result};
@@ -124,7 +124,7 @@ fn write_private_remapped_agent_task_plan(path: &std::path::Path, contents: &str
 
 pub(super) fn mirror_agent_task_run_plan_lifecycle(
     args: &[String],
-    agent_task: Option<&RunnerWorkloadAgentTask>,
+    agent_task: Option<&LabRunnerWorkloadAgentTask>,
     notification_route: Option<&NotificationRoute>,
     stdout: &str,
     output_file_content: Option<&str>,
@@ -148,12 +148,12 @@ pub(super) fn mirror_agent_task_run_plan_lifecycle(
 }
 
 fn mirror_typed_agent_task_run_plan_lifecycle(
-    agent_task: &RunnerWorkloadAgentTask,
+    agent_task: &LabRunnerWorkloadAgentTask,
     notification_route: Option<&NotificationRoute>,
     job_events: Option<&[JobEvent]>,
 ) -> Result<()> {
     if agent_task.lifecycle_mirror_policy
-        != RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate
+        != LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate
     {
         return Ok(());
     }
@@ -1039,12 +1039,14 @@ mod tests {
         ];
         let stdout = "{\"success\":true,\"data\":{\"command\":\"extension.setup\"}}";
 
-        let agent_task = RunnerWorkloadAgentTask {
+        let agent_task = LabRunnerWorkloadAgentTask {
             run_id: "run-typed-no-event".to_string(),
             plan_ref: Some("@/tmp/plan.json".to_string()),
             resolved_provider_policy: None,
-            dispatch_kind: homeboy_core::lab_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
-            lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+            dispatch_kind:
+                homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
+            lifecycle_mirror_policy:
+                LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
         };
 
         mirror_agent_task_run_plan_lifecycle(&args, Some(&agent_task), None, stdout, None, None)
@@ -1061,14 +1063,14 @@ mod tests {
                 r#"{"schema":"homeboy/agent-task-plan/v1","plan_id":"plan-typed","tasks":[]}"#,
             )
             .expect("write plan");
-            let agent_task = RunnerWorkloadAgentTask {
+            let agent_task = LabRunnerWorkloadAgentTask {
                 run_id: "run-typed-workload".to_string(),
                 plan_ref: Some(format!("@{}", plan_path.display())),
                 resolved_provider_policy: None,
                 dispatch_kind:
-                    homeboy_core::lab_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
+                    homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
-                    RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+                    LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
             };
             let events = vec![JobEvent {
                 sequence: 1,
@@ -1118,14 +1120,14 @@ mod tests {
                 r#"{"schema":"homeboy/agent-task-plan/v1","plan_id":"plan-noop","tasks":[]}"#,
             )
             .expect("write plan");
-            let agent_task = RunnerWorkloadAgentTask {
+            let agent_task = LabRunnerWorkloadAgentTask {
                 run_id: "run-completed-noop".to_string(),
                 plan_ref: Some(format!("@{}", plan_path.display())),
                 resolved_provider_policy: None,
                 dispatch_kind:
-                    homeboy_core::lab_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
+                    homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
-                    RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+                    LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
             };
             let events = vec![JobEvent {
                 sequence: 1,
@@ -1240,7 +1242,7 @@ mod tests {
                 serde_json::to_vec(&plan).expect("serialize remapped plan"),
             )
             .expect("write remapped plan");
-            let agent_task = RunnerWorkloadAgentTask {
+            let agent_task = LabRunnerWorkloadAgentTask {
                 run_id: "run-remapped-model".to_string(),
                 plan_ref: Some(format!("@{}", plan_path.display())),
                 resolved_provider_policy: Some(
@@ -1256,9 +1258,9 @@ mod tests {
                     },
                 ),
                 dispatch_kind:
-                    homeboy_core::lab_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
+                    homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
-                    RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+                    LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
             };
             let events = vec![JobEvent {
                 sequence: 1,
