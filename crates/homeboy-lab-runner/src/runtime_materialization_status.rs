@@ -1,7 +1,5 @@
 use serde::Serialize;
 
-use homeboy_core::build_identity;
-
 use super::session::{RunnerSession, RunnerStatusReport};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -48,7 +46,7 @@ impl RuntimeMaterializationStatus {
         configured_executable: &str,
         status: &RunnerStatusReport,
     ) -> Self {
-        let controller = build_identity::current();
+        let controller = homeboy_product_identity::build_identity();
         let active_daemon_version = status
             .session
             .as_ref()
@@ -201,6 +199,12 @@ mod tests {
             Some(homeboy_product_identity::product_version())
         );
         assert_eq!(status.stale_daemon_hint(), None);
+        assert!(!status.has_drift());
+        assert_ne!(
+            env!("CARGO_PKG_VERSION"),
+            homeboy_product_identity::product_version(),
+            "the runner crate's internal package version must not become a compatibility version"
+        );
     }
 
     #[test]

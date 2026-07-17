@@ -205,6 +205,10 @@ fn stale_daemon_warning_includes_explicit_refresh_recovery_command() {
             homeboy_product_identity::product_version()
         )]
     );
+    assert_ne!(
+        warning.refresh_command,
+        "homeboy runner refresh-homeboy homeboy-lab --ref v0.1.0 --reconnect"
+    );
 }
 
 #[test]

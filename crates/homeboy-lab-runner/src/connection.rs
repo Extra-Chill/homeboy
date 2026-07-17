@@ -631,7 +631,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
 
     let runner = load(&options.runner_id)?;
     let session_path = session_path(&runner.id)?;
-    let homeboy_identity = homeboy_core::build_identity::current();
+    let homeboy_identity = homeboy_product_identity::build_identity();
     let homeboy_version = homeboy_identity.version.clone();
     let now = Utc::now().to_rfc3339();
     let session = RunnerSession {

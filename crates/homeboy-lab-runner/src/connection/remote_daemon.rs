@@ -371,7 +371,7 @@ pub(super) fn remote_daemon_connect_action(
     remote_daemon_connect_action_with_controller_identity(
         previous_session,
         status,
-        &homeboy_core::build_identity::current().display,
+        &homeboy_product_identity::build_identity().display,
     )
 }
 

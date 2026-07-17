@@ -1028,7 +1028,7 @@ fn runner_exec_homeboy_binaries(
     runner: &Runner,
     session: Option<&RunnerSession>,
 ) -> RunnerExecHomeboyBinaries {
-    let controller_identity = homeboy_core::build_identity::current();
+    let controller_identity = homeboy_product_identity::build_identity();
     let configured_executable = match runner.kind {
         RunnerKind::Local => Some(
             runner
