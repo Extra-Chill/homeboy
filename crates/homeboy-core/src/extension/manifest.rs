@@ -24,10 +24,10 @@ use std::path::PathBuf;
 
 // Keep broad manifest wiring here while leaf config structs live in focused files.
 pub use super::manifest_config::{
-    AutofixVerifyConfig, FuzzConfig, FuzzWorkloadConfig, TraceBrowserArtifactMapConfig,
-    TraceBrowserEvidenceAdapterConfig, TraceBrowserMetricAliasConfig,
-    TraceBrowserSummaryAliasConfig, TraceConfig,
+    AutofixVerifyConfig, TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
+    TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
 };
+pub use homeboy_extension_contract::fuzz_config::{FuzzConfig, FuzzWorkloadConfig};
 pub use homeboy_extension_contract::manifest_action_config::{
     ActionConfig, InputConfig, RuntimeConfig, SelectOption, SettingConfig,
 };

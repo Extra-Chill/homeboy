@@ -902,6 +902,7 @@ dependencies = [
  "homeboy-audit-contract",
  "homeboy-engine-primitives",
  "homeboy-error",
+ "homeboy-lifecycle-contract",
  "homeboy-product-identity",
  "semver",
  "serde",
