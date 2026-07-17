@@ -91,14 +91,25 @@ pub fn record_pre_execution_failure(
         },
     };
     let mut failed_record = record_aggregate(&mut record, plan, &aggregate)?;
+    let runner_id = failed_record.runner_id().map(str::to_string);
     let metadata = failed_record.ensure_metadata_object();
     metadata.insert(
         "pre_execution_failure".to_string(),
         json!({
             "phase": phase,
             "error_code": error.code.as_str(),
+            "failure_code": error.details.get("field").cloned().unwrap_or_else(|| json!(error.code.as_str())),
             "message": error.message,
+            "details": error.details.clone(),
             "hints": error.hints.iter().map(|hint| hint.message.as_str()).collect::<Vec<_>>(),
+            "provider_executions_consumed": 0,
+            "controller_identity": crate::build_identity::current().display,
+            "runner_id": runner_id,
+            "task_linkage": plan.tasks.iter().map(|task| json!({
+                "task_id": task.task_id,
+                "workspace": task.workspace,
+                "source_refs": task.source_refs,
+            })).collect::<Vec<_>>(),
         }),
     );
     store::write_record(&failed_record)?;

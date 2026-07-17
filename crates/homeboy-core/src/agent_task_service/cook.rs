@@ -1692,6 +1692,34 @@ mod tests {
         fail: bool,
     }
 
+    #[derive(Debug)]
+    struct AdmissionFailingAttemptDispatcher {
+        message: &'static str,
+    }
+
+    impl AgentTaskCookAttemptDispatcher for AdmissionFailingAttemptDispatcher {
+        fn durable_recipe(&self) -> Result<Value> {
+            Ok(serde_json::json!({ "kind": "test-admission-failure" }))
+        }
+
+        fn dispatch_attempt(
+            &self,
+            plan: AgentTaskPlan,
+            run_id: &str,
+            _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+        ) -> Result<()> {
+            agent_task_lifecycle::submit_plan_with_runtime_admission(&plan, Some(run_id), || {
+                Err::<Value, _>(Error::validation_invalid_argument(
+                    "controller_admission",
+                    self.message,
+                    Some("fixture controller diagnostics".to_string()),
+                    None,
+                ))
+            })?;
+            Ok(())
+        }
+    }
+
     impl AgentTaskCookAttemptDispatcher for BatchAttemptDispatcher {
         fn durable_recipe(&self) -> Result<Value> {
             Ok(serde_json::json!({ "kind": "test-batch" }))
@@ -1782,6 +1810,111 @@ mod tests {
             attempt_dispatcher: Some(dispatcher),
             harvest_context: Default::default(),
         }
+    }
+
+    #[test]
+    fn cook_persists_controller_admission_timeout_before_provider_execution() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-admission-timeout";
+            let run_id = "cook-admission-timeout-attempt-1";
+            let mut options = batch_cook_options(
+                cook_id,
+                Arc::new(AdmissionFailingAttemptDispatcher {
+                    message: "timed out waiting for controller generation admission",
+                }),
+            );
+            options.provider_command = Some("fixture-provider".to_string());
+            let result = run_cook(
+                AgentTaskCookServiceOptions {
+                    initial_run_id: run_id.to_string(),
+                    ..options
+                },
+                UnusedExecutor,
+            )
+            .expect("cook returns the persisted dispatch failure");
+
+            assert_eq!(result.exit_code, 1);
+            assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id));
+            assert_eq!(result.value.history_run_ids, vec![run_id]);
+            let record =
+                agent_task_lifecycle::status(run_id).expect("returned attempt is resolvable");
+            let logs =
+                agent_task_lifecycle::logs(run_id).expect("failed attempt logs are resolvable");
+            let retry = agent_task_lifecycle::retry(run_id, Some("cook-admission-timeout-retry"))
+                .expect("failed admission attempt is retryable");
+
+            assert_eq!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert!(record.provider_handles.is_empty());
+            assert_eq!(record.metadata["provider_executions_consumed"], 0);
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["phase"],
+                "controller_admission"
+            );
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["failure_code"],
+                "controller_admission"
+            );
+            assert!(record.metadata["pre_execution_failure"]["message"]
+                .as_str()
+                .expect("failure message")
+                .contains("timed out waiting for controller generation admission"));
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["details"]["id"],
+                "fixture controller diagnostics"
+            );
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["provider_executions_consumed"],
+                0
+            );
+            assert_eq!(
+                logs.events.last().map(|event| event.state),
+                Some(AgentTaskState::Failed)
+            );
+            assert_eq!(retry.metadata["retry_of"], run_id);
+            assert_eq!(
+                retry.metadata["retry_origin"]["pre_execution_failure"]["phase"],
+                "controller_admission"
+            );
+        });
+    }
+
+    #[test]
+    fn cook_persists_controller_runtime_mismatch_before_provider_execution() {
+        crate::test_support::with_isolated_home(|_| {
+            let run_id = "cook-runtime-mismatch-attempt-1";
+            let mut options = batch_cook_options(
+                "cook-runtime-mismatch",
+                Arc::new(AdmissionFailingAttemptDispatcher {
+                    message: "pinned controller executable hash mismatch: expected fixture, found replacement",
+                }),
+            );
+            options.provider_command = Some("fixture-provider".to_string());
+            let result = run_cook(
+                AgentTaskCookServiceOptions {
+                    initial_run_id: run_id.to_string(),
+                    ..options
+                },
+                UnusedExecutor,
+            )
+            .expect("cook returns the persisted runtime mismatch");
+
+            let record =
+                agent_task_lifecycle::status(run_id).expect("runtime mismatch attempt exists");
+            assert_eq!(result.exit_code, 1);
+            assert_eq!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert!(record.provider_handles.is_empty());
+            assert_eq!(record.metadata["provider_executions_consumed"], 0);
+            assert!(record.metadata["pre_execution_failure"]["message"]
+                .as_str()
+                .expect("failure message")
+                .contains("hash mismatch"));
+        });
     }
 
     #[test]
