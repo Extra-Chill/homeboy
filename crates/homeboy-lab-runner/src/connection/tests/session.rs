@@ -631,6 +631,25 @@ fn test_open_loopback_tunnel_noops_for_local_runner() {
     assert_eq!(tunnel.stderr, "");
 }
 
+#[cfg(unix)]
+#[test]
+fn direct_ssh_tunnel_process_isolated_from_cook_command_cleanup() {
+    let mut command = std::process::Command::new("sh");
+    command.args(["-c", "sleep 60"]);
+    let mut tunnel = super::super::remote_daemon::spawn_tunnel_process(&mut command)
+        .expect("spawn tunnel process");
+    let pid = tunnel.id() as libc::pid_t;
+
+    unsafe {
+        assert_eq!(libc::getpgid(pid), pid);
+        assert_ne!(libc::getpgid(0), pid);
+    }
+    assert!(homeboy_core::process::pid_is_running(tunnel.id()));
+
+    super::terminate_pid(tunnel.id());
+    let _ = tunnel.wait();
+}
+
 #[test]
 fn connect_reports_local_runner_as_unsupported() {
     test_support::with_isolated_home(|_| {
