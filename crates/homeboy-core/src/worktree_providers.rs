@@ -468,7 +468,7 @@ fn validate_provider_handle(
     let verified_gate_feedback_baseline = worktree.safety.dirty
         && gate_feedback_baseline
             .map(|baseline| {
-                crate::agent_task_candidate_baseline::validate_gate_feedback_candidate_baseline(
+                crate::gate_feedback_baseline::validate_gate_feedback_candidate_baseline(
                     &path, baseline,
                 )
             })

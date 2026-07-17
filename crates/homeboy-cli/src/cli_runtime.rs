@@ -176,6 +176,11 @@ impl CliRuntime {
         // can validate a materialized agent-task loop-spec artifact without
         // depending on the agent-task subsystem.
         crate::core::agent_task_controller_service::loop_spec_validation_provider::register();
+        // Register the gate-feedback candidate-baseline provider so core's
+        // worktree-safety logic can accept a dirty worktree that is a verified
+        // agent-task gate-feedback candidate without depending on the agent-task
+        // subsystem.
+        crate::core::agent_task_candidate_baseline::register();
         // Register the command-label resolver so core::runner can map dispatched
         // argv to a hot-command label without depending on the full CLI parser.
         crate::runner::set_command_label_resolver(|argv| {
