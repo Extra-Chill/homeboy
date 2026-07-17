@@ -110,13 +110,22 @@ pub(crate) fn github_release_asset_paths(state: &ReleaseState) -> Result<Vec<Str
         .filter(|path| !path_is_file(path))
         .map(|path| release_asset_name(path))
         .collect::<Vec<_>>();
-    if missing.is_empty() {
-        Ok(paths)
-    } else {
+    if !missing.is_empty() {
         Err(format!(
             "release assets declared by dist-manifest.json are missing: {}. Run the package step again, then resume with `homeboy release --head --from-artifacts <artifact-dir>`.",
             missing.join(", ")
         ))
+    } else if let Some(path) = paths.iter().find(|path| {
+        std::fs::metadata(path)
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(false)
+    }) {
+        Err(format!(
+            "release asset '{}' is empty",
+            release_asset_name(path)
+        ))
+    } else {
+        Ok(paths)
     }
 }
 
@@ -520,6 +529,28 @@ mod tests {
                 manifest.display().to_string(),
                 archive.display().to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn release_assets_reject_zero_byte_external_artifacts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = dir.path().join("homeboy-x86_64-unknown-linux-gnu.tar.xz");
+        std::fs::write(&archive, []).expect("write empty archive");
+        let state = ReleaseState {
+            artifacts: vec![crate::release::types::ReleaseArtifact {
+                path: archive.display().to_string(),
+                durable_path: None,
+                artifact_type: None,
+                platform: None,
+            }],
+            ..ReleaseState::default()
+        };
+
+        let error = github_release_asset_paths(&state).expect_err("empty archive");
+        assert_eq!(
+            error,
+            "release asset 'homeboy-x86_64-unknown-linux-gnu.tar.xz' is empty"
         );
     }
 
