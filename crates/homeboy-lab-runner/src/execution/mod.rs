@@ -811,10 +811,7 @@ pub(crate) fn exec_with_status_snapshot(
     }
 
     let connected = execution_status(runner_id, status_snapshot)?;
-    if connected.connected
-        && connected.stale_daemon.is_some()
-        && !allows_idle_stale_daemon_refresh(&options, &connected)
-    {
+    if refuses_stale_daemon_execution(&options, &connected) {
         return Err(Error::validation_invalid_argument(
             "runner",
             format!(
@@ -925,6 +922,21 @@ fn allows_idle_stale_daemon_refresh(
                 && status.active_job_count == 0
                 && status.active_jobs.is_empty()
                 && status.active_job_error.is_none()))
+}
+
+fn refuses_stale_daemon_execution(
+    options: &RunnerExecOptions,
+    status: &RunnerStatusReport,
+) -> bool {
+    status.connected
+        && status.stale_daemon.is_some()
+        // The live daemon probe is authoritative over a controller-scoped
+        // session projection. Missing or stale evidence remains fail-closed.
+        && !status
+            .daemon_freshness
+            .as_ref()
+            .is_some_and(|freshness| freshness.fresh)
+        && !allows_idle_stale_daemon_refresh(options, status)
 }
 
 fn apply_explicit_runner_exec_run_id_env(

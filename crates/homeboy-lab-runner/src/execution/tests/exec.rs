@@ -43,6 +43,29 @@ fn explicit_refresh_keeps_active_or_uncertain_stale_daemons_protected() {
 }
 
 #[test]
+fn runner_exec_accepts_a_fresh_daemon_when_a_scoped_session_projection_is_stale() {
+    let mut status = stale_direct_daemon_status();
+    status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
+        fresh: true,
+        stale_reason_code: None,
+        ..authoritative_drained_freshness()
+    });
+
+    assert!(!refuses_stale_daemon_execution(
+        &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
+        &status,
+    ));
+}
+
+#[test]
+fn runner_exec_keeps_stale_session_projections_fail_closed_without_fresh_daemon_evidence() {
+    assert!(refuses_stale_daemon_execution(
+        &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
+        &stale_direct_daemon_status(),
+    ));
+}
+
+#[test]
 fn refresh_execution_uses_the_connected_preflight_session_without_a_second_lookup() {
     let mut status = stale_direct_daemon_status();
     status.session = Some(RunnerSession {
