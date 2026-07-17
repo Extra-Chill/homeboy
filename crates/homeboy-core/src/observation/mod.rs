@@ -20,7 +20,7 @@ mod run_failure_causes;
 pub mod runs_service;
 pub mod store;
 mod test_findings;
-pub mod timeline;
+pub use homeboy_lifecycle_contract::timeline;
 
 pub use lifecycle::{
     finish_run_best_effort, merge_metadata, run_has_active_remote_job, run_owner_pid,
@@ -37,6 +37,10 @@ pub use loop_inventory_run::persist_loop_inventory_run;
 pub use crate::notification_route::NotificationRoute;
 pub use budget_findings::finding_records_from_budget;
 pub use context::{RunContext, RunProvenance};
+pub use homeboy_lifecycle_contract::timeline::{
+    ObservationEvent, ObservationPhaseMilestone, ObservationSpanDefinition, ObservationSpanResult,
+    ObservationSpanStatus,
+};
 pub use observed_workflow::{
     finish_adapted_observed_workflow, finish_observed_workflow, ObservationPersistenceWarning,
     ObservedWorkflowRunner, WorkflowObservationAdapter,
@@ -59,8 +63,4 @@ pub use store::{
 pub use test_findings::{
     finding_records_from_failure_clusters, finding_records_from_test_analysis_input,
     homeboy_findings_from_test_analysis_input,
-};
-pub use timeline::{
-    ObservationEvent, ObservationPhaseMilestone, ObservationSpanDefinition, ObservationSpanResult,
-    ObservationSpanStatus,
 };
