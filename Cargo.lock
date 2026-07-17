@@ -739,6 +739,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-agents"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "fs4",
+ "glob",
+ "homeboy-core",
+ "homeboy-error",
+ "homeboy-lab-contract",
+ "homeboy-lab-runner-contract",
+ "libc",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shellexpand",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "homeboy-audit-contract"
 version = "0.1.0"
 dependencies = [
