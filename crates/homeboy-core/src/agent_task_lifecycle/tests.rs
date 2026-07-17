@@ -631,6 +631,55 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
 }
 
 #[test]
+fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
+    with_isolated_home(|_| {
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "expired-handoff-late-acceptance",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("controller proxy recorded before handoff");
+        rewrite_record_for_test("expired-handoff-late-acceptance", |record| {
+            record.metadata["handoff_acceptance"]["deadline_at"] =
+                json!("2000-01-01T00:00:00+00:00");
+        })
+        .expect("expire acceptance deadline");
+
+        let expired = status("expired-handoff-late-acceptance")
+            .expect("status reconciles the expired controller proxy");
+        assert_eq!(expired.state, AgentTaskRunState::Cancelled);
+        assert_eq!(expired.metadata["handoff_acceptance"]["state"], "expired");
+        assert_eq!(expired.metadata["retryable"], true);
+
+        let accepted = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "expired-handoff-late-acceptance",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-accepted-after-deadline",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("late acceptance supersedes only the synthetic expiry cancellation");
+        assert_eq!(accepted.state, AgentTaskRunState::Running);
+        assert_eq!(accepted.metadata["handoff_acceptance"]["state"], "accepted");
+        assert_eq!(
+            accepted.metadata["runner_job_id"],
+            "job-accepted-after-deadline"
+        );
+        assert_eq!(
+            accepted.metadata["runner_execution_record"]["status"],
+            "running"
+        );
+    });
+}
+
+#[test]
 fn detached_cook_attempt_proxy_advances_after_daemon_acceptance() {
     with_isolated_home(|_| {
         let command = vec![

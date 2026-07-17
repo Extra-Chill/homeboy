@@ -3,6 +3,8 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 
 const LAB_HANDOFF_ACCEPTANCE_TIMEOUT_SECONDS: i64 = 120;
+const EXPIRED_LAB_HANDOFF_REASON: &str =
+    "runner handoff acceptance deadline expired before a runner job was recorded";
 
 fn lab_handoff_acceptance_timeout_seconds() -> i64 {
     std::env::var("HOMEBOY_TEST_LAB_HANDOFF_ACCEPTANCE_TIMEOUT_SECONDS")
@@ -190,6 +192,41 @@ fn candidate_artifact_url(run_id: &str, task_id: &str, artifact_id: &str) -> Str
 struct DeferredCandidateLock {
     #[allow(dead_code)] // Retains the advisory lock until this guard drops.
     file: File,
+}
+
+struct LabHandoffLock {
+    // Retains the advisory lock until acceptance or expiry has been persisted.
+    #[allow(dead_code)]
+    file: File,
+}
+
+impl LabHandoffLock {
+    fn lock(run_id: &str) -> Result<Self> {
+        let lock_path = paths::homeboy_data()?
+            .join("agent-task-runs")
+            .join(run_id)
+            .join("lab-handoff.lock");
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| Error::internal_io(error.to_string(), None))?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some("open Lab handoff lock".to_string()))
+            })?;
+        #[cfg(unix)]
+        if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) } != 0 {
+            return Err(Error::internal_io(
+                std::io::Error::last_os_error().to_string(),
+                Some("lock Lab handoff".to_string()),
+            ));
+        }
+        Ok(Self { file })
+    }
 }
 impl DeferredCandidateLock {
     #[cfg(unix)]
@@ -558,6 +595,10 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let resolved_run_id = resolve_run_id(run_id)?;
     let _ = reconcile_deferred_candidate(&resolved_run_id)?;
     let mut record = store::read_record(&resolved_run_id)?;
+    if is_expired_unaccepted_lab_handoff(&record, chrono::Utc::now()) {
+        let _ = expire_unaccepted_lab_handoff(&resolved_run_id)?;
+        record = store::read_record(&resolved_run_id)?;
+    }
     let controller_plan = store::read_controller_plan(&record.run_id)?;
     let controller_plan_path = store::controller_plan_path(&record.run_id)?
         .display()
@@ -690,21 +731,35 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     Ok(record)
 }
 
-/// Refresh every accepted runner handoff before a read model (such as activity)
-/// projects lifecycle state. A controller wait expiry is not terminal: the
-/// runner daemon remains the authority until it reports a terminal job result.
+/// Refresh accepted runner handoffs and expire unbound controller handoffs before
+/// a read model (such as activity) projects lifecycle state. A controller wait
+/// expiry is not terminal after a runner job is recorded: the runner daemon
+/// remains the authority until it reports a terminal job result.
 pub fn reconcile_active_runner_handoffs() -> Result<usize> {
-    let run_ids = list_records()?
-        .into_iter()
-        .filter(|record| {
-            record.state == AgentTaskRunState::Running
-                && record.runner_id().is_some()
-                && record.runner_job_id().is_some()
-        })
-        .map(|record| record.run_id)
-        .collect::<Vec<_>>();
+    let now = chrono::Utc::now();
+    let mut accepted_run_ids = Vec::new();
+    let mut expired_run_ids = Vec::new();
+    // Scan the stored snapshot so this operation owns and reports its expiry
+    // mutations. `list_records` refreshes through `status`, which also expires
+    // pending handoffs as a user-visible read-side convergence guarantee.
+    for record in store::read_records()? {
+        if record.state == AgentTaskRunState::Running
+            && record.runner_id().is_some()
+            && record.runner_job_id().is_some()
+        {
+            accepted_run_ids.push(record.run_id);
+        } else if is_expired_unaccepted_lab_handoff(&record, now) {
+            expired_run_ids.push(record.run_id);
+        }
+    }
+
     let mut reconciled = 0;
-    for run_id in run_ids {
+    for run_id in expired_run_ids {
+        if expire_unaccepted_lab_handoff(&run_id)? {
+            reconciled += 1;
+        }
+    }
+    for run_id in accepted_run_ids {
         // `status` owns snapshot validation, persistence, and the exact
         // no-PID daemon-loss projection. A bad remote record must not prevent
         // unrelated activity from being listed.
@@ -713,6 +768,72 @@ pub fn reconcile_active_runner_handoffs() -> Result<usize> {
         }
     }
     Ok(reconciled)
+}
+
+fn is_expired_unaccepted_lab_handoff(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    record.state == AgentTaskRunState::Queued
+        && record.runner_id().is_some()
+        && record.runner_job_id().is_none()
+        && record
+            .metadata
+            .get("lifecycle_store_owner")
+            .and_then(Value::as_str)
+            == Some("controller")
+        && record
+            .metadata
+            .get("handoff_acceptance")
+            .filter(|acceptance| acceptance.get("state").and_then(Value::as_str) == Some("pending"))
+            .and_then(|acceptance| acceptance.get("deadline_at").and_then(Value::as_str))
+            .and_then(|deadline| chrono::DateTime::parse_from_rfc3339(deadline).ok())
+            .is_some_and(|deadline| deadline.with_timezone(&chrono::Utc) <= now)
+}
+
+fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
+    let _lock = LabHandoffLock::lock(run_id)?;
+    // Re-read while holding the handoff lock: an accepted job is runner-owned
+    // and must never be terminalized by controller deadline recovery.
+    let record = store::read_record(run_id)?;
+    if !is_expired_unaccepted_lab_handoff(&record, chrono::Utc::now()) {
+        return Ok(false);
+    }
+
+    let mut record = cancel_run(run_id, Some(EXPIRED_LAB_HANDOFF_REASON))?;
+    let expired_at = now_timestamp();
+    let record_run_id = record.run_id.clone();
+    let runner_id = record.runner_id().unwrap_or_default().to_string();
+    let metadata = record.ensure_metadata_object();
+    metadata.insert(
+        "handoff_acceptance".to_string(),
+        json!({
+            "state": "expired",
+            "expired_at": expired_at,
+            "reason": EXPIRED_LAB_HANDOFF_REASON,
+        }),
+    );
+    metadata.insert("phase".to_string(), json!("handoff_rejected"));
+    metadata.insert(
+        "phase_activity".to_string(),
+        json!("runner handoff acceptance deadline expired before runner acceptance"),
+    );
+    metadata.insert("retryable".to_string(), json!(true));
+    metadata.insert(
+        "runner_execution_record".to_string(),
+        serde_json::to_value(
+            crate::runner_execution_envelope::RunnerExecutionRecord::terminal(
+                &record_run_id,
+                runner_id,
+                "daemon",
+                1,
+            )
+            .with_agent_task_run_id(record_run_id),
+        )
+        .unwrap_or(Value::Null),
+    );
+    store::write_record(&record)?;
+    Ok(true)
 }
 
 fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) -> Result<()> {
@@ -1621,6 +1742,7 @@ fn record_lab_offload_phase_metadata(
 
 pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(input.run_id);
+    let _lock = LabHandoffLock::lock(&run_id)?;
     let plan = detached_lab_plan(&run_id, &input);
     let mut record = match store::read_record(&run_id) {
         Ok(record) => record,
@@ -1635,14 +1757,24 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
         }
         Err(error) => return Err(error),
     };
-    if matches!(
-        record.state,
-        AgentTaskRunState::Succeeded
-            | AgentTaskRunState::PartialRecoverable
-            | AgentTaskRunState::PartialFailure
-            | AgentTaskRunState::Failed
-            | AgentTaskRunState::Cancelled
-    ) {
+    let expired_unaccepted_handoff = record.state == AgentTaskRunState::Cancelled
+        && record.runner_id() == Some(input.runner_id)
+        && record
+            .metadata
+            .get("handoff_acceptance")
+            .and_then(|acceptance| acceptance.get("state"))
+            .and_then(Value::as_str)
+            == Some("expired");
+    if !expired_unaccepted_handoff
+        && matches!(
+            record.state,
+            AgentTaskRunState::Succeeded
+                | AgentTaskRunState::PartialRecoverable
+                | AgentTaskRunState::PartialFailure
+                | AgentTaskRunState::Failed
+                | AgentTaskRunState::Cancelled
+        )
+    {
         // A terminal proxy must not be resurrected. A later runner job may
         // attach finalized evidence, but only from the original Lab runner.
         if record.runner_id() == Some(input.runner_id) {
