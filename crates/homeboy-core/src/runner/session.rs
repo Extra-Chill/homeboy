@@ -589,11 +589,12 @@ impl RunnerStaleDaemonWarning {
         self.stale_runtime_paths = stale_runtime_paths;
         self.changed_runtime_paths = changed_runtime_paths;
         if !self.stale_runtime_paths.is_empty() || !self.changed_runtime_paths.is_empty() {
-            self.message = "connected runner daemon runtime paths are stale; run recovery_commands in order to restart the active daemon after runner-side rebuilds or path changes".to_string();
-            self.recovery_commands = vec![
-                format!("homeboy runner disconnect {}", runner_id),
-                format!("homeboy runner connect {}", runner_id),
-            ];
+            self.message = "connected runner daemon runtime paths are stale; run recovery_commands after active jobs are drained to replace the active daemon with the configured runtime paths".to_string();
+            self.recovery_commands = vec![format!(
+                "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
+                shell::quote_arg(runner_id),
+                homeboy_product_identity::product_version()
+            )];
         }
         self
     }

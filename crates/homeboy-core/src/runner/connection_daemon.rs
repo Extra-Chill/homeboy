@@ -402,7 +402,9 @@ fn daemon_freshness_report(
     Ok(DaemonFreshnessReport {
         fresh: mismatch.is_none(),
         stale_reason_code: mismatch.map(|_| DaemonStaleReasonCode::VersionMismatch),
-        restartable: true,
+        // A legacy version response has no daemon-owned job count, so it cannot
+        // authorize replacement while the typed job endpoint is unavailable.
+        restartable: false,
         lease_id: daemon_lease_id_from_body(&body).map(ToString::to_string),
         pid: None,
         recovery_evidence: None,

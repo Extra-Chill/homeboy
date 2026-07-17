@@ -198,7 +198,10 @@ fn lab_runner_preparation_falls_back_for_stale_default_runtime_paths() {
     assert_eq!(
         prepared,
         LabRunnerPreparation::FallBackLocal {
-            reason: "connected runner `lab` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `homeboy runner disconnect lab && homeboy runner connect lab`".to_string()
+            reason: format!(
+                "connected runner `lab` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `homeboy runner refresh-homeboy lab --ref v{} --reconnect`",
+                homeboy_product_identity::product_version()
+            )
         }
     );
 }
@@ -245,7 +248,7 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
     assert!(err.message.contains("homeboy 0.219.0"));
     assert!(err
         .message
-        .contains("homeboy runner disconnect lab && homeboy runner connect lab"));
+        .contains("homeboy runner refresh-homeboy lab --ref v"));
     assert!(err
         .message
         .contains("malformed or misleading provider output"));
@@ -257,8 +260,7 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
         .flatten()
         .any(|suggestion| suggestion
             .as_str()
-            .is_some_and(|value| value
-                .contains("homeboy runner disconnect lab && homeboy runner connect lab"))));
+            .is_some_and(|value| value.contains("homeboy runner refresh-homeboy lab --ref v"))));
 }
 
 #[test]

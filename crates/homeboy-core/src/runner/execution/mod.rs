@@ -809,7 +809,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
             ),
             Some(runner_id.to_string()),
             Some(vec![format!(
-                "Drain or recover known jobs. An explicit `homeboy runner refresh-homeboy {runner_id} --ref <version> --reconnect` can rotate this daemon only after `homeboy runner status {runner_id}` reports `active_job_count: 0` and `active_job_state: available`."
+                "Drain or recover known jobs. An explicit `homeboy runner refresh-homeboy {runner_id} --ref <version> --reconnect` can rotate this daemon only after `homeboy runner status {runner_id}` reports an authoritative zero active-job count."
             )]),
         ));
     }
@@ -892,17 +892,19 @@ fn allows_idle_stale_daemon_refresh(
     options: &RunnerExecOptions,
     status: &RunnerStatusReport,
 ) -> bool {
-    // A refresh replaces the daemon immediately after this command. Require both
-    // a successful /jobs poll and the daemon's authoritative zero-job count.
+    // A refresh replaces the daemon immediately after this command. A successful
+    // typed /jobs poll or the daemon's restartable freshness report may prove it
+    // is drained; every other state remains fail-closed.
     options
         .capability_preflight
         .as_ref()
         .is_some_and(|preflight| preflight.command == "runner.refresh-homeboy")
-        && status.active_job_state == RunnerActiveJobState::Available
-        && status.active_job_source == Some(RunnerActiveJobSource::DirectDaemon)
-        && status.active_job_count == 0
-        && status.active_jobs.is_empty()
-        && status.active_job_error.is_none()
+        && (crate::runner::connection::authoritative_zero_active_jobs(status)
+            || (status.active_job_state == RunnerActiveJobState::Available
+                && status.active_job_source == Some(RunnerActiveJobSource::DirectDaemon)
+                && status.active_job_count == 0
+                && status.active_jobs.is_empty()
+                && status.active_job_error.is_none()))
 }
 
 fn apply_explicit_runner_exec_run_id_env(

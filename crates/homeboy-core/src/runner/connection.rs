@@ -842,6 +842,9 @@ pub(super) fn active_jobs_before_daemon_replacement(
     if !report.connected {
         return Ok(Vec::new());
     }
+    if authoritative_zero_active_jobs(&report) {
+        return Ok(Vec::new());
+    }
     if report.active_job_state != RunnerActiveJobState::Available {
         let mut error = Error::validation_invalid_argument(
             "reconnect",
@@ -854,7 +857,27 @@ pub(super) fn active_jobs_before_daemon_replacement(
         error.details["active_job_state"] = serde_json::json!(report.active_job_state);
         return Err(error);
     }
+    if let Some(error) = &report.active_job_error {
+        return Err(Error::validation_invalid_argument(
+            "reconnect",
+            format!(
+                "runner `{runner_id}` has an inconsistent active daemon job view ({}); refusing to replace the daemon",
+                error.message
+            ),
+            Some(runner_id.to_string()),
+            Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
+        ));
+    }
     Ok(report.active_jobs)
+}
+
+/// A daemon freshness report is the daemon's own job count. Only a restartable
+/// daemon which reports zero jobs can replace an unavailable typed `/jobs` view.
+pub(crate) fn authoritative_zero_active_jobs(report: &RunnerStatusReport) -> bool {
+    report
+        .daemon_freshness
+        .as_ref()
+        .is_some_and(|freshness| freshness.restartable && freshness.active_jobs == 0)
 }
 
 fn runner_daemon_freshness(
