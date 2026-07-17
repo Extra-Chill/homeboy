@@ -5,6 +5,9 @@ use super::workload::LabRunnerWorkloadCapability;
 pub const LAB_CAPABILITY_PLAYWRIGHT: &str = "playwright";
 pub const LAB_TRACE_EXTRA_CAPABILITIES: &[&str] = &[LAB_CAPABILITY_PLAYWRIGHT];
 pub const LAB_NO_SECRET_ENV_SOURCES: &[LabSecretEnvSource] = &[];
+/// Runner identity retained by a child already executing on Lab. Unlike the
+/// controller transport marker, consumers must treat this as provenance only.
+pub const LAB_EXECUTION_RUNNER_ID_ENV: &str = "HOMEBOY_LAB_EXECUTION_RUNNER_ID";
 pub const LAB_NO_EXTRA_CAPABILITIES: &[&str] = &[];
 pub const LAB_AGENT_TASK_SECRET_ENV_SOURCES: &[LabSecretEnvSource] =
     &[LabSecretEnvSource::AgentTask];

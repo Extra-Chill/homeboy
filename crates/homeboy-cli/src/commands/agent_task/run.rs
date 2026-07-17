@@ -276,7 +276,7 @@ pub(super) fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {
 }
 
 fn emit_runner_lifecycle_progress(plan: &AgentTaskPlan, run_id: Option<&str>) {
-    if std::env::var_os("HOMEBOY_LAB_RUNNER_ID").is_none() {
+    if std::env::var_os(homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV).is_none() {
         return;
     }
     for task in &plan.tasks {
