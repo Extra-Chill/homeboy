@@ -719,12 +719,21 @@ fn detached_cook_attempt_proxy_advances_after_daemon_acceptance() {
         assert_eq!(accepted.run_id, attempt_run_id);
         assert_eq!(accepted.state, AgentTaskRunState::Running);
         assert_eq!(accepted.metadata["runner_job_id"], "job-7970");
-        assert_eq!(accepted.metadata["phase"], "awaiting_runner_result");
+        assert_eq!(accepted.metadata["phase"], "waiting_for_capacity");
         assert_eq!(
             accepted.metadata["phase_activity"],
-            "controller handoff complete; awaiting authoritative runner daemon result"
+            "runner owns this FIFO queue entry; awaiting a capacity lease"
         );
-        assert_eq!(accepted.metadata["runner_handoff"]["state"], "in_flight");
+        assert_eq!(accepted.metadata["runner_handoff"]["state"], "queued");
+        assert_eq!(
+            accepted.metadata["runner_queue"],
+            json!({
+                "owner_runner_id": "homeboy-lab",
+                "ordering": "fifo",
+                "dispatch_eligibility": "runner_capacity_lease",
+                "state": "waiting_for_capacity",
+            })
+        );
         assert_eq!(
             accepted.metadata["runner_handoff"]["continuation"]["intent"],
             "reconcile_runner_job"
@@ -1342,6 +1351,45 @@ fn reachable_running_child_clears_disconnected_liveness_and_refreshes_heartbeat(
         assert!(record.metadata.get("stale_running_reason").is_none());
         assert!(record.metadata.get("retryable").is_none());
         assert_ne!(record.lifecycle.heartbeat, disconnected_heartbeat);
+    });
+}
+
+#[test]
+fn queued_runner_child_reports_fifo_capacity_ownership_before_its_claim() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-queued-capacity",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("queued proxy");
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.job.status = crate::api_jobs::JobStatus::Queued;
+        snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
+        snapshot.events.clear();
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("queued reconciliation");
+
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(record.metadata["phase"], "waiting_for_capacity");
+        assert_eq!(record.metadata["provider_state"], "queued");
+        assert_eq!(
+            record.metadata["runner_queue"],
+            json!({
+                "owner_runner_id": "homeboy-lab",
+                "ordering": "fifo",
+                "dispatch_eligibility": "runner_capacity_lease",
+                "state": "waiting_for_capacity",
+            })
+        );
+
+        snapshot.job.status = crate::api_jobs::JobStatus::Running;
+        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("claim reconciliation");
+        assert_eq!(record.metadata["phase"], "executing");
+        assert_eq!(record.metadata["runner_queue"]["state"], "claimed");
     });
 }
 

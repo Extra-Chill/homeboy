@@ -1206,12 +1206,36 @@ pub(crate) fn reconcile_runner_job_snapshot(
             metadata.insert("runner_job_status".to_string(), json!(snapshot.job.status));
             metadata.insert("runner_job_last_seen_at".to_string(), json!(last_seen_at));
             metadata.insert("runner_job_events".to_string(), json!(snapshot.events));
-            metadata.insert("phase".to_string(), json!("executing"));
+            let queued = snapshot.job.status == crate::api_jobs::JobStatus::Queued;
+            metadata.insert(
+                "phase".to_string(),
+                json!(if queued {
+                    "waiting_for_capacity"
+                } else {
+                    "executing"
+                }),
+            );
             metadata.insert(
                 "phase_activity".to_string(),
-                json!("provider/executor process is active"),
+                json!(if queued {
+                    "runner owns this FIFO queue entry; awaiting a capacity lease"
+                } else {
+                    "provider/executor process is active"
+                }),
             );
-            metadata.insert("provider_state".to_string(), json!("active"));
+            metadata.insert(
+                "provider_state".to_string(),
+                json!(if queued { "queued" } else { "active" }),
+            );
+            metadata.insert(
+                "runner_queue".to_string(),
+                json!({
+                    "owner_runner_id": snapshot.job.target_runner_id,
+                    "ordering": "fifo",
+                    "dispatch_eligibility": "runner_capacity_lease",
+                    "state": if queued { "waiting_for_capacity" } else { "claimed" },
+                }),
+            );
             if let Some(provider) = metadata
                 .get("provider_rotation")
                 .and_then(|rotation| rotation.get("entries"))
@@ -1883,12 +1907,12 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
             "runner_job_id": input.runner_job_id,
         }),
     );
-    metadata.insert("phase".to_string(), json!("awaiting_runner_result"));
+    metadata.insert("phase".to_string(), json!("waiting_for_capacity"));
     metadata.insert(
         "phase_activity".to_string(),
-        json!("controller handoff complete; awaiting authoritative runner daemon result"),
+        json!("runner owns this FIFO queue entry; awaiting a capacity lease"),
     );
-    metadata.insert("provider_state".to_string(), json!("active"));
+    metadata.insert("provider_state".to_string(), json!("queued"));
     let source_snapshot = metadata
         .get("source_checkout")
         .cloned()
@@ -1896,7 +1920,7 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
     metadata.insert(
         "runner_handoff".to_string(),
         json!({
-            "state": "in_flight",
+            "state": "queued",
             "authority": "runner_daemon",
             "identity": {
                 "run_id": run_id,
@@ -1913,6 +1937,15 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
     );
     metadata.insert("runner_id".to_string(), json!(input.runner_id));
     metadata.insert("runner_job_id".to_string(), json!(input.runner_job_id));
+    metadata.insert(
+        "runner_queue".to_string(),
+        json!({
+            "owner_runner_id": input.runner_id,
+            "ordering": "fifo",
+            "dispatch_eligibility": "runner_capacity_lease",
+            "state": "waiting_for_capacity",
+        }),
+    );
     metadata.insert(
         "remote_workspace".to_string(),
         json!(input.remote_workspace),

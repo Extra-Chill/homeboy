@@ -1738,6 +1738,29 @@ mod tests {
                 reasons: vec!["capacity_reached".to_string()],
             }
         );
+        assert!(busy.availability().is_capacity_exhausted());
+    }
+
+    #[test]
+    fn runner_availability_does_not_treat_substrate_failures_as_queueable_capacity() {
+        let availability = RunnerAvailability::from_status_parts(
+            "lab-a",
+            false,
+            false,
+            1,
+            &RunnerActiveJobState::Unavailable,
+            Some(1),
+        );
+
+        assert!(!availability.is_capacity_exhausted());
+        assert_eq!(
+            availability.reasons,
+            vec![
+                "not_connected".to_string(),
+                "capacity_reached".to_string(),
+                "active_jobs_unavailable".to_string(),
+            ]
+        );
     }
 
     #[test]

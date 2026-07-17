@@ -91,9 +91,16 @@ pub fn prepare_explicit_lab_runner_for_offload(runner_id: &str) -> Result<()> {
 pub(super) fn preflight_lab_runner_availability(
     command: &LabOffloadCommand,
     selection: &LabRunnerSelection,
+    allow_capacity_queue: bool,
 ) -> Result<()> {
     let availability = preflight_lab_runner_availability_with(selection, status)?;
     if availability.accepts_jobs {
+        return Ok(());
+    }
+    if allow_capacity_queue
+        && selection.mode == RunnerTunnelMode::Reverse
+        && availability.is_capacity_exhausted()
+    {
         return Ok(());
     }
 
