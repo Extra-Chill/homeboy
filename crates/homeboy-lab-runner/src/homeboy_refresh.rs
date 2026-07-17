@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,6 +29,8 @@ pub(super) use super::{extension_materialization, Runner};
 const DEFAULT_HOMEBOY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
 const DEFAULT_HOMEBOY_REF: &str = "main";
 const DISCONNECTED_SSH_REFRESH_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const RECONNECT_VERIFICATION_WINDOW: Duration = Duration::from_secs(3);
+const RECONNECT_VERIFICATION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HomeboyBinaryRefreshMode {
@@ -432,7 +434,7 @@ pub fn refresh_homeboy_binary(
             }
         };
         let daemon_identity_verification = (connect_exit_code == 0)
-            .then(|| verify_refreshed_daemon_identity(&plan.runner_id))
+            .then(|| verify_refreshed_daemon_identity(&plan.runner_id, &identity))
             .transpose()
             .map_err(|error| error.message);
         daemon_refreshed = daemon_identity_verification.is_ok();
@@ -442,9 +444,11 @@ pub fn refresh_homeboy_binary(
             } else {
                 connect_exit_code
             };
-            if let Err(rollback_error) =
-                restore_runner_homeboy_path(&plan.runner_id, previous_homeboy_path.as_deref())
-            {
+            if let Err(rollback_error) = rollback_refreshed_daemon(
+                &plan.runner_id,
+                previous_homeboy_path.as_deref(),
+                options.force,
+            ) {
                 return Err(reconnect_rollback_error(&report, rollback_error));
             }
             return Ok((
@@ -554,20 +558,81 @@ fn refresh_verification_failure(
     failure
 }
 
-fn verify_refreshed_daemon_identity(runner_id: &str) -> Result<()> {
-    let status = super::status(runner_id)?;
-    if !status.connected {
+fn verify_refreshed_daemon_identity(runner_id: &str, identity: &Value) -> Result<()> {
+    let expected_commit = identity
+        .get("data")
+        .unwrap_or(identity)
+        .get("git_commit")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "runner `{runner_id}` refreshed binary did not report a git commit"
+            ))
+        })?;
+    verify_refreshed_daemon_identity_with(
+        runner_id,
+        expected_commit,
+        || super::status(runner_id),
+        || std::thread::sleep(RECONNECT_VERIFICATION_RETRY_INTERVAL),
+    )
+}
+
+fn verify_refreshed_daemon_identity_with<Status, Wait>(
+    runner_id: &str,
+    expected_commit: &str,
+    mut status: Status,
+    mut wait: Wait,
+) -> Result<()>
+where
+    Status: FnMut() -> Result<super::RunnerStatusReport>,
+    Wait: FnMut(),
+{
+    let deadline = Instant::now() + RECONNECT_VERIFICATION_WINDOW;
+    loop {
+        match verify_refreshed_daemon_status(runner_id, expected_commit, &status()?) {
+            Ok(()) => return Ok(()),
+            Err(_) if Instant::now() < deadline => wait(),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn verify_refreshed_daemon_status(
+    runner_id: &str,
+    expected_commit: &str,
+    status: &super::RunnerStatusReport,
+) -> Result<()> {
+    if !status.is_connected() {
         return Err(Error::internal_unexpected(format!(
             "runner `{runner_id}` reconnect did not persist an active daemon session"
         )));
     }
-    if let Some(stale_daemon) = status.stale_daemon {
+    if let Some(stale_daemon) = &status.stale_daemon {
         return Err(Error::internal_unexpected(format!(
             "runner `{runner_id}` reconnect retained a stale daemon: {}",
             stale_daemon.message
         )));
     }
+    let actual_identity = status
+        .session
+        .as_ref()
+        .and_then(|session| session.homeboy_build_identity.as_deref())
+        .ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "runner `{runner_id}` reconnect did not persist a daemon build identity"
+            ))
+        })?;
+    if build_identity_commit(actual_identity) != Some(expected_commit) {
+        return Err(Error::internal_unexpected(format!(
+            "runner `{runner_id}` reconnect started daemon `{actual_identity}`, expected commit `{expected_commit}`"
+        )));
+    }
     Ok(())
+}
+
+fn build_identity_commit(identity: &str) -> Option<&str> {
+    let (_, commit) = identity.strip_prefix("homeboy ")?.split_once('+')?;
+    Some(commit.strip_suffix("-dirty").unwrap_or(commit))
 }
 
 fn refresh_execution_options(
@@ -1068,6 +1133,51 @@ fn restore_runner_homeboy_path(runner_id: &str, homeboy_path: Option<&str>) -> R
             MergeOutput::Single(_) | MergeOutput::Bulk(_) => Ok(()),
         }
     })
+}
+
+fn rollback_refreshed_daemon(
+    runner_id: &str,
+    previous_homeboy_path: Option<&str>,
+    force: bool,
+) -> Result<()> {
+    // Stop the newly selected daemon before restoring configuration so all
+    // persisted state converges on the previous binary before it reconnects.
+    rollback_refreshed_daemon_with(
+        previous_homeboy_path,
+        || disconnect_with_session(runner_id, None, force).map(|_| ()),
+        |homeboy_path| restore_runner_homeboy_path(runner_id, homeboy_path),
+        |_| {
+            let (report, exit_code) =
+                connect_with_orphan_adoption(runner_id, None, &[], false, None, None, None)?;
+            if exit_code != 0 || !report.connected {
+                return Err(Error::validation_invalid_argument(
+                    "reconnect",
+                    report.failure_message.unwrap_or_else(|| {
+                        "rollback reconnect did not persist an active daemon session".to_string()
+                    }),
+                    Some(runner_id.to_string()),
+                    None,
+                ));
+            }
+            Ok(())
+        },
+    )
+}
+
+fn rollback_refreshed_daemon_with<Stop, Restore, Reconnect>(
+    previous_homeboy_path: Option<&str>,
+    stop: Stop,
+    restore: Restore,
+    reconnect: Reconnect,
+) -> Result<()>
+where
+    Stop: FnOnce() -> Result<()>,
+    Restore: FnOnce(Option<&str>) -> Result<()>,
+    Reconnect: FnOnce(Option<&str>) -> Result<()>,
+{
+    stop()?;
+    restore(previous_homeboy_path)?;
+    reconnect(previous_homeboy_path)
 }
 
 fn rollback_refresh_error<T>(
