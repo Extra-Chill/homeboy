@@ -28,6 +28,38 @@ pub(in crate::code_audit) fn run(
     findings
 }
 
+/// Reject configured source roots that would otherwise silently disable a rule.
+pub(in crate::code_audit) fn validate_source_roots(
+    fingerprints: &[&FileFingerprint],
+    rules: &[SourcePolicyRule],
+) -> crate::Result<()> {
+    let missing = rules
+        .iter()
+        .flat_map(|rule| {
+            rule.include_path_contains.iter().filter_map(|root| {
+                (!fingerprints
+                    .iter()
+                    .any(|fingerprint| fingerprint.relative_path.contains(root)))
+                .then(|| format!("{}: {root}", rule.id))
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(crate::Error::validation_invalid_argument(
+        "audit.source_policies",
+        format!(
+            "configured source root(s) matched zero files: {}. Update the configured path or remove the stale source root.",
+            missing.join(", ")
+        ),
+        None,
+        None,
+    ))
+}
+
 fn run_rule(rule: &SourcePolicyRule, fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     match &rule.rule {
         SourcePolicyRuleBody::ForbiddenTerms {
@@ -489,6 +521,22 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].file, "src/commands/new_feature.rs");
         assert!(findings[0].description.contains("direct process execution"));
+    }
+
+    #[test]
+    fn rejects_configured_source_roots_that_match_zero_files() {
+        let fp = rust_fp("crates/homeboy-core/src/engine.rs", "fn dispatch() {}");
+        let mut rule = rule();
+        rule.include_path_contains = vec![
+            "crates/homeboy-core/src/".to_string(),
+            "crates/renamed-core/src/".to_string(),
+        ];
+
+        let error = validate_source_roots(&[&fp], &[rule]).expect_err("missing root must fail");
+
+        assert!(error.to_string().contains("synthetic-source-boundary"));
+        assert!(error.to_string().contains("crates/renamed-core/src/"));
+        assert!(error.to_string().contains("matched zero files"));
     }
 
     // ------------------------------------------------------------------------

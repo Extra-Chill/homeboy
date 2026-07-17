@@ -96,6 +96,8 @@ pub fn source_policy_findings_for_path(
         .collect::<Vec<_>>();
     let fingerprint_refs = fingerprints.iter().collect::<Vec<_>>();
 
+    source_policy::validate_source_roots(&fingerprint_refs, &audit_config.source_policies)?;
+
     Ok(source_policy::run(
         &fingerprint_refs,
         &audit_config.source_policies,
