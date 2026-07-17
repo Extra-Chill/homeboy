@@ -524,6 +524,7 @@ jobs:
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
       tag-flag: ${{ format('--tag={0}', needs.prepare.outputs['release-tag']) }}
+      expected-assets: ${{ steps.plan.outputs.expected-assets }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -557,6 +558,12 @@ jobs:
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+          EXPECTED_ASSETS="$(jq -c '[.releases[].artifacts[]? | split("/") | last] | unique' plan-dist-manifest.json)"
+          if [ "$(jq 'length' <<< "${EXPECTED_ASSETS}")" -eq 0 ]; then
+            echo "::error::cargo-dist planned no release assets"
+            exit 1
+          fi
+          echo "expected-assets=${EXPECTED_ASSETS}" >> "$GITHUB_OUTPUT"
 
       - name: Upload dist-manifest.json
         uses: actions/upload-artifact@v4
@@ -569,7 +576,7 @@ jobs:
     needs:
       - prepare
       - plan
-    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null }}
+    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' && needs.plan.result == 'success' && fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
@@ -646,6 +653,7 @@ jobs:
       - prepare
       - plan
       - build-local-artifacts
+    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' && needs.plan.result == 'success' && (fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include == null || needs.build-local-artifacts.result == 'success') }}
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -735,7 +743,7 @@ jobs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
-    if: ${{ always() && needs.plan.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' && needs.plan.result == 'success' && needs.build-global-artifacts.result == 'success' && (fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include == null || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -746,6 +754,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs['release-tag'] }}
+          fetch-depth: 0
           persist-credentials: false
           submodules: recursive
 
@@ -821,20 +830,44 @@ jobs:
     name: Verify GitHub Release published
     needs:
       - prepare
+      - plan
       - host
     if: ${{ always() && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Enforce publish completed
+      - name: Verify planned release assets
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
           HOST_RESULT: ${{ needs.host.result }}
+          EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
         run: |
           if [ "${HOST_RESULT}" != "success" ]; then
             echo "::error::Release ${RELEASE_TAG} was prepared and tagged but the Create GitHub Release job did not succeed (result: ${HOST_RESULT}). The tag exists with no GitHub Release. Investigate the plan/build/host publish chain; recover with a workflow_dispatch run using release_tag=${RELEASE_TAG}."
             exit 1
           fi
-          echo "::notice::Release ${RELEASE_TAG} published successfully."
+
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > release.json
+          missing=()
+          invalid=()
+          while IFS= read -r asset; do
+            matches="$(jq -c --arg name "${asset}" '[.assets[] | select(.name == $name)]' release.json)"
+            if [ "${matches}" = "[]" ]; then
+              missing+=("${asset}")
+            elif ! jq -e --arg name "${asset}" '.assets[] | select(.name == $name and .state == "uploaded" and .size > 0)' release.json >/dev/null; then
+              invalid+=("${asset}: $(jq -c --arg name "${asset}" '[.assets[] | select(.name == $name) | {state, size}]' release.json)")
+            fi
+          done < <(jq -r '.[]' <<< "${EXPECTED_ASSETS}")
+
+          if [ "${#missing[@]}" -gt 0 ] || [ "${#invalid[@]}" -gt 0 ]; then
+            [ "${#missing[@]}" -eq 0 ] || echo "::error::Release ${RELEASE_TAG} is missing planned assets: ${missing[*]}"
+            [ "${#invalid[@]}" -eq 0 ] || echo "::error::Release ${RELEASE_TAG} has planned assets that are not uploaded or are zero bytes: ${invalid[*]}"
+            exit 1
+          fi
+          echo "::notice::Release ${RELEASE_TAG} contains every planned asset."
 
   announce:
     needs:
