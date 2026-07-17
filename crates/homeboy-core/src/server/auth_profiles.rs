@@ -145,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_set_profile_basic() {
         let profile = "homeboy-auth-profile-basic-test";
         let _ = remove_profile(profile);
@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_set_profile_bearer() {
         let profile = "homeboy-auth-profile-bearer-test";
         let _ = remove_profile(profile);
@@ -171,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_profile_status() {
         let profile = "homeboy-auth-profile-status-test";
         let _ = remove_profile(profile);
@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_profile_authorization_header() {
         let profile = "homeboy-auth-profile-header-test";
         let _ = remove_profile(profile);
@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_remove_profile() {
         let profile = "homeboy-auth-profile-remove-test";
         set_profile_bearer(profile, "token").expect("store bearer profile");

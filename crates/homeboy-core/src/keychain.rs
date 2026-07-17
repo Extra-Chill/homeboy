@@ -360,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_set() {
         let project_id = "homeboy-keychain-test-set";
         let variable_name = "token";
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_get() {
         let project_id = "homeboy-keychain-test-get";
         let variable_name = "token";
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_remove() {
         let project_id = "homeboy-keychain-test-remove";
         let variable_name = "token";
@@ -412,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_exists() {
         let project_id = "homeboy-keychain-test-exists";
         let variable_name = "token";
@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_remove_many() {
         let project_id = "homeboy-keychain-test-remove-many";
         let variables = vec!["token".to_string(), "refresh".to_string()];
@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn stores_reads_and_removes_keychain_value() {
         let project_id = "homeboy-keychain-test";
         let variable_name = "token";
