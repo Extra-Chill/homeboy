@@ -58,6 +58,9 @@ pub enum AuditFinding {
     /// re-running that test for no added coverage — usually a leftover rename
     /// shim.
     RedundantTestWrapper,
+    /// Test is disabled with a bare skip attribute that carries no reason,
+    /// leaving no record of why it is skipped or when it should run again.
+    IgnoredTestWithoutReason,
     /// Comment starts with TODO/FIXME/HACK/XXX marker.
     TodoMarker,
     /// Comment starts with stale or legacy phrasing.
@@ -217,6 +220,7 @@ impl AuditFinding {
             "orphaned_test",
             "vacuous_test",
             "redundant_test_wrapper",
+            "ignored_test_without_reason",
             "todo_marker",
             "legacy_comment",
             "layer_ownership_violation",
