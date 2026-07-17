@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.289.3] - 2026-07-17
+
+### Changed
+- Make package-only release recovery executable
+
 ## [0.289.2] - 2026-07-17
 
 ### Changed
