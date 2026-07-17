@@ -350,6 +350,8 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
             .status()
             .expect("clone target");
         assert!(status.success());
+        std::fs::write(source.join("pre-existing-candidate.txt"), "preserve me\n")
+            .expect("write pre-existing candidate");
         let expected_patch = temp.path().join("expected.patch");
         let promotion_request = temp.path().join("promotion-request.json");
         std::fs::write(
@@ -490,5 +492,17 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
             .as_str()
             .expect("inline selected patch")
             .contains("committed work"));
+        assert!(
+            !request["patch"]
+                .as_str()
+                .expect("inline selected patch")
+                .contains("pre-existing-candidate.txt"),
+            "promotion receives only the provider delta"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("pre-existing-candidate.txt"))
+                .expect("pre-existing candidate preserved"),
+            "preserve me\n"
+        );
     });
 }
