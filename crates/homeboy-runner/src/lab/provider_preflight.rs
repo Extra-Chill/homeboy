@@ -809,6 +809,35 @@ mod tests {
     }
 
     #[test]
+    fn controller_identity_rejects_provider_backend_mismatch() {
+        let selection = AgentTaskProviderSelection {
+            backend: "codex".to_string(),
+            selector: None,
+            runtime_identity: None,
+        };
+        let identity = homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity {
+            runtime_id: "opencode".to_string(),
+            provider_id: "opencode.agent-task-executor".to_string(),
+            source_selector: "extension:opencode".to_string(),
+            source_revision: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            freshness:
+                homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Unverifiable,
+            provider: serde_json::json!({
+                "id": "opencode.agent-task-executor",
+                "backend": "opencode"
+            }),
+            materialization_plan: serde_json::Value::Null,
+        };
+
+        let error = validate_controller_runtime_identity(&identity, &selection)
+            .expect_err("mismatched provider identity must fail");
+
+        assert!(error
+            .message
+            .contains("does not match the requested provider"));
+    }
+
+    #[test]
     fn runner_provider_output_parser_accepts_cli_envelope_with_chatter() {
         let stdout = concat!(
             "Preparing runtime...\n",
