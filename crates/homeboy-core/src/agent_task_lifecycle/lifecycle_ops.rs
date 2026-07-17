@@ -264,21 +264,55 @@ pub fn submit_plan(
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
+    submit_plan_with_runtime_admission(
+        plan,
+        requested_run_id,
+        crate::controller_runtime::admit_current,
+    )
+}
+
+pub(crate) trait RuntimeAdmissionEvidence {
+    fn runtime(&self) -> Value;
+}
+
+impl RuntimeAdmissionEvidence for crate::controller_runtime::RuntimeAdmission {
+    fn runtime(&self) -> Value {
+        self.runtime.clone()
+    }
+}
+
+#[cfg(test)]
+impl RuntimeAdmissionEvidence for Value {
+    fn runtime(&self) -> Value {
+        self.clone()
+    }
+}
+
+/// Persist the run identity before controller admission so an admission failure
+/// remains inspectable and retryable through the normal lifecycle commands.
+pub(crate) fn submit_plan_with_runtime_admission<F, A>(
+    plan: &AgentTaskPlan,
+    requested_run_id: Option<&str>,
+    admit_runtime: F,
+) -> Result<AgentTaskRunRecord>
+where
+    F: FnOnce() -> Result<A>,
+    A: RuntimeAdmissionEvidence,
+{
     let run_id = requested_run_id
         .map(sanitize_run_id)
         .unwrap_or_else(default_run_id);
     let plan_path = store::write_plan(&run_id, plan)?;
 
-    let admission = crate::controller_runtime::admit_current()?;
     let mut metadata = json!({
         "task_count": plan.tasks.len(),
         "max_concurrency": plan.options.max_concurrency,
         "provider_run_ids": [],
+        "provider_executions_consumed": 0,
+        "controller_identity": crate::build_identity::current().display,
         "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
     });
-    metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
-        admission.runtime.clone();
     if let Ok(runner_id) = std::env::var(homeboy_runner_contract::RUNNER_ID_ENV) {
         if !runner_id.trim().is_empty() {
             metadata["runner_id"] = json!(runner_id);
@@ -288,9 +322,9 @@ pub fn submit_plan(
         route.insert_into_metadata(&mut metadata);
     }
 
-    let record = AgentTaskRunRecord {
+    let mut record = AgentTaskRunRecord {
         schema: schemas::RUN.to_string(),
-        run_id,
+        run_id: run_id.clone(),
         plan_id: plan.plan_id.clone(),
         state: AgentTaskRunState::Queued,
         submitted_at: now_timestamp(),
@@ -306,6 +340,18 @@ pub fn submit_plan(
         metadata,
     };
     store::write_record(&record)?;
+
+    match admit_runtime() {
+        Ok(admission) => {
+            record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
+                admission.runtime();
+            store::write_record(&record)?;
+        }
+        Err(error) => {
+            record_pre_execution_failure(&run_id, plan, "controller_admission", &error)?;
+            return Err(error);
+        }
+    }
     Ok(record)
 }
 
