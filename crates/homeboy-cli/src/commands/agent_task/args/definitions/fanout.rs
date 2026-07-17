@@ -19,7 +19,7 @@ pub enum AgentTaskFanoutCommand {
     RunPlan(AgentTaskFanoutRunPlanArgs),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct AgentTaskFanoutCookBatchArgs {
     #[arg(value_name = "ISSUE_URL", required = true)]
     pub issues: Vec<String>,

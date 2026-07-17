@@ -112,7 +112,9 @@ pub fn route_after_parse(
         return Ok(Some(exit_code));
     }
 
-    if let Some(exit_code) = run_split_placement_fanout(cli, output_file, cli.runner.as_deref())? {
+    if let Some(exit_code) =
+        run_split_placement_fanout(cli, output_file, inferred_runner_id.as_deref())?
+    {
         return Ok(Some(exit_code));
     }
 
@@ -270,18 +272,6 @@ fn run_split_placement_fanout(
     let Some(runner_id) = runner_id else {
         return Ok(None);
     };
-    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-        command:
-            crate::commands::agent_task::AgentTaskCommand::Fanout(
-                crate::commands::agent_task::AgentTaskFanoutArgs {
-                    command: crate::commands::agent_task::AgentTaskFanoutCommand::RunPlan(args),
-                },
-            ),
-    }) = &cli.command
-    else {
-        return Ok(None);
-    };
-
     let dispatcher = LabCookAttemptDispatcher {
         runner_id: runner_id.to_string(),
         allow_local_fallback: false,
@@ -291,20 +281,46 @@ fn run_split_placement_fanout(
         source_path: None,
         job_overrides: lab_job_overrides(cli)?,
     };
-    let (value, exit_code) =
-        crate::commands::agent_task::fanout::run_batch_cook_fanout_with_attempt_dispatcher(
+    let attempt_dispatcher =
+        move |options: &crate::core::agent_task_service::AgentTaskCookServiceOptions| {
+            let mut dispatcher = dispatcher.clone();
+            dispatcher.source_path = options
+                .initial_plan
+                .tasks
+                .first()
+                .and_then(|task| task.workspace.root.as_ref())
+                .map(PathBuf::from);
+            Arc::new(dispatcher)
+                as Arc<dyn crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>
+        };
+    let (value, exit_code) = match &cli.command {
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command:
+                crate::commands::agent_task::AgentTaskCommand::Fanout(
+                    crate::commands::agent_task::AgentTaskFanoutArgs {
+                        command: crate::commands::agent_task::AgentTaskFanoutCommand::RunPlan(args),
+                    },
+                ),
+        }) => crate::commands::agent_task::fanout::run_batch_cook_fanout_with_attempt_dispatcher(
             args.clone(),
-            move |options| {
-                let mut dispatcher = dispatcher.clone();
-                dispatcher.source_path = options
-                    .initial_plan
-                    .tasks
-                    .first()
-                    .and_then(|task| task.workspace.root.as_ref())
-                    .map(PathBuf::from);
-                Arc::new(dispatcher)
-            },
-        )?;
+            &attempt_dispatcher,
+        )?,
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command:
+                crate::commands::agent_task::AgentTaskCommand::Fanout(
+                    crate::commands::agent_task::AgentTaskFanoutArgs {
+                        command:
+                            crate::commands::agent_task::AgentTaskFanoutCommand::CookBatch(args),
+                    },
+                ),
+        }) if args.run_plan => {
+            crate::commands::agent_task::fanout::cook_batch_with_attempt_dispatcher(
+                args.clone(),
+                &attempt_dispatcher,
+            )?
+        }
+        _ => return Ok(None),
+    };
     let stdout = serde_json::to_string_pretty(&value).map_err(|error| {
         Error::internal_json(
             error.to_string(),
