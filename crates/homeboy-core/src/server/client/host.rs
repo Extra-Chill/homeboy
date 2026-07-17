@@ -88,7 +88,7 @@ fn successful_command_stdout(output: std::process::Output) -> Option<String> {
 }
 
 /// Check if an SSH failure is a transient connection error worth retrying.
-pub(crate) fn is_transient_ssh_error(output: &CommandOutput) -> bool {
+pub fn is_transient_ssh_error(output: &CommandOutput) -> bool {
     let stderr = output.stderr.to_lowercase();
     // SSH exit code 255 = connection error (not a remote command failure)
     let is_connection_exit = output.exit_code == 255;
