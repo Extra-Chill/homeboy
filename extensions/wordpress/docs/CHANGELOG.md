@@ -2,6 +2,15 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.26.0] - 2026-07-17
+
+### Added
+- add extension discovery composition metadata
+
+### Changed
+- generate agent task provider contract
+- share runner sidecar adapter loading
+
 ## [3.24.6] - 2026-07-15
 
 ### Fixed
