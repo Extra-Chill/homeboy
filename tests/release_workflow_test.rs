@@ -203,6 +203,13 @@ fn release_ci_disables_homeboy_update_checks() {
 }
 
 #[test]
+fn release_concurrency_scopes_recovery_runs_to_the_requested_tag() {
+    assert!(release_workflow().contains(
+        "concurrency:\n  group: release-${{ inputs.release_tag || github.ref }}\n  cancel-in-progress: false"
+    ));
+}
+
+#[test]
 fn release_test_gate_does_not_repeat_separate_lint_gate() {
     let gate_test = job_section(release_workflow(), "gate-test");
 

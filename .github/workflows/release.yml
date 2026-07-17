@@ -47,7 +47,7 @@ env:
 # after the first finishes and its check job exits in seconds because
 # HEAD is already tagged — zero wasted work.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
