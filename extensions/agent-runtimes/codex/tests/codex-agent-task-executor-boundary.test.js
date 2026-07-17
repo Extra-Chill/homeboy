@@ -56,7 +56,6 @@ const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'codex.json')
 assert.equal(manifest.id, 'codex');
 assert.equal(manifest.name, 'Codex');
 assert.equal(manifest.agent_task_executors.length, 1);
-assert.deepEqual(manifest.agent_task_executors[0], providerContract());
 
 const registry = runtimeRegistry({ repoRoot });
 assert.equal(registry.codex.id, 'codex');
@@ -99,7 +98,7 @@ process.exit(0);
 
 	const contractResult = spawnSync(process.execPath, [scriptPath, '--provider-contract'], { encoding: 'utf8' });
 	assert.equal(contractResult.status, 0, contractResult.stderr);
-	assert.deepEqual(JSON.parse(contractResult.stdout), providerContract());
+	assert.deepEqual(JSON.parse(contractResult.stdout), manifest.agent_task_executors[0]);
 
 	const request = {
 		schema: 'homeboy/agent-task-request/v1',

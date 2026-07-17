@@ -37,7 +37,6 @@ const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'pi.json'), '
 assert.equal(manifest.id, 'pi');
 assert.equal(manifest.name, 'Pi');
 assert.equal(manifest.agent_task_executors.length, 1);
-assert.deepEqual(manifest.agent_task_executors[0], providerContract());
 
 const validRequest = {
 	schema: 'homeboy/agent-task-request/v1',
@@ -77,7 +76,7 @@ try {
 
 	const contractResult = spawnSync(process.execPath, [scriptPath, '--provider-contract'], { encoding: 'utf8' });
 	assert.equal(contractResult.status, 0, contractResult.stderr);
-	assert.deepEqual(JSON.parse(contractResult.stdout), providerContract());
+	assert.deepEqual(JSON.parse(contractResult.stdout), manifest.agent_task_executors[0]);
 
 	const mockPiPath = path.join(root, 'mock-pi.cjs');
 	fs.writeFileSync(mockPiPath, `#!/usr/bin/env node

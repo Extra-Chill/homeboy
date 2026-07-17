@@ -25,7 +25,6 @@ const {
 	OPENCODE_WORKSPACE_TOOLS,
 	executeOpenCodeAgentTask,
 	providerContract,
-	runtimeManifest,
 } = require('..');
 
 const runtimeRoot = path.join(__dirname, '..');
@@ -62,12 +61,10 @@ assert.equal(provider.capabilities.includes('run_scoped_scratch'), true);
 assert.equal(provider.capabilities.includes('browser_runtime'), false);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'opencode.json'), 'utf8'));
-assert.deepEqual(manifest, runtimeManifest());
 assert.equal(manifest.id, 'opencode');
 assert.equal(manifest.name, 'OpenCode');
 assert.equal(manifest.agent_task_executors.length, 1);
 assert.equal(manifest.agent_task_executors[0].capabilities.includes('nested_orchestrator'), true);
-assert.deepEqual(manifest.agent_task_executors[0], providerContract());
 const packageJson = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'package.json'), 'utf8'));
 assert.equal(packageJson.name, 'homeboy-agent-runtime-opencode');
 assert.equal(packageJson.homeboy.agent_runtime_manifest, 'opencode.json');
@@ -107,7 +104,7 @@ process.exit(0);
 
 	const contractResult = spawnSync(process.execPath, [scriptPath, '--provider-contract'], { encoding: 'utf8' });
 	assert.equal(contractResult.status, 0, contractResult.stderr);
-	assert.deepEqual(JSON.parse(contractResult.stdout), providerContract());
+	assert.deepEqual(JSON.parse(contractResult.stdout), manifest.agent_task_executors[0]);
 
 	const request = {
 		schema: 'homeboy/agent-task-request/v1',

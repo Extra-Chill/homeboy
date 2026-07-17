@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -49,6 +50,19 @@ const coreContract = JSON.parse(fs.readFileSync(
 	path.join(rootDir, 'agent-runtimes', 'fixtures', 'homeboy-agent-task-core-contract.json'),
 	'utf8'
 ));
+
+for (const runtimeId of ['claude-code', 'codex', 'local-shell', 'opencode', 'pi', 'wp-codebox']) {
+	const runtimePath = path.join(rootDir, 'agent-runtimes', runtimeId);
+	const manifest = JSON.parse(fs.readFileSync(path.join(runtimePath, `${runtimeId}.json`), 'utf8'));
+	const [program, scriptTemplate] = manifest.agent_task_executors[0].invocation.argv;
+	const result = spawnSync(program, [scriptTemplate.replaceAll('{{runtime_path}}', runtimePath), '--provider-contract'], {
+		cwd: rootDir,
+		encoding: 'utf8',
+		stdio: ['ignore', 'pipe', 'pipe'],
+	});
+	assert.equal(result.status, 0, `${runtimeId}: ${result.stderr}`);
+	assert.deepEqual(JSON.parse(result.stdout), manifest.agent_task_executors[0]);
+}
 assert.deepEqual(fields, {
 	request_schema: coreContract.provider_capability.request_schema,
 	outcome_schema: coreContract.provider_capability.outcome_schema,

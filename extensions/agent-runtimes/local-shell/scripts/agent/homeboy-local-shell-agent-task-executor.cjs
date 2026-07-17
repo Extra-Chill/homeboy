@@ -3,6 +3,12 @@
 
 const fs = require('node:fs');
 
+if (process.argv.includes('--provider-contract')) {
+  const { agent_task_executors } = require('../../local-shell.json');
+  process.stdout.write(`${JSON.stringify(agent_task_executors[0], null, 2)}\n`);
+  process.exit(0);
+}
+
 const request = JSON.parse(fs.readFileSync(0, 'utf8'));
 const taskId = request.task_id || 'local-shell-task';
 

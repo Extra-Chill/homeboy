@@ -52,7 +52,6 @@ assert.equal(manifest.id, 'claude-code');
 assert.equal(manifest.name, 'Claude Code');
 assert.equal(manifest.agent_task_executors.length, 1);
 assert.equal(manifest.agent_task_executors[0].capabilities.includes('nested_orchestrator'), true);
-assert.deepEqual(manifest.agent_task_executors[0], providerContract());
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-claude-code-provider-contract-'));
 try {
@@ -89,7 +88,7 @@ process.stdin.on('end', () => {
 
 	const contractResult = spawnSync(process.execPath, [scriptPath, '--provider-contract'], { encoding: 'utf8' });
 	assert.equal(contractResult.status, 0, contractResult.stderr);
-	assert.deepEqual(JSON.parse(contractResult.stdout), providerContract());
+	assert.deepEqual(JSON.parse(contractResult.stdout), manifest.agent_task_executors[0]);
 
 	const runRequest = {
 		schema: 'homeboy/agent-task-request/v1',

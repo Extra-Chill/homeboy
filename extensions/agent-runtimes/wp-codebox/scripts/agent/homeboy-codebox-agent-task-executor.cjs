@@ -10,13 +10,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+if (process.argv.includes('--provider-contract')) {
+  const { agent_task_executors } = require('../../wp-codebox.json');
+  process.stdout.write(`${JSON.stringify(agent_task_executors[0], null, 2)}\n`);
+  process.exit(0);
+}
+
 /**
  * Internal dependencies
  */
 const {
   agentTaskOutcomeFromCodeboxResult,
   codeboxTaskRequestFromAgentTaskRequest,
-  providerContract,
 } = require('../../lib/codebox-agent-task-executor');
 const {
   normalizeStringArray,
@@ -73,10 +78,6 @@ function runtimeAgentDebugEnabled(env = process.env) {
 function argValue(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : '';
-}
-
-function hasFlag(name) {
-  return process.argv.includes(name);
 }
 
 function readStdin() {
@@ -615,7 +616,7 @@ async function runTaskRunner(request) {
     ['--homeboy-extensions', config.homeboy_extensions_path || config.homeboyExtensionsPath],
   ].flatMap(([name, value]) => (value ? [name, value] : []));
   const args = process.argv.slice(2).filter((arg, index, all) => {
-    if (arg === '--task-runner' || all[index - 1] === '--task-runner' || arg === '--print-contract') {
+    if (arg === '--task-runner' || all[index - 1] === '--task-runner') {
       return false;
     }
     return true;
@@ -675,11 +676,6 @@ async function runTaskRunner(request) {
 
 (async () => {
   try {
-    if (hasFlag('--print-contract')) {
-      process.stdout.write(`${JSON.stringify(providerContract(), null, 2)}\n`);
-      process.exit(0);
-    }
-
     const request = readRequest();
     const outcome = await runTaskRunner(request);
     process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
