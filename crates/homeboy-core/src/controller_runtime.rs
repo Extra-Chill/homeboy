@@ -1216,6 +1216,7 @@ mod tests {
             let temporary = tempfile::tempdir().expect("temporary runtime directory");
             let legacy = temporary.path().join("legacy-homeboy");
             let identity = "homeboy test+legacy";
+            fake_controller(&legacy, identity, "legacy");
             let runtime = json!({ "originating": {
                 "build_identity": identity,
                 "pinned_executable": legacy,
