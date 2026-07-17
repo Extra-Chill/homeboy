@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use clap::{Args, Subcommand, ValueEnum};
 use homeboy::core::cleanup::{
@@ -320,7 +321,9 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     }
     let mut categories = Vec::new();
 
-    if selected.includes(CleanupCategoryArg::RepoArtifacts) {
+    if selected.skips_repo_artifacts_without_checkout(current_dir_is_git_checkout()) {
+        categories.push(repo_artifacts_checkout_skipped_category(apply));
+    } else if selected.includes(CleanupCategoryArg::RepoArtifacts) {
         let output = cleanup::cleanup_artifacts(ArtifactCleanupOptions {
             path: None,
             apply,
@@ -499,6 +502,39 @@ impl CleanupCategorySelection {
     fn includes(&self, category: CleanupCategoryArg) -> bool {
         (self.include.is_empty() || self.include.contains(&category))
             && !self.exclude.contains(&category)
+    }
+
+    fn skips_repo_artifacts_without_checkout(&self, in_git_checkout: bool) -> bool {
+        !in_git_checkout
+            && self.include.is_empty()
+            && !self.exclude.contains(&CleanupCategoryArg::RepoArtifacts)
+    }
+}
+
+fn current_dir_is_git_checkout() -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(Path::new("."))
+        .output()
+        .is_ok_and(|output| output.status.success() && output.stdout.trim_ascii() == b"true")
+}
+
+fn repo_artifacts_checkout_skipped_category(apply: bool) -> CleanupInventoryCategory {
+    CleanupInventoryCategory {
+        category: REPO_ARTIFACTS_METADATA.category,
+        canonical_cleanup_command: REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply),
+        specialist_command: "homeboy cleanup artifacts --path <PATH>".to_string(),
+        included: true,
+        skipped: true,
+        skip_reason: Some(
+            "current directory is not inside a git checkout; run from a checkout or use `homeboy cleanup artifacts --path <PATH>`".to_string(),
+        ),
+        candidate_count: 0,
+        applied_count: 0,
+        skipped_count: 1,
+        estimated_bytes: 0,
+        reclaimed_bytes: 0,
+        output: serde_json::json!({ "path_remediation": "homeboy cleanup artifacts --path <PATH>" }),
     }
 }
 
@@ -1046,6 +1082,61 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn repo_artifacts_checkout_precondition_is_default_only() {
+        let cases = [
+            ("default", vec![], vec![], true, true),
+            (
+                "explicit include remains strict",
+                vec![CleanupCategoryArg::RepoArtifacts],
+                vec![],
+                true,
+                false,
+            ),
+            (
+                "exclude remains excluded",
+                vec![],
+                vec![CleanupCategoryArg::RepoArtifacts],
+                false,
+                false,
+            ),
+        ];
+
+        for (name, include, exclude, included, skipped) in cases {
+            let selection = CleanupCategorySelection::new(include, exclude);
+            assert_eq!(
+                selection.includes(CleanupCategoryArg::RepoArtifacts),
+                included,
+                "{name}: selection"
+            );
+            assert_eq!(
+                selection.skips_repo_artifacts_without_checkout(false),
+                skipped,
+                "{name}: checkout precondition"
+            );
+        }
+    }
+
+    #[test]
+    fn repo_artifacts_checkout_skip_is_structured_with_path_remediation() {
+        let category = repo_artifacts_checkout_skipped_category(false);
+
+        assert_eq!(category.category, "repo_artifacts");
+        assert!(category.included);
+        assert!(category.skipped);
+        assert_eq!(category.skipped_count, 1);
+        assert_eq!(
+            category.skip_reason.as_deref(),
+            Some(
+                "current directory is not inside a git checkout; run from a checkout or use `homeboy cleanup artifacts --path <PATH>`"
+            )
+        );
+        assert_eq!(
+            category.output["path_remediation"],
+            "homeboy cleanup artifacts --path <PATH>"
+        );
     }
 
     #[test]
