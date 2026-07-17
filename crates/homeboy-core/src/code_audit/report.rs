@@ -368,40 +368,29 @@ fn compute_fixability_impl(
         return None;
     }
 
-    // Generate fix plan (dry-run — never writes)
-    let fix_policy = crate::refactor::auto::FixPolicy::default();
-    let mut fix_result = match analysis {
-        Some(analysis) if !analysis.fingerprints.is_empty() => {
-            crate::refactor::plan::generate::generate_audit_fixes_with_fingerprints(
-                result,
-                source_path,
-                &fix_policy,
-                &analysis.fingerprints,
-            )
-        }
-        _ => {
-            crate::refactor::plan::generate::generate_audit_fixes(result, source_path, &fix_policy)
-        }
-    };
+    // Plan the fixes and project each into an automation verdict. The refactor
+    // engine owns the planning (generate + policy annotation); audit only needs
+    // the per-fix (finding, auto_apply) tally. When no refactor provider is
+    // registered, this yields no verdicts and fixability is unavailable.
+    let fingerprints = analysis
+        .map(|analysis| analysis.fingerprints.as_slice())
+        .unwrap_or(&[]);
+    let verdicts = super::fixability_provider::plan_fixability(
+        result,
+        &source_path.to_string_lossy(),
+        fingerprints,
+    );
 
-    if fix_result.fixes.is_empty() && fix_result.new_files.is_empty() {
+    if verdicts.is_empty() {
         return None;
     }
-
-    // Apply policy annotation (dry-run mode: write=false, no filtering)
-    let policy = crate::refactor::auto::FixPolicy {
-        only: None,
-        exclude: Vec::new(),
-    };
-    let _ = source_path;
-    crate::refactor::auto::apply_fix_policy(&mut fix_result, false, &policy);
 
     // Count by automation eligibility
     let mut automated_count = 0usize;
     let mut manual_only = 0usize;
     let mut by_kind: BTreeMap<String, FixabilityKindBreakdown> = BTreeMap::new();
-    let mut count_fixability = |finding: &AuditFinding, auto_apply: bool| {
-        let kind_key = finding_kind_key(finding);
+    for verdict in &verdicts {
+        let kind_key = finding_kind_key(&verdict.finding);
         let entry = by_kind.entry(kind_key).or_insert(FixabilityKindBreakdown {
             total: 0,
             automated: 0,
@@ -409,23 +398,13 @@ fn compute_fixability_impl(
         });
         entry.total += 1;
 
-        if auto_apply {
+        if verdict.auto_apply {
             automated_count += 1;
             entry.automated += 1;
         } else {
             manual_only += 1;
             entry.manual_only += 1;
         }
-    };
-
-    for fix in &fix_result.fixes {
-        for insertion in &fix.insertions {
-            count_fixability(&insertion.finding, insertion.auto_apply);
-        }
-    }
-
-    for new_file in &fix_result.new_files {
-        count_fixability(&new_file.finding, new_file.auto_apply);
     }
 
     let fixable_count = automated_count + manual_only;

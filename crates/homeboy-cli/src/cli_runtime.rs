@@ -109,6 +109,10 @@ impl CliRuntime {
         // code_audit depending on observation — the last seam before audit becomes
         // its own crate.
         crate::core::observation::audit_artifact_provider::register();
+        // Register the audit fixability provider so code_audit can report how
+        // fixable its findings are without calling up into the refactor engine's
+        // fix planner — the seam that removes the last code_audit->refactor edge.
+        crate::core::refactor::audit_fixability_provider::register();
         // Register the runner-evidence provider so observation::runs_service can
         // enrich run/artifact lookups with live runner + daemon evidence without
         // core depending on runner behavior. (Runner is still in-crate today;

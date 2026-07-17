@@ -8,6 +8,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 pub mod add;
+pub mod audit_fixability_provider;
 pub mod auto;
 pub mod decompose;
 pub mod edit_op_tagged;
