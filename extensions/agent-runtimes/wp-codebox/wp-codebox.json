@@ -253,6 +253,7 @@
         "unable_to_remediate",
         "provider_error",
         "timeout",
+        "candidate_recoverable",
         "failed",
         "follow_up_issue",
         "cancelled"
@@ -261,6 +262,8 @@
         "provider",
         "transient",
         "timeout",
+        "stalled",
+        "rate_limited",
         "policy_denied",
         "capability_missing",
         "invalid_input",

@@ -159,6 +159,13 @@ copying schema strings or selector paths into each backend. Domain policy, such
 as project-specific defaults, belongs in the caller/runtime package and not in
 the generic adapter.
 
+`agent-task-contracts/agent-task-provider-contract.generated.json` is generated
+from the pinned core fixture and carries both its own export schema and the
+source core-contract schema. Run
+`npm --prefix agent-task-contracts run generate:check` to verify it. The core
+contract drift test validates both generated artifacts against
+`homeboy agent-task contract --format json` when Homeboy is available.
+
 ## Host Orchestration Contract
 
 The published Homeboy core fixture is

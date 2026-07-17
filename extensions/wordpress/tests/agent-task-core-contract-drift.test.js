@@ -15,6 +15,7 @@ const {
   AGENT_TASK_REDACTED_METADATA_KEYS,
   AGENT_TASK_REQUEST_SCHEMA,
   agentTaskProviderContractFields,
+  providerSecretEnvRequirement,
 } = require('../../agent-task-contracts');
 const {
   FANOUT_RECONCILE_PLAN_SCHEMA,
@@ -36,9 +37,20 @@ const {
   canonicalJson,
   fetchCoreContractData,
 } = require('../../agent-runtimes/fixtures/generate-homeboy-agent-task-core-contract.cjs');
+const {
+  CORE_CONTRACT_SCHEMA,
+  CORE_CONTRACT_PATH,
+  GENERATED_SCHEMA,
+  OUTPUT_PATH,
+  buildProviderContract,
+  canonicalJson: canonicalProviderContractJson,
+  readPinnedCoreContract,
+} = require('../../agent-task-contracts/generate-agent-task-provider-contract.cjs');
 
 const committedFixtureText = fs.readFileSync(FIXTURE_PATH, 'utf8');
 const contract = JSON.parse(committedFixtureText);
+const committedProviderContractText = fs.readFileSync(OUTPUT_PATH, 'utf8');
+const generatedProviderContract = JSON.parse(committedProviderContractText);
 const wpCodeboxManifest = JSON.parse(fs.readFileSync(path.join(
   __dirname,
   '..',
@@ -51,12 +63,26 @@ const wpCodeboxProvider = wpCodeboxManifest.agent_task_executors[0];
 const providerFields = contract.provider_capability;
 
 assert.equal(contract.schema, 'homeboy/agent-task-core-contract/v1');
+assert.equal(CORE_CONTRACT_PATH, FIXTURE_PATH);
+assert.deepEqual(readPinnedCoreContract(), contract);
+assert.equal(generatedProviderContract.schema, GENERATED_SCHEMA);
+assert.equal(generatedProviderContract.core_contract_schema, CORE_CONTRACT_SCHEMA);
+assert.deepEqual(generatedProviderContract.provider_capability, {
+  failure_classifications: AGENT_TASK_FAILURE_CLASSIFICATIONS,
+  outcome_statuses: AGENT_TASK_OUTCOME_STATUSES,
+  redacted_metadata_keys: AGENT_TASK_REDACTED_METADATA_KEYS,
+  request_required_fields: providerFields.request_required_fields,
+});
 assert.equal(AGENT_TASK_REQUEST_SCHEMA, contract.schemas.request);
 assert.equal(AGENT_TASK_OUTCOME_SCHEMA, contract.schemas.outcome);
 assert.equal(AGENT_TASK_ARTIFACT_SCHEMA, contract.schemas.artifact);
 assert.equal(AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA, contract.schemas.artifact_declaration);
 assert.equal(AGENT_TASK_EVIDENCE_REF_SCHEMA, contract.schemas.evidence_ref);
 assert.equal(AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA, contract.schemas.provider);
+assert.equal(
+  providerSecretEnvRequirement('example', 'EXAMPLE_TOKEN').schema,
+  contract.schemas.secret_env_requirement
+);
 assert.equal(GENERIC_FANOUT_RECONCILE_CONFIG_SCHEMA, contract.schemas.fanout_reconcile_config);
 assert.equal(FANOUT_RECONCILE_PLAN_SCHEMA, contract.schemas.fanout_reconcile_plan);
 assert.equal(FANOUT_RECONCILE_RUN_SCHEMA, contract.schemas.fanout_reconcile_run);
@@ -122,6 +148,19 @@ if (coreData === null) {
     canonicalJson(expectedFixture),
     'Fixture serialization drifted from the generator: regenerate with '
       + 'node agent-runtimes/fixtures/generate-homeboy-agent-task-core-contract.cjs'
+  );
+  const expectedProviderContract = buildProviderContract(coreData);
+  assert.deepEqual(
+    generatedProviderContract,
+    expectedProviderContract,
+    'Provider contract drifted from core: regenerate with '
+      + 'node agent-task-contracts/generate-agent-task-provider-contract.cjs'
+  );
+  assert.equal(
+    committedProviderContractText,
+    canonicalProviderContractJson(expectedProviderContract),
+    'Provider contract serialization drifted from the generator: regenerate with '
+      + 'node agent-task-contracts/generate-agent-task-provider-contract.cjs'
   );
   process.stdout.write('Agent task core contract drift check passed (verified against core)\n');
 }

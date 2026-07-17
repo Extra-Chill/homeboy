@@ -4,9 +4,10 @@ const {
   agentTaskRequestFromRunnerSpec,
   agentTaskRunnerSpec,
 } = require('./agent-task-runner-contract');
+const { AGENT_TASK_REQUEST_SCHEMA } = require('./agent-task-provider-contract');
 
 const GENERIC_AGENT_TASK_PLAN_SCHEMA = 'homeboy/agent-task-plan/v1';
-const GENERIC_AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
+const GENERIC_AGENT_TASK_REQUEST_SCHEMA = AGENT_TASK_REQUEST_SCHEMA;
 const GENERIC_RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 
 function genericAgentTaskRunnerSpec(options = {}) {

@@ -1,43 +1,18 @@
 'use strict';
 
-const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
-const AGENT_TASK_OUTCOME_SCHEMA = 'homeboy/agent-task-outcome/v1';
-const AGENT_TASK_ARTIFACT_SCHEMA = 'homeboy/agent-task-artifact/v1';
-const AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA = 'homeboy/agent-task-artifact-declaration/v1';
-const AGENT_TASK_EVIDENCE_REF_SCHEMA = 'homeboy/agent-task-evidence-ref/v1';
-const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA = 'homeboy/agent-task-executor-provider/v1';
-const SECRET_ENV_REQUIREMENT_SCHEMA = 'homeboy/secret-env-requirement/v1';
+const coreContract = require('./agent-task-provider-contract.generated.json');
 
-const AGENT_TASK_REQUEST_REQUIRED_FIELDS = ['schema', 'task_id', 'executor.backend', 'instructions'];
-
-const AGENT_TASK_OUTCOME_STATUSES = [
-  'succeeded',
-  'no_op',
-  'unable_to_remediate',
-  'provider_error',
-  'timeout',
-  'failed',
-  'follow_up_issue',
-  'cancelled',
-];
-
-const AGENT_TASK_FAILURE_CLASSIFICATIONS = [
-  'provider',
-  'provider_quota',
-  'transient',
-  'timeout',
-  'policy_denied',
-  'capability_missing',
-  'invalid_input',
-  'execution_failed',
-  'unknown',
-];
-
-const AGENT_TASK_REDACTED_METADATA_KEYS = [
-  'secret_env_values',
-  'secretEnvValues',
-  'secrets',
-];
+const AGENT_TASK_REQUEST_SCHEMA = coreContract.schemas.request;
+const AGENT_TASK_OUTCOME_SCHEMA = coreContract.schemas.outcome;
+const AGENT_TASK_ARTIFACT_SCHEMA = coreContract.schemas.artifact;
+const AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA = coreContract.schemas.artifact_declaration;
+const AGENT_TASK_EVIDENCE_REF_SCHEMA = coreContract.schemas.evidence_ref;
+const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA = coreContract.schemas.provider;
+const SECRET_ENV_REQUIREMENT_SCHEMA = coreContract.schemas.secret_env_requirement;
+const AGENT_TASK_REQUEST_REQUIRED_FIELDS = coreContract.provider_capability.request_required_fields;
+const AGENT_TASK_OUTCOME_STATUSES = coreContract.provider_capability.outcome_statuses;
+const AGENT_TASK_FAILURE_CLASSIFICATIONS = coreContract.provider_capability.failure_classifications;
+const AGENT_TASK_REDACTED_METADATA_KEYS = coreContract.provider_capability.redacted_metadata_keys;
 
 const AGENT_TASK_SECRET_SELECTOR_PATHS = [
   'executor.config.provider',

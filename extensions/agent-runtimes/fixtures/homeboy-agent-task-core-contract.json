@@ -86,6 +86,8 @@
   "enums": {
     "aggregate_status": [
       "succeeded",
+      "candidate_recoverable",
+      "partial_recoverable",
       "partial_failure",
       "failed",
       "cancelled"
@@ -108,6 +110,8 @@
       "provider",
       "transient",
       "timeout",
+      "stalled",
+      "rate_limited",
       "policy_denied",
       "capability_missing",
       "invalid_input",
@@ -130,6 +134,7 @@
       "unable_to_remediate",
       "provider_error",
       "timeout",
+      "candidate_recoverable",
       "failed",
       "follow_up_issue",
       "cancelled"
@@ -138,6 +143,8 @@
       "queued",
       "running",
       "succeeded",
+      "candidate_recoverable",
+      "partial_recoverable",
       "partial_failure",
       "failed",
       "cancelled"
@@ -150,7 +157,8 @@
       "succeeded",
       "failed",
       "cancelled",
-      "timed_out"
+      "timed_out",
+      "candidate_recoverable"
     ],
     "workflow_step_status": [
       "pending",
@@ -164,6 +172,7 @@
   "orchestration": {
     "agent_task_outcome_to_fanout_record_status": {
       "cancelled": "failed",
+      "candidate_recoverable": "failed",
       "failed": "failed",
       "follow_up_issue": "failed",
       "no_op": "completed",
@@ -220,6 +229,8 @@
       "provider",
       "transient",
       "timeout",
+      "stalled",
+      "rate_limited",
       "policy_denied",
       "capability_missing",
       "invalid_input",
@@ -233,6 +244,7 @@
       "unable_to_remediate",
       "provider_error",
       "timeout",
+      "candidate_recoverable",
       "failed",
       "follow_up_issue",
       "cancelled"
@@ -297,8 +309,7 @@
       "set-cookie",
       "x-api-key",
       "x-auth-token",
-      "x-csrf-token",
-      "x-wp-nonce"
+      "x-csrf-token"
     ],
     "sensitive_keys": [
       "api_key",

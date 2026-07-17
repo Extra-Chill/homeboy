@@ -1,0 +1,50 @@
+{
+  "_generated_by": "agent-runtimes/fixtures/homeboy-agent-task-core-contract.json",
+  "core_contract_schema": "homeboy/agent-task-core-contract/v1",
+  "provider_capability": {
+    "failure_classifications": [
+      "provider",
+      "transient",
+      "timeout",
+      "stalled",
+      "rate_limited",
+      "policy_denied",
+      "capability_missing",
+      "invalid_input",
+      "execution_failed",
+      "unknown"
+    ],
+    "outcome_statuses": [
+      "succeeded",
+      "no_op",
+      "unable_to_remediate",
+      "provider_error",
+      "timeout",
+      "candidate_recoverable",
+      "failed",
+      "follow_up_issue",
+      "cancelled"
+    ],
+    "redacted_metadata_keys": [
+      "secret_env_values",
+      "secretEnvValues",
+      "secrets"
+    ],
+    "request_required_fields": [
+      "schema",
+      "task_id",
+      "executor.backend",
+      "instructions"
+    ]
+  },
+  "schema": "homeboy/agent-task-provider-contract-export/v1",
+  "schemas": {
+    "artifact": "homeboy/agent-task-artifact/v1",
+    "artifact_declaration": "homeboy/agent-task-artifact-declaration/v1",
+    "evidence_ref": "homeboy/agent-task-evidence-ref/v1",
+    "outcome": "homeboy/agent-task-outcome/v1",
+    "provider": "homeboy/agent-task-executor-provider/v1",
+    "request": "homeboy/agent-task-request/v1",
+    "secret_env_requirement": "homeboy/secret-env-requirement/v1"
+  }
+}
