@@ -980,6 +980,16 @@ mod tests {
 
             crate::agent_task_lifecycle::status("run").unwrap();
 
+            let record = crate::agent_task_lifecycle::status("run").unwrap();
+            assert_eq!(
+                record.metadata["cook_continuation_scheduler"]["status"],
+                "queued"
+            );
+            assert_eq!(
+                record.metadata["cook_continuation_scheduler"]["run_id"],
+                "run"
+            );
+
             assert_eq!(executions.load(Ordering::SeqCst), 0);
             assert_eq!(
                 consume_next_with(|_| {

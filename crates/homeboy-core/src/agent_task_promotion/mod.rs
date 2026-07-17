@@ -16,7 +16,7 @@ mod patch;
 mod promote;
 mod types;
 
-pub use apply::apply_materialized_workspace_patch;
+pub use apply::{apply_materialized_workspace_patch, preflight_configured_workspace_provider};
 pub use fingerprint::{
     candidate_fingerprint, AgentTaskCandidateFingerprint, AgentTaskPromotionCandidate,
 };

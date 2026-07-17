@@ -547,19 +547,55 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
             .map(str::to_string)
         {
             if crate::agent_task_service::recipe_exists(&cook_id)? {
-                if let Err(error) = crate::agent_task_service::enqueue_terminal_continuation(
+                let existing_scheduler_status = record
+                    .metadata
+                    .get("cook_continuation_scheduler")
+                    .and_then(Value::as_object)
+                    .and_then(|scheduler| scheduler.get("status"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                match crate::agent_task_service::enqueue_terminal_continuation(
                     &cook_id,
                     &record.run_id,
                 ) {
-                    record.ensure_metadata_object().insert(
-                        "cook_continuation_scheduler".to_string(),
-                        json!({
-                            "status": "failed",
-                            "error_code": error.code.as_str(),
-                            "message": error.message,
-                        }),
-                    );
-                    store::write_record(&record)?;
+                    Ok(enqueued) => {
+                        let run_id = record.run_id.clone();
+                        let candidate = record.latest_executor_evidence.as_ref().map(|evidence| {
+                            json!({
+                                "task_id": evidence.task_id,
+                                "provider_run_id": evidence.provider_run_id,
+                                "normalized_output_ref": evidence.normalized_output_ref,
+                            })
+                        });
+                        let status = if enqueued {
+                            "queued"
+                        } else {
+                            existing_scheduler_status
+                                .as_deref()
+                                .unwrap_or("already_queued_or_completed")
+                        };
+                        record.ensure_metadata_object().insert(
+                            "cook_continuation_scheduler".to_string(),
+                            json!({
+                                "status": status,
+                                "cook_id": cook_id,
+                                "run_id": run_id,
+                                "candidate": candidate,
+                            }),
+                        );
+                        store::write_record(&record)?;
+                    }
+                    Err(error) => {
+                        record.ensure_metadata_object().insert(
+                            "cook_continuation_scheduler".to_string(),
+                            json!({
+                                "status": "failed",
+                                "error_code": error.code.as_str(),
+                                "message": error.message,
+                            }),
+                        );
+                        store::write_record(&record)?;
+                    }
                 }
             }
         }
@@ -2010,6 +2046,26 @@ pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRe
             .expect("promotions array")
             .push(promotion.clone());
         metadata.insert("latest_promotion".to_string(), promotion);
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
+/// Persist the controller publication result separately from promotion so a
+/// resumed cook can prove finalization already completed before it publishes.
+pub fn record_cook_finalization(run_id: &str, finalization: Value) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        if record.metadata.get("cook_finalization") == Some(&finalization) {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        record
+            .ensure_metadata_object()
+            .insert("cook_finalization".to_string(), finalization.clone());
         true
     })?;
     match record {

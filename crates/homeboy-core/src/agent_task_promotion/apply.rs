@@ -96,6 +96,26 @@ pub(crate) const AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA: &str =
 pub(crate) const AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA: &str =
     "homeboy/agent-task-promotion-apply-response/v1";
 
+/// Confirm that the controller can promote into a managed workspace before it
+/// spends a provider attempt. Explicit provider commands remain authoritative
+/// and intentionally bypass this configured-provider lookup.
+pub fn preflight_configured_workspace_provider(to_workspace: &str) -> Result<()> {
+    let config = crate::defaults::load_config();
+    preflight_configured_workspace_provider_with_config(to_workspace, &config)
+}
+
+pub(crate) fn preflight_configured_workspace_provider_with_config(
+    to_workspace: &str,
+    config: &crate::defaults::HomeboyConfig,
+) -> Result<()> {
+    worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+        to_workspace,
+        config,
+        None,
+    )?;
+    Ok(())
+}
+
 /// Apply a promotion-provider request to an already materialized Git workspace.
 ///
 /// Lab uses this adapter after it has safely staged the target workspace on the
