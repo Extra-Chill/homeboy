@@ -95,6 +95,16 @@ pub struct RunnerAvailability {
     pub reasons: Vec<String>,
 }
 
+/// The authoritative runner condition used by callers that need to decide
+/// whether to reconnect, wait for capacity, or recover a stale daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerRecoveryState {
+    Disconnected,
+    StaleDaemon { active_job_count: usize },
+    Busy { active_job_count: usize },
+    Idle,
+}
+
 impl RunnerAvailability {
     pub fn from_status_parts(
         runner_id: impl Into<String>,
@@ -513,6 +523,22 @@ impl RunnerStatusReport {
     /// serialized compatibility field for command consumers.
     pub fn is_connected(&self) -> bool {
         self.state == RunnerSessionState::Connected
+    }
+
+    pub fn recovery_state(&self) -> RunnerRecoveryState {
+        if !self.is_connected() {
+            RunnerRecoveryState::Disconnected
+        } else if self.stale_daemon.is_some() {
+            RunnerRecoveryState::StaleDaemon {
+                active_job_count: self.active_job_count,
+            }
+        } else if self.active_job_count > 0 {
+            RunnerRecoveryState::Busy {
+                active_job_count: self.active_job_count,
+            }
+        } else {
+            RunnerRecoveryState::Idle
+        }
     }
 }
 
