@@ -11,7 +11,14 @@
 
 pub mod action_types;
 pub mod autofix_config;
+pub mod bench_result;
 pub mod capability;
+pub use bench_result::{
+    BenchChildCommandFailure, BenchMemory, BenchMetricDirection, BenchMetricPhase,
+    BenchMetricPolicy, BenchMetrics, BenchProvenance, BenchProvenanceLink, BenchRunExecution,
+    BenchRunnerMetadata, BenchWorkloadMetadata, RegressionTest, RigPackageEvidence,
+    RigPackageFreshness,
+};
 pub use capability::ExtensionCapability;
 pub mod ci_config;
 pub mod core_compat;
