@@ -219,7 +219,7 @@ fn test_phase_report(status: &str, exit_code: i32, counts: Option<&TestCounts>) 
                 "test phase passed".to_string()
             }
         } else if counts.map(|counts| counts.total == 0).unwrap_or(false) {
-            "PHPUnit discovery found zero tests; no PHPUnit assertions ran".to_string()
+            "test runner reported zero executed tests".to_string()
         } else if exit_code >= 2 {
             format!("test harness infrastructure failure (exit {})", exit_code)
         } else if counts.map(|counts| counts.failed == 0).unwrap_or(false) {
@@ -254,7 +254,7 @@ fn test_phase_failure(exit_code: i32, counts: Option<&TestCounts>) -> PhaseFailu
         summary: match category {
             PhaseFailureCategory::Infrastructure => {
                 if counts.map(|counts| counts.total == 0).unwrap_or(false) {
-                    "PHPUnit discovery found zero tests; no PHPUnit assertions ran".to_string()
+                    "test runner reported zero executed tests".to_string()
                 } else if counts.map(|counts| counts.failed == 0).unwrap_or(false) {
                     format!(
                         "test runner failed after reporting zero test failures (exit {})",
@@ -266,7 +266,11 @@ fn test_phase_failure(exit_code: i32, counts: Option<&TestCounts>) -> PhaseFailu
             }
             PhaseFailureCategory::Findings => {
                 if let Some(counts) = counts {
-                    format!("{} test failure(s) detected", counts.failed)
+                    if counts.total == 0 {
+                        "test runner reported zero executed tests".to_string()
+                    } else {
+                        format!("{} test failure(s) detected", counts.failed)
+                    }
                 } else {
                     format!("test phase reported failures (exit {})", exit_code)
                 }
@@ -437,6 +441,23 @@ mod tests {
         assert_eq!(json["status"], "passed");
         assert_eq!(json["exit_code"], 0);
         assert!(json.get("failure").is_none());
+    }
+
+    #[test]
+    fn zero_executed_tests_use_runner_neutral_failure_summary() {
+        let (output, exit_code) =
+            from_main_workflow(workflow_result_with_counts(1, TestCounts::new(0, 0, 0, 0)));
+
+        let json = serde_json::to_value(output).expect("serialize test command output");
+        assert_eq!(exit_code, 1);
+        assert_eq!(
+            json["phase"]["summary"],
+            "test runner reported zero executed tests"
+        );
+        assert_eq!(
+            json["failure"]["summary"],
+            "test runner reported zero executed tests"
+        );
     }
 
     #[test]

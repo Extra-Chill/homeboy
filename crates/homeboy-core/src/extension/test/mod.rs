@@ -211,24 +211,32 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
     let mut fallback_message = None;
 
     for test_file in files {
-        if test_file.starts_with("tests/") && test_file.ends_with(".rs") {
-            let rest = test_file.trim_start_matches("tests/");
+        let Some(routing_file) = cargo_relative_test_path(component, test_file) else {
+            fallback_message = Some(
+                "Changed Rust test path has no owning Cargo package; running the full test command."
+                    .to_string(),
+            );
+            continue;
+        };
+
+        if routing_file.starts_with("tests/") && routing_file.ends_with(".rs") {
+            let rest = routing_file.trim_start_matches("tests/");
             if !rest.contains('/') {
                 integration_args.push(rest.trim_end_matches(".rs").to_string());
                 continue;
             }
         }
 
-        let mut module_path = test_file
+        let mut module_path = routing_file
             .strip_prefix("src/")
-            .unwrap_or(test_file)
+            .unwrap_or(&routing_file)
             .strip_prefix("tests/")
-            .unwrap_or_else(|| test_file.strip_prefix("src/").unwrap_or(test_file))
+            .unwrap_or_else(|| routing_file.strip_prefix("src/").unwrap_or(&routing_file))
             .trim_end_matches(".rs")
             .trim_end_matches("/mod")
             .to_string();
 
-        if test_file.starts_with("tests/") && test_file.ends_with("_test.rs") {
+        if routing_file.starts_with("tests/") && routing_file.ends_with("_test.rs") {
             let test_module = module_path
                 .rsplit('/')
                 .next()
@@ -242,14 +250,17 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
 
             if source_file.is_file() || source_mod.is_file() {
                 module_path = format!("{source_module}::{test_module}");
-            } else if test_file.starts_with("tests/") && test_file["tests/".len()..].contains('/') {
+            } else if routing_file.starts_with("tests/")
+                && routing_file["tests/".len()..].contains('/')
+            {
                 fallback_message = Some(
                     "Changed files include nested tests without a direct target; running the full test command."
                         .to_string(),
                 );
                 continue;
             }
-        } else if test_file.starts_with("tests/") && test_file["tests/".len()..].contains('/') {
+        } else if routing_file.starts_with("tests/") && routing_file["tests/".len()..].contains('/')
+        {
             fallback_message = Some(
                 "Changed files include nested tests without a direct target; running the full test command."
                     .to_string(),
@@ -262,7 +273,7 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
         // cargo filter that matches zero tests. The runner treats "ran 0 tests"
         // as a failure, producing a spurious test-phase failure with no counts.
         // Fall back to the full suite instead of emitting an empty filter.
-        if is_inline_test_support_file(component, test_file) {
+        if is_inline_test_support_file(component, test_file, &routing_file) {
             fallback_message = Some(
                 "Changed files include an inline test support module without test functions; running the full test command."
                     .to_string(),
@@ -346,6 +357,36 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
     Vec::new()
 }
 
+/// Return a changed file path relative to its Cargo package.
+///
+/// Changed-file selection is repository-relative for workspace components, but
+/// Cargo test filters are module-relative to the owning package. Component
+/// relative `src/` and `tests/` paths already satisfy that contract. For other
+/// paths, locate the nearest package manifest rather than treating directory
+/// names above `src/` as Rust modules.
+fn cargo_relative_test_path(component: &Component, test_file: &str) -> Option<String> {
+    if test_file.starts_with("src/") || test_file.starts_with("tests/") {
+        return Some(test_file.to_string());
+    }
+
+    let component_root = component_source_path(component);
+    let file_path = component_root.join(test_file);
+    let mut directory = file_path.parent()?;
+
+    loop {
+        if directory.join("Cargo.toml").is_file() {
+            return file_path
+                .strip_prefix(directory)
+                .ok()
+                .map(|path| path.to_string_lossy().replace('\\', "/"));
+        }
+        directory = directory.parent()?;
+        if !directory.starts_with(&component_root) {
+            return None;
+        }
+    }
+}
+
 /// Returns `true` when `test_file` is an inline test module (lives under a
 /// `tests/` directory inside `src/`) that defines no test functions and would
 /// therefore produce a cargo filter matching zero tests.
@@ -353,10 +394,10 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
 /// Only files that exist on disk and contain no `#[test]`/`#[*::test]` attribute
 /// are treated as support modules; if the file is missing or cannot be read we
 /// conservatively return `false` so normal filter routing is preserved.
-fn is_inline_test_support_file(component: &Component, test_file: &str) -> bool {
+fn is_inline_test_support_file(component: &Component, test_file: &str, routing_file: &str) -> bool {
     // Restrict to inline test modules: `src/.../tests/....rs`. Integration
     // tests under the top-level `tests/` dir are handled separately above.
-    let Some(relative) = test_file.strip_prefix("src/") else {
+    let Some(relative) = routing_file.strip_prefix("src/") else {
         return false;
     };
     if !relative.ends_with(".rs") {
@@ -725,6 +766,59 @@ mod tests {
             "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
             "--\ncore::daemon".to_string()
         )));
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_maps_repository_relative_inline_test_to_owning_package() {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("homeboy-core should live in the workspace crates directory");
+        let component = Component::new(
+            "fixture-component".to_string(),
+            workspace_root.to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &["crates/homeboy-lab-runner/src/workspace/tests/snapshot.rs".to_string()],
+        );
+
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            "rust_filter".to_string()
+        )));
+        assert!(
+            env.contains(&(
+                "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
+                "--\nworkspace::tests::snapshot".to_string()
+            )),
+            "env: {env:?}"
+        );
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_falls_back_without_an_owning_package() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &["packages/example/src/tests/scope.rs".to_string()],
+        );
+
+        assert!(
+            env.contains(&("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string())),
+            "env: {env:?}"
+        );
+        assert!(!env.iter().any(|(key, _)| key == "HOMEBOY_TEST_RUNNER_ARGS"));
     }
 
     #[test]
