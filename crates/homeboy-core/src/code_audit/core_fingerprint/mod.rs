@@ -37,7 +37,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use crate::extension;
 use homeboy_audit_contract::{
     AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker, HookRef, UnusedParam,
 };
@@ -278,16 +277,15 @@ pub fn fingerprint_from_grammar(
 /// Searches installed extensions for a grammar.toml that handles the given
 /// file extension.
 pub fn load_grammar_for_ext(ext: &str) -> Option<Grammar> {
-    let matched = extension::find_extension_for_file_ext(ext, "fingerprint")?;
-    let extension_path = matched.extension_path.as_deref()?;
+    let grammar_dir = super::grammar_source_provider::grammar_dir_for_ext(ext)?;
 
     // Try grammar.toml first, then grammar.json
-    let grammar_path = Path::new(extension_path).join("grammar.toml");
+    let grammar_path = grammar_dir.join("grammar.toml");
     if grammar_path.exists() {
         return grammar::load_grammar(&grammar_path).ok();
     }
 
-    let grammar_json_path = Path::new(extension_path).join("grammar.json");
+    let grammar_json_path = grammar_dir.join("grammar.json");
     if grammar_json_path.exists() {
         return grammar::load_grammar_json(&grammar_json_path).ok();
     }

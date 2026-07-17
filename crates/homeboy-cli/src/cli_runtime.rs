@@ -108,6 +108,10 @@ impl CliRuntime {
         // extension fingerprint scripts (for files the core grammar engine can't
         // handle) without depending on the extension script runner.
         crate::core::extension::audit_fingerprint_script_provider::register();
+        // Register the grammar-source provider so code_audit's core fingerprint
+        // engine can load extension-shipped grammars without resolving them
+        // through the extension registry directly.
+        crate::core::extension::audit_grammar_source_provider::register();
         // Register the audit recorded-artifact provider so the artifact-portability
         // detector can read past runs' artifacts from the observation store without
         // code_audit depending on observation — the last seam before audit becomes

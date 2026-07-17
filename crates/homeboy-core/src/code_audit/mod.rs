@@ -35,6 +35,7 @@ pub(crate) mod findings;
 pub mod fingerprint;
 pub mod fingerprint_script_provider;
 pub mod fixability_provider;
+pub mod grammar_source_provider;
 mod idiomatic;
 pub(crate) mod impact;
 pub(crate) mod import_matching;
