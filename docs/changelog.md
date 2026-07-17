@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.288.12] - 2026-07-17
+
+### Changed
+- relocate phase_timing primitive into homeboy-engine-primitives
+- invert audit compiler-warning detection behind a provider hook
+- invert audit grammar-source resolution behind a provider hook
+- move ExtensionPhaseTiming value type into the audit contract
+
+### Fixed
+- Fix recovery manifest cleanup before finalization
+
 ## [0.288.11] - 2026-07-17
 
 ### Changed
