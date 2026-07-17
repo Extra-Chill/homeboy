@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "3.24.6",
+  "version": "3.25.0",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -9,7 +9,24 @@
   },
   "provides": {
     "file_extensions": ["php", "css", "ts", "tsx", "js", "jsx", "json"],
-    "capabilities": ["fingerprint", "refactor", "crossref", "validate", "fuzz"]
+    "capabilities": ["fingerprint", "refactor", "crossref", "validate", "fuzz"],
+    "discovery_markers": [
+      { "all": ["*.php"] },
+      { "all": ["style.css", "functions.php"] }
+    ]
+  },
+  "composition": {
+    "includes": ["nodejs"],
+    "optional": [
+      "dependency-adapters/composer-package-manager",
+      "dependency-adapters/nodejs-package-managers",
+      "dependency-adapters/wordpress-dependency-helpers"
+    ],
+    "roles": {
+      "project": ["wordpress-plugin", "wordpress-theme"],
+      "javascript": "nodejs"
+    },
+    "conflicts": []
   },
   "source_snapshot": {
     "sync_excludes": ["vendor/", "vendor/**"]

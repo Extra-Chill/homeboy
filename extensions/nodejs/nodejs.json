@@ -1,12 +1,24 @@
 {
   "name": "Node.js",
-  "version": "3.5.0",
+  "version": "3.6.0",
   "icon": "server.rack",
   "description": "Node.js project type — discovery, audit grammar, and npm release lifecycle",
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["js", "jsx", "ts", "tsx", "mjs", "cjs", "json"],
-    "capabilities": ["format", "validate", "fuzz", "playwright-browser"]
+    "capabilities": ["format", "validate", "fuzz", "playwright-browser"],
+    "discovery_markers": [
+      { "all": ["package.json"] }
+    ]
+  },
+  "composition": {
+    "includes": [],
+    "optional": ["dependency-adapters/nodejs-package-managers"],
+    "roles": {
+      "project": ["node-package"],
+      "javascript": "nodejs"
+    },
+    "conflicts": []
   },
   "source_snapshot": {
     "sync_excludes": ["node_modules/", "node_modules/**"]

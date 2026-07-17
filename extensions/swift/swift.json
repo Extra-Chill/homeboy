@@ -1,12 +1,23 @@
 {
   "name": "Swift",
-  "version": "2.6.2",
+  "version": "2.7.0",
   "icon": "swift",
   "description": "Swift testing infrastructure for macOS, iOS, and Swift CLI projects",
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["swift", "xcodeproj", "xcworkspace", "yml"],
-    "capabilities": ["fingerprint", "validate"]
+    "capabilities": ["fingerprint", "validate"],
+    "discovery_markers": [
+      { "any": ["Package.swift", "project.yml", "*.xcodeproj", "*.xcworkspace"] }
+    ]
+  },
+  "composition": {
+    "includes": [],
+    "optional": [],
+    "roles": {
+      "project": ["swift-package", "swift-xcode-project"]
+    },
+    "conflicts": []
   },
   "structured_sidecars": {
     "lint.findings": true,

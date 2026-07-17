@@ -1,13 +1,24 @@
 {
   "name": "Go",
   "id": "go",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "icon": "g.circle.fill",
   "description": "Go CLI integration for services, bridges, and binaries",
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["go", "mod", "sum"],
-    "capabilities": ["fingerprint", "format", "validate"]
+    "capabilities": ["fingerprint", "format", "validate"],
+    "discovery_markers": [
+      { "all": ["go.mod"] }
+    ]
+  },
+  "composition": {
+    "includes": [],
+    "optional": [],
+    "roles": {
+      "project": ["go-module"]
+    },
+    "conflicts": []
   },
   "structured_sidecars": {
     "lint.findings": true,

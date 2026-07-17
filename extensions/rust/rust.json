@@ -1,12 +1,23 @@
 {
   "name": "Rust",
-  "version": "1.23.10",
+  "version": "1.24.0",
   "icon": "gearshape.2.fill",
   "description": "Cargo CLI integration for Rust components",
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["rs"],
-    "capabilities": ["fingerprint", "refactor", "format", "validate"]
+    "capabilities": ["fingerprint", "refactor", "format", "validate"],
+    "discovery_markers": [
+      { "all": ["Cargo.toml"] }
+    ]
+  },
+  "composition": {
+    "includes": [],
+    "optional": [],
+    "roles": {
+      "project": ["rust-crate"]
+    },
+    "conflicts": []
   },
   "source_snapshot": {
     "sync_excludes": ["target/", "target/**"]
