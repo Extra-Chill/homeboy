@@ -48,9 +48,16 @@ pub struct Cli {
     )]
     pub notification_route: Option<String>,
 
-    /// Select where eligible work executes. `auto` uses the command contract,
-    /// controller pressure, and ready Lab capacity.
-    #[arg(long, global = true, value_enum, default_value_t = Placement::Auto)]
+    /// Select where eligible work executes without pinning a runner. `auto` uses
+    /// the command contract, controller pressure, and ready Lab capacity. Use
+    /// `--runner <id>` instead to pin a connected Lab runner.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = Placement::Auto,
+        conflicts_with = "runner"
+    )]
     pub placement: Placement,
 
     /// Return after a runner daemon accepts the job instead of waiting for remote completion.
@@ -62,8 +69,14 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     pub artifact_root: Option<PathBuf>,
 
-    /// Route commands with portable Lab offload support to a connected runner.
-    #[arg(long, global = true, value_name = "RUNNER_ID")]
+    /// Pin portable work to a connected Lab runner. This implies Lab placement;
+    /// use `--placement <policy>` instead to select placement without pinning.
+    #[arg(
+        long,
+        global = true,
+        value_name = "RUNNER_ID",
+        conflicts_with = "placement"
+    )]
     pub runner: Option<String>,
 
     /// Permit Lab git workspace materialization to overwrite a dirty runner-side checkout.
@@ -1104,6 +1117,41 @@ mod tests {
     }
 
     #[test]
+    fn runner_and_placement_are_mutually_exclusive() {
+        for placement in ["lab", "local"] {
+            let result = Cli::command_with_scoped_lab_args().try_get_matches_from([
+                "homeboy",
+                "bench",
+                "example",
+                "--runner",
+                "homeboy-lab",
+                "--placement",
+                placement,
+            ]);
+            let Err(error) = result else {
+                panic!("runner selection and placement policy must not be combined");
+            };
+
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            let message = error.to_string();
+            assert!(message.contains("--runner"));
+            assert!(message.contains("--placement"));
+        }
+    }
+
+    #[test]
+    fn runner_only_preserves_auto_placement() {
+        let matches = Cli::command_with_scoped_lab_args()
+            .try_get_matches_from(["homeboy", "bench", "example", "--runner", "homeboy-lab"])
+            .expect("runner-only selection should parse");
+        let (cli, _) = Cli::from_registered_arg_matches(&matches)
+            .expect("runner-only selection should deserialize");
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert_eq!(cli.placement, Placement::Auto);
+    }
+
+    #[test]
     fn placement_does_not_consume_passthrough_arguments() {
         let cli = Cli::try_parse_from([
             "homeboy",
@@ -1157,6 +1205,8 @@ mod tests {
         ] {
             assert!(help.contains(flag), "bench must advertise {flag}");
         }
+        assert!(help.contains("without pinning a runner"));
+        assert!(help.contains("This implies Lab placement"));
     }
 
     #[test]
