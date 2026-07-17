@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::artifact_contract::ArtifactContract;
-use crate::lifecycle::{LifecycleContract, LifecycleResultMetadata};
+use homeboy_core::artifact_contract::ArtifactContract;
+use homeboy_core::lifecycle::{LifecycleContract, LifecycleResultMetadata};
 
 use super::contract::{canonical_operation_family, FuzzOperationFamily, FuzzSafetyClass};
 use super::coverage::{

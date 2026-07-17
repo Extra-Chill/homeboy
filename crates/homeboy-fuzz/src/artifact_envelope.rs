@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::observation::ArtifactRecord;
+use homeboy_core::observation::ArtifactRecord;
 
 use super::envelope::FuzzResultEnvelope;
 use super::schemas::{
@@ -311,7 +311,7 @@ fn validate_artifact_refs(
 
 #[cfg(test)]
 mod tests {
-    use crate::observation::ArtifactRecord;
+    use homeboy_core::observation::ArtifactRecord;
 
     use super::*;
 

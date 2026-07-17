@@ -3,11 +3,11 @@ use super::*;
 #[test]
 fn fuzz_output_contract_includes_results_file_and_parsed_campaign() {
     let results = FuzzCampaign {
-        schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
-        version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        schema: homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+        version: homeboy::fuzz::FUZZ_CONTRACT_VERSION,
         id: "campaign-1".to_string(),
         title: None,
-        safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+        safety_class: homeboy::fuzz::FuzzSafetyClass::ReadOnly,
         surfaces: Vec::new(),
         targets: Vec::new(),
         workloads: Vec::new(),
@@ -70,7 +70,7 @@ fn fuzz_output_contract_includes_results_file_and_parsed_campaign() {
     );
     assert_eq!(
         run["results"]["schema"],
-        homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA
+        homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA
     );
     assert_eq!(run["results"]["id"], "campaign-1");
     assert_eq!(
@@ -80,7 +80,7 @@ fn fuzz_output_contract_includes_results_file_and_parsed_campaign() {
     assert_eq!(run["campaign_contract"]["seed"], "seed-1");
     assert_eq!(
         run["campaign_contract"]["result_schema"],
-        homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA
+        homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA
     );
     assert!(run["campaign_contract"]["unsupported"]
         .as_array()
@@ -129,8 +129,8 @@ fn fuzz_performance_hotspots_extracts_generic_metadata_metrics() {
         },
         "label": "ignored"
     });
-    campaign.coverage_summary = Some(homeboy::core::fuzz::FuzzCoverageSummary {
-        schema: homeboy::core::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+    campaign.coverage_summary = Some(homeboy::fuzz::FuzzCoverageSummary {
+        schema: homeboy::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
         declared_targets: 0,
         executable_targets: 0,
         proven_targets: 0,
@@ -139,7 +139,7 @@ fn fuzz_performance_hotspots_extracts_generic_metadata_metrics() {
         proven_operations: 0,
         skipped_targets: Vec::new(),
         skipped_operations: Vec::new(),
-        surface_summaries: vec![homeboy::core::fuzz::FuzzCoverageGroupSummary {
+        surface_summaries: vec![homeboy::fuzz::FuzzCoverageGroupSummary {
             id: "surface-a".to_string(),
             kind: "api".to_string(),
             label: None,
@@ -159,8 +159,8 @@ fn fuzz_performance_hotspots_extracts_generic_metadata_metrics() {
         metadata: serde_json::json!({ "coverage_queries": 7 }),
         extra: std::collections::BTreeMap::new(),
     });
-    campaign.artifacts = vec![homeboy::core::fuzz::FuzzArtifact {
-        schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+    campaign.artifacts = vec![homeboy::fuzz::FuzzArtifact {
+        schema: homeboy::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
         id: "profile".to_string(),
         kind: "profile".to_string(),
         artifact: None,
@@ -195,7 +195,7 @@ fn fuzz_observation_hotspots_rank_observation_set_metrics() {
     let mut campaign = empty_fuzz_campaign();
     campaign.metadata = serde_json::json!({
         "observation_set": {
-            "schema": homeboy::core::fuzz::FUZZ_OBSERVATION_SET_SCHEMA,
+            "schema": homeboy::fuzz::FUZZ_OBSERVATION_SET_SCHEMA,
             "version": 1,
             "id": "report-observations",
             "observations": [

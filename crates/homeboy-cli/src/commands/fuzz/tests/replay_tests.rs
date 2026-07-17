@@ -67,19 +67,19 @@ fn fuzz_replay_resolves_campaign_metadata_without_executing() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("fuzz-results.json");
     let campaign = serde_json::json!({
-        "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
-        "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        "schema": homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+        "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
         "id": "campaign-1",
         "safety_class": "read_only",
         "cases": [
             {
-                "schema": homeboy::core::fuzz::FUZZ_CASE_SCHEMA,
+                "schema": homeboy::fuzz::FUZZ_CASE_SCHEMA,
                 "id": "case-1",
                 "replay_id": "replay-1"
             }
         ],
         "replay": {
-            "schema": homeboy::core::fuzz::FUZZ_REPLAY_SCHEMA,
+            "schema": homeboy::fuzz::FUZZ_REPLAY_SCHEMA,
             "id": "replay-1",
             "seed": "1234",
             "artifact_id": "case-artifact"
@@ -186,19 +186,19 @@ fn fuzz_replay_resolves_case_from_nested_lab_normalized_result_payload() {
         std::fs::write(
             &path,
             serde_json::json!({
-                "schema": homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA,
-                "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                "schema": homeboy::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA,
+                "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
                 "id": "lab-envelope-1",
                 "status": "passed",
                 "request": {
-                    "schema": homeboy::core::fuzz::FUZZ_EXECUTION_REQUEST_SCHEMA,
-                    "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                    "schema": homeboy::fuzz::FUZZ_EXECUTION_REQUEST_SCHEMA,
+                    "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
                     "id": "request-1",
                     "component": "component-a"
                 },
                 "campaign": {
-                    "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
-                    "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                    "schema": homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+                    "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
                     "id": "campaign-with-artifact-payloads",
                     "safety_class": "read_only",
                     "metadata": {
@@ -264,28 +264,28 @@ fn fuzz_minimize_resolves_case_from_nested_lab_fuzz_result_artifact_payload() {
             "artifact": {
                 "payload": {
                     "fuzz_result_envelope": {
-                        "schema": homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA,
-                        "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                        "schema": homeboy::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA,
+                        "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
                         "id": "nested-envelope-1",
                         "status": "passed",
                         "request": {
-                            "schema": homeboy::core::fuzz::FUZZ_EXECUTION_REQUEST_SCHEMA,
-                            "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                            "schema": homeboy::fuzz::FUZZ_EXECUTION_REQUEST_SCHEMA,
+                            "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
                             "id": "request-1",
                             "component": "component-a"
                         },
                         "campaign": {
-                            "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
-                            "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                            "schema": homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+                            "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
                             "id": "nested-campaign-1",
                             "safety_class": "read_only",
                             "cases": [{
-                                "schema": homeboy::core::fuzz::FUZZ_CASE_SCHEMA,
+                                "schema": homeboy::fuzz::FUZZ_CASE_SCHEMA,
                                 "id": "case-from-nested-envelope",
                                 "replay_id": "replay-1"
                             }],
                             "replay": {
-                                "schema": homeboy::core::fuzz::FUZZ_REPLAY_SCHEMA,
+                                "schema": homeboy::fuzz::FUZZ_REPLAY_SCHEMA,
                                 "id": "replay-1",
                                 "seed": "nested-seed",
                                 "artifact_id": "nested-artifact"
@@ -333,19 +333,19 @@ fn fuzz_replay_preserves_clear_error_when_nested_case_is_absent() {
     std::fs::write(
         &path,
         serde_json::json!({
-            "schema": homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA,
-            "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+            "schema": homeboy::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA,
+            "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
             "id": "lab-envelope-1",
             "status": "passed",
             "request": {
-                "schema": homeboy::core::fuzz::FUZZ_EXECUTION_REQUEST_SCHEMA,
-                "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                "schema": homeboy::fuzz::FUZZ_EXECUTION_REQUEST_SCHEMA,
+                "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
                 "id": "request-1",
                 "component": "component-a"
             },
             "campaign": {
-                "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
-                "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                "schema": homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+                "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
                 "id": "campaign-with-artifact-payloads",
                 "safety_class": "read_only",
                 "metadata": {
@@ -415,7 +415,7 @@ fn fuzz_replay_dry_run_resolves_persisted_homeboy_artifact_ref_without_local_byt
                 size_bytes: None,
                 mime: Some("application/json".to_string()),
                 metadata_json: serde_json::json!({
-                    "schema": homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA
+                    "schema": homeboy::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA
                 }),
                 created_at: chrono::Utc::now().to_rfc3339(),
             })
@@ -577,7 +577,7 @@ fn fuzz_replay_dry_run_surfaces_persisted_artifact_public_access() {
                 size_bytes: None,
                 mime: Some("application/json".to_string()),
                 metadata_json: serde_json::json!({
-                    "schema": homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA
+                    "schema": homeboy::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA
                 }),
                 created_at: chrono::Utc::now().to_rfc3339(),
             })
@@ -877,19 +877,19 @@ fn write_fuzz_rig(
 fn write_replay_campaign(dir: &Path) -> PathBuf {
     let path = dir.join("fuzz-results.json");
     let campaign = serde_json::json!({
-        "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
-        "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        "schema": homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+        "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
         "id": "campaign-1",
         "safety_class": "read_only",
         "cases": [
             {
-                "schema": homeboy::core::fuzz::FUZZ_CASE_SCHEMA,
+                "schema": homeboy::fuzz::FUZZ_CASE_SCHEMA,
                 "id": "case-1",
                 "replay_id": "replay-1"
             }
         ],
         "replay": {
-            "schema": homeboy::core::fuzz::FUZZ_REPLAY_SCHEMA,
+            "schema": homeboy::fuzz::FUZZ_REPLAY_SCHEMA,
             "id": "replay-1",
             "seed": "1234",
             "artifact_id": "case-artifact"

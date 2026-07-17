@@ -133,13 +133,13 @@ pub(super) fn isolation_proof_schema() -> String {
 }
 
 pub(super) fn lifecycle_contract_schema() -> String {
-    crate::lifecycle::LIFECYCLE_CONTRACT_SCHEMA.to_string()
+    homeboy_core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA.to_string()
 }
 
 pub(super) fn lifecycle_result_schema() -> String {
-    crate::lifecycle::LIFECYCLE_RESULT_SCHEMA.to_string()
+    homeboy_core::lifecycle::LIFECYCLE_RESULT_SCHEMA.to_string()
 }
 
 pub(super) fn lifecycle_snapshot_ref_schema() -> String {
-    crate::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA.to_string()
+    homeboy_core::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA.to_string()
 }

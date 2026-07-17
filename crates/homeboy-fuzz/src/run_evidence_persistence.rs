@@ -9,14 +9,14 @@
 
 use std::path::Path;
 
-use crate::artifact_ref::EvidenceRef;
-use crate::artifacts::{record_artifact_postprocess_outputs, ArtifactPostprocessOutput};
-use crate::fuzz::{
+use crate::{
     fuzz_result_envelope_evidence_ref, persist_fuzz_coverage_reconciliation,
     persist_fuzz_run_result_envelope, FuzzCampaign, FuzzResultEnvelope,
     FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA,
 };
-use crate::observation::{ObservationStore, RunRecord};
+use homeboy_core::artifact_ref::EvidenceRef;
+use homeboy_core::artifacts::{record_artifact_postprocess_outputs, ArtifactPostprocessOutput};
+use homeboy_core::observation::{ObservationStore, RunRecord};
 
 /// Plain-data inputs for persisting fuzz run evidence.
 ///
@@ -48,7 +48,7 @@ pub struct FuzzRunEvidence<'a> {
 /// any evidence references produced while recording the result envelope.
 pub fn persist_fuzz_run_evidence(
     evidence: FuzzRunEvidence<'_>,
-) -> crate::Result<(String, Vec<EvidenceRef>)> {
+) -> homeboy_core::Result<(String, Vec<EvidenceRef>)> {
     let store = ObservationStore::open_initialized()?;
     let run_id = evidence.run.id.clone();
     store.upsert_imported_run(&evidence.run)?;

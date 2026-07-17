@@ -130,7 +130,6 @@ pub mod extension;
 // `crate::finding::*` call sites keep working unchanged.
 pub use homeboy_finding as finding;
 pub mod fleet;
-pub mod fuzz;
 pub mod gate;
 pub mod gh_actions_cache;
 pub mod git;

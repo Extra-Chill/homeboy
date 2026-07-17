@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use homeboy::core::fuzz::{
+use homeboy::fuzz::{
     parse_fuzz_hotspot_set_value, parse_fuzz_observation_set_value,
     parse_fuzz_result_envelope_file, rank_fuzz_observation_set_hotspots, FuzzHotspot,
     FuzzResultEnvelope,
@@ -660,7 +660,7 @@ fn is_failure_status(status: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use homeboy::core::artifact_contract::ArtifactContract;
-    use homeboy::core::fuzz::{
+    use homeboy::fuzz::{
         default_fuzz_gates, default_fuzz_required_artifacts, FuzzArtifact, FuzzCampaign, FuzzCase,
         FuzzCoverageSummary, FuzzExecutionRequest, FuzzFinding, FuzzFindingStatus,
         FuzzResultEnvelope, FuzzSafetyClass, FUZZ_ARTIFACT_SCHEMA, FUZZ_CAMPAIGN_SCHEMA,
@@ -910,7 +910,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(index, status)| FuzzCase {
-                    schema: homeboy::core::fuzz::FUZZ_CASE_SCHEMA.to_string(),
+                    schema: homeboy::fuzz::FUZZ_CASE_SCHEMA.to_string(),
                     id: format!("case-{index}"),
                     target_id: None,
                     operation_id: None,
@@ -927,7 +927,7 @@ mod tests {
             seeds: Vec::new(),
             coverage: Vec::new(),
             coverage_summary: Some(FuzzCoverageSummary {
-                schema: homeboy::core::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+                schema: homeboy::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
                 declared_targets,
                 executable_targets: declared_targets,
                 proven_targets,
@@ -946,7 +946,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(index, severity)| FuzzFinding {
-                    schema: homeboy::core::fuzz::FUZZ_FINDING_SCHEMA.to_string(),
+                    schema: homeboy::fuzz::FUZZ_FINDING_SCHEMA.to_string(),
                     id: format!("finding-{index}"),
                     title: format!("finding {index}"),
                     severity: severity.to_string(),

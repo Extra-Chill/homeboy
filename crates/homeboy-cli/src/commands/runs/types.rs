@@ -11,12 +11,12 @@ use serde_json::Value;
 
 use homeboy::core::artifact_links::ArtifactViewerDescriptor;
 use homeboy::core::artifacts::{ArtifactPreviewEntrypoint, MatrixArtifactSummary};
-use homeboy::core::fuzz::FuzzResultEnvelopeArtifactInspection;
 use homeboy::core::observation::evidence_report::DirectoryArtifactPublicationGuidance;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::resource_lifecycle_index::ResourceLifecycleIndex;
 use homeboy::core::validation_progress::ValidationCommandSummary;
+use homeboy::fuzz::FuzzResultEnvelopeArtifactInspection;
 use homeboy::runner::runners::RunnerArtifactRef;
 
 use super::bench::{BenchCompareOutput, RunsBenchCompareArgs};

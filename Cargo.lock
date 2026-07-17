@@ -756,6 +756,7 @@ dependencies = [
  "homeboy-engine-primitives",
  "homeboy-error",
  "homeboy-finding",
+ "homeboy-fuzz",
  "homeboy-lab-contract",
  "homeboy-output",
  "homeboy-paths",
@@ -866,6 +867,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-fuzz"
+version = "0.1.0"
+dependencies = [
+ "homeboy-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "homeboy-lab-contract"
 version = "0.1.0"
 dependencies = [
@@ -927,6 +938,7 @@ dependencies = [
  "glob-match",
  "homeboy-cli-contract",
  "homeboy-core",
+ "homeboy-fuzz",
  "homeboy-product-identity",
  "homeboy-runner-contract",
  "libc",

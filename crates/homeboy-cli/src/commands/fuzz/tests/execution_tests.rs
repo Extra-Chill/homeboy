@@ -628,7 +628,7 @@ fn fuzz_run_persists_coverage_reconciliation_artifact() {
 
 fn fuzz_case(id: &str, operation_id: &str, metadata: serde_json::Value) -> FuzzCase {
     FuzzCase {
-        schema: homeboy::core::fuzz::FUZZ_CASE_SCHEMA.to_string(),
+        schema: homeboy::fuzz::FUZZ_CASE_SCHEMA.to_string(),
         id: id.to_string(),
         target_id: Some("target-a".to_string()),
         operation_id: Some(operation_id.to_string()),
@@ -783,7 +783,7 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_failed_campaign() {
         false,
         Some(&campaign),
         None,
-        homeboy::core::fuzz::FuzzGateProfile::Strict,
+        homeboy::fuzz::FuzzGateProfile::Strict,
     );
 
     assert_eq!(outcome.status, "failed");
@@ -795,7 +795,7 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_failed_campaign() {
 fn fuzz_run_outcome_fails_when_successful_command_reports_open_finding() {
     let mut campaign = empty_fuzz_campaign();
     campaign.findings = vec![FuzzFinding {
-        schema: homeboy::core::fuzz::FUZZ_FINDING_SCHEMA.to_string(),
+        schema: homeboy::fuzz::FUZZ_FINDING_SCHEMA.to_string(),
         id: "finding-1".to_string(),
         title: "runner surfaced a failing case".to_string(),
         severity: "high".to_string(),
@@ -819,7 +819,7 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_open_finding() {
         false,
         Some(&campaign),
         None,
-        homeboy::core::fuzz::FuzzGateProfile::Strict,
+        homeboy::fuzz::FuzzGateProfile::Strict,
     );
 
     assert_eq!(outcome.status, "failed");
@@ -831,7 +831,7 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_open_finding() {
 fn fuzz_run_outcome_measurement_profile_records_open_findings_without_failing() {
     let mut campaign = empty_fuzz_campaign();
     campaign.findings = vec![FuzzFinding {
-        schema: homeboy::core::fuzz::FUZZ_FINDING_SCHEMA.to_string(),
+        schema: homeboy::fuzz::FUZZ_FINDING_SCHEMA.to_string(),
         id: "finding-1".to_string(),
         title: "runner surfaced a failing case".to_string(),
         severity: "high".to_string(),
@@ -855,7 +855,7 @@ fn fuzz_run_outcome_measurement_profile_records_open_findings_without_failing() 
         false,
         Some(&campaign),
         None,
-        homeboy::core::fuzz::FuzzGateProfile::Measurement,
+        homeboy::fuzz::FuzzGateProfile::Measurement,
     );
 
     assert_eq!(outcome.status, "passed");
@@ -877,7 +877,7 @@ fn fuzz_run_outcome_prefers_passed_campaign_over_transport_exit_code() {
         false,
         Some(&campaign),
         None,
-        homeboy::core::fuzz::FuzzGateProfile::Evidence,
+        homeboy::fuzz::FuzzGateProfile::Evidence,
     );
 
     assert_eq!(outcome.status, "passed");
@@ -895,7 +895,7 @@ fn fuzz_run_outcome_keeps_transport_failure_without_passed_campaign() {
         false,
         Some(&campaign),
         None,
-        homeboy::core::fuzz::FuzzGateProfile::Evidence,
+        homeboy::fuzz::FuzzGateProfile::Evidence,
     );
 
     assert_eq!(outcome.status, "failed");
@@ -927,7 +927,7 @@ fn fuzz_run_expected_metric_gate_fails_when_observed_metric_differs() {
         false,
         Some(&campaign),
         Some(&error),
-        homeboy::core::fuzz::FuzzGateProfile::Measurement,
+        homeboy::fuzz::FuzzGateProfile::Measurement,
     );
 
     assert_eq!(gate_status(&gates), "failed");
@@ -968,7 +968,7 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_failed_lifecycle_phase
         false,
         Some(&campaign),
         None,
-        homeboy::core::fuzz::FuzzGateProfile::Strict,
+        homeboy::fuzz::FuzzGateProfile::Strict,
     );
 
     assert_eq!(outcome.status, "failed");
@@ -1008,7 +1008,7 @@ fn fuzz_run_outcome_fails_when_workload_reports_invariant_failure_count() {
         false,
         Some(&campaign),
         None,
-        homeboy::core::fuzz::FuzzGateProfile::Strict,
+        homeboy::fuzz::FuzzGateProfile::Strict,
     );
 
     assert_eq!(outcome.status, "failed");
@@ -1047,7 +1047,7 @@ fn fuzz_run_outcome_measurement_profile_records_failure_metadata_without_failing
         false,
         Some(&campaign),
         None,
-        homeboy::core::fuzz::FuzzGateProfile::Measurement,
+        homeboy::fuzz::FuzzGateProfile::Measurement,
     );
 
     assert_eq!(outcome.status, "passed");
@@ -1063,7 +1063,7 @@ fn fuzz_run_outcome_reports_timeout_as_non_pass() {
         true,
         None,
         None,
-        homeboy::core::fuzz::FuzzGateProfile::Measurement,
+        homeboy::fuzz::FuzzGateProfile::Measurement,
     );
 
     assert_eq!(outcome.status, "timeout");
@@ -1096,7 +1096,7 @@ fn fuzz_run_outcome_reports_skipped_lifecycle_as_non_proof() {
         false,
         Some(&campaign),
         None,
-        homeboy::core::fuzz::FuzzGateProfile::Measurement,
+        homeboy::fuzz::FuzzGateProfile::Measurement,
     );
 
     assert_eq!(outcome.status, "skipped");
@@ -1120,7 +1120,7 @@ fn fuzz_run_outcome_reports_unsupported_metadata_as_non_proof() {
         false,
         Some(&campaign),
         None,
-        homeboy::core::fuzz::FuzzGateProfile::Measurement,
+        homeboy::fuzz::FuzzGateProfile::Measurement,
     );
 
     assert_eq!(outcome.status, "unsupported");
@@ -1186,8 +1186,8 @@ fn strict_fuzz_run_artifact_validation_passes_with_required_artifacts() {
     args.require_coverage_summary = true;
     args.require_result_envelope = true;
     let mut campaign = artifact_complete_fuzz_campaign();
-    campaign.artifacts.push(homeboy::core::fuzz::FuzzArtifact {
-        schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+    campaign.artifacts.push(homeboy::fuzz::FuzzArtifact {
+        schema: homeboy::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
         id: "result-envelope".to_string(),
         kind: "result_envelope".to_string(),
         artifact: None,
@@ -1321,8 +1321,8 @@ fn fuzz_artifact_ref_validation_reports_missing_local_refs() {
         std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
         std::fs::write(artifacts_dir.join("present.json"), "{}").expect("present artifact");
         let mut campaign = empty_fuzz_campaign();
-        campaign.artifacts.push(homeboy::core::fuzz::FuzzArtifact {
-            schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+        campaign.artifacts.push(homeboy::fuzz::FuzzArtifact {
+            schema: homeboy::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
             id: "case-log".to_string(),
             kind: "case_log".to_string(),
             artifact: Some(homeboy::core::artifact_contract::ArtifactContract {
@@ -1534,7 +1534,7 @@ fn fuzz_report_persists_result_envelope_artifact_for_run_id() {
             "report-run-1"
         );
         let persisted = std::fs::read_to_string(&envelope_artifact.path).expect("artifact file");
-        assert!(persisted.contains(homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA));
+        assert!(persisted.contains(homeboy::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA));
 
         let artifact_index =
             homeboy::core::observation::evidence_report::evidence_artifact_index(&artifacts);
@@ -1587,8 +1587,8 @@ fn fuzz_report_fails_required_artifact_gate_when_replay_data_is_missing() {
 fn fuzz_report_passes_required_artifact_gates_with_seed_replay_data() {
     with_isolated_home(|home| {
         let mut campaign = artifact_complete_fuzz_campaign();
-        campaign.seeds = vec![homeboy::core::fuzz::FuzzSeed {
-            schema: homeboy::core::fuzz::FUZZ_SEED_SCHEMA.to_string(),
+        campaign.seeds = vec![homeboy::fuzz::FuzzSeed {
+            schema: homeboy::fuzz::FUZZ_SEED_SCHEMA.to_string(),
             id: "seed-1".to_string(),
             kind: "literal".to_string(),
             label: None,

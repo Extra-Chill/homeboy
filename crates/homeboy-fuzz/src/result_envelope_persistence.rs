@@ -9,9 +9,9 @@
 
 use std::path::Path;
 
-use crate::artifact_ref::EvidenceRef;
-use crate::fuzz::FuzzResultEnvelope;
-use crate::observation::{ArtifactRecord, ObservationStore};
+use crate::FuzzResultEnvelope;
+use homeboy_core::artifact_ref::EvidenceRef;
+use homeboy_core::observation::{ArtifactRecord, ObservationStore};
 
 /// Observation-store artifact kind for a persisted fuzz result envelope.
 pub const FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND: &str = "fuzz_result_envelope";
@@ -27,11 +27,11 @@ pub fn report_fuzz_result_envelope(
     run_id: Option<&str>,
     envelope: &FuzzResultEnvelope,
     envelope_path: Option<&Path>,
-) -> crate::Result<Vec<EvidenceRef>> {
+) -> homeboy_core::Result<Vec<EvidenceRef>> {
     if let Some(path) = envelope_path {
         let json = fuzz_result_envelope_json(envelope)?;
         std::fs::write(path, json).map_err(|error| {
-            crate::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+            homeboy_core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
         })?;
     }
     let persisted = persist_fuzz_result_envelope(run_id, envelope, envelope_path)?;
@@ -47,7 +47,7 @@ pub fn persist_fuzz_result_envelope(
     run_id: Option<&str>,
     envelope: &FuzzResultEnvelope,
     envelope_path: Option<&Path>,
-) -> crate::Result<Option<ArtifactRecord>> {
+) -> homeboy_core::Result<Option<ArtifactRecord>> {
     persist_fuzz_result_envelope_with_source(run_id, envelope, envelope_path, "homeboy fuzz report")
 }
 
@@ -55,7 +55,7 @@ pub fn persist_fuzz_result_envelope(
 pub fn persist_fuzz_run_result_envelope(
     run_id: Option<&str>,
     envelope: &FuzzResultEnvelope,
-) -> crate::Result<Option<ArtifactRecord>> {
+) -> homeboy_core::Result<Option<ArtifactRecord>> {
     persist_fuzz_result_envelope_with_source(run_id, envelope, None, "homeboy fuzz run")
 }
 
@@ -64,7 +64,7 @@ fn persist_fuzz_result_envelope_with_source(
     envelope: &FuzzResultEnvelope,
     envelope_path: Option<&Path>,
     source: &str,
-) -> crate::Result<Option<ArtifactRecord>> {
+) -> homeboy_core::Result<Option<ArtifactRecord>> {
     let Some(run_id) = run_id.filter(|run_id| !run_id.trim().is_empty()) else {
         return Ok(None);
     };
@@ -81,13 +81,15 @@ fn persist_fuzz_result_envelope_with_source(
         .suffix(".json")
         .tempfile()
         .map_err(|error| {
-            crate::Error::internal_io(
+            homeboy_core::Error::internal_io(
                 error.to_string(),
                 Some("create temporary fuzz result envelope artifact".to_string()),
             )
         })?;
     serde_json::to_writer_pretty(&mut artifact_file, envelope).map_err(|error| {
-        crate::Error::internal_unexpected(format!("failed to encode fuzz result envelope: {error}"))
+        homeboy_core::Error::internal_unexpected(format!(
+            "failed to encode fuzz result envelope: {error}"
+        ))
     })?;
     record_fuzz_result_envelope_artifact(&store, run_id, artifact_file.path(), envelope, source)
 }
@@ -98,7 +100,7 @@ fn record_fuzz_result_envelope_artifact(
     path: &Path,
     envelope: &FuzzResultEnvelope,
     source: &str,
-) -> crate::Result<Option<ArtifactRecord>> {
+) -> homeboy_core::Result<Option<ArtifactRecord>> {
     let metadata = serde_json::json!({
         "schema": envelope.schema.as_str(),
         "envelope_id": envelope.id.as_str(),
@@ -126,8 +128,10 @@ pub fn fuzz_result_envelope_evidence_ref(artifact: &ArtifactRecord) -> EvidenceR
 }
 
 /// Encode a fuzz result envelope to pretty JSON.
-pub fn fuzz_result_envelope_json(envelope: &FuzzResultEnvelope) -> crate::Result<String> {
+pub fn fuzz_result_envelope_json(envelope: &FuzzResultEnvelope) -> homeboy_core::Result<String> {
     serde_json::to_string_pretty(envelope).map_err(|error| {
-        crate::Error::internal_unexpected(format!("failed to encode fuzz result envelope: {error}"))
+        homeboy_core::Error::internal_unexpected(format!(
+            "failed to encode fuzz result envelope: {error}"
+        ))
     })
 }

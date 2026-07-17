@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::fuzz::{
+use crate::{
     parse_fuzz_observation_set_value, FuzzObservationFamily, FuzzObservationSet,
     FUZZ_OBSERVATION_SET_SCHEMA,
 };

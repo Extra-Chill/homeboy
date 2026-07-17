@@ -123,12 +123,12 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         rust_type: "homeboy::core::secret_env_plan::SecretEnvMaterializedHandoff",
     },
     ContractRegistryEntry {
-        schema_id: crate::core::fuzz::FUZZ_WORKLOAD_SCHEMA,
+        schema_id: crate::fuzz::FUZZ_WORKLOAD_SCHEMA,
         name: "fuzz-workload",
         title: "Fuzz workload",
         owner: "homeboy-core",
         summary: "Generic fuzz workload declaration consumed by Homeboy fuzz orchestration.",
-        rust_type: "homeboy::core::fuzz::FuzzWorkload",
+        rust_type: "homeboy::fuzz::FuzzWorkload",
     },
     ContractRegistryEntry {
         schema_id: crate::core::resource_cleanup_intent::RESOURCE_CLEANUP_INTENT_SCHEMA,

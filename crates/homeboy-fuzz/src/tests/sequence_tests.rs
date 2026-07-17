@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::fuzz::*;
+use crate::*;
 
 #[test]
 fn sequence_plan_normalizes_generic_cases_and_steps() {

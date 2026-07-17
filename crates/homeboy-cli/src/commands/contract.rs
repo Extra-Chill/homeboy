@@ -21,7 +21,6 @@ use crate::command_contract::{
 use crate::commands::{adapter, CmdResult, GlobalArgs};
 use crate::core::artifact_ref::{validate_reviewer_facing_artifact_ref, ArtifactReference};
 use crate::core::artifacts::{validate_artifact_postprocess_plan, ArtifactManifest};
-use crate::core::fuzz::{FuzzWorkload, FUZZ_WORKLOAD_SCHEMA};
 use crate::core::host_mutation_lifecycle::{
     HostMutationLifecycle, HostMutationRevertStrategy, HostMutationStatus,
     HOST_MUTATION_LIFECYCLE_SCHEMA,
@@ -52,6 +51,7 @@ use crate::core::secret_env_plan::{
     SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA, SECRET_ENV_PLAN_SCHEMA,
 };
 use crate::core::{Error, ErrorCode, Result};
+use crate::fuzz::{FuzzWorkload, FUZZ_WORKLOAD_SCHEMA};
 
 const CONTRACT_EXPORT_INDEX_SCHEMA: &str = "homeboy/contract-export-index/v1";
 const COMMAND_REGISTRY_EXPORT_SCHEMA: &str = "homeboy/command-registry-export/v1";

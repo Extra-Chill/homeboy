@@ -222,9 +222,10 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             gate: FUZZ_GATE_SCHEMA.to_string(),
             hotspot_set: FUZZ_HOTSPOT_SET_SCHEMA.to_string(),
             observation_set: FUZZ_OBSERVATION_SET_SCHEMA.to_string(),
-            lifecycle_contract: crate::lifecycle::LIFECYCLE_CONTRACT_SCHEMA.to_string(),
-            lifecycle_result: crate::lifecycle::LIFECYCLE_RESULT_SCHEMA.to_string(),
-            lifecycle_snapshot_ref: crate::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA.to_string(),
+            lifecycle_contract: homeboy_core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA.to_string(),
+            lifecycle_result: homeboy_core::lifecycle::LIFECYCLE_RESULT_SCHEMA.to_string(),
+            lifecycle_snapshot_ref: homeboy_core::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA
+                .to_string(),
             isolation_proof: ISOLATION_PROOF_SCHEMA.to_string(),
         },
         safety_classes: vec![

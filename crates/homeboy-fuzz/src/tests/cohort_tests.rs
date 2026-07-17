@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::fuzz::{compare_fuzz_hotspot_cohorts, FuzzHotspotCohortItem};
+use crate::{compare_fuzz_hotspot_cohorts, FuzzHotspotCohortItem};
 
 fn item(key: &str, score: f64, rank: usize) -> FuzzHotspotCohortItem {
     FuzzHotspotCohortItem {

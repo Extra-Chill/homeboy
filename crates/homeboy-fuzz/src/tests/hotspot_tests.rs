@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::fuzz::{
+use crate::{
     compare_fuzz_hotspot_sets, parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots,
     FuzzHotspot, FuzzHotspotDimension, FuzzHotspotMetric, FuzzHotspotSet, FuzzObservationSet,
     FUZZ_CONTRACT_VERSION, FUZZ_HOTSPOT_SET_SCHEMA, FUZZ_OBSERVATION_SET_SCHEMA,

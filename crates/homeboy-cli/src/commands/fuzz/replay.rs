@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use homeboy::core::artifact_address::{ArtifactAddress, ArtifactAddressKind};
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner};
-use homeboy::core::fuzz::{
+use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore};
+use homeboy::core::{Error, ErrorCode};
+use homeboy::fuzz::{
     FuzzCampaign, FuzzReplayMetadata, FuzzResultEnvelope, FUZZ_CAMPAIGN_SCHEMA,
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
-use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore};
-use homeboy::core::{Error, ErrorCode};
 use homeboy::runner::runners::is_retrievable_runner_artifact;
 
 use super::super::utils::args::PositionalComponentArgs;
@@ -774,16 +774,16 @@ mod replay_artifact_source_tests {
                     },
                     "campaign": {
                         "schema": FUZZ_CAMPAIGN_SCHEMA,
-                        "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                        "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
                         "id": "campaign-1",
                         "safety_class": "read_only",
                         "cases": [{
-                            "schema": homeboy::core::fuzz::FUZZ_CASE_SCHEMA,
+                            "schema": homeboy::fuzz::FUZZ_CASE_SCHEMA,
                             "id": "case-1",
                             "replay_id": "replay-1"
                         }],
                         "replay": {
-                            "schema": homeboy::core::fuzz::FUZZ_REPLAY_SCHEMA,
+                            "schema": homeboy::fuzz::FUZZ_REPLAY_SCHEMA,
                             "id": "replay-1",
                             "seed": "1234",
                             "artifact_id": "case-artifact"

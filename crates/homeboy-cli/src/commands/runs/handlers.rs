@@ -219,7 +219,7 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
         homeboy::core::artifacts::summarize_matrix_artifacts(&run_id, &artifacts, &findings);
     let fuzz_result_envelopes = artifacts
         .iter()
-        .filter_map(homeboy::core::fuzz::inspect_fuzz_result_envelope_artifact)
+        .filter_map(homeboy::fuzz::inspect_fuzz_result_envelope_artifact)
         .collect();
     let directory_publication = directory_publication_guidance_for_artifacts(&artifacts);
     let resource_lifecycle_index = resource_lifecycle_index_from_artifacts(&artifacts)?;

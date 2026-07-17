@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::{Error, Result};
+use homeboy_core::{Error, Result};
 
 use super::envelope::{FuzzResultEnvelope, FuzzTargetInventory};
 use super::schemas::{FUZZ_CAMPAIGN_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA};
