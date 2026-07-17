@@ -329,6 +329,15 @@ pub(crate) fn exec_lab_context(
             None,
             request.durable_agent_task_plan,
         )?;
+        if context.detach_after_handoff {
+            agent_task_lifecycle::record_lab_offload_submission_intent(
+                run_id,
+                runner_id,
+                &remote_cwd,
+                &context.remote_command,
+                &secret_env_names,
+            )?;
+        }
     }
     preflight_lab_secret_env_handoff(runner_id, context.runner, &env, &context.secret_env_handoff)?;
     if let Some(runner) = context.runner {

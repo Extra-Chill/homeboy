@@ -73,10 +73,13 @@ pub(super) fn exec_via_reverse_broker(
         source_snapshot: Some(source_snapshot.clone()),
         path_materialization_plan: path_materialization_plan.clone(),
         lab_runner_workload: lab_runner_workload.clone(),
-        metadata: Some(runner_exec_request_metadata(
-            run_id.as_deref(),
-            "reverse_broker",
-        )),
+        metadata: Some({
+            let mut metadata = runner_exec_request_metadata(run_id.as_deref(), "reverse_broker");
+            if let Some(run_id) = run_id.as_deref() {
+                metadata["submission_key"] = serde_json::json!(format!("agent-task:{run_id}"));
+            }
+            metadata
+        }),
         lifecycle: Some(RunnerJobLifecycleMetadata {
             source: Some("reverse-broker".to_string()),
             kind: Some("runner.exec".to_string()),

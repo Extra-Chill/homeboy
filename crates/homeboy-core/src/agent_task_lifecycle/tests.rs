@@ -635,6 +635,64 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
 }
 
 #[test]
+fn detached_handoff_persists_redacted_submission_intent_before_broker_ack() {
+    with_isolated_home(|_| {
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "intent-before-post",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("controller proxy");
+        record_lab_offload_submission_intent(
+            "intent-before-post",
+            "homeboy-lab",
+            "/runner/workspace/repo",
+            &command,
+            &["RUNNER_SECRET_TOKEN".to_string()],
+        )
+        .expect("persist intent");
+
+        let pending = status("intent-before-post").expect("pending intent status");
+        assert_eq!(
+            pending.metadata["runner_submission_intent"]["state"],
+            "pending"
+        );
+        assert_eq!(
+            pending.metadata["runner_submission_intent"]["submission_key"],
+            "agent-task:intent-before-post"
+        );
+        assert_eq!(pending.metadata["phase"], "waiting_for_runner_capacity");
+        assert!(!serde_json::to_string(&pending)
+            .expect("serialize record")
+            .contains("secret-value"));
+
+        let accepted = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "intent-before-post",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-replayed",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("ack binds intent");
+        assert_eq!(
+            accepted.metadata["runner_submission_intent"]["state"],
+            "accepted"
+        );
+        assert_eq!(
+            accepted.metadata["runner_submission_intent"]["runner_job_id"],
+            "job-replayed"
+        );
+    });
+}
+
+#[test]
 fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
     with_isolated_home(|_| {
         let command = vec![

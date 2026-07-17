@@ -93,6 +93,18 @@ pub struct RemoteRunnerJobRequest {
 }
 
 impl RemoteRunnerJobRequest {
+    /// A caller-owned identity makes a retried POST safe across a lost response.
+    /// It deliberately lives in metadata so older clients can continue submitting
+    /// anonymous jobs while durable handoffs opt into replayable ownership.
+    pub(crate) fn submission_key(&self) -> Option<&str> {
+        self.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("submission_key"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+    }
+
     pub(crate) fn normalize(&mut self) -> SecretEnvPlan {
         let mut base_plan = self
             .lab_runner_workload
@@ -219,6 +231,21 @@ impl RemoteRunnerJobRequest {
             }
         }
         public
+    }
+
+    fn dispatch_request(&self) -> Self {
+        let mut request = self.clone();
+        let secret_names = request.secret_env_plan.secret_env_names();
+        for name in secret_names {
+            if request
+                .env
+                .get(&name)
+                .is_some_and(|value| value == "<redacted>")
+            {
+                request.env.remove(&name);
+            }
+        }
+        request
     }
 
     pub(crate) fn run_ref_metadata(&self) -> Option<Value> {
@@ -356,6 +383,20 @@ impl JobStore {
         })?;
 
         let now = timestamp_ms();
+        let public_request = request.public_metadata();
+        let submission_key = request.submission_key().map(str::to_string);
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        if let Some(submission_key) = submission_key.as_deref() {
+            if let Some(existing) = inner.jobs.values().find(|stored| {
+                stored
+                    .remote_runner
+                    .as_ref()
+                    .and_then(|remote| remote.request.submission_key())
+                    == Some(submission_key)
+            }) {
+                return Ok(existing.job.clone());
+            }
+        }
         let job = Job {
             id: Uuid::new_v4(),
             operation: request.operation.clone(),
@@ -379,16 +420,17 @@ impl JobStore {
             runner_job_projection: None,
         };
 
-        let public_request = request.public_metadata();
         let run_ref_metadata = public_request.run_ref_metadata();
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
         inner.jobs.insert(
             job.id,
             StoredJob {
                 job: job.clone(),
                 events: Vec::new(),
                 remote_runner: Some(StoredRemoteRunnerJob {
-                    execution_request: Some(request),
+                    // Durable broker state intentionally contains only the
+                    // redacted request. The runner hydrates named references
+                    // immediately before dispatch.
+                    execution_request: None,
                     request: public_request,
                 }),
                 local_runner: None,
@@ -486,7 +528,7 @@ impl JobStore {
                     .execution_request
                     .as_ref()
                     .unwrap_or(&remote_runner.request)
-                    .clone();
+                    .dispatch_request();
                 claimed = Some((stored.job.id, request));
             }
         }

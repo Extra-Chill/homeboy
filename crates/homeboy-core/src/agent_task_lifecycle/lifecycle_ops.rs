@@ -654,6 +654,46 @@ pub fn record_runner_job_identity(
     Ok(record)
 }
 
+/// Persist redacted submission ownership before a reverse-broker POST. The
+/// command itself is canonical controller provenance; secret values are never
+/// copied here, only the names the runner must hydrate at dispatch.
+pub fn record_lab_offload_submission_intent(
+    run_id: &str,
+    runner_id: &str,
+    remote_workspace: &str,
+    remote_command: &[String],
+    secret_env_names: &[String],
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let _lock = LabHandoffLock::lock(&run_id)?;
+    let mut record = store::read_record(&run_id)?;
+    let submission_key = format!("agent-task:{run_id}");
+    let metadata = record.ensure_metadata_object();
+    metadata.insert(
+        "runner_submission_intent".to_string(),
+        json!({
+            "state": "pending",
+            "submission_key": submission_key,
+            "runner_id": runner_id,
+            "ordering": "broker_fifo",
+            "eligibility": "reverse_runner_detached_durable_handoff",
+            "canonical_workload": {
+                "run_id": run_id,
+                "remote_workspace": remote_workspace,
+                "remote_command": remote_command,
+            },
+            "secret_env_names": secret_env_names,
+        }),
+    );
+    metadata.insert("phase".to_string(), json!("waiting_for_runner_capacity"));
+    metadata.insert(
+        "phase_activity".to_string(),
+        json!("durable broker submission intent recorded; waiting for runner capacity"),
+    );
+    store::write_record(&record)?;
+    Ok(record)
+}
+
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let requested_run_id = sanitize_run_id(run_id);
     let resolved_run_id = resolve_run_id(run_id)?;
@@ -1896,6 +1936,11 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
     let accepted_at = record.updated_at.clone();
     let metadata = record.ensure_metadata_object();
     metadata.insert("kind".to_string(), json!("lab_offload_detached_handoff"));
+    if let Some(intent) = metadata.get_mut("runner_submission_intent") {
+        intent["state"] = json!("accepted");
+        intent["runner_job_id"] = json!(input.runner_job_id);
+        intent["accepted_at"] = json!(accepted_at);
+    }
     metadata.insert(
         "handoff_acceptance".to_string(),
         json!({

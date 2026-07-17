@@ -823,15 +823,7 @@ fn remote_runner_job_secret_env_is_execution_only_not_public_or_persisted() {
             remote_runner.request.env.get("RUNNER_SECRET_TOKEN"),
             Some(&"<redacted>".to_string())
         );
-        assert_eq!(
-            remote_runner
-                .execution_request
-                .as_ref()
-                .expect("execution request")
-                .env
-                .get("RUNNER_SECRET_TOKEN"),
-            Some(&sentinel.to_string())
-        );
+        assert!(remote_runner.execution_request.is_none());
     }
 
     let persisted = fs::read_to_string(&path).expect("read durable store");
@@ -844,21 +836,58 @@ fn remote_runner_job_secret_env_is_execution_only_not_public_or_persisted() {
     let reopened = JobStore::open(&path).expect("durable store reopens");
     assert_eq!(
         reopened.get(job.id).expect("reopened job").status,
-        JobStatus::Failed
+        JobStatus::Queued
     );
-    assert!(reopened
-        .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
-        .expect("claim request succeeds")
-        .is_none());
-
-    let claim = store
+    let claim = reopened
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
         .expect("claim succeeds")
         .expect("job is claimed");
-    assert_eq!(
-        claim.request.env.get("RUNNER_SECRET_TOKEN"),
-        Some(&sentinel.to_string())
+    assert!(claim.request.env.get("RUNNER_SECRET_TOKEN").is_none());
+    assert!(claim
+        .request
+        .secret_env_plan
+        .secret_env_names()
+        .contains(&"RUNNER_SECRET_TOKEN".to_string()));
+}
+
+#[test]
+fn remote_runner_submission_key_replays_one_redacted_durable_job() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open(&path).expect("durable store");
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.env.insert(
+        "RUNNER_SECRET_TOKEN".to_string(),
+        "never-persist".to_string(),
     );
+    request.secret_env_names = vec!["RUNNER_SECRET_TOKEN".to_string()];
+    request.metadata = Some(json!({ "submission_key": "agent-task:crash-window" }));
+
+    // Models POST-before-ack-persist: the recovery POST carries the same key.
+    let first = store
+        .submit_remote_runner_job(request.clone())
+        .expect("first submit");
+    let replay = store
+        .submit_remote_runner_job(request)
+        .expect("replayed submit");
+    assert_eq!(first.id, replay.id);
+    assert_eq!(
+        store
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, Some(1))
+            .expect("claim")
+            .expect("one claim")
+            .job
+            .id,
+        first.id
+    );
+    assert!(store
+        .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, Some(1))
+        .expect("duplicate wake")
+        .is_none());
+
+    let persisted = fs::read_to_string(path).expect("read durable store");
+    assert!(!persisted.contains("never-persist"));
+    assert!(persisted.contains("RUNNER_SECRET_TOKEN"));
 }
 
 #[test]
