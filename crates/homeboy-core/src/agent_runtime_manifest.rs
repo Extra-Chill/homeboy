@@ -369,10 +369,6 @@ fn runtime_source_revision(path: &Path) -> Option<String> {
     })
 }
 
-fn is_immutable_revision(revision: &str) -> bool {
-    matches!(revision.len(), 40 | 64) && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 pub fn discover_agent_runtime_catalog() -> AgentRuntimeDiscoveryCatalog {
     let standalone = discover_standalone_agent_runtime_catalog();
     let extensions = load_all_extensions().unwrap_or_default();
@@ -1659,6 +1655,13 @@ mod tests {
     }
 
     #[test]
+    fn immutable_revision_requires_a_full_git_sha() {
+        assert!(is_immutable_revision(&"a".repeat(40)));
+        assert!(!is_immutable_revision(&"a".repeat(64)));
+        assert!(!is_immutable_revision("main"));
+    }
+
+    #[test]
     fn sample_runtime_materialization_fixture_is_plain_data() {
         let manifest: AgentRuntimeManifest = serde_json::from_str(include_str!(
             "../../../tests/fixtures/sample_runtime_materialization_manifest.json"
@@ -1728,10 +1731,11 @@ mod tests {
             extension_id: None,
             extension_path: None,
             runtime_path: Some(root.path().display().to_string()),
+            source_revision: Some(revision.clone()),
             extra: BTreeMap::new(),
         };
 
-        let controller_plan = runtime_materialization_plan(&manifest);
+        let controller_plan = runtime_materialization_plan(&manifest, "parity.default");
         let lab_plan: AgentRuntimeMaterializationPlan =
             serde_json::from_value(serde_json::to_value(&controller_plan).expect("handoff"))
                 .expect("lab plan");
@@ -1742,6 +1746,15 @@ mod tests {
             Some(revision.as_str())
         );
         assert_eq!(controller_plan.selected_identity.freshness, "current");
+        assert_eq!(controller_plan.provider_id, "parity.default");
+        assert_eq!(
+            controller_plan.source_revision.as_deref(),
+            Some(revision.as_str())
+        );
+        assert_eq!(
+            controller_plan.freshness,
+            AgentRuntimeFreshness::Unverifiable
+        );
         assert_eq!(
             controller_plan.source_roots[0].git_ref.as_deref(),
             Some(revision.as_str())
@@ -1774,12 +1787,15 @@ mod tests {
             extension_id: None,
             extension_path: None,
             runtime_path: Some(root.path().display().to_string()),
+            source_revision: None,
             extra: BTreeMap::new(),
         };
 
-        let plan = runtime_materialization_plan(&manifest);
+        let plan = runtime_materialization_plan(&manifest, "extracted.default");
 
         assert_eq!(plan.selected_identity.freshness, "unverifiable");
+        assert_eq!(plan.provider_id, "extracted.default");
+        assert!(plan.source_revision.is_none());
         assert_eq!(plan.source_roots[0].git_ref.as_deref(), Some("main"));
     }
 }
