@@ -4,12 +4,12 @@ use crate::extension::test::resolve_drift_options;
 use crate::extension::test::TestScopeOutput;
 use crate::extension::test::{ChangeType, TestAnalysis};
 use crate::extension::test::{TestBaselineComparison, TestCounts};
-use crate::refactor::AppliedRefactor;
 use crate::refactor::{
     self,
     auto::{self, AutofixMode},
     TransformSet,
 };
+use homeboy_refactor_contract::AppliedRefactor;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]

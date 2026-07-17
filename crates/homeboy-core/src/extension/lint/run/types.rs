@@ -4,8 +4,8 @@ use crate::extension::lint::baseline as lint_baseline;
 use crate::extension::self_check::SelfCheckCaptureMetadata;
 use crate::extension::ExtensionPhaseTiming;
 use crate::finding::{FindingProducerSummary, HomeboyFinding};
-use crate::refactor::AppliedRefactor;
 use homeboy_engine_primitives::baseline::BaselineFlags;
+use homeboy_refactor_contract::AppliedRefactor;
 use serde::Serialize;
 use std::collections::BTreeMap;
 

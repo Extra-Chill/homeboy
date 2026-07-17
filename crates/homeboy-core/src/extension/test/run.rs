@@ -13,11 +13,11 @@ use crate::extension::test::{
 use crate::extension::{self, ExtensionCapability, ExtensionPhaseTiming};
 use crate::finding::HomeboyFinding;
 use crate::observation::homeboy_findings_from_test_analysis_input;
-use crate::refactor::AppliedRefactor;
 use crate::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 use homeboy_engine_primitives::baseline::BaselineFlags;
 use homeboy_engine_primitives::local_files;
 use homeboy_engine_primitives::output_parse::ParseSpec;
+use homeboy_refactor_contract::AppliedRefactor;
 use serde::Serialize;
 use std::path::Path;
 
