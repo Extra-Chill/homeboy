@@ -2,7 +2,7 @@
   "schema": "homeboy/agent-runtime-manifest/v1",
   "id": "opencode",
   "name": "OpenCode",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "OpenCode agent runtime for nested orchestration and repository-scoped agent tasks.",
   "contract_producers": [
     {
@@ -51,15 +51,17 @@
         "unable_to_remediate",
         "provider_error",
         "timeout",
+        "candidate_recoverable",
         "failed",
         "follow_up_issue",
         "cancelled"
       ],
       "failure_classifications": [
         "provider",
-        "provider_quota",
         "transient",
         "timeout",
+        "stalled",
+        "rate_limited",
         "policy_denied",
         "capability_missing",
         "invalid_input",
