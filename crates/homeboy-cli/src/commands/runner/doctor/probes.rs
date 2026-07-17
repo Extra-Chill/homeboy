@@ -601,6 +601,13 @@ fn runtime_relative_path(runtime_root: &Path, value: &str) -> Option<String> {
 pub(super) fn provider_executor_resolution_remote_shell(
     entrypoint: &RemoteProviderExecutorEntrypoint,
 ) -> String {
+    provider_executor_resolution_remote_shell_with_timeout(entrypoint, 20)
+}
+
+pub(super) fn provider_executor_resolution_remote_shell_with_timeout(
+    entrypoint: &RemoteProviderExecutorEntrypoint,
+    timeout_seconds: u64,
+) -> String {
     let runtime_root = format!(
         "runtime_root=\"$HOME/.config/homeboy/agent-runtimes\"/{}",
         common::shell_word(&entrypoint.runtime_id)
@@ -616,15 +623,15 @@ pub(super) fn provider_executor_resolution_remote_shell(
     argv.push(common::shell_word("--provider-contract"));
     let invocation = argv.join(" ");
     let invocation = if let Some(cwd) = &entrypoint.cwd {
-        format!("cd {} && {invocation}", runner_path(cwd))
+        format!("cd {} && exec {invocation}", runner_path(cwd))
     } else {
-        invocation
+        format!("exec {invocation}")
     };
 
     // Keep the remote SSH command bounded even if an executor ignores the
     // dry-load flag and waits for input. Stdin is closed and stderr is captured.
     format!(
-        "{runtime_root}; tmp=$(mktemp 2>/dev/null || printf '/tmp/homeboy-provider-probe-$$'); ({invocation}) </dev/null >/dev/null 2>\"$tmp\" & pid=$!; (sleep 20; kill \"$pid\" 2>/dev/null) & killer=$!; wait \"$pid\"; rc=$?; kill \"$killer\" 2>/dev/null; cat \"$tmp\" >&2; rm -f \"$tmp\"; exit \"$rc\""
+        "{runtime_root}; tmp=$(mktemp 2>/dev/null || printf '/tmp/homeboy-provider-probe-$$'); ({invocation}) </dev/null >/dev/null 2>\"$tmp\" & pid=$!; (trap 'kill \"$sleeper\" 2>/dev/null; wait \"$sleeper\" 2>/dev/null; exit' TERM; sleep {timeout_seconds} & sleeper=$!; wait \"$sleeper\"; kill \"$pid\" 2>/dev/null) & killer=$!; wait \"$pid\"; rc=$?; kill \"$killer\" 2>/dev/null; wait \"$killer\" 2>/dev/null; cat \"$tmp\" >&2; rm -f \"$tmp\"; exit \"$rc\""
     )
 }
 

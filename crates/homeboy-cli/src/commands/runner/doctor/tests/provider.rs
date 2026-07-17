@@ -5,6 +5,8 @@ use homeboy::core::agent_tasks::provider::{
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::process::Command;
+use std::time::{Duration, Instant};
 use types::RunnerDoctorStatus;
 
 #[test]
@@ -244,19 +246,73 @@ fn remote_executor_probe_keeps_missing_runner_local_dependency_actionable() {
     assert!(entrypoint
         .display()
         .contains("<runtime:test-runtime>/scripts/executor.cjs"));
-    let runner_root = tempfile::tempdir().expect("runner root");
-    let script = runner_root.path().join("scripts/executor.cjs");
+    let home = tempfile::tempdir().expect("runner home");
+    let runner_root = home
+        .path()
+        .join(".config/homeboy/agent-runtimes/test-runtime");
+    let script = runner_root.join("scripts/executor.cjs");
     std::fs::create_dir_all(script.parent().expect("script parent")).expect("create scripts");
     std::fs::write(&script, "require('./missing-runner-local-package');\n")
         .expect("write runner executor");
-    let output = std::process::Command::new("node")
-        .arg(runner_root.path().join("scripts/executor.cjs"))
-        .arg("--provider-contract")
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(probes::provider_executor_resolution_remote_shell(
+            &entrypoint,
+        ))
+        .env("HOME", home.path())
         .output()
-        .expect("run runner-local probe");
+        .expect("run runner shell probe");
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Cannot find module"));
+}
+
+#[test]
+fn remote_executor_probe_shell_returns_promptly_after_success() {
+    let shell = probes::provider_executor_resolution_remote_shell_with_timeout(
+        &shell_entrypoint("exit 0"),
+        1,
+    );
+    let started = Instant::now();
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(shell)
+        .output()
+        .expect("run successful runner shell probe");
+
+    assert!(output.status.success());
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn remote_executor_probe_shell_bounds_and_terminates_hanging_executor() {
+    let shell = probes::provider_executor_resolution_remote_shell_with_timeout(
+        &shell_entrypoint("while :; do :; done"),
+        1,
+    );
+    let started = Instant::now();
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(shell)
+        .output()
+        .expect("run hanging runner shell probe");
+    let elapsed = started.elapsed();
+
+    assert!(!output.status.success());
+    assert!(elapsed >= Duration::from_millis(750));
+    assert!(elapsed < Duration::from_secs(3));
+}
+
+fn shell_entrypoint(script: &str) -> probes::RemoteProviderExecutorEntrypoint {
+    probes::RemoteProviderExecutorEntrypoint {
+        runtime_id: "test-runtime".to_string(),
+        program: probes::RemoteProviderExecutorEntrypointPart::Literal("sh".to_string()),
+        args: vec![
+            probes::RemoteProviderExecutorEntrypointPart::Literal("-c".to_string()),
+            probes::RemoteProviderExecutorEntrypointPart::Literal(script.to_string()),
+        ],
+        cwd: None,
+    }
 }
 
 fn node_provider(id: &str, backend: &str, script: &std::path::Path) -> AgentTaskExecutorProvider {
