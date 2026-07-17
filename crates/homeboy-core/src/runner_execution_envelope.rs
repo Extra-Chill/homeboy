@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::agent_task::{AgentTaskArtifactDeclaration, AgentTaskRequest};
 use crate::env_materialization_plan::EnvMaterializationPlan;
 use crate::lab_contract::{LabRunnerWorkload, LabRunnerWorkloadArtifactRef};
 use crate::secret_env_plan::SecretEnvPlan;
@@ -44,8 +43,11 @@ pub struct RunnerExecutionEnvelope {
         skip_serializing_if = "Option::is_none"
     )]
     pub lab_runner_workload: Option<LabRunnerWorkload>,
+    /// The originating agent-task request, carried opaquely as JSON so core does
+    /// not depend on the agent-task subsystem. The agent-task layer owns
+    /// deserialization back into its request type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_task: Option<AgentTaskRequest>,
+    pub agent_task: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_env: Option<SecretEnvPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -597,56 +599,6 @@ impl RunnerExecutionEnvelope {
             metadata: Value::Null,
         }
     }
-
-    pub fn from_agent_task_request(request: AgentTaskRequest) -> Self {
-        let artifact_declarations = request
-            .canonical_artifact_declarations()
-            .into_iter()
-            .map(RunnerExecutionArtifactDeclaration::from)
-            .collect();
-        let secret_env = SecretEnvPlan::from_secret_env_names(request.executor.secret_env.clone());
-        let result_refs = RunnerExecutionResultRefs {
-            task_id: Some(request.task_id.clone()),
-            plan_id: request.parent_plan_id.clone(),
-            ..RunnerExecutionResultRefs::default()
-        };
-
-        Self {
-            schema: RUNNER_EXECUTION_ENVELOPE_SCHEMA.to_string(),
-            envelope_id: request.task_id.clone(),
-            source: RunnerExecutionSource {
-                kind: "agent_task".to_string(),
-                ref_id: Some(request.task_id.clone()),
-            },
-            lab_runner_workload: None,
-            agent_task: Some(request),
-            secret_env: Some(secret_env),
-            env_materialization: None,
-            dispatch: None,
-            lifecycle: None,
-            lifecycle_policy: RunnerExecutionLifecyclePolicy::default(),
-            artifact_declarations,
-            loop_policy: RunnerExecutionLoopPolicy::default(),
-            mutation_policy: RunnerExecutionMutationPolicy::default(),
-            publication_intent: RunnerExecutionPublicationIntent::default(),
-            result_refs,
-            metadata: Value::Null,
-        }
-    }
-}
-
-impl From<AgentTaskArtifactDeclaration> for RunnerExecutionArtifactDeclaration {
-    fn from(declaration: AgentTaskArtifactDeclaration) -> Self {
-        Self {
-            name: declaration.name,
-            artifact_type: declaration.artifact_type,
-            artifact_schema: declaration.artifact_schema,
-            path: declaration.path,
-            required: declaration.required,
-            description: declaration.description,
-            metadata: declaration.metadata,
-        }
-    }
 }
 
 fn runner_execution_envelope_schema() -> String {
@@ -666,10 +618,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::agent_task::{
-        AgentTaskExecutor, AgentTaskPolicy, AgentTaskWorkspace, AgentTaskWorkspaceMode,
-        AGENT_TASK_REQUEST_SCHEMA,
-    };
     use crate::lab_contract::{
         LabRunnerWorkloadAssignment, LabRunnerWorkloadCommandFamily, LabRunnerWorkloadKind,
         LabRunnerWorkloadMutationPolicy, LabRunnerWorkloadResultRefs, LabRunnerWorkloadSecrets,
@@ -909,138 +857,5 @@ mod tests {
             projection.materialized_paths[1].role,
             PATH_MATERIALIZATION_ROLE_REQUIRED_PATH
         );
-    }
-
-    #[test]
-    fn agent_task_request_compiles_secret_env_and_artifacts_into_envelope() {
-        let request = AgentTaskRequest {
-            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
-            task_id: "task-1".to_string(),
-            group_key: None,
-            parent_plan_id: Some("plan-1".to_string()),
-            executor: AgentTaskExecutor {
-                backend: "sandbox".to_string(),
-                selector: Some("provider-a".to_string()),
-                runtime_selection: None,
-                required_capabilities: Vec::new(),
-                secret_env: vec!["TOKEN_A".to_string()],
-                model: None,
-                config: Value::Null,
-            },
-            instructions: "Run the task.".to_string(),
-            inputs: Value::Null,
-            source_refs: Vec::new(),
-            workspace: AgentTaskWorkspace {
-                mode: AgentTaskWorkspaceMode::Materialized,
-                root: Some("/workspace/project".to_string()),
-                ..AgentTaskWorkspace::default()
-            },
-            component_contracts: Vec::new(),
-            policy: AgentTaskPolicy::default(),
-            limits: Default::default(),
-            expected_artifacts: vec!["patch".to_string()],
-            artifact_declarations: vec![AgentTaskArtifactDeclaration {
-                name: "report".to_string(),
-                artifact_type: Some("json".to_string()),
-                artifact_schema: Some("example/report/v1".to_string()),
-                path: Some("artifacts/report.json".to_string()),
-                required: true,
-                description: None,
-                metadata: Value::Null,
-            }],
-            metadata: Value::Null,
-        };
-
-        let envelope = RunnerExecutionEnvelope::from_agent_task_request(request);
-
-        assert_eq!(envelope.schema, RUNNER_EXECUTION_ENVELOPE_SCHEMA);
-        assert_eq!(envelope.source.kind, "agent_task");
-        assert_eq!(envelope.result_refs.task_id.as_deref(), Some("task-1"));
-        assert_eq!(envelope.result_refs.plan_id.as_deref(), Some("plan-1"));
-        assert_eq!(
-            envelope
-                .secret_env
-                .expect("secret env plan")
-                .secret_env_names(),
-            vec!["TOKEN_A".to_string()]
-        );
-        assert_eq!(
-            envelope
-                .artifact_declarations
-                .iter()
-                .map(|artifact| artifact.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["report", "patch"]
-        );
-    }
-
-    #[test]
-    fn extensions_shaped_runtime_fixture_compiles_without_losing_runtime_selection() {
-        let request: AgentTaskRequest = serde_json::from_value(json!({
-            "schema": AGENT_TASK_REQUEST_SCHEMA,
-            "task_id": "task-runtime-fixture",
-            "executor": {
-                "backend": "legacy-backend",
-                "selector": "legacy-provider",
-                "runtime": {
-                    "runtime_id": "runtime-1",
-                    "backend": "runtime-backend",
-                    "selector": "runtime-provider",
-                    "provider": "oauth-provider",
-                    "model": "model-a",
-                    "substrate_ref": "sandbox://run/1"
-                },
-                "secret_env": ["TOKEN_A"],
-                "required_capabilities": ["structured_output"]
-            },
-            "instructions": "Execute the fixture.",
-            "workspace": {
-                "mode": "materialized",
-                "root": "/workspace/project"
-            },
-            "expected_artifacts": ["patch"],
-            "artifact_declarations": [
-                {
-                    "name": "report",
-                    "type": "json",
-                    "artifact_schema": "example/report/v1",
-                    "path": "artifacts/report.json",
-                    "required": true
-                }
-            ]
-        }))
-        .expect("decode extensions-shaped fixture");
-
-        let selection = request.executor.runtime_selection();
-        let envelope = RunnerExecutionEnvelope::from_agent_task_request(request);
-        let encoded = serde_json::to_value(&envelope).expect("serialize envelope");
-        let decoded: RunnerExecutionEnvelope =
-            serde_json::from_value(encoded).expect("decode envelope");
-
-        assert_eq!(selection.runtime_id.as_deref(), Some("runtime-1"));
-        assert_eq!(
-            selection.executor_backend.as_deref(),
-            Some("runtime-backend")
-        );
-        assert_eq!(
-            selection.executor_provider_id.as_deref(),
-            Some("runtime-provider")
-        );
-        assert_eq!(
-            decoded
-                .agent_task
-                .expect("agent task")
-                .executor
-                .runtime_id(),
-            Some("runtime-1")
-        );
-        assert_eq!(
-            decoded
-                .secret_env
-                .expect("secret env plan")
-                .secret_env_names(),
-            vec!["TOKEN_A".to_string()]
-        );
-        assert_eq!(decoded.artifact_declarations.len(), 2);
     }
 }
