@@ -689,6 +689,19 @@ pub(crate) struct ProcessOutput {
 }
 
 pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOutput, i32)> {
+    exec_with_status_snapshot(runner_id, options, None)
+}
+
+/// Execute against a status observation made by the caller's transaction.
+///
+/// A refresh verifies the session before selecting or replacing a binary. Keep
+/// that verified transport rather than resolving a controller-scoped session a
+/// second time during the same transaction.
+pub(crate) fn exec_with_status_snapshot(
+    runner_id: &str,
+    options: RunnerExecOptions,
+    status_snapshot: Option<RunnerStatusReport>,
+) -> Result<(RunnerExecOutput, i32)> {
     if options.command.is_empty() {
         return Err(Error::validation_invalid_argument(
             "command",
@@ -797,7 +810,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         );
     }
 
-    let connected = status(runner_id)?;
+    let connected = execution_status(runner_id, status_snapshot)?;
     if connected.connected
         && connected.stale_daemon.is_some()
         && !allows_idle_stale_daemon_refresh(&options, &connected)
@@ -886,6 +899,13 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         append_runner_exec_diagnostic_hint(&mut output, run_id_hint);
         (output, exit_code)
     })
+}
+
+fn execution_status(
+    runner_id: &str,
+    status_snapshot: Option<RunnerStatusReport>,
+) -> Result<RunnerStatusReport> {
+    status_snapshot.map(Ok).unwrap_or_else(|| status(runner_id))
 }
 
 fn allows_idle_stale_daemon_refresh(
