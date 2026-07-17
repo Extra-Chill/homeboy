@@ -278,14 +278,14 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '') {
 	// Homeboy owns durable task identity, so OpenCode must not create a competing
 	// provider session title from an ambient or run-scoped configuration layer.
 	content.agent.title = { ...objectValue(content.agent.title), disable: true };
-	const workspacePattern = opencodeExternalDirectoryPattern(request, config);
-	if (workspacePattern) {
-		content.permission = permissionWithWorkspaceAllowance(content.permission, workspacePattern);
+	const externalDirectoryPatterns = opencodeExternalDirectoryPatterns(request, config);
+	if (externalDirectoryPatterns.length > 0) {
+		content.permission = permissionWithExternalDirectoryAllowances(content.permission, externalDirectoryPatterns);
 		content.agent[primaryAgent] = {
 			...objectValue(content.agent[primaryAgent]),
-			permission: permissionWithWorkspaceAllowance(
+			permission: permissionWithExternalDirectoryAllowances(
 				objectValue(content.agent[primaryAgent]).permission,
-				workspacePattern
+				externalDirectoryPatterns
 			),
 		};
 	}
@@ -293,26 +293,49 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '') {
 	return JSON.stringify(content);
 }
 
-function opencodeExternalDirectoryPattern(request = {}, config = {}) {
+function opencodeExternalDirectoryPatterns(request = {}, config = {}) {
 	const cwd = resolveOpenCodeCwd(request, config);
-	if (typeof cwd !== 'string' || cwd.trim() === '') {
-		return '';
+	if (!isAbsolutePath(cwd)) {
+		return [];
 	}
 
-	const workspace = path.resolve(cwd);
+	const concreteWorkspace = concretePath(cwd);
+	const patterns = [path.join(concreteWorkspace, '**')];
+	const attemptRoot = config.runtime_env?.TMPDIR;
+	if (isAbsolutePath(attemptRoot)) {
+		const concreteAttemptRoot = concretePath(attemptRoot);
+		if (isStrictDescendant(concreteWorkspace, concreteAttemptRoot)) {
+			// OpenCode discovers project metadata from this Homeboy-provided attempt root.
+			patterns.unshift(path.join(concreteAttemptRoot, '*'));
+		}
+	}
+
+	return [...new Set(patterns)];
+}
+
+function concretePath(candidate) {
+	const resolved = path.resolve(candidate);
 	// OpenCode compares tool paths against the process working directory, which
 	// resolves symlinks when the child process starts.
-	let concreteWorkspace = workspace;
 	try {
-		concreteWorkspace = fs.realpathSync.native?.(workspace) || fs.realpathSync(workspace);
+		return fs.realpathSync.native?.(resolved) || fs.realpathSync(resolved);
 	} catch {
 		// Keep the configured request path when the caller materializes it after
 		// constructing the executor environment.
+		return resolved;
 	}
-	return path.join(concreteWorkspace, '**');
 }
 
-function permissionWithWorkspaceAllowance(permission, workspacePattern) {
+function isAbsolutePath(value) {
+	return typeof value === 'string' && value.trim() !== '' && path.isAbsolute(value);
+}
+
+function isStrictDescendant(candidate, parent) {
+	const relative = path.relative(parent, candidate);
+	return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function permissionWithExternalDirectoryAllowances(permission, patterns) {
 	const rules = typeof permission === 'string'
 		? { '*': permission }
 		: objectValue(permission);
@@ -324,9 +347,9 @@ function permissionWithWorkspaceAllowance(permission, workspacePattern) {
 		...rules,
 		external_directory: {
 			...externalDirectory,
-			// OpenCode resolves matching rules in order, so this narrowly scoped rule
-			// deliberately supersedes an inherited catch-all for this task workspace.
-			[workspacePattern]: 'allow',
+			// OpenCode resolves matching rules in order, so these task-owned paths
+			// deliberately supersede inherited catch-all rules.
+			...Object.fromEntries(patterns.map((pattern) => [pattern, 'allow'])),
 		},
 	};
 }
