@@ -1,5 +1,4 @@
-mod autofix_config;
-pub use autofix_config::AutofixVerifyConfig;
+pub use homeboy_extension_contract::autofix_config::AutofixVerifyConfig;
 pub use homeboy_extension_contract::trace_config::{
     TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
     TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
