@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use homeboy_core::api_jobs::{Job, JobStatus, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata};
 use homeboy_core::error::{Error, Result};
-use homeboy_core::lab_contract::RunnerWorkload;
+use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::redaction::redact_argv;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use reqwest::blocking::Client;
@@ -28,7 +28,7 @@ pub(super) fn exec_via_reverse_broker(
     source_snapshot_override: Option<SourceSnapshot>,
     path_materialization_plan: Option<PathMaterializationPlan>,
     require_paths: Vec<String>,
-    runner_workload: Option<RunnerWorkload>,
+    lab_runner_workload: Option<LabRunnerWorkload>,
     run_id: Option<String>,
     detach_after_handoff: bool,
     mirror_evidence: bool,
@@ -72,7 +72,7 @@ pub(super) fn exec_via_reverse_broker(
         capture_patch,
         source_snapshot: Some(source_snapshot.clone()),
         path_materialization_plan: path_materialization_plan.clone(),
-        runner_workload: runner_workload.clone(),
+        lab_runner_workload: lab_runner_workload.clone(),
         metadata: Some(runner_exec_request_metadata(
             run_id.as_deref(),
             "reverse_broker",
@@ -222,7 +222,7 @@ pub(super) fn exec_via_reverse_broker(
             &events,
             &result,
             run_id.as_deref(),
-            runner_workload
+            lab_runner_workload
                 .as_ref()
                 .and_then(|workload| workload.notification_route.as_ref()),
         )?
@@ -255,12 +255,12 @@ pub(super) fn exec_via_reverse_broker(
     );
     let provenance_extensions = required_extensions_for_command(
         &command,
-        &super::super::workload::merge_runner_workload_required_extensions(
+        &super::super::workload::merge_lab_runner_workload_required_extensions(
             Vec::new(),
-            runner_workload.as_ref(),
+            lab_runner_workload.as_ref(),
         ),
     );
-    let handoff = runner_handoff(
+    let handoff = lab_runner_handoff(
         runner,
         "reverse_broker",
         Some(runner_job.clone()),

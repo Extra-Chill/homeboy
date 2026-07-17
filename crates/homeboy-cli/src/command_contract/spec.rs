@@ -85,7 +85,7 @@ pub(crate) const AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL: &str = "agent-task fanout
 pub(crate) const AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL: &str = "agent-task fanout submit-batch";
 pub(crate) const AGENT_TASK_FANOUT_STATUS_LAB_LABEL: &str = "agent-task fanout status/artifacts";
 pub(crate) const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth status";
-// The lab-runnable command labels below are the ones `RunnerWorkload`
+// The lab-runnable command labels below are the ones `LabRunnerWorkload`
 // classification matches on; they live in the homeboy-lab-contract crate and are
 // re-exported here so existing `spec::*_LAB_LABEL` call sites are unchanged.
 pub(crate) use homeboy_lab_contract::lab::labels::{

@@ -340,7 +340,7 @@ pub struct RunnerResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerHandoff {
+pub struct LabRunnerHandoff {
     pub runner_id: String,
     pub transport: String,
     pub lifecycle_owner: RunnerLifecycleOwner,

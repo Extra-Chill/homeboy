@@ -9,10 +9,10 @@ use crate::{
 };
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::{
-    RunnerWorkload, RunnerWorkloadArtifactRef, RunnerWorkloadAssignment,
-    RunnerWorkloadCommandFamily, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
-    RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
-    RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
+    LabRunnerWorkload, LabRunnerWorkloadArtifactRef, LabRunnerWorkloadAssignment,
+    LabRunnerWorkloadCommandFamily, LabRunnerWorkloadKind, LabRunnerWorkloadMutationPolicy,
+    LabRunnerWorkloadResultRefs, LabRunnerWorkloadSecrets, LabRunnerWorkloadState,
+    LabRunnerWorkloadWorkspaceMappings, LAB_RUNNER_WORKLOAD_SCHEMA,
 };
 use homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy;
 use homeboy_core::runner_execution_envelope::RunnerExecutionProjection;
@@ -80,7 +80,8 @@ pub struct ExtensionDevRunSourceRevision {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExtensionDevRunExecutionOutcome {
-    pub runner_workload: RunnerWorkload,
+    #[serde(rename = "runner_workload")]
+    pub lab_runner_workload: LabRunnerWorkload,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_record: Option<RunnerExecutionProjection>,
     pub exit_code: i32,
@@ -263,7 +264,7 @@ pub(crate) fn run_extension_dev_run_with(
             required_extensions: Vec::new(),
             accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
-            runner_workload: Some(install_workload.clone()),
+            lab_runner_workload: Some(install_workload.clone()),
             run_id: None,
             detach_after_handoff: false,
             mirror_evidence: true,
@@ -326,7 +327,7 @@ pub(crate) fn run_extension_dev_run_with(
             required_extensions: vec![plan.extension_id.clone()],
             accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
-            runner_workload: Some(command_workload.clone()),
+            lab_runner_workload: Some(command_workload.clone()),
             run_id: None,
             detach_after_handoff: false,
             mirror_evidence: true,
@@ -436,48 +437,48 @@ fn extension_dev_run_workload(
     command_label: &str,
     remote_workspace: &str,
     required_extensions: Vec<String>,
-) -> RunnerWorkload {
+) -> LabRunnerWorkload {
     let plan_id = format!(
         "extension-dev-run:{}:{}:{stage}",
         plan.runner_id, plan.extension_id
     );
-    RunnerWorkload {
-        schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
+    LabRunnerWorkload {
+        schema: LAB_RUNNER_WORKLOAD_SCHEMA.to_string(),
         workload_id: format!("{plan_id}.runner_workload"),
-        kind: RunnerWorkloadKind {
+        kind: LabRunnerWorkloadKind {
             command_label: command_label.to_string(),
-            command_family: RunnerWorkloadCommandFamily::from_command_label(command_label),
+            command_family: LabRunnerWorkloadCommandFamily::from_command_label(command_label),
         },
         agent_task: None,
         notification_route: homeboy_core::notification_route::current(),
-        workspace_mappings: RunnerWorkloadWorkspaceMappings {
+        workspace_mappings: LabRunnerWorkloadWorkspaceMappings {
             source_path_mode: "snapshot".to_string(),
             workspace_mode_policy: "snapshot_unique_workspace".to_string(),
             mapping_ref: Some(plan.source.clone()),
         },
         required_capabilities: Vec::new(),
-        required_secrets: RunnerWorkloadSecrets {
+        required_secrets: LabRunnerWorkloadSecrets {
             categories: Vec::new(),
             secret_env_plan: Default::default(),
         },
         required_extensions,
         required_extension_revisions: Vec::new(),
-        mutation_policy: RunnerWorkloadMutationPolicy {
+        mutation_policy: LabRunnerWorkloadMutationPolicy {
             capture_patch: false,
             mutation_flag: None,
             allow_dirty_lab_workspace: false,
         },
-        assignment: RunnerWorkloadAssignment {
+        assignment: LabRunnerWorkloadAssignment {
             runner_id: Some(plan.runner_id.clone()),
             runner_mode: None,
             source: Some(plan.source.clone()),
         },
-        state: RunnerWorkloadState {
+        state: LabRunnerWorkloadState {
             status: "dispatched".to_string(),
             remote_workspace: Some(remote_workspace.to_string()),
             fallback_reason: None,
         },
-        result_refs: RunnerWorkloadResultRefs {
+        result_refs: LabRunnerWorkloadResultRefs {
             plan_id,
             proof_id: None,
             workspace_mapping_ref: Some(plan.source.clone()),
@@ -501,20 +502,20 @@ fn extension_dev_run_command_label(command: &[String]) -> String {
 }
 
 fn extension_dev_run_execution_outcome(
-    runner_workload: &RunnerWorkload,
+    lab_runner_workload: &LabRunnerWorkload,
     output: &RunnerExecOutput,
 ) -> ExtensionDevRunExecutionOutcome {
-    let mut runner_workload = runner_workload.clone();
-    runner_workload.result_refs.job_id = output.job_id.clone();
-    runner_workload.result_refs.mirror_run_id = output.mirror_run_id.clone();
-    runner_workload.result_refs.artifacts = output
+    let mut lab_runner_workload = lab_runner_workload.clone();
+    lab_runner_workload.result_refs.job_id = output.job_id.clone();
+    lab_runner_workload.result_refs.mirror_run_id = output.mirror_run_id.clone();
+    lab_runner_workload.result_refs.artifacts = output
         .execution_record
         .as_ref()
         .map(|record| {
             record
                 .artifact_refs
                 .iter()
-                .map(|artifact| RunnerWorkloadArtifactRef {
+                .map(|artifact| LabRunnerWorkloadArtifactRef {
                     id: artifact.id.clone(),
                     name: artifact.name.clone(),
                     path: artifact.path.clone(),
@@ -524,7 +525,7 @@ fn extension_dev_run_execution_outcome(
         })
         .unwrap_or_default();
     ExtensionDevRunExecutionOutcome {
-        runner_workload,
+        lab_runner_workload,
         execution_record: output
             .execution_record
             .as_ref()
@@ -590,7 +591,7 @@ fn probe_runner_extension_state(
             required_extensions: Vec::new(),
             accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
-            runner_workload: None,
+            lab_runner_workload: None,
             run_id: None,
             detach_after_handoff: false,
             mirror_evidence: false,
@@ -719,7 +720,7 @@ mod tests {
                     options.command.clone(),
                     options.env.clone(),
                     options.required_extensions.clone(),
-                    options.runner_workload.clone(),
+                    options.lab_runner_workload.clone(),
                 ));
                 Ok((exec_output(runner_id, options.command, 0), 0))
             },
@@ -803,7 +804,11 @@ mod tests {
         assert!(output.lifecycle.retain_policy.contains("retain"));
         assert!(output.lifecycle.revert_policy.contains("manual"));
         assert_eq!(
-            output.install_outcome.runner_workload.kind.command_label,
+            output
+                .install_outcome
+                .lab_runner_workload
+                .kind
+                .command_label,
             "extension refresh"
         );
         assert_eq!(output.install_outcome.exit_code, 0);
@@ -812,7 +817,7 @@ mod tests {
                 .command_outcome
                 .as_ref()
                 .expect("command outcome")
-                .runner_workload
+                .lab_runner_workload
                 .result_refs
                 .job_id,
             Some("job-homeboy-extension-run-demo".to_string())
@@ -822,7 +827,7 @@ mod tests {
                 .command_outcome
                 .as_ref()
                 .expect("command outcome")
-                .runner_workload
+                .lab_runner_workload
                 .result_refs
                 .mirror_run_id,
             Some("run-homeboy-extension-run-demo".to_string())
@@ -857,7 +862,7 @@ mod tests {
             &command,
             |_runner_id, _options| Ok((sync_output(), 0)),
             |runner_id, options| {
-                if let Some(workload) = options.runner_workload.clone() {
+                if let Some(workload) = options.lab_runner_workload.clone() {
                     stages.borrow_mut().push((options.cwd.clone(), workload));
                 }
                 Ok((exec_output(runner_id, options.command, 0), 0))

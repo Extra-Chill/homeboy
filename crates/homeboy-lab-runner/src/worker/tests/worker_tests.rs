@@ -61,7 +61,7 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
                 source_snapshot: None,
                 path_materialization_plan: None,
                 require_paths: Vec::new(),
-                runner_workload: None,
+                lab_runner_workload: None,
                 lifecycle: None,
                 metadata: None,
             })
@@ -349,7 +349,7 @@ fn reverse_worker_reports_execution_failure_to_broker() {
                 source_snapshot: None,
                 path_materialization_plan: None,
                 require_paths: Vec::new(),
-                runner_workload: None,
+                lab_runner_workload: None,
                 lifecycle: None,
                 metadata: None,
             })
@@ -393,7 +393,7 @@ fn reverse_worker_loop_reports_failed_job_status() {
                 source_snapshot: None,
                 path_materialization_plan: None,
                 require_paths: Vec::new(),
-                runner_workload: None,
+                lab_runner_workload: None,
                 lifecycle: None,
                 metadata: None,
             })
@@ -468,7 +468,7 @@ fn reverse_worker_skips_execution_when_claim_is_cancelled_before_start() {
                 source_snapshot: None,
                 path_materialization_plan: None,
                 require_paths: Vec::new(),
-                runner_workload: None,
+                lab_runner_workload: None,
                 lifecycle: None,
                 metadata: None,
             })
@@ -533,7 +533,7 @@ fn reverse_worker_skips_finish_when_cancelled_after_execution() {
                 source_snapshot: None,
                 path_materialization_plan: None,
                 require_paths: Vec::new(),
-                runner_workload: None,
+                lab_runner_workload: None,
                 lifecycle: None,
                 metadata: None,
             })
@@ -607,7 +607,7 @@ fn reverse_worker_interrupts_running_job_when_broker_cancel_is_observed() {
                 source_snapshot: None,
                 path_materialization_plan: None,
                 require_paths: Vec::new(),
-                runner_workload: None,
+                lab_runner_workload: None,
                 lifecycle: None,
                 metadata: None,
             })
@@ -678,7 +678,7 @@ fn run_id_echo_request() -> RemoteRunnerJobRequest {
         source_snapshot: None,
             path_materialization_plan: None,
         require_paths: Vec::new(),
-        runner_workload: None,
+        lab_runner_workload: None,
         lifecycle: None,
         metadata: None,
     }

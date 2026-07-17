@@ -13,7 +13,7 @@ use super::types::{ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
 pub(super) fn remote_runner_result_from_exec_output(
     exec_output: super::super::execution::RunnerExecOutput,
     exit_code: i32,
-    runner_workload: Option<homeboy_core::lab_contract::RunnerWorkload>,
+    lab_runner_workload: Option<homeboy_core::lab_contract::LabRunnerWorkload>,
 ) -> RemoteRunnerJobResult {
     let patch = exec_output.patch.clone();
     let mutation_artifacts = exec_output.mutation_artifacts.clone();
@@ -54,15 +54,16 @@ pub(super) fn remote_runner_result_from_exec_output(
         data["agent_task_lifecycle_event"] =
             serde_json::to_value(lifecycle_event).unwrap_or(serde_json::Value::Null);
     }
-    if let Some(runner_workload) = runner_workload {
-        data["runner_workload"] =
-            serde_json::to_value(super::super::workload::runner_workload_with_result_refs(
-                runner_workload,
+    if let Some(lab_runner_workload) = lab_runner_workload {
+        data["runner_workload"] = serde_json::to_value(
+            super::super::workload::lab_runner_workload_with_result_refs(
+                lab_runner_workload,
                 exec_output.job_id.as_deref(),
                 exec_output.mirror_run_id.as_deref(),
                 &exec_output.artifacts,
-            ))
-            .unwrap_or(serde_json::Value::Null);
+            ),
+        )
+        .unwrap_or(serde_json::Value::Null);
     }
     let fallback_outcome_run_id = exec_output
         .mirror_run_id

@@ -168,7 +168,7 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         title: "Runner artifact manifest reference",
         owner: "homeboy-core",
         summary: "Points to a runner-resident artifact manifest and declares the manifest schema it contains.",
-        rust_type: "homeboy::command_contract::RunnerHandoffArtifactManifestRef",
+        rust_type: "homeboy::command_contract::LabRunnerHandoffArtifactManifestRef",
     },
     ContractRegistryEntry {
         schema_id: crate::core::extension::EXTENSION_MATERIALIZATION_SOURCE_SCHEMA,

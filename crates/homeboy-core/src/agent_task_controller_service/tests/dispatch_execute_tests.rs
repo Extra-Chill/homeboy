@@ -252,7 +252,7 @@ fn execute_controller_dispatch_injects_action_scoped_identity() {
 }
 
 #[test]
-fn accepted_runner_handoff_waits_and_terminal_replay_is_idempotent() {
+fn accepted_lab_runner_handoff_waits_and_terminal_replay_is_idempotent() {
     with_isolated_home(|_| {
         let mut record = AgentTaskLoopControllerRecord::new("loop-runner-replay", "dispatch", "v1");
         let action = record.record_action(
@@ -283,7 +283,7 @@ fn accepted_runner_handoff_waits_and_terminal_replay_is_idempotent() {
             &mut record,
             &action.action_id,
             CapturingExecutor::default(),
-            &RunnerHandoffDispatchHook,
+            &LabRunnerHandoffDispatchHook,
             |_| AgentTaskLoopRunnerAvailability::Available,
         )
         .expect("runner accepts handoff");
@@ -354,12 +354,12 @@ fn accepted_runner_handoff_waits_and_terminal_replay_is_idempotent() {
 }
 
 #[test]
-fn accepted_runner_handoff_rejects_an_unbound_persisted_identity() {
+fn accepted_lab_runner_handoff_rejects_an_unbound_persisted_identity() {
     with_isolated_home(|_| {
-        let run_id = "controller-unbound-runner-handoff";
+        let run_id = "controller-unbound-lab-runner-handoff";
         lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persisted queued run");
 
-        let error = accepted_runner_handoff_identity(&json!({
+        let error = accepted_lab_runner_handoff_identity(&json!({
             "schema": "homeboy/agent-task-controller-lab-handoff/v1",
             "run_id": run_id,
             "identity": {

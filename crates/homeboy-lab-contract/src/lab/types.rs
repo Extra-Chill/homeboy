@@ -1,6 +1,6 @@
 //! Lab portability contract types and construction policy.
 
-use super::workload::RunnerWorkloadCapability;
+use super::workload::LabRunnerWorkloadCapability;
 
 pub const LAB_CAPABILITY_PLAYWRIGHT: &str = "playwright";
 pub const LAB_TRACE_EXTRA_CAPABILITIES: &[&str] = &[LAB_CAPABILITY_PLAYWRIGHT];
@@ -40,7 +40,7 @@ pub struct LabRoutingPolicy {
 pub struct LabCommandRouteContract {
     pub command: LabCommandContract,
     pub required_extensions: Vec<String>,
-    pub required_capabilities: Vec<RunnerWorkloadCapability>,
+    pub required_capabilities: Vec<LabRunnerWorkloadCapability>,
     pub workload: Option<LabRigWorkloadArguments>,
 }
 
@@ -135,7 +135,7 @@ impl LabCommandContract {
         let required_capabilities = self
             .extra_required_capabilities
             .iter()
-            .map(|capability| RunnerWorkloadCapability {
+            .map(|capability| LabRunnerWorkloadCapability {
                 name: (*capability).to_string(),
                 required: true,
             })

@@ -1,7 +1,7 @@
 //! Lab-runnable command labels.
 //!
 //! These identify the command families that can be dispatched to a Lab runner.
-//! `RunnerWorkload` classification (see `workload.rs`) matches on them, so they
+//! `LabRunnerWorkload` classification (see `workload.rs`) matches on them, so they
 //! live with the lab contract. `command_contract::spec` re-exports them to keep
 //! its existing call sites stable.
 

@@ -70,7 +70,7 @@ struct CountingFailingDispatchHook {
 struct RuntimeBudgetDispatchHook;
 
 #[derive(Clone, Default)]
-struct RunnerHandoffDispatchHook;
+struct LabRunnerHandoffDispatchHook;
 
 #[derive(Clone, Default)]
 struct EvidenceExecutor;
@@ -249,7 +249,7 @@ impl ControllerDispatchHook for RuntimeBudgetDispatchHook {
     }
 }
 
-impl ControllerDispatchHook for RunnerHandoffDispatchHook {
+impl ControllerDispatchHook for LabRunnerHandoffDispatchHook {
     fn dispatch(&self, request: &Value) -> Result<(Value, i32)> {
         let run_id = request["dispatch"]["run_id"]
             .as_str()

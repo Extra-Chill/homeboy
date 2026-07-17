@@ -369,7 +369,7 @@ fn run_once_output(
     let job = finish(remote_runner_result_from_exec_output(
         exec_output,
         exit_code,
-        claim.request.runner_workload.clone(),
+        claim.request.lab_runner_workload.clone(),
     ))?;
 
     Ok((
@@ -397,7 +397,7 @@ fn runner_exec_options_from_envelope(
     let secret_env_plan = envelope.secret_env.unwrap_or_default();
     let secret_env_names = secret_env_plan.secret_env_names();
     let required_extensions = envelope
-        .runner_workload
+        .lab_runner_workload
         .as_ref()
         .map(|workload| workload.required_extensions.clone())
         .unwrap_or_default();
@@ -420,7 +420,7 @@ fn runner_exec_options_from_envelope(
         required_extensions,
         accepted_extension_settings: Vec::new(),
         require_paths: dispatch.require_paths,
-        runner_workload: envelope.runner_workload,
+        lab_runner_workload: envelope.lab_runner_workload,
         run_id,
         detach_after_handoff: false,
         mirror_evidence: true,

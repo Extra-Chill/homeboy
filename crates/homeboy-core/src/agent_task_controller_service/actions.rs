@@ -58,8 +58,8 @@ where
 
     match execute_claimed_controller_action(record, &action, executor, dispatch) {
         Ok((execution, exit_code)) => {
-            if let Some(identity) = accepted_runner_handoff_identity(&execution)? {
-                bind_controller_action_runner_handoff(record, action_id, identity, &execution)?;
+            if let Some(identity) = accepted_lab_runner_handoff_identity(&execution)? {
+                bind_controller_action_lab_runner_handoff(record, action_id, identity, &execution)?;
                 controller::write_controller(record)?;
                 return Ok(AgentTaskRunResult {
                     value: ControllerActionReport {
@@ -248,7 +248,7 @@ pub(super) fn action_status_report_label(status: AgentTaskLoopActionStatus) -> &
     }
 }
 
-pub(super) fn accepted_runner_handoff_identity(execution: &Value) -> Result<Option<Value>> {
+pub(super) fn accepted_lab_runner_handoff_identity(execution: &Value) -> Result<Option<Value>> {
     // Spawn-task dispatch results are wrapped with their controller mode and
     // request artifacts. The Lab handoff itself remains the typed result.
     let handoff = execution.get("result").unwrap_or(execution);
@@ -321,7 +321,7 @@ pub(super) fn accepted_runner_handoff_identity(execution: &Value) -> Result<Opti
     Ok(Some(identity))
 }
 
-fn bind_controller_action_runner_handoff(
+fn bind_controller_action_lab_runner_handoff(
     record: &mut AgentTaskLoopControllerRecord,
     action_id: &str,
     identity: Value,

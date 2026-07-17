@@ -593,7 +593,7 @@ fn reconcile_waiting_runner_actions(record: &mut AgentTaskLoopControllerRecord) 
         .into_iter()
         .filter(|action| action.status == AgentTaskLoopActionStatus::WaitingForRunner)
     {
-        let Some(identity) = runner_handoff_identity(&action) else {
+        let Some(identity) = lab_runner_handoff_identity(&action) else {
             continue;
         };
         let run_id = identity["run_id"].as_str().unwrap_or_default();
@@ -624,7 +624,7 @@ fn replay_runner_terminal_event(
     let action = record
         .next_actions
         .iter()
-        .find(|action| runner_handoff_identity(action).as_ref() == Some(&identity));
+        .find(|action| lab_runner_handoff_identity(action).as_ref() == Some(&identity));
     let Some(action) = action else {
         return Err(Error::validation_invalid_argument(
             "payload.identity",
@@ -671,7 +671,7 @@ fn replay_runner_terminal_event(
     Ok(true)
 }
 
-fn runner_handoff_identity(action: &AgentTaskLoopPolicyActionRecord) -> Option<Value> {
+fn lab_runner_handoff_identity(action: &AgentTaskLoopPolicyActionRecord) -> Option<Value> {
     action
         .diagnostics
         .iter()

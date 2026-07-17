@@ -1287,7 +1287,7 @@ pub(super) fn fuzz_runner_env(
     ));
     if let Some(workload) = workload {
         env.push(("HOMEBOY_FUZZ_WORKLOAD_ID".to_string(), workload.id.clone()));
-        if let Some(path) = fuzz_runner_workload_path(workload, rig_context, run_dir)? {
+        if let Some(path) = fuzz_lab_runner_workload_path(workload, rig_context, run_dir)? {
             env.push(("HOMEBOY_FUZZ_WORKLOAD_PATH".to_string(), path.clone()));
         }
     }
@@ -1422,7 +1422,7 @@ pub(super) fn build_fuzz_execution_request(
     })
 }
 
-fn fuzz_runner_workload_path(
+fn fuzz_lab_runner_workload_path(
     workload: &FuzzWorkloadOutput,
     rig_context: Option<&FuzzRigContext>,
     run_dir: &RunDir,

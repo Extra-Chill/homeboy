@@ -770,11 +770,11 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             .iter()
             .any(|artifact| artifact.artifact_id == "run_location_index"));
         let json: Value = serde_json::from_str(&output.stdout).expect("handoff JSON");
-        let envelope: homeboy_core::lab_contract::RunnerHandoffEnvelope =
+        let envelope: homeboy_core::lab_contract::LabRunnerHandoffEnvelope =
             serde_json::from_value(json.clone()).expect("typed handoff envelope");
         assert_eq!(
             envelope.schema,
-            homeboy_core::lab_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA
+            homeboy_core::lab_contract::LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA
         );
         assert_eq!(envelope.status, "running");
         assert_eq!(envelope.execution_location, "runner:lab");
@@ -917,8 +917,8 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
 }
 
 #[test]
-fn runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
-    let envelope = homeboy_core::lab_contract::RunnerHandoffEnvelope::detached_lab_offload(
+fn lab_runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
+    let envelope = homeboy_core::lab_contract::LabRunnerHandoffEnvelope::detached_lab_offload(
         "lab",
         "job-123",
         "/srv/homeboy/project".to_string(),
@@ -931,7 +931,7 @@ fn runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
 
     assert_eq!(
         json["schema"],
-        homeboy_core::lab_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA
+        homeboy_core::lab_contract::LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA
     );
     assert_eq!(json["status"], "running");
     assert_eq!(json["execution_location"], "runner:lab");

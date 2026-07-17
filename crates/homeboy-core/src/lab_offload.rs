@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::{Error, Result};
 use crate::lab_contract::{
-    LabCommandContract, LabRigWorkloadArguments, LabSourcePathMode, LabWorkspaceModePolicy,
-    RunnerWorkloadCapability,
+    LabCommandContract, LabRigWorkloadArguments, LabRunnerWorkloadCapability, LabSourcePathMode,
+    LabWorkspaceModePolicy,
 };
 use crate::plan::HomeboyPlan;
 
@@ -33,7 +33,7 @@ pub struct LabJobOverrides {
 pub struct LabOffloadCommand {
     pub command: LabCommandContract,
     pub required_extensions: Vec<String>,
-    pub required_capabilities: Vec<RunnerWorkloadCapability>,
+    pub required_capabilities: Vec<LabRunnerWorkloadCapability>,
     pub workload: Option<LabRigWorkloadArguments>,
 }
 

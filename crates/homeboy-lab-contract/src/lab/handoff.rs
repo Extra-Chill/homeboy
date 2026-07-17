@@ -2,9 +2,9 @@
 
 use crate::path_materialization::PathMaterializationPlan;
 
-use super::workload::RunnerWorkloadArtifactRef;
+use super::workload::LabRunnerWorkloadArtifactRef;
 
-pub const RUNNER_HANDOFF_ENVELOPE_SCHEMA: &str = "homeboy/runner-exec-handoff/v1";
+pub const LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA: &str = "homeboy/runner-exec-handoff/v1";
 pub const RUN_LOCATION_INDEX_SCHEMA: &str = "homeboy/run-location-index/v1";
 pub const RUNNER_ARTIFACT_MANIFEST_REF_NAME: &str = "runner-artifact-manifest-ref";
 pub const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA: &str = "homeboy/runner-artifact-manifest-ref/v1";
@@ -19,7 +19,7 @@ pub const RUNNER_ARTIFACT_MANIFEST_FILE: &str = ARTIFACT_MANIFEST_FILE;
 pub const RUNNER_ARTIFACT_ROOT_DIR_SUFFIX: &str = "-homeboy-artifacts";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerHandoffEnvelope {
+pub struct LabRunnerHandoffEnvelope {
     pub schema: String,
     pub status: String,
     pub execution_location: String,
@@ -33,21 +33,21 @@ pub struct RunnerHandoffEnvelope {
     pub remote_cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_materialization_plan: Option<PathMaterializationPlan>,
-    pub artifact_manifest: RunnerHandoffArtifactManifestRef,
+    pub artifact_manifest: LabRunnerHandoffArtifactManifestRef,
     pub run_location_index: RunLocationIndex,
-    pub evidence: RunnerHandoffEvidence,
-    pub follow_commands: RunnerHandoffFollowCommands,
+    pub evidence: LabRunnerHandoffEvidence,
+    pub follow_commands: LabRunnerHandoffFollowCommands,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerHandoffArtifactManifestRef {
+pub struct LabRunnerHandoffArtifactManifestRef {
     pub schema: String,
     pub manifest_schema: String,
     pub path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerHandoffEvidence {
+pub struct LabRunnerHandoffEvidence {
     pub schema: String,
     pub status: String,
     pub runner_id: String,
@@ -59,15 +59,15 @@ pub struct RunnerHandoffEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
     pub remote_cwd: String,
-    pub artifact_manifest: RunnerHandoffArtifactManifestRef,
+    pub artifact_manifest: LabRunnerHandoffArtifactManifestRef,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<RunnerWorkloadArtifactRef>,
+    pub artifact_refs: Vec<LabRunnerWorkloadArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub next_commands: Vec<RunnerHandoffNextCommand>,
+    pub next_commands: Vec<LabRunnerHandoffNextCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerHandoffNextCommand {
+pub struct LabRunnerHandoffNextCommand {
     pub label: String,
     pub command: Vec<String>,
 }
@@ -85,7 +85,7 @@ pub struct AgentTaskDispatchIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerHandoffFollowCommands {
+pub struct LabRunnerHandoffFollowCommands {
     pub job_logs: String,
     pub job_cancel: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -104,12 +104,12 @@ pub struct RunLocationIndex {
     pub runner_id: String,
     pub remote_job_id: String,
     pub remote_cwd: String,
-    pub artifact_manifest_ref: RunnerHandoffArtifactManifestRef,
+    pub artifact_manifest_ref: LabRunnerHandoffArtifactManifestRef,
     pub liveness_heartbeat_timestamp: String,
-    pub follow_commands: RunnerHandoffFollowCommands,
+    pub follow_commands: LabRunnerHandoffFollowCommands,
 }
 
-impl RunnerHandoffEnvelope {
+impl LabRunnerHandoffEnvelope {
     pub fn detached_lab_offload(
         runner_id: &str,
         job_id: &str,
@@ -137,11 +137,11 @@ impl RunnerHandoffEnvelope {
             job_id.to_string(),
         ];
         let mut next_commands = vec![
-            RunnerHandoffNextCommand {
+            LabRunnerHandoffNextCommand {
                 label: "runner_job_logs".to_string(),
                 command: job_logs_command.clone(),
             },
-            RunnerHandoffNextCommand {
+            LabRunnerHandoffNextCommand {
                 label: "runner_job_cancel".to_string(),
                 command: job_cancel_command.clone(),
             },
@@ -149,7 +149,7 @@ impl RunnerHandoffEnvelope {
         let actionable_run_id = accepted_run_id.as_ref().or(mirror_run_id.as_ref());
         if let Some(run_id) = actionable_run_id {
             next_commands.extend([
-                RunnerHandoffNextCommand {
+                LabRunnerHandoffNextCommand {
                     label: "run_status".to_string(),
                     command: vec![
                         "homeboy".to_string(),
@@ -158,7 +158,7 @@ impl RunnerHandoffEnvelope {
                         run_id.clone(),
                     ],
                 },
-                RunnerHandoffNextCommand {
+                LabRunnerHandoffNextCommand {
                     label: "run_logs".to_string(),
                     command: vec![
                         "homeboy".to_string(),
@@ -167,7 +167,7 @@ impl RunnerHandoffEnvelope {
                         run_id.clone(),
                     ],
                 },
-                RunnerHandoffNextCommand {
+                LabRunnerHandoffNextCommand {
                     label: "run_artifacts".to_string(),
                     command: vec![
                         "homeboy".to_string(),
@@ -178,9 +178,9 @@ impl RunnerHandoffEnvelope {
                 },
             ]);
         }
-        let artifact_manifest = RunnerHandoffArtifactManifestRef::for_remote_cwd(&remote_cwd);
+        let artifact_manifest = LabRunnerHandoffArtifactManifestRef::for_remote_cwd(&remote_cwd);
         let run_location_index_path = run_location_index_path(&remote_cwd);
-        let follow_commands = RunnerHandoffFollowCommands {
+        let follow_commands = LabRunnerHandoffFollowCommands {
             job_logs: format!("homeboy runner job logs {runner_id} {job_id} --follow"),
             job_cancel: format!("homeboy runner job cancel {runner_id} {job_id}"),
             status: actionable_run_id
@@ -206,7 +206,7 @@ impl RunnerHandoffEnvelope {
             liveness_heartbeat_timestamp,
             follow_commands: follow_commands.clone(),
         };
-        let evidence = RunnerHandoffEvidence {
+        let evidence = LabRunnerHandoffEvidence {
             schema: "homeboy/runner-handoff-evidence/v1".to_string(),
             // The daemon has accepted this job even though its execution remains
             // in flight. Keep that acceptance distinct from terminal state.
@@ -219,13 +219,13 @@ impl RunnerHandoffEnvelope {
             remote_cwd: remote_cwd.clone(),
             artifact_manifest: artifact_manifest.clone(),
             artifact_refs: vec![
-                RunnerWorkloadArtifactRef {
+                LabRunnerWorkloadArtifactRef {
                     id: "artifact_manifest".to_string(),
                     name: Some("runner artifact manifest".to_string()),
                     path: Some(artifact_manifest.path.clone()),
                     url: None,
                 },
-                RunnerWorkloadArtifactRef {
+                LabRunnerWorkloadArtifactRef {
                     id: "run_location_index".to_string(),
                     name: Some("run location index".to_string()),
                     path: Some(run_location_index_path),
@@ -235,7 +235,7 @@ impl RunnerHandoffEnvelope {
             next_commands,
         };
         Self {
-            schema: RUNNER_HANDOFF_ENVELOPE_SCHEMA.to_string(),
+            schema: LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA.to_string(),
             status: "running".to_string(),
             execution_location: format!("runner:{runner_id}"),
             identity: AgentTaskDispatchIdentity {
@@ -260,7 +260,7 @@ impl RunnerHandoffEnvelope {
     }
 }
 
-impl RunnerHandoffArtifactManifestRef {
+impl LabRunnerHandoffArtifactManifestRef {
     pub fn for_remote_cwd(remote_cwd: &str) -> Self {
         Self {
             schema: RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA.to_string(),

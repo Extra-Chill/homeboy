@@ -475,7 +475,7 @@ generic contracts:
   runner command captures source changes, `mutation_artifacts.patch_ref` points
   at the patch artifact; future file-bundle and operation-log returns use
   `file_bundle_ref` and `operation_log_ref` without changing caller logic.
-- `RunnerHandoff`: the controller-to-runner handoff envelope tying transport,
+- `LabRunnerHandoff`: the controller-to-runner handoff envelope tying transport,
   owner, job, workspace lease, and result together.
 
 Compatibility fields such as `active_jobs`, `job`, `job_id`, `job_events`, and

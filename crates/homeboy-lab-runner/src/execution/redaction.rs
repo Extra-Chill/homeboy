@@ -7,7 +7,7 @@ use homeboy_core::redaction::RedactionPolicy;
 use homeboy_core::source_snapshot::SourceSnapshot;
 
 use super::super::{
-    Runner, RunnerArtifactRef, RunnerHandoff, RunnerJob, RunnerLifecycleOwner,
+    LabRunnerHandoff, Runner, RunnerArtifactRef, RunnerJob, RunnerLifecycleOwner,
     RunnerMutationArtifacts, RunnerResult,
 };
 
@@ -203,13 +203,13 @@ pub(super) fn runner_result(
     }
 }
 
-pub(super) fn runner_handoff(
+pub(super) fn lab_runner_handoff(
     runner: &Runner,
     transport: &str,
     job: Option<RunnerJob>,
     result: Option<RunnerResult>,
-) -> RunnerHandoff {
-    RunnerHandoff {
+) -> LabRunnerHandoff {
+    LabRunnerHandoff {
         runner_id: runner.id.clone(),
         transport: transport.to_string(),
         lifecycle_owner: match transport {
