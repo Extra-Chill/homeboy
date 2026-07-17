@@ -12,7 +12,7 @@ use crate::extension::{
 };
 use crate::finding::{FindingProducerSummary, HomeboyFinding};
 use crate::refactor::plan::RefactorSourceRun;
-use crate::refactor::AppliedRefactor;
+use homeboy_refactor_contract::AppliedRefactor;
 use serde::Serialize;
 use serde_json::Value;
 
