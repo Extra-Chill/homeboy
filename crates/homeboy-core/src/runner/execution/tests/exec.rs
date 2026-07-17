@@ -1,9 +1,70 @@
 use super::*;
+use crate::runner::{
+    RunnerActiveJobSource, RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerStatusReport,
+};
 use crate::runner_execution_envelope::{
     PATH_MATERIALIZATION_MODE_GIT, PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
     PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
 use serde_json::json;
+
+#[test]
+fn explicit_refresh_allows_an_idle_stale_daemon_after_reconnect() {
+    let status = stale_direct_daemon_status();
+
+    assert!(allows_idle_stale_daemon_refresh(
+        &explicit_refresh_options(),
+        &status,
+    ));
+}
+
+#[test]
+fn explicit_refresh_keeps_active_or_uncertain_stale_daemons_protected() {
+    let options = explicit_refresh_options();
+    let mut active = stale_direct_daemon_status();
+    active.active_job_count = 1;
+    let mut unavailable = stale_direct_daemon_status();
+    unavailable.active_job_state = RunnerActiveJobState::Unavailable;
+
+    assert!(!allows_idle_stale_daemon_refresh(&options, &active));
+    assert!(!allows_idle_stale_daemon_refresh(&options, &unavailable));
+}
+
+fn explicit_refresh_options() -> RunnerExecOptions {
+    RunnerExecOptions::raw_command(vec!["bash".to_string()]).with_capability_preflight(
+        RunnerCapabilityPreflight {
+            command: "runner.refresh-homeboy".to_string(),
+            ..Default::default()
+        },
+    )
+}
+
+fn stale_direct_daemon_status() -> RunnerStatusReport {
+    RunnerStatusReport {
+        runner_id: "homeboy-lab".to_string(),
+        connected: true,
+        state: RunnerSessionState::Connected,
+        session: None,
+        stale_daemon: Some(RunnerStaleDaemonWarning::new(
+            "homeboy-lab",
+            "homeboy 0.288.8".to_string(),
+            "homeboy 0.288.9".to_string(),
+            None,
+            None,
+        )),
+        daemon_freshness: None,
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        stale_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::Available,
+        active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
+        active_job_error: None,
+        session_path: "/tmp/homeboy-lab.json".to_string(),
+    }
+}
 
 #[test]
 fn runner_execution_record_uses_dispatched_path_materialization_plan() {

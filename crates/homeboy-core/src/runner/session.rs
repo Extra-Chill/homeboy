@@ -557,15 +557,11 @@ impl RunnerStaleDaemonWarning {
         session_homeboy_build_identity: Option<String>,
         current_homeboy_build_identity: Option<String>,
     ) -> Self {
-        let recovery_commands = vec![
-            format!(
-                "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
-                shell::quote_arg(runner_id),
-                homeboy_product_identity::product_version()
-            ),
-            format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
-            format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
-        ];
+        let recovery_commands = vec![format!(
+            "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
+            shell::quote_arg(runner_id),
+            homeboy_product_identity::product_version()
+        )];
         Self {
             severity: "warning",
             active_daemon_control_plane_version: session_homeboy_version.clone(),
