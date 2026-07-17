@@ -4,12 +4,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::agent_task_lifecycle::{self, AgentTaskRunRecord};
 use crate::api_jobs::{self, ActiveRunnerJobSummary, Job, JobEvent};
 use crate::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
 use crate::run_lifecycle_record::RunExecutionState;
 use crate::run_lifecycle_status::RunLifecycleStatus;
 use crate::{paths, Error, Result};
+
+pub mod agent_task_provider;
 
 pub const ACTIVITY_REPORT_SCHEMA: &str = "homeboy/activity-report/v1";
 
@@ -125,8 +126,11 @@ pub struct ActivityReport {
     pub command: &'static str,
     pub counts: ActivityCounts,
     pub items: Vec<ActivityItem>,
+    /// Agent-task record-health summary, carried as JSON so core does not depend
+    /// on the agent-task health type. Supplied by the agent-task activity
+    /// provider (null when the agent-task subsystem is absent).
     #[serde(default)]
-    pub agent_task_record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary,
+    pub agent_task_record_health: Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<String>,
 }
@@ -134,11 +138,13 @@ pub struct ActivityReport {
 pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityReport> {
     let mut collector = ActivityCollector::default();
     observation::collect(&mut collector, limit)?;
-    agent_tasks::collect(&mut collector)?;
+    for item in agent_task_provider::agent_task_activity_items()? {
+        collector.insert(item);
+    }
     daemon_jobs::collect(&mut collector)?;
     runner_sessions::collect(&mut collector);
     let mut report = report_from_items(collector.items(scope, limit), "activity");
-    report.agent_task_record_health = agent_task_lifecycle::record_health_summary()?;
+    report.agent_task_record_health = agent_task_provider::agent_task_record_health()?;
     Ok(report)
 }
 
@@ -199,7 +205,7 @@ fn report_from_items(items: Vec<ActivityItem>, command: &'static str) -> Activit
         command,
         counts,
         items,
-        agent_task_record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary::healthy(),
+        agent_task_record_health: Value::Null,
         next_actions,
     }
 }
@@ -514,96 +520,6 @@ mod observation {
         ));
         if matches!(state, ActivityState::Stale) {
             actions.push(action("reconcile stale runs", "homeboy runs reconcile"));
-        }
-        actions
-    }
-}
-
-mod agent_tasks {
-    use super::*;
-
-    pub(super) fn collect(collector: &mut ActivityCollector) -> Result<()> {
-        for record in agent_task_lifecycle::list_records()? {
-            collector.insert(item_from_agent_task(record));
-        }
-        Ok(())
-    }
-
-    fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
-        let runner_id = metadata_string(&record.metadata, &["runner_id"]);
-        let job_id = metadata_string(&record.metadata, &["runner_job_id", "job_id"]);
-        let remote_run_id = metadata_string(&record.metadata, &["remote_run_id"]);
-        let state = ActivityState::from(RunExecutionState::from(record.state));
-        ActivityItem {
-            id: record.run_id.clone(),
-            kind: "agent-task".to_string(),
-            source_store: "agent-task.lifecycle".to_string(),
-            state,
-            created_at: record.submitted_at.clone(),
-            updated_at: record.updated_at.clone(),
-            finished_at: if is_active(state) {
-                None
-            } else {
-                record.updated_at.clone()
-            },
-            command: None,
-            cwd: None,
-            runner: ActivityRunnerRefs {
-                runner_id,
-                job_id: job_id.clone(),
-                transport: remote_run_id,
-            },
-            refs: ActivityCrossRefs {
-                run_id: None,
-                agent_task_run_id: Some(record.run_id.clone()),
-                runner_job_id: job_id,
-            },
-            artifacts: record
-                .artifact_refs
-                .into_iter()
-                .map(|artifact| ActivityEvidenceRef {
-                    id: artifact.task_id,
-                    kind: artifact.kind,
-                    uri: artifact.uri,
-                })
-                .collect(),
-            evidence: record
-                .latest_executor_evidence
-                .into_iter()
-                .flat_map(|evidence| evidence.refs())
-                .enumerate()
-                .map(|(index, evidence)| ActivityEvidenceRef {
-                    id: evidence
-                        .label
-                        .unwrap_or_else(|| format!("evidence-{}", index + 1)),
-                    kind: evidence.kind,
-                    uri: evidence.uri,
-                })
-                .collect(),
-            source_projections: Vec::new(),
-            next_actions: actions_for_agent_task(&record.run_id, state),
-        }
-    }
-
-    fn actions_for_agent_task(run_id: &str, state: ActivityState) -> Vec<ActivityNextAction> {
-        let mut actions = vec![
-            action("status", format!("homeboy agent-task status {run_id}")),
-            action("logs", format!("homeboy agent-task logs {run_id}")),
-            action(
-                "artifacts",
-                format!("homeboy agent-task artifacts {run_id}"),
-            ),
-        ];
-        if is_active(state) {
-            actions.push(action("watch", format!("homeboy activity watch {run_id}")));
-        } else if is_failure(state) {
-            actions.push(action(
-                "retry",
-                format!("homeboy agent-task retry --run {run_id}"),
-            ));
-        }
-        if matches!(state, ActivityState::Stale) {
-            actions.push(action("reconcile", "homeboy agent-task active --reconcile"));
         }
         actions
     }
