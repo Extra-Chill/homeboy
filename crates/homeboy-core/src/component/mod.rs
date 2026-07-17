@@ -1,4 +1,5 @@
 pub mod artifacts;
+pub mod audit_provider;
 // The audit config schema was extracted to the homeboy-audit-contract crate
 // (#8425) so it no longer couples component <-> code_audit through the core
 // module tree. Re-exported as `component::audit` so existing

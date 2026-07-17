@@ -122,6 +122,11 @@ fn fixture_workflow_args() -> AuditRunWorkflowArgs {
 /// Run the fixture audit through the CI entry point and return the workflow
 /// result.
 fn run_fixture_audit() -> AuditRunWorkflowResult {
+    // Audit resolves the component under audit (here, the portable fixture's
+    // homeboy.json) through a provider the CLI registers at startup; a core lib
+    // test never runs the CLI, so register the component-backed provider so the
+    // fixture's audit config is discovered.
+    crate::component::audit_provider::register();
     run_main_audit_workflow(fixture_workflow_args())
         .expect("audit workflow runs on the fixture tree")
 }

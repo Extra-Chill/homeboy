@@ -11,13 +11,12 @@ use super::execution_plan::AuditExecutionPlan;
 use super::findings::Finding;
 use super::types::{AuditWithAnalysis, CodeAuditResult};
 use super::{fingerprint, walker};
-use crate::{component, Result};
+use crate::Result;
 use homeboy_audit_contract::AuditConfig;
 
 /// Audit a registered component by ID.
 pub fn audit_component(component_id: &str) -> Result<CodeAuditResult> {
-    let comp = component::resolve_effective(Some(component_id), None, None)?;
-    component::validate_local_path(&comp)?;
+    let comp = super::component_provider::resolve_effective(component_id)?;
     audit_path_with_id(component_id, &comp.local_path)
 }
 
@@ -175,24 +174,20 @@ pub(super) fn audit_config_for(
     root: &Path,
     extension_overrides: &[String],
 ) -> AuditConfig {
-    let component =
-        component::discover_from_portable(root).or_else(|| component::load(component_id).ok());
+    let component = super::component_provider::discover_from_portable(root)
+        .or_else(|| super::component_provider::resolve_by_id(component_id));
     let mut audit_config = AuditConfig::default();
 
     if let Some(component) = &component {
-        if let Some(extensions) = &component.extensions {
-            for extension_id in extensions.keys() {
-                if let Some(manifest) =
-                    super::extension_manifests::load_audit_manifest(extension_id)
-                {
-                    if let Some(rules) = &manifest.audit_detector_rules {
-                        audit_config.merge(rules);
-                    }
+        for extension_id in &component.extension_ids {
+            if let Some(manifest) = super::extension_manifests::load_audit_manifest(extension_id) {
+                if let Some(rules) = &manifest.audit_detector_rules {
+                    audit_config.merge(rules);
                 }
             }
         }
 
-        if let Some(component_rules) = &component.audit {
+        if let Some(component_rules) = &component.audit_rules {
             audit_config.merge(component_rules);
         }
     }

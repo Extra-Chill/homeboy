@@ -7,7 +7,6 @@ use std::path::Path;
 use super::conventions::AuditFinding;
 use super::docs_audit;
 use super::findings::{Finding, Severity};
-use crate::component;
 
 pub(super) fn detect_doc_drift(root: &Path, component_id: &str) -> Vec<Finding> {
     use docs_audit::claims::ClaimConfidence;
@@ -29,15 +28,14 @@ pub(super) fn detect_doc_drift(root: &Path, component_id: &str) -> Vec<Finding> 
         return findings;
     };
 
-    let doc_excludes = if let Ok(comp) = component::load(component_id) {
-        crate::component::scope::resolve_component_scope(
-            &comp,
-            crate::component::scope::ScopeCommand::Audit,
-        )
-        .exclude
-    } else {
-        Vec::new()
-    };
+    // Resolve the component's audit-scope excludes and extension ids once, via
+    // the provider hook (no direct dependency on the component layer).
+    let component = super::component_provider::resolve_by_id(component_id);
+
+    let doc_excludes = component
+        .as_ref()
+        .map(|c| c.audit_scope_excludes.clone())
+        .unwrap_or_default();
 
     let doc_files = docs_audit::find_doc_files(&docs_path, &doc_excludes);
     if doc_files.is_empty() {
@@ -45,11 +43,10 @@ pub(super) fn detect_doc_drift(root: &Path, component_id: &str) -> Vec<Finding> 
     }
 
     // Load extension-configured ignore patterns if component is registered
-    let ignore_patterns = if let Ok(comp) = component::load(component_id) {
-        docs_audit::collect_extension_ignore_patterns(&comp)
-    } else {
-        Vec::new()
-    };
+    let ignore_patterns = component
+        .as_ref()
+        .map(|c| docs_audit::collect_extension_ignore_patterns(&c.extension_ids))
+        .unwrap_or_default();
 
     for relative_doc in &doc_files {
         let abs_doc = docs_path.join(relative_doc);

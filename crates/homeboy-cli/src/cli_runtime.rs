@@ -113,6 +113,11 @@ impl CliRuntime {
         // fixable its findings are without calling up into the refactor engine's
         // fix planner — the seam that removes the last code_audit->refactor edge.
         crate::core::refactor::audit_fixability_provider::register();
+        // Register the audit component provider so code_audit can resolve the
+        // component under audit (path, extension ids, audit rules, scope excludes)
+        // without depending on the component layer — the last cross-layer seam
+        // before audit becomes its own crate.
+        crate::core::component::audit_provider::register();
         // Register the runner-evidence provider so observation::runs_service can
         // enrich run/artifact lookups with live runner + daemon evidence without
         // core depending on runner behavior. (Runner is still in-crate today;

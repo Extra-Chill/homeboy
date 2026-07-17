@@ -12,7 +12,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::code_audit::fingerprint::{self, FileFingerprint};
-use crate::{component, extension, Error};
+use crate::{extension, Error};
 use homeboy_engine_primitives::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
 // ============================================================================
@@ -108,7 +108,7 @@ pub struct MapConfig<'a> {
 /// Scans source directories for files, fingerprints each one, and groups
 /// results into modules by directory. Builds class hierarchy and hook summaries.
 pub fn build_map(config: &MapConfig) -> Result<CodebaseMap, Error> {
-    let comp = component::resolve_effective(Some(config.component_id), None, None)?;
+    let comp = super::component_provider::resolve_effective(config.component_id)?;
     let root = Path::new(&comp.local_path);
 
     // Determine which directories to scan

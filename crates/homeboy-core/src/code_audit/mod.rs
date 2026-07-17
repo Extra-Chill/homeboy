@@ -19,6 +19,7 @@ mod comment_blocks;
 mod comment_hygiene;
 pub mod compare;
 mod compiler_warnings;
+pub mod component_provider;
 mod convention_membership;
 pub(crate) mod conventions;
 pub(crate) mod core_fingerprint;
