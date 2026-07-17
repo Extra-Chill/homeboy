@@ -132,7 +132,7 @@ fn detect_direct_aggregate_construction(fingerprints: &[&FileFingerprint]) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::{AggregateConstructionSeam, AggregateLiteral};
+    use homeboy_audit_contract::{AggregateConstructionSeam, AggregateLiteral};
 
     fn file(
         path: &str,

@@ -5,6 +5,8 @@ pub mod finding_kind;
 pub use finding::{finding_confidence, Finding, FindingConfidence, Severity};
 pub use finding_kind::AuditFinding;
 pub mod fingerprint;
+pub mod phase_timing;
+pub use phase_timing::ExtensionPhaseTiming;
 pub mod result;
 pub mod test_mapping;
 pub use fingerprint::{

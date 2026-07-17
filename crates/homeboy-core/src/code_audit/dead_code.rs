@@ -478,7 +478,7 @@ fn classify_unused_param(
 mod tests {
     use super::*;
     use crate::code_audit::conventions::Language;
-    use crate::extension::{DeadCodeMarker, UnusedParam};
+    use homeboy_audit_contract::{DeadCodeMarker, UnusedParam};
     use std::collections::HashMap;
 
     fn make_fingerprint(

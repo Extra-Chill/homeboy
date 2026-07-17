@@ -37,9 +37,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use crate::extension::{
-    self, AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker, HookRef,
-    UnusedParam,
+use crate::extension;
+use homeboy_audit_contract::{
+    AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker, HookRef, UnusedParam,
 };
 use homeboy_engine_primitives::grammar::{self, AggregateSeamConfig, Grammar, Symbol};
 
