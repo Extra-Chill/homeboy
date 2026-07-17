@@ -1,61 +1,48 @@
+//! Structured-sidecar declaration resolution.
+//!
+//! The pure contract types live in `homeboy-extension-contract`; this module
+//! re-exports them and provides the resolution logic that depends on core's
+//! run-dir file constants and `structured_sidecar` defaults.
+
 use crate::{engine::run_dir, structured_sidecar};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum StructuredSidecarContract {
-    Enabled(bool),
-    Detail(StructuredSidecarDetail),
-}
+pub use homeboy_extension_contract::sidecar_config::{
+    StructuredSidecarContract, StructuredSidecarDeclaration, StructuredSidecarDetail,
+};
 
-impl StructuredSidecarContract {
-    pub(super) fn declaration(&self, name: &str) -> Option<StructuredSidecarDeclaration> {
-        match self {
-            StructuredSidecarContract::Enabled(true) => Some(StructuredSidecarDeclaration {
-                name: name.to_string(),
-                path: default_structured_sidecar_path(name),
-                schema_version: structured_sidecar::default_schema_version(name)
-                    .map(str::to_string),
-                producer: default_structured_sidecar_producer(name),
-            }),
-            StructuredSidecarContract::Enabled(false) => None,
-            StructuredSidecarContract::Detail(detail) => {
-                if !detail.enabled {
-                    return None;
-                }
-
-                Some(StructuredSidecarDeclaration {
-                    name: name.to_string(),
-                    path: detail
-                        .path
-                        .clone()
-                        .unwrap_or_else(|| default_structured_sidecar_path(name)),
-                    schema_version: detail.schema_version.clone(),
-                    producer: detail
-                        .producer
-                        .clone()
-                        .or_else(|| default_structured_sidecar_producer(name)),
-                })
+/// Resolve a structured-sidecar contract into a concrete declaration for the
+/// given sidecar name, applying core's default paths and producers.
+pub(super) fn structured_sidecar_declaration(
+    contract: &StructuredSidecarContract,
+    name: &str,
+) -> Option<StructuredSidecarDeclaration> {
+    match contract {
+        StructuredSidecarContract::Enabled(true) => Some(StructuredSidecarDeclaration {
+            name: name.to_string(),
+            path: default_structured_sidecar_path(name),
+            schema_version: structured_sidecar::default_schema_version(name).map(str::to_string),
+            producer: default_structured_sidecar_producer(name),
+        }),
+        StructuredSidecarContract::Enabled(false) => None,
+        StructuredSidecarContract::Detail(detail) => {
+            if !detail.enabled {
+                return None;
             }
+
+            Some(StructuredSidecarDeclaration {
+                name: name.to_string(),
+                path: detail
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| default_structured_sidecar_path(name)),
+                schema_version: detail.schema_version.clone(),
+                producer: detail
+                    .producer
+                    .clone()
+                    .or_else(|| default_structured_sidecar_producer(name)),
+            })
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct StructuredSidecarDetail {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub producer: Option<String>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_structured_sidecar_path(name: &str) -> String {
@@ -96,15 +83,4 @@ fn default_structured_sidecar_producer(name: &str) -> Option<String> {
         _ => None,
     }
     .map(str::to_string)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct StructuredSidecarDeclaration {
-    pub name: String,
-    pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub producer: Option<String>,
 }
