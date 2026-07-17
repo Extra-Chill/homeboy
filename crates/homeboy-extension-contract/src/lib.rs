@@ -18,6 +18,7 @@ pub mod bench_gate;
 pub mod bench_metric_preset;
 pub mod bench_responsiveness;
 pub mod bench_result;
+pub mod bench_results;
 pub mod capability;
 pub use bench_artifact::{BenchArtifact, BenchArtifactViewer, BenchPreviewLifecycleMetadata};
 pub use bench_diagnostics::{
@@ -34,6 +35,7 @@ pub use bench_result::{
     BenchRunnerMetadata, BenchWorkloadMetadata, RegressionTest, RigPackageEvidence,
     RigPackageFreshness,
 };
+pub use bench_results::{BenchResults, BenchRunMetadata, BenchRunSnapshot, BenchScenario};
 pub use capability::ExtensionCapability;
 pub mod ci_config;
 pub mod core_compat;
