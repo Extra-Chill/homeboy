@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.0] - 2026-07-17
+
+### Added
+- add extension discovery composition metadata
+
+### Changed
+- share runner sidecar adapter loading
+
 ## [1.6.1] - 2026-07-06
 
 ### Changed
