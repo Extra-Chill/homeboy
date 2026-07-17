@@ -24,18 +24,20 @@ use std::path::PathBuf;
 
 // Keep broad manifest wiring here while leaf config structs live in focused files.
 pub use super::manifest_config::{
-    AutofixVerifyConfig, BenchConfig, BuildConfig, CliAutoFlag, CliAutoFlagCondition, CliConfig,
-    CliHelpConfig, DatabaseCliConfig, DatabaseConfig, DeployOverride, DeployOwnerHint,
-    DeployVerification, DepsConfig, DiscoveryConfig, EnvProviderConfig, FileContainsCondition,
-    FuzzConfig, FuzzWorkloadConfig, LintChangedFileRoute, LintConfig, RemotePathInferenceRule,
-    RemotePathRootRule, RequirementsConfig, SinceTagConfig, SourceSnapshotConfig,
-    TestChangedFileExclusiveEnv, TestChangedFileRouting, TestChangedFileRoutingStrategy,
-    TestConfig, TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
-    TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
-    VersionPatternConfig,
+    AutofixVerifyConfig, FuzzConfig, FuzzWorkloadConfig, TraceBrowserArtifactMapConfig,
+    TraceBrowserEvidenceAdapterConfig, TraceBrowserMetricAliasConfig,
+    TraceBrowserSummaryAliasConfig, TraceConfig,
 };
 pub use homeboy_extension_contract::manifest_action_config::{
     ActionConfig, InputConfig, RuntimeConfig, SelectOption, SettingConfig,
+};
+pub use homeboy_extension_contract::manifest_toolchain_config::{
+    BenchConfig, BuildConfig, CliAutoFlag, CliAutoFlagCondition, CliConfig, CliHelpConfig,
+    DatabaseCliConfig, DatabaseConfig, DeployOverride, DeployOwnerHint, DeployVerification,
+    DepsConfig, DiscoveryConfig, EnvProviderConfig, FileContainsCondition, LintChangedFileRoute,
+    LintConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig, SinceTagConfig,
+    SourceSnapshotConfig, TestChangedFileExclusiveEnv, TestChangedFileRouting,
+    TestChangedFileRoutingStrategy, TestConfig, VersionPatternConfig,
 };
 mod ci_config;
 pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
