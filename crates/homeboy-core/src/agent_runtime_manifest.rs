@@ -1587,7 +1587,9 @@ mod tests {
                 resolved.diagnostics[0].class,
                 "agent_runtime_catalog.conflict"
             );
-            assert!(resolved.diagnostics[0].message.contains("stale-cache"));
+            assert!(resolved.diagnostics[0]
+                .message
+                .contains(runtime_dir.to_str().expect("runtime dir utf-8")));
             assert!(resolved.diagnostics[0]
                 .message
                 .contains("sample-runtime-extension"));
