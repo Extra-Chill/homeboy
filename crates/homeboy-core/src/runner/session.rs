@@ -508,6 +508,14 @@ pub struct RunnerStatusReport {
     pub session_path: String,
 }
 
+impl RunnerStatusReport {
+    /// The session state is the canonical connection view; `connected` is a
+    /// serialized compatibility field for command consumers.
+    pub fn is_connected(&self) -> bool {
+        self.state == RunnerSessionState::Connected
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunnerStaleDaemonWarning {
     pub severity: &'static str,
