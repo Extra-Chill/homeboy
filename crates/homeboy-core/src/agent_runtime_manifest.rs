@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
@@ -241,6 +241,10 @@ pub struct AgentRuntimeExecutableRequirement {
 pub struct AgentRuntimeMaterializationPlan {
     pub schema: String,
     pub runtime_id: String,
+    /// The controller-selected runtime source. Lab consumers materialize this
+    /// identity rather than repeating ambient runtime discovery.
+    #[serde(default)]
+    pub selected_identity: AgentRuntimeSelectedIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -257,6 +261,26 @@ pub struct AgentRuntimeMaterializationPlan {
     pub workspace: Option<AgentTaskProviderWorkspaceMaterialization>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentRuntimeSelectedIdentity {
+    #[serde(default)]
+    pub runtime_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// `current` means an immutable source revision was observed. Extracted
+    /// installs without that proof are intentionally `unverifiable`.
+    #[serde(default = "default_runtime_freshness")]
+    pub freshness: String,
+}
+
+fn default_runtime_freshness() -> String {
+    "unverifiable".to_string()
+}
+
 pub(crate) fn runtime_materialization_plan(
     manifest: &AgentRuntimeManifest,
 ) -> AgentRuntimeMaterializationPlan {
@@ -264,11 +288,40 @@ pub(crate) fn runtime_materialization_plan(
     env_passthrough.sort();
     env_passthrough.dedup();
 
+    let revision = manifest
+        .runtime_path
+        .as_deref()
+        .and_then(|path| runtime_source_revision(Path::new(path)));
+    let freshness = if revision.as_deref().is_some_and(is_immutable_revision) {
+        "current"
+    } else {
+        "unverifiable"
+    };
+    let source_roots = manifest
+        .materialization
+        .source_roots
+        .iter()
+        .cloned()
+        .map(|mut source| {
+            if source.git_ref.is_some() && freshness == "current" {
+                source.git_ref = revision.clone();
+            }
+            source
+        })
+        .collect();
+
     AgentRuntimeMaterializationPlan {
         schema: AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA.to_string(),
         runtime_id: manifest.id.clone(),
+        selected_identity: AgentRuntimeSelectedIdentity {
+            runtime_id: manifest.id.clone(),
+            extension_id: manifest.extension_id.clone(),
+            source_path: manifest.runtime_path.clone(),
+            revision,
+            freshness: freshness.to_string(),
+        },
         runtime_path: manifest.runtime_path.clone(),
-        source_roots: manifest.materialization.source_roots.clone(),
+        source_roots,
         dependencies: manifest.materialization.dependencies.clone(),
         executable_requirements: manifest.materialization.executable_requirements.clone(),
         readiness_checks: manifest.materialization.readiness_checks.clone(),
@@ -277,14 +330,29 @@ pub(crate) fn runtime_materialization_plan(
     }
 }
 
+fn runtime_source_revision(path: &Path) -> Option<String> {
+    crate::git::head_sha(path).or_else(|| {
+        std::fs::read_to_string(path.join(".source-revision"))
+            .ok()
+            .map(|revision| revision.trim().to_string())
+            .filter(|revision| !revision.is_empty())
+    })
+}
+
+fn is_immutable_revision(revision: &str) -> bool {
+    matches!(revision.len(), 40 | 64) && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 pub fn discover_agent_runtime_catalog() -> AgentRuntimeDiscoveryCatalog {
     let standalone = discover_standalone_agent_runtime_catalog();
     let extensions = load_all_extensions().unwrap_or_default();
     let extension = discover_agent_runtime_catalog_from_extensions(&extensions);
     let mut diagnostics = standalone.diagnostics;
     diagnostics.extend(extension.diagnostics);
+    let resolved = resolve_agent_runtime_manifests(standalone.manifests, extension.manifests);
+    diagnostics.extend(resolved.diagnostics);
     AgentRuntimeDiscoveryCatalog {
-        manifests: merge_agent_runtime_manifests(standalone.manifests, extension.manifests),
+        manifests: resolved.manifests,
         diagnostics,
     }
 }
@@ -297,21 +365,68 @@ pub fn discover_agent_runtime_tool_diagnostic_manifests() -> Vec<AgentRuntimeMan
         .collect()
 }
 
-fn merge_agent_runtime_manifests(
+struct ResolvedAgentRuntimeCatalog {
+    manifests: Vec<AgentRuntimeManifest>,
+    diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
+}
+
+fn resolve_agent_runtime_manifests(
     standalone_manifests: Vec<AgentRuntimeManifest>,
     extension_manifests: Vec<AgentRuntimeManifest>,
-) -> Vec<AgentRuntimeManifest> {
-    let extension_runtime_ids: BTreeSet<String> = extension_manifests
-        .iter()
-        .map(|manifest| manifest.id.clone())
-        .collect();
-    let mut manifests = extension_manifests;
-    manifests.extend(
-        standalone_manifests
-            .into_iter()
-            .filter(|manifest| !extension_runtime_ids.contains(manifest.id.as_str())),
-    );
-    manifests
+) -> ResolvedAgentRuntimeCatalog {
+    let mut candidates = standalone_manifests;
+    candidates.extend(extension_manifests);
+    candidates.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then_with(|| left.extension_id.cmp(&right.extension_id))
+            .then_with(|| left.runtime_path.cmp(&right.runtime_path))
+    });
+
+    let mut manifests = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut candidates = candidates.into_iter().peekable();
+    while let Some(manifest) = candidates.next() {
+        let id = manifest.id.clone();
+        let mut collisions = vec![manifest];
+        while candidates
+            .peek()
+            .is_some_and(|candidate| candidate.id == id)
+        {
+            collisions.push(candidates.next().expect("peeked runtime candidate"));
+        }
+        if collisions.len() == 1 {
+            manifests.push(collisions.pop().expect("single runtime candidate"));
+            continue;
+        }
+        let sources = collisions
+            .iter()
+            .map(runtime_source_description)
+            .collect::<Vec<_>>();
+        diagnostics.push(AgentRuntimeDiscoveryDiagnostic {
+            class: "agent_runtime_catalog.conflict".to_string(),
+            message: format!(
+                "Runtime id '{id}' is declared by multiple sources: {}. Select one source explicitly before dispatching.",
+                sources.join(", ")
+            ),
+            runtime_id: Some(id),
+            extension_id: None,
+            path: None,
+        });
+    }
+    ResolvedAgentRuntimeCatalog {
+        manifests,
+        diagnostics,
+    }
+}
+
+fn runtime_source_description(manifest: &AgentRuntimeManifest) -> String {
+    match (&manifest.extension_id, &manifest.runtime_path) {
+        (Some(extension_id), Some(path)) => format!("extension:{extension_id} ({path})"),
+        (Some(extension_id), None) => format!("extension:{extension_id}"),
+        (None, Some(path)) => format!("standalone ({path})"),
+        (None, None) => "standalone".to_string(),
+    }
 }
 
 fn discover_standalone_agent_runtime_catalog() -> AgentRuntimeDiscoveryCatalog {
@@ -551,9 +666,38 @@ pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorP
 pub(crate) fn discover_agent_task_executor_provider_catalog(
 ) -> AgentTaskExecutorProviderDiscoveryCatalog {
     let catalog = discover_agent_runtime_catalog();
+    let mut providers = agent_task_executor_providers_from_runtime_manifests(catalog.manifests);
+    let mut diagnostics = catalog.diagnostics;
+    providers.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut selected = Vec::new();
+    let mut candidates = providers.into_iter().peekable();
+    while let Some(provider) = candidates.next() {
+        let id = provider.id.clone();
+        let mut collisions = vec![provider];
+        while candidates
+            .peek()
+            .is_some_and(|candidate| candidate.id == id)
+        {
+            collisions.push(candidates.next().expect("peeked provider candidate"));
+        }
+        if collisions.len() == 1 {
+            selected.push(collisions.pop().expect("single provider candidate"));
+            continue;
+        }
+        diagnostics.push(AgentRuntimeDiscoveryDiagnostic {
+            class: "agent_task_executor_provider.conflict".to_string(),
+            message: format!(
+                "Provider id '{id}' is declared by multiple runtime sources: {}. Select one source explicitly before dispatching.",
+                collisions.iter().map(|provider| format!("{}:{}", provider.runtime_id.as_deref().unwrap_or("unknown"), provider.extension_id.as_deref().unwrap_or("standalone"))).collect::<Vec<_>>().join(", ")
+            ),
+            runtime_id: None,
+            extension_id: None,
+            path: None,
+        });
+    }
     AgentTaskExecutorProviderDiscoveryCatalog {
-        providers: agent_task_executor_providers_from_runtime_manifests(catalog.manifests),
-        diagnostics: catalog.diagnostics,
+        providers: selected,
+        diagnostics,
     }
 }
 
@@ -1290,7 +1434,7 @@ mod tests {
     }
 
     #[test]
-    fn extension_agent_runtime_wins_over_same_id_standalone_cache() {
+    fn duplicate_runtime_ids_fail_closed_with_source_diagnostics() {
         crate::test_support::with_isolated_home(|home| {
             let runtime_dir = home
                 .path()
@@ -1330,31 +1474,17 @@ mod tests {
             let extension_manifests =
                 discover_agent_runtime_catalog_from_extensions(&[extension]).manifests;
 
-            let merged = merge_agent_runtime_manifests(standalone, extension_manifests);
-            assert_eq!(merged.len(), 1);
-            assert_eq!(merged[0].id, "sample-runtime");
+            let resolved = resolve_agent_runtime_manifests(standalone, extension_manifests);
+            assert!(resolved.manifests.is_empty());
+            assert_eq!(resolved.diagnostics.len(), 1);
             assert_eq!(
-                merged[0].extension_id.as_deref(),
-                Some("sample-runtime-extension")
+                resolved.diagnostics[0].class,
+                "agent_runtime_catalog.conflict"
             );
-            assert_eq!(merged[0].extra["runtime_metadata"]["origin"], "extension");
-
-            let providers = agent_task_executor_providers_from_runtime_manifests(merged);
-            assert_eq!(providers.len(), 1);
-            assert_eq!(providers[0].id, "sample.default");
-            assert_eq!(providers[0].runtime_id.as_deref(), Some("sample-runtime"));
-            assert_eq!(
-                providers[0].extension_id.as_deref(),
-                Some("sample-runtime-extension")
-            );
-            assert_eq!(
-                providers[0].invocation.argv,
-                vec!["fresh-extension-executor"]
-            );
-            assert_eq!(
-                providers[0].runtime_path.as_deref(),
-                Some("/extensions/sample-runtime-extension")
-            );
+            assert!(resolved.diagnostics[0].message.contains("stale-cache"));
+            assert!(resolved.diagnostics[0]
+                .message
+                .contains("sample-runtime-extension"));
         });
     }
 
@@ -1369,6 +1499,10 @@ mod tests {
 
         assert_eq!(manifest.id, "sample-runtime");
         assert_eq!(materialization_plan.runtime_id, "sample-runtime");
+        assert_eq!(
+            materialization_plan.selected_identity.freshness,
+            "unverifiable"
+        );
         assert_eq!(materialization_plan.source_roots[0].id, "sample-runtime");
         assert_eq!(
             materialization_plan.source_roots[0].remote_url.as_deref(),
@@ -1390,5 +1524,87 @@ mod tests {
                 "SAMPLE_RUNTIME_HOME".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn controller_and_lab_share_a_revision_pinned_runtime_plan() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let revision = "a".repeat(40);
+        std::fs::write(root.path().join(".source-revision"), &revision).expect("source revision");
+        let manifest = AgentRuntimeManifest {
+            schema: AGENT_RUNTIME_MANIFEST_SCHEMA.to_string(),
+            id: "parity-runtime".to_string(),
+            label: None,
+            agent_task_executors: Vec::new(),
+            config_path_fields: Vec::new(),
+            materialization: AgentRuntimeMaterializationContract {
+                source_roots: vec![AgentTaskProviderRunnerSource {
+                    id: "runtime".to_string(),
+                    label: "Runtime".to_string(),
+                    path: "/runtime".to_string(),
+                    git_ref: Some("main".to_string()),
+                    remote_url: None,
+                    remediation: None,
+                    extra: BTreeMap::new(),
+                }],
+                ..Default::default()
+            },
+            requires: None,
+            extension_id: None,
+            extension_path: None,
+            runtime_path: Some(root.path().display().to_string()),
+            extra: BTreeMap::new(),
+        };
+
+        let controller_plan = runtime_materialization_plan(&manifest);
+        let lab_plan: AgentRuntimeMaterializationPlan =
+            serde_json::from_value(serde_json::to_value(&controller_plan).expect("handoff"))
+                .expect("lab plan");
+
+        assert_eq!(controller_plan, lab_plan);
+        assert_eq!(
+            controller_plan.selected_identity.revision.as_deref(),
+            Some(revision.as_str())
+        );
+        assert_eq!(controller_plan.selected_identity.freshness, "current");
+        assert_eq!(
+            controller_plan.source_roots[0].git_ref.as_deref(),
+            Some(revision.as_str())
+        );
+    }
+
+    #[test]
+    fn extracted_runtime_without_an_immutable_revision_is_unverifiable() {
+        let root = tempfile::tempdir().expect("runtime root");
+        std::fs::write(root.path().join(".source-revision"), "main").expect("source revision");
+        let manifest = AgentRuntimeManifest {
+            schema: AGENT_RUNTIME_MANIFEST_SCHEMA.to_string(),
+            id: "extracted-runtime".to_string(),
+            label: None,
+            agent_task_executors: Vec::new(),
+            config_path_fields: Vec::new(),
+            materialization: AgentRuntimeMaterializationContract {
+                source_roots: vec![AgentTaskProviderRunnerSource {
+                    id: "runtime".to_string(),
+                    label: "Runtime".to_string(),
+                    path: "/runtime".to_string(),
+                    git_ref: Some("main".to_string()),
+                    remote_url: None,
+                    remediation: None,
+                    extra: BTreeMap::new(),
+                }],
+                ..Default::default()
+            },
+            requires: None,
+            extension_id: None,
+            extension_path: None,
+            runtime_path: Some(root.path().display().to_string()),
+            extra: BTreeMap::new(),
+        };
+
+        let plan = runtime_materialization_plan(&manifest);
+
+        assert_eq!(plan.selected_identity.freshness, "unverifiable");
+        assert_eq!(plan.source_roots[0].git_ref.as_deref(), Some("main"));
     }
 }
