@@ -657,19 +657,28 @@ fn validate_content_manifest(
     manifest: &WorkspaceContentManifest,
     permission_policy: Option<&str>,
 ) -> std::result::Result<(), String> {
-    if manifest.entries.len() > 16 || manifest.entry_count < manifest.entries.len() {
-        return Err("has invalid bounded workspace content manifest".to_string());
+    if manifest.entry_count != manifest.entries.len() {
+        return Err("has incomplete workspace content manifest".to_string());
     }
     for entry in &manifest.entries {
         if entry.path.is_empty()
-            || entry.path.len() > super::snapshot::WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT
             || entry.path.contains('\0')
             || !matches!(entry.kind.as_str(), "file" | "directory")
         {
-            return Err("has invalid bounded workspace content manifest entry".to_string());
+            return Err("has invalid workspace content manifest entry".to_string());
         }
         if entry.kind == "directory" && entry.owner_executable.is_some() {
             return Err("has invalid directory workspace content manifest entry".to_string());
+        }
+        if entry.kind == "file"
+            && (entry
+                .sha256
+                .as_deref()
+                .filter(|hash| hash.starts_with("sha256:"))
+                .is_none()
+                || entry.bytes.is_none())
+        {
+            return Err("has incomplete file workspace content manifest entry".to_string());
         }
         if entry.kind == "file"
             && permission_policy
@@ -1056,13 +1065,15 @@ mod tests {
         let entry = WorkspaceContentManifestEntry {
             path: "file.txt".to_string(),
             kind: "file".to_string(),
+            sha256: Some("sha256:fixture".to_string()),
+            bytes: Some(1),
             owner_executable: Some(false),
         };
         let oversized = WorkspaceContentManifest {
             entry_count: 17,
             entries: vec![entry.clone(); 17],
         };
-        assert!(validate_content_manifest(&oversized, None).is_err());
+        assert!(validate_content_manifest(&oversized, None).is_ok());
 
         let long_path = WorkspaceContentManifest {
             entry_count: 1,
@@ -1072,7 +1083,7 @@ mod tests {
                 ..entry
             }],
         };
-        assert!(validate_content_manifest(&long_path, None).is_err());
+        assert!(validate_content_manifest(&long_path, None).is_ok());
     }
 
     #[test]

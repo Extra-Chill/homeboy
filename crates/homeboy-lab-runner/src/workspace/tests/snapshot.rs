@@ -1082,7 +1082,7 @@ fn workspace_content_hash_versions_legacy_any_execute_separately_from_owner_exec
 }
 
 #[test]
-fn workspace_content_manifest_omits_long_paths_but_counts_them() {
+fn workspace_content_manifest_contains_every_materialized_path() {
     let workspace = tempfile::tempdir().expect("workspace");
     fs::write(workspace.path().join("a".repeat(193)), "contents\n").expect("long path file");
 
@@ -1093,7 +1093,9 @@ fn workspace_content_manifest_omits_long_paths_but_counts_them() {
     )
     .expect("content manifest");
     assert_eq!(manifest.entry_count, 1);
-    assert!(manifest.entries.is_empty());
+    assert_eq!(manifest.entries.len(), 1);
+    assert_eq!(manifest.entries[0].bytes, Some(9));
+    assert!(manifest.entries[0].sha256.is_some());
 }
 
 #[test]

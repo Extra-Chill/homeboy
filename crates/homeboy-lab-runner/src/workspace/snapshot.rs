@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use glob_match::glob_match;
@@ -9,31 +11,34 @@ use homeboy_core::error::{Error, Result};
 
 use super::super::{Runner, RunnerKind};
 use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializer};
-use super::types::SnapshotStats;
+use super::types::{ByteFileCounts, SnapshotStats, SnapshotTransferStats};
 use super::util::{
-    git_output, hex_prefix, run_shell_capture, run_shell_command, ssh_args, ssh_client_for_runner,
-    tar_exclude_args,
+    git_output, hex_prefix, owner_capture_shell, owner_restore_shell, parent_remote_path,
+    run_shell_capture, run_shell_command, ssh_args, ssh_client_for_runner, tar_exclude_args,
 };
 
 const RUNNER_WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
 pub(crate) const WORKSPACE_CONTENT_PERMISSION_PORTABLE: &str = "portable-content-only";
 pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE: &str = "unix-executable";
 pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE: &str = "unix-owner-executable";
-const WORKSPACE_CONTENT_DIAGNOSTIC_ENTRY_LIMIT: usize = 16;
 pub(crate) const WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT: usize = 192;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub(crate) struct WorkspaceContentManifest {
-    pub(crate) entry_count: usize,
-    pub(crate) entries: Vec<WorkspaceContentManifestEntry>,
+pub struct WorkspaceContentManifest {
+    pub entry_count: usize,
+    pub entries: Vec<WorkspaceContentManifestEntry>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub(crate) struct WorkspaceContentManifestEntry {
-    pub(crate) path: String,
-    pub(crate) kind: String,
+pub struct WorkspaceContentManifestEntry {
+    pub path: String,
+    pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) owner_executable: Option<bool>,
+    pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_executable: Option<bool>,
 }
 
 #[cfg(unix)]
@@ -119,8 +124,9 @@ pub(crate) fn workspace_content_hash_for_policy(
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
-/// A bounded, content-free sample used only to explain a verification mismatch.
-/// The complete hash remains the authority; this manifest never contains bytes.
+/// A deterministic, content-free inventory of every path a snapshot materializes.
+/// It is persisted with the immutable snapshot and used to derive explicit
+/// incremental transport and deletion sets.
 pub(crate) fn workspace_content_manifest_for_policy(
     path: &Path,
     excludes: &[String],
@@ -140,7 +146,7 @@ pub(crate) fn workspace_content_manifest_for_policy(
     let root = content_hash_root(path)?;
     let mut manifest = WorkspaceContentManifest {
         entry_count: 0,
-        entries: Vec::with_capacity(WORKSPACE_CONTENT_DIAGNOSTIC_ENTRY_LIMIT),
+        entries: Vec::new(),
     };
     // Use the authoritative v2 traversal so diagnostics and the content hash
     // have identical symlink, exclusion, and metadata behavior.
@@ -264,6 +270,8 @@ fn collect_content_hash_entries_v2(
                     relative.clone(),
                     "directory",
                     None,
+                    None,
+                    None,
                 );
             }
             ancestors.push(canonical);
@@ -293,6 +301,8 @@ fn collect_content_hash_entries_v2(
                 &mut manifest,
                 relative,
                 "file",
+                Some(format!("sha256:{:x}", Sha256::digest(&contents))),
+                Some(contents.len() as u64),
                 executable_capability.owner_value(&metadata),
             );
         }
@@ -304,21 +314,21 @@ fn record_workspace_content_manifest_entry(
     manifest: &mut Option<&mut WorkspaceContentManifest>,
     path: String,
     kind: &str,
+    sha256: Option<String>,
+    bytes: Option<u64>,
     owner_executable: Option<bool>,
 ) {
     let Some(manifest) = manifest.as_deref_mut() else {
         return;
     };
     manifest.entry_count += 1;
-    if path.len() <= WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT
-        && manifest.entries.len() < WORKSPACE_CONTENT_DIAGNOSTIC_ENTRY_LIMIT
-    {
-        manifest.entries.push(WorkspaceContentManifestEntry {
-            path,
-            kind: kind.to_string(),
-            owner_executable,
-        });
-    }
+    manifest.entries.push(WorkspaceContentManifestEntry {
+        path,
+        kind: kind.to_string(),
+        sha256,
+        bytes,
+        owner_executable,
+    });
 }
 
 #[cfg(unix)]
@@ -636,6 +646,334 @@ pub(crate) fn materialize_snapshot(
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SnapshotManifestDelta {
+    pub(crate) changed_paths: Vec<String>,
+    pub(crate) deleted_paths: Vec<String>,
+    pub(crate) replaced_paths: Vec<String>,
+    pub(crate) changed_file_paths: Vec<String>,
+    pub(crate) transfer: SnapshotTransferStats,
+}
+
+pub(crate) fn snapshot_manifest_delta(
+    controller: &WorkspaceContentManifest,
+    seed: &WorkspaceContentManifest,
+) -> Result<SnapshotManifestDelta> {
+    validate_workspace_content_manifest(controller)?;
+    validate_workspace_content_manifest(seed)?;
+    let index = |manifest: &WorkspaceContentManifest| -> Result<BTreeMap<String, WorkspaceContentManifestEntry>> {
+        let mut entries = BTreeMap::new();
+        for entry in &manifest.entries {
+            if entries.insert(entry.path.clone(), entry.clone()).is_some() {
+                return Err(Error::internal_unexpected(
+                    "workspace snapshot content manifest contains duplicate or invalid paths",
+                ));
+            }
+        }
+        Ok(entries)
+    };
+    let controller_entries = index(controller)?;
+    let seed_entries = index(seed)?;
+    let changed_paths = controller_entries
+        .iter()
+        .filter_map(|(path, entry)| (seed_entries.get(path) != Some(entry)).then(|| path.clone()))
+        .collect::<Vec<_>>();
+    let replaced_paths = changed_paths
+        .iter()
+        .filter(|path| {
+            seed_entries
+                .get(*path)
+                .is_some_and(|seed_entry| seed_entry.kind != controller_entries[*path].kind)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let changed_file_paths = changed_paths
+        .iter()
+        .filter(|path| controller_entries[*path].kind == "file")
+        .cloned()
+        .collect::<Vec<_>>();
+    let deleted_paths = seed_entries
+        .keys()
+        .filter(|path| !controller_entries.contains_key(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let count_files = |entries: Vec<&WorkspaceContentManifestEntry>| {
+        entries
+            .into_iter()
+            .fold(ByteFileCounts::default(), |mut counts, entry| {
+                if entry.kind == "file" {
+                    counts.files += 1;
+                    counts.bytes = counts.bytes.saturating_add(entry.bytes.unwrap_or_default());
+                }
+                counts
+            })
+    };
+    let transferred = count_files(
+        changed_paths
+            .iter()
+            .filter_map(|path| controller_entries.get(path))
+            .collect(),
+    );
+    let final_size = count_files(controller_entries.values().collect());
+    Ok(SnapshotManifestDelta {
+        changed_paths,
+        deleted_paths,
+        replaced_paths,
+        changed_file_paths,
+        transfer: SnapshotTransferStats {
+            reused: ByteFileCounts {
+                files: final_size.files.saturating_sub(transferred.files),
+                bytes: final_size.bytes.saturating_sub(transferred.bytes),
+            },
+            transferred,
+            final_size,
+        },
+    })
+}
+
+fn validate_workspace_content_manifest(manifest: &WorkspaceContentManifest) -> Result<()> {
+    if manifest.entry_count != manifest.entries.len() {
+        return Err(Error::internal_unexpected(
+            "workspace snapshot content manifest is incomplete or corrupt",
+        ));
+    }
+    for entry in &manifest.entries {
+        let path = Path::new(&entry.path);
+        let valid_path = !entry.path.is_empty()
+            && !entry.path.contains('\0')
+            && !path.is_absolute()
+            && path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)));
+        let valid_file = entry.kind == "file"
+            && entry.bytes.is_some()
+            && entry.sha256.as_deref().is_some_and(|hash| {
+                hash.len() == 71
+                    && hash.starts_with("sha256:")
+                    && hash[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
+        if !valid_path
+            || !(entry.kind == "directory" || valid_file)
+            || (entry.kind == "directory"
+                && (entry.sha256.is_some()
+                    || entry.bytes.is_some()
+                    || entry.owner_executable.is_some()))
+        {
+            return Err(Error::internal_unexpected(
+                "workspace snapshot content manifest contains invalid entries",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Materialize an immutable snapshot by linking unchanged content from a
+/// compatible runner-local seed, deleting paths absent from the controller
+/// manifest, and transporting only the manifest's explicit changed paths.
+pub(crate) fn materialize_snapshot_incremental(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    seed_path: &str,
+    delta: &SnapshotManifestDelta,
+) -> Result<SnapshotTransferStats> {
+    let temporary = format!("{}.tmp-{}", remote_path, uuid::Uuid::new_v4());
+    let prepare = incremental_prepare_command(remote_path, &temporary, seed_path, delta);
+    let finalize = incremental_finalize_command(remote_path, &temporary);
+    let result = match runner.kind {
+        RunnerKind::Local => {
+            run_shell_command(&prepare, "prepare incremental local workspace snapshot")
+                .and_then(|_| {
+                    materialize_changed_paths(
+                        local_path,
+                        &local_extract_command(&temporary),
+                        &delta.changed_paths,
+                        "materialize incremental local workspace delta",
+                    )
+                })
+                .and_then(|_| {
+                    run_shell_command(&finalize, "finalize incremental local workspace snapshot")
+                })
+        }
+        RunnerKind::Ssh => {
+            let (_server, client) = ssh_client_for_runner(runner)?;
+            if client.is_local {
+                run_shell_command(&prepare, "prepare incremental local workspace snapshot")
+                    .and_then(|_| {
+                        materialize_changed_paths(
+                            local_path,
+                            &local_extract_command(&temporary),
+                            &delta.changed_paths,
+                            "materialize incremental local workspace delta",
+                        )
+                    })
+                    .and_then(|_| {
+                        run_shell_command(
+                            &finalize,
+                            "finalize incremental local workspace snapshot",
+                        )
+                    })
+            } else {
+                let remote = format!("{}@{}", client.user, client.host);
+                let remote_shell = |script: &str| {
+                    format!(
+                        "ssh {} {} {}",
+                        ssh_args(&client),
+                        shell::quote_arg(&remote),
+                        shell::quote_arg(script),
+                    )
+                };
+                run_shell_command(
+                    &remote_shell(&prepare),
+                    "prepare incremental SSH workspace snapshot",
+                )
+                .and_then(|_| {
+                    materialize_changed_paths(
+                        local_path,
+                        &remote_extract_command(&client, &remote, &temporary),
+                        &delta.changed_paths,
+                        "materialize incremental SSH workspace delta",
+                    )
+                })
+                .and_then(|_| {
+                    run_shell_command(
+                        &remote_shell(&finalize),
+                        "finalize incremental SSH workspace snapshot",
+                    )
+                })
+            }
+        }
+    };
+    if result.is_err() {
+        cleanup_incremental_temporary(runner, &temporary);
+    }
+    result.map(|_| delta.transfer.clone())
+}
+
+fn cleanup_incremental_temporary(runner: &Runner, temporary: &str) {
+    let command = format!("rm -rf -- {}", shell::quote_arg(temporary));
+    match runner.kind {
+        RunnerKind::Local => {
+            let _ = run_shell_command(&command, "clean incremental workspace temporary");
+        }
+        RunnerKind::Ssh => {
+            if let Ok((_server, client)) = ssh_client_for_runner(runner) {
+                if client.is_local {
+                    let _ = run_shell_command(&command, "clean incremental workspace temporary");
+                } else {
+                    let remote = format!("{}@{}", client.user, client.host);
+                    let command = format!(
+                        "ssh {} {} {}",
+                        ssh_args(&client),
+                        shell::quote_arg(&remote),
+                        shell::quote_arg(&command),
+                    );
+                    let _ =
+                        run_shell_command(&command, "clean incremental SSH workspace temporary");
+                }
+            }
+        }
+    }
+}
+
+fn incremental_prepare_command(
+    remote_path: &str,
+    temporary: &str,
+    seed_path: &str,
+    delta: &SnapshotManifestDelta,
+) -> String {
+    let parent = parent_remote_path(remote_path);
+    let removals = delta
+        .deleted_paths
+        .iter()
+        .chain(delta.replaced_paths.iter())
+        // The seed is hard-link cloned. Unlink changed files before tar writes
+        // them so a new snapshot can never mutate its immutable seed inode.
+        .chain(delta.changed_file_paths.iter())
+        .map(|path| {
+            format!(
+                "rm -rf -- {}/{}",
+                shell::quote_arg(temporary),
+                shell::quote_arg(path)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" && ");
+    format!(
+        "{owner_capture} ; mkdir -p {parent} && rm -rf {temporary} && mkdir -p {temporary} && {seed} {removals}",
+        owner_capture = owner_capture_shell(&parent),
+        parent = shell::quote_arg(&parent),
+        temporary = shell::quote_arg(&temporary),
+        seed = seed_snapshot_command(seed_path, temporary),
+        removals = if removals.is_empty() { String::new() } else { format!(" && {removals}") },
+    )
+}
+
+fn incremental_finalize_command(remote_path: &str, temporary: &str) -> String {
+    let parent = parent_remote_path(remote_path);
+    format!(
+        "mv {} {} && {}",
+        shell::quote_arg(temporary),
+        shell::quote_arg(remote_path),
+        owner_restore_shell(&parent, remote_path),
+    )
+}
+
+fn seed_snapshot_command(seed_path: &str, destination: &str) -> String {
+    // A hard-link clone gives the new immutable snapshot its own directory
+    // without copying unchanged bytes. If the runner filesystem cannot link
+    // across its storage boundary, retain correctness with a local copy while
+    // transfer metrics continue to report controller-to-runner content only.
+    format!(
+        "(cp -al {seed}/. {destination}/ 2>/dev/null || cp -a {seed}/. {destination}/) && rm -f {destination}/{metadata}",
+        seed = shell::quote_arg(seed_path),
+        destination = destination,
+        metadata = shell::quote_arg(RUNNER_WORKSPACE_METADATA_FILE),
+    )
+}
+
+fn materialize_changed_paths(
+    local_path: &Path,
+    target_command: &str,
+    changed_paths: &[String],
+    action: &str,
+) -> Result<()> {
+    if changed_paths.is_empty() {
+        return Ok(());
+    }
+    let mut list = tempfile::NamedTempFile::new()
+        .map_err(|err| Error::internal_io(err.to_string(), Some(action.to_string())))?;
+    for path in changed_paths {
+        list.write_all(path.as_bytes())
+            .and_then(|_| list.write_all(&[0]))
+            .map_err(|err| Error::internal_io(err.to_string(), Some(action.to_string())))?;
+    }
+    let command = format!(
+        "COPYFILE_DISABLE=1 tar --no-xattrs -h -C {} --null -T {} -cf - | {}",
+        shell::quote_arg(&local_path.display().to_string()),
+        shell::quote_arg(&list.path().display().to_string()),
+        target_command,
+    );
+    run_shell_command(&command, action)
+}
+
+fn local_extract_command(destination: &str) -> String {
+    format!("tar --no-xattrs -xf - -C {}", shell::quote_arg(destination))
+}
+
+fn remote_extract_command(
+    client: &homeboy_core::server::SshClient,
+    remote: &str,
+    destination: &str,
+) -> String {
+    format!(
+        "ssh {} {} {}",
+        ssh_args(client),
+        shell::quote_arg(remote),
+        shell::quote_arg(&local_extract_command(destination)),
+    )
 }
 
 pub(crate) fn materialize_snapshot_git(

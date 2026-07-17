@@ -200,6 +200,7 @@ pub use workspace::{
     RunnerWorkspacePullOutput, RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters,
     RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput,
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    WorkspaceContentManifest, WorkspaceContentManifestEntry,
 };
 pub(crate) use workspace::{
     verify_lab_workspace_from_env, workspace_content_hash, workspace_content_hash_algorithm,

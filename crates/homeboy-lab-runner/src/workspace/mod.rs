@@ -51,6 +51,7 @@ pub(crate) use snapshot::{
     workspace_content_hash_algorithm, workspace_content_manifest_for_policy,
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
+pub use snapshot::{WorkspaceContentManifest, WorkspaceContentManifestEntry};
 pub use snapshot_provider::register as register_workspace_snapshot_provider;
 pub(crate) use types::{canonical_workspace_path, DEFAULT_EXCLUDES};
 pub(crate) use util::{
