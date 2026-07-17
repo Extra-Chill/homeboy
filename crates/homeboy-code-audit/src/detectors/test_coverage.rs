@@ -1,0 +1,1485 @@
+//! Structural test coverage gap detection — identify source files and methods
+//! that lack corresponding tests.
+//!
+//! Plugs into the audit pipeline as Phase 4f. Uses the extension's
+//! `TestMappingConfig` to understand how source files map to test files
+//! and how source methods map to test methods.
+//!
+//! Performs four checks:
+//! 1. Missing test files — source files with no corresponding test file
+//! 2. Missing test methods — source methods with no corresponding test method
+//! 3. Orphaned tests — test files with no corresponding source file
+//! 4. Orphaned test methods — test methods whose source method no longer exists
+
+mod symbols;
+
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+use regex::Regex;
+
+use self::symbols::{
+    collect_source_symbol_names, references_multiple_source_symbols, references_source_file,
+};
+use super::conventions::AuditFinding;
+use super::findings::{Finding, Severity};
+use super::fingerprint::FileFingerprint;
+use super::idiomatic::{is_trivial_method, test_covers_method};
+use super::test_mapping::{
+    build_source_name_index, partition_fingerprints, source_to_test_path, test_to_source_path,
+};
+use super::test_vacuity::{find_vacuous_test_methods, resolve_package_name};
+use homeboy_audit_contract::TestMappingConfig;
+
+pub(crate) fn run(
+    root: &Path,
+    fingerprints: &[&FileFingerprint],
+    config: &TestMappingConfig,
+) -> Vec<Finding> {
+    analyze_test_coverage(root, fingerprints, config)
+}
+
+/// Analyze test coverage gaps given source fingerprints and a test mapping config.
+///
+/// `root` is the component root directory (for resolving test file existence).
+/// `fingerprints` are all fingerprinted source files from the audit pipeline.
+/// `config` is the extension-provided test mapping convention.
+pub(crate) fn analyze_test_coverage(
+    root: &Path,
+    fingerprints: &[&FileFingerprint],
+    config: &TestMappingConfig,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    // Partition fingerprints into source files and test files based on path prefixes
+    let (source_fps, test_fps) = partition_fingerprints(fingerprints, config);
+
+    // Build a map of test file relative paths -> their fingerprints
+    let test_file_map: HashMap<&str, &FileFingerprint> = test_fps
+        .iter()
+        .map(|fp| (fp.relative_path.as_str(), *fp))
+        .collect();
+
+    let package_name = config
+        .vacuity
+        .as_ref()
+        .and_then(|policy| policy.package_name.as_ref())
+        .and_then(|source| resolve_package_name(root, source));
+
+    // Resolve the effective idiomatic-method sets once. These are
+    // config-declared (or the builtin agnostic fallback) so the detector does
+    // not embed any language/ecosystem literals when deciding which methods are
+    // exempt from coverage findings.
+    let trivial_names = config.effective_trivial_method_names();
+    let trivial_prefixes = config.effective_trivial_method_prefixes();
+
+    // Check 1 & 2: For each source file, check for corresponding test file and methods
+    for source_fp in &source_fps {
+        // Skip files matching skip_test_patterns (e.g. CLI wrappers, pure type defs)
+        if is_skipped_path(&source_fp.relative_path, config) {
+            continue;
+        }
+
+        let expected_test_path = source_to_test_path(&source_fp.relative_path, config);
+
+        let severity = if is_critical(&source_fp.relative_path, config) {
+            Severity::Warning
+        } else {
+            Severity::Info
+        };
+
+        // Check if the test file exists (either fingerprinted or on disk)
+        let test_fp = expected_test_path
+            .as_deref()
+            .and_then(|p| test_file_map.get(p).copied());
+        let disk_test_methods = expected_test_path
+            .as_deref()
+            .filter(|_| test_fp.is_none())
+            .and_then(|p| load_test_methods_from_disk(root, p, config));
+        let test_file_exists = test_fp.is_some()
+            || expected_test_path
+                .as_deref()
+                .map(|p| root.join(p).exists())
+                .unwrap_or(false);
+        let behavior_test_references_source = test_fps
+            .iter()
+            .any(|test_fp| references_source_file(test_fp, source_fp));
+
+        // For inline test languages (Rust), check for #[cfg(test)] in the source file itself
+        if config.inline_tests {
+            // Rust convention: tests can be inline in the same file.
+            // The core grammar engine extracts functions with `#[test]` into the
+            // fingerprint's `test_methods` list (prefix normalized on). Reading
+            // the structural list rather than filtering `.methods` by name is
+            // what prevents production methods named `test_*` (like
+            // `ExtensionManifest::test_script`) from being classified as tests
+            // — see Extra-Chill/homeboy#1471.
+            let has_inline_tests = !source_fp.test_methods.is_empty();
+
+            if !test_file_exists && !has_inline_tests && !behavior_test_references_source {
+                if let Some(ref test_path) = expected_test_path {
+                    findings.push(Finding {
+                        convention: "test_coverage".to_string(),
+                        severity: severity.clone(),
+                        file: source_fp.relative_path.clone(),
+                        description: format!(
+                            "No test file found (expected '{}') and no inline tests",
+                            test_path
+                        ),
+                        suggestion: format!(
+                            "Add tests in '{}' or add #[cfg(test)] inline tests",
+                            test_path
+                        ),
+                        kind: AuditFinding::MissingTestFile,
+                    });
+                }
+                continue; // No tests at all — skip method-level checks
+            }
+
+            if !test_file_exists && !has_inline_tests && behavior_test_references_source {
+                continue; // Covered by a behavior/integration test that is not path-mirrored.
+            }
+
+            // Methods from dedicated test file — for Rust, these are also
+            // structural (top-level `#[test]` functions in `tests/`). For
+            // extension-fingerprinted languages the core list is empty so we
+            // fall back to the prefix filter on `.methods`.
+            let dedicated_test_methods: Vec<&str> = if let Some(test_fingerprint) = test_fp {
+                collect_test_method_refs(test_fingerprint, config)
+            } else if let Some(test_methods) = &disk_test_methods {
+                test_methods
+                    .iter()
+                    .filter(|m| m.starts_with(&config.method_prefix))
+                    .map(|m| m.as_str())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // Build set of source method names for orphaned test detection.
+            // Test methods already live in `source_fp.test_methods` — `.methods`
+            // contains only non-test functions, so no prefix filter needed.
+            let source_methods: HashSet<&str> =
+                source_fp.methods.iter().map(|m| m.as_str()).collect();
+
+            if let Some(vacuity) = &config.vacuity {
+                find_vacuous_test_methods(
+                    &mut findings,
+                    source_fp,
+                    &source_fp.test_methods,
+                    &source_methods,
+                    vacuity,
+                    package_name.as_deref(),
+                );
+            }
+
+            // Check method coverage: combine inline test methods + dedicated
+            // test file methods, accepting either literal-prefix matches or
+            // token-bounded substring matches (see `test_covers_method`).
+            let mut covered_methods: HashSet<&str> = HashSet::new();
+            for source_method in &source_methods {
+                let covered = source_fp
+                    .test_methods
+                    .iter()
+                    .map(|s| s.as_str())
+                    .chain(dedicated_test_methods.iter().copied())
+                    .any(|test| test_covers_method(test, source_method, &config.method_prefix));
+                if covered {
+                    covered_methods.insert(*source_method);
+                }
+            }
+
+            // Find source methods without tests (Check 2: MissingTestMethod)
+            for method in &source_methods {
+                if is_trivial_method(method, &trivial_names, &trivial_prefixes) {
+                    continue;
+                }
+                if !is_testable_visibility(method, &source_fp.visibility) {
+                    continue; // Skip private helpers — tested transitively
+                }
+                if !covered_methods.contains(method) {
+                    findings.push(Finding {
+                        convention: "test_coverage".to_string(),
+                        severity: Severity::Info,
+                        file: source_fp.relative_path.clone(),
+                        description: format!(
+                            "Method '{}' has no corresponding test (expected '{}{}')",
+                            method, config.method_prefix, method
+                        ),
+                        suggestion: format!(
+                            "Add a test method '{}{}' for '{}'",
+                            config.method_prefix, method, method
+                        ),
+                        kind: AuditFinding::MissingTestMethod,
+                    });
+                }
+            }
+
+            // Check 4a: Orphaned test methods (inline) — test methods whose
+            // source method no longer exists. This catches tests left behind
+            // when a function is deleted from the source.
+            //
+            // We pass `source_fp.test_methods` directly rather than filtering
+            // `source_fp.methods` by prefix. The detector historically used the
+            // prefix filter and emitted source-file findings for production
+            // methods named `test_*` — see Extra-Chill/homeboy#1471.
+            find_orphaned_test_methods(
+                &mut findings,
+                &source_fp.relative_path,
+                &source_fp.test_methods,
+                &source_methods,
+                config,
+            );
+
+            // Also check dedicated test file methods against this source
+            if let Some(test_fingerprint) = test_fp {
+                if let Some(vacuity) = &config.vacuity {
+                    find_vacuous_test_methods(
+                        &mut findings,
+                        test_fingerprint,
+                        &collect_test_methods_from_fp(test_fingerprint, config),
+                        &HashSet::new(),
+                        vacuity,
+                        package_name.as_deref(),
+                    );
+                }
+                find_orphaned_test_methods(
+                    &mut findings,
+                    &test_fingerprint.relative_path,
+                    &collect_test_methods_from_fp(test_fingerprint, config),
+                    &source_methods,
+                    config,
+                );
+            } else if let Some(test_methods) = &disk_test_methods {
+                let test_path = expected_test_path.as_deref().unwrap_or("test file");
+                find_orphaned_test_methods(
+                    &mut findings,
+                    test_path,
+                    test_methods,
+                    &source_methods,
+                    config,
+                );
+            }
+        } else {
+            // Non-inline test languages (PHP, JS, etc.)
+            if !test_file_exists && !behavior_test_references_source {
+                if let Some(ref test_path) = expected_test_path {
+                    findings.push(Finding {
+                        convention: "test_coverage".to_string(),
+                        severity: severity.clone(),
+                        file: source_fp.relative_path.clone(),
+                        description: format!("No test file found (expected '{}')", test_path),
+                        suggestion: format!("Create test file '{}'", test_path),
+                        kind: AuditFinding::MissingTestFile,
+                    });
+                }
+                continue; // No test file — skip method-level checks
+            }
+
+            if !test_file_exists && behavior_test_references_source {
+                continue; // Covered by a behavior/integration test that is not path-mirrored.
+            }
+
+            // Check method coverage from the test file
+            let test_methods: Vec<String> = if let Some(test_fingerprint) = test_fp {
+                test_fingerprint.methods.clone()
+            } else {
+                disk_test_methods.unwrap_or_default()
+            };
+
+            let source_methods: HashSet<&str> =
+                source_fp.methods.iter().map(|m| m.as_str()).collect();
+
+            if !test_methods.is_empty() {
+                // Coverage accepts either literal-prefix matches or
+                // token-bounded substring matches (see `test_covers_method`).
+                let mut covered_methods: HashSet<&str> = HashSet::new();
+                for source_method in source_fp.methods.iter().map(|m| m.as_str()) {
+                    let covered = test_methods
+                        .iter()
+                        .any(|test| test_covers_method(test, source_method, &config.method_prefix));
+                    if covered {
+                        covered_methods.insert(source_method);
+                    }
+                }
+
+                let test_file_label = test_fp
+                    .map(|fp| fp.relative_path.clone())
+                    .or(expected_test_path.clone())
+                    .unwrap_or_else(|| "test file".to_string());
+
+                for method in &source_fp.methods {
+                    if is_trivial_method(method, &trivial_names, &trivial_prefixes) {
+                        continue;
+                    }
+                    if !is_testable_visibility(method, &source_fp.visibility) {
+                        continue; // Skip private helpers — tested transitively
+                    }
+                    if !covered_methods.contains(method.as_str()) {
+                        findings.push(Finding {
+                            convention: "test_coverage".to_string(),
+                            severity: Severity::Info,
+                            file: source_fp.relative_path.clone(),
+                            description: format!(
+                                "Method '{}' has no corresponding test in '{}'",
+                                method, test_file_label
+                            ),
+                            suggestion: format!(
+                                "Add test method '{}{}' to '{}'",
+                                config.method_prefix, method, test_file_label
+                            ),
+                            kind: AuditFinding::MissingTestMethod,
+                        });
+                    }
+                }
+
+                // Check 4b: Orphaned test methods (external file)
+                if let Some(test_fingerprint) = test_fp {
+                    if let Some(vacuity) = &config.vacuity {
+                        find_vacuous_test_methods(
+                            &mut findings,
+                            test_fingerprint,
+                            &test_methods,
+                            &HashSet::new(),
+                            vacuity,
+                            package_name.as_deref(),
+                        );
+                    }
+                }
+                find_orphaned_test_methods(
+                    &mut findings,
+                    &test_file_label,
+                    &test_methods,
+                    &source_methods,
+                    config,
+                );
+            }
+        }
+    }
+
+    // Check 3: Orphaned tests — test files with no corresponding source file.
+    //
+    // Uses two-tier matching:
+    // - Tier 1: template-based path matching (existing behavior)
+    // - Tier 2: name-based auto-discovery (finds source files that moved)
+    //
+    // When a test file's source is found by name at a different path, the test
+    // is "misplaced" not "orphaned" — the suggestion is to move it.
+    let source_paths: HashSet<&str> = source_fps
+        .iter()
+        .map(|fp| fp.relative_path.as_str())
+        .collect();
+
+    let source_name_index = build_source_name_index(&source_fps);
+    let source_symbol_names = collect_source_symbol_names(&source_fps);
+
+    for test_fp in &test_fps {
+        let expected_source_path = test_to_source_path(&test_fp.relative_path, config);
+
+        if let Some(ref source_path) = expected_source_path {
+            let source_exists =
+                source_paths.contains(source_path.as_str()) || root.join(source_path).exists();
+
+            if !source_exists {
+                // Tier 2: Try name-based discovery — maybe the source moved
+                let discovered = super::test_mapping::discover_source_file(
+                    &test_fp.relative_path,
+                    config,
+                    &source_name_index,
+                );
+
+                if let Some(actual_source_path) = discovered {
+                    // Source exists at a different path — this is a misplaced test, not orphaned.
+                    // Compute where the test SHOULD be based on the actual source location.
+                    let correct_test_path =
+                        source_to_test_path(actual_source_path, config).unwrap_or_default();
+
+                    if is_include_wrapper_for_test_path(
+                        &test_fp.relative_path,
+                        &test_fp.content,
+                        &correct_test_path,
+                        config,
+                    ) {
+                        continue;
+                    }
+
+                    findings.push(Finding {
+                        convention: "test_coverage".to_string(),
+                        severity: Severity::Info,
+                        file: test_fp.relative_path.clone(),
+                        description: format!(
+                            "Test file is misplaced — source moved to '{}' (expected test at '{}')",
+                            actual_source_path, correct_test_path
+                        ),
+                        suggestion: format!(
+                            "Move test file to '{}' to match source structure",
+                            correct_test_path
+                        ),
+                        kind: AuditFinding::OrphanedTest,
+                    });
+                } else if !references_multiple_source_symbols(test_fp, &source_symbol_names) {
+                    // Truly orphaned — no source found anywhere
+                    findings.push(Finding {
+                        convention: "test_coverage".to_string(),
+                        severity: Severity::Info,
+                        file: test_fp.relative_path.clone(),
+                        description: format!(
+                            "Test file has no corresponding source file (expected '{}')",
+                            source_path
+                        ),
+                        suggestion: "Remove the orphaned test or create the source file"
+                            .to_string(),
+                        kind: AuditFinding::OrphanedTest,
+                    });
+                }
+            }
+        }
+    }
+
+    // Sort by file path for deterministic output
+    findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
+    findings
+}
+
+/// Load test methods from disk for a known test file path.
+///
+/// Uses extension fingerprinting when available, with a lightweight regex fallback
+/// so singleton test files still contribute method coverage in scoped audits.
+fn load_test_methods_from_disk(
+    root: &Path,
+    test_path: &str,
+    config: &TestMappingConfig,
+) -> Option<Vec<String>> {
+    let abs = root.join(test_path);
+    if !abs.exists() {
+        return None;
+    }
+
+    if let Some(fp) = super::fingerprint::fingerprint_file(&abs, root) {
+        if !fp.methods.is_empty() {
+            return Some(fp.methods);
+        }
+    }
+
+    let content = std::fs::read_to_string(&abs).ok()?;
+    Some(extract_test_methods_fallback(&content, test_path, config))
+}
+
+/// Extract test method names from raw file text using config-declared,
+/// per-extension regex templates. Core supplies only a generic identifier
+/// fallback; concrete per-language test-method syntax is declared by the
+/// extension via `test_method_patterns` / `default_test_method_pattern`.
+fn extract_test_methods_fallback(
+    content: &str,
+    test_path: &str,
+    config: &TestMappingConfig,
+) -> Vec<String> {
+    let ext = Path::new(test_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    let escaped = regex::escape(&config.method_prefix);
+    let template = config
+        .test_method_patterns
+        .get(ext)
+        .or(config.default_test_method_pattern.as_ref())
+        .cloned()
+        // Generic identifier fallback when nothing is declared: any token that
+        // starts with the configured prefix. Capture group required.
+        .unwrap_or_else(|| r"({prefix}\w*)".to_string());
+    let pattern = template.replace("{prefix}", &escaped);
+
+    let re = match Regex::new(&pattern) {
+        Ok(re) => re,
+        Err(_) => return Vec::new(),
+    };
+
+    re.captures_iter(content)
+        .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+        .collect()
+}
+
+/// Check if a source file matches any critical pattern.
+fn is_critical(path: &str, config: &TestMappingConfig) -> bool {
+    config
+        .critical_patterns
+        .iter()
+        .any(|pattern| path.contains(pattern))
+}
+
+/// Check if a method should be flagged based on its visibility.
+/// Only public and pub(crate) methods warrant test coverage findings —
+/// private helpers get tested transitively through their public callers.
+fn is_testable_visibility(method: &str, visibility: &HashMap<String, String>) -> bool {
+    match visibility.get(method).map(|s| s.as_str()) {
+        Some("public") | Some("pub(crate)") | Some("pub(super)") => true,
+        Some("private") => false,
+        // If visibility is unknown (not in the map), assume testable
+        None => true,
+        Some(_) => true,
+    }
+}
+
+/// Check if a source file should be excluded from test coverage checks
+/// based on the skip_patterns config.
+fn is_skipped_path(path: &str, config: &TestMappingConfig) -> bool {
+    config
+        .skip_test_patterns
+        .iter()
+        .any(|pattern| path.contains(pattern))
+}
+
+/// Collect test method names from a fingerprint.
+///
+/// Prefers the structural `test_methods` list populated by the core grammar
+/// engine (Rust `#[test]` functions). Falls back to filtering `.methods` by
+/// the configured test prefix for extension-script fingerprints (PHP/JS/TS)
+/// that don't distinguish test functions structurally.
+///
+/// A production method named `test_foo()` in a source file is NOT considered
+/// a test method by this helper, because only the structural list is consulted
+/// when it's populated.
+fn collect_test_methods_from_fp(fp: &FileFingerprint, config: &TestMappingConfig) -> Vec<String> {
+    if !fp.test_methods.is_empty() {
+        return fp.test_methods.clone();
+    }
+    fp.methods
+        .iter()
+        .filter(|m| m.starts_with(&config.method_prefix))
+        .cloned()
+        .collect()
+}
+
+/// Collect test method names as borrowed `&str`s (same semantics as
+/// `collect_test_methods_from_fp`, borrowed for coverage-set building).
+fn collect_test_method_refs<'a>(
+    fp: &'a FileFingerprint,
+    config: &TestMappingConfig,
+) -> Vec<&'a str> {
+    if !fp.test_methods.is_empty() {
+        return fp.test_methods.iter().map(|m| m.as_str()).collect();
+    }
+    fp.methods
+        .iter()
+        .filter(|m| m.starts_with(&config.method_prefix))
+        .map(|m| m.as_str())
+        .collect()
+}
+
+/// Check 4: Orphaned test methods — test methods whose source method no longer exists.
+///
+/// For each `test_X` method, checks whether `X` exists in the source file's methods.
+/// This catches tests left behind when a function is deleted from the source — the kind
+/// of breakage that `#[cfg(test)]` hides from normal compilation.
+fn find_orphaned_test_methods(
+    findings: &mut Vec<Finding>,
+    file_path: &str,
+    test_methods: &[String],
+    source_methods: &HashSet<&str>,
+    config: &TestMappingConfig,
+) {
+    for test_method in test_methods {
+        let Some(expected_source) = test_method.strip_prefix(&config.method_prefix) else {
+            continue;
+        };
+
+        // Skip if the test doesn't follow the naming convention (no source method implied)
+        if expected_source.is_empty() {
+            continue;
+        }
+
+        // If the source method exists (exact match), this test is valid
+        if source_methods.contains(expected_source) {
+            continue;
+        }
+
+        // Prefix match: test_compare_detects_new_drift should match source method
+        // "compare" because it's testing a specific scenario of that method.
+        // We require the prefix to be followed by '_' to prevent false matches
+        // (e.g., test_parse_this should not match source method "par").
+        let has_prefix_match = source_methods.iter().any(|source_method| {
+            let prefix = format!("{}_", source_method);
+            expected_source.starts_with(&prefix)
+        });
+        if has_prefix_match {
+            continue;
+        }
+
+        if config.inline_tests
+            && source_methods.iter().any(|source_method| {
+                test_covers_method(test_method, source_method, &config.method_prefix)
+                    || source_method.starts_with(&format!("{expected_source}_"))
+            })
+        {
+            continue;
+        }
+
+        if config.inline_tests && config.behavior_scenario_names.matches(expected_source) {
+            continue;
+        }
+
+        // Behavior-driven test names: test_detects_exact_duplicate describes a
+        // behavior, not a method reference. Short names (1-2 segments like
+        // "old_function" or "pause") are likely real method references. But
+        // longer compound names (3+ segments like "detects_exact_duplicate" or
+        // "apply_replace_text") are usually behavioral/scenario descriptions.
+        //
+        // For 3+ segment names, we skip (treat as behavioral) UNLESS the
+        // expected source name is a direct prefix of a source method. This
+        // prevents false positives where common verbs like "apply", "resolve",
+        // "build" happen to match source methods (e.g., "apply" matching
+        // "apply_edit_ops" would falsely flag "apply_replace_text" as orphaned).
+        let segment_count = expected_source.split('_').count();
+        if segment_count >= 3 {
+            // Only flag if the expected source is itself a prefix of some source
+            // method (suggesting it really names a method that was truncated or
+            // renamed). A single first-word match is too loose.
+            let is_direct_prefix_of_source = source_methods.iter().any(|m| {
+                // "apply_edit_ops" would match source "apply_edit_ops_to_content"
+                m.starts_with(&format!("{}_", expected_source))
+            });
+            if !is_direct_prefix_of_source {
+                continue;
+            }
+        }
+
+        findings.push(Finding {
+            convention: "test_coverage".to_string(),
+            severity: Severity::Warning,
+            file: file_path.to_string(),
+            description: format!(
+                "Test method '{}' references '{}' which no longer exists in the source",
+                test_method, expected_source
+            ),
+            suggestion: format!(
+                "Remove the orphaned test '{}' or rename it to match an existing method",
+                test_method
+            ),
+            kind: AuditFinding::OrphanedTest,
+        });
+    }
+}
+
+/// Determine whether `wrapper_path` is a thin wrapper that only includes
+/// `target_test_path`, according to the extension-declared `include_wrapper`
+/// policy. The wrapper file extension(s) and the include template (with
+/// `{relative_target}`) are config-owned so core does not hardcode any
+/// language's include syntax.
+fn is_include_wrapper_for_test_path(
+    wrapper_path: &str,
+    wrapper_content: &str,
+    target_test_path: &str,
+    config: &TestMappingConfig,
+) -> bool {
+    let Some(policy) = &config.include_wrapper else {
+        return false;
+    };
+
+    let has_ext = |path: &str| {
+        let ext = Path::new(path).extension().and_then(|e| e.to_str());
+        ext.is_some_and(|ext| {
+            policy
+                .file_extensions
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(ext))
+        })
+    };
+    if !has_ext(wrapper_path) || !has_ext(target_test_path) {
+        return false;
+    }
+
+    let wrapper_dir = Path::new(wrapper_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let target_path = Path::new(target_test_path);
+    let Ok(relative_target) = target_path.strip_prefix(wrapper_dir) else {
+        return false;
+    };
+
+    let relative_target = relative_target.to_string_lossy().replace('\\', "/");
+    let normalized_content: String = wrapper_content
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    let expected: String = policy
+        .include_template
+        .replace("{relative_target}", &relative_target)
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+
+    normalized_content == expected
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conventions::Language;
+    use homeboy_audit_contract::{BehaviorScenarioNames, IncludeWrapperPolicy};
+
+    fn make_config() -> TestMappingConfig {
+        TestMappingConfig {
+            source_dirs: vec!["src".to_string()],
+            test_dirs: vec!["tests".to_string()],
+            test_file_pattern: "tests/{dir}/{name}_test.{ext}".to_string(),
+            method_prefix: "test_".to_string(),
+            inline_tests: false,
+            critical_patterns: vec!["core/".to_string()],
+            skip_test_patterns: vec![],
+            ..Default::default()
+        }
+    }
+
+    fn make_rust_config() -> TestMappingConfig {
+        TestMappingConfig {
+            source_dirs: vec!["src".to_string()],
+            test_dirs: vec!["tests".to_string()],
+            test_file_pattern: "tests/{dir}/{name}_test.{ext}".to_string(),
+            method_prefix: "test_".to_string(),
+            inline_tests: true,
+            critical_patterns: vec!["core/".to_string()],
+            skip_test_patterns: vec![],
+            behavior_scenario_names: BehaviorScenarioNames {
+                prefixes: vec![
+                    "accepts_".to_string(),
+                    "detects_".to_string(),
+                    "emits_".to_string(),
+                    "handles_".to_string(),
+                    "ignores_".to_string(),
+                    "rejects_".to_string(),
+                    "skips_".to_string(),
+                    "translates_".to_string(),
+                ],
+                suffixes: vec!["_roundtrip".to_string(), "_roundtrips".to_string()],
+            },
+            include_wrapper: Some(IncludeWrapperPolicy {
+                file_extensions: vec!["rs".to_string()],
+                include_template: "include!(\"{relative_target}\");".to_string(),
+            }),
+            vacuity: Some(rust_vacuity_policy()),
+            ..Default::default()
+        }
+    }
+
+    fn rust_vacuity_policy() -> homeboy_audit_contract::TestVacuityPolicy {
+        homeboy_audit_contract::TestVacuityPolicy {
+            file_extensions: vec!["rs".to_string()],
+            allowed_body_markers: vec![
+                "compile contract".to_string(),
+                "compile-only".to_string(),
+                "assert_snapshot".to_string(),
+                "assert_debug_snapshot".to_string(),
+            ],
+            product_reference_markers: vec![
+                "crate::".to_string(),
+                "super::".to_string(),
+                "self::".to_string(),
+            ],
+            package_name: None,
+        }
+    }
+
+    /// Build a fingerprint for tests.
+    ///
+    /// For **source-file paths** (not under `tests/`), methods that start
+    /// with the conventional test prefix are split into `test_methods`,
+    /// mirroring what the core grammar engine does with `#[test]` functions.
+    /// This preserves backwards-compatibility with existing fixtures that mix
+    /// source methods and inline test methods into a single vec.
+    ///
+    /// For **test-file paths** (under `tests/` / `__tests__/` / matching
+    /// language-specific test suffixes), all methods stay in `.methods`. This
+    /// mirrors the extension-script fingerprint protocol (PHP/JS/TS) which
+    /// does not distinguish `#[test]`-attributed functions.
+    ///
+    /// For tests that need to model the specific case "production method with
+    /// a `test_` prefixed name" (e.g. `ExtensionManifest::test_script`), use
+    /// `make_fp_split` and pass an empty `test_methods` vec.
+    fn make_fp(path: &str, methods: Vec<&str>) -> FileFingerprint {
+        let mut fp = FileFingerprint {
+            relative_path: path.to_string(),
+            language: Language::Rust,
+            ..Default::default()
+        };
+        let is_test_file = crate::walker::is_test_path(path);
+        for m in methods {
+            if !is_test_file && m.starts_with("test_") {
+                fp.test_methods.push(m.to_string());
+            } else {
+                fp.methods.push(m.to_string());
+            }
+        }
+        fp
+    }
+
+    /// Build a fingerprint with explicit `methods` and `test_methods` splits.
+    fn make_fp_split(path: &str, methods: Vec<&str>, test_methods: Vec<&str>) -> FileFingerprint {
+        FileFingerprint {
+            relative_path: path.to_string(),
+            language: Language::Rust,
+            methods: methods.into_iter().map(String::from).collect(),
+            test_methods: test_methods.into_iter().map(String::from).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn make_rust_test_fp(path: &str, methods: Vec<&str>, content: &str) -> FileFingerprint {
+        FileFingerprint {
+            relative_path: path.to_string(),
+            language: Language::Rust,
+            methods: methods.into_iter().map(String::from).collect(),
+            content: content.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn source_to_test_path_basic() {
+        let config = make_config();
+        assert_eq!(
+            source_to_test_path("src/core/audit.rs", &config),
+            Some("tests/core/audit_test.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn source_to_test_path_top_level() {
+        let config = make_config();
+        assert_eq!(
+            source_to_test_path("src/main.rs", &config),
+            Some("tests/main_test.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_to_source_path_basic() {
+        let config = make_config();
+        assert_eq!(
+            test_to_source_path("tests/core/audit_test.rs", &config),
+            Some("src/core/audit.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn missing_test_file_detected() {
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_missing_file");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/core")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+
+        let source = make_fp("src/core/audit.rs", vec!["run_audit", "build_report"]);
+
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, AuditFinding::MissingTestFile);
+        assert_eq!(findings[0].severity, Severity::Warning); // core/ is critical
+        assert!(findings[0].description.contains("audit_test.rs"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_test_method_detected() {
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_missing_method");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+
+        let source = make_fp("src/parser.rs", vec!["parse", "validate", "transform"]);
+        let test = make_fp("tests/parser_test.rs", vec!["test_parse", "test_validate"]);
+
+        let findings = analyze_test_coverage(&dir, &[&source, &test], &config);
+
+        let missing_methods: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::MissingTestMethod)
+            .collect();
+        assert_eq!(missing_methods.len(), 1);
+        assert!(missing_methods[0].description.contains("transform"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphaned_test_detected() {
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_orphaned");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+
+        // Test file exists but source file doesn't
+        let test = make_fp("tests/old_module_test.rs", vec!["test_something"]);
+
+        let findings = analyze_test_coverage(&dir, &[&test], &config);
+
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::OrphanedTest)
+            .collect();
+        assert_eq!(orphaned.len(), 1);
+        assert!(orphaned[0].description.contains("old_module"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn behavior_named_test_referencing_multiple_source_symbols_is_not_orphaned() {
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_behavior_file");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/core")).unwrap();
+        std::fs::create_dir_all(dir.join("tests/core")).unwrap();
+
+        let mut resolver = make_fp("src/core/tool_policy_resolver.rs", vec!["resolve"]);
+        resolver.type_name = Some("ToolPolicyResolver".to_string());
+        let mut registry = make_fp("src/core/tool_registry.rs", vec!["register"]);
+        registry.type_name = Some("ToolRegistry".to_string());
+        let mut test = make_fp(
+            "tests/core/chat_tools_availability_test.rs",
+            vec!["test_chat_tools"],
+        );
+        test.content = r#"
+use crate::tool_policy_resolver::ToolPolicyResolver;
+use crate::tool_registry::ToolRegistry;
+
+#[test]
+fn test_chat_tools() {
+    let _ = ToolPolicyResolver::new(ToolRegistry::default());
+}
+"#
+        .to_string();
+
+        let findings = analyze_test_coverage(&dir, &[&resolver, &registry, &test], &config);
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::OrphanedTest)
+            .collect();
+        let missing_files: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::MissingTestFile)
+            .collect();
+
+        assert!(
+            orphaned.is_empty(),
+            "behavior/integration test files that reference multiple source symbols should not be marked orphaned: {:?}",
+            orphaned
+        );
+        assert!(
+            missing_files.is_empty(),
+            "source files covered by behavior/integration tests should not require exact mirrored test files: {:?}",
+            missing_files
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inline_tests_satisfy_coverage() {
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_inline");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        // Source file with inline test methods
+        let source = make_fp(
+            "src/utils.rs",
+            vec!["helper", "compute", "test_helper", "test_compute"],
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        // All methods have inline tests — no findings
+        let missing: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::MissingTestFile || f.kind == AuditFinding::MissingTestMethod
+            })
+            .collect();
+        assert!(missing.is_empty(), "Inline tests should satisfy coverage");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inline_tests_partial_coverage() {
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_inline_partial");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/core")).unwrap();
+
+        // Source file with only some inline tests
+        let source = make_fp(
+            "src/core/engine.rs",
+            vec!["start", "stop", "reset", "test_start"],
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        let missing_methods: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::MissingTestMethod)
+            .collect();
+        // "stop" and "reset" should be missing tests
+        assert_eq!(missing_methods.len(), 2);
+        // MissingTestMethod is informational; the rule no longer drives autofix or
+        // critical-path warnings. (#1518: severity demotion alongside the
+        // synthesis-pipeline removal.)
+        assert!(missing_methods.iter().all(|f| f.severity == Severity::Info));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trivial_methods_not_flagged() {
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_trivial");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+
+        // Source file with only trivial methods
+        let source = make_fp("src/types.rs", vec!["new", "default", "clone", "fmt"]);
+        // Empty test file (exists but no test methods)
+        let test = make_fp("tests/types_test.rs", vec![]);
+
+        let findings = analyze_test_coverage(&dir, &[&source, &test], &config);
+
+        let missing_methods: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::MissingTestMethod)
+            .collect();
+        assert!(
+            missing_methods.is_empty(),
+            "Trivial methods should not be flagged"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_critical_paths_get_info_severity() {
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_non_critical");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/utils")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+
+        // utils/ is not in critical_patterns
+        let source = make_fp("src/utils/helpers.rs", vec!["format_output"]);
+
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Info);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fully_tested_source_no_findings() {
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_full");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+
+        let source = make_fp("src/parser.rs", vec!["parse", "validate"]);
+        let test = make_fp("tests/parser_test.rs", vec!["test_parse", "test_validate"]);
+
+        let findings = analyze_test_coverage(&dir, &[&source, &test], &config);
+
+        let coverage_findings: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::MissingTestFile || f.kind == AuditFinding::MissingTestMethod
+            })
+            .collect();
+        assert!(
+            coverage_findings.is_empty(),
+            "Fully tested source should have no coverage findings"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vacuous_test_detects_assert_true_placeholder() {
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_vacuous_assert_true");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"homeboy\"\n").unwrap();
+
+        let source = make_fp("src/commands/refactor.rs", vec!["run"]);
+        let test = make_rust_test_fp(
+            "tests/commands/refactor_test.rs",
+            vec!["test_run"],
+            r#"
+                #[test]
+                fn test_run() {
+                    // Keep this named coverage test to satisfy audit mapping.
+                    assert!(true);
+                }
+            "#,
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source, &test], &config);
+
+        let vacuous: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::VacuousTest)
+            .collect();
+        assert_eq!(vacuous.len(), 1);
+        assert!(vacuous[0].description.contains("test_run"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vacuous_test_skips_imported_product_calls() {
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_real_product_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"homeboy\"\n").unwrap();
+
+        let source = make_fp("src/deploy.rs", vec!["parse_bulk_component_ids"]);
+        let test = make_rust_test_fp(
+            "tests/deploy_test.rs",
+            vec!["test_parse_bulk_component_ids_supports_json_array"],
+            r##"
+                use homeboy_core::deploy::parse_bulk_component_ids;
+
+                #[test]
+                fn test_parse_bulk_component_ids_supports_json_array() {
+                    let ids = parse_bulk_component_ids(r#"[\"api\",\"web\"]"#).unwrap();
+                    assert_eq!(ids, vec!["api", "web"]);
+                }
+            "##,
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source, &test], &config);
+
+        assert!(!findings.iter().any(|f| f.kind == AuditFinding::VacuousTest));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn php_test_mapping() {
+        let config = TestMappingConfig {
+            source_dirs: vec!["inc".to_string()],
+            test_dirs: vec!["tests/Unit".to_string()],
+            test_file_pattern: "tests/Unit/{dir}/{name}Test.{ext}".to_string(),
+            method_prefix: "test_".to_string(),
+            inline_tests: false,
+            critical_patterns: vec!["Abilities/".to_string()],
+            skip_test_patterns: vec![],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            source_to_test_path("inc/Abilities/Flow/CreateFlow.php", &config),
+            Some("tests/Unit/Abilities/Flow/CreateFlowTest.php".to_string())
+        );
+
+        assert_eq!(
+            test_to_source_path("tests/Unit/Abilities/Flow/CreateFlowTest.php", &config),
+            Some("inc/Abilities/Flow/CreateFlow.php".to_string())
+        );
+    }
+
+    #[test]
+    fn rust_inline_uses_disk_test_methods_when_test_file_not_fingerprinted() {
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_disk_methods");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/core/refactor")).unwrap();
+        std::fs::create_dir_all(dir.join("tests/core/refactor")).unwrap();
+
+        std::fs::write(
+            dir.join("tests/core/refactor/decompose_test.rs"),
+            "#[test]\nfn test_build_plan() {}\n#[test]\nfn test_apply_plan_skeletons() {}\n",
+        )
+        .unwrap();
+
+        let source = make_fp(
+            "src/core/refactor/decompose.rs",
+            vec!["build_plan", "apply_plan_skeletons"],
+        );
+
+        // Intentionally do not include test fingerprint in `fingerprints` to mimic
+        // singleton test-file directories excluded from convention grouping.
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        assert!(findings.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn private_methods_not_flagged() {
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_visibility");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/core")).unwrap();
+
+        let mut source = make_fp(
+            "src/core/engine.rs",
+            vec!["run", "helper_fn", "internal_parse", "test_run"],
+        );
+        // run is public, helper_fn and internal_parse are private
+        source
+            .visibility
+            .insert("run".to_string(), "public".to_string());
+        source
+            .visibility
+            .insert("helper_fn".to_string(), "private".to_string());
+        source
+            .visibility
+            .insert("internal_parse".to_string(), "private".to_string());
+
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        // Only "run" should be covered (by test_run), private methods skipped entirely.
+        // No findings expected since run has test_run.
+        let missing_methods: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::MissingTestMethod)
+            .collect();
+        assert!(
+            missing_methods.is_empty(),
+            "Private methods should not be flagged: {:?}",
+            missing_methods
+                .iter()
+                .map(|f| &f.description)
+                .collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skip_test_patterns_excludes_files() {
+        let mut config = make_rust_config();
+        config.skip_test_patterns = vec!["commands/".to_string()];
+
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_skip_patterns");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/commands")).unwrap();
+        std::fs::create_dir_all(dir.join("src/core")).unwrap();
+
+        let cmd_source = make_fp("src/commands/deploy.rs", vec!["run_deploy"]);
+        let core_source = make_fp("src/core/deploy.rs", vec!["execute_deploy"]);
+
+        let findings = analyze_test_coverage(&dir, &[&cmd_source, &core_source], &config);
+
+        // commands/deploy.rs should be skipped, core/deploy.rs should NOT
+        let flagged_files: Vec<&str> = findings.iter().map(|f| f.file.as_str()).collect();
+        assert!(
+            !flagged_files.contains(&"src/commands/deploy.rs"),
+            "commands/ should be skipped"
+        );
+        assert!(
+            flagged_files.contains(&"src/core/deploy.rs"),
+            "core/ should NOT be skipped"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trivial_getters_not_flagged() {
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_getters");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+
+        // File with only getter/accessor methods
+        let source = make_fp(
+            "src/config.rs",
+            vec!["get_name", "is_enabled", "has_value", "as_str", "len"],
+        );
+        let test = make_fp("tests/config_test.rs", vec![]);
+
+        let findings = analyze_test_coverage(&dir, &[&source, &test], &config);
+
+        let missing_methods: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.kind == AuditFinding::MissingTestMethod)
+            .collect();
+        assert!(
+            missing_methods.is_empty(),
+            "Trivial getters should not be flagged: {:?}",
+            missing_methods
+                .iter()
+                .map(|f| &f.description)
+                .collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ========================================================================
+    // Orphaned test method detection (Check 4)
+    // ========================================================================
+
+    #[test]
+    fn orphaned_test_method_inline_detected() {
+        // Source has discover_from_portable and has_portable_config.
+        // Tests: test_discover_from_portable (valid — exact match),
+        //        test_discover_stale_data (behavioral — 3+ segments, "discover_stale_data"
+        //          is not a direct prefix of any source method → treated as behavioral),
+        //        test_load_config (orphaned — "load_config" is 2 segments, no exact/prefix match).
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_orphaned_inline");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/core")).unwrap();
+
+        let source = make_fp(
+            "src/core/component.rs",
+            vec![
+                "discover_from_portable",
+                "has_portable_config",
+                "test_discover_from_portable", // valid — source method exists
+                "test_discover_stale_data",    // behavioral — 3+ segments, not a direct prefix
+                "test_load_config",            // orphaned — short name, no match at all
+            ],
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::OrphanedTest && f.description.contains("no longer exists")
+            })
+            .collect();
+        assert_eq!(
+            orphaned.len(),
+            1,
+            "Should detect 1 orphaned test method (load_config), found: {:?}",
+            orphaned.iter().map(|f| &f.description).collect::<Vec<_>>()
+        );
+        assert!(orphaned
+            .iter()
+            .any(|f| f.description.contains("load_config")));
+        assert!(orphaned.iter().all(|f| f.severity == Severity::Warning));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphaned_test_method_external_file_detected() {
+        // A test file has test_old_function but the source no longer has old_function
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_orphaned_external");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+
+        let source = make_fp("src/parser.rs", vec!["parse", "validate"]);
+        let test = make_fp(
+            "tests/parser_test.rs",
+            vec![
+                "test_parse",        // valid
+                "test_validate",     // valid
+                "test_old_function", // orphaned — old_function was deleted
+            ],
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source, &test], &config);
+
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::OrphanedTest && f.description.contains("no longer exists")
+            })
+            .collect();
+        assert_eq!(orphaned.len(), 1);
+        assert!(orphaned[0].description.contains("old_function"));
+        assert!(orphaned[0].file.contains("parser_test.rs"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphaned_test_method_not_flagged_when_source_exists() {
+        // All test methods map to existing source methods — no findings
+        let config = make_rust_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_no_orphaned");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        let source = make_fp(
+            "src/utils.rs",
+            vec!["helper", "compute", "test_helper", "test_compute"],
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source], &config);
+
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::OrphanedTest && f.description.contains("no longer exists")
+            })
+            .collect();
+        assert!(
+            orphaned.is_empty(),
+            "No orphaned test methods expected: {:?}",
+            orphaned.iter().map(|f| &f.description).collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphaned_test_method_mixed_valid_and_orphaned() {
+        // Some tests valid, some orphaned — only orphaned should be flagged
+        let config = make_config();
+        let dir = std::env::temp_dir().join("homeboy_test_coverage_mixed_orphaned");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+
+        let source = make_fp("src/engine.rs", vec!["start", "stop"]);
+        let test = make_fp(
+            "tests/engine_test.rs",
+            vec![
+                "test_start",  // valid
+                "test_stop",   // valid
+                "test_pause",  // orphaned
+                "test_resume", // orphaned
+            ],
+        );
+
+        let findings = analyze_test_coverage(&dir, &[&source, &test], &config);
+
+        let orphaned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                f.kind == AuditFinding::OrphanedTest && f.description.contains("no longer exists")
+            })
+            .collect();
+        assert_eq!(orphaned.len(), 2);
+
+        let orphaned_names: Vec<&str> = orphaned.iter().map(|f| f.description.as_str()).collect();
+        assert!(orphaned_names.iter().any(|d| d.contains("pause")));
+        assert!(orphaned_names.iter().any(|d| d.contains("resume")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    mod test_coverage_behavior_tests;
+}

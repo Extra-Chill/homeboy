@@ -104,7 +104,10 @@ pub mod ci_plan;
 pub mod ci_profile;
 pub mod ci_scope;
 pub mod cleanup;
-pub mod code_audit;
+// code_audit lives in its own crate (homeboy-code-audit). Re-exported as
+// `crate::code_audit` so the in-crate consumers and the provider impls (which
+// reference code_audit's provider traits) keep working unchanged.
+pub use homeboy_code_audit as code_audit;
 pub mod command_execution_plan;
 pub mod command_invocation;
 pub mod component;

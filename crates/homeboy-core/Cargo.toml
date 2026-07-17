@@ -28,6 +28,7 @@ homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }
 homeboy-process = { version = "0.1.0", path = "../homeboy-process" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 homeboy-audit-contract = { version = "0.1.0", path = "../homeboy-audit-contract" }
+homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit" }
 homeboy-extension-contract = { version = "0.1.0", path = "../homeboy-extension-contract" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
 homeboy-lab-contract = { version = "0.1.0", path = "../homeboy-lab-contract" }
@@ -60,3 +61,6 @@ tempfile = "3.14"
 clap = { version = "4.5", features = ["derive", "string"] }
 toml = "1.0.3"
 sha2 = "0.10.9"
+
+[dev-dependencies]
+homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit", features = ["test-support"] }

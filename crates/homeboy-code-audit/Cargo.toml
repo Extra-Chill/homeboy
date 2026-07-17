@@ -1,0 +1,35 @@
+[package]
+name = "homeboy-code-audit"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+# Exposes code_audit's shared test fixtures (test_helpers) so other crates'
+# tests (e.g. homeboy-core's refactor tests) can build audit findings/results.
+test-support = []
+
+[dependencies]
+homeboy-audit-contract = { version = "0.1.0", path = "../homeboy-audit-contract" }
+homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
+homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
+homeboy-finding = { version = "0.1.0", path = "../homeboy-finding" }
+homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }
+homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.11"
+glob-match = "0.2"
+semver = "1.0"
+sha2 = "0.10"
+tempfile = "3.14"
+
+[dev-dependencies]
+# Dev-only dependency on homeboy-core for its hermetic test-support fixtures
+# (AuditGuard / with_isolated_home / global_env_guard) and to exercise
+# code_audit's provider hooks against their core-side impls. This is a
+# dev-dependency cycle (core depends on this crate normally), which Cargo
+# permits because dev-deps are excluded from the normal dependency graph.
+homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
+chrono = "0.4"
+toml = "1.0.3"

@@ -803,6 +803,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-code-audit"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "glob-match",
+ "homeboy-audit-contract",
+ "homeboy-core",
+ "homeboy-engine-primitives",
+ "homeboy-error",
+ "homeboy-finding",
+ "homeboy-paths",
+ "homeboy-product-identity",
+ "regex",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "homeboy-core"
 version = "0.1.0"
 dependencies = [
@@ -817,6 +839,7 @@ dependencies = [
  "heck",
  "homeboy-audit-contract",
  "homeboy-cli-contract",
+ "homeboy-code-audit",
  "homeboy-engine-primitives",
  "homeboy-error",
  "homeboy-extension-contract",
