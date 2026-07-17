@@ -171,6 +171,82 @@ mod materialization {
     }
 
     #[test]
+    fn materialize_allows_declared_shared_template_root() {
+        let repo = tempfile::tempdir().expect("repo");
+        let package = repo.path().join("packages/app");
+        let rig = package.join("rigs/example/rig.json");
+        let shared = repo.path().join("shared/templates");
+        fs::create_dir_all(rig.parent().expect("rig directory")).expect("rig directory");
+        fs::create_dir_all(&shared).expect("shared directory");
+        fs::write(
+            shared.join("base.json"),
+            r#"{ "settings": { "shared": true } }"#,
+        )
+        .expect("shared template");
+        fs::write(
+            &rig,
+            r#"{
+                "id": "example",
+                "shared_templates": ["../../../../shared/templates"],
+                "extends": "../../../../shared/templates/base.json"
+            }"#,
+        )
+        .expect("rig");
+        GitFixture::init(repo.path()).commit("shared template");
+
+        assert_eq!(
+            materialize_rig_spec(&rig, &package).expect("materialize"),
+            serde_json::json!({ "id": "example", "settings": { "shared": true } })
+        );
+    }
+
+    #[test]
+    fn materialize_rejects_undeclared_template_outside_package_root() {
+        let repo = tempfile::tempdir().expect("repo");
+        let package = repo.path().join("packages/app");
+        let rig = package.join("rigs/example/rig.json");
+        let shared = repo.path().join("shared/templates");
+        fs::create_dir_all(rig.parent().expect("rig directory")).expect("rig directory");
+        fs::create_dir_all(&shared).expect("shared directory");
+        fs::write(shared.join("base.json"), r#"{}"#).expect("shared template");
+        fs::write(
+            &rig,
+            r#"{ "extends": "../../../../shared/templates/base.json" }"#,
+        )
+        .expect("rig");
+        GitFixture::init(repo.path()).commit("undeclared shared template");
+
+        let error = materialize_rig_spec(&rig, &package).expect_err("undeclared template rejected");
+        assert_eq!(error.details["field"], "extends");
+        assert!(error.message.contains("declared shared template root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_rejects_shared_template_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let package = tempfile::tempdir().expect("package");
+        let outside = tempfile::tempdir().expect("outside");
+        let rig = package.path().join("rigs/example/rig.json");
+        fs::create_dir_all(rig.parent().expect("rig directory")).expect("rig directory");
+        fs::write(outside.path().join("base.json"), r#"{}"#).expect("outside template");
+        symlink(outside.path(), package.path().join("shared")).expect("shared symlink");
+        fs::write(
+            &rig,
+            r#"{
+                "shared_templates": ["../../shared"],
+                "extends": "../../shared/base.json"
+            }"#,
+        )
+        .expect("rig");
+
+        let error = materialize_rig_spec(&rig, package.path()).expect_err("symlink rejected");
+        assert_eq!(error.details["field"], "shared_templates");
+        assert!(error.message.contains("must stay inside"));
+    }
+
+    #[test]
     fn materialize_default_source_root_keeps_non_standard_files_narrow() {
         assert_eq!(
             default_materialize_source_root(Path::new("rigs/example/template.json")),

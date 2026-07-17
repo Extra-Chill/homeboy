@@ -322,7 +322,7 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
         }
 
         let config_path = PathBuf::from(&rig.config_path);
-        super::install::materialize_rig_spec(&rig_path, Path::new(&source.source_root))?;
+        super::install::materialize_rig_spec(&rig_path, Path::new(&source.package_path))?;
         if config_path.exists() || fs::symlink_metadata(&config_path).is_ok() {
             fs::remove_file(&config_path).map_err(|e| {
                 Error::internal_io(e.to_string(), Some("replace rig config link".into()))

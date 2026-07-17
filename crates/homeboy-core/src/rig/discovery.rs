@@ -189,9 +189,10 @@ fn discovered_from_path(
         description: String::new(),
         rig_path: path.to_path_buf(),
     };
-    let effective_source_root =
-        super::install::local_package_source_root_for_dependencies(source_root, &[discovered])?;
-    let mut spec = parse_discovered_rig_spec(path, &effective_source_root)?;
+    // Validate dependency declarations for runner materialization, but keep
+    // template inheritance bounded to the selected package root.
+    super::install::local_package_source_root_for_dependencies(source_root, &[discovered])?;
+    let mut spec = parse_discovered_rig_spec(path, source_root)?;
     if spec.id.is_empty() {
         spec.id = if fallback_id.is_empty() {
             return Err(Error::validation_invalid_argument(

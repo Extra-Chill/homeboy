@@ -357,9 +357,9 @@ fn read_spec_from_path(
     path: &Path,
     id_hint: Option<&str>,
     package_root: &Path,
-    source_root: &Path,
+    _source_root: &Path,
 ) -> Result<RigSpec> {
-    let value = install::materialize_rig_spec(path, source_root)?;
+    let value = install::materialize_rig_spec(path, package_root)?;
     let mut spec: RigSpec = serde_json::from_value(value.clone())
         .map_err(|e| rig_spec_parse_error(e, path, Some(&value), None))?;
     if spec.id.is_empty() {

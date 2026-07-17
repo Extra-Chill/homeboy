@@ -40,6 +40,7 @@ touching component checkouts.
 | `services` | object | No | Map of service ID to `ServiceSpec`. |
 | `symlinks` | array | No | List of `SymlinkSpec` entries. |
 | `shared_paths` | array | No | List of dependency paths the rig may borrow from another checkout. |
+| `shared_templates` | array | No | Template roots, relative to this `rig.json`, this rig may inherit from outside its selected package root. |
 | `package_dependencies` | array | No | Install-time package-relative paths that must materialize with the package, for nested package imports that cross the selected package root. |
 | `resources` | object | No | Resource declarations used by active-run leases. |
 | `pipeline` | object | No | Map of pipeline name to `PipelineStep[]`. |
@@ -70,7 +71,7 @@ Merge rules are intentionally generic:
 - A child field whose inherited value is an array can opt into array merge semantics by using an object directive instead of a plain array:
   - `{ "$append": [...] }` appends entries after the inherited array.
   - `{ "$merge_by": "<key>", "entries": [...] }` merges array objects by a key field such as `id` or `label`; matching entries deep-merge with the same object rules, and new keyed entries append.
-- `extends` paths must be non-empty relative paths that stay inside the rig package source root.
+- `extends` paths must be non-empty relative paths that stay inside the rig package source root, or inside a root explicitly declared in `shared_templates`.
 
 Example:
 
@@ -100,6 +101,20 @@ Example:
 ```
 
 The installed rig keeps the base `pipeline.check` and `components.app.branch`, while replacing `components.app.path`.
+
+### Shared Templates
+
+Packages nested inside a repository can reuse a repository-level template by declaring its directory in `shared_templates`. The declaration and every resolved template are canonicalized, must remain inside the containing repository (or materialized runner snapshot), and authorize only that declared root. This keeps package-local templates working as before while rejecting undeclared traversal and symlink escapes.
+
+```jsonc
+// Automattic/jetpack/rigs/browser-coverage/rig.json
+{
+  "shared_templates": ["../../../../shared/wordpress-plugin"],
+  "extends": "../../../../shared/wordpress-plugin/browser-coverage.base.json"
+}
+```
+
+For runner installation, declare the same repository-level directory in `package_dependencies` when it must travel with a selected package snapshot.
 
 Array merge example:
 
