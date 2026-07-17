@@ -8,9 +8,8 @@ use crate::api_jobs::{
 };
 use crate::error::{Error, Result};
 use crate::paths;
-use crate::runner::{
-    self, BrokerAuthStore, BrokerScope, RunnerSession, RunnerSessionRole, RunnerTunnelMode,
-};
+use crate::broker_auth::{BrokerAuthStore, BrokerScope};
+use crate::runner::{self, RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
 /// Per-request broker authentication context extracted from the network layer.
 ///
@@ -609,7 +608,7 @@ fn write_session(session: &RunnerSession) -> Result<std::path::PathBuf> {
 #[cfg(test)]
 mod auth_tests {
     use super::*;
-    use crate::runner::BrokerScope;
+    use crate::broker_auth::BrokerScope;
     use crate::test_support::HomeGuard;
     use std::collections::BTreeSet;
 

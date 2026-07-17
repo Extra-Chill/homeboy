@@ -215,7 +215,7 @@ pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobE
                 "reverse runner session has no broker URL",
             ));
         };
-        let broker_token = super::super::broker_auth::broker_submit_token_for_runner(&runner.id)?;
+        let broker_token = crate::broker_auth::broker_submit_token_for_runner(&runner.id)?;
         broker_http::post_json(
             &client,
             broker_url,

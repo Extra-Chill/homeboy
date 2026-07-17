@@ -2,7 +2,7 @@ use reqwest::blocking::{Client, RequestBuilder};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::broker_auth::BROKER_TOKEN_HEADER;
+use crate::broker_auth::BROKER_TOKEN_HEADER;
 use crate::error::{Error, Result};
 
 #[derive(Debug, Deserialize)]

@@ -1167,7 +1167,7 @@ fn allow_unauthenticated_loopback_broker() {
         crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
         "sha256:test-fixed-daemon-binary",
     );
-    super::super::super::broker_auth::BrokerAuthStore {
+    crate::broker_auth::BrokerAuthStore {
         allow_unauthenticated_loopback: true,
         ..Default::default()
     }
