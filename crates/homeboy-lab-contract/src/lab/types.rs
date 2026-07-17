@@ -34,6 +34,31 @@ pub struct LabRoutingPolicy {
     /// Whether runner-resident reads should avoid durable mirror runs and
     /// handoff boilerplate unless the command itself emits them.
     pub read_only_polling: bool,
+    /// Whether automatic pressure-driven Lab offload requires a genuinely `hot`
+    /// machine rather than merely `warm`. Cheap portable commands set this so a
+    /// slightly-loaded (`warm`) controller does not pay the full Lab
+    /// round-trip for work that finishes faster locally. Expensive portable
+    /// commands (bench/audit/test/agent-task) leave it `false` and offload as
+    /// soon as the machine leaves `ok`.
+    pub offload_only_when_hot: bool,
+}
+
+impl LabRoutingPolicy {
+    /// Whether a machine at the given resource severity (`"ok"` / `"warm"` /
+    /// `"hot"`) should trigger automatic pressure-driven Lab offload for this
+    /// command. `ok` never offloads; cheap commands
+    /// (`offload_only_when_hot`) require `hot`; everything else offloads once
+    /// the machine leaves `ok`. Single source of truth for the offload
+    /// decision so the runner-side execute path and tests agree.
+    pub fn should_pressure_offload(&self, severity: &str) -> bool {
+        if severity == "ok" {
+            return false;
+        }
+        if self.offload_only_when_hot {
+            return severity == "hot";
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -169,6 +194,7 @@ impl LabCommandContract {
                 release_gate: false,
                 requires_extension_parity,
                 read_only_polling: false,
+                offload_only_when_hot: false,
             },
         }
     }
@@ -254,12 +280,21 @@ impl LabCommandContract {
                 release_gate: false,
                 requires_extension_parity: false,
                 read_only_polling: false,
+                offload_only_when_hot: false,
             },
         }
     }
 
     pub const fn release_gate(mut self) -> Self {
         self.routing_policy.release_gate = true;
+        self
+    }
+
+    /// Mark a portable command as cheap: automatic pressure-driven Lab offload
+    /// then requires a genuinely `hot` machine, not merely `warm`. Prevents
+    /// paying the Lab round-trip for fast work on a slightly-loaded controller.
+    pub const fn cheap(mut self) -> Self {
+        self.routing_policy.offload_only_when_hot = true;
         self
     }
 
@@ -271,5 +306,53 @@ impl LabCommandContract {
     pub const fn with_secret_env_sources(mut self, sources: &'static [LabSecretEnvSource]) -> Self {
         self.secret_env_sources = sources;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eager_portable_offloads_on_warm_and_hot_but_not_ok() {
+        let policy = LabCommandContract::portable("bench", None, false, LAB_NO_EXTRA_CAPABILITIES)
+            .routing_policy;
+        assert!(!policy.offload_only_when_hot);
+        assert!(!policy.should_pressure_offload("ok"));
+        assert!(policy.should_pressure_offload("warm"));
+        assert!(policy.should_pressure_offload("hot"));
+    }
+
+    #[test]
+    fn cheap_portable_offloads_only_when_hot() {
+        let policy =
+            LabCommandContract::portable("promote", None, false, LAB_NO_EXTRA_CAPABILITIES)
+                .cheap()
+                .routing_policy;
+        assert!(policy.offload_only_when_hot);
+        assert!(!policy.should_pressure_offload("ok"));
+        // The bug this fixes: a merely warm machine must NOT force a cheap
+        // command onto the Lab.
+        assert!(!policy.should_pressure_offload("warm"));
+        assert!(policy.should_pressure_offload("hot"));
+    }
+
+    #[test]
+    fn cheap_is_opt_in_and_default_constructors_stay_eager() {
+        assert!(
+            !LabCommandContract::local_only("x", "r")
+                .routing_policy
+                .offload_only_when_hot
+        );
+        assert!(
+            !LabCommandContract::explicit_runner_simple("x")
+                .routing_policy
+                .offload_only_when_hot
+        );
+        assert!(
+            !LabCommandContract::portable("x", None, false, LAB_NO_EXTRA_CAPABILITIES)
+                .routing_policy
+                .offload_only_when_hot
+        );
     }
 }

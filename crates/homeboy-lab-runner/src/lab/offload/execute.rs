@@ -95,12 +95,19 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     // controller pressure. Other portable workspace commands use the single
     // preflight snapshot captured by CliRuntime: cold controllers stay local,
     // while warm/hot controllers may use an eligible default Lab runner.
+    //
+    // Cheap commands (`offload_only_when_hot`) require a genuinely `hot`
+    // machine before auto-offloading, so a merely `warm` controller does not
+    // pay the full Lab round-trip for work that finishes faster locally.
     if !contract.routing_policy.default_lab_offload
         && request.placement == homeboy_cli_contract::Placement::Auto
         && contract.source_path_mode
             != homeboy_core::lab_contract::LabSourcePathMode::RunnerResident
-        && homeboy_core::resource_policy_context::captured_context()
-            .is_some_and(|context| context.severity != "ok")
+        && homeboy_core::resource_policy_context::captured_context().is_some_and(|context| {
+            contract
+                .routing_policy
+                .should_pressure_offload(&context.severity)
+        })
     {
         contract.routing_policy.default_lab_offload = true;
     }

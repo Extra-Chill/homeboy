@@ -90,7 +90,11 @@ impl Commands {
                 Some("--to-worktree"),
                 false,
                 LAB_NO_EXTRA_CAPABILITIES,
-            ),
+            )
+            // Promotion is a fast local-state git worktree projection, not a
+            // workload run: a merely `warm` controller should not pay the Lab
+            // round-trip for it. Only offload when the machine is genuinely hot.
+            .cheap(),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Providers(_),
             }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_PROVIDERS_LAB_LABEL),
@@ -222,6 +226,9 @@ impl Commands {
                     false,
                     LAB_NO_EXTRA_CAPABILITIES,
                 )
+                // Mechanical rename/refactor is cheap relative to a Lab
+                // round-trip; only offload it on a genuinely hot machine.
+                .cheap()
             }
             Commands::Rig(args) => return args.portability_contract(),
             Commands::Trace(args) => return args.portability_contract(),
