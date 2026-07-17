@@ -68,11 +68,51 @@ pub(super) fn hostname_fallback() -> String {
 }
 
 pub(super) fn session_path(runner_id: &str) -> Result<PathBuf> {
+    paths::runner_controller_session_file(runner_id, &controller_id())
+}
+
+pub(super) fn ownership_path(runner_id: &str) -> Result<PathBuf> {
     paths::runner_session_file(runner_id)
 }
 
+pub(super) fn controller_id() -> String {
+    if let Ok(value) = std::env::var("HOMEBOY_CONTROLLER_ID") {
+        if !value.trim().is_empty() {
+            return value;
+        }
+    }
+    let executable = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.canonicalize().ok().or(Some(path)))
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "homeboy".to_string());
+    let directory = std::env::current_dir()
+        .ok()
+        .and_then(|path| path.canonicalize().ok().or(Some(path)))
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unknown-directory".to_string());
+    format!("{executable}@{directory}")
+}
+
 pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
-    let path = session_path(runner_id)?;
+    read_session_for_controller(runner_id, &controller_id())
+}
+
+pub(super) fn read_session_for_controller(
+    runner_id: &str,
+    controller_id: &str,
+) -> Result<Option<RunnerSession>> {
+    read_session_at(&paths::runner_controller_session_file(
+        runner_id,
+        controller_id,
+    )?)
+}
+
+pub(super) fn read_ownership(runner_id: &str) -> Result<Option<RunnerSession>> {
+    read_session_at(&ownership_path(runner_id)?)
+}
+
+fn read_session_at(path: &PathBuf) -> Result<Option<RunnerSession>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -85,7 +125,28 @@ pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
 }
 
 pub(super) fn write_session(session: &RunnerSession) -> Result<()> {
-    let path = session_path(&session.runner_id)?;
+    let controller_id = if session.mode == RunnerTunnelMode::DirectSsh {
+        session.controller_id.clone().unwrap_or_else(controller_id)
+    } else {
+        controller_id()
+    };
+    write_session_at(
+        &paths::runner_controller_session_file(&session.runner_id, &controller_id)?,
+        session,
+    )
+}
+
+pub(super) fn write_ownership(session: &RunnerSession) -> Result<()> {
+    write_session_at(&ownership_path(&session.runner_id)?, session)
+}
+
+pub(super) fn claim_ownership_if_owner_not_live(session: &RunnerSession) -> Result<bool> {
+    Ok(!read_ownership(&session.runner_id)?
+        .as_ref()
+        .is_some_and(session_is_live))
+}
+
+fn write_session_at(path: &PathBuf, session: &RunnerSession) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| {
             Error::internal_io(
@@ -103,6 +164,111 @@ pub(super) fn write_session(session: &RunnerSession) -> Result<()> {
     std::fs::write(&path, body).map_err(|err| {
         Error::internal_io(err.to_string(), Some(format!("write {}", path.display())))
     })
+}
+
+pub(super) fn remove_session(runner_id: &str) -> Result<()> {
+    let path = session_path(runner_id)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(format!("delete {}", path.display())))
+        })?;
+    }
+    Ok(())
+}
+
+pub(super) fn remove_ownership(runner_id: &str) -> Result<()> {
+    let path = ownership_path(runner_id)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(format!("delete {}", path.display())))
+        })?;
+    }
+    Ok(())
+}
+
+pub(super) fn has_live_peer_session(session: &RunnerSession) -> Result<bool> {
+    let directory = paths::runner_sessions_dir()?.join(&session.runner_id);
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some("read runner controller sessions".to_string()),
+            ))
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read runner controller session".to_string()),
+            )
+        })?;
+        let Some(peer) = read_session_at(&entry.path())? else {
+            continue;
+        };
+        if peer.controller_id != session.controller_id
+            && peer.remote_daemon_lease_id == session.remote_daemon_lease_id
+            && session_is_live(&peer)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runner::{RunnerSessionRole, RunnerTunnelMode};
+
+    fn session(controller_id: &str, lease_id: &str) -> RunnerSession {
+        RunnerSession {
+            runner_id: "lab".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: RunnerSessionRole::Controller,
+            server_id: None,
+            controller_id: Some(controller_id.to_string()),
+            broker_url: None,
+            remote_daemon_address: Some("127.0.0.1:4444".to_string()),
+            local_port: None,
+            local_url: None,
+            tunnel_pid: None,
+            remote_daemon_pid: Some(42),
+            remote_daemon_lease_id: Some(lease_id.to_string()),
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: None,
+            connected_at: "2026-07-17T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }
+    }
+
+    #[test]
+    fn controller_sessions_have_distinct_paths_and_share_a_lease_record() {
+        let first = paths::runner_controller_session_file("lab", "controller-a").expect("path");
+        let second = paths::runner_controller_session_file("lab", "controller-b").expect("path");
+        let ownership = paths::runner_session_file("lab").expect("path");
+
+        assert_ne!(first, second);
+        assert_ne!(first, ownership);
+        assert_ne!(second, ownership);
+    }
+
+    #[test]
+    fn stale_owner_can_be_replaced_without_reusing_its_tunnel() {
+        let stale = session("controller-a", "lease-old");
+        let replacement = session("controller-b", "lease-live");
+
+        assert_ne!(stale.controller_id, replacement.controller_id);
+        assert_ne!(
+            stale.remote_daemon_lease_id,
+            replacement.remote_daemon_lease_id
+        );
+    }
 }
 
 pub(super) fn failed_connect(

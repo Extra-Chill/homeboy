@@ -29,7 +29,6 @@ pub(crate) fn disconnect_with_session(
     let promotion_lease =
         crate::runtime_promotion::acquire("runner daemon disconnect", runner_id.to_string())?;
     promotion_lease.assert_generation()?;
-    let session_path = session_path(runner_id)?;
     let session = read_session(runner_id)?;
     if let Some(expected_session) = expected_session {
         if !session.as_ref().is_some_and(|current_session| {
@@ -46,7 +45,8 @@ pub(crate) fn disconnect_with_session(
         }
     }
     if let Some(session) = &session {
-        if session.mode == RunnerTunnelMode::DirectSsh {
+        let ownership = read_ownership(runner_id)?;
+        if should_stop_remote_daemon(session, ownership.as_ref(), has_live_peer_session(session)?) {
             disconnect_remote_daemon(session, force).map_err(|err| {
                 Error::validation_invalid_argument(
                     "disconnect",
@@ -55,25 +55,31 @@ pub(crate) fn disconnect_with_session(
                     Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
                 )
             })?;
+            remove_ownership(runner_id)?;
         }
         if let Some(pid) = session.tunnel_pid {
             terminate_pid(pid);
         }
     }
-    if session_path.exists() {
-        std::fs::remove_file(&session_path).map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some(format!("delete {}", session_path.display())),
-            )
-        })?;
-    }
+    remove_session(runner_id)?;
     Ok(RunnerDisconnectReport {
         runner_id: runner_id.to_string(),
         disconnected: session.is_some(),
         session,
-        session_path: session_path.display().to_string(),
+        session_path: session_path(runner_id)?.display().to_string(),
     })
+}
+
+fn should_stop_remote_daemon(
+    session: &RunnerSession,
+    ownership: Option<&RunnerSession>,
+    has_live_peer: bool,
+) -> bool {
+    let owns_daemon = ownership.map_or(true, |owner| {
+        same_remote_daemon_ownership(&session.runner_id, session, owner)
+            && owner.controller_id == session.controller_id
+    });
+    session.mode == RunnerTunnelMode::DirectSsh && owns_daemon && !has_live_peer
 }
 
 fn same_remote_daemon_ownership(
@@ -345,6 +351,79 @@ pub(super) fn remote_lease_bound_daemon_stop_command(homeboy: &str, lease_id: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Barrier,
+    };
+    use std::thread;
+
+    struct FixtureDaemon {
+        address: std::net::SocketAddr,
+        running: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl FixtureDaemon {
+        fn new(lease_id: &str, pid: u32) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
+            let address = listener.local_addr().expect("fixture address");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let running = Arc::new(AtomicBool::new(true));
+            let server_running = Arc::clone(&running);
+            let health = format!(
+                r#"{{"freshness":{{"fresh":true,"stale_reason_code":null,"restartable":true,"lease_id":"{lease_id}","pid":{pid},"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]}},"pid":{pid}}}"#
+            );
+            let thread = thread::spawn(move || {
+                while server_running.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                            let mut request = [0; 1024];
+                            let length = stream.read(&mut request).unwrap_or(0);
+                            if String::from_utf8_lossy(&request[..length]).contains("GET /health ")
+                            {
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    health.len(),
+                                    health
+                                );
+                                let _ = stream.write_all(response.as_bytes());
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("fixture listener failed: {error}"),
+                    }
+                }
+            });
+            Self {
+                address,
+                running,
+                thread: Some(thread),
+            }
+        }
+
+        fn url(&self) -> String {
+            format!("http://{}", self.address)
+        }
+    }
+
+    impl Drop for FixtureDaemon {
+        fn drop(&mut self) {
+            self.running.store(false, Ordering::SeqCst);
+            let _ = TcpStream::connect(self.address);
+            self.thread
+                .take()
+                .expect("fixture thread")
+                .join()
+                .expect("fixture shutdown");
+        }
+    }
 
     fn direct_ssh_session(lease_id: &str) -> RunnerSession {
         RunnerSession {
@@ -394,6 +473,96 @@ mod tests {
             endpoint_probe_error: None,
             termination_evidence: None,
         }
+    }
+
+    fn fixture_session(controller_id: &str, local_url: String) -> RunnerSession {
+        RunnerSession {
+            runner_id: "fixture-lab".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: RunnerSessionRole::Controller,
+            server_id: Some("fixture-server".to_string()),
+            controller_id: Some(controller_id.to_string()),
+            broker_url: None,
+            remote_daemon_address: Some("127.0.0.1:49152".to_string()),
+            local_port: local_url
+                .rsplit(':')
+                .next()
+                .and_then(|port| port.parse().ok()),
+            local_url: Some(local_url),
+            tunnel_pid: None,
+            remote_daemon_pid: Some(4242),
+            remote_daemon_lease_id: Some("lease-fixture".to_string()),
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: Some("homeboy test+fixture".to_string()),
+            connected_at: Utc::now().to_rfc3339(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }
+    }
+
+    #[test]
+    fn fixture_two_controller_session_ownership_lifecycle() {
+        crate::test_support::with_isolated_home(|_| {
+            let owner_daemon = FixtureDaemon::new("lease-fixture", 4242);
+            let peer_daemon = FixtureDaemon::new("lease-fixture", 4242);
+            let owner = fixture_session("controller-owner", owner_daemon.url());
+            let peer = fixture_session("controller-peer", peer_daemon.url());
+
+            let barrier = Arc::new(Barrier::new(3));
+            let mut connects = Vec::new();
+            for session in [owner.clone(), peer.clone()] {
+                let barrier = Arc::clone(&barrier);
+                connects.push(thread::spawn(move || {
+                    write_session(&session).expect("record controller connection");
+                    barrier.wait();
+                    read_session_for_controller(
+                        &session.runner_id,
+                        session.controller_id.as_deref().expect("controller ID"),
+                    )
+                    .expect("read controller connection")
+                    .expect("recorded controller connection")
+                }));
+            }
+            barrier.wait();
+            let connected: Vec<_> = connects
+                .into_iter()
+                .map(|connect| connect.join().expect("controller connect"))
+                .collect();
+
+            assert_ne!(
+                paths::runner_controller_session_file("fixture-lab", "controller-owner")
+                    .expect("owner controller path"),
+                paths::runner_controller_session_file("fixture-lab", "controller-peer")
+                    .expect("peer controller path")
+            );
+            assert_eq!(connected.len(), 2);
+            assert!(connected.iter().all(session_is_live));
+
+            write_ownership(&owner).expect("record live owner");
+            assert!(has_live_peer_session(&owner).expect("live peer"));
+            assert!(!claim_ownership_if_owner_not_live(&peer).expect("protect live owner"));
+            assert!(
+                !should_stop_remote_daemon(&owner, Some(&owner), true),
+                "the live owner cannot tear down the daemon while a peer remains"
+            );
+
+            drop(owner_daemon);
+            assert!(claim_ownership_if_owner_not_live(&peer).expect("transfer stale ownership"));
+            write_ownership(&peer).expect("transfer owner record");
+            assert_eq!(
+                read_ownership("fixture-lab")
+                    .expect("read owner")
+                    .expect("owner record")
+                    .controller_id,
+                peer.controller_id
+            );
+            assert!(
+                should_stop_remote_daemon(&peer, Some(&peer), false),
+                "only the transferred owner can tear down after stale peers are gone"
+            );
+        });
     }
 
     #[test]
