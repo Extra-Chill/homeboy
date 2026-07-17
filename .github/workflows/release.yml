@@ -392,6 +392,7 @@ jobs:
       release-tag: ${{ steps.outputs.outputs['release-tag'] }}
       prepared: ${{ steps.outputs.outputs.prepared }}
       released: ${{ steps.outputs.outputs.released }}
+      recovery-release: ${{ steps.outputs.outputs.recovery-release }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -500,11 +501,13 @@ jobs:
           RELEASE_TAG="${{ steps.recovery.outputs['release-tag'] || steps.release.outputs['release-tag'] }}"
           PREPARED="${{ steps.recovery.outputs.prepared || steps.prepared.outputs.prepared }}"
           RELEASED="${{ steps.recovery.outputs.released || steps.release.outputs.released }}"
+          RECOVERY_RELEASE="${{ needs.check.outputs.recovery-release }}"
 
           echo "release-version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
           echo "release-tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "prepared=${PREPARED}" >> "$GITHUB_OUTPUT"
           echo "released=${RELEASED}" >> "$GITHUB_OUTPUT"
+          echo "recovery-release=${RECOVERY_RELEASE}" >> "$GITHUB_OUTPUT"
 
   # ── Step 4: Build cross-platform binaries ──
   plan:
@@ -542,7 +545,15 @@ jobs:
 
       - id: plan
         run: |
-          dist host --steps=create --tag=${{ needs.prepare.outputs['release-tag'] }} --output-format=json > plan-dist-manifest.json
+          if ! grep -Fqx '[package.metadata.dist]' Cargo.toml; then
+            printf '\n[package.metadata.dist]\ndist = true\n' >> Cargo.toml
+          fi
+          if [ "${{ needs.prepare.outputs.recovery-release }}" = "true" ]; then
+            DIST_ALLOW_DIRTY="--allow-dirty"
+          else
+            DIST_ALLOW_DIRTY=""
+          fi
+          dist host --steps=create --tag=${{ needs.prepare.outputs['release-tag'] }} --output-format=json ${DIST_ALLOW_DIRTY} > plan-dist-manifest.json
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -602,7 +613,15 @@ jobs:
 
       - name: Build artifacts
         run: |
-          dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+          if ! grep -Fqx '[package.metadata.dist]' Cargo.toml; then
+            printf '\n[package.metadata.dist]\ndist = true\n' >> Cargo.toml
+          fi
+          if [ "${{ needs.prepare.outputs.recovery-release }}" = "true" ]; then
+            DIST_ALLOW_DIRTY="--allow-dirty"
+          else
+            DIST_ALLOW_DIRTY=""
+          fi
+          dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} ${DIST_ALLOW_DIRTY} > dist-manifest.json
           echo "dist ran successfully"
 
       - id: cargo-dist
@@ -685,7 +704,15 @@ jobs:
       - id: cargo-dist
         shell: bash
         run: |
-          dist build ${{ needs.plan.outputs.tag-flag }} --output-format=json "--artifacts=global" > dist-manifest.json
+          if ! grep -Fqx '[package.metadata.dist]' Cargo.toml; then
+            printf '\n[package.metadata.dist]\ndist = true\n' >> Cargo.toml
+          fi
+          if [ "${{ needs.prepare.outputs.recovery-release }}" = "true" ]; then
+            DIST_ALLOW_DIRTY="--allow-dirty"
+          else
+            DIST_ALLOW_DIRTY=""
+          fi
+          dist build ${{ needs.plan.outputs.tag-flag }} --output-format=json "--artifacts=global" ${DIST_ALLOW_DIRTY} > dist-manifest.json
           echo "dist ran successfully"
           echo "paths<<EOF" >> "$GITHUB_OUTPUT"
           jq --raw-output ".upload_files[]" dist-manifest.json >> "$GITHUB_OUTPUT"
@@ -740,7 +767,15 @@ jobs:
       - id: host
         shell: bash
         run: |
-          dist host --tag=${{ needs.prepare.outputs['release-tag'] }} --steps=upload --output-format=json > dist-manifest.json
+          if ! grep -Fqx '[package.metadata.dist]' Cargo.toml; then
+            printf '\n[package.metadata.dist]\ndist = true\n' >> Cargo.toml
+          fi
+          if [ "${{ needs.prepare.outputs.recovery-release }}" = "true" ]; then
+            DIST_ALLOW_DIRTY="--allow-dirty"
+          else
+            DIST_ALLOW_DIRTY=""
+          fi
+          dist host --tag=${{ needs.prepare.outputs['release-tag'] }} --steps=upload --output-format=json ${DIST_ALLOW_DIRTY} > dist-manifest.json
           echo "artifacts uploaded successfully"
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"

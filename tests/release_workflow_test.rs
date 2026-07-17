@@ -424,6 +424,52 @@ fn release_finish_head_pipeline_uses_homeboy_action_head_inputs() {
 }
 
 #[test]
+fn release_recovery_propagates_dist_opt_in_and_dirty_allowance_through_all_dist_phases() {
+    let workflow = release_workflow();
+    let prepare = job_section(workflow, "prepare");
+
+    assert!(prepare.contains("recovery-release: ${{ steps.outputs.outputs.recovery-release }}"));
+    assert!(prepare.contains("RECOVERY_RELEASE=\"${{ needs.check.outputs.recovery-release }}\""));
+    assert!(prepare.contains("echo \"recovery-release=${RECOVERY_RELEASE}\" >> \"$GITHUB_OUTPUT\""));
+
+    for job in ["plan", "build-local-artifacts", "build-global-artifacts", "host"] {
+        let section = job_section(workflow, job);
+        let opt_in = section
+            .find("grep -Fqx '[package.metadata.dist]' Cargo.toml")
+            .unwrap_or_else(|| panic!("{job} must use fixed-string exact-line matching"));
+        let dist = section
+            .find("\n          dist ")
+            .unwrap_or_else(|| panic!("{job} must execute cargo-dist"));
+
+        assert!(
+            opt_in < dist,
+            "{job} must append the dist opt-in before executing cargo-dist"
+        );
+        assert!(
+            section.contains("printf '\\n[package.metadata.dist]\\ndist = true\\n' >> Cargo.toml"),
+            "{job} must append the literal root package dist opt-in when it is absent"
+        );
+        assert!(
+            section.contains(
+                "if [ \"${{ needs.prepare.outputs.recovery-release }}\" = \"true\" ]; then\n            DIST_ALLOW_DIRTY=\"--allow-dirty\""
+            ),
+            "{job} must allow a dirty manifest only in recovery mode"
+        );
+        assert!(
+            section.contains("else\n            DIST_ALLOW_DIRTY=\"\""),
+            "{job} must preserve a clean fresh-release cargo-dist invocation"
+        );
+        assert_eq!(
+            section.matches("--allow-dirty").count(),
+            1,
+            "{job} must not pass --allow-dirty outside the recovery branch"
+        );
+    }
+
+    assert!(cargo_manifest().contains("[package.metadata.dist]\ndist = true"));
+}
+
+#[test]
 fn release_prepare_and_publish_preflight_runner_disk() {
     let workflow = release_workflow();
 
