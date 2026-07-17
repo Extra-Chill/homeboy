@@ -427,8 +427,17 @@ pub fn refresh_homeboy_binary(
                 )
             }
         };
-        daemon_refreshed = connect_exit_code == 0;
+        let daemon_identity_verification = (connect_exit_code == 0)
+            .then(|| verify_refreshed_daemon_identity(&plan.runner_id))
+            .transpose()
+            .map_err(|error| error.message);
+        daemon_refreshed = daemon_identity_verification.is_ok();
         if !daemon_refreshed {
+            let reconnect_exit_code = if connect_exit_code == 0 {
+                1
+            } else {
+                connect_exit_code
+            };
             if let Err(rollback_error) =
                 restore_runner_homeboy_path(&plan.runner_id, previous_homeboy_path.as_deref())
             {
@@ -448,10 +457,15 @@ pub fn refresh_homeboy_binary(
                     selected_binary_path: plan.binary_path.clone(),
                     reconnect_required: true,
                     followup_commands: plan.followup_commands.clone(),
-                    failure: Some(refresh_reconnect_failure(&plan, &exec_output, &report)),
+                    failure: Some(refresh_reconnect_failure(
+                        &plan,
+                        &exec_output,
+                        &report,
+                        daemon_identity_verification.err().as_deref(),
+                    )),
                     bootstrap_provenance: None,
                 },
-                connect_exit_code,
+                reconnect_exit_code,
             ));
         }
     } else {
@@ -538,6 +552,22 @@ fn refresh_verification_failure(
 
 fn status_is_disconnected(runner_id: &str) -> Result<bool> {
     Ok(!super::status(runner_id)?.connected)
+}
+
+fn verify_refreshed_daemon_identity(runner_id: &str) -> Result<()> {
+    let status = super::status(runner_id)?;
+    if !status.connected {
+        return Err(Error::internal_unexpected(format!(
+            "runner `{runner_id}` reconnect did not persist an active daemon session"
+        )));
+    }
+    if let Some(stale_daemon) = status.stale_daemon {
+        return Err(Error::internal_unexpected(format!(
+            "runner `{runner_id}` reconnect retained a stale daemon: {}",
+            stale_daemon.message
+        )));
+    }
+    Ok(())
 }
 
 fn refresh_execution_options(
@@ -1105,6 +1135,7 @@ fn refresh_reconnect_failure(
     plan: &HomeboyBinaryRefreshPlan,
     execution: &RunnerExecOutput,
     report: &super::RunnerConnectReport,
+    daemon_identity_verification: Option<&str>,
 ) -> HomeboyBinaryRefreshFailure {
     let mut failure = refresh_failure(plan, execution.clone(), 1);
     failure.verification = Some(format!(
@@ -1112,6 +1143,7 @@ fn refresh_reconnect_failure(
         report
             .failure_message
             .as_deref()
+            .or(daemon_identity_verification)
             .unwrap_or("runner connect returned a non-zero exit code")
     ));
     failure
