@@ -933,7 +933,7 @@ fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
         actions,
         inputs: extension.inputs().to_vec(),
         settings: extension.settings.clone(),
-        structured_sidecars: extension.structured_sidecars(),
+        structured_sidecars: homeboy::core::extension::structured_sidecars(&extension),
         materialization_source: extension.materialization_source.clone(),
         contract_producers: extension.contract_producers.clone(),
         requires,
