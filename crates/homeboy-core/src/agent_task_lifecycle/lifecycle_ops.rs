@@ -976,7 +976,7 @@ pub fn reconcile_pending_runner_submission_intent(run_id: &str) -> Result<bool> 
         source_snapshot: None,
         path_materialization_plan: None,
         require_paths: Vec::new(),
-        runner_workload: None,
+        lab_runner_workload: None,
         lifecycle: Some(RunnerJobLifecycleMetadata {
             source: Some("reverse-broker-reconciliation".to_string()),
             kind: Some("agent-task".to_string()),
