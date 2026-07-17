@@ -137,7 +137,7 @@ pub fn from_main_workflow_with_rig_and_ci_context(
     )
 }
 
-mod comparison;
+pub(crate) mod comparison;
 
 pub(super) use comparison::comparison_metrics;
 pub use comparison::{

@@ -158,7 +158,7 @@ pub(super) fn prepare_committed_harvest(
     } else if snapshot_signaled {
         let source_snapshot = context.source_snapshot()?;
         let lab_offload = context.lab_offload()?;
-        let provenance = lab_workspace_provenance::with_lab_workspace_provenance(|p| {
+        let provenance = crate::lab_workspace_provenance::with_lab_workspace_provenance(|p| {
             p.verify_lab_workspace(
                 &root.display().to_string(),
                 root,
@@ -216,7 +216,7 @@ pub(super) fn prepare_committed_harvest(
     if !is_repository {
         let source_snapshot = context.source_snapshot()?;
         let lab_offload = context.lab_offload()?;
-        lab_workspace_provenance::with_lab_workspace_provenance(|p| {
+        crate::lab_workspace_provenance::with_lab_workspace_provenance(|p| {
             p.materialize_verified_lab_snapshot_git_baseline(
                 &root.display().to_string(),
                 root,

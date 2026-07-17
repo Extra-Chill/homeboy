@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use homeboy_core::agent_task_scheduler::lab_workspace_provenance::{
+use homeboy_core::lab_workspace_provenance::{
     LabWorkspaceProvenanceInfo, LabWorkspaceProvenanceProvider,
 };
 use homeboy_core::source_snapshot::SourceSnapshot;
@@ -83,7 +83,7 @@ impl LabWorkspaceProvenanceProvider for LabWorkspaceProvenance {
 /// Register the lab-workspace provenance provider with core. Called once at
 /// startup.
 pub fn register() {
-    homeboy_core::agent_task_scheduler::lab_workspace_provenance::register_lab_workspace_provenance_provider(
-        Box::new(LabWorkspaceProvenance),
-    );
+    homeboy_core::lab_workspace_provenance::register_lab_workspace_provenance_provider(Box::new(
+        LabWorkspaceProvenance,
+    ));
 }

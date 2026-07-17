@@ -185,6 +185,10 @@ impl CliRuntime {
         // includes durable agent-task records and their health summary without
         // depending on the agent-task subsystem.
         crate::core::agent_task_lifecycle::activity_provider::register();
+        // Register the bench agent-task matrix provider so core's cross-rig
+        // bench comparison can project rig entries into an agent-task matrix
+        // without depending on the agent-task subsystem.
+        crate::core::agent_task::bench_matrix_provider::register();
         // Register the command-label resolver so core::runner can map dispatched
         // argv to a hot-command label without depending on the full CLI parser.
         crate::runner::set_command_label_resolver(|argv| {
