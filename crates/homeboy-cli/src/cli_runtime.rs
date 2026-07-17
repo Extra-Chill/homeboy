@@ -112,6 +112,10 @@ impl CliRuntime {
         // engine can load extension-shipped grammars without resolving them
         // through the extension registry directly.
         crate::core::extension::audit_grammar_source_provider::register();
+        // Register the compiler-warning provider so code_audit's compiler-warnings
+        // detector can run extension compiler/checker scripts without depending on
+        // the extension script runner.
+        crate::core::extension::audit_compiler_warning_provider::register();
         // Register the audit recorded-artifact provider so the artifact-portability
         // detector can read past runs' artifacts from the observation store without
         // code_audit depending on observation — the last seam before audit becomes
