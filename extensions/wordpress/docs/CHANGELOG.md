@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.26.1] - 2026-07-17
+
+### Changed
+- Model WordPress request constants dynamically
+
 ## [3.26.0] - 2026-07-17
 
 ### Added
