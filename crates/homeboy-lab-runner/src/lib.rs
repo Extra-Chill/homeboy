@@ -109,7 +109,7 @@ pub use connection::{
     connect, connect_reverse, connect_with_leaseless_orphan_reconciliation,
     connect_with_orphan_adoption, connect_with_recovery, disconnect, reverse_broker_artifact,
     reverse_broker_artifact_content, reverse_broker_reconcile, runner_artifact_content, status,
-    statuses,
+    statuses, submit_reverse_broker_job,
 };
 mod upgrade_runners;
 pub use availability_provider::register as register_runner_availability_provider;

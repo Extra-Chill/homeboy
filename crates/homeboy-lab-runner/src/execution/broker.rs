@@ -130,13 +130,26 @@ pub(super) fn exec_via_reverse_broker(
         &command,
     )?;
     if let Some(run_id) = run_id.as_deref() {
-        // Match daemon handoff behavior: the accepted remote job must be bound
-        // to its controller lifecycle before a detached response is returned.
-        homeboy_core::agent_task_lifecycle::record_runner_job_identity(
-            run_id,
-            &runner.id,
-            &job.id.to_string(),
-        )?;
+        // A detached handoff must durably transition its controller projection
+        // before the response can be lost. Reconciliation reuses this same
+        // operation after an intent-only crash.
+        if detach_after_handoff {
+            homeboy_core::agent_task_lifecycle::record_detached_lab_run(
+                homeboy_core::agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: &runner.id,
+                    runner_job_id: &job.id.to_string(),
+                    remote_workspace: &cwd,
+                    remote_command: &command,
+                },
+            )?;
+        } else {
+            homeboy_core::agent_task_lifecycle::record_runner_job_identity(
+                run_id,
+                &runner.id,
+                &job.id.to_string(),
+            )?;
+        }
     }
     let persisted_run_id = mirror_evidence
         .then(|| persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref()))

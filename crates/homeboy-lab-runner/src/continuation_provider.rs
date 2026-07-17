@@ -6,7 +6,7 @@
 //! execution, and evidence functions.
 
 use homeboy_core::agent_task_lifecycle::RunnerContinuationProvider;
-use homeboy_core::api_jobs::RunnerJobLogSnapshot;
+use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
 use homeboy_core::error::Result;
 
 /// The runner layer's `RunnerContinuationProvider`. Registered with core at startup.
@@ -52,6 +52,14 @@ impl RunnerContinuationProvider for RunnerContinuation {
             },
         )?;
         Ok(exit_code)
+    }
+
+    fn submit_reverse_broker_job(
+        &self,
+        runner_id: &str,
+        request: RemoteRunnerJobRequest,
+    ) -> Result<Job> {
+        super::connection::submit_reverse_broker_job(runner_id, request)
     }
 }
 

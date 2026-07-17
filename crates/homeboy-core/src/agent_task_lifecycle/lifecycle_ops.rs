@@ -1,4 +1,6 @@
 use super::*;
+use crate::api_jobs::{RemoteRunnerJobRequest, RunnerJobLifecycleMetadata};
+use crate::secret_env_plan::SecretEnvPlan;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 
@@ -699,6 +701,9 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let resolved_run_id = resolve_run_id(run_id)?;
     let _ = reconcile_deferred_candidate(&resolved_run_id)?;
     let mut record = store::read_record(&resolved_run_id)?;
+    if reconcile_pending_runner_submission_intent(&resolved_run_id)? {
+        record = store::read_record(&resolved_run_id)?;
+    }
     if is_expired_unaccepted_lab_handoff(&record, chrono::Utc::now()) {
         let _ = expire_unaccepted_lab_handoff(&resolved_run_id)?;
         record = store::read_record(&resolved_run_id)?;
@@ -842,6 +847,7 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
 pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
     let now = chrono::Utc::now();
     let mut accepted_run_ids = Vec::new();
+    let mut pending_intent_run_ids = Vec::new();
     let mut expired_run_ids = Vec::new();
     // Scan the stored snapshot so this operation owns and reports its expiry
     // mutations. `list_records` refreshes through `status`, which also expires
@@ -852,12 +858,19 @@ pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
             && record.runner_job_id().is_some()
         {
             accepted_run_ids.push(record.run_id);
+        } else if has_pending_runner_submission_intent(&record) {
+            pending_intent_run_ids.push(record.run_id);
         } else if is_expired_unaccepted_lab_handoff(&record, now) {
             expired_run_ids.push(record.run_id);
         }
     }
 
     let mut reconciled = 0;
+    for run_id in pending_intent_run_ids {
+        if reconcile_pending_runner_submission_intent(&run_id)? {
+            reconciled += 1;
+        }
+    }
     for run_id in expired_run_ids {
         if expire_unaccepted_lab_handoff(&run_id)? {
             reconciled += 1;
@@ -872,6 +885,137 @@ pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
         }
     }
     Ok(reconciled)
+}
+
+fn has_pending_runner_submission_intent(record: &AgentTaskRunRecord) -> bool {
+    record.runner_job_id().is_none()
+        && record
+            .metadata
+            .pointer("/runner_submission_intent/state")
+            .and_then(Value::as_str)
+            == Some("pending")
+}
+
+/// Replay an unacknowledged durable handoff. A broker that already accepted the
+/// original POST returns the same job for its submission key, so this covers
+/// both controller crash boundaries without retaining secret values.
+pub fn reconcile_pending_runner_submission_intent(run_id: &str) -> Result<bool> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::read_record(&run_id)?;
+    if !has_pending_runner_submission_intent(&record) {
+        return Ok(false);
+    }
+    let intent = record
+        .metadata
+        .get("runner_submission_intent")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            Error::internal_unexpected("pending runner submission intent is malformed")
+        })?;
+    let string = |key: &str| {
+        intent
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+    };
+    let runner_id = string("runner_id").ok_or_else(|| {
+        Error::internal_unexpected("pending runner submission intent has no runner id")
+    })?;
+    let submission_key = string("submission_key").ok_or_else(|| {
+        Error::internal_unexpected("pending runner submission intent has no submission key")
+    })?;
+    let workload = intent
+        .get("canonical_workload")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            Error::internal_unexpected("pending runner submission intent has no canonical workload")
+        })?;
+    let cwd = workload
+        .get("remote_workspace")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::internal_unexpected("pending runner submission intent has no remote workspace")
+        })?;
+    let command = workload
+        .get("remote_command")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            Error::internal_unexpected("pending runner submission intent has no remote command")
+        })?
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                Error::internal_unexpected(
+                    "pending runner submission intent has invalid remote command",
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let secret_env_names = intent
+        .get("secret_env_names")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let request = RemoteRunnerJobRequest {
+        runner_id: runner_id.clone(),
+        project_id: None,
+        operation: "runner.exec".to_string(),
+        command: command.clone(),
+        cwd: Some(cwd.clone()),
+        env: Default::default(),
+        secret_env_names: secret_env_names.clone(),
+        secret_env_plan: SecretEnvPlan::from_secret_env_names(secret_env_names),
+        env_materialization: None,
+        capture_patch: false,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        require_paths: Vec::new(),
+        runner_workload: None,
+        lifecycle: Some(RunnerJobLifecycleMetadata {
+            source: Some("reverse-broker-reconciliation".to_string()),
+            kind: Some("agent-task".to_string()),
+            durable_run_id: Some(run_id.clone()),
+            active_child_count: None,
+            active_cell_count: None,
+        }),
+        metadata: Some(json!({
+            "submission_key": submission_key,
+            "durable_run_id": run_id,
+            "reconciled_from": "durable_detached_handoff_intent",
+        })),
+    };
+    match runner_continuation::with_runner_continuation(|provider| {
+        provider.submit_reverse_broker_job(&runner_id, request)
+    }) {
+        Ok(job) => {
+            record_detached_lab_run(DetachedLabRunRecord {
+                run_id: &run_id,
+                runner_id: &runner_id,
+                runner_job_id: &job.id.to_string(),
+                remote_workspace: &cwd,
+                remote_command: &command,
+            })?;
+            Ok(true)
+        }
+        Err(error) => {
+            let _ = store::mutate_record(&run_id, |record| {
+                let metadata = record.ensure_metadata_object();
+                metadata["runner_submission_intent"]["last_reconciliation_error"] = json!({
+                    "code": error.code.as_str(),
+                    "message": error.message,
+                    "retryable": true,
+                });
+                true
+            })?;
+            Ok(false)
+        }
+    }
 }
 
 fn is_expired_unaccepted_lab_handoff(
