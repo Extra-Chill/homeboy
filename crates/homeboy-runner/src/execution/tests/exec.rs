@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    RunnerActiveJobSource, RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning,
-    RunnerStatusReport,
+    RunnerActiveJobSource, RunnerActiveJobState, RunnerSession, RunnerSessionRole,
+    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode,
 };
 use homeboy_core::runner_execution_envelope::{
     PATH_MATERIALIZATION_MODE_GIT, PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
@@ -40,6 +40,45 @@ fn explicit_refresh_keeps_active_or_uncertain_stale_daemons_protected() {
 
     assert!(!allows_idle_stale_daemon_refresh(&options, &active));
     assert!(!allows_idle_stale_daemon_refresh(&options, &unavailable));
+}
+
+#[test]
+fn refresh_execution_uses_the_connected_preflight_session_without_a_second_lookup() {
+    let mut status = stale_direct_daemon_status();
+    status.session = Some(RunnerSession {
+        runner_id: "homeboy-lab".to_string(),
+        mode: RunnerTunnelMode::DirectSsh,
+        role: RunnerSessionRole::Controller,
+        server_id: Some("homeboy-lab".to_string()),
+        controller_id: Some("controller".to_string()),
+        broker_url: None,
+        remote_daemon_address: Some("127.0.0.1:4242".to_string()),
+        local_port: Some(4242),
+        local_url: Some("http://127.0.0.1:4242".to_string()),
+        tunnel_pid: Some(1),
+        remote_daemon_pid: Some(2),
+        remote_daemon_lease_id: Some("idempotently-reattached-lease".to_string()),
+        homeboy_version: "0.288.10".to_string(),
+        homeboy_build_identity: None,
+        connected_at: "2026-07-17T00:00:00Z".to_string(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: None,
+        leaseless_recovery_evidence: None,
+    });
+    let resolved = execution_status("unresolvable-runner", Some(status.clone()))
+        .expect("the refresh transaction keeps its authoritative preflight session");
+
+    assert_eq!(resolved.runner_id, "homeboy-lab");
+    assert!(resolved.connected);
+    assert_eq!(resolved.session_path, "/tmp/homeboy-lab.json");
+    assert_eq!(
+        resolved
+            .session
+            .as_ref()
+            .and_then(|session| session.remote_daemon_lease_id.as_deref()),
+        Some("idempotently-reattached-lease")
+    );
 }
 
 fn authoritative_drained_freshness() -> homeboy_core::daemon::DaemonFreshnessReport {

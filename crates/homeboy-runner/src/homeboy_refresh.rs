@@ -15,10 +15,10 @@ use homeboy_core::output::MergeOutput;
 
 use super::connection::{active_jobs_before_daemon_replacement, disconnect_with_session};
 use super::{
-    connect_with_orphan_adoption, exec, load, materialize_runner_extension_with_env, merge,
-    normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
-    RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput,
-    RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
+    connect_with_orphan_adoption, exec, exec_with_status_snapshot, load,
+    materialize_runner_extension_with_env, merge, normalize_runner_command_env_for_homeboy_path,
+    plan_controller_snapshot_extension, RunnerCapabilityPreflight, RunnerExecOptions,
+    RunnerExecOutput, RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
     RunnerFileTransfer, RunnerKind,
 };
 
@@ -296,10 +296,11 @@ pub fn refresh_homeboy_binary(
     promotion_lease.assert_generation()?;
     let runner = load(&plan.runner_id)?;
     let previous_homeboy_path = runner.settings.homeboy_path.clone();
-    let disconnected_ssh =
-        runner.kind == RunnerKind::Ssh && status_is_disconnected(&plan.runner_id)?;
+    let connection_status = super::status(&plan.runner_id)?;
+    let disconnected_ssh = runner.kind == RunnerKind::Ssh && !connection_status.connected;
     let exec_options = refresh_execution_options(&plan, required_commands, disconnected_ssh);
-    let (exec_output, exit_code) = exec(&plan.runner_id, exec_options)?;
+    let (exec_output, exit_code) =
+        exec_with_status_snapshot(&plan.runner_id, exec_options, Some(connection_status))?;
     if exit_code != 0 {
         return Ok((
             HomeboyBinaryRefreshOutput {
@@ -550,10 +551,6 @@ fn refresh_verification_failure(
     let mut failure = refresh_failure(plan, execution, 1);
     failure.verification = Some(verification);
     failure
-}
-
-fn status_is_disconnected(runner_id: &str) -> Result<bool> {
-    Ok(!super::status(runner_id)?.connected)
 }
 
 fn verify_refreshed_daemon_identity(runner_id: &str) -> Result<()> {
