@@ -128,6 +128,7 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
             source_worktree_path: None,
             base_ref: None,
             task_base_sha: None,
+            candidate_ref: None,
             to_worktree: "fixture@socket-gate".to_string(),
             task_id: None,
             artifact_id: None,
