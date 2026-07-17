@@ -16,7 +16,6 @@ use std::path::Path;
 pub use claims::{Claim, ClaimConfidence, ClaimType};
 pub use verify::VerifyResult;
 
-use crate::component;
 use crate::is_zero;
 
 /// A doc that needs content review due to referenced files changing.
@@ -156,15 +155,13 @@ pub(crate) fn find_doc_files(docs_path: &Path, excluded_targets: &[String]) -> V
 }
 
 /// Collect audit ignore patterns from all linked extensions.
-pub(crate) fn collect_extension_ignore_patterns(comp: &component::Component) -> Vec<String> {
+pub(crate) fn collect_extension_ignore_patterns(extension_ids: &[String]) -> Vec<String> {
     let mut patterns = Vec::new();
-    if let Some(ref extensions) = comp.extensions {
-        for extension_id in extensions.keys() {
-            if let Some(manifest) =
-                crate::code_audit::extension_manifests::load_audit_manifest(extension_id)
-            {
-                patterns.extend(manifest.audit_ignore_claim_patterns);
-            }
+    for extension_id in extension_ids {
+        if let Some(manifest) =
+            crate::code_audit::extension_manifests::load_audit_manifest(extension_id)
+        {
+            patterns.extend(manifest.audit_ignore_claim_patterns);
         }
     }
     patterns

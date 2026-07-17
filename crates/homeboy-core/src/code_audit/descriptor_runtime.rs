@@ -14,7 +14,6 @@ use super::{
     time_audit_detector, AuditExecutionPlan, AuditTiming, DetectorDescriptor, DetectorRuntime,
     Finding, FingerprintDetectorRunner, GenericDetectorRunner, RootDetectorRunner,
 };
-use crate::component;
 use homeboy_audit_contract::AuditConfig;
 use homeboy_engine_primitives::codebase_scan::CodebaseSnapshot;
 use std::path::Path;
@@ -178,13 +177,10 @@ fn run_dead_code(context: &DetectorRunContext<'_>) -> Vec<Finding> {
 /// that declares a `test_mapping` for the component, matching the prior
 /// hand-wired loop's "first extension wins, then stop" behavior.
 fn run_test_coverage(context: &DetectorRunContext<'_>) -> Vec<Finding> {
-    let Ok(comp) = component::load(context.component_id) else {
+    let Some(comp) = super::component_provider::resolve_by_id(context.component_id) else {
         return Vec::new();
     };
-    let Some(extensions) = comp.extensions else {
-        return Vec::new();
-    };
-    for ext_id in extensions.keys() {
+    for ext_id in &comp.extension_ids {
         if let Some(ext_manifest) = super::extension_manifests::load_audit_manifest(ext_id) {
             if let Some(test_mapping) = &ext_manifest.test_mapping {
                 return test_coverage::run(context.root, context.all_fingerprints, test_mapping);
