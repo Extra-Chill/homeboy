@@ -5,7 +5,7 @@ use homeboy_engine_primitives::command::{wait_with_bounded_output, DEFAULT_CAPTU
 use super::ExtensionManifest;
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum CompilerWarningContract {
+pub enum CompilerWarningContract {
     Warnings,
     Fixes,
 }
@@ -19,7 +19,7 @@ impl CompilerWarningContract {
     }
 }
 
-pub(crate) fn extensions_for_compiler_warning_contract(
+pub fn extensions_for_compiler_warning_contract(
     root: &Path,
     contract: CompilerWarningContract,
 ) -> Vec<ExtensionManifest> {
@@ -51,7 +51,7 @@ pub(crate) fn extensions_for_compiler_warning_contract(
     extensions
 }
 
-pub(crate) fn run_compiler_warning_contract_script(
+pub fn run_compiler_warning_contract_script(
     extension: &ExtensionManifest,
     contract: CompilerWarningContract,
     root: &Path,

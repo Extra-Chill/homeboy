@@ -338,7 +338,7 @@ impl PlanBuilder {
         self
     }
 
-    pub(crate) fn warnings(mut self, warnings: impl IntoIterator<Item = String>) -> Self {
+    pub fn warnings(mut self, warnings: impl IntoIterator<Item = String>) -> Self {
         self.plan.warnings.extend(warnings);
         self
     }
@@ -353,7 +353,7 @@ impl PlanBuilder {
         self
     }
 
-    pub(crate) fn summarize_disabled_as_skipped(mut self) -> Self {
+    pub fn summarize_disabled_as_skipped(mut self) -> Self {
         self.summary_mode = SummaryMode::DisabledAsSkipped;
         self
     }

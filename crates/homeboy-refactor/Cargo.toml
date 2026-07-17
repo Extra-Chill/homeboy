@@ -1,0 +1,30 @@
+[package]
+name = "homeboy-refactor"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Structural refactoring engine for homeboy: term rename, module decompose, item moves, and lint/test/audit autofix. Depends on homeboy-core; core does not depend on it."
+publish = false
+
+[lib]
+name = "homeboy_refactor"
+path = "src/lib.rs"
+
+[dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit" }
+homeboy-refactor-contract = { version = "0.1.0", path = "../homeboy-refactor-contract" }
+homeboy-audit-contract = { version = "0.1.0", path = "../homeboy-audit-contract" }
+homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
+homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.11"
+glob = "0.3"
+glob-match = "0.2"
+toml = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
+tempfile = "3.14"
+
+[dev-dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
