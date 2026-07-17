@@ -5,7 +5,6 @@ use serde::Serialize;
 
 use homeboy::core::activity::{self, ActivityItem, ActivityReport, ActivityScope, ActivityState};
 use homeboy::core::notify::{self, NotifyEvent, NotifyOutcome};
-use homeboy::core::observation::ObservationStore;
 use homeboy::core::{Error, Result};
 
 use super::utils::response::{
@@ -180,7 +179,6 @@ pub fn render_activity_summary(payload: &serde_json::Value) -> Option<String> {
 }
 
 fn list(args: ActivityListArgs) -> CmdResult<ActivityOutput> {
-    reconcile_runs_best_effort();
     let scope = if args.all {
         ActivityScope::All
     } else {
@@ -195,7 +193,6 @@ fn list(args: ActivityListArgs) -> CmdResult<ActivityOutput> {
 }
 
 fn show(id: &str) -> CmdResult<ActivityOutput> {
-    reconcile_runs_best_effort();
     let report = activity::show_activity(id)?;
     let actionable = actionable_for_activity_report(&report);
     Ok((
@@ -211,7 +208,6 @@ fn watch(args: ActivityWatchArgs) -> CmdResult<ActivityOutput> {
     let mut poll_count = 0;
 
     loop {
-        reconcile_runs_best_effort();
         let item = activity::resolve_activity(&args.id)?;
         poll_count += 1;
         eprintln!(
@@ -239,12 +235,6 @@ fn watch(args: ActivityWatchArgs) -> CmdResult<ActivityOutput> {
             }
         }
         std::thread::sleep(interval);
-    }
-}
-
-fn reconcile_runs_best_effort() {
-    if let Ok(store) = ObservationStore::open_initialized() {
-        let _ = crate::commands::runs::reconcile::reconcile_owned_stale_running_runs(&store, 1000);
     }
 }
 
@@ -488,6 +478,8 @@ fn truncate(value: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
+    use homeboy::test_support::with_isolated_home;
     use serde_json::json;
 
     #[test]
@@ -506,5 +498,49 @@ mod tests {
             parse_duration("2s").expect("duration"),
             Duration::from_secs(2)
         );
+    }
+
+    #[test]
+    fn activity_reads_do_not_reconcile_stale_running_records() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("activity-read-test")
+                        .metadata(json!({ "owner_pid": 999_999 }))
+                        .build(),
+                )
+                .expect("running run");
+            let before = store
+                .get_run(&run.id)
+                .expect("read run")
+                .expect("run exists");
+
+            list(ActivityListArgs {
+                limit: 1,
+                all: false,
+            })
+            .expect("list activity");
+            show(&run.id).expect("show activity");
+            watch(ActivityWatchArgs {
+                id: run.id.clone(),
+                timeout: Some("0s".to_string()),
+                interval: "0s".to_string(),
+                notify: false,
+            })
+            .expect("watch activity");
+            list(ActivityListArgs {
+                limit: 1,
+                all: false,
+            })
+            .expect("repeat list activity");
+
+            let after = store
+                .get_run(&run.id)
+                .expect("read run")
+                .expect("run exists");
+            assert_eq!(after, before);
+            assert_eq!(after.status, RunStatus::Running.as_str());
+        });
     }
 }
