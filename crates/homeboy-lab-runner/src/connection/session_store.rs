@@ -98,6 +98,20 @@ pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
     read_session_for_controller(runner_id, &controller_id())
 }
 
+/// Resolve this controller's session, or borrow a peer's live direct-SSH
+/// tunnel for an in-process handoff. Borrowing never writes a controller
+/// record, so only the original controller may later tear down that tunnel.
+pub(super) fn read_session_or_live_peer(runner_id: &str) -> Result<Option<RunnerSession>> {
+    let session = read_session(runner_id)?;
+    if session.as_ref().is_some_and(session_is_live) {
+        return Ok(session);
+    }
+
+    let directory = paths::runner_sessions_dir()?.join(runner_id);
+    let peer = live_peer_session_in(&directory, None, session_is_live)?;
+    Ok(peer.or(session))
+}
+
 pub(super) fn read_session_for_controller(
     runner_id: &str,
     controller_id: &str,
@@ -218,10 +232,60 @@ pub(super) fn has_live_peer_session(session: &RunnerSession) -> Result<bool> {
     Ok(false)
 }
 
+fn live_peer_session_in(
+    directory: &PathBuf,
+    controller_id: Option<&str>,
+    is_live: impl Fn(&RunnerSession) -> bool,
+) -> Result<Option<RunnerSession>> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some("read runner controller sessions".to_string()),
+            ))
+        }
+    };
+    let mut live_peer: Option<RunnerSession> = None;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read runner controller session".to_string()),
+            )
+        })?;
+        let Some(peer) = read_session_at(&entry.path())? else {
+            continue;
+        };
+        if controller_id
+            .is_none_or(|controller_id| peer.controller_id.as_deref() != Some(controller_id))
+            && peer.mode == RunnerTunnelMode::DirectSsh
+            && is_live(&peer)
+        {
+            if let Some(existing) = &live_peer {
+                if existing.remote_daemon_address != peer.remote_daemon_address
+                    || existing.remote_daemon_lease_id != peer.remote_daemon_lease_id
+                    || existing.remote_daemon_pid != peer.remote_daemon_pid
+                {
+                    // Two live sessions for this runner disagree on daemon
+                    // identity. Refuse an ambiguous handoff rather than route
+                    // a Cook job to an arbitrary peer tunnel.
+                    return Ok(None);
+                }
+            } else {
+                live_peer = Some(peer);
+            }
+        }
+    }
+    Ok(live_peer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{RunnerSessionRole, RunnerTunnelMode};
+    use tempfile::TempDir;
 
     fn session(controller_id: &str, lease_id: &str) -> RunnerSession {
         RunnerSession {
@@ -268,6 +332,27 @@ mod tests {
             stale.remote_daemon_lease_id,
             replacement.remote_daemon_lease_id
         );
+    }
+
+    #[test]
+    fn cook_handoff_adopts_a_live_peer_direct_ssh_session_without_claiming_it() {
+        let root = TempDir::new().expect("session directory");
+        let peer = session("cook-readiness", "lease-accepted");
+        write_session_at(&root.path().join("cook-readiness.json"), &peer)
+            .expect("write readiness session");
+
+        let adopted =
+            live_peer_session_in(&root.path().to_path_buf(), Some("cook-handoff"), |_| true)
+                .expect("read live peer")
+                .expect("accepted session");
+
+        assert_eq!(
+            adopted.remote_daemon_lease_id.as_deref(),
+            Some("lease-accepted")
+        );
+        assert_eq!(adopted.controller_id.as_deref(), Some("cook-readiness"));
+        assert!(root.path().join("cook-readiness.json").exists());
+        assert!(!root.path().join("cook-handoff.json").exists());
     }
 }
 
