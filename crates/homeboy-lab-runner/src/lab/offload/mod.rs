@@ -108,12 +108,12 @@ use super::super::{
     lab_offload_changed_since_ref, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, load, plan_managed_runner_source_syncs,
     preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
-    prepare_lab_runner_capability, remote_runner_homeboy_path, rig_materialization, status,
-    sync_workspace, LabRunnerGateDecision, MaterializedWorkspace, Runner,
-    RunnerCapabilityPreflight, RunnerDependencyCacheSaveOutput, RunnerDependencyCacheSaveRequest,
-    RunnerExecOptions, RunnerFileTransfer, RunnerStatusReport, RunnerWorkspaceApplyOutput,
-    RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy,
+    prepare_lab_runner_capability, remote_runner_homeboy_path, reuse_compatible_snapshot_workspace,
+    rig_materialization, status, sync_workspace, LabRunnerGateDecision, MaterializedWorkspace,
+    Runner, RunnerCapabilityPreflight, RunnerDependencyCacheSaveOutput,
+    RunnerDependencyCacheSaveRequest, RunnerExecOptions, RunnerFileTransfer, RunnerStatusReport,
+    RunnerWorkspaceApplyOutput, RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy,
 };
 
 #[cfg(test)]

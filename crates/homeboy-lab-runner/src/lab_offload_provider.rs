@@ -34,6 +34,7 @@ impl LabOffloadProvider for RunnerLabOffload {
             source_path: request.source_path,
             verified_cook_baseline: request.verified_cook_baseline,
             require_controller_git_bundle: request.require_controller_git_bundle,
+            reuse_compatible_snapshot: request.reuse_compatible_snapshot,
             job_overrides: request.job_overrides,
         })
     }
