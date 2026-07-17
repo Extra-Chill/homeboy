@@ -1,0 +1,466 @@
+use crate::report::{
+    build_audit_summary, build_changed_since_summary, compute_fixability, finding_kind_key,
+    from_main_workflow, AuditChangedSinceSummary, AuditCommandOutput,
+};
+// Only used by the slow-tier `test_compute_fixability_with_analysis`.
+#[cfg(feature = "slow-tests")]
+use crate::report::compute_fixability_with_analysis;
+use crate::test_helpers::{empty_result, make_finding};
+use crate::{AuditFinding, Finding, FindingConfidence, Severity};
+
+#[test]
+fn test_build_audit_summary_empty_result() {
+    let result = empty_result();
+    let summary = build_audit_summary(&result, 0);
+
+    assert_eq!(summary.total_findings, 0);
+    assert_eq!(summary.warnings, 0);
+    assert_eq!(summary.info, 0);
+    assert_eq!(summary.exit_code, 0);
+    assert!(summary.finding_groups.is_empty());
+    assert!(summary.top_findings.is_empty());
+    assert_eq!(summary.alignment_score, None);
+}
+
+#[test]
+fn test_build_audit_summary() {
+    let result = empty_result();
+    let summary = build_audit_summary(&result, 0);
+
+    assert_eq!(summary.total_findings, 0);
+    assert_eq!(summary.exit_code, 0);
+}
+
+#[test]
+fn test_build_audit_summary_counts_severities() {
+    let mut result = empty_result();
+    result.findings.push(make_finding(Severity::Warning));
+    result.findings.push(make_finding(Severity::Warning));
+    result.findings.push(make_finding(Severity::Info));
+
+    let summary = build_audit_summary(&result, 1);
+
+    assert_eq!(summary.total_findings, 3);
+    assert_eq!(summary.warnings, 2);
+    assert_eq!(summary.info, 1);
+    assert_eq!(summary.exit_code, 1);
+}
+
+#[test]
+fn test_build_audit_summary_prioritizes_warnings_in_top_findings() {
+    let mut result = empty_result();
+    result.findings.push(Finding {
+        convention: "test_coverage".to_string(),
+        severity: Severity::Info,
+        file: "src/missing-test.rs".to_string(),
+        description: "No test file found".to_string(),
+        suggestion: "Create test file".to_string(),
+        kind: AuditFinding::MissingTestFile,
+    });
+    result.findings.push(Finding {
+        convention: "duplication".to_string(),
+        severity: Severity::Warning,
+        file: "src/duplicate.rs".to_string(),
+        description: "Duplicate function".to_string(),
+        suggestion: "Extract shared helper".to_string(),
+        kind: AuditFinding::DuplicateFunction,
+    });
+
+    let summary = crate::report::build_audit_summary(&result, 1);
+
+    assert_eq!(summary.top_findings[0].severity.as_deref(), Some("warning"));
+    assert_eq!(
+        summary.top_findings[0].rule.as_deref(),
+        Some("duplicate_function")
+    );
+}
+
+#[test]
+fn test_build_audit_summary_groups_findings_for_drilldown() {
+    let mut result = empty_result();
+    result.component_id = "homeboy".to_string();
+    result.findings.push(Finding {
+        convention: "structural".to_string(),
+        severity: Severity::Warning,
+        file: "src/a.rs".to_string(),
+        description: "File exceeds the size threshold".to_string(),
+        suggestion: "Split the module into focused pieces".to_string(),
+        kind: AuditFinding::GodFile,
+    });
+    result.findings.push(Finding {
+        convention: "structural".to_string(),
+        severity: Severity::Info,
+        file: "src/b.rs".to_string(),
+        description: "File exceeds the size threshold".to_string(),
+        suggestion: "Split the module into focused pieces".to_string(),
+        kind: AuditFinding::GodFile,
+    });
+    result.findings.push(Finding {
+        convention: "structural".to_string(),
+        severity: Severity::Warning,
+        file: "src/large.rs".to_string(),
+        description: "Module has too many items".to_string(),
+        suggestion: "Move related items into submodules".to_string(),
+        kind: AuditFinding::HighItemCount,
+    });
+
+    let summary = build_audit_summary(&result, 1);
+    let grouped_json = serde_json::to_value(&summary.finding_groups).expect("groups serialize");
+
+    assert_eq!(summary.finding_groups.len(), 2);
+    assert_eq!(summary.finding_groups[0].kind, "god_file");
+    assert_eq!(summary.finding_groups[0].count, 2);
+    assert_eq!(summary.finding_groups[0].warnings, 1);
+    assert_eq!(summary.finding_groups[0].info, 1);
+    assert_eq!(
+        summary.finding_groups[0].confidence,
+        FindingConfidence::Heuristic
+    );
+    assert_eq!(
+        summary.finding_groups[0].sample_files,
+        vec!["src/a.rs", "src/b.rs"]
+    );
+    assert_eq!(
+        summary.finding_groups[0].drilldown_command,
+        "homeboy review audit homeboy --only god_file"
+    );
+    assert_eq!(summary.finding_groups[1].kind, "high_item_count");
+    assert_eq!(grouped_json[0]["sample_files"][1], "src/b.rs");
+    assert_eq!(
+        grouped_json[1]["drilldown_command"],
+        "homeboy review audit homeboy --only high_item_count"
+    );
+}
+
+#[test]
+fn test_build_audit_summary_includes_finding_confidence() {
+    let mut result = empty_result();
+    result.findings.push(make_finding(Severity::Warning));
+    result.findings[0].kind = AuditFinding::OrphanedTest;
+
+    let summary = build_audit_summary(&result, 1);
+
+    assert_eq!(summary.top_findings.len(), 1);
+    assert_eq!(
+        summary.top_findings[0].metadata["confidence"],
+        serde_json::json!(FindingConfidence::Heuristic)
+    );
+}
+
+#[test]
+fn test_build_audit_summary_caps_top_findings_at_20() {
+    let mut result = empty_result();
+    for _ in 0..25 {
+        result.findings.push(make_finding(Severity::Warning));
+    }
+
+    let summary = build_audit_summary(&result, 1);
+
+    assert_eq!(summary.total_findings, 25);
+    assert_eq!(summary.top_findings.len(), 20);
+}
+
+#[test]
+fn test_build_audit_summary_preserves_alignment_score() {
+    let mut result = empty_result();
+    result.summary.alignment_score = Some(0.85);
+
+    let summary = build_audit_summary(&result, 0);
+
+    assert_eq!(summary.alignment_score, Some(0.85));
+}
+
+#[test]
+fn test_build_audit_summary_omits_changed_since_by_default() {
+    let result = empty_result();
+    let summary = build_audit_summary(&result, 0);
+
+    assert!(summary.changed_since.is_none());
+}
+
+#[test]
+fn test_build_changed_since_summary_splits_introduced_from_context() {
+    let mut result = empty_result();
+    result.findings.push(Finding {
+        convention: "structural".to_string(),
+        severity: Severity::Warning,
+        file: "src/large.rs".to_string(),
+        description: "Existing large file debt".to_string(),
+        suggestion: "Consider decomposing into focused modules".to_string(),
+        kind: AuditFinding::GodFile,
+    });
+    result.findings.push(Finding {
+        convention: "dead_code".to_string(),
+        severity: Severity::Warning,
+        file: "src/large.rs".to_string(),
+        description: "New unused export".to_string(),
+        suggestion: "Remove or reference the export".to_string(),
+        kind: AuditFinding::UnreferencedExport,
+    });
+
+    let comparison = homeboy_core::engine::baseline::Comparison {
+        new_items: vec![homeboy_core::engine::baseline::NewItem {
+            fingerprint: "dead_code::src/large.rs::UnreferencedExport".to_string(),
+            description: "New unused export".to_string(),
+            context_label: "dead_code".to_string(),
+        }],
+        resolved_fingerprints: vec![],
+        delta: 1,
+        drift_increased: true,
+    };
+
+    assert_eq!(
+        build_changed_since_summary(&result, &comparison),
+        AuditChangedSinceSummary {
+            introduced_findings: 1,
+            contextual_findings: 1,
+        }
+    );
+}
+
+#[test]
+fn test_changed_since_summary_serializes_as_additive_summary_field() {
+    let mut summary = build_audit_summary(&empty_result(), 0);
+    summary.changed_since = Some(AuditChangedSinceSummary {
+        introduced_findings: 0,
+        contextual_findings: 3,
+    });
+
+    let value = serde_json::to_value(summary).expect("summary serializes");
+
+    assert_eq!(value["changed_since"]["introduced_findings"], 0);
+    assert_eq!(value["changed_since"]["contextual_findings"], 3);
+}
+
+#[test]
+fn test_compute_fixability_returns_none_for_empty_result() {
+    let result = empty_result();
+    // source_path is /tmp/test which exists but has no source files to fix
+    let fixability = compute_fixability(&result);
+    assert!(fixability.is_none());
+}
+
+#[test]
+fn test_compute_fixability() {
+    let mut result = empty_result();
+    result.source_path = "/nonexistent/path/that/does/not/exist".to_string();
+
+    assert!(compute_fixability(&result).is_none());
+}
+
+#[test]
+fn test_compute_fixability_returns_none_for_nonexistent_path() {
+    let mut result = empty_result();
+    result.source_path = "/nonexistent/path/that/does/not/exist".to_string();
+    result.findings.push(make_finding(Severity::Warning));
+    let fixability = compute_fixability(&result);
+    assert!(fixability.is_none());
+}
+
+#[test]
+fn test_compute_fixability_skips_structural_only_results() {
+    let mut result = empty_result();
+    result.findings.push(Finding {
+        convention: "structural".to_string(),
+        severity: Severity::Warning,
+        file: "src/big.rs".to_string(),
+        description: "File has 1200 lines".to_string(),
+        suggestion: "Consider decomposing into focused modules".to_string(),
+        kind: AuditFinding::GodFile,
+    });
+
+    assert!(compute_fixability(&result).is_none());
+}
+
+#[cfg(feature = "slow-tests")]
+#[test]
+fn test_compute_fixability_counts_fixes_from_real_audit() {
+    use std::fs;
+
+    // Fixability planning is inverted behind a provider the CLI registers at
+    // startup; a core lib test never runs the CLI, so register the refactor-backed
+    // provider explicitly — otherwise fixability is always unavailable (None).
+    crate::refactor::audit_fixability_provider::register();
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+
+    // Create a minimal codebase with a detectable convention + outlier
+    fs::create_dir_all(root.join("commands")).unwrap();
+    // Two conforming files establish a convention (methods: run + helper)
+    fs::write(
+        root.join("commands/good_one.rs"),
+        "pub fn run() {}\npub fn helper() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("commands/good_two.rs"),
+        "pub fn run() {}\npub fn helper() {}\n",
+    )
+    .unwrap();
+    // One outlier is missing a method → should produce a fixable finding
+    fs::write(root.join("commands/bad.rs"), "pub fn run() {}\n").unwrap();
+
+    // Run a real audit
+    let result = crate::audit_path_with_id("fixability-test", &root.to_string_lossy())
+        .expect("audit should run");
+
+    // Compute fixability
+    let fixability = compute_fixability(&result);
+
+    // Should have at least some fixable findings (the missing method outlier)
+    if let Some(fix) = fixability {
+        assert!(
+            fix.fixable_count > 0,
+            "expected at least one fixable finding"
+        );
+        // automated + manual_only should equal fixable_count
+        assert_eq!(
+            fix.fixable_count,
+            fix.automated_count + fix.manual_only_count
+        );
+        // by_kind should not be empty
+        assert!(!fix.by_kind.is_empty(), "expected per-kind breakdown");
+    }
+    // Note: fixability may also be None if the minimal codebase doesn't trigger
+    // enough conventions — that's acceptable for this test.
+}
+
+// Runs the full audit-with-analysis pipeline (walk + fingerprint + detectors +
+// fixability planning) over a fixture tree, matching the broad-machinery slow
+// tier described in `docs/internals/test-tiers.md` — the same tier its sibling
+// `test_compute_fixability_counts_fixes_from_real_audit` already lives in.
+#[cfg(feature = "slow-tests")]
+#[test]
+fn test_compute_fixability_with_analysis() {
+    use std::fs;
+
+    homeboy_core::test_support::with_isolated_audit_home(|home| {
+        homeboy_core::test_support::write_source_extension(
+            home.path(),
+            "source-fixture",
+            "fixture",
+        );
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("commands")).unwrap();
+        fs::write(
+            root.join("commands/good_one.fixture"),
+            "pub fn run() {}\npub fn helper() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("commands/good_two.fixture"),
+            "pub fn run() {}\npub fn helper() {}\n",
+        )
+        .unwrap();
+        fs::write(root.join("commands/bad.fixture"), "pub fn run() {}\n").unwrap();
+
+        let audit = crate::audit_path_with_id_with_plan_and_analysis(
+            "fixability-context-test",
+            &root.to_string_lossy(),
+            &crate::AuditExecutionPlan::full(),
+            &[],
+            &["source-fixture".to_string()],
+        )
+        .expect("audit should run with analysis");
+
+        assert!(
+            !audit.analysis.fingerprints.is_empty(),
+            "audit analysis should retain fingerprints for fixability planning"
+        );
+        assert!(
+            audit
+                .analysis
+                .fingerprints
+                .iter()
+                .any(|fp| fp.relative_path == "commands/good_one.fixture"
+                    && fp.content.contains("pub fn helper")),
+            "audit analysis should retain source content for downstream fix planning"
+        );
+
+        let from_context = compute_fixability_with_analysis(&audit.result, &audit.analysis);
+        let from_wrapper = compute_fixability(&audit.result);
+
+        assert_eq!(from_context.is_some(), from_wrapper.is_some());
+        if let (Some(context), Some(wrapper)) = (from_context, from_wrapper) {
+            assert_eq!(context.fixable_count, wrapper.fixable_count);
+            assert_eq!(context.automated_count, wrapper.automated_count);
+            assert_eq!(context.manual_only_count, wrapper.manual_only_count);
+            assert_eq!(
+                serde_json::to_value(&context.by_kind).unwrap(),
+                serde_json::to_value(&wrapper.by_kind).unwrap()
+            );
+        }
+    });
+}
+
+#[test]
+fn test_finding_kind_key_produces_snake_case() {
+    // finding_kind_key must produce serde-compatible snake_case keys
+    // so that fixability.by_kind matches the JSON finding group keys.
+    assert_eq!(
+        finding_kind_key(&AuditFinding::CompilerWarning),
+        "compiler_warning"
+    );
+    assert_eq!(
+        finding_kind_key(&AuditFinding::UnusedParameter),
+        "unused_parameter"
+    );
+    assert_eq!(
+        finding_kind_key(&AuditFinding::UnreferencedExport),
+        "unreferenced_export"
+    );
+    assert_eq!(
+        finding_kind_key(&AuditFinding::IntraMethodDuplicate),
+        "intra_method_duplicate"
+    );
+    assert_eq!(
+        finding_kind_key(&AuditFinding::OrphanedTest),
+        "orphaned_test"
+    );
+    assert_eq!(
+        finding_kind_key(&AuditFinding::MissingTestFile),
+        "missing_test_file"
+    );
+    assert_eq!(
+        finding_kind_key(&AuditFinding::MissingTestMethod),
+        "missing_test_method"
+    );
+    assert_eq!(
+        finding_kind_key(&AuditFinding::MissingMethod),
+        "missing_method"
+    );
+    assert_eq!(finding_kind_key(&AuditFinding::GodFile), "god_file");
+    assert_eq!(
+        finding_kind_key(&AuditFinding::DuplicateFunction),
+        "duplicate_function"
+    );
+    assert_eq!(
+        finding_kind_key(&AuditFinding::NearDuplicate),
+        "near_duplicate"
+    );
+}
+
+#[test]
+fn test_finding_kind_key() {
+    assert_eq!(
+        finding_kind_key(&AuditFinding::OrphanedTest),
+        "orphaned_test"
+    );
+}
+
+#[test]
+fn test_from_main_workflow() {
+    let output = AuditCommandOutput::Summary(build_audit_summary(&empty_result(), 0));
+    let (output, exit_code) = from_main_workflow(crate::run::AuditRunWorkflowResult {
+        output,
+        exit_code: 3,
+        findings: Vec::new(),
+        timing: crate::AuditTiming::default(),
+    });
+
+    assert_eq!(exit_code, 3);
+    assert!(matches!(output, AuditCommandOutput::Summary(_)));
+}
