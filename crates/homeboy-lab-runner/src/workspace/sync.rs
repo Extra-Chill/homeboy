@@ -331,6 +331,133 @@ pub fn sync_workspace(
     }
 }
 
+/// Return a previously materialized source snapshot only when it is tied to the
+/// exact clean controller checkout now being dispatched. This lets callers that
+/// already hold a runner snapshot avoid reopening Git transport (and its object
+/// closure) merely to hand the same source to a provider.
+pub fn reuse_compatible_snapshot_workspace(
+    runner_id: &str,
+    options: &RunnerWorkspaceSyncOptions,
+) -> Result<Option<RunnerWorkspaceSyncOutput>> {
+    if options.changed_since_base.is_some() || !options.git_fetch_refs.is_empty() {
+        return Ok(None);
+    }
+
+    let runner = load(runner_id)?;
+    let local_path = canonical_workspace_path(&options.path)?;
+    let source_commit = git_output(&local_path, &["rev-parse", "HEAD"]).ok();
+    let source_dirty = git_output(&local_path, &["status", "--porcelain=v1"])
+        .ok()
+        .map(|status| !status.trim().is_empty());
+    let Some(source_commit) = source_commit else {
+        return Ok(None);
+    };
+    if source_dirty != Some(false) {
+        return Ok(None);
+    }
+
+    let (snapshots, _) = workspace_snapshots(
+        runner_id,
+        RunnerWorkspaceSnapshotFilters {
+            limit: usize::MAX,
+            ..Default::default()
+        },
+    )?;
+    let local_path_string = local_path.display().to_string();
+    let Some(snapshot) = snapshots.snapshots.into_iter().find(|snapshot| {
+        snapshot.sync_mode == RunnerWorkspaceSyncMode::Snapshot.label()
+            && snapshot.local_path == local_path_string
+            && snapshot.source_commit.as_deref() == Some(source_commit.as_str())
+            && snapshot.source_dirty == Some(false)
+    }) else {
+        return Ok(None);
+    };
+
+    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_root",
+            "runner workspace sync requires workspace_root",
+            Some(runner.id.clone()),
+            Some(vec![
+                "Set runner.workspace_root to the remote workspace directory.".to_string(),
+            ]),
+        )
+    })?;
+    let mut excludes = DEFAULT_EXCLUDES
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    for pattern in &runner.policy.snapshot_excludes {
+        if !excludes.contains(pattern) {
+            excludes.push(pattern.clone());
+        }
+    }
+    for pattern in homeboy_core::source_snapshot::declared_sync_excludes_for_path(&local_path) {
+        if !excludes.contains(&pattern) {
+            excludes.push(pattern);
+        }
+    }
+    let mut includes = runner.policy.snapshot_includes.clone();
+    for pattern in &options.snapshot_includes {
+        if !includes.contains(pattern) {
+            includes.push(pattern.clone());
+        }
+    }
+    let excludes = effective_snapshot_excludes(excludes, &includes);
+    let workspace_cleanliness = "snapshot_reused_clean_workspace";
+    let mut snapshot_options = options.clone();
+    snapshot_options.mode = RunnerWorkspaceSyncMode::Snapshot;
+    snapshot_options.controller_routed_git = false;
+    let materialization_plan = workspace_materialization_plan(
+        workspace_root,
+        &local_path,
+        &snapshot.remote_path,
+        &snapshot.snapshot_identity,
+        &snapshot_options,
+        &includes,
+        workspace_cleanliness,
+    );
+    let current_workspace = RunnerWorkspaceCurrentSummary {
+        local_path: local_path_string.clone(),
+        remote_path: snapshot.remote_path.clone(),
+        sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+        materialized: true,
+        source_commit: snapshot.source_commit.clone(),
+        source_ref: snapshot.source_ref.clone(),
+        source_dirty: snapshot.source_dirty,
+        synthetic_checkout_commit: None,
+        synthetic_checkout_ref: None,
+        synthetic_checkout_tree: None,
+    };
+    let resource_lifecycle = snapshot.resource_lifecycle.unwrap_or_else(|| {
+        workspace_resource_lifecycle(
+            &runner.id,
+            &snapshot.remote_path,
+            None,
+            ResourceCleanupPolicy::DeleteOnSuccess,
+        )
+    });
+
+    Ok(Some(RunnerWorkspaceSyncOutput {
+        variant: "workspace_sync",
+        command: "runner.workspace.sync",
+        runner_id: runner.id.clone(),
+        local_path: local_path_string,
+        remote_path: snapshot.remote_path,
+        materialization_plan,
+        workspace_lease: workspace_lease(&runner.id, &current_workspace),
+        current_workspace,
+        resource_lifecycle,
+        sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+        snapshot_identity: snapshot.snapshot_identity,
+        counts: ByteFileCounts::default(),
+        excludes,
+        includes,
+        workspace_cleanliness: workspace_cleanliness.to_string(),
+        validation_dependencies: Vec::new(),
+    }))
+}
+
 fn is_runner_git_auth_or_network_failure(error: &Error) -> bool {
     let message = error.message.to_ascii_lowercase();
     [

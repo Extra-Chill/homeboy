@@ -93,7 +93,7 @@ pub fn route_after_parse(
         }
     }
 
-    let mut lab_command = lab_offload_command(&cli.command)?;
+    let lab_command = lab_offload_command(&cli.command)?;
 
     let inferred_runner_id = if lab_command.is_some() {
         cli.runner
@@ -128,14 +128,6 @@ pub fn route_after_parse(
     } else {
         None
     };
-    if retry_handoff.is_some() {
-        if let Some(command) = lab_command.as_mut() {
-            // A retry's task primary must be a real checkout so the provider can
-            // capture a bounded git diff instead of receiving a source snapshot.
-            command.command.workspace_mode_policy =
-                homeboy::command_contract::LabWorkspaceModePolicy::GitCheckoutRequired;
-        }
-    }
     let normalized_args = run_handoff
         .as_ref()
         .map(|handoff| handoff.args.as_slice())
@@ -218,7 +210,8 @@ pub fn route_after_parse(
                         .map(|handoff| handoff.primary_workspace.as_path())
                 }),
             verified_cook_baseline: None,
-            require_controller_git_bundle: retry_handoff.is_some(),
+            require_controller_git_bundle: false,
+            reuse_compatible_snapshot: retry_handoff.is_some(),
             job_overrides,
         },
         inferred_runner_id.as_deref(),
@@ -603,6 +596,7 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCook
                 output_file_requested: false,
                 read_only_polling: false,
                 require_controller_git_bundle: false,
+                reuse_compatible_snapshot: false,
                 local_output_file: None,
                 durable_agent_task_plan: Some(&plan),
                 // A retry's baseline is controller-owned capability, not plan

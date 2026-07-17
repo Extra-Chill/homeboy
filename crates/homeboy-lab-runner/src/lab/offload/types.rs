@@ -36,6 +36,9 @@ pub struct LabOffloadRequest<'a> {
     pub verified_cook_baseline: Option<&'a serde_json::Value>,
     /// Select controller-bundle materialization before runner-side Git transport.
     pub require_controller_git_bundle: bool,
+    /// Reuse a clean, exact-source snapshot already materialized on the selected
+    /// runner instead of rebuilding the source through Git transport.
+    pub reuse_compatible_snapshot: bool,
     pub job_overrides: LabJobOverrides,
 }
 

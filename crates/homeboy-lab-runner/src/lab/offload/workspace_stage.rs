@@ -90,7 +90,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     lifecycle_args: &[String],
     preferred_attempt_run_id: Option<&str>,
 ) -> Result<LabOffloadWorkspaceStage> {
-    let sync_mode =
+    let mut sync_mode =
         lab_workspace_sync_mode(contract.workspace_mode_policy, lifecycle_args, source_path)?;
     let changed_since_preflight = if sync_mode == RunnerWorkspaceSyncMode::Git {
         prepare_git_lab_offload_changed_since(lifecycle_args, source_path)?
@@ -144,27 +144,32 @@ fn prepare_lab_offload_workspace_stage_inner(
     // can observe its leftover untracked artifacts (#4393). Resolve the
     // agent-task run id (existing or freshly generated) up front and fold it
     // into the workspace identity so each run gets a clean, isolated directory.
-    let synced = sync_workspace(
-        runner_id,
-        RunnerWorkspaceSyncOptions {
-            path: source_path.display().to_string(),
-            mode: sync_mode,
-            // Retry handoffs must stage the controller checkout before the
-            // runner attempts Git transport: private origins are intentionally
-            // unavailable to the runner, and changed-since must resolve from
-            // the staged bundle.
-            controller_routed_git: sync_mode == RunnerWorkspaceSyncMode::Git
-                && (request.require_controller_git_bundle
-                    || contract.workspace_mode_policy
-                        != LabOffloadWorkspaceModePolicy::GitCheckoutRequired),
-            changed_since_base: changed_since_preflight.resolved_base.clone(),
-            git_fetch_refs: git_fetch_refs.clone(),
-            snapshot_includes: Vec::new(),
-            allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
-            run_isolation_token: run_isolation_token.clone(),
-        },
-    )?
+    let sync_options = RunnerWorkspaceSyncOptions {
+        path: source_path.display().to_string(),
+        mode: sync_mode,
+        // Retry handoffs must stage the controller checkout before the
+        // runner attempts Git transport: private origins are intentionally
+        // unavailable to the runner, and changed-since must resolve from
+        // the staged bundle.
+        controller_routed_git: sync_mode == RunnerWorkspaceSyncMode::Git
+            && (request.require_controller_git_bundle
+                || contract.workspace_mode_policy
+                    != LabOffloadWorkspaceModePolicy::GitCheckoutRequired),
+        changed_since_base: changed_since_preflight.resolved_base.clone(),
+        git_fetch_refs: git_fetch_refs.clone(),
+        snapshot_includes: Vec::new(),
+        allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
+        run_isolation_token: run_isolation_token.clone(),
+    };
+    let synced = if request.reuse_compatible_snapshot {
+        reuse_compatible_snapshot_workspace(runner_id, &sync_options)?
+            .map(|snapshot| (snapshot, 0))
+            .unwrap_or(sync_workspace(runner_id, sync_options)?)
+    } else {
+        sync_workspace(runner_id, sync_options)?
+    }
     .0;
+    sync_mode = synced.sync_mode;
     let remote_cwd = synced.remote_path.clone();
     let mut workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
     // The primary workspace sync materializes each declared dependency checkout
@@ -2159,6 +2164,7 @@ mod tests {
                 source_path: None,
                 verified_cook_baseline: None,
                 require_controller_git_bundle: true,
+                reuse_compatible_snapshot: false,
                 job_overrides: LabJobOverrides::default(),
             };
             let contract = LabOffloadCommand {
@@ -2312,6 +2318,7 @@ mod tests {
                 source_path: Some(source.as_path()),
                 verified_cook_baseline: None,
                 require_controller_git_bundle: false,
+                reuse_compatible_snapshot: false,
                 job_overrides: LabJobOverrides::default(),
             };
             let mut contract = LabOffloadCommand {

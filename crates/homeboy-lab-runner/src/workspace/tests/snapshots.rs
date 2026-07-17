@@ -1,7 +1,9 @@
 use std::fs;
 
 use super::git;
-use crate::workspace::sync::{sync_workspace, workspace_snapshots};
+use crate::workspace::sync::{
+    reuse_compatible_snapshot_workspace, sync_workspace, workspace_snapshots,
+};
 use crate::workspace::types::{
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
@@ -129,6 +131,53 @@ fn workspace_snapshots_filters_by_repo_ref_commit_and_run() {
         )
         .expect("mismatched filter");
         assert!(none.snapshots.is_empty());
+    });
+}
+
+#[test]
+fn clean_snapshot_reuse_preserves_exact_source_provenance_without_git_materialization() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        create_local_runner("lab-local-reuse", runner_root.path());
+        let source = git_source("homeboy@partial-clone", "fix/reuse", "source\n");
+        let commit = crate::workspace::util::git_output(source.path(), &["rev-parse", "HEAD"])
+            .expect("source commit");
+
+        // Snapshot sync is intentionally independent of Git object closure
+        // hydration, as a blob:none controller checkout may not hold it.
+        let (synced, _) = sync_workspace(
+            "lab-local-reuse",
+            sync_options(source.path().display().to_string(), None),
+        )
+        .expect("initial snapshot sync");
+        let mut retry_options = sync_options(
+            source.path().display().to_string(),
+            Some("retry-attempt".to_string()),
+        );
+        // A retry normally requests Git materialization. An exact snapshot is
+        // still the stronger transport choice when no Git-only ref is needed.
+        retry_options.mode = RunnerWorkspaceSyncMode::Git;
+        let reused = reuse_compatible_snapshot_workspace("lab-local-reuse", &retry_options)
+            .expect("look up compatible snapshot")
+            .expect("clean exact snapshot is reused");
+
+        assert_eq!(reused.remote_path, synced.remote_path);
+        assert_eq!(reused.snapshot_identity, synced.snapshot_identity);
+        assert_eq!(
+            reused.current_workspace.source_commit.as_deref(),
+            Some(commit.as_str())
+        );
+        assert_eq!(reused.current_workspace.source_dirty, Some(false));
+        assert_eq!(reused.sync_mode, RunnerWorkspaceSyncMode::Snapshot);
+        assert_eq!(
+            reused.materialization_plan.declared_inputs.mode,
+            RunnerWorkspaceSyncMode::Snapshot
+        );
+        assert_eq!(
+            reused.workspace_cleanliness,
+            "snapshot_reused_clean_workspace"
+        );
+        assert!(reused.materialization_plan.controller_git_bundle.is_none());
     });
 }
 
