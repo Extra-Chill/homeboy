@@ -2,8 +2,10 @@ use std::path::Path;
 
 use crate::code_audit::conventions::AuditFinding;
 use crate::code_audit::findings::{Finding, Severity};
-use crate::execution_contract::EXECUTION_CONTRACT;
 use homeboy_audit_contract::ArtifactPortabilityConfig;
+use homeboy_engine_primitives::artifact_ref_scheme::{
+    is_metadata_only_ref, is_runner_artifact_ref,
+};
 use serde_json::Value;
 
 pub(crate) const DEFAULT_OBSERVATION_RUN_WINDOW: usize = 1000;
@@ -91,9 +93,7 @@ fn artifact_path_is_portable(
     artifact_root: Option<&Path>,
     config: &ArtifactPortabilityConfig,
 ) -> bool {
-    if EXECUTION_CONTRACT.artifacts.is_runner_artifact_ref(path)
-        || EXECUTION_CONTRACT.artifacts.is_metadata_only_ref(path)
-    {
+    if is_runner_artifact_ref(path) || is_metadata_only_ref(path) {
         return true;
     }
     let path_ref = Path::new(path);
@@ -261,7 +261,7 @@ fn looks_like_local_absolute_path(
     artifact_root: Option<&Path>,
     _config: &ArtifactPortabilityConfig,
 ) -> bool {
-    if is_runner_artifact_ref(path) || EXECUTION_CONTRACT.artifacts.is_metadata_only_ref(path) {
+    if is_runner_artifact_ref(path) || is_metadata_only_ref(path) {
         return false;
     }
     let path_ref = Path::new(path);
@@ -274,10 +274,6 @@ fn looks_like_local_absolute_path(
         }
     }
     true
-}
-
-fn is_runner_artifact_ref(path: &str) -> bool {
-    EXECUTION_CONTRACT.artifacts.is_runner_artifact_ref(path)
 }
 
 fn metadata_promises_cleanup(value: &Value) -> bool {
