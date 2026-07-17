@@ -105,7 +105,7 @@ use super::super::lab_workspaces::{
 use super::super::offload_changed_since::LabOffloadChangedSincePreflight;
 use super::super::{
     dependency_cache_save, evaluate_lab_runner_capabilities_for_runner, exec,
-    lab_offload_changed_since_ref, lab_offload_metadata,
+    exec_with_status_snapshot, lab_offload_changed_since_ref, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, load, plan_managed_runner_source_syncs,
     preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
     prepare_lab_runner_capability, remote_runner_homeboy_path, reuse_compatible_snapshot_workspace,

@@ -417,9 +417,10 @@ pub(crate) fn exec_lab_context(
     }
 
     let remote_exec_started = std::time::Instant::now();
-    let exec_result = exec(
+    let exec_result = exec_with_status_snapshot(
         runner_id,
         lab_runner_exec_options(&context, env, secret_env_names),
+        Some(context.runner_status.clone()),
     );
     context
         .overhead
@@ -839,10 +840,10 @@ pub(crate) fn run_lab_offload_inner(
     mut plan: HomeboyPlan,
     mut messages: Vec<String>,
     mut overhead: LabOffloadOverhead,
+    runner_status: RunnerStatusReport,
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner = load(runner_id)?;
-    let runner_status = status(runner_id)?;
     if runner.kind != super::super::super::RunnerKind::Ssh {
         return Err(Error::validation_invalid_argument(
             "runner",
@@ -855,19 +856,7 @@ pub(crate) fn run_lab_offload_inner(
         ));
     }
 
-    if !runner_status.connected {
-        return Err(Error::validation_invalid_argument(
-            "runner",
-            format!(
-                "Lab offload requires a connected {} runner daemon",
-                status_tunnel_mode(&runner_status).label()
-            ),
-            Some(runner_id.to_string()),
-            Some(vec![format!(
-                "Connect runner `{runner_id}` before using --runner."
-            )]),
-        ));
-    }
+    require_connected_lab_runner(runner_id, &runner_status)?;
 
     let runner_workspace_root = request
         .job_overrides
@@ -1519,6 +1508,24 @@ pub(crate) fn run_lab_offload_inner(
     })
 }
 
+fn require_connected_lab_runner(runner_id: &str, runner_status: &RunnerStatusReport) -> Result<()> {
+    if runner_status.connected {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "runner",
+        format!(
+            "Lab offload requires a connected {} runner daemon",
+            status_tunnel_mode(runner_status).label()
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![format!(
+            "Connect runner `{runner_id}` before using --runner."
+        )]),
+    ))
+}
+
 fn reconcile_lab_mutation_output(output: &str, changed_files: &[String]) -> String {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(output) else {
         return output.to_string();
@@ -1699,6 +1706,17 @@ fn artifact_name_or_kind_is_fuzz_result(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{RunnerActiveJobState, RunnerSessionState};
+
+    #[test]
+    fn inner_uses_authoritative_preflight_status_not_conflicting_cwd_projection() {
+        let preflight_status = runner_status(true);
+        let conflicting_cwd_projection = runner_status(false);
+
+        require_connected_lab_runner("homeboy-lab", &preflight_status)
+            .expect("inner accepts the connected status selected during preflight");
+        assert!(require_connected_lab_runner("homeboy-lab", &conflicting_cwd_projection).is_err());
+    }
 
     #[test]
     fn reconciles_refactor_sources_output_after_lab_patch_apply() {
@@ -1763,6 +1781,31 @@ mod tests {
             reconcile_lab_mutation_output(output, &["src/lib.rs".to_string()]),
             output
         );
+    }
+
+    fn runner_status(connected: bool) -> RunnerStatusReport {
+        RunnerStatusReport {
+            runner_id: "homeboy-lab".to_string(),
+            connected,
+            state: if connected {
+                RunnerSessionState::Connected
+            } else {
+                RunnerSessionState::Disconnected
+            },
+            session: None,
+            stale_daemon: None,
+            daemon_freshness: None,
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_jobs: Vec::new(),
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "/tmp/homeboy-lab.json".to_string(),
+        }
     }
 }
 

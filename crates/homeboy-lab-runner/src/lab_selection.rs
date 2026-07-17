@@ -93,10 +93,10 @@ pub(super) fn preflight_lab_runner_availability(
     selection: &LabRunnerSelection,
     detach_after_handoff: bool,
     has_durable_agent_task_plan: bool,
-) -> Result<()> {
-    let availability = preflight_lab_runner_availability_with(selection, status)?;
+) -> Result<RunnerStatusReport> {
+    let (availability, status) = preflight_lab_runner_availability_with(selection, status)?;
     if availability.accepts_jobs {
-        return Ok(());
+        return Ok(status);
     }
     if allows_detached_reverse_capacity_queue(
         detach_after_handoff,
@@ -104,7 +104,7 @@ pub(super) fn preflight_lab_runner_availability(
         selection,
         &availability,
     ) {
-        return Ok(());
+        return Ok(status);
     }
 
     let eligible = if matches!(selection.source, LabRunnerSelectionSource::Default) {
@@ -115,6 +115,7 @@ pub(super) fn preflight_lab_runner_availability(
     Err(lab_runner_availability_error(
         command.hot_label,
         Some(&availability),
+        Some(&status),
         eligible,
     ))
 }
@@ -136,16 +137,17 @@ pub(super) fn allows_detached_reverse_capacity_queue(
 fn preflight_lab_runner_availability_with(
     selection: &LabRunnerSelection,
     status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
-) -> Result<RunnerAvailability> {
+) -> Result<(RunnerAvailability, RunnerStatusReport)> {
     let status = status_fn(&selection.runner_id)?;
-    Ok(RunnerAvailability::from_status_parts(
+    let availability = RunnerAvailability::from_status_parts(
         selection.runner_id.clone(),
         status.connected,
         status.stale_daemon.is_some(),
         status.active_jobs.len(),
         &status.active_job_state,
         load(&selection.runner_id)?.settings.concurrency_limit,
-    ))
+    );
+    Ok((availability, status))
 }
 
 pub(super) fn fail_if_no_default_runner_accepts_jobs(command: &LabOffloadCommand) -> Result<()> {
@@ -178,6 +180,7 @@ pub(super) fn fail_if_no_default_runner_accepts_jobs_with(
     Err(lab_runner_availability_error(
         command.hot_label,
         None,
+        None,
         eligible,
     ))
 }
@@ -185,6 +188,7 @@ pub(super) fn fail_if_no_default_runner_accepts_jobs_with(
 pub(super) fn lab_runner_availability_error(
     command_label: &str,
     selected: Option<&RunnerAvailability>,
+    selected_status: Option<&RunnerStatusReport>,
     eligible: Vec<RunnerAvailability>,
 ) -> Error {
     let selected_runner_id = selected.map(|availability| availability.runner_id.clone());
@@ -206,6 +210,21 @@ pub(super) fn lab_runner_availability_error(
         )
     };
 
+    let stale_daemon_recovery = selected_status
+        .and_then(|status| status.stale_daemon.as_ref())
+        .map(|warning| warning.refresh_command.clone());
+    let mut tried = vec![
+        "Wait for an active Lab runner job to finish, then retry.".to_string(),
+        "Choose another available runner with --runner <runner-id>.".to_string(),
+        "Inspect availability with `homeboy runner status <runner-id> --json`.".to_string(),
+    ];
+    if let Some(recovery) = stale_daemon_recovery.as_ref() {
+        tried.insert(
+            0,
+            format!("Refresh the connected stale runner: `{recovery}`."),
+        );
+    }
+
     Error::new(
         ErrorCode::ValidationInvalidArgument,
         format!("Invalid argument 'runner': {message}"),
@@ -218,11 +237,9 @@ pub(super) fn lab_runner_availability_error(
                 "eligible": eligible,
                 "reasons": reasons,
             },
-            "tried": [
-                "Wait for an active Lab runner job to finish, then retry.",
-                "Choose another available runner with --runner <runner-id>.",
-                "Inspect availability with `homeboy runner status <runner-id> --json`.",
-            ],
+            "runner_status": selected_status,
+            "stale_daemon_recovery_command": stale_daemon_recovery,
+            "tried": tried,
         }),
     )
 }

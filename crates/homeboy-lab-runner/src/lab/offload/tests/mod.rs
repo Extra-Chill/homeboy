@@ -4,7 +4,8 @@ pub(super) use super::super::super::lab_capabilities::lab_runner_capability_cont
 pub(super) use super::super::super::lab_env::build_lab_offload_env;
 pub(super) use super::super::super::lab_plan::base_lab_plan;
 pub(super) use super::super::super::lab_selection::{
-    fail_if_no_default_runner_accepts_jobs_with, resolve_lab_runner_selection_from_placement,
+    fail_if_no_default_runner_accepts_jobs_with, lab_runner_availability_error,
+    resolve_lab_runner_selection_from_placement,
 };
 pub(super) use super::super::super::lab_workspaces::{
     workspace_mapping_entry, LAB_WORKSPACE_MAPPING_SCHEMA,
