@@ -117,6 +117,13 @@ pub(super) fn run_dry_run_mode(
                 .with_source_identity(c, config.head);
             if let Some(requested_ref) = config.requested_ref.as_deref() {
                 let identity = resolve_exact_ref(c, requested_ref)?;
+                if let Some(artifact) = config.prepared_artifact.as_ref() {
+                    artifact.validate_exact_source(
+                        &c.id,
+                        config.expected_version.as_deref(),
+                        &identity.resolved_sha,
+                    )?;
+                }
                 result = result.with_exact_ref_identity(
                     &identity.requested_ref,
                     &identity.resolved_sha,
@@ -165,6 +172,16 @@ fn with_dry_run_artifact_plan(
     let is_file_deploy = deploy_config.is_file_deploy();
     if is_git_deploy || is_file_deploy {
         return result;
+    }
+
+    if let Some(artifact) = config.prepared_artifact.as_ref() {
+        result.warnings.push(format!(
+            "artifact source: verified prepared artifact from commit {}; build phase: skipped; deploy phase: would upload prepared artifact",
+            artifact.source_commit
+        ));
+        return result
+            .with_artifact_path(Some(artifact.effective_path().to_string()))
+            .with_artifact_source(DeployArtifactSource::Prepared);
     }
 
     match release_artifact_plan(component, config, is_git_deploy, is_file_deploy) {
@@ -258,6 +275,7 @@ fn latest_deploy_tag(component: &Component, expected_version: Option<&str>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deploy::PreparedDeployArtifact;
     use std::path::Path;
     use std::process::Command;
 
@@ -337,6 +355,81 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn exact_ref_dry_run_reports_verified_prepared_artifact_strategy() {
+        let repo = tempfile::tempdir().expect("repo");
+        git(repo.path(), &["init", "-q"]);
+        git(repo.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        std::fs::write(repo.path().join("payload.txt"), "reviewed\n").expect("payload");
+        git(repo.path(), &["add", "payload.txt"]);
+        git(repo.path(), &["commit", "-q", "-m", "reviewed"]);
+        let sha = git_output(repo.path(), &["rev-parse", "HEAD"]);
+        let artifact_path = repo.path().join("fixture.zip");
+        std::fs::write(&artifact_path, "prepared bytes").expect("artifact");
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: repo.path().to_string_lossy().to_string(),
+            remote_path: "components/fixture".to_string(),
+            build_artifact: Some("build/fixture.zip".to_string()),
+            ..Component::default()
+        };
+        let mut config = DeployConfig {
+            component_ids: vec!["fixture".to_string()],
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: true,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            skip_deps_hydration: false,
+            expected_version: None,
+            no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
+            head: false,
+            requested_ref: Some(sha.clone()),
+            tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
+        };
+        config.prepared_artifact = Some(PreparedDeployArtifact {
+            component_id: "fixture".to_string(),
+            path: artifact_path.display().to_string(),
+            durable_path: artifact_path.display().to_string(),
+            size_bytes: "prepared bytes".len() as u64,
+            sha256: crate::deploy::sha256_file(&artifact_path).expect("sha"),
+            version: String::new(),
+            tag: "prepared".to_string(),
+            source_commit: sha,
+        });
+
+        let result = run_dry_run_mode(
+            std::slice::from_ref(&component),
+            &HashMap::new(),
+            &HashMap::new(),
+            &Project::default(),
+            "/srv/site",
+            &config,
+        )
+        .expect("dry-run plan");
+        let evidence = &result.results[0];
+
+        assert_eq!(
+            evidence.artifact_source,
+            Some(DeployArtifactSource::Prepared)
+        );
+        assert!(evidence
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("verified prepared artifact")));
     }
 
     #[test]

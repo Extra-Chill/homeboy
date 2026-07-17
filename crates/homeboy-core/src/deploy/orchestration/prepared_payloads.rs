@@ -56,8 +56,9 @@ pub(super) fn prepare_component_deployments(
                 let mut preparation_config = effective_config.clone();
                 // The existing detached checkout is the authoritative exact-ref source.
                 preparation_config.requested_ref = None;
-                let request =
+                let mut request =
                     ComponentPayloadPreparationRequest::new(&component, &preparation_config);
+                request.config.exact_ref_materialized = config.requested_ref.is_some();
                 if let Some(lease) = release_artifacts.get(&component.id).cloned() {
                     if let Err(error) = payloads.insert(request.clone(), Some(lease)) {
                         failures.push(ComponentDeployResult::failed(

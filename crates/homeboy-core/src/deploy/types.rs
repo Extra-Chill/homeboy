@@ -216,6 +216,29 @@ impl PreparedDeployArtifact {
         }
         Ok(())
     }
+
+    /// An exact ref can reuse a prepared artifact only when its immutable source
+    /// identity was recorded at that same commit.
+    pub(crate) fn validate_exact_source(
+        &self,
+        component_id: &str,
+        expected_version: Option<&str>,
+        resolved_sha: &str,
+    ) -> Result<()> {
+        self.validate(component_id, expected_version)?;
+        if self.source_commit != resolved_sha {
+            return Err(crate::error::Error::validation_invalid_argument(
+                "prepared_artifact.source_commit",
+                format!(
+                    "Prepared artifact source commit '{}' does not match exact ref commit '{}'",
+                    self.source_commit, resolved_sha
+                ),
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn sha256_file(path: &Path) -> Result<String> {
@@ -1132,6 +1155,12 @@ mod tests {
 
         assert!(artifact.validate("fixture", Some("1.2.3")).is_ok());
         assert!(artifact.validate("fixture", Some("1.2.4")).is_err());
+        assert!(artifact
+            .validate_exact_source("fixture", Some("1.2.3"), "0123456789abcdef")
+            .is_ok());
+        assert!(artifact
+            .validate_exact_source("fixture", Some("1.2.3"), "fedcba9876543210")
+            .is_err());
 
         std::fs::write(&artifact_path, "changed bytes").expect("changed artifact");
         assert!(artifact.validate("fixture", Some("1.2.3")).is_err());
