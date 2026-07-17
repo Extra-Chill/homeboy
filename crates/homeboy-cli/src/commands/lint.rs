@@ -7,6 +7,22 @@ use homeboy::core::extension::lint::{
 };
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::git;
+
+/// Build the slim `LintFixInput` the core lint report consumes from a full
+/// refactor source-run, so core does not depend on the refactor engine's
+/// `RefactorSourceRun` type.
+fn lint_fix_input(
+    run: &homeboy::core::refactor::plan::RefactorSourceRun,
+) -> homeboy_refactor_contract::LintFixInput {
+    homeboy_refactor_contract::LintFixInput {
+        applied: run.applied,
+        files_modified: run.files_modified,
+        changed_files: run.changed_files.clone(),
+        hints: run.hints.clone(),
+        warnings: run.warnings.clone(),
+        fix_summary: run.fix_summary.clone(),
+    }
+}
 use homeboy::core::observation::{
     finding_records_from_lint, merge_metadata, ActiveObservation, NewFindingRecord, NewRunRecord,
     RunStatus,
@@ -493,7 +509,7 @@ fn run_fix(
 
     let run = collect_refactor_sources(request)?;
 
-    Ok(report::from_lint_fix(component_label, run))
+    Ok(report::from_lint_fix(component_label, lint_fix_input(&run)))
 }
 
 #[cfg(test)]
@@ -650,7 +666,8 @@ mod tests {
         // The contract under #1507: autofixable findings never fail the run.
         // Even when --fix actually modifies files, the lint command exits 0.
         let run = fixture_refactor_run(true, 3);
-        let (output, exit_code) = report::from_lint_fix("demo".to_string(), run);
+        let (output, exit_code) =
+            report::from_lint_fix("demo".to_string(), super::lint_fix_input(&run));
 
         assert_eq!(exit_code, 0);
         assert!(output.passed);
@@ -675,7 +692,8 @@ mod tests {
         // When no autofixable findings exist, --fix is a clean no-op:
         // exit 0, no autofix changes reported, friendly hint.
         let run = fixture_refactor_run(false, 0);
-        let (output, exit_code) = report::from_lint_fix("demo".to_string(), run);
+        let (output, exit_code) =
+            report::from_lint_fix("demo".to_string(), super::lint_fix_input(&run));
 
         assert_eq!(exit_code, 0);
         assert!(output.passed);
