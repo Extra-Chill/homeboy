@@ -97,10 +97,7 @@ pub(super) fn preflight_lab_runner_availability(
     if availability.accepts_jobs {
         return Ok(());
     }
-    if allow_capacity_queue
-        && selection.mode == RunnerTunnelMode::Reverse
-        && availability.is_capacity_exhausted()
-    {
+    if allows_reverse_capacity_queue(allow_capacity_queue, selection, &availability) {
         return Ok(());
     }
 
@@ -114,6 +111,18 @@ pub(super) fn preflight_lab_runner_availability(
         Some(&availability),
         eligible,
     ))
+}
+
+/// Capacity admission is only valid for the durable reverse-broker handoff.
+/// Every other availability failure remains a preflight failure.
+pub(super) fn allows_reverse_capacity_queue(
+    allow_capacity_queue: bool,
+    selection: &LabRunnerSelection,
+    availability: &RunnerAvailability,
+) -> bool {
+    allow_capacity_queue
+        && selection.mode == RunnerTunnelMode::Reverse
+        && availability.is_capacity_exhausted()
 }
 
 fn preflight_lab_runner_availability_with(

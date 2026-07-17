@@ -1,4 +1,5 @@
 use super::*;
+use crate::runner::lab_selection::allows_reverse_capacity_queue;
 
 fn select(
     command: &LabOffloadCommand,
@@ -209,4 +210,60 @@ fn explicit_lab_never_allows_missing_or_busy_default_runner_to_run_local() {
     .expect_err("explicit Lab placement fails closed");
 
     assert!(error.message.contains("--placement lab requires"));
+}
+
+#[test]
+fn capacity_queue_admission_requires_detached_reverse_capacity_only() {
+    let reverse = LabRunnerSelection {
+        runner_id: "homeboy-lab".to_string(),
+        source: LabRunnerSelectionSource::Explicit,
+        mode: RunnerTunnelMode::Reverse,
+    };
+    let direct = LabRunnerSelection {
+        mode: RunnerTunnelMode::DirectSsh,
+        ..reverse.clone()
+    };
+    let capacity = RunnerAvailability::from_status_parts(
+        "homeboy-lab",
+        true,
+        false,
+        1,
+        &RunnerActiveJobState::Available,
+        Some(1),
+    );
+    let disconnected = RunnerAvailability::from_status_parts(
+        "homeboy-lab",
+        false,
+        false,
+        1,
+        &RunnerActiveJobState::Available,
+        Some(1),
+    );
+    let stale = RunnerAvailability::from_status_parts(
+        "homeboy-lab",
+        true,
+        true,
+        1,
+        &RunnerActiveJobState::Available,
+        Some(1),
+    );
+    let unknown = RunnerAvailability::from_status_parts(
+        "homeboy-lab",
+        true,
+        false,
+        1,
+        &RunnerActiveJobState::Unavailable,
+        None,
+    );
+
+    assert!(allows_reverse_capacity_queue(true, &reverse, &capacity));
+    assert!(!allows_reverse_capacity_queue(false, &reverse, &capacity));
+    assert!(!allows_reverse_capacity_queue(true, &direct, &capacity));
+    assert!(!allows_reverse_capacity_queue(
+        true,
+        &reverse,
+        &disconnected
+    ));
+    assert!(!allows_reverse_capacity_queue(true, &reverse, &stale));
+    assert!(!allows_reverse_capacity_queue(true, &reverse, &unknown));
 }

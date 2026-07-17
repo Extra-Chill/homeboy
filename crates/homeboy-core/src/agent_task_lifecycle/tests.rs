@@ -719,21 +719,13 @@ fn detached_cook_attempt_proxy_advances_after_daemon_acceptance() {
         assert_eq!(accepted.run_id, attempt_run_id);
         assert_eq!(accepted.state, AgentTaskRunState::Running);
         assert_eq!(accepted.metadata["runner_job_id"], "job-7970");
-        assert_eq!(accepted.metadata["phase"], "waiting_for_capacity");
+        assert_eq!(accepted.metadata["phase"], "awaiting_runner_result");
         assert_eq!(
             accepted.metadata["phase_activity"],
-            "runner owns this FIFO queue entry; awaiting a capacity lease"
+            "controller handoff complete; awaiting authoritative runner daemon result"
         );
-        assert_eq!(accepted.metadata["runner_handoff"]["state"], "queued");
-        assert_eq!(
-            accepted.metadata["runner_queue"],
-            json!({
-                "owner_runner_id": "homeboy-lab",
-                "ordering": "fifo",
-                "dispatch_eligibility": "runner_capacity_lease",
-                "state": "waiting_for_capacity",
-            })
-        );
+        assert_eq!(accepted.metadata["runner_handoff"]["state"], "in_flight");
+        assert!(accepted.metadata.get("runner_queue").is_none());
         assert_eq!(
             accepted.metadata["runner_handoff"]["continuation"]["intent"],
             "reconcile_runner_job"

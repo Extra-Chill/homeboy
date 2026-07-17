@@ -591,9 +591,6 @@ where
 }
 
 pub fn claim_next_queued_run() -> Result<Option<AgentTaskRunRecord>> {
-    // Interactive local `run-next` invocations can race across processes. Keep
-    // their selection and transition atomic without assigning them daemon ownership.
-    let _claim_lock = QueuedRunClaimLock::lock()?;
     let mut queued: Vec<AgentTaskRunRecord> = store::read_records()?
         .into_iter()
         .filter(|record| record.state == AgentTaskRunState::Queued && !is_transport_proxy(record))
@@ -1907,12 +1904,12 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
             "runner_job_id": input.runner_job_id,
         }),
     );
-    metadata.insert("phase".to_string(), json!("waiting_for_capacity"));
+    metadata.insert("phase".to_string(), json!("awaiting_runner_result"));
     metadata.insert(
         "phase_activity".to_string(),
-        json!("runner owns this FIFO queue entry; awaiting a capacity lease"),
+        json!("controller handoff complete; awaiting authoritative runner daemon result"),
     );
-    metadata.insert("provider_state".to_string(), json!("queued"));
+    metadata.insert("provider_state".to_string(), json!("active"));
     let source_snapshot = metadata
         .get("source_checkout")
         .cloned()
@@ -1920,7 +1917,7 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
     metadata.insert(
         "runner_handoff".to_string(),
         json!({
-            "state": "queued",
+            "state": "in_flight",
             "authority": "runner_daemon",
             "identity": {
                 "run_id": run_id,
@@ -1937,15 +1934,6 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
     );
     metadata.insert("runner_id".to_string(), json!(input.runner_id));
     metadata.insert("runner_job_id".to_string(), json!(input.runner_job_id));
-    metadata.insert(
-        "runner_queue".to_string(),
-        json!({
-            "owner_runner_id": input.runner_id,
-            "ordering": "fifo",
-            "dispatch_eligibility": "runner_capacity_lease",
-            "state": "waiting_for_capacity",
-        }),
-    );
     metadata.insert(
         "remote_workspace".to_string(),
         json!(input.remote_workspace),
