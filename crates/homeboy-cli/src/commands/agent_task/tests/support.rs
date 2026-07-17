@@ -23,7 +23,7 @@ pub(in crate::commands::agent_task) use super::super::controller::{
     controller_run_from_spec_with_test_executor, controller_run_next_with_executor,
 };
 pub(in crate::commands::agent_task) use super::super::run::{
-    retry, run_cook_with_executor, run_cook_with_executor_and_dispatcher, run_loaded_plan,
+    resume, retry, run_cook_with_executor, run_cook_with_executor_and_dispatcher, run_loaded_plan,
     run_next_with_executor, run_resume_with_executor, run_submitted, run_submitted_with_executor,
     submit,
 };
@@ -45,7 +45,9 @@ pub(crate) use homeboy::core::agent_tasks::provider::{
     ExtensionProviderAgentTaskExecutor, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
     AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
 };
-pub(crate) use homeboy::core::agent_tasks::scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
+pub(crate) use homeboy::core::agent_tasks::scheduler::{
+    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
+};
 
 pub(crate) use crate::test_support::with_isolated_home;
 pub(crate) use homeboy::core::agent_tasks::controller_service as agent_task_controller_service;

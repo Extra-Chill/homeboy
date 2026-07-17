@@ -216,7 +216,6 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
             args.artifact_id.as_deref(),
         )?;
     }
-    let (raw, source_path) = read_promotion_source(&args.source)?;
     let promotion_options = AgentTaskPromotionOptions {
         source: raw,
         source_run_id: source_run_id.clone(),
