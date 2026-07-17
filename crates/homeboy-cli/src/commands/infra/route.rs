@@ -143,6 +143,8 @@ pub fn route_after_parse(
         None
     };
     let normalized_args = inject_agent_task_cook_attempt_plan(normalized_args, cook_plan.as_ref())?;
+    // Lab routing carries the durable plan opaquely as JSON (core does not
+    // depend on the agent-task subsystem); serialize the selected typed plan.
     let durable_agent_task_plan = run_handoff
         .as_ref()
         .map(|handoff| &handoff.plan)
@@ -151,7 +153,16 @@ pub fn route_after_parse(
                 .as_ref()
                 .map(|handoff| &handoff.plan)
                 .or(cook_plan.as_ref())
-        });
+        })
+        .map(|plan| {
+            serde_json::to_value(plan).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize durable agent-task plan".to_string()),
+                )
+            })
+        })
+        .transpose()?;
     let observer = lab_dispatch_observer(cli, &normalized_args, inferred_runner_id.as_deref());
     let active_run_id = observer
         .run_id()
@@ -197,7 +208,7 @@ pub fn route_after_parse(
                 .lab_route_contract()?
                 .is_some_and(|contract| contract.command.routing_policy.read_only_polling),
             local_output_file: output_file,
-            durable_agent_task_plan,
+            durable_agent_task_plan: durable_agent_task_plan.as_ref(),
             // A serialized run-plan has no workspace CLI argument. Carry its
             // canonical plan root through the portable source channel so Lab
             // snapshots it before remapping nested plan/config paths.
@@ -567,6 +578,14 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCook
                 Some("serialize Lab cook attempt plan".to_string()),
             )
         })?;
+        // Lab routing carries the durable plan opaquely as JSON (only its
+        // presence is consulted); serialize the typed plan for the request.
+        let durable_agent_task_plan = serde_json::to_value(&plan).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize durable agent-task plan".to_string()),
+            )
+        })?;
         let provider_args = lab_cook_attempt_args(serialized_plan, run_id);
         let provider_cli = Cli::try_parse_from(&provider_args).map_err(|error| {
             Error::validation_invalid_argument(
@@ -598,7 +617,7 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCook
                 require_controller_git_bundle: false,
                 reuse_compatible_snapshot: false,
                 local_output_file: None,
-                durable_agent_task_plan: Some(&plan),
+                durable_agent_task_plan: Some(&durable_agent_task_plan),
                 // A retry's baseline is controller-owned capability, not plan
                 // data. Stage that exact clean checkout; never substitute the
                 // controller's original workspace during nested Lab dispatch.

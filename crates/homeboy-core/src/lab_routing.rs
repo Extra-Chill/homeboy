@@ -42,7 +42,11 @@ pub struct LabRoutingRequest<'a> {
     /// Controller-local `--output` path forwarded to the offload executor so the
     /// durable agent-task run id can be persisted before long execution (#5684).
     pub local_output_file: Option<&'a str>,
-    pub durable_agent_task_plan: Option<&'a crate::agent_task_scheduler::AgentTaskPlan>,
+    /// The durable agent-task plan authorizing a controller retry, carried
+    /// opaquely as JSON so core lab routing does not depend on the agent-task
+    /// subsystem. Only its presence is consulted along the routing path; the
+    /// agent-task layer owns the typed plan.
+    pub durable_agent_task_plan: Option<&'a serde_json::Value>,
     /// Controller checkout selected independently of CLI argv, such as the
     /// logical primary workspace of a materialized retry plan.
     pub source_path: Option<&'a std::path::Path>,
