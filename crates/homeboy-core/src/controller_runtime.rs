@@ -16,6 +16,9 @@ use uuid::Uuid;
 use crate::{build_identity, paths, Error, Result};
 
 pub const CONTROLLER_RUNTIME_METADATA_KEY: &str = "controller_runtime";
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV: &str =
+    "HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE";
 
 const ACTIVE_GENERATION_FILE: &str = "active.json";
 const ADMISSION_LOCK_DIR: &str = "admission.lock";
@@ -425,13 +428,22 @@ pub fn pin_current() -> Result<Value> {
 
 fn pin_current_unlocked() -> Result<Value> {
     let identity = build_identity::current();
-    let executable = std::env::current_exe().map_err(|error| {
+    let executable = current_executable()?;
+    pin_executable(&executable, &identity.display)
+}
+
+fn current_executable() -> Result<PathBuf> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(executable) = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV) {
+        return Ok(PathBuf::from(executable));
+    }
+
+    std::env::current_exe().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("resolve controller executable".to_string()),
         )
-    })?;
-    pin_executable(&executable, &identity.display)
+    })
 }
 
 fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
@@ -1122,16 +1134,16 @@ fn verify_self_status_identity(path: &Path, expected: &str) -> Result<()> {
 }
 
 fn executable_identity(path: &Path) -> Result<String> {
-    #[cfg(test)]
+    #[cfg(all(test, not(unix)))]
     if std::env::current_exe().ok().is_some_and(|current| {
         executable_digest(&current)
             .ok()
             .zip(executable_digest(path).ok())
             .is_some_and(|(current, candidate)| current == candidate)
     }) {
-        // Unit tests run inside the libtest executable, not the Homeboy CLI.
-        // Pins are byte-identical copies, so accept them without recursively
-        // launching the test harness. Explicit fake controllers still execute.
+        // Non-Unix tests cannot use the shell executable fixture supplied by
+        // test support. Pins are byte-identical copies, so avoid recursively
+        // launching the test harness there. Explicit fake controllers execute.
         return Ok(build_identity::current().display);
     }
     let output = Command::new(path)
@@ -1690,6 +1702,28 @@ mod tests {
             )
             .expect("parse refreshed active generation");
             assert_eq!(active["originating"]["build_identity"], current);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pin_current_uses_the_explicit_test_controller_fixture() {
+        crate::test_support::with_isolated_home(|_| {
+            let runtime = pin_current().expect("pin explicit controller fixture");
+            let pinned = runtime
+                .pointer("/originating/pinned_executable")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .expect("pinned executable");
+
+            assert_ne!(
+                pinned,
+                std::env::current_exe().expect("current test executable")
+            );
+            assert_eq!(
+                executable_identity(&pinned).expect("fixture identity"),
+                build_identity::current().display
+            );
         });
     }
 
