@@ -421,46 +421,55 @@ where
             })
             .unwrap_or(true);
         if needs_execution {
-            let initial_baseline = if attempt == 1 {
-                materialize_initial_candidate_baseline(
-                    &plan,
-                    options.source_worktree_path.as_deref(),
-                    &run_id,
-                )?
-            } else {
-                None
-            };
-            let mut dispatch_plan = plan.clone();
-            if let Some(baseline) = initial_baseline.as_ref() {
-                for task in &mut dispatch_plan.tasks {
-                    task.workspace.root = Some(baseline.path.display().to_string());
+            let execution = (|| {
+                if let Some(dispatcher) = &options.attempt_dispatcher {
+                    dispatcher.prepare_for_cook()?;
                 }
-            }
-            let execution = if let Some(dispatcher) = &options.attempt_dispatcher {
-                dispatcher.dispatch_attempt(
-                    dispatch_plan,
-                    &run_id,
-                    initial_baseline
-                        .as_ref()
-                        .map(CookFollowUpBaseline::capability),
-                )
-            } else {
-                run_loaded_plan_with_derived_cook_baseline(
-                    dispatch_plan,
-                    Some(&run_id),
-                    executor.clone(),
-                    initial_baseline
-                        .as_ref()
-                        .map(CookFollowUpBaseline::capability),
-                    Some(cook_attempt_harvest_context(&options.harvest_context)),
-                )
-                .map(|_| ())
-            };
+                let initial_baseline = if attempt == 1 {
+                    materialize_initial_candidate_baseline(
+                        &plan,
+                        options.source_worktree_path.as_deref(),
+                        &run_id,
+                    )?
+                } else {
+                    None
+                };
+                let mut dispatch_plan = plan.clone();
+                if let Some(baseline) = initial_baseline.as_ref() {
+                    for task in &mut dispatch_plan.tasks {
+                        task.workspace.root = Some(baseline.path.display().to_string());
+                    }
+                }
+                if let Some(dispatcher) = &options.attempt_dispatcher {
+                    dispatcher.dispatch_attempt(
+                        dispatch_plan,
+                        &run_id,
+                        initial_baseline
+                            .as_ref()
+                            .map(CookFollowUpBaseline::capability),
+                    )
+                } else {
+                    run_loaded_plan_with_derived_cook_baseline(
+                        dispatch_plan,
+                        Some(&run_id),
+                        executor.clone(),
+                        initial_baseline
+                            .as_ref()
+                            .map(CookFollowUpBaseline::capability),
+                        Some(cook_attempt_harvest_context(&options.harvest_context)),
+                    )
+                    .map(|_| ())
+                }
+            })();
             if let Err(error) = execution {
-                let record = agent_task_lifecycle::status(&run_id).ok();
-                if record.is_some() {
-                    agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
-                }
+                let record = match agent_task_lifecycle::status(&run_id) {
+                    Ok(record) => Some(record),
+                    Err(_) => {
+                        record_pre_execution_failure(&plan, &run_id, &error)?;
+                        agent_task_lifecycle::status(&run_id).ok()
+                    }
+                };
+                agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
                 attempts.push(AgentTaskCookAttemptReport {
                     attempt,
                     run_id: run_id.clone(),
@@ -472,14 +481,22 @@ where
                     promotion: None,
                     feedback: None,
                 });
-                return Ok(cook_report(
-                    cook_id,
-                    "provider_failure",
-                    attempts,
-                    None,
-                    Some(error.to_string()),
-                    1,
-                ));
+                if attempt == max_attempts {
+                    return Ok(cook_report(
+                        cook_id,
+                        "retries_exhausted",
+                        attempts,
+                        None,
+                        Some(error.to_string()),
+                        1,
+                    ));
+                }
+                let next_attempt = attempt + 1;
+                let next_run_id = agent_task_lifecycle::cook_attempt_run_id(&cook_id, next_attempt);
+                super::record_recipe_attempt(&cook_id, next_attempt, &next_run_id, &plan)?;
+                run_id = next_run_id;
+                next_plan = Some(plan);
+                continue;
             }
         }
         agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
@@ -805,6 +822,20 @@ where
         Some("cook attempt budget exhausted".to_string()),
         1,
     ))
+}
+
+/// Pre-execution failures happen before a provider can receive work. Persist a
+/// normal terminal run so the Cook alias can expose its complete retry history.
+fn record_pre_execution_failure(plan: &AgentTaskPlan, run_id: &str, error: &Error) -> Result<()> {
+    if agent_task_lifecycle::submit_plan(plan, Some(run_id)).is_ok() {
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            plan,
+            "cook_pre_execution",
+            error,
+        )?;
+    }
+    Ok(())
 }
 
 /// A cook-owned detached checkout turns the already-promoted dirty candidate
@@ -1837,6 +1868,48 @@ mod tests {
         message: &'static str,
     }
 
+    #[derive(Debug)]
+    struct FlakyPreparationDispatcher {
+        failures_remaining: AtomicUsize,
+    }
+
+    impl AgentTaskCookAttemptDispatcher for FlakyPreparationDispatcher {
+        fn durable_recipe(&self) -> Result<Value> {
+            Ok(serde_json::json!({ "kind": "test-flaky-preparation" }))
+        }
+
+        fn prepare_for_cook(&self) -> Result<()> {
+            if self.failures_remaining.fetch_sub(1, Ordering::SeqCst) > 0 {
+                return Err(Error::validation_invalid_argument(
+                    "runner",
+                    "fixture runner is unavailable",
+                    None,
+                    None,
+                ));
+            }
+            Ok(())
+        }
+
+        fn dispatch_attempt(
+            &self,
+            plan: AgentTaskPlan,
+            run_id: &str,
+            _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+        ) -> Result<()> {
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+            agent_task_lifecycle::record_detached_lab_run(
+                agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: "fixture-lab",
+                    runner_job_id: "accepted-daemon-job",
+                    remote_workspace: "/runner/workspace",
+                    remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+                },
+            )
+            .map(|_| ())
+        }
+    }
+
     impl AgentTaskCookAttemptDispatcher for AdmissionFailingAttemptDispatcher {
         fn durable_recipe(&self) -> Result<Value> {
             Ok(serde_json::json!({ "kind": "test-admission-failure" }))
@@ -2018,6 +2091,87 @@ mod tests {
                 retry.metadata["retry_origin"]["pre_execution_failure"]["phase"],
                 "controller_admission"
             );
+        });
+    }
+
+    #[test]
+    fn cook_retries_runner_unavailable_under_one_durable_identity() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-runner-unavailable";
+            let first_run_id = "cook-runner-unavailable-attempt-1";
+            let mut options = batch_cook_options(
+                cook_id,
+                Arc::new(FlakyPreparationDispatcher {
+                    failures_remaining: AtomicUsize::new(1),
+                }),
+            );
+            options.provider_command = Some("fixture-provider".to_string());
+            options.initial_run_id = first_run_id.to_string();
+            options.max_attempts = 2;
+
+            let result = run_cook(options, UnusedExecutor).expect("cook recovers runner admission");
+
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.value.status, "in_flight");
+            assert_eq!(result.value.history_run_ids.len(), 2);
+            assert_eq!(result.value.history_run_ids[0], first_run_id);
+            let failed = agent_task_lifecycle::status(first_run_id).expect("failed attempt");
+            assert!(failed.provider_handles.is_empty());
+            assert_eq!(failed.metadata["provider_executions_consumed"], 0);
+            let resumed =
+                agent_task_lifecycle::status(cook_id).expect("cook alias resolves latest");
+            assert_eq!(resumed.run_id, result.value.history_run_ids[1]);
+        });
+    }
+
+    #[test]
+    fn cook_persists_materialization_failure_without_provider_execution() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("temp source root");
+            let cook_id = "cook-materialization-failure";
+            let run_id = "cook-materialization-failure-attempt-1";
+            let mut options =
+                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.provider_command = Some("fixture-provider".to_string());
+            options.initial_run_id = run_id.to_string();
+            options.source_worktree_path = Some(temp.path().to_path_buf());
+
+            let result =
+                run_cook(options, UnusedExecutor).expect("cook records materialization failure");
+
+            assert_eq!(result.value.status, "retries_exhausted");
+            let record =
+                agent_task_lifecycle::status(cook_id).expect("cook alias resolves failure");
+            assert_eq!(record.run_id, run_id);
+            assert!(record.provider_handles.is_empty());
+            assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        });
+    }
+
+    #[test]
+    fn cook_terminally_exhausts_pre_execution_retries_without_provider_budget() {
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-runner-exhaustion";
+            let mut options = batch_cook_options(
+                cook_id,
+                Arc::new(FlakyPreparationDispatcher {
+                    failures_remaining: AtomicUsize::new(usize::MAX),
+                }),
+            );
+            options.provider_command = Some("fixture-provider".to_string());
+            options.initial_run_id = "cook-runner-exhaustion-attempt-1".to_string();
+            options.max_attempts = 2;
+
+            let result = run_cook(options, UnusedExecutor).expect("cook reports exhaustion");
+
+            assert_eq!(result.exit_code, 1);
+            assert_eq!(result.value.status, "retries_exhausted");
+            assert_eq!(result.value.history_run_ids.len(), 2);
+            for run_id in &result.value.history_run_ids {
+                let record = agent_task_lifecycle::status(run_id).expect("failed attempt");
+                assert!(record.provider_handles.is_empty());
+                assert_eq!(record.metadata["provider_executions_consumed"], 0);
+            }
         });
     }
 
