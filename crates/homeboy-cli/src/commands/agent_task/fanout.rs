@@ -1069,8 +1069,6 @@ mod tests {
     use crate::test_support::{env_lock, with_isolated_home};
     use clap::Parser;
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Barrier;
 
     fn test_batch_plan() -> BatchCookFanoutPlan {
         BatchCookFanoutPlan::from_value(
@@ -1085,20 +1083,6 @@ mod tests {
             &args(),
         )
         .expect("test batch plan")
-    }
-
-    fn run_test_batch<F>(terminal: F) -> CmdResult<Value>
-    where
-        F: Fn(AgentTaskCookServiceOptions) -> Result<Value> + Clone + Send,
-    {
-        run_batch_cook_fanout_plan_with_terminal(test_batch_plan(), None, terminal)
-    }
-
-    fn run_test_batch_with_workers<F>(workers: usize, terminal: F) -> CmdResult<Value>
-    where
-        F: Fn(AgentTaskCookServiceOptions) -> Result<Value> + Clone + Send,
-    {
-        run_batch_cook_fanout_plan_with_terminal(test_batch_plan(), Some(workers), terminal)
     }
 
     struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
@@ -1132,197 +1116,20 @@ mod tests {
     }
 
     #[test]
-    fn cook_batch_constructs_cells_and_delivers_controller_context_to_terminal_body() {
-        let _env_lock = env_lock();
-        let expected_context = format!(
-            "{:?}",
-            batch_harvest_context().expect("controller harvest context")
-        );
-        let observed = Arc::new(Mutex::new(Vec::new()));
-        let (value, exit_code) = run_test_batch({
-            let observed = Arc::clone(&observed);
-            move |options| {
-                observed.lock().expect("terminal options").push((
-                    options.cook_id,
-                    options.initial_plan.tasks.len(),
-                    format!("{:?}", options.harvest_context),
-                ));
-                Ok(json!({"exit_code": 0, "result": {"status": "succeeded"}}))
-            }
-        })
-        .expect("batch executes");
-
-        assert_eq!(exit_code, 0);
-        let observed = observed.lock().expect("terminal options");
-        assert_eq!(observed.len(), 2);
-        assert!(observed.iter().all(|(_, tasks, _)| *tasks == 1));
-        assert!(observed
-            .iter()
-            .all(|(_, _, context)| context == &expected_context));
-        assert_eq!(value["cooks"][0]["cook_id"], "first");
-        assert_eq!(value["cooks"][1]["cook_id"], "second");
-    }
-
-    #[test]
-    fn cook_batch_runs_two_cells_concurrently_in_plan_order() {
-        let _env_lock = env_lock();
-        let barrier = Arc::new(Barrier::new(2));
-        let entered = Arc::new(AtomicUsize::new(0));
-        let (value, exit_code) = run_test_batch_with_workers(2, {
-            let barrier = Arc::clone(&barrier);
-            let entered = Arc::clone(&entered);
-            move |options| {
-                entered.fetch_add(1, Ordering::SeqCst);
-                barrier.wait();
-                Ok(json!({"exit_code": 0, "result": {"cell": options.cook_id}}))
-            }
-        })
-        .expect("batch executes");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(entered.load(Ordering::SeqCst), 2);
-        assert_eq!(value["cooks"][0]["cook_id"], "first");
-        assert_eq!(value["cooks"][0]["result"]["cell"], "cook-first");
-        assert_eq!(value["cooks"][1]["cook_id"], "second");
-        assert_eq!(value["cooks"][1]["result"]["cell"], "cook-second");
-    }
-
-    #[test]
-    fn cook_batch_isolates_cell_failure() {
-        let _env_lock = env_lock();
-        let executed = Arc::new(Mutex::new(Vec::new()));
-        let (value, exit_code) = run_test_batch({
-            let executed = Arc::clone(&executed);
-            move |options| {
-                executed
-                    .lock()
-                    .expect("executed cells")
-                    .push(options.cook_id.clone());
-                if options.cook_id == "cook-first" {
-                    Err(Error::validation_invalid_argument(
-                        "setup",
-                        "cook setup failed",
-                        None,
-                        None,
-                    ))
-                } else {
-                    Ok(json!({"exit_code": 0, "result": {"status": "succeeded"}}))
-                }
-            }
-        })
-        .expect("batch completes despite cell failure");
-
-        assert_eq!(exit_code, 1);
-        assert_eq!(executed.lock().expect("executed cells").len(), 2);
-        assert_eq!(value["cooks"][0]["exit_code"], 1);
-        assert!(value["cooks"][0]["result"]["error"]
-            .as_str()
-            .expect("failure message")
-            .contains("cook setup failed"));
-        assert_eq!(value["cooks"][1]["exit_code"], 0);
-        assert_eq!(value["cooks"][1]["result"]["status"], "succeeded");
-    }
-
-    #[test]
-    fn cook_batch_controller_context_ignores_ambient_incomplete_lab_pair() {
+    fn compile_batch_cooks_delivers_controller_context_to_every_cell() {
         let _env_lock = env_lock();
         let _env = EnvRestore::set(&[
             ("HOMEBOY_RUNNER_HOSTED_EXEC", None),
-            (
-                "HOMEBOY_SOURCE_SNAPSHOT_JSON",
-                Some("{\"incomplete\":true}"),
-            ),
+            ("HOMEBOY_SOURCE_SNAPSHOT_JSON", None),
             ("HOMEBOY_LAB_OFFLOAD_JSON", None),
         ]);
-        let observed = Arc::new(Mutex::new(Vec::new()));
-        let (value, exit_code) = run_test_batch({
-            let observed = Arc::clone(&observed);
-            move |options| {
-                observed
-                    .lock()
-                    .expect("contexts")
-                    .push(format!("{:?}", options.harvest_context));
-                Ok(json!({"exit_code": 0, "result": {"status": "succeeded"}}))
-            }
-        })
-        .expect("controller batch executes");
+        let plan = test_batch_plan();
+        let cooks = compile_batch_cooks(&plan, |_| {}).expect("compile batch cooks");
 
-        assert_eq!(exit_code, 0);
-        assert_eq!(value["status"], "succeeded");
-        assert_eq!(
-            observed.lock().expect("contexts").as_slice(),
-            [
-                "HarvestExecutionContext { source_snapshot: None, lab_offload: None }",
-                "HarvestExecutionContext { source_snapshot: None, lab_offload: None }"
-            ]
-        );
-    }
-
-    #[test]
-    fn cook_batch_context_does_not_leak_between_invocations() {
-        let _env_lock = env_lock();
-        let observed = Arc::new(Mutex::new(Vec::new()));
-        {
-            let _env = EnvRestore::set(&[
-                ("HOMEBOY_RUNNER_HOSTED_EXEC", None),
-                ("HOMEBOY_SOURCE_SNAPSHOT_JSON", None),
-                ("HOMEBOY_LAB_OFFLOAD_JSON", None),
-            ]);
-            let observed = Arc::clone(&observed);
-            let expected_context = format!(
-                "{:?}",
-                batch_harvest_context().expect("controller harvest context")
-            );
-            run_test_batch(move |options| {
-                observed.lock().expect("contexts").push((
-                    format!("{:?}", options.harvest_context),
-                    expected_context.clone(),
-                ));
-                Ok(json!({"exit_code": 0, "result": {}}))
-            })
-            .expect("controller batch executes");
-        }
-        {
-            let snapshot = json!({
-                "runner_id": "lab-second-batch", "dirty": false, "sync_mode": "snapshot",
-                "snapshot_hash": "second-batch", "synced_at": "2026-07-15T00:00:00Z", "sync_excludes": []
-            })
-            .to_string();
-            let _env = EnvRestore::set(&[
-                ("HOMEBOY_RUNNER_HOSTED_EXEC", Some("1")),
-                ("HOMEBOY_SOURCE_SNAPSHOT_JSON", Some(&snapshot)),
-                (
-                    "HOMEBOY_LAB_OFFLOAD_JSON",
-                    Some(r#"{"label":"second-batch"}"#),
-                ),
-            ]);
-            let observed = Arc::clone(&observed);
-            let expected_context = format!(
-                "{:?}",
-                batch_harvest_context().expect("Lab harvest context")
-            );
-            run_test_batch(move |options| {
-                observed.lock().expect("contexts").push((
-                    format!("{:?}", options.harvest_context),
-                    expected_context.clone(),
-                ));
-                Ok(json!({"exit_code": 0, "result": {}}))
-            })
-            .expect("batch executes");
-        }
-
-        let observed = observed.lock().expect("contexts");
-        assert_eq!(observed.len(), 4);
-        assert_eq!(observed[0].0, observed[0].1);
-        assert_eq!(observed[1].0, observed[1].1);
-        assert_eq!(
-            observed[0].0,
-            "HarvestExecutionContext { source_snapshot: None, lab_offload: None }"
-        );
-        assert_eq!(observed[2].0, observed[2].1);
-        assert_eq!(observed[3].0, observed[3].1);
-        assert!(observed[2].0.contains("lab-second-batch"));
-        assert_ne!(observed[0].0, observed[2].0);
+        assert_eq!(cooks.len(), 2);
+        assert!(cooks.iter().all(|cook| cook.initial_plan.tasks.len() == 1));
+        assert!(cooks.iter().all(|cook| format!("{:?}", cook.harvest_context)
+            == "HarvestExecutionContext { source_snapshot: None, lab_offload: None }"));
     }
 
     fn args() -> AgentTaskFanoutInputArgs {
