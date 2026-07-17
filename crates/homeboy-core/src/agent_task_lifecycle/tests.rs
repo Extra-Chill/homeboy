@@ -760,7 +760,9 @@ fn detached_cook_preacceptance_failure_terminalizes_attempt_proxy() {
             attempt_run_id,
             &plan,
             "lab_workspace_stage",
-            &Error::internal_unexpected("workspace materialization failed"),
+            &Error::internal_unexpected("workspace materialization failed").with_hint(format!(
+                "Retry: homeboy agent-task retry {attempt_run_id} --run"
+            )),
         )
         .expect("terminal staging failure");
 
@@ -770,6 +772,12 @@ fn detached_cook_preacceptance_failure_terminalizes_attempt_proxy() {
             record.metadata["pre_execution_failure"]["phase"],
             "lab_workspace_stage"
         );
+        assert!(record.metadata["pre_execution_failure"]["hints"]
+            .as_array()
+            .expect("failure hints")
+            .iter()
+            .any(|hint| hint
+                == "Retry: homeboy agent-task retry cook-7970-attempt-1-staging-failure --run"));
         assert!(record.metadata.get("runner_job_id").is_none());
     });
 }

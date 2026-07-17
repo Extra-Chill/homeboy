@@ -1182,6 +1182,11 @@ pub(crate) fn run_lab_offload_inner(
     ) {
         Ok(stage) => stage,
         Err(error) => {
+            let error = if let Some(run_id) = pre_acceptance_run_id.as_deref() {
+                error.with_hint(format!("Retry: homeboy agent-task retry {run_id} --run"))
+            } else {
+                error
+            };
             if let Some(run_id) = pre_acceptance_run_id.as_deref() {
                 if let Ok(plan) = agent_task_lifecycle::load_plan(run_id) {
                     // Staging is still controller-side. Make a failed handoff
