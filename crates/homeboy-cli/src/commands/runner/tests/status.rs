@@ -127,6 +127,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
         active_job_state: RunnerActiveJobState::Available,
         active_job_source: Some(RunnerActiveJobSource::ReverseBroker),
         active_job_error: None,
+        active_job_recovery_evidence: None,
         session_path: "/tmp/session.json".to_string(),
     };
 
@@ -214,6 +215,7 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
             code: "active_job_view_inconsistent".to_string(),
             message: "freshness has one job while /jobs has none".to_string(),
         }),
+        active_job_recovery_evidence: None,
         session_path: "/tmp/session.json".to_string(),
     };
 
@@ -600,6 +602,7 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
         active_job_state: RunnerActiveJobState::Available,
         active_job_source: Some(RunnerActiveJobSource::ReverseBroker),
         active_job_error: None,
+        active_job_recovery_evidence: None,
         session_path: "/tmp/session.json".to_string(),
     };
 
@@ -661,6 +664,7 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
         active_job_state: RunnerActiveJobState::Available,
         active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
         active_job_error: None,
+        active_job_recovery_evidence: None,
         session_path: "/tmp/session.json".to_string(),
     };
 
