@@ -5,11 +5,9 @@ use crate::project;
 use crate::server::http::ApiClient;
 use homeboy_engine_primitives::validation;
 
-use super::{
-    build_action_env, execute_extension_command, load_extension, ExtensionExecutionMode,
-    ExtensionScope,
-};
+use super::{build_action_env, execute_extension_command, load_extension, ExtensionExecutionMode};
 use crate::extension::manifest::{ActionConfig, ActionType, HttpMethod};
+use crate::extension::ExtensionScope;
 
 pub(crate) fn execute_action(
     extension_id: &str,
