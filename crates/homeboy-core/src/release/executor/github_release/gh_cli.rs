@@ -74,6 +74,98 @@ pub(crate) fn github_release_artifact_paths(state: &ReleaseState) -> Vec<String>
         .collect()
 }
 
+/// Resolve every local asset required to publish a release. A cargo-dist
+/// manifest is itself an uploadable asset, but it also declares the archives
+/// that must exist before the release can become public.
+pub(crate) fn github_release_asset_paths(state: &ReleaseState) -> Result<Vec<String>, String> {
+    let mut paths = github_release_artifact_paths(state);
+    let manifests = paths
+        .iter()
+        .filter(|path| {
+            std::path::Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some("dist-manifest.json")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for manifest in manifests {
+        let contents = std::fs::read_to_string(&manifest).map_err(|error| {
+            format!("could not read distribution manifest '{manifest}': {error}")
+        })?;
+        let value: serde_json::Value = serde_json::from_str(&contents).map_err(|error| {
+            format!("could not parse distribution manifest '{manifest}': {error}")
+        })?;
+        let manifest_dir = std::path::Path::new(&manifest)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        collect_manifest_assets(&value, manifest_dir, &mut paths);
+    }
+
+    paths.sort();
+    paths.dedup();
+    let missing = paths
+        .iter()
+        .filter(|path| !path_is_file(path))
+        .map(|path| release_asset_name(path))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(paths)
+    } else {
+        Err(format!(
+            "release assets declared by dist-manifest.json are missing: {}. Run the package step again, then resume with `homeboy release --head --from-artifacts <artifact-dir>`.",
+            missing.join(", ")
+        ))
+    }
+}
+
+fn collect_manifest_assets(
+    value: &serde_json::Value,
+    manifest_dir: &std::path::Path,
+    paths: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            // cargo-dist artifacts use a path/name pair. Require a distributable
+            // filename so unrelated manifest metadata is never treated as an asset.
+            if let Some(path) = object.get("path").and_then(serde_json::Value::as_str) {
+                let candidate = std::path::Path::new(path);
+                if is_release_archive(candidate) {
+                    paths.push(manifest_dir.join(candidate).display().to_string());
+                }
+            }
+            for value in object.values() {
+                collect_manifest_assets(value, manifest_dir, paths);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_manifest_assets(value, manifest_dir, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_release_archive(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            [".tar.xz", ".tar.gz", ".tar.zst", ".zip", ".sha256"]
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
+        })
+}
+
+fn release_asset_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
 pub(crate) fn github_release_upload_timeout() -> Duration {
     std::env::var(GITHUB_RELEASE_UPLOAD_TIMEOUT_ENV)
         .ok()
@@ -374,6 +466,74 @@ mod tests {
         assert_eq!(
             github_release_artifact_paths(&state),
             vec![durable.display().to_string()]
+        );
+    }
+
+    #[test]
+    fn manifest_only_release_fails_with_the_missing_target_archive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = dir.path().join("dist-manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{"artifacts":[{"path":"homeboy-x86_64-unknown-linux-gnu.tar.xz"}]}"#,
+        )
+        .expect("write manifest");
+        let state = ReleaseState {
+            artifacts: vec![crate::release::types::ReleaseArtifact {
+                path: manifest.display().to_string(),
+                durable_path: None,
+                artifact_type: None,
+                platform: None,
+            }],
+            ..ReleaseState::default()
+        };
+
+        let error = github_release_asset_paths(&state).expect_err("missing archive");
+        assert!(error.contains("homeboy-x86_64-unknown-linux-gnu.tar.xz"));
+        assert!(error.contains("homeboy release --head --from-artifacts"));
+    }
+
+    #[test]
+    fn manifest_declared_archives_are_uploaded_with_the_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = dir.path().join("dist-manifest.json");
+        let archive = dir.path().join("homeboy-x86_64-unknown-linux-gnu.tar.xz");
+        std::fs::write(&archive, b"archive").expect("write archive");
+        std::fs::write(
+            &manifest,
+            r#"{"artifacts":[{"path":"homeboy-x86_64-unknown-linux-gnu.tar.xz"}]}"#,
+        )
+        .expect("write manifest");
+        let state = ReleaseState {
+            artifacts: vec![crate::release::types::ReleaseArtifact {
+                path: manifest.display().to_string(),
+                durable_path: None,
+                artifact_type: None,
+                platform: None,
+            }],
+            ..ReleaseState::default()
+        };
+
+        assert_eq!(
+            github_release_asset_paths(&state).expect("assets"),
+            vec![
+                manifest.display().to_string(),
+                archive.display().to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn verification_names_the_missing_uploaded_archive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("homeboy-x86_64-unknown-linux-gnu.tar.xz");
+        std::fs::write(&path, b"archive").expect("write archive");
+
+        let error = verify_release_assets(&[path.display().to_string()], &[])
+            .expect_err("remote archive is absent");
+        assert_eq!(
+            error,
+            "GitHub Release is missing uploaded asset 'homeboy-x86_64-unknown-linux-gnu.tar.xz'"
         );
     }
 }

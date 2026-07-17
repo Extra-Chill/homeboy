@@ -2,7 +2,9 @@
 
 use crate::release::types::ReleaseStepStatus;
 
-use super::super::{create_failed_result, not_created_result, upload_failed_result};
+use super::super::{
+    create_failed_result, not_created_result, upload_failed_result, upload_success_result,
+};
 use super::{data_bool, data_str, test_body, test_repair, test_repo};
 
 #[test]
@@ -136,4 +138,20 @@ fn upload_timeout_is_classified_and_preserves_empty_stderr() {
         Some(124)
     );
     assert!(result.error.as_deref().unwrap().contains("timed out"));
+}
+
+#[test]
+fn verified_upload_result_is_successful_only_after_publication() {
+    let result = upload_success_result("v0.10.6", &test_repo(), 2);
+
+    assert_eq!(result.status, ReleaseStepStatus::Success);
+    assert_eq!(data_str(&result, "action"), Some("github.release.upload"));
+    assert_eq!(
+        result
+            .data
+            .as_ref()
+            .and_then(|data| data.get("artifact_count"))
+            .and_then(|value| value.as_u64()),
+        Some(2)
+    );
 }

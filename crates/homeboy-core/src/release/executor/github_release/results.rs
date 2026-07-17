@@ -162,7 +162,7 @@ pub(crate) fn upload_failed_result(
     )
 }
 
-pub(super) fn upload_success_result(
+pub(crate) fn upload_success_result(
     tag: &str,
     github: &GitHubRepo,
     artifact_count: usize,

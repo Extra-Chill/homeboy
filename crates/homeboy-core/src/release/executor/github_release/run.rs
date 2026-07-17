@@ -7,7 +7,7 @@ use crate::release::types::{ReleaseState, ReleaseStepResult};
 use super::super::step_success;
 use super::gh_cli::{
     gh_command, gh_is_authenticated, gh_is_available, gh_release_exists,
-    github_release_artifact_paths,
+    github_release_artifact_paths, github_release_asset_paths,
 };
 use super::notes::{
     build_github_release_body, github_changelog_url, github_release_notes_start_tag,
@@ -85,7 +85,8 @@ pub(crate) fn run_github_release(
     // single API call — keeping the github.release step responsible for
     // the full Release lifecycle (entry + assets) instead of requiring a
     // separate publish.<target> step.
-    let artifact_paths = github_release_artifact_paths(state);
+    let artifact_paths = github_release_asset_paths(state)
+        .map_err(|error| Error::validation_invalid_argument("release assets", error, None, None))?;
     let has_artifacts = !artifact_paths.is_empty();
     // Single repair-command builder for every failure path. The persisted
     // exact-body file only exists after `persist_release_body` runs below, so
@@ -279,6 +280,9 @@ pub(crate) fn run_github_release(
         artifact_paths.len()
     );
 
+    // Create a draft first. A public release immediately becomes eligible for
+    // GitHub's latest-download endpoint, so it must not be visible until its
+    // manifest-declared assets have been read back and verified.
     // Build args dynamically so we can append artifact paths as positional
     // arguments — `gh release create <tag> [files...]` attaches each file
     // as a Release asset in the same API call.
@@ -290,6 +294,7 @@ pub(crate) fn run_github_release(
         &tag,
         "--notes",
         &release_notes,
+        "--draft",
         "-R",
         &repo_flag,
     ];
@@ -340,9 +345,53 @@ pub(crate) fn run_github_release(
         ));
     }
 
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    log_status!("release", "Created GitHub Release: {}", url);
+    let metadata = match gh_release_metadata(&github, &component.github, &tag, &repo_flag) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return Ok(upload_failed_result(
+                &tag,
+                &github,
+                String::new(),
+                error,
+                None,
+                false,
+                artifact_paths.len(),
+                repair_commands(notes_start_tag.as_deref(), persisted_notes_path.as_deref()),
+            ))
+        }
+    };
+    if let Err(error) = verify_release_assets(&artifact_paths, &metadata.assets) {
+        return Ok(upload_failed_result(
+            &tag,
+            &github,
+            String::new(),
+            error,
+            None,
+            false,
+            artifact_paths.len(),
+            repair_commands(notes_start_tag.as_deref(), persisted_notes_path.as_deref()),
+        ));
+    }
+    let publish_args = ["release", "edit", &tag, "--draft=false", "-R", &repo_flag];
+    let publish_output = run_gh_command(
+        gh_command(&github, &component.github, &publish_args),
+        github_release_upload_timeout(),
+    );
+    if publish_output.timed_out || publish_output.exit_code != Some(0) {
+        return Ok(upload_failed_result(
+            &tag,
+            &github,
+            publish_output.stdout,
+            publish_output.stderr,
+            publish_output.exit_code,
+            publish_output.timed_out,
+            artifact_paths.len(),
+            repair_commands(notes_start_tag.as_deref(), persisted_notes_path.as_deref()),
+        ));
+    }
 
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    log_status!("release", "Published verified GitHub Release: {}", url);
     Ok(step_success(
         "github.release",
         "github.release",
@@ -354,14 +403,9 @@ pub(crate) fn run_github_release(
             "url": url,
             "artifact_count": artifact_paths.len(),
             "generated_notes": generated_notes_ok,
-            // The changelog URL embedded in the release body footer, read back
-            // from the single body builder so step metadata and the posted body
-            // can never disagree (issue #3508).
+            "published": true,
             "changelog_url": body.changelog_url,
             "notes_start_tag": notes_start_tag,
-            // The exact GitHub Release body Homeboy posted, plus a persisted
-            // copy on disk, so manual recovery reproduces the identical body
-            // without reconstructing it from source (issue #3508).
             "release_body": release_notes,
             "release_body_source": body.source_label(),
             "release_body_file": persisted_notes_path,
