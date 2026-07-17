@@ -432,7 +432,12 @@ fn release_recovery_propagates_dist_opt_in_and_dirty_allowance_through_all_dist_
     assert!(prepare.contains("RECOVERY_RELEASE=\"${{ needs.check.outputs.recovery-release }}\""));
     assert!(prepare.contains("echo \"recovery-release=${RECOVERY_RELEASE}\" >> \"$GITHUB_OUTPUT\""));
 
-    for job in ["plan", "build-local-artifacts", "build-global-artifacts", "host"] {
+    for job in [
+        "plan",
+        "build-local-artifacts",
+        "build-global-artifacts",
+        "host",
+    ] {
         let section = job_section(workflow, job);
         let opt_in = section
             .find("grep -Fqx '[package.metadata.dist]' Cargo.toml")
@@ -467,6 +472,33 @@ fn release_recovery_propagates_dist_opt_in_and_dirty_allowance_through_all_dist_
     }
 
     assert!(cargo_manifest().contains("[package.metadata.dist]\ndist = true"));
+}
+
+#[test]
+fn release_recovery_restores_only_the_cargo_dist_overlay_before_finalization() {
+    let host = job_section(release_workflow(), "host");
+    let cargo_dist_upload = host
+        .find("dist host --tag=${{ needs.prepare.outputs['release-tag'] }} --steps=upload")
+        .expect("host must upload artifacts with cargo-dist");
+    let restore = host
+        .find("- name: Restore recovery cargo-dist overlay")
+        .expect("host must clean up the recovery cargo-dist overlay");
+    let finalize = host
+        .find("- name: Finish Homeboy release pipeline at tag")
+        .expect("host must finalize the Homeboy release pipeline");
+
+    assert!(
+        host.contains("if: needs.prepare.outputs.recovery-release == 'true'"),
+        "only recovery releases may restore the cargo-dist overlay"
+    );
+    assert!(
+        host.contains("run: git restore --source=HEAD -- Cargo.toml"),
+        "cleanup must restore only the intentional Cargo.toml overlay"
+    );
+    assert!(
+        cargo_dist_upload < restore && restore < finalize,
+        "recovery overlay cleanup must follow cargo-dist upload and precede Homeboy finalization"
+    );
 }
 
 #[test]
