@@ -38,6 +38,7 @@ pub(super) fn run(root: &Path) -> Vec<Finding> {
         };
 
         findings.extend(detect_vacuous_tests(&relative, &content));
+        findings.extend(detect_ignored_without_reason(&relative, &content));
         for site in detect_env_mutations(&relative, &content) {
             env_mutations
                 .entry(site.var.clone())
@@ -559,6 +560,134 @@ fn extract_fn_name(line: &str) -> Option<String> {
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .next()?;
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Flag `#[ignore]` attributes that carry no reason string.
+///
+/// An ignored test with no rationale leaves no record of *why* it is skipped or
+/// what would re-enable it, so it tends to rot into permanently-dead weight.
+/// The documented form `#[ignore = "..."]` keeps the skip self-explaining; this
+/// check nudges bare `#[ignore]` toward it.
+///
+/// Detection is line-oriented (rustfmt always places attributes on their own
+/// line). String and raw-string literals are blanked first so `#[ignore]` text
+/// embedded in test fixtures is never mistaken for a real attribute. A line
+/// whose trimmed text is exactly `#[ignore]` is flagged.
+fn detect_ignored_without_reason(file: &str, content: &str) -> Vec<Finding> {
+    let masked = blank_string_literals(content);
+    masked
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim() == "#[ignore]")
+        .map(|(index, _)| Finding {
+            convention: "test_quality".to_string(),
+            severity: Severity::Info,
+            file: file.to_string(),
+            description: format!(
+                "Test at line {} is disabled with a bare `#[ignore]` that gives no reason",
+                index + 1
+            ),
+            suggestion:
+                "Use `#[ignore = \"<why it is skipped / when it should run>\"]` so the skip is self-documenting"
+                    .to_string(),
+            kind: AuditFinding::IgnoredTestWithoutReason,
+        })
+        .collect()
+}
+
+/// Replace the contents of Rust string literals (regular `"..."` and raw
+/// `r#"..."#`) with spaces while preserving newlines, so line-oriented scans
+/// see the code skeleton but not literal payloads such as test fixtures.
+///
+/// Operates purely on bytes (never slicing `&str` at an arbitrary offset) so it
+/// is safe on files containing multi-byte UTF-8 characters. Every non-newline
+/// byte inside a literal is replaced by a single space; because ASCII spaces
+/// and newlines are one byte each, the output preserves line boundaries and
+/// column-agnostic line numbers.
+fn blank_string_literals(content: &str) -> String {
+    let bytes = content.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    let blank = |byte: u8| if byte == b'\n' { b'\n' } else { b' ' };
+
+    while i < bytes.len() {
+        let byte = bytes[i];
+
+        // Raw string: r"...", r#"..."#, r##"..."##, ...
+        if byte == b'r' {
+            let mut j = i + 1;
+            let mut hashes = 0;
+            while j < bytes.len() && bytes[j] == b'#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'"' {
+                out.push(b'r');
+                out.extend(std::iter::repeat_n(b'#', hashes));
+                out.push(b'"');
+                j += 1;
+                // Closing delimiter is `"` followed by `hashes` `#` bytes.
+                loop {
+                    if j >= bytes.len() {
+                        break;
+                    }
+                    let is_close = bytes[j] == b'"'
+                        && bytes[j + 1..]
+                            .iter()
+                            .take(hashes)
+                            .filter(|b| **b == b'#')
+                            .count()
+                            == hashes;
+                    if is_close {
+                        out.push(b'"');
+                        out.extend(std::iter::repeat_n(b'#', hashes));
+                        j += 1 + hashes;
+                        break;
+                    }
+                    out.push(blank(bytes[j]));
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+        }
+
+        // Regular string: "...", honoring backslash escapes.
+        if byte == b'"' {
+            out.push(b'"');
+            let mut j = i + 1;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'\\' => {
+                        out.push(b' ');
+                        if j + 1 < bytes.len() {
+                            out.push(blank(bytes[j + 1]));
+                        }
+                        j += 2;
+                    }
+                    b'"' => {
+                        out.push(b'"');
+                        j += 1;
+                        break;
+                    }
+                    other => {
+                        out.push(blank(other));
+                        j += 1;
+                    }
+                }
+            }
+            i = j;
+            continue;
+        }
+
+        out.push(byte);
+        i += 1;
+    }
+
+    // Every replaced byte is ASCII (space/newline) and untouched bytes retain
+    // their original UTF-8 sequences, so the result is always valid UTF-8.
+    String::from_utf8(out).unwrap_or_else(|_| content.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -1167,5 +1296,60 @@ fn with_isolated_home() { std::env::set_var("HOME", "/tmp/a"); }
             ],
         );
         assert!(detect_inconsistent_env_guards(shared).is_empty());
+    }
+
+    #[test]
+    fn flags_bare_ignore_attribute() {
+        let findings = detect_ignored_without_reason(
+            "src/server/auth.rs",
+            r#"
+    #[test]
+    #[ignore]
+    fn test_login() {
+        let _ = login("fixture");
+    }
+"#,
+        );
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, AuditFinding::IgnoredTestWithoutReason);
+        assert!(findings[0].description.contains("bare `#[ignore]`"));
+    }
+
+    #[test]
+    fn keeps_ignore_attribute_with_reason() {
+        let findings = detect_ignored_without_reason(
+            "src/code_audit/mod.rs",
+            r#"
+    #[test]
+    #[ignore = "Requires PHP extension with fingerprint script installed"]
+    fn integration_only() {
+        run();
+    }
+"#,
+        );
+
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn ignores_bare_ignore_text_inside_string_fixtures() {
+        // The literal `#[ignore]` here is test-input data, not an attribute
+        // position: nothing that looks like a test item follows it.
+        let findings = detect_ignored_without_reason(
+            "src/code_audit/detectors/test_vacuity.rs",
+            r#"
+    fn fixture() {
+        let sample = "\
+#[test]
+#[ignore]
+fn generated() {}
+";
+        assert!(sample.contains("ignore"));
+    }
+"#,
+        );
+
+        assert!(findings.is_empty());
     }
 }
