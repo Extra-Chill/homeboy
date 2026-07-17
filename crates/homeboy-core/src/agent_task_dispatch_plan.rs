@@ -288,7 +288,10 @@ pub fn build_dispatch_plan_with_provider_requirements(
     // absent rotation. Per-task `metadata.provider_rotation` still overrides it.
     plan.options.rotation = match &request.core.resolved_provider_policy {
         Some(_) => resolved_rotation,
-        None => defaults::load_config().agent_task.rotation,
+        None => defaults::load_config()
+            .agent_task
+            .rotation
+            .and_then(|rotation| serde_json::from_value(rotation).ok()),
     };
     if let Some(policy) = &request.core.resolved_provider_policy {
         for task in &mut plan.tasks {
@@ -1041,7 +1044,7 @@ mod tests {
     fn dispatch_plan_applies_global_agent_task_rotation_policy() {
         with_isolated_home(|_| {
             let mut config = defaults::load_config();
-            config.agent_task.rotation = Some(
+            config.agent_task.rotation = serde_json::to_value(
                 crate::agent_task_scheduler::AgentTaskProviderRotationPolicy {
                     entries: vec![
                         crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
@@ -1052,7 +1055,8 @@ mod tests {
                     max_attempts: Some(2),
                     ..Default::default()
                 },
-            );
+            )
+            .ok();
             defaults::save_config(&config).expect("save config");
 
             let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
@@ -1090,7 +1094,7 @@ mod tests {
     fn submitted_provider_policy_preserves_controller_execution_policy() {
         with_isolated_home(|_| {
             let mut runner_config = defaults::load_config();
-            runner_config.agent_task.rotation = Some(
+            runner_config.agent_task.rotation = serde_json::to_value(
                 crate::agent_task_scheduler::AgentTaskProviderRotationPolicy {
                     entries: vec![
                         crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
@@ -1100,7 +1104,8 @@ mod tests {
                     ],
                     ..Default::default()
                 },
-            );
+            )
+            .ok();
             defaults::save_config(&runner_config).expect("save runner config");
 
             let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
@@ -1192,7 +1197,7 @@ mod tests {
     fn submitted_provider_policy_without_rotation_ignores_runner_rotation() {
         with_isolated_home(|_| {
             let mut runner_config = defaults::load_config();
-            runner_config.agent_task.rotation = Some(
+            runner_config.agent_task.rotation = serde_json::to_value(
                 crate::agent_task_scheduler::AgentTaskProviderRotationPolicy {
                     entries: vec![
                         crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
@@ -1202,7 +1207,8 @@ mod tests {
                     ],
                     ..Default::default()
                 },
-            );
+            )
+            .ok();
             defaults::save_config(&runner_config).expect("save runner config");
 
             let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
@@ -1290,7 +1296,7 @@ mod tests {
     fn controller_plan_compilation_uses_initial_global_rotation_model() {
         with_isolated_home(|_| {
             let mut config = defaults::load_config();
-            config.agent_task.rotation = Some(
+            config.agent_task.rotation = serde_json::to_value(
                 crate::agent_task_scheduler::AgentTaskProviderRotationPolicy {
                     entries: vec![
                         crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
@@ -1300,7 +1306,8 @@ mod tests {
                     ],
                     ..Default::default()
                 },
-            );
+            )
+            .ok();
             defaults::save_config(&config).expect("save config");
             let mut request = dispatch_request(DispatchRequestOverrides {
                 prompt: Some("Cook with the selected global model.".to_string()),
@@ -1331,7 +1338,7 @@ mod tests {
     fn controller_plan_compilation_preserves_submitted_provider_policy() {
         with_isolated_home(|_| {
             let mut config = defaults::load_config();
-            config.agent_task.rotation = Some(
+            config.agent_task.rotation = serde_json::to_value(
                 crate::agent_task_scheduler::AgentTaskProviderRotationPolicy {
                     entries: vec![
                         crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
@@ -1341,7 +1348,8 @@ mod tests {
                     ],
                     ..Default::default()
                 },
-            );
+            )
+            .ok();
             defaults::save_config(&config).expect("save config");
             let submitted_policy =
                 crate::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {

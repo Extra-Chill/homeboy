@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::agent_task_schedule::AgentTaskProviderRotationPolicy;
-
 #[path = "defaults/builtins.rs"]
 mod builtins;
 mod io;
@@ -285,8 +283,12 @@ pub struct AgentTaskConfig {
     /// `homeboy config set /agent_task/rotation <json> --json`. A per-plan
     /// `options.rotation` or per-task `metadata.provider_rotation` override
     /// takes precedence (#6978).
+    ///
+    /// Carried opaquely as JSON so core config does not depend on the agent-task
+    /// subsystem; the agent-task dispatch layer deserializes it into its
+    /// `AgentTaskProviderRotationPolicy` when building a plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rotation: Option<AgentTaskProviderRotationPolicy>,
+    pub rotation: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -454,6 +456,7 @@ pub fn builtin_defaults() -> Defaults {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_task_schedule::AgentTaskProviderRotationPolicy;
     use crate::test_support::with_isolated_home;
 
     #[test]
@@ -530,7 +533,9 @@ mod tests {
         )
         .unwrap();
 
-        let rotation = config.agent_task.rotation.expect("rotation policy");
+        let rotation: AgentTaskProviderRotationPolicy =
+            serde_json::from_value(config.agent_task.rotation.expect("rotation policy"))
+                .expect("rotation policy deserializes");
         assert_eq!(rotation.entries.len(), 2);
         assert_eq!(rotation.max_attempts, Some(3));
         assert_eq!(

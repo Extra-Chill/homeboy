@@ -120,7 +120,19 @@ pub fn default_profile() -> AgentTaskReviewProfile {
 /// config therefore fails finalization instead of being mistaken for profile absence.
 pub fn resolve_review_profile(path: &str) -> Result<AgentTaskReviewProfile> {
     let component = crate::component::resolve_effective(None, Some(path), None)?;
-    let profile = component.review_profile.unwrap_or_else(default_profile);
+    // The component model carries the profile opaquely as JSON; deserialize it
+    // here (the agent-task layer owns the profile schema). A present-but-invalid
+    // profile fails finalization instead of being mistaken for profile absence.
+    let profile = match component.review_profile {
+        Some(value) => serde_json::from_value(value).map_err(|error| {
+            crate::Error::validation_invalid_json(
+                error,
+                Some("parse component review profile".to_string()),
+                None,
+            )
+        })?,
+        None => default_profile(),
+    };
     validate_profile(&profile)?;
     Ok(profile)
 }
