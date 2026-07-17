@@ -12,9 +12,6 @@ HOMEBOY_EXTENSION_REVISION="${HOMEBOY_EXTENSION_REVISION:-unknown}"
 HOMEBOY_ACTION_REF="${HOMEBOY_ACTION_REF:-unknown}"
 HOMEBOY_ACTION_REPOSITORY="${HOMEBOY_ACTION_REPOSITORY:-unknown}"
 COMMANDS_CSV="${COMMANDS:-}"
-AUTOFIX_ENABLED="${AUTOFIX_ENABLED:-false}"
-AUTOFIX_ATTEMPTED="${AUTOFIX_ATTEMPTED:-false}"
-AUTOFIX_COMMANDS="${AUTOFIX_COMMANDS:-}"
 COMPONENT_NAME="${COMPONENT_NAME:-${HOMEBOY_COMPONENT_ID:-}}"
 
 append_local_reproduction_commands() {
@@ -133,16 +130,7 @@ ARGS=(
   --run-url "${RUN_URL}"
   --tooling-json "${TOOLING_JSON}"
   --commands "${COMMANDS_CSV}"
-  --autofix-commands "${AUTOFIX_COMMANDS}"
 )
-
-if [ "${AUTOFIX_ENABLED}" = "true" ]; then
-  ARGS+=(--autofix-enabled)
-fi
-
-if [ "${AUTOFIX_ATTEMPTED}" = "true" ]; then
-  ARGS+=(--autofix-attempted)
-fi
 
 if ! homeboy "${ARGS[@]}" > "${DIGEST_FILE}" 2>/dev/null; then
   rm -f "${DIGEST_FILE}"

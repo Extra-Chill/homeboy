@@ -39,9 +39,6 @@ export HOMEBOY_EXTENSION_REVISION="abc123"
 export HOMEBOY_ACTION_REPOSITORY="Extra-Chill/homeboy-action"
 export HOMEBOY_ACTION_REF="v2"
 export COMMANDS="review lint,review test,review audit"
-export AUTOFIX_ENABLED="true"
-export AUTOFIX_ATTEMPTED="true"
-export AUTOFIX_COMMANDS="review test"
 export COMPONENT_NAME="wordpress"
 export SCOPE_CONTEXT="pr"
 export SCOPE_MODE="changed"
@@ -80,10 +77,6 @@ grep -Fx -- "--tooling-json" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "${TOOLING_JSON}" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "--commands" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "review lint,review test,review audit" "${ARGS_FILE}" >/dev/null
-grep -Fx -- "--autofix-commands" "${ARGS_FILE}" >/dev/null
-grep -Fx -- "review test" "${ARGS_FILE}" >/dev/null
-grep -Fx -- "--autofix-enabled" "${ARGS_FILE}" >/dev/null
-grep -Fx -- "--autofix-attempted" "${ARGS_FILE}" >/dev/null
 
 jq -e \
   '.homeboy_cli_version == "homeboy 1.2.3" and

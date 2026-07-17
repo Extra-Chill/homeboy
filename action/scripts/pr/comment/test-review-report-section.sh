@@ -41,7 +41,6 @@ if [ "${HOMEBOY_REVIEW_OUTPUT_MODE:-}" = "custom" ]; then
   exit 0
 fi
 printf ':zap: Scope: **changed files only** (since `origin/main`)\n\n'
-printf '> :wrench: **autofix:** applied — 2 file(s) fixed via lint\n'
 printf '> :warning: **binary-source:** fallback release binary (source build failed)\n\n'
 printf '**2** finding(s) across 2 stage(s)\n\n'
 printf ':x: **audit** — failed (2 finding(s))\n'
@@ -57,10 +56,6 @@ export RESULTS='{"review audit":"fail","review lint":"pass","review test":"pass"
 export COMP_ID="data-machine"
 export WORKSPACE="/tmp/workspace"
 export SECTION_TITLE="Audit"
-export AUTOFIX_ENABLED="true"
-export AUTOFIX_COMMITTED="true"
-export AUTOFIX_FILE_COUNT="2"
-export AUTOFIX_FIX_TYPES="lint"
 export BINARY_SOURCE="fallback"
 export HOMEBOY_CI_RESULTS_ARTIFACT="homeboy-ci-results-data-machine-audit"
 export HOMEBOY_OBSERVATIONS_ARTIFACT="homeboy-observations-data-machine-audit"
@@ -85,7 +80,6 @@ assert_contains "${SECTION_BODY}" "homeboy runs import <dir>" "comment includes 
 assert_contains "${SECTION_BODY}" "homeboy runs findings <run-id>" "comment includes findings drill-down command"
 assert_contains "${SECTION_BODY}" "https://github.com/Extra-Chill/homeboy-action/actions/runs/123" "comment links workflow run artifacts"
 assert_not_contains "${SECTION_BODY}" ":x: **audit** _(changed files only)_" "legacy per-command audit block skipped"
-assert_contains "$(cat "${HOMEBOY_REVIEW_CALL_LOG}")" "--banner autofix=applied — 2 file(s) fixed via lint" "autofix banner passed to core"
 assert_contains "$(cat "${HOMEBOY_REVIEW_CALL_LOG}")" "--banner binary-source=fallback release binary (source build failed)" "binary-source banner passed to core"
 assert_contains "$(cat "${HOMEBOY_REVIEW_CALL_LOG}")" "--placement local review data-machine" "review report opts into local placement in GitHub Actions"
 

@@ -21,20 +21,6 @@ add_review_banner() {
 }
 
 append_review_banner_args() {
-  if [ "${AUTOFIX_ENABLED:-false}" = "true" ] && [ "${AUTOFIX_COMMITTED:-}" = "true" ]; then
-    local autofix_summary="applied"
-    if [ -n "${AUTOFIX_FILE_COUNT:-}" ] && [ -n "${AUTOFIX_FIX_TYPES:-}" ]; then
-      autofix_summary+=" — ${AUTOFIX_FILE_COUNT} file(s) fixed via ${AUTOFIX_FIX_TYPES}"
-    elif [ -n "${AUTOFIX_FILE_COUNT:-}" ]; then
-      autofix_summary+=" — ${AUTOFIX_FILE_COUNT} file(s) fixed"
-    fi
-    add_review_banner "autofix" "${autofix_summary}"
-  elif [ "${AUTOFIX_ENABLED:-false}" = "true" ] && [ "${AUTOFIX_ATTEMPTED:-false}" = "true" ] && [ "${AUTOFIX_STATUS:-}" = "push-failed" ]; then
-    add_review_banner "autofix" "generated changes but could not push them back to ${AUTOFIX_TARGET_REPO:-${REPO}}:${AUTOFIX_TARGET_BRANCH:-unknown}"
-  elif [ "${AUTOFIX_ENABLED:-false}" = "true" ] && [ "${AUTOFIX_STATUS:-}" = "skipped-head-bot-author" ]; then
-    add_review_banner "autofix" "skipped — PR head is already a homeboy-ci[bot] commit, so PR autofix only runs after human commits"
-  fi
-
   if [ "${BINARY_SOURCE:-source}" = "fallback" ]; then
     add_review_banner "binary-source" "fallback release binary (source build failed)"
   fi

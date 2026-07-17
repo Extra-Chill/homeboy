@@ -109,30 +109,6 @@ on:
         description: 'Duration window for best-effort observation export.'
         type: string
         default: '24h'
-      autofix:
-        description: 'Enable PR autofix.'
-        type: string
-        default: 'false'
-      autofix-mode:
-        description: 'When to run autofix.'
-        type: string
-        default: 'on-failure'
-      autofix-open-pr:
-        description: 'Enable non-PR autofix PR creation.'
-        type: string
-        default: 'false'
-      autofix-max-commits:
-        description: 'Maximum autofix commits per branch.'
-        type: string
-        default: '2'
-      autofix-commands:
-        description: 'Override autofix commands.'
-        type: string
-        default: ''
-      autofix-label:
-        description: 'PR label required before autofix runs.'
-        type: string
-        default: ''
       pr-comment:
         description: 'Post the default Homeboy PR comment.'
         type: string
@@ -390,12 +366,6 @@ jobs:
           differential-gating: ${{ inputs.differential-gating }}
           baseline-commands: ${{ inputs.baseline-commands }}
           observation-window: ${{ inputs.observation-window }}
-          autofix: ${{ inputs.autofix }}
-          autofix-mode: ${{ inputs.autofix-mode }}
-          autofix-open-pr: ${{ inputs.autofix-open-pr }}
-          autofix-max-commits: ${{ inputs.autofix-max-commits }}
-          autofix-commands: ${{ inputs.autofix-commands }}
-          autofix-label: ${{ inputs.autofix-label }}
           app-token: ${{ steps.app-token.outputs.token || github.token }}
           auto-issue: ${{ inputs.auto-issue }}
           comment-key: ${{ inputs.comment-key }}

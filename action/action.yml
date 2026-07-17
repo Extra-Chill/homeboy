@@ -77,7 +77,7 @@ inputs:
     required: false
     default: ''
   differential-gating:
-    description: 'On PRs, compare audit/lint/test failure counts against the base SHA and fail only when the PR is worse. Opt-in; PR autofix is skipped while enabled.'
+    description: 'On PRs, compare audit/lint/test failure counts against the base SHA and fail only when the PR is worse.'
     required: false
     default: 'false'
   baseline-commands:
@@ -89,7 +89,7 @@ inputs:
     required: false
     default: '24h'
   execution-timeout-seconds:
-    description: 'Maximum wall-clock time for a Homeboy command or autofix phase. Emits liveness notices and exits with actionable timeout evidence.'
+    description: 'Maximum wall-clock time for a Homeboy command phase. Emits liveness notices and exits with actionable timeout evidence.'
     required: false
     default: '1800'
   cleanup-timeout-seconds:
@@ -112,32 +112,6 @@ inputs:
     default: ''
   node-version:
     description: 'Node.js version override. Auto-detected from homeboy.json or package.json if not set.'
-    required: false
-    default: ''
-
-  # ── Autofix ──
-  autofix:
-    description: 'Enable autofix. Set to "true" to enable; disabled by default.'
-    required: false
-    default: 'false'
-  autofix-mode:
-    description: 'When to run autofix: "on-failure" (default) or "always" (for baseline auto-ratchet).'
-    required: false
-    default: 'on-failure'
-  autofix-open-pr:
-    description: 'Enable non-PR autofix PR creation. Set to "true" to enable; disabled by default.'
-    required: false
-    default: 'false'
-  autofix-max-commits:
-    description: 'Maximum autofix commits per branch (loop safety).'
-    required: false
-    default: '2'
-  autofix-commands:
-    description: 'Override autofix commands (e.g. "lint --fix,audit --fix --write").'
-    required: false
-    default: ''
-  autofix-label:
-    description: 'PR label required to allow autofix.'
     required: false
     default: ''
 
@@ -585,74 +559,7 @@ runs:
         RUN_GROUP_PREFIX: homeboy baseline
       run: bash ${{ github.action_path }}/scripts/core/run-baseline-commands.sh
 
-    # ── Phase 6: Autofix ──
-    # Autofix defaults: enabled when app-token is provided.
-    # Explicit input overrides the default.
-
-    - name: Apply autofix commit
-      id: autofix-commit
-      if: |
-        always()
-        && github.event_name == 'pull_request'
-        && steps.run-commands.outputs.results != ''
-        && inputs.autofix == 'true'
-        && inputs.differential-gating != 'true'
-        && (inputs.autofix-mode == 'always' || contains(steps.run-commands.outputs.results, '"fail"'))
-      shell: bash
-      env:
-        COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
-        COMPONENT_NAME: ${{ inputs.component }}
-        EXTRA_ARGS: ${{ inputs.args }}
-        AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
-        AUTOFIX_LABEL: ${{ inputs.autofix-label }}
-        AUTOFIX_MAX_COMMITS: ${{ inputs.autofix-max-commits }}
-        AUTOFIX_MODE: ${{ inputs.autofix-mode }}
-        BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
-        PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
-        PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        APP_TOKEN: ${{ inputs.app-token }}
-      run: bash ${{ github.action_path }}/scripts/autofix/apply-autofix-commit.sh
-
-    - name: Prepare non-PR autofix branch
-      id: autofix-prepare-nonpr
-      if: |
-        always()
-        && github.event_name != 'pull_request'
-        && steps.run-commands.outputs.results != ''
-        && inputs.autofix == 'true'
-        && inputs.autofix-open-pr == 'true'
-        && (inputs.autofix-mode == 'always' || contains(steps.run-commands.outputs.results, '"fail"'))
-      shell: bash
-      env:
-        COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
-        COMPONENT_NAME: ${{ inputs.component }}
-        EXTRA_ARGS: ${{ inputs.args }}
-        AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
-        AUTOFIX_MAX_COMMITS: ${{ inputs.autofix-max-commits }}
-        APP_TOKEN: ${{ inputs.app-token }}
-        HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
-        HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
-      run: bash ${{ github.action_path }}/scripts/core/run-with-liveness-timeout.sh "Non-PR autofix" bash ${{ github.action_path }}/scripts/autofix/prepare-autofix-branch.sh
-
-    - name: Open non-PR autofix PR
-      id: autofix-open-pr
-      if: github.event_name != 'pull_request' && steps.autofix-prepare-nonpr.outputs.committed == 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.app-token || github.token }}
-        COMPONENT_NAME: ${{ inputs.component }}
-        AUTOFIX_BRANCH: ${{ steps.autofix-prepare-nonpr.outputs.autofix-branch }}
-        AUTOFIX_FILE_COUNT: ${{ steps.autofix-prepare-nonpr.outputs.autofix-file-count }}
-        AUTOFIX_TOTAL_FIXES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-total-fixes }}
-        AUTOFIX_FIX_TYPES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-fix-types }}
-        AUTOFIX_FINDING_TYPES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-finding-types }}
-        AUTOFIX_CHANGED_FILES: ${{ steps.autofix-prepare-nonpr.outputs.autofix-changed-files }}
-        AUTOFIX_REPORT: ${{ steps.autofix-prepare-nonpr.outputs.autofix-report }}
-        PR_OPEN_POLICY: ${{ inputs.pr-open-policy || inputs.pr-policy }}
-      run: bash ${{ github.action_path }}/scripts/autofix/open-autofix-pr.sh
-
-    # ── Phase 7: Results and reporting ──
+    # ── Phase 6: Results and reporting ──
 
     - name: Select final results
       id: select-results
@@ -677,9 +584,6 @@ runs:
       env:
         RESULTS: ${{ steps.select-results.outputs.results }}
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
-        AUTOFIX_ENABLED: ${{ inputs.autofix == 'true' }}
-        AUTOFIX_ATTEMPTED: ${{ steps.autofix-commit.outputs.committed == 'true' || steps.autofix-prepare-nonpr.outputs.committed == 'true' }}
-        AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
         COMPONENT_NAME: ${{ inputs.component }}
       run: bash ${{ github.action_path }}/scripts/digest/generate-failure-digest.sh
 
@@ -770,14 +674,6 @@ runs:
         RESULTS: ${{ steps.select-results.outputs.results }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
-        AUTOFIX_ENABLED: ${{ inputs.autofix == 'true' }}
-        AUTOFIX_ATTEMPTED: ${{ steps.autofix-commit.outputs.attempted }}
-        AUTOFIX_COMMITTED: ${{ steps.autofix-commit.outputs.committed }}
-        AUTOFIX_STATUS: ${{ steps.autofix-commit.outputs.status }}
-        AUTOFIX_TARGET_REPO: ${{ steps.autofix-commit.outputs.target-repo }}
-        AUTOFIX_TARGET_BRANCH: ${{ steps.autofix-commit.outputs.target-branch }}
-        AUTOFIX_FILE_COUNT: ${{ steps.autofix-commit.outputs.autofix-file-count }}
-        AUTOFIX_FIX_TYPES: ${{ steps.autofix-commit.outputs.autofix-fix-types }}
         COMMENT_KEY_INPUT: ${{ inputs.comment-key }}
         COMMENT_SECTION_KEY_INPUT: ${{ inputs.comment-section-key }}
         COMMENT_SECTION_TITLE_INPUT: ${{ inputs.comment-section-title }}
@@ -786,7 +682,7 @@ runs:
         GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: bash ${{ github.action_path }}/scripts/pr/post-pr-comment.sh
 
-    # ── Phase 8: Auto-issue filing ──
+    # ── Phase 7: Auto-issue filing ──
     # Default: enabled on non-PR events (auto when input is empty).
 
     - name: Auto-file categorized issues
@@ -805,6 +701,4 @@ runs:
         EXPECTED_COMMANDS: ${{ inputs.expected-commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
-        AUTOFIX_ATTEMPTED: ${{ steps.autofix-prepare-nonpr.outputs.committed }}
-        AUTOFIX_PR_CREATED: ${{ steps.autofix-open-pr.outputs.created }}
       run: bash ${{ github.action_path }}/scripts/issues/auto-file-categorized-issues.sh

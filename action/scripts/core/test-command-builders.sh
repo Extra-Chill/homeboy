@@ -183,7 +183,7 @@ unset HOMEBOY_DIFFERENTIAL_GATING
 assert_equals \
   "homeboy --placement local review audit data-machine --baseline --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "review audit --baseline" "${COMPONENT}" "${WORKSPACE}")" \
-  "GitHub Actions autofix baseline update selects local placement"
+  "GitHub Actions baseline update selects local placement"
 
 assert_equals \
   "homeboy --placement local review data-machine --path /tmp/workspace --report=pr-comment --changed-since origin/main" \
@@ -317,21 +317,6 @@ unset HOMEBOY_SETTINGS_JSON
 EXTRA_ARGS="--format json"
 
 assert_equals \
-  "homeboy refactor data-machine --from lint --write --path /tmp/workspace --changed-since origin/main --format json" \
-  "$(build_autofix_command "refactor --from lint --write" "${COMPONENT}" "${WORKSPACE}")" \
-  "autofix refactor lint keeps path and changed-since"
-
-assert_equals \
-  "homeboy --output /tmp/workspace/out.json refactor data-machine --from lint --write --path /tmp/workspace --changed-since origin/main --format json" \
-  "$(build_autofix_command "refactor --from lint --write" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
-  "autofix refactor lint keeps output path and changed-since"
-
-assert_equals \
-  "homeboy refactor data-machine --from audit --write --path /tmp/workspace --changed-since origin/main --format json" \
-  "$(build_autofix_command "refactor --from audit --write" "${COMPONENT}" "${WORKSPACE}")" \
-  "autofix refactor audit keeps path and changed-since"
-
-assert_equals \
   "homeboy refactor data-machine --all --path /tmp/workspace --changed-since origin/main --format json" \
   "$(build_run_command "refactor --all" "${COMPONENT}" "${WORKSPACE}")" \
   "refactor keeps path with changed-since"
@@ -344,20 +329,10 @@ assert_equals \
 assert_equals \
   "refactor---from-audit---write" \
   "$(command_output_stem "refactor --from audit --write")" \
-  "output stem sanitizes autofix command"
+  "output stem sanitizes refactor command"
 
-assert_equals \
-  "homeboy refactor data-machine --from-audit --from-lint --from-test --all --write --path /tmp/workspace --changed-since origin/main --format json" \
-  "$(build_autofix_command "refactor --from-audit --from-lint --from-test --all --write" "${COMPONENT}" "${WORKSPACE}")" \
-  "autofix refactor keeps path and changed-since"
-
-# ── Unscoped autofix ──
 unset SCOPE_MODE SCOPE_BASE_REF EXTRA_ARGS || true
 SCOPE_MODE="full"
-assert_equals \
-  "homeboy refactor data-machine --from test --write --path /tmp/workspace" \
-  "$(build_autofix_command "refactor --from test --write" "${COMPONENT}" "${WORKSPACE}")" \
-  "autofix refactor test keeps workspace path"
 
 assert_equals \
   "homeboy refactor data-machine --all --path /tmp/workspace" \
@@ -378,45 +353,6 @@ assert_equals \
   "homeboy runs import /tmp/workspace/homeboy-observations-import/job" \
   "$(build_observation_import_command "/tmp/workspace/homeboy-observations-import/job")" \
   "observation import uses downloaded bundle directory"
-
-PR_HEAD_REPO="some-contributor/homeboy-action"
-GITHUB_REPOSITORY="Extra-Chill/homeboy-action"
-GITHUB_HEAD_REF="feat/fork-pr"
-GITHUB_REF_NAME="ignored-here"
-assert_equals \
-  "some-contributor/homeboy-action" \
-  "$(resolve_pr_target_repo)" \
-  "target repo prefers PR head repo"
-
-assert_equals \
-  "feat/fork-pr" \
-  "$(resolve_pr_target_branch)" \
-  "target branch prefers PR head ref"
-
-assert_equals \
-  "https://github.com/some-contributor/homeboy-action.git" \
-  "$(build_github_remote_url "some-contributor/homeboy-action")" \
-  "build github remote url without token"
-
-assert_equals \
-  "https://x-access-token:secret123@github.com/some-contributor/homeboy-action.git" \
-  "$(build_github_remote_url "some-contributor/homeboy-action" "secret123")" \
-  "build github remote url with token"
-
-assert_equals \
-  "origin" \
-  "$(resolve_push_target "Extra-Chill/homeboy-action")" \
-  "same-repo push without token uses origin"
-
-assert_equals \
-  "https://github.com/some-contributor/homeboy-action.git" \
-  "$(resolve_push_target "some-contributor/homeboy-action")" \
-  "fork push without token uses explicit remote url"
-
-assert_equals \
-  "https://x-access-token:secret123@github.com/some-contributor/homeboy-action.git" \
-  "$(resolve_push_target "some-contributor/homeboy-action" "secret123")" \
-  "fork push with token uses authenticated remote url"
 
 # ── Canonicalize: fleet/deploy commands are filtered out ──
 

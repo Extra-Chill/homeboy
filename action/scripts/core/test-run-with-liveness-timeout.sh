@@ -77,8 +77,8 @@ if ! grep -q '^  cleanup-timeout-seconds:' "${ACTION}"; then
   exit 1
 fi
 
-wrapper_count="$(grep -c 'run-with-liveness-timeout.sh' "${ACTION}")"
-if [ "${wrapper_count}" -ne 1 ]; then
+wrapper_count="$(grep -c 'run-with-liveness-timeout.sh' "${ACTION}" || true)"
+if [ "${wrapper_count}" -ne 0 ]; then
   printf 'FAIL: action must leave command timeout enforcement to the per-command runner, got %s action wrappers\n' "${wrapper_count}"
   exit 1
 fi
@@ -90,4 +90,4 @@ if grep -q 'run-with-liveness-timeout.sh.*| tee' "${ROOT_DIR}/scripts/core/run-h
   printf 'FAIL: quality command finalization still depends on an unbounded tee pipeline\n'
   exit 1
 fi
-printf 'PASS: action applies bounded execution to each quality command and autofix\n'
+printf 'PASS: action applies bounded execution to each quality command\n'

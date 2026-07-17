@@ -82,7 +82,7 @@ export HOMEBOY_CALL_LOG="${TMPDIR}/calls.log"
 source "${ROOT}/scripts/core/lib.sh"
 
 test_generation() {
-  local generation="$1" run_command="$2" bench_command="$3" refactor_command="$4" autofix_command="$5" report_command="$6" help_calls="$7"
+  local generation="$1" run_command="$2" bench_command="$3" refactor_command="$4" report_command="$5" help_calls="$6"
   : > "${HOMEBOY_HELP_LOG}"
   : > "${HOMEBOY_CALL_LOG}"
   export HOMEBOY_FAKE_GENERATION="${generation}"
@@ -97,14 +97,13 @@ test_generation() {
   assert_equals "${run_command}" "$(build_run_command 'review lint' component /tmp/workspace /tmp/out.json)" "${generation} review builder preserves output ordering"
   assert_equals "${bench_command}" "$(build_run_command bench component /tmp/workspace /tmp/out.json)" "${generation} bench builder"
   assert_equals "${refactor_command}" "$(build_run_command 'refactor --all' component /tmp/workspace)" "${generation} refactor builder"
-  assert_equals "${autofix_command}" "$(build_autofix_command 'refactor --from lint --write' component /tmp/workspace)" "${generation} autofix builder"
   assert_equals "${report_command}" "$(build_review_report_command component /tmp/workspace)" "${generation} report builder"
   assert_equals "${help_calls}" "$(wc -l < "${HOMEBOY_HELP_LOG}" | xargs)" "${generation} capability probes"
 }
 
-test_generation scoped 'homeboy --output /tmp/out.json review lint --placement local component --path /tmp/workspace' 'homeboy --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy refactor component --all --path /tmp/workspace' 'homeboy refactor component --from lint --write --path /tmp/workspace' 'homeboy review --placement local component --path /tmp/workspace --report=pr-comment' 2
-test_generation global 'homeboy --placement local --output /tmp/out.json review lint component --path /tmp/workspace' 'homeboy --placement local --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy --placement local refactor component --all --path /tmp/workspace' 'homeboy --placement local refactor component --from lint --write --path /tmp/workspace' 'homeboy --placement local review component --path /tmp/workspace --report=pr-comment' 1
-test_generation legacy 'homeboy --force-hot --allow-local-hot --output /tmp/out.json review lint component --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot refactor component --all --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot refactor component --from lint --write --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot review component --path /tmp/workspace --report=pr-comment' 2
+test_generation scoped 'homeboy --output /tmp/out.json review lint --placement local component --path /tmp/workspace' 'homeboy --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy refactor component --all --path /tmp/workspace' 'homeboy review --placement local component --path /tmp/workspace --report=pr-comment' 2
+test_generation global 'homeboy --placement local --output /tmp/out.json review lint component --path /tmp/workspace' 'homeboy --placement local --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy --placement local refactor component --all --path /tmp/workspace' 'homeboy --placement local review component --path /tmp/workspace --report=pr-comment' 1
+test_generation legacy 'homeboy --force-hot --allow-local-hot --output /tmp/out.json review lint component --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot refactor component --all --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot review component --path /tmp/workspace --report=pr-comment' 2
 
 # Exercise the action execution script with a scoped-placement binary.
 : > "${HOMEBOY_HELP_LOG}"

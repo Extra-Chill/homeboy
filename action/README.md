@@ -14,6 +14,10 @@ Use the floating `v2` channel for normal GitHub Actions workflows:
 
 The action release stream is aligned with that channel. Release commits and tags use `v2.x.y`, and the floating `v2` tag moves to the latest compatible `v2.x.y` release.
 
+## Breaking Change Notice
+
+The generic source-mutation interface has been removed: `autofix`, `autofix-mode`, `autofix-open-pr`, `autofix-max-commits`, `autofix-commands`, and `autofix-label` are no longer accepted by the action or reusable workflow. Quality runs are read-only; audit, lint, test, review reporting, failure digests, categorized issue reconciliation, and final status enforcement remain available. Consumers using any removed input must remove it before adopting the next major action release.
+
 ## Quick Start
 
 ### PR Quality Checks
@@ -175,19 +179,14 @@ Use these outputs to gate downstream jobs:
 | `runs` | No | | Bench run count passed to `homeboy bench --runs` |
 | `iterations` | No | | Bench iteration count passed to `homeboy bench --iterations` |
 | `regression-threshold` | No | | Bench regression threshold passed to `homeboy bench --regression-threshold` |
-| `differential-gating` | No | `false` | On PRs, compare `review audit`/`review test` counts against the base SHA and fail only when the PR is worse. Opt-in; `review lint` still gates on exit code. PR autofix is skipped while enabled. |
+| `differential-gating` | No | `false` | On PRs, compare `review audit`/`review test` counts against the base SHA and fail only when the PR is worse. Opt-in; `review lint` still gates on exit code. |
 | `baseline-commands` | No | `auto` | Commands to rerun at the PR base when `differential-gating` is true. `auto` reruns requested `review audit`/`review lint`/`review test` commands; use a comma-separated subset such as `review audit` or `none` to skip baseline reruns. |
 | `observation-window` | No | `24h` | Duration window passed to best-effort `homeboy runs export --since` for the separate matrix-safe observations artifact. |
-| `execution-timeout-seconds` | No | `1800` | Per-phase command and non-PR autofix wall-clock budget. The action writes liveness notices and returns timeout evidence when the budget expires. |
+| `execution-timeout-seconds` | No | `1800` | Per-command wall-clock budget. The action writes liveness notices and returns timeout evidence when the budget expires. |
 | `cleanup-timeout-seconds` | No | `15` | Process-group teardown budget after a command finishes or times out. The action retains command logs and fails with diagnostics if cleanup cannot finish. |
 | `import-observations` | No | `false` | Download and best-effort import earlier `homeboy-observations-*` artifacts from the same workflow run before command execution. |
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |
 | `node-version` | No | | Node.js version (sets up via `actions/setup-node`) |
-| `autofix` | No | `false` | On PR failures, run safe autofixes, commit, push, and re-run checks |
-| `autofix-open-pr` | No | `false` | On non-PR failures, open an autofix PR if safe fixes allow rerun to pass |
-| `autofix-max-commits` | No | `2` | Safety limit for autofix commit chain depth per branch |
-| `autofix-commands` | No | | Override autofix commands (comma-separated, e.g. `lint --fix,test --fix`) |
-| `autofix-label` | No | | Optional PR label required before autofix runs (e.g. `autofix`) |
 | `scope` | No | `auto` | Execution scope: `auto` uses changed scope on PRs and full scope elsewhere; `changed` forces `--changed-since` when a base SHA is available; `full` scans the full workspace. |
 | `auto-issue` | No | *(auto)* | Reconcile categorized audit, lint, and test issues on non-PR runs. Empty means enabled for non-PR events and disabled for PRs; set `false` to suppress issue maintenance. |
 | `comment-key` | No | *(auto)* | Shared PR comment key so multiple jobs aggregate into one sticky comment |
@@ -305,29 +304,6 @@ jobs:
 
 All three jobs write to the **same PR comment** automatically.
 
-### Auto-apply Fixable CI Issues (PRs)
-
-```yaml
-- uses: Extra-Chill/homeboy-action@v2
-  with:
-    extension: wordpress
-    commands: review lint,review test
-    php-version: '8.3'
-    autofix: 'true'
-```
-
-When enabled, the action will:
-1. Run configured commands
-2. If any fail, run safe autofix commands
-3. Re-fetch the latest PR branch head and recompute fixes there when the branch moved underneath CI
-4. Commit changes as `chore(ci): homeboy autofix ...`
-5. Push directly to the PR branch when credentials allow
-6. Re-run checks and report final status
-
-For fork PRs, Homeboy Action now attempts the same direct-to-PR autofix flow first. Actual push success still depends on the token/permission model available to the workflow run.
-
-**Merge guard:** If the PR is merged or closed while CI is running, autofix and PR comments are automatically skipped. This prevents zombie commits to deleted branches and stale result noise on already-merged PRs. Pair with a `concurrency` group to cancel the entire run early.
-
 ### Deterministic PR Policy Gate
 
 Use `pr-policy` to classify whether a PR is safe for deterministic auto-merge after Homeboy checks pass. Homeboy core reads changed files from GitHub, applies repo-local author, branch, path, and content rules, then exposes `pr-policy-safe` and optionally merges the PR.
@@ -347,28 +323,12 @@ Use `pr-policy` to classify whether a PR is safe for deterministic auto-merge af
 Example policy:
 
 ```yaml
-open:
-  title: World PR open policy
-  allowed_sources: [autofix, generated]
-  allowed_head_branches:
-    - world-day/**
-    - ci/autofix/**
-  allowed_paths:
-    - content/**
-    - themes/world-of-wordpress/patterns/**
-  blocked_paths:
-    - .github/**
-    - bundles/**
-    - plugins/**
-  require_same_repository: true
-
 merge:
   title: World PR merge policy
   allowed_authors:
     - github-actions[bot]
   allowed_head_branches:
     - world-day/**
-    - ci/autofix/**
   allowed_paths:
     - content/**
     - themes/world-of-wordpress/patterns/**
@@ -384,19 +344,6 @@ merge:
 ```
 
 Flat policy files from earlier action versions continue to work as merge policies. The gate fails closed for missing policy, unknown changed files, blocked paths, unexpected authors, fork PRs when `require_same_repository` is true, or blocked content patterns. Unsafe PRs are not merged; the action still emits outputs so a workflow can decide whether to fail, comment, or route to human review.
-
-### Auto-open Fix PRs on non-PR runs
-
-```yaml
-- uses: Extra-Chill/homeboy-action@v2
-  with:
-    extension: wordpress
-    commands: review lint,review test,review audit
-    php-version: '8.3'
-    autofix: 'true'
-    autofix-open-pr: 'true'
-    auto-issue: 'true'
-```
 
 ### Continuous Release with Quality Gate
 
