@@ -143,6 +143,10 @@ impl CliRuntime {
         // can prepare and run a runner job as a local child without core
         // depending on runner process-execution behavior.
         crate::core::runner::register_runner_daemon_exec_driver();
+        // Register the runner workspace-root provider so the daemon file API can
+        // resolve a runner's configured workspace_root without core depending on
+        // the runner config registry.
+        crate::core::runner::register_runner_workspace_root_provider();
         // Register the runner-upgrade provider so the core upgrade flow can
         // refresh configured runners without depending on runner behavior.
         crate::core::upgrade::register_runner_upgrade();
