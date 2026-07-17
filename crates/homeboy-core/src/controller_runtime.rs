@@ -49,22 +49,11 @@ pub struct ControllerRuntimePruneResult {
 /// still operate on them. The active admission generation is retained as well.
 pub fn retention_report() -> Result<ControllerRuntimeRetentionReport> {
     let root = runtime_root()?;
-    let (records, _) = crate::agent_task_lifecycle::list_records_with_health()?;
+    let referenced = crate::controller_pin_reference::referenced_controller_pins()?;
     let mut retained = BTreeSet::new();
 
-    for record in records {
-        if !state_retains_pin(record.state) {
-            continue;
-        }
-        if let Some(path) = record
-            .metadata
-            .pointer(&format!(
-                "/{CONTROLLER_RUNTIME_METADATA_KEY}/originating/pinned_executable"
-            ))
-            .and_then(Value::as_str)
-            .map(PathBuf::from)
-            .filter(|path| content_addressed_pin_path(&root, path))
-        {
+    for path in referenced {
+        if content_addressed_pin_path(&root, &path) {
             retained.insert(path);
         }
     }
@@ -123,17 +112,6 @@ pub fn prune_pins(apply: bool) -> Result<ControllerRuntimePruneResult> {
         eligible: report.eligible,
         removed,
     })
-}
-
-fn state_retains_pin(state: crate::agent_task_lifecycle::AgentTaskRunState) -> bool {
-    matches!(
-        state,
-        crate::agent_task_lifecycle::AgentTaskRunState::Queued
-            | crate::agent_task_lifecycle::AgentTaskRunState::Running
-            | crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-            | crate::agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
-            | crate::agent_task_lifecycle::AgentTaskRunState::PartialFailure
-    )
 }
 
 fn content_addressed_pin_path(root: &Path, path: &Path) -> bool {
