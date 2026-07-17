@@ -283,7 +283,7 @@ struct GeneratedSourceArtifactCleanup {
 
 impl GeneratedSourceArtifactCleanup {
     fn new(component: &Component) -> Result<Self> {
-        let artifact = artifact_path(component)?;
+        let artifact = configured_artifact_path(component)?;
         let build_dir =
             Path::new(&component.local_path).join(crate::defaults::deploy_generated_build_dir());
         let artifact_parent = artifact.parent().map(Path::to_path_buf);
@@ -623,42 +623,41 @@ fn copy_prepared_artifact(source: &Path) -> Result<(PathBuf, PreparedArtifactCle
 }
 
 fn artifact_path(component: &Component) -> Result<PathBuf> {
-    component
-        .build_artifact
-        .as_ref()
-        .map(|artifact| {
-            let path = Path::new(artifact);
-            Ok(if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                Path::new(&component.local_path).join(path)
-            })
-        })
-        .transpose()?
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "build_artifact",
-                "Component has no build artifact to prepare",
-                None,
-                None,
-            )
-        })
+    let artifact = artifact_pattern(component)?;
+    crate::extension::build::resolve_artifact_path_from_root(
+        &artifact,
+        Some(Path::new(&component.local_path)),
+    )
 }
 
-fn remove_exact_ref_artifacts(component: &Component) -> Result<()> {
-    let artifact = component.build_artifact.as_deref().ok_or_else(|| {
+fn configured_artifact_path(component: &Component) -> Result<PathBuf> {
+    let artifact = artifact_pattern(component)?;
+    let path = Path::new(&artifact);
+    Ok(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        Path::new(&component.local_path).join(path)
+    })
+}
+
+fn artifact_pattern(component: &Component) -> Result<String> {
+    crate::component::resolve_artifact(component).ok_or_else(|| {
         Error::validation_invalid_argument(
             "build_artifact",
-            "Component has no build artifact to prepare",
+            "Component has no build artifact configured by itself or a linked extension",
             None,
             None,
         )
-    })?;
+    })
+}
+
+fn remove_exact_ref_artifacts(component: &Component) -> Result<()> {
+    let artifact = artifact_pattern(component)?;
     let source_root = Path::new(&component.local_path);
-    let pattern = if Path::new(artifact).is_absolute() {
-        PathBuf::from(artifact)
+    let pattern = if Path::new(&artifact).is_absolute() {
+        PathBuf::from(&artifact)
     } else {
-        source_root.join(artifact)
+        source_root.join(&artifact)
     };
     let candidates = if artifact.contains(['*', '?', '[', ']']) {
         glob::glob(&pattern.to_string_lossy())
@@ -666,7 +665,7 @@ fn remove_exact_ref_artifacts(component: &Component) -> Result<()> {
                 Error::validation_invalid_argument(
                     "build_artifact",
                     format!("Invalid build artifact pattern '{}': {error}", artifact),
-                    Some(artifact.to_string()),
+                    Some(artifact.clone()),
                     None,
                 )
             })?
@@ -1439,7 +1438,7 @@ mod tests {
             std::fs::create_dir_all(&extension_dir).expect("extension directory");
             std::fs::write(
                 extension_dir.join("fixture-packager.json"),
-                r#"{"name":"fixture-packager","version":"1.0.0","build":{"extension_script":"build.sh"}}"#,
+                r#"{"name":"fixture-packager","version":"1.0.0","build":{"extension_script":"build.sh","artifact_pattern":"build/fixture.zip"}}"#,
             )
             .expect("extension manifest");
             std::fs::write(
@@ -1475,7 +1474,7 @@ mod tests {
 
             let mut component = component();
             component.local_path = repo.path().display().to_string();
-            component.build_artifact = Some("build/fixture.zip".to_string());
+            component.build_artifact = None;
             component.remote_url = Some("https://github.com/example/fixture".to_string());
             component.extensions = Some(HashMap::from([(
                 "fixture-packager".to_string(),
