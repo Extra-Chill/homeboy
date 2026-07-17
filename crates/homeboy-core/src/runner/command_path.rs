@@ -64,24 +64,6 @@ fn prepend_path_entry(env: &mut HashMap<String, String>, entry: &str) {
     }
 }
 
-pub(crate) fn remote_shell_path_preamble() -> &'static str {
-    concat!(
-        "export PATH=\"$HOME/.local/bin:$HOME/.",
-        "car",
-        "go/bin:$HOME/.kimaki/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}\"; ",
-        "for d in \"$HOME\"/.local/opt/node-*/bin \"$HOME\"/.nvm/versions/node/*/bin; do ",
-        "[ -d \"$d\" ] && PATH=\"$d:$PATH\"; done; export PATH"
-    )
-}
-
-pub(crate) fn quote_runner_env_value(key: &str, value: &str) -> String {
-    if key == "PATH" {
-        return format!("\"{}\"", escape_double_quoted_env_value(value));
-    }
-
-    crate::engine::shell::quote_arg(value)
-}
-
 /// Explicit path-translation preflight for a remote dispatch argv.
 ///
 /// Rejects any argument that still embeds the controller-local source-checkout
@@ -569,13 +551,6 @@ fn arg_embeds_untranslated_local_path(arg: &str, local_root: &str, remote_cwd: &
     true
 }
 
-fn escape_double_quoted_env_value(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('`', "\\`")
-}
-
 fn local_runner_command_path() -> Option<OsString> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let existing_path = std::env::var_os("PATH");
@@ -702,31 +677,6 @@ mod tests {
         normalize_runner_command_env(&mut env);
 
         assert_eq!(env.get("PATH").map(String::as_str), Some("/custom/bin"));
-    }
-
-    #[test]
-    fn remote_shell_path_preamble_includes_local_opt_node_glob() {
-        let preamble = remote_shell_path_preamble();
-
-        assert!(preamble.contains("$HOME/.local/bin"));
-        assert!(preamble.contains("$HOME\"/.local/opt/node-*/bin"));
-        assert!(preamble.contains("$HOME\"/.nvm/versions/node/*/bin"));
-    }
-
-    #[test]
-    fn path_env_value_allows_existing_path_expansion() {
-        assert_eq!(
-            quote_runner_env_value("PATH", "$PATH:/custom/bin"),
-            "\"$PATH:/custom/bin\""
-        );
-    }
-
-    #[test]
-    fn non_path_env_value_uses_shell_quoting() {
-        assert_eq!(
-            quote_runner_env_value("TOKEN", "hello world"),
-            "'hello world'"
-        );
     }
 
     #[test]

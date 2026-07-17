@@ -77,3 +77,65 @@ fn split_respecting_quotes(input: &str) -> Vec<String> {
 pub fn quote_path(path: &str) -> String {
     format!("'{}'", escape_single_quote_content(path))
 }
+
+/// Shell preamble that normalizes `PATH` for a remote (SSH) command so common
+/// user/tool bin directories and versioned Node installs are discoverable
+/// before the dispatched command runs. Pure shell-string construction shared by
+/// remote-dispatch callers; contains no runner-specific behavior.
+pub fn remote_shell_path_preamble() -> &'static str {
+    concat!(
+        "export PATH=\"$HOME/.local/bin:$HOME/.",
+        "car",
+        "go/bin:$HOME/.kimaki/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}\"; ",
+        "for d in \"$HOME\"/.local/opt/node-*/bin \"$HOME\"/.nvm/versions/node/*/bin; do ",
+        "[ -d \"$d\" ] && PATH=\"$d:$PATH\"; done; export PATH"
+    )
+}
+
+/// Quote an environment-variable value for inclusion in a remote `export`
+/// statement. `PATH` is quoted with double quotes so `$PATH` expansion is
+/// preserved; every other value is shell-quoted normally.
+pub fn quote_runner_env_value(key: &str, value: &str) -> String {
+    if key == "PATH" {
+        return format!("\"{}\"", escape_double_quoted_env_value(value));
+    }
+
+    quote_arg(value)
+}
+
+fn escape_double_quoted_env_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('`', "\\`")
+}
+
+#[cfg(test)]
+mod remote_env_tests {
+    use super::*;
+
+    #[test]
+    fn remote_shell_path_preamble_includes_local_opt_node_glob() {
+        let preamble = remote_shell_path_preamble();
+
+        assert!(preamble.contains("$HOME/.local/bin"));
+        assert!(preamble.contains("$HOME\"/.local/opt/node-*/bin"));
+        assert!(preamble.contains("$HOME\"/.nvm/versions/node/*/bin"));
+    }
+
+    #[test]
+    fn path_env_value_allows_existing_path_expansion() {
+        assert_eq!(
+            quote_runner_env_value("PATH", "$PATH:/custom/bin"),
+            "\"$PATH:/custom/bin\""
+        );
+    }
+
+    #[test]
+    fn non_path_env_value_uses_shell_quoting() {
+        assert_eq!(
+            quote_runner_env_value("TOKEN", "hello world"),
+            "'hello world'"
+        );
+    }
+}
