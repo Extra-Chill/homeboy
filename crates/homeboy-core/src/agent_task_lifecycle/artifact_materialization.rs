@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
 
-use base64::Engine;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -9,12 +8,6 @@ use crate::agent_task::AgentTaskArtifact;
 use crate::{Error, Result};
 
 use super::{apply_aggregate_to_record, status, store};
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct RunnerArtifactRoute {
-    runner_id: String,
-    job_id: String,
-}
 
 /// Materialize a recovered reverse-runner patch into controller-owned storage.
 /// The aggregate is updated atomically with the durable run record, making a
@@ -37,16 +30,30 @@ pub fn materialize_recovered_patch_artifact(
             {
                 continue;
             }
-            let route = resolve_runner_artifact_route(&record, artifact)?;
-            changed |= materialize_artifact(
-                artifact,
-                &route.runner_id,
-                &route.job_id,
+            let runner_id = record.runner_id().ok_or_else(|| {
+                unavailable(
+                    artifact,
+                    "no validated source-provenance runner is recorded for the aggregate",
+                )
+            })?;
+            let remote_ref = canonical_runner_artifact_ref(
+                runner_id,
                 &record.run_id,
                 &outcome.task_id,
-                |id| {
+                artifact,
+            )?;
+            changed |= materialize_artifact(
+                artifact,
+                runner_id,
+                &remote_ref,
+                &record.run_id,
+                &outcome.task_id,
+                |remote_ref| {
                     crate::observation::runs_service::runner_evidence::with_runner_evidence(|p| {
-                        p.runner_artifact_content(&route.runner_id, &route.job_id, id)
+                        p.download_remote_artifact(remote_ref, None)
+                    })
+                    .and_then(|download| {
+                        fs::read(&download.output_path).map_err(io_error(&download.output_path))
                     })
                 },
             )?;
@@ -69,54 +76,38 @@ pub fn materialize_recovered_patch_artifact(
     Ok(changed)
 }
 
-fn resolve_runner_artifact_route(
-    record: &super::AgentTaskRunRecord,
+fn canonical_runner_artifact_ref(
+    runner_id: &str,
+    run_id: &str,
+    task_id: &str,
     artifact: &AgentTaskArtifact,
-) -> Result<RunnerArtifactRoute> {
-    let lifecycle_route =
-        record
-            .runner_id()
-            .zip(record.runner_job_id())
-            .map(|(runner_id, job_id)| RunnerArtifactRoute {
-                runner_id: runner_id.to_string(),
-                job_id: job_id.to_string(),
-            });
-    let mirrored_identities = if lifecycle_route.is_none() {
-        crate::observation::runs_service::mirrored_runner_job_identities(&record.run_id)?
-    } else {
-        Vec::new()
-    };
-    resolve_runner_artifact_route_from_identities(artifact, lifecycle_route, mirrored_identities)
-}
+) -> Result<String> {
+    use crate::execution_contract::encode_uri_component;
 
-fn resolve_runner_artifact_route_from_identities(
-    artifact: &AgentTaskArtifact,
-    lifecycle_route: Option<RunnerArtifactRoute>,
-    mirrored_identities: Vec<(String, String)>,
-) -> Result<RunnerArtifactRoute> {
-    let mut routes = lifecycle_route.into_iter().collect::<Vec<_>>();
-    if routes.is_empty() {
-        routes = mirrored_identities
-            .into_iter()
-            .map(|(runner_id, job_id)| RunnerArtifactRoute { runner_id, job_id })
-            .collect();
+    let canonical_url = format!(
+        "homeboy://agent-task/run/{}/artifacts#task={}&artifact={}",
+        encode_uri_component(run_id),
+        encode_uri_component(task_id),
+        encode_uri_component(&artifact.id),
+    );
+    if artifact.url.as_deref() != Some(canonical_url.as_str()) {
+        return Err(unavailable(
+            artifact,
+            "aggregate does not retain its canonical agent-task artifact route",
+        ));
     }
-    routes.sort();
-    routes.dedup();
-    match routes.as_slice() {
-        [route] => Ok(route.clone()),
-        [] => Err(unavailable(artifact, "no authenticated runner/job binding exists in lifecycle or mirrored runner evidence")),
-        _ => Err(unavailable(artifact, "multiple conflicting authenticated runner/job bindings exist in lifecycle or mirrored runner evidence")),
-    }
+    Ok(crate::execution_contract::EXECUTION_CONTRACT
+        .artifacts
+        .runner_artifact_ref(runner_id, run_id, &artifact.id))
 }
 
 fn materialize_artifact(
     artifact: &mut AgentTaskArtifact,
     runner_id: &str,
-    job_id: &str,
+    remote_ref: &str,
     run_id: &str,
     task_id: &str,
-    fetch: impl FnOnce(&str) -> Result<serde_json::Value>,
+    fetch: impl FnOnce(&str) -> Result<Vec<u8>>,
 ) -> Result<bool> {
     if let Some(path) = artifact
         .path
@@ -140,26 +131,7 @@ fn materialize_artifact(
         artifact.path = Some(path.display().to_string());
         return Ok(false);
     }
-    let response = fetch(&artifact.id)?;
-    let encoded = response
-        .get("content_base64")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            unavailable(
-                artifact,
-                "runner job result has no mirrored artifact content",
-            )
-        })?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .map_err(|error| {
-            Error::validation_invalid_argument(
-                "artifact",
-                format!("runner artifact content is not valid base64: {error}"),
-                None,
-                None,
-            )
-        })?;
+    let bytes = fetch(remote_ref)?;
     validate_bytes(artifact, &bytes)?;
     fs::create_dir_all(path.parent().expect("materialized artifact parent"))
         .map_err(io_error(path.parent().unwrap()))?;
@@ -172,9 +144,9 @@ fn materialize_artifact(
     }
     artifact.metadata["controller_artifact_materialization"] = json!({
         "runner_id": runner_id,
-        "runner_job_id": job_id,
         "artifact_id": artifact.id,
-        "source": "runner_terminal_artifact_content",
+        "source": "runner_canonical_artifact_content",
+        "source_ref": remote_ref,
         "verified_size_bytes": expected_size,
         "verified_sha256": expected_sha,
     });
@@ -270,54 +242,22 @@ mod tests {
     }
 
     #[test]
-    fn route_selection_prefers_lifecycle_and_fails_closed_for_missing_or_ambiguous_mirrors() {
+    fn canonical_route_requires_the_aggregate_artifact_identity() {
         let value = artifact(b"patch bytes");
-        let lifecycle = RunnerArtifactRoute {
-            runner_id: "lifecycle-runner".to_string(),
-            job_id: "lifecycle-job".to_string(),
-        };
         assert_eq!(
-            resolve_runner_artifact_route_from_identities(
-                &value,
-                Some(lifecycle.clone()),
-                vec![("mirror-runner".to_string(), "mirror-job".to_string())],
-            )
-            .expect("lifecycle route wins"),
-            lifecycle
+            canonical_runner_artifact_ref("runner", "run", "task", &value)
+                .expect_err("missing canonical route")
+                .message,
+            "Invalid argument 'artifact': recovered runner artifact `patch` cannot be materialized: aggregate does not retain its canonical agent-task artifact route"
         );
+        let mut value = value;
+        value.url =
+            Some("homeboy://agent-task/run/run/artifacts#task=task&artifact=patch".to_string());
         assert_eq!(
-            resolve_runner_artifact_route_from_identities(
-                &value,
-                None,
-                vec![("mirror-runner".to_string(), "mirror-job".to_string())],
-            )
-            .expect("single mirror route"),
-            RunnerArtifactRoute {
-                runner_id: "mirror-runner".to_string(),
-                job_id: "mirror-job".to_string(),
-            }
+            canonical_runner_artifact_ref("runner", "run", "task", &value)
+                .expect("canonical runner ref"),
+            "runner-artifact://runner/run/patch"
         );
-
-        let missing = resolve_runner_artifact_route_from_identities(&value, None, Vec::new())
-            .expect_err("missing route fails closed");
-        assert_eq!(missing.code, crate::ErrorCode::ValidationInvalidArgument);
-        assert!(missing
-            .message
-            .contains("no authenticated runner/job binding"));
-
-        let ambiguous = resolve_runner_artifact_route_from_identities(
-            &value,
-            None,
-            vec![
-                ("runner-a".to_string(), "job-a".to_string()),
-                ("runner-b".to_string(), "job-b".to_string()),
-            ],
-        )
-        .expect_err("ambiguous routes fail closed");
-        assert_eq!(ambiguous.code, crate::ErrorCode::ValidationInvalidArgument);
-        assert!(ambiguous
-            .message
-            .contains("multiple conflicting authenticated runner/job bindings"));
     }
 
     #[test]
@@ -327,22 +267,18 @@ mod tests {
         std::env::set_var("HOMEBOY_ARTIFACT_ROOT", root.path());
         let bytes = b"mirrored patch bytes";
         let mut value = artifact(bytes);
-        let route = resolve_runner_artifact_route_from_identities(
-            &value,
-            None,
-            vec![("mirror-runner".to_string(), "mirror-job".to_string())],
-        )
-        .expect("select mirrored route");
+        value.url =
+            Some("homeboy://agent-task/run/run/artifacts#task=task&artifact=patch".to_string());
+        let remote_ref = canonical_runner_artifact_ref("mirror-runner", "run", "task", &value)
+            .expect("canonical route");
 
         assert!(materialize_artifact(
             &mut value,
-            &route.runner_id,
-            &route.job_id,
+            "mirror-runner",
+            &remote_ref,
             "run",
             "task",
-            |_| Ok(
-                json!({ "content_base64": base64::engine::general_purpose::STANDARD.encode(bytes) })
-            ),
+            |_| Ok(bytes.to_vec()),
         )
         .expect("materialize mirrored artifact"));
         let path = PathBuf::from(value.path.as_deref().expect("controller path"));
@@ -352,8 +288,8 @@ mod tests {
             "mirror-runner"
         );
         assert_eq!(
-            value.metadata["controller_artifact_materialization"]["runner_job_id"],
-            "mirror-job"
+            value.metadata["controller_artifact_materialization"]["source"],
+            "runner_canonical_artifact_content"
         );
         assert_eq!(
             value.metadata["controller_artifact_materialization"]["verified_size_bytes"],
@@ -373,18 +309,24 @@ mod tests {
         std::env::set_var("HOMEBOY_ARTIFACT_ROOT", root.path());
         let bytes = b"patch bytes";
         let mut value = artifact(bytes);
-        assert!(
-            materialize_artifact(&mut value, "lab", "job", "run", "task", |_| Ok(
-                json!({ "content_base64": base64::engine::general_purpose::STANDARD.encode(bytes) })
-            ),)
-            .expect("materialize")
-        );
-        assert!(
-            !materialize_artifact(&mut value, "lab", "job", "run", "task", |_| panic!(
-                "must reuse controller artifact"
-            ),)
-            .expect("replay")
-        );
+        assert!(materialize_artifact(
+            &mut value,
+            "lab",
+            "runner-artifact://lab/run/patch",
+            "run",
+            "task",
+            |_| Ok(bytes.to_vec()),
+        )
+        .expect("materialize"));
+        assert!(!materialize_artifact(
+            &mut value,
+            "lab",
+            "runner-artifact://lab/run/patch",
+            "run",
+            "task",
+            |_| panic!("must reuse controller artifact"),
+        )
+        .expect("replay"));
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
     }
 
@@ -394,7 +336,15 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         std::env::set_var("HOMEBOY_ARTIFACT_ROOT", root.path());
         let mut value = artifact(b"expected");
-        let error = materialize_artifact(&mut value, "lab", "job", "run", "task", |_| Ok(json!({ "content_base64": base64::engine::general_purpose::STANDARD.encode(b"wrong") }))).expect_err("integrity failure");
+        let error = materialize_artifact(
+            &mut value,
+            "lab",
+            "runner-artifact://lab/run/patch",
+            "run",
+            "task",
+            |_| Ok(b"wrong".to_vec()),
+        )
+        .expect_err("integrity failure");
         assert!(error.message.contains("mismatch"));
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
     }
@@ -407,12 +357,15 @@ mod tests {
         let mut value = artifact(b"local patch");
         value.path = Some(source.display().to_string());
 
-        assert!(
-            !materialize_artifact(&mut value, "lab", "job", "run", "task", |_| panic!(
-                "must preserve a usable local artifact"
-            ),)
-            .expect("local artifact")
-        );
+        assert!(!materialize_artifact(
+            &mut value,
+            "lab",
+            "runner-artifact://lab/run/patch",
+            "run",
+            "task",
+            |_| panic!("must preserve a usable local artifact"),
+        )
+        .expect("local artifact"));
         assert_eq!(value.path.as_deref(), source.to_str());
     }
 }

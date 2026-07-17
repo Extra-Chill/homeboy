@@ -551,6 +551,35 @@ pub(crate) fn record_terminal_artifact_projection(
     record: &mut AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
 ) -> Result<()> {
+    if record.runner_id().is_none()
+        && aggregate
+            .outcomes
+            .iter()
+            .flat_map(|outcome| &outcome.artifacts)
+            .any(|artifact| {
+                artifact
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| Path::new(path).is_absolute())
+                    && artifact.size_bytes.is_some()
+                    && artifact.sha256.is_some()
+            })
+    {
+        match runner_id_from_artifact_provenance(aggregate) {
+            Ok(runner_id) => {
+                record
+                    .ensure_metadata_object()
+                    .insert("runner_id".to_string(), json!(runner_id));
+            }
+            Err(error) => {
+                record.ensure_metadata_object().insert(
+                    "artifact_projection".to_string(),
+                    json!({ "status": "pending", "error": error.message }),
+                );
+                return store::write_record(record);
+            }
+        }
+    }
     match project_terminal_artifacts(record, aggregate) {
         Ok(()) => {
             record.ensure_metadata_object().insert(
@@ -566,6 +595,136 @@ pub(crate) fn record_terminal_artifact_projection(
         }
     }
     store::write_record(record)
+}
+
+/// Recover the only runner identity trusted by legacy aggregate artifact
+/// provenance. Every unresolved absolute artifact must agree so controller
+/// reconciliation cannot treat a runner path as a local file.
+fn runner_id_from_artifact_provenance(aggregate: &AgentTaskAggregate) -> Result<String> {
+    let runner_ids = aggregate
+        .outcomes
+        .iter()
+        .flat_map(|outcome| &outcome.artifacts)
+        .filter(|artifact| {
+            artifact.path.as_deref().is_some_and(|path| Path::new(path).is_absolute())
+                && artifact.size_bytes.is_some()
+                && artifact.sha256.is_some()
+        })
+        .map(|artifact| {
+            artifact
+                .metadata
+                .pointer("/source_provenance/runner_id")
+                .and_then(Value::as_str)
+                .filter(|runner_id| !runner_id.trim().is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "artifact.metadata.source_provenance.runner_id",
+                        "cannot recover a controller artifact projection without unambiguous runner provenance",
+                        Some(artifact.id.clone()),
+                        None,
+                    )
+                })
+        })
+        .collect::<Result<std::collections::BTreeSet<_>>>()?;
+    match runner_ids.into_iter().collect::<Vec<_>>().as_slice() {
+        [runner_id] => Ok(runner_id.clone()),
+        _ => Err(Error::validation_invalid_argument(
+            "artifact.metadata.source_provenance.runner_id",
+            "cannot recover a controller artifact projection without unambiguous runner provenance",
+            None,
+            None,
+        )),
+    }
+}
+
+pub(crate) fn terminal_artifact_projection_is_verified(
+    record: &AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+) -> Result<bool> {
+    for outcome in &aggregate.outcomes {
+        for artifact in &outcome.artifacts {
+            if artifact.path.is_some() && artifact.size_bytes.is_some() && artifact.sha256.is_some()
+            {
+                if verified_controller_artifact_projection_path(
+                    &record.run_id,
+                    &outcome.task_id,
+                    artifact,
+                )?
+                .is_none()
+                {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn artifact(runner_id: Option<&str>) -> AgentTaskArtifact {
+        AgentTaskArtifact {
+            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "patch".to_string(),
+            kind: "patch".to_string(),
+            name: None,
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: Some("/runner/patch.diff".to_string()),
+            url: None,
+            mime: None,
+            size_bytes: Some(1),
+            sha256: Some("a".repeat(64)),
+            metadata: runner_id.map_or_else(
+                || json!({}),
+                |runner_id| json!({ "source_provenance": { "runner_id": runner_id } }),
+            ),
+        }
+    }
+
+    #[test]
+    fn legacy_runner_provenance_requires_one_consistent_value() {
+        let mut aggregate = AgentTaskAggregate {
+            schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: "plan".to_string(),
+            status: AgentTaskAggregateStatus::Succeeded,
+            totals: AgentTaskAggregateTotals::default(),
+            outcomes: Vec::new(),
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: AgentTaskQueueStatus::default(),
+        };
+        aggregate.outcomes.push(AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: "task".to_string(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: None,
+            failure_classification: None,
+            artifacts: vec![artifact(Some("runner-a")), artifact(Some("runner-b"))],
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        });
+
+        assert!(runner_id_from_artifact_provenance(&aggregate).is_err());
+        aggregate.outcomes[0].artifacts[1] = artifact(Some("runner-a"));
+        assert_eq!(
+            runner_id_from_artifact_provenance(&aggregate).expect("consistent provenance"),
+            "runner-a"
+        );
+        aggregate.outcomes[0].artifacts[1] = artifact(None);
+        assert!(runner_id_from_artifact_provenance(&aggregate).is_err());
+    }
 }
 
 /// Project finalized executor artifacts into the standard observation registry.

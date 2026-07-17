@@ -1636,7 +1636,10 @@ fn recovery_preserves_terminal_runner_identity_before_projecting_runner_artifact
             role: None,
             semantic_key: None,
             path: Some("/home/runner/.homeboy/executor-finalized/patch.diff".to_string()),
-            url: None,
+            url: Some(
+                "homeboy://agent-task/run/detached-run/artifacts#task=task-a&artifact=patch"
+                    .to_string(),
+            ),
             mime: Some("text/x-patch".to_string()),
             size_bytes: Some(patch.len() as u64),
             sha256: Some(format!("{:x}", sha2::Sha256::digest(patch.as_bytes()))),
@@ -1667,7 +1670,11 @@ fn recovery_preserves_terminal_runner_identity_before_projecting_runner_artifact
             record.metadata["runner_job_id"],
             "00000000-0000-0000-0000-000000000123"
         );
-        assert_eq!(record.metadata["artifact_projection"]["status"], "complete");
+        assert_eq!(
+            record.metadata["artifact_projection"]["status"], "complete",
+            "{:#}",
+            record.metadata
+        );
         let artifacts = crate::observation::ObservationStore::open_initialized()
             .expect("store")
             .list_artifacts(run_id)
@@ -1825,7 +1832,7 @@ fn terminal_executor_artifacts_are_projected_under_logical_ids() {
 }
 
 #[test]
-fn controller_mirrors_verified_detached_runner_artifact_into_a_local_projection() {
+fn status_backfills_legacy_runner_provenance_and_mirrors_a_verified_projection_idempotently() {
     with_isolated_home(|_| {
         use sha2::Digest;
         use std::io::{Read, Write};
@@ -1891,6 +1898,77 @@ fn controller_mirrors_verified_detached_runner_artifact_into_a_local_projection(
             serde_json::to_string(&session).expect("session JSON"),
         )
         .expect("write session");
+        struct FakeRunnerEvidence;
+        impl crate::observation::runs_service::RunnerEvidenceProvider for FakeRunnerEvidence {
+            fn mirror_connected_runner_run(
+                &self,
+                _: &str,
+            ) -> Result<Option<crate::observation::RunRecord>> {
+                Ok(None)
+            }
+            fn statuses(&self) -> Vec<crate::observation::runs_service::RunnerConnectionInfo> {
+                Vec::new()
+            }
+            fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
+                Ok(Value::Null)
+            }
+            fn runner_artifact_content(&self, _: &str, _: &str, _: &str) -> Result<Value> {
+                Ok(Value::Null)
+            }
+            fn runner_job_cancel(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
+                unreachable!()
+            }
+            fn refresh_mirrored_daemon_evidence(
+                &self,
+                _: &str,
+            ) -> Result<Option<Vec<crate::observation::RunRecord>>> {
+                Ok(None)
+            }
+            fn mirrored_runner_job_identity(
+                &self,
+                _: &crate::observation::RunRecord,
+            ) -> Option<(String, String)> {
+                None
+            }
+            fn download_remote_artifact(
+                &self,
+                path: &str,
+                output: Option<std::path::PathBuf>,
+            ) -> Result<crate::observation::runs_service::RemoteArtifactDownloadInfo> {
+                assert_eq!(path, "runner-artifact://local/detached-run/patch");
+                let output_path = output.unwrap_or_else(|| {
+                    crate::paths::artifact_root()
+                        .expect("artifact root")
+                        .join("fake-runner-patch")
+                });
+                std::fs::write(&output_path, b"patch bytes").expect("write fake runner bytes");
+                Ok(
+                    crate::observation::runs_service::RemoteArtifactDownloadInfo {
+                        output_path,
+                        content_type: Some("text/x-patch".to_string()),
+                        size_bytes: Some(11),
+                        sha256: Some(format!("{:x}", sha2::Sha256::digest(b"patch bytes"))),
+                        artifact_ref: homeboy_runner_contract::RunnerArtifactRef {
+                            artifact_id: "patch".to_string(),
+                            name: None,
+                            path: Some(path.to_string()),
+                            url: None,
+                            mime: Some("text/x-patch".to_string()),
+                            size_bytes: Some(11),
+                            sha256: Some(format!("{:x}", sha2::Sha256::digest(b"patch bytes"))),
+                            transport: Some("test".to_string()),
+                        },
+                    },
+                )
+            }
+        }
+        crate::observation::runs_service::register_runner_evidence_provider(Box::new(
+            FakeRunnerEvidence,
+        ));
 
         let plan = test_plan();
         let mut aggregate = succeeded_aggregate(&plan);
@@ -1907,13 +1985,38 @@ fn controller_mirrors_verified_detached_runner_artifact_into_a_local_projection(
             mime: Some("text/x-patch".to_string()),
             size_bytes: Some(patch.len() as u64),
             sha256: Some(sha256),
-            metadata: json!({ "executor_artifact_finalized": true }),
+            metadata: json!({
+                "executor_artifact_finalized": true,
+                "source_provenance": { "runner_id": "local" }
+            }),
         });
         submit_plan(&plan, Some("detached-run")).expect("submit");
-        record_runner_job_identity("detached-run", "local", "job-1").expect("runner identity");
+        record_runner_job_identity("detached-run", "local", "job-1").expect("runner setup");
         record_run_aggregate("detached-run", &plan, &aggregate).expect("reconcile aggregate");
 
+        // Match the pre-#8562 persisted shape: terminal and claimed complete,
+        // but without a controller projection or record-level runner identity.
+        let mut legacy = store::read_record("detached-run").expect("legacy record");
+        legacy.ensure_metadata_object().remove("runner_id");
+        legacy.ensure_metadata_object().remove("runner_job_id");
+        legacy.ensure_metadata_object().insert(
+            "artifact_projection".to_string(),
+            json!({ "status": "complete" }),
+        );
+        store::write_record(&legacy).expect("persist legacy record");
+        let observation =
+            crate::observation::ObservationStore::open_initialized().expect("observation store");
+        for artifact in observation
+            .list_artifacts("detached-run")
+            .expect("existing projections")
+        {
+            observation
+                .delete_artifact_record(&artifact.id)
+                .expect("remove unverified projection");
+        }
+
         let record = status("detached-run").expect("status");
+        assert_eq!(record.metadata["runner_id"], "local");
         assert_eq!(record.metadata["artifact_projection"]["status"], "complete");
         let store = crate::observation::ObservationStore::open_initialized().expect("store");
         let artifact = crate::observation::runs_service::resolve_artifact_for_run(
@@ -1926,6 +2029,19 @@ fn controller_mirrors_verified_detached_runner_artifact_into_a_local_projection(
         assert_eq!(
             std::fs::read(artifact.path).expect("projection bytes"),
             patch
+        );
+        let projection_count = store
+            .list_artifacts("detached-run")
+            .expect("initial projections")
+            .len();
+        let replay = status("detached-run").expect("idempotent status");
+        assert_eq!(replay.metadata, record.metadata);
+        assert_eq!(
+            store
+                .list_artifacts("detached-run")
+                .expect("idempotent projections")
+                .len(),
+            projection_count
         );
     });
 }
@@ -3830,7 +3946,9 @@ fn test_plan() -> AgentTaskPlan {
     )
 }
 
-fn terminal_child_snapshot(aggregate: &AgentTaskAggregate) -> crate::api_jobs::RunnerJobLogSnapshot {
+fn terminal_child_snapshot(
+    aggregate: &AgentTaskAggregate,
+) -> crate::api_jobs::RunnerJobLogSnapshot {
     let job_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("job id");
     crate::api_jobs::RunnerJobLogSnapshot {
         job: crate::api_jobs::Job {
