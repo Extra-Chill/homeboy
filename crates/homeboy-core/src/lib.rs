@@ -145,7 +145,7 @@ pub mod io;
 pub mod keychain;
 pub mod lab_offload;
 pub mod lab_routing;
-pub mod lifecycle;
+pub use homeboy_lifecycle_contract::lifecycle;
 pub mod loop_lifecycle;
 pub mod markdown;
 pub mod matrix_artifact_summary;

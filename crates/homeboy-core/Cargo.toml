@@ -30,6 +30,7 @@ homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-ident
 homeboy-audit-contract = { version = "0.1.0", path = "../homeboy-audit-contract" }
 homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit" }
 homeboy-extension-contract = { version = "0.1.0", path = "../homeboy-extension-contract" }
+homeboy-lifecycle-contract = { version = "0.1.0", path = "../homeboy-lifecycle-contract" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
 homeboy-lab-contract = { version = "0.1.0", path = "../homeboy-lab-contract" }
 homeboy-lab-runner-contract = { version = "0.1.0", path = "../homeboy-lab-runner-contract" }
