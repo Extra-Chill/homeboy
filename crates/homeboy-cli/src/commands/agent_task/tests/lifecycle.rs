@@ -1122,17 +1122,19 @@ fn run_next_claims_oldest_queued_run_and_leaves_later_runs_queued() {
             .expect("first submitted");
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-next-b"))
             .expect("second submitted");
-        let pinned = lifecycle_status("run-next-a")
-            .expect("first submitted status")
-            .metadata["controller_runtime"]["originating"]["pinned_executable"]
+        let submitted = lifecycle_status("run-next-a").expect("first submitted status");
+        let source = submitted.metadata["controller_runtime"]["originating"]["executable"]
             .as_str()
             .map(std::path::PathBuf::from)
-            .expect("pinned controller executable");
+            .expect("controller fixture source");
+        assert_eq!(source, controller_runtime_test_executable());
         assert_ne!(
-            pinned,
+            source,
             std::env::current_exe().expect("current test executable"),
             "dependent core must not pin the libtest harness"
         );
+        homeboy::core::agent_task_lifecycle::validate_controller_runtime("run-next-a")
+            .expect("pinned controller identity validates");
         let observed_status = Arc::new(Mutex::new(None));
 
         let (_value, exit_code) = run_next_with_executor(InspectingExecutor {
