@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use homeboy::core::api_jobs::{JobEvent, JobStatus};
-use homeboy::core::runners::{self as runner, runner_job_log_snapshot};
+use homeboy::runner::runners::{self as runner, runner_job_log_snapshot};
 
 use super::super::CmdResult;
 use super::cli::RunnerJobCommand;
@@ -73,8 +73,8 @@ fn job_artifacts(
 }
 
 fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
-    let (job, events) = homeboy::core::runners::runner_job_cancel(runner_id, job_id)?;
-    let runner_job = homeboy::core::runners::RunnerJob::from_job(
+    let (job, events) = homeboy::runner::runners::runner_job_cancel(runner_id, job_id)?;
+    let runner_job = homeboy::runner::runners::RunnerJob::from_job(
         runner_id,
         "runner.job.cancel",
         &[],
@@ -120,7 +120,7 @@ fn job_logs(
         snapshot = runner_job_log_snapshot(runner_id, job_id)?;
         emit_new_job_events(&snapshot.events, &mut emitted_sequence);
     }
-    let runner_job = homeboy::core::runners::RunnerJob::from_job(
+    let runner_job = homeboy::runner::runners::RunnerJob::from_job(
         runner_id,
         "runner.job.logs",
         &[],

@@ -52,7 +52,7 @@ struct MaterializedRefPathEvidence {
     exists: bool,
 }
 
-pub(crate) fn materialize_provider_config_refs(config: Value) -> Result<Value> {
+pub fn materialize_provider_config_refs(config: Value) -> Result<Value> {
     materialize_value(config)
 }
 

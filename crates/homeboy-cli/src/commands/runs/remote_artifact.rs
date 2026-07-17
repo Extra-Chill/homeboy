@@ -2,9 +2,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use homeboy::core::observation::artifact_preview;
-use homeboy::core::observation::runner_artifact_attach::{
-    self, RunnerAttachArtifactType, RunnerAttachSource,
-};
 use homeboy::core::observation::runs_service::{
     self, PersistedArtifactCleanupOptions, RunnerDownloadCleanupOptions,
 };
@@ -15,8 +12,11 @@ use homeboy::core::resource_lifecycle_index::{
     ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycleRecord,
     ResourceLifecycleResourceStatus,
 };
-use homeboy::core::runners::{self as runner, Runner, RunnerKind};
 use homeboy::core::{server, Error};
+use homeboy::runner::artifact_attach::{
+    self as runner_artifact_attach, RunnerAttachArtifactType, RunnerAttachSource,
+};
+use homeboy::runner::runners::{self as runner, Runner, RunnerKind};
 
 use super::types::{
     RunsArtifactAttachArgs, RunsArtifactAttachOutput, RunsArtifactCaptureArgs,

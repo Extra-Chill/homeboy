@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use homeboy::core::runners::{Runner, RunnerKind};
 use homeboy::core::server::{RunnerPolicy, RunnerSettings};
+use homeboy::runner::runners::{Runner, RunnerKind};
 
 mod exec;
 mod redaction;

@@ -2,11 +2,11 @@ use serde::Serialize;
 use serde_json::Value;
 
 use homeboy::core::api_jobs::{Job, JobEvent};
-use homeboy::core::runners::{
+use homeboy::core::EntityCrudOutput;
+use homeboy::runner::runners::{
     ReverseRunnerWorkerOutput, Runner, RunnerAvailability, RunnerConnectReport,
     RunnerDisconnectReport, RunnerExecOutput, RunnerStatusReport,
 };
-use homeboy::core::EntityCrudOutput;
 
 use std::collections::BTreeMap;
 
@@ -278,8 +278,8 @@ pub enum RunnerCommandOutput {
     Lifecycle(lifecycle::RunnerLifecycleOutput),
     Job(RunnerJobOutput),
     BrokerJob(RunnerBrokerJobOutput),
-    RefreshHomeboy(homeboy::core::runners::HomeboyBinaryRefreshOutput),
-    DevSync(homeboy::core::runners::RunnerDevSyncOutput),
+    RefreshHomeboy(homeboy::runner::runners::HomeboyBinaryRefreshOutput),
+    DevSync(homeboy::runner::runners::RunnerDevSyncOutput),
     Worker(ReverseRunnerWorkerOutput),
     Workspace(workspace::RunnerWorkspaceOutput),
     RefreshPlan(refresh_plan::LabRefreshPlanOutput),
@@ -341,7 +341,7 @@ pub struct RunnerJobOutput {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub compact: bool,
     pub job: Job,
-    pub runner_job: homeboy::core::runners::RunnerJob,
+    pub runner_job: homeboy::runner::runners::RunnerJob,
     pub events: Vec<JobEvent>,
     /// Exit code lifted out of the structured result event. Surfaced only in
     /// compact/tail projections so callers can read "exit N" without the blob.

@@ -1,6 +1,6 @@
 use homeboy::core::engine::shell;
-use homeboy::core::runners::{self as runner};
 use homeboy::core::{server, Error};
+use homeboy::runner::runners::{self as runner};
 
 use super::cli::RunnerBrokerCommand;
 use super::types::{RunnerBrokerCredentialSummary, RunnerBrokerOutput};

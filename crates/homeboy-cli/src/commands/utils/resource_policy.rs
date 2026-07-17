@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn non_interactive_hot_warning_fails_before_starting_command() {
         let _lock = env_lock();
-        let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
         let warning = evaluate(
             lab_supported_hot("audit"),
             &resources(ResourceRecommendation::Hot),
@@ -653,7 +653,7 @@ mod tests {
     #[test]
     fn non_interactive_hot_warning_allows_default_lab_runner_auto_offload() {
         let _lock = env_lock();
-        let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
         let warning = evaluate_with_runner_hint(
             lab_supported_hot("agent-task providers"),
             &resources(ResourceRecommendation::Hot),
@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn non_interactive_local_only_refusal_includes_local_hot_rerun_command() {
         let _lock = env_lock();
-        let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
         let command = local_only_hot(
             "lint",
             "Changed-scope lint runs stay local because changed-file scopes are not represented in the current Lab portability contract yet.",
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn portable_refusal_without_runner_uses_explicit_local_last_resort() {
         let _lock = env_lock();
-        let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
         let warning = evaluate(
             lab_supported_hot("audit"),
             &resources(ResourceRecommendation::Warm),
@@ -752,7 +752,7 @@ mod tests {
     #[test]
     fn runner_hosted_exec_does_not_fail_non_interactive_preflight() {
         let _lock = env_lock();
-        let _guard = EnvVarGuard::set(crate::core::runner::RUNNER_HOSTED_EXEC_ENV, "1");
+        let _guard = EnvVarGuard::set(crate::runner::RUNNER_HOSTED_EXEC_ENV, "1");
         let warning = evaluate(
             lab_supported_hot("agent-task cook/run-plan"),
             &resources(ResourceRecommendation::Hot),
@@ -765,7 +765,7 @@ mod tests {
     #[test]
     fn interactive_or_forced_hot_warning_does_not_fail_preflight() {
         let _lock = env_lock();
-        let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
         let warning = evaluate(
             lab_supported_hot("audit"),
             &resources(ResourceRecommendation::Hot),
@@ -910,7 +910,7 @@ mod tests {
         // The runner is ephemeral and non-interactive by design; refusing there
         // fails otherwise-good PR checks.
         let _lock = env_lock();
-        let _hosted = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _hosted = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
         let _ci = EnvVarGuard::set("GITHUB_ACTIONS", "true");
         let warning = evaluate(
             lab_supported_hot("review test"),
@@ -926,7 +926,7 @@ mod tests {
         // Guard against the CI bypass leaking into ordinary non-interactive
         // shells (e.g. cron, agent runners) where the refusal is still correct.
         let _lock = env_lock();
-        let _hosted = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _hosted = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
         let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
         let warning = evaluate(
             lab_supported_hot("review test"),

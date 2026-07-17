@@ -8,7 +8,6 @@ mod capability;
 mod compiler_warning_contract;
 pub mod component_script;
 mod core_compat;
-mod dev_run;
 mod env_provider;
 mod execution;
 mod fingerprint;
@@ -65,10 +64,7 @@ pub use core_compat::{
     validate_core_compatibility, CoreCompatibilityReport, CORE_COMPAT_REMEDIATION_COMMAND,
     CORE_INCOMPATIBLE_DIAGNOSTIC,
 };
-pub use dev_run::{
-    plan_extension_dev_run, run_extension_dev_run, ExtensionDevRunOutput, ExtensionDevRunPlan,
-    ExtensionDevRunProvenance, RunnerExtensionStateProbe,
-};
+
 pub(crate) use execution::{build_settings_json_from_manifest, execute_action};
 pub use execution::{
     extension_ready_status, is_extension_compatible, run_action, run_extension, run_setup,
@@ -80,7 +76,7 @@ pub use fingerprint::{
     FingerprintOutput, HookRef, UnusedParam,
 };
 pub use invocation_context::ResolvedExtensionInvocationContext;
-pub(crate) use lifecycle::source_metadata::resolve_source_url;
+pub use lifecycle::source_metadata::resolve_source_url;
 pub use lifecycle::source_metadata::SourceMetadataRepair;
 pub use lifecycle::{
     check_update_available, derive_id_from_url, install, install_for_component,

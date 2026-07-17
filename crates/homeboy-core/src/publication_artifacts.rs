@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::execution_contract::{decode_uri_component, EXECUTION_CONTRACT};
 use crate::observation::{ArtifactRecord, ObservationStore};
-use crate::{paths, runner, Result};
+use crate::{paths, Result};
 
 pub(crate) fn index_published_artifact_refs(
     store: &ObservationStore,
@@ -55,7 +55,9 @@ pub fn index_remote_published_artifact_refs_for_run(
         if !is_remote_publication_manifest_candidate(&artifact) {
             continue;
         }
-        let Ok(download) = runner::download_remote_artifact(&artifact.path, None) else {
+        let Ok(download) = crate::observation::runs_service::with_runner_evidence(|provider| {
+            provider.download_remote_artifact(&artifact.path, None)
+        }) else {
             continue;
         };
         let Ok(content) = std::fs::read_to_string(&download.output_path) else {
@@ -70,7 +72,11 @@ pub fn index_remote_published_artifact_refs_for_run(
         };
         index_manifest_refs(store, &artifact, &manifest, |locator| {
             Ok(Some(IndexedArtifactPath::Remote(
-                runner::runner_artifact_store_token(&runner_id, &remote_run_id, locator),
+                crate::execution_contract::runner_artifact_store_token(
+                    &runner_id,
+                    &remote_run_id,
+                    locator,
+                ),
             )))
         })?;
     }

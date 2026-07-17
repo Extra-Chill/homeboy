@@ -36,7 +36,6 @@ pub use lab_contract as command_contract;
 // Stable domain facades for new command/core integrations.
 pub mod agent_tasks;
 pub mod artifacts;
-pub mod runners;
 
 // Public extensions (config first — exports entity_crud! macro used by entity extensions)
 #[macro_use]
@@ -53,7 +52,7 @@ pub mod agent_task_artifacts;
 pub mod agent_task_batch;
 pub use homeboy_lab_contract::agent_task_config;
 pub(crate) mod agent_task_candidate_baseline;
-pub(crate) mod agent_task_config_materialization;
+pub mod agent_task_config_materialization;
 pub mod agent_task_contract;
 pub mod agent_task_controller_service;
 pub mod agent_task_cook_loop;
@@ -143,6 +142,7 @@ pub mod hygiene;
 pub mod io;
 pub mod issues;
 pub mod keychain;
+pub mod lab_offload;
 pub mod lab_routing;
 pub mod lifecycle;
 pub mod loop_lifecycle;
@@ -195,7 +195,6 @@ pub mod rig;
 pub mod run_lifecycle_record;
 pub mod run_lifecycle_status;
 pub mod run_outcome_envelope;
-pub mod runner;
 pub mod runner_execution_envelope;
 pub mod runtime_package;
 pub mod runtime_promotion;

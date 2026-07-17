@@ -16,7 +16,7 @@ pub mod loop_inventory_run;
 pub mod observed_workflow;
 pub mod records;
 mod run_failure_causes;
-pub mod runner_artifact_attach;
+
 pub mod runs_service;
 pub mod store;
 mod test_findings;

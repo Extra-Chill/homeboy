@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use homeboy::cli_surface::current_command_surface_doctor_report;
 use homeboy::core::build_identity;
 use homeboy::core::engine;
-use homeboy::core::runners::{self as runner, Runner, RunnerKind, RunnerStatusReport};
+use homeboy::runner::runners::{self as runner, Runner, RunnerKind, RunnerStatusReport};
 use homeboy::core::self_status::{self, ControllerRuntimeInput, RunnerRuntimeInput};
 use serde_json::Value;
 

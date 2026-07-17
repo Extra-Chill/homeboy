@@ -24,6 +24,7 @@ pub struct RunnerConnectionInfo {
     pub runner_id: String,
     pub connected: bool,
     pub stale_runner_jobs: Vec<StaleRunnerJobInfo>,
+    pub active_jobs: Vec<crate::api_jobs::ActiveRunnerJobSummary>,
 }
 
 /// A stale runner job, slimmed to the fields `runs_service` reconciles. Field
@@ -281,6 +282,7 @@ mod tests {
                 vec![RunnerConnectionInfo {
                     runner_id: "fake".to_string(),
                     connected: true,
+                    active_jobs: Vec::new(),
                     stale_runner_jobs: Vec::new(),
                 }]
             }

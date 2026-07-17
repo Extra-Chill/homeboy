@@ -11,10 +11,10 @@ use std::time::Duration;
 
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
 use homeboy::core::rig::RigRunArtifactIndex;
-use homeboy::core::runners::{
+use homeboy::core::Error;
+use homeboy::runner::runners::{
     is_reportable_artifact_evidence_path, is_retrievable_runner_artifact,
 };
-use homeboy::core::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

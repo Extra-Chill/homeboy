@@ -34,12 +34,12 @@ fn normalize_top_level_keys_to_snake_case(value: Value) -> Value {
 
 /// Internal result from merge_config (no ID, caller adds it).
 #[derive(Debug)]
-pub(crate) struct MergeFields {
+pub struct MergeFields {
     pub updated_fields: Vec<String>,
 }
 
 /// Merge a JSON patch into any serializable config type.
-pub(crate) fn merge_config<T: Serialize + DeserializeOwned>(
+pub fn merge_config<T: Serialize + DeserializeOwned>(
     existing: &mut T,
     patch: Value,
     replace_fields: &[String],
@@ -140,7 +140,7 @@ pub(crate) struct RemoveFields {
 }
 
 /// Remove items from arrays in any serializable config type.
-pub(crate) fn remove_config<T: Serialize + DeserializeOwned>(
+pub fn remove_config<T: Serialize + DeserializeOwned>(
     existing: &mut T,
     spec: Value,
 ) -> Result<RemoveFields> {

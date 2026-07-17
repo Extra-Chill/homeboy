@@ -1,0 +1,943 @@
+use super::*;
+
+#[test]
+fn apply_patch_step_accepts_noop_mutation_return() {
+    let plan = base_lab_plan(Some(&portable_lab_command("refactor")));
+
+    let plan = with_lab_apply_patch_step(plan, None);
+
+    let step = plan
+        .steps
+        .iter()
+        .find(|step| step.id == "lab.apply_patch")
+        .expect("apply patch step");
+    assert_eq!(step.status, PlanStepStatus::Success);
+    assert_eq!(step.inputs["apply"]["applied"], serde_json::json!(false));
+    assert_eq!(
+        step.inputs["apply"]["reason"],
+        serde_json::json!("no_patch")
+    );
+}
+
+#[test]
+fn lost_exec_response_reconciles_the_single_accepted_durable_job() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-8525-attempt-1";
+        homeboy_core::agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "dispatching",
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("record controller proxy before daemon acceptance");
+        let mut status = reverse_status("homeboy-lab");
+        status.active_runner_jobs.push(crate::RunnerJob {
+            runner_id: "homeboy-lab".to_string(),
+            job_id: "job-8525".to_string(),
+            operation: "runner.exec".to_string(),
+            status: homeboy_core::api_jobs::JobStatus::Running,
+            command: "homeboy agent-task cook".to_string(),
+            cwd: Some("/runner/workspace".to_string()),
+            source: "runner-daemon".to_string(),
+            lifecycle_owner: crate::RunnerLifecycleOwner::Controller,
+            lifecycle: None,
+            started_at_ms: Some(1),
+            updated_at_ms: Some(1),
+            elapsed_ms: Some(1),
+            heartbeat_age_ms: Some(1),
+            claim: Default::default(),
+            claim_expires_in_ms: None,
+            durable_run_id: Some(run_id.to_string()),
+            stale_reason: None,
+            lifecycle_state: Some("running".to_string()),
+            retryable: Some(false),
+            artifact_refs: Vec::new(),
+        });
+
+        let response_error = Error::internal_unexpected("/exec response connection reset");
+        let job_id = accepted_runner_job_id_with("homeboy-lab", run_id, || Ok(status))
+            .expect("reconcile exactly one accepted daemon job");
+        let outcome = in_flight_daemon_disconnect_outcome(
+            base_lab_plan(Some(&portable_lab_command("agent-task cook"))),
+            "homeboy-lab",
+            &job_id,
+            run_id,
+            "/runner/workspace",
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+            ],
+            "daemon accepted the durable job before the exec response was lost",
+            &response_error,
+        )
+        .expect("accepted job must become an in-flight outcome");
+
+        assert!(matches!(outcome, LabOffloadOutcome::InFlight { .. }));
+        let record = homeboy_core::agent_task_lifecycle::status(run_id).expect("controller record");
+        assert_eq!(
+            record.state,
+            homeboy_core::agent_task_lifecycle::AgentTaskRunState::Running
+        );
+        assert_eq!(record.runner_job_id(), Some("job-8525"));
+        assert!(record.metadata.get("pre_execution_failure").is_none());
+    });
+}
+
+#[test]
+fn lab_remote_dispatch_preflight_requires_configured_homeboy_path() {
+    let runner = crate::Runner {
+        id: "lab-default".to_string(),
+        kind: crate::RunnerKind::Ssh,
+        server_id: Some("lab-default".to_string()),
+        workspace_root: Some("/srv/homeboy".to_string()),
+        settings: homeboy_core::server::RunnerSettings::default(),
+        env: Default::default(),
+        secret_env: Default::default(),
+        resources: Default::default(),
+        policy: Default::default(),
+    };
+
+    let err = crate::remote_runner_homeboy_path(&runner, "Lab offload preflight")
+        .expect_err("missing remote homeboy_path fails before dispatch");
+
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert!(err.message.contains("refusing to use bare `homeboy`"));
+    assert!(err.details["tried"]
+        .as_array()
+        .expect("tried hints")
+        .iter()
+        .any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("explicit remote Homeboy binary path"))));
+}
+
+#[test]
+fn lab_offload_rejects_truncated_runner_stdout() {
+    let exec_output = RunnerExecOutput {
+        variant: "exec",
+        command: "runner.exec",
+        runner_id: "lab-default".to_string(),
+        dry_run: false,
+        mode: RunnerExecMode::Daemon,
+        argv: vec!["homeboy".to_string(), "agent-task".to_string()],
+        remote_cwd: "/srv/homeboy/_lab_workspaces/sample-plugin-code".to_string(),
+        exit_code: 0,
+        stdout: "tail-only-json-fragment".to_string(),
+        stderr: String::new(),
+        source_snapshot: None,
+        job: None,
+        runner_job: None,
+        job_id: Some("job-123".to_string()),
+        job_events: None,
+        mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
+        patch: None,
+        mutation_artifacts: None,
+        artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
+        metrics: None,
+        capture: Some(CommandCaptureMetadata {
+            stdout: CaptureMetadata {
+                bytes_seen: 4_500_000,
+                bytes_retained: 4 * 1024 * 1024,
+                byte_limit: 4 * 1024 * 1024,
+                truncated: true,
+            },
+            stderr: CaptureMetadata::default(),
+        }),
+        execution_record: None,
+        runner_result: None,
+        handoff: None,
+        diagnostics: None,
+    };
+
+    let err = ensure_lab_offload_streams_not_truncated(&exec_output, false)
+        .expect_err("truncated stdout is rejected");
+
+    assert_eq!(err.code.as_str(), "internal.unexpected");
+    assert!(err.message.contains("output exceeded"));
+    assert_eq!(err.details["runner_id"], "lab-default");
+    assert_eq!(err.details["job_id"], "job-123");
+    assert_eq!(err.details["capture"]["stdout"]["truncated"], true);
+}
+
+#[test]
+fn lab_offload_failure_summary_uses_runner_failure_context() {
+    let exec_output = RunnerExecOutput {
+        variant: "exec",
+        command: "runner.exec",
+        runner_id: "lab-default".to_string(),
+        dry_run: false,
+        mode: RunnerExecMode::Daemon,
+        argv: vec!["homeboy".to_string(), "test".to_string()],
+        remote_cwd: "/srv/homeboy/_lab_workspaces/sample-plugin-code".to_string(),
+        exit_code: 2,
+        stdout: String::new(),
+        stderr: r#"{"success":false,"error":{"code":"validation.invalid_argument","message":"Missing required field: cwd","details":{"field":"cwd"}}}"#.to_string(),
+        source_snapshot: None,
+        job: None,
+        runner_job: None,
+        job_id: Some("job-123".to_string()),
+        job_events: None,
+        mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
+        patch: None,
+        mutation_artifacts: None,
+        artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
+        metrics: None,
+        capture: None,
+        execution_record: None,
+        runner_result: None,
+        handoff: None,
+        diagnostics: None,
+    };
+    let mut stderr = String::new();
+
+    append_runner_failure_context_summary(&mut stderr, &exec_output);
+
+    assert!(stderr.contains("command `homeboy test`"));
+    assert!(stderr.contains("runner job `job-123`"));
+    assert!(stderr.contains("persisted run `runner-exec-lab-default-job-123`"));
+    assert!(stderr.contains("contract field: `cwd`"));
+    assert!(stderr.contains("Missing required field: cwd"));
+}
+
+#[test]
+fn lab_offload_failure_summary_keeps_rig_not_found_without_contract_field() {
+    let exec_output = RunnerExecOutput {
+        variant: "exec",
+        command: "runner.exec",
+        runner_id: "lab-default".to_string(),
+        dry_run: false,
+        mode: RunnerExecMode::Daemon,
+        argv: vec![
+            "homeboy".to_string(),
+            "rig".to_string(),
+            "up".to_string(),
+            "missing".to_string(),
+        ],
+        remote_cwd: "/srv/homeboy/_lab_workspaces/sample-plugin-code".to_string(),
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: r#"{"success":false,"error":{"code":"rig.not_found","message":"Rig not found","details":{"rig":"missing"}}}"#.to_string(),
+        source_snapshot: None,
+        job: None,
+        runner_job: None,
+        job_id: Some("job-123".to_string()),
+        job_events: None,
+        mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
+        patch: None,
+        mutation_artifacts: None,
+        artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
+        metrics: None,
+        capture: None,
+        execution_record: None,
+        runner_result: None,
+        handoff: None,
+        diagnostics: None,
+    };
+    let mut stderr = String::new();
+
+    append_runner_failure_context_summary(&mut stderr, &exec_output);
+
+    assert!(stderr.contains("structured error: `rig.not_found`"));
+    assert!(stderr.contains("reason: Rig not found"));
+    assert!(stderr.contains("details: {\"rig\":\"missing\"}"));
+    assert!(stderr.contains("homeboy runner exec lab-default -- homeboy rig list"));
+    assert!(!stderr.contains("unknown contract field"));
+    assert!(!stderr.contains("contract field"));
+}
+
+#[test]
+fn missing_mutation_patch_error_points_to_runner_evidence_and_retry() {
+    let exec_output = RunnerExecOutput {
+        variant: "exec",
+        command: "runner.exec",
+        runner_id: "lab-default".to_string(),
+        dry_run: false,
+        mode: RunnerExecMode::Daemon,
+        argv: vec![
+            "homeboy".to_string(),
+            "refactor".to_string(),
+            "--from".to_string(),
+            "lint".to_string(),
+            "--write".to_string(),
+            "sample-plugin-code".to_string(),
+        ],
+        remote_cwd: "/srv/homeboy/_lab_workspaces/sample-plugin-code".to_string(),
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+        source_snapshot: None,
+        job: None,
+        runner_job: None,
+        job_id: Some("job-123".to_string()),
+        job_events: None,
+        mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
+        patch: None,
+        mutation_artifacts: None,
+        artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
+        metrics: None,
+        capture: None,
+        execution_record: None,
+        runner_result: None,
+        handoff: None,
+        diagnostics: None,
+    };
+
+    let err = missing_mutation_patch_error(
+        &[
+            "homeboy".to_string(),
+            "refactor".to_string(),
+            "--from".to_string(),
+            "lint".to_string(),
+            "--write".to_string(),
+            "sample-plugin-code".to_string(),
+        ],
+        Some("--write"),
+        &exec_output,
+    );
+
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert!(err.message.contains("returned no source-tree patch"));
+    assert_eq!(err.details["runner_id"], "lab-default");
+    assert_eq!(err.details["job_id"], "job-123");
+    assert_eq!(
+        err.details["mirror_run_id"],
+        "runner-exec-lab-default-job-123"
+    );
+    let hints = err
+        .hints
+        .iter()
+        .map(|hint| hint.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains("homeboy runs show runner-exec-lab-default-job-123")));
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains("homeboy runs artifacts runner-exec-lab-default-job-123")));
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains("homeboy refactor --from lint --write sample-plugin-code")));
+}
+
+#[test]
+fn default_runner_missing_capabilities_fails_without_local_fallback_opt_in() {
+    let plan = base_lab_plan(Some(&portable_lab_command("trace")));
+    let selection = LabRunnerSelection {
+        runner_id: "homeboy-lab".to_string(),
+        source: LabRunnerSelectionSource::Default,
+        mode: RunnerTunnelMode::Reverse,
+    };
+    let status = reverse_status("homeboy-lab");
+
+    let overhead = LabOffloadOverhead::start();
+    let result = automatic_capability_fallback_or_error(
+        plan,
+        &selection,
+        &status,
+        "Runner 'homeboy-lab' is missing required capability parity for `trace`: tools: playwright."
+            .to_string(),
+        vec!["Install Playwright and browser binaries on the runner.".to_string()],
+        false,
+        homeboy_cli_contract::Placement::Auto,
+        &overhead,
+    );
+
+    let Err(err) = result else {
+        panic!("expected selected default runner to fail fast");
+    };
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert!(err.message.contains("missing required capability parity"));
+    assert!(err.message.contains("playwright"));
+    assert_eq!(err.details["id"], "homeboy-lab");
+    let tried = err.details["tried"].as_array().expect("tried");
+    assert!(tried.iter().any(|hint| hint
+        .as_str()
+        .is_some_and(|hint| hint.contains("--placement lab-or-local"))));
+}
+
+#[test]
+fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
+    let plan = base_lab_plan(Some(&portable_lab_command("trace")));
+    let selection = LabRunnerSelection {
+        runner_id: "homeboy-lab".to_string(),
+        source: LabRunnerSelectionSource::Default,
+        mode: RunnerTunnelMode::Reverse,
+    };
+    let status = reverse_status("homeboy-lab");
+
+    let mut overhead = LabOffloadOverhead::start();
+    overhead.set_attempted("homeboy-lab", "default", Some("reverse_tunnel"));
+    overhead.record(
+        LabOffloadPhase::Preflight,
+        std::time::Duration::from_millis(8),
+    );
+    overhead
+        .set_fallback_reason("missing required capability parity for `trace`: tools: playwright");
+    let outcome = automatic_capability_fallback_or_error(
+        plan,
+        &selection,
+        &status,
+        "Runner 'homeboy-lab' is missing required capability parity for `trace`: tools: playwright."
+            .to_string(),
+        Vec::new(),
+        true,
+        homeboy_cli_contract::Placement::Auto,
+        &overhead,
+    )
+    .expect("explicit fallback opt-in should allow local run");
+
+    let LabOffloadOutcome::RunLocal {
+        messages, metadata, ..
+    } = outcome
+    else {
+        panic!("expected local fallback");
+    };
+    assert!(messages[0].contains("running locally"));
+    let metadata = metadata.expect("metadata");
+    assert_eq!(metadata["status"], "fallback");
+    // The fallback-to-local outcome records the runner-agnostic overhead:
+    // the attempted selection/preflight cost plus the fallback reason (#3001).
+    let overhead_meta = &metadata["lab_offload_overhead"];
+    assert_eq!(overhead_meta["schema"], "homeboy/lab-offload-overhead/v1");
+    assert_eq!(
+        overhead_meta["attempted_selection"]["runner_id"],
+        "homeboy-lab"
+    );
+    assert_eq!(overhead_meta["attempted_selection"]["source"], "default");
+    assert!(overhead_meta["fallback_reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("capability parity")));
+    assert!(overhead_meta["phase_durations_ms"]["preflight"]
+        .as_u64()
+        .is_some());
+    // Workload duration stays separable: no remote exec happened on fallback.
+    assert!(overhead_meta["workload_ms"].is_null());
+}
+
+#[test]
+fn plan_records_skipped_auto_offload() {
+    let outcome = execute_lab_offload(LabOffloadRequest {
+        command: Some(portable_lab_command("test")),
+        normalized_args: &["homeboy".to_string(), "test".to_string()],
+        explicit_runner: None,
+        placement: homeboy_cli_contract::Placement::Local,
+        allow_local_fallback: false,
+        allow_dirty_lab_workspace: false,
+        skip_deps_hydration: false,
+        capture_patch: false,
+        mutation_flag: None,
+        detach_after_handoff: false,
+        output_file_requested: false,
+        read_only_polling: false,
+        local_output_file: None,
+        durable_agent_task_plan: None,
+        source_path: None,
+        verified_cook_baseline: None,
+        require_controller_git_bundle: false,
+        job_overrides: LabJobOverrides::default(),
+    })
+    .expect("outcome");
+
+    let LabOffloadOutcome::RunLocal { plan, metadata, .. } = outcome else {
+        panic!("local placement should run locally");
+    };
+    assert_eq!(plan.kind, PlanKind::LabOffload);
+    assert_eq!(plan.steps[0].id, "lab.select_runner");
+    assert_eq!(plan.steps[0].status, PlanStepStatus::Skipped);
+    assert_eq!(metadata.expect("metadata")["status"], "skipped");
+}
+
+#[test]
+fn lab_placement_refuses_local_execution_without_lab_contract() {
+    let outcome = execute_lab_offload(LabOffloadRequest {
+        command: None,
+        normalized_args: &["homeboy".to_string(), "status".to_string()],
+        explicit_runner: None,
+        placement: homeboy_cli_contract::Placement::Lab,
+        allow_local_fallback: false,
+        allow_dirty_lab_workspace: false,
+        skip_deps_hydration: false,
+        capture_patch: false,
+        mutation_flag: None,
+        detach_after_handoff: false,
+        output_file_requested: false,
+        read_only_polling: false,
+        local_output_file: None,
+        durable_agent_task_plan: None,
+        source_path: None,
+        verified_cook_baseline: None,
+        require_controller_git_bundle: false,
+        job_overrides: LabJobOverrides::default(),
+    });
+
+    let Err(err) = outcome else {
+        panic!("Lab placement should refuse local execution");
+    };
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert!(err.message.contains("Lab placement refused"));
+}
+
+#[test]
+fn lab_placement_refuses_local_only_rig_install_with_actionable_boundary() {
+    let reason = homeboy_core::lab_contract::RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON;
+    let outcome = execute_lab_offload(LabOffloadRequest {
+        command: Some(local_only_lab_command(reason)),
+        normalized_args: &[
+            "homeboy".to_string(),
+            "rig".to_string(),
+            "install".to_string(),
+            "./rig-package".to_string(),
+        ],
+        explicit_runner: None,
+        placement: homeboy_cli_contract::Placement::Lab,
+        allow_local_fallback: false,
+        allow_dirty_lab_workspace: false,
+        skip_deps_hydration: false,
+        capture_patch: false,
+        mutation_flag: None,
+        detach_after_handoff: false,
+        output_file_requested: false,
+        read_only_polling: false,
+        local_output_file: None,
+        durable_agent_task_plan: None,
+        source_path: None,
+        verified_cook_baseline: None,
+        require_controller_git_bundle: false,
+        job_overrides: LabJobOverrides::default(),
+    });
+
+    let Err(err) = outcome else {
+        panic!("rig install with Lab placement should fail before local execution");
+    };
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert!(err.message.contains("rig install"));
+    assert!(err.message.contains("not Lab-portable yet"));
+    assert!(err
+        .message
+        .contains("homeboy rig check <rig-id> --runner <runner-id>"));
+}
+
+#[test]
+fn build_runner_error_gives_managed_runner_replacement() {
+    let outcome = execute_lab_offload(LabOffloadRequest {
+        command: None,
+        normalized_args: &[
+            "homeboy".to_string(),
+            "build".to_string(),
+            "homeboy".to_string(),
+        ],
+        explicit_runner: Some("homeboy-lab"),
+        placement: homeboy_cli_contract::Placement::Auto,
+        allow_local_fallback: false,
+        allow_dirty_lab_workspace: false,
+        skip_deps_hydration: false,
+        capture_patch: false,
+        mutation_flag: None,
+        detach_after_handoff: false,
+        output_file_requested: false,
+        read_only_polling: false,
+        local_output_file: None,
+        durable_agent_task_plan: None,
+        source_path: None,
+        verified_cook_baseline: None,
+        require_controller_git_bundle: false,
+        job_overrides: LabJobOverrides::default(),
+    });
+
+    let Err(err) = outcome else {
+        panic!("build --runner should fail before local execution");
+    };
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert!(err
+        .message
+        .contains("homeboy build is not Lab-portable yet"));
+    let tried = err.details["tried"].as_array().expect("tried hints");
+    assert!(tried
+        .iter()
+        .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
+            "homeboy runner workspace sync homeboy-lab --path <local-worktree> --mode snapshot"
+        ))));
+    assert!(tried
+        .iter()
+        .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
+            "homeboy runner exec homeboy-lab --cwd <runner_path> -- homeboy build <component>"
+        ))));
+}
+
+#[test]
+fn build_lab_placement_error_gives_managed_runner_replacement() {
+    let outcome = execute_lab_offload(LabOffloadRequest {
+        command: None,
+        normalized_args: &[
+            "homeboy".to_string(),
+            "build".to_string(),
+            "homeboy".to_string(),
+        ],
+        explicit_runner: None,
+        placement: homeboy_cli_contract::Placement::Lab,
+        allow_local_fallback: false,
+        allow_dirty_lab_workspace: false,
+        skip_deps_hydration: false,
+        capture_patch: false,
+        mutation_flag: None,
+        detach_after_handoff: false,
+        output_file_requested: false,
+        read_only_polling: false,
+        local_output_file: None,
+        durable_agent_task_plan: None,
+        source_path: None,
+        verified_cook_baseline: None,
+        require_controller_git_bundle: false,
+        job_overrides: LabJobOverrides::default(),
+    });
+
+    let Err(err) = outcome else {
+        panic!("build with Lab placement should fail before local execution");
+    };
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert!(err
+        .message
+        .contains("homeboy build is not Lab-portable yet"));
+    let tried = err.details["tried"].as_array().expect("tried hints");
+    assert!(tried
+        .iter()
+        .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
+            "homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapshot"
+        ))));
+    assert!(tried
+        .iter()
+        .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
+            "homeboy runner exec <runner-id> --cwd <runner_path> -- homeboy build <component>"
+        ))));
+}
+
+#[test]
+fn unsupported_runner_error_guides_tunnel_service_inspection() {
+    let outcome = execute_lab_offload(LabOffloadRequest {
+        command: None,
+        normalized_args: &[
+            "homeboy".to_string(),
+            "tunnel".to_string(),
+            "service".to_string(),
+            "status".to_string(),
+            "wpcom-ai-manual-held".to_string(),
+        ],
+        explicit_runner: Some("homeboy-lab"),
+        placement: homeboy_cli_contract::Placement::Auto,
+        allow_local_fallback: false,
+        allow_dirty_lab_workspace: false,
+        skip_deps_hydration: false,
+        capture_patch: false,
+        mutation_flag: None,
+        detach_after_handoff: false,
+        output_file_requested: false,
+        read_only_polling: false,
+        local_output_file: None,
+        durable_agent_task_plan: None,
+        source_path: None,
+        verified_cook_baseline: None,
+        require_controller_git_bundle: false,
+        job_overrides: LabJobOverrides::default(),
+    });
+
+    let Err(err) = outcome else {
+        panic!("unsupported --runner command should fail");
+    };
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    let tried = err.details["tried"].as_array().expect("tried hints");
+    assert!(tried.iter().any(|hint| hint
+        .as_str()
+        .is_some_and(|hint| hint.contains("homeboy runner exec homeboy-lab"))));
+    assert!(tried.iter().any(|hint| hint
+        .as_str()
+        .is_some_and(|hint| hint.contains("tunnel service status"))));
+}
+
+#[test]
+fn lab_stream_truncation_fails_without_structured_output_file() {
+    let output = truncated_runner_exec_output();
+
+    let err = ensure_lab_offload_streams_not_truncated(&output, false)
+        .expect_err("truncated streams without structured output should fail");
+
+    assert_eq!(err.code, ErrorCode::InternalUnexpected);
+    assert!(err.message.contains("retained stream limit"));
+    assert_eq!(err.details["reason"], "output_too_large");
+}
+
+#[test]
+fn lab_stream_truncation_is_allowed_with_structured_output_file() {
+    let output = truncated_runner_exec_output();
+
+    // Guard: the fixture must actually present a truncation condition, otherwise
+    // the function would short-circuit on the `!truncated` early return and this
+    // test would never reach the structured-output branch it is named for.
+    let capture = output
+        .capture
+        .as_ref()
+        .expect("fixture provides capture metadata");
+    assert!(
+        capture.stdout.truncated || capture.stderr.truncated,
+        "fixture must model a truncated stream so the structured-output branch is exercised"
+    );
+
+    // Same truncated output WITHOUT a structured output file is rejected, proving
+    // that it is specifically the structured output file that flips the decision.
+    let rejected = ensure_lab_offload_streams_not_truncated(&output, false);
+    let err = rejected.expect_err("truncated streams without structured output must be rejected");
+    assert_eq!(err.code, ErrorCode::InternalUnexpected);
+
+    // With a structured output file present, the real production decision allows
+    // the truncated streams (the complete result is preserved out-of-band).
+    let allowed = ensure_lab_offload_streams_not_truncated(&output, true);
+    assert!(
+        allowed.is_ok(),
+        "structured output file must permit truncated streams, got: {allowed:?}"
+    );
+}
+
+#[test]
+fn lab_stream_truncation_is_allowed_with_fuzz_results_artifact() {
+    let mut output = truncated_runner_exec_output();
+    output
+        .artifacts
+        .push(homeboy_core::api_jobs::JobArtifactMetadata {
+            id: "024b0a9c-d639-4662-a727-a3a6a2970701".to_string(),
+            name: Some("fuzz_results".to_string()),
+            path: Some("/tmp/fuzz-results.json".to_string()),
+            url: None,
+            mime: Some("application/json".to_string()),
+            size_bytes: Some(1234),
+            sha256: None,
+            content_base64: None,
+            metadata: Some(serde_json::json!({ "kind": "fuzz_results" })),
+        });
+
+    let allowed = ensure_lab_offload_streams_not_truncated(&output, false);
+
+    assert!(
+        allowed.is_ok(),
+        "fuzz result artifact must permit truncated retained stdout, got: {allowed:?}"
+    );
+}
+
+#[test]
+fn lab_stream_truncation_is_allowed_with_structured_runner_result() {
+    let mut output = truncated_runner_exec_output();
+    output.runner_result = Some(crate::RunnerResult {
+        exit_code: 0,
+        status: homeboy_core::api_jobs::JobStatus::Succeeded,
+        stdout_bytes: Some(5 * 1024 * 1024),
+        stderr_bytes: Some(0),
+        mirror_run_id: Some("fuzz-run-123".to_string()),
+        mutation_artifacts: None,
+        artifact_refs: vec![crate::RunnerArtifactRef {
+            artifact_id: "artifact-123".to_string(),
+            name: Some("fuzz_results".to_string()),
+            path: Some("runner-artifact://homeboy-lab/fuzz-run-123/artifact-123".to_string()),
+            url: None,
+            mime: Some("application/json".to_string()),
+            size_bytes: Some(2048),
+            sha256: None,
+            transport: Some("runner_artifact".to_string()),
+        }],
+    });
+
+    let structured_result_available = lab_offload_structured_result_available(&output, None);
+    assert!(structured_result_available);
+    assert_eq!(
+        output.runner_result.as_ref().expect("runner result").status,
+        homeboy_core::api_jobs::JobStatus::Succeeded
+    );
+    let allowed = ensure_lab_offload_streams_not_truncated(&output, structured_result_available);
+
+    assert!(
+        allowed.is_ok(),
+        "structured runner result must permit truncated streams, got: {allowed:?}"
+    );
+}
+
+#[test]
+fn lab_stream_truncation_is_allowed_with_fuzz_result_runner_ref() {
+    let mut output = truncated_runner_exec_output();
+    output.runner_result = Some(crate::RunnerResult {
+        exit_code: 0,
+        status: homeboy_core::api_jobs::JobStatus::Succeeded,
+        stdout_bytes: Some(5 * 1024 * 1024),
+        stderr_bytes: Some(0),
+        mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
+        mutation_artifacts: None,
+        artifact_refs: vec![crate::RunnerArtifactRef {
+            artifact_id: "024b0a9c-d639-4662-a727-a3a6a2970701".to_string(),
+            name: Some("fuzz_result_envelope".to_string()),
+            path: Some("/tmp/fuzz-result-envelope.json".to_string()),
+            url: None,
+            mime: Some("application/json".to_string()),
+            size_bytes: Some(1234),
+            sha256: None,
+            transport: None,
+        }],
+    });
+
+    let allowed = ensure_lab_offload_streams_not_truncated(&output, false);
+
+    assert!(
+        allowed.is_ok(),
+        "fuzz result runner artifact ref must permit truncated retained stdout, got: {allowed:?}"
+    );
+}
+
+#[test]
+fn lab_artifact_dir_is_a_sibling_outside_the_checkout() {
+    let checkout = "/srv/runner/workspaces/homeboy-core";
+    let artifact_dir = remote_lab_artifact_dir(checkout);
+
+    // The artifact directory must NOT live inside the synced git checkout,
+    // otherwise its structured output would dirty the workspace (#6219).
+    assert_eq!(
+        artifact_dir,
+        "/srv/runner/workspaces/homeboy-core-homeboy-artifacts"
+    );
+    assert!(
+        !artifact_dir.starts_with(&format!("{checkout}/")),
+        "artifact dir `{artifact_dir}` must not be nested inside checkout `{checkout}`"
+    );
+}
+
+#[test]
+fn lab_artifact_dir_ignores_trailing_slash_on_checkout() {
+    assert_eq!(
+        remote_lab_artifact_dir("/srv/runner/workspaces/homeboy-core/"),
+        "/srv/runner/workspaces/homeboy-core-homeboy-artifacts"
+    );
+}
+
+#[test]
+fn lab_structured_output_file_is_written_outside_the_checkout() {
+    let checkout = "/srv/runner/workspaces/homeboy-core";
+    let output_file = remote_lab_output_file(checkout);
+
+    // Structured output goes into the Homeboy-owned sibling artifact directory,
+    // never directly into the synced checkout root.
+    assert!(
+        output_file.starts_with(&format!("{checkout}-homeboy-artifacts/")),
+        "structured output `{output_file}` must live in the sibling artifact dir"
+    );
+    assert!(
+        !output_file.starts_with(&format!("{checkout}/")),
+        "structured output `{output_file}` must not dirty the checkout `{checkout}`"
+    );
+    assert!(output_file.ends_with(".json"));
+    assert!(output_file.contains("homeboy-lab-structured-output-"));
+}
+
+#[test]
+fn runner_resident_structured_output_file_stays_inside_workspace_root() {
+    let workspace_root = "/srv/runner/workspaces";
+    let output_file = remote_runner_resident_lab_output_file(workspace_root);
+
+    assert!(
+        output_file.starts_with("/srv/runner/workspaces/.homeboy-artifacts/"),
+        "runner-resident output `{output_file}` must stay inside workspace root `{workspace_root}`"
+    );
+    assert!(output_file.ends_with(".json"));
+    assert!(output_file.contains("homeboy-lab-structured-output-"));
+}
+
+#[test]
+fn lab_cannot_proceed_error_names_runner_workspace_ref_dependency_and_fix_command() {
+    // A bare dependency-resolution failure as it surfaces today, before
+    // orchestration context is woven in.
+    let bare = Error::validation_invalid_argument(
+        "dependency",
+        "Could not resolve dependency checkout",
+        Some("sample-dependency".to_string()),
+        None,
+    );
+
+    let mut context = LabOrchestrationContext::for_runner_workspace(
+        "homeboy-lab",
+        "/Users/dev/Developer/sample-project",
+    )
+    .with_ref_base(Some("origin/main".to_string()));
+    context.dependency = Some("sample-dependency".to_string());
+
+    let enriched = enrich_lab_cannot_proceed_error(bare, &context);
+
+    // Structured context for machine consumers.
+    let ctx = &enriched.details["lab_orchestration_context"];
+    assert_eq!(ctx["runner_id"], "homeboy-lab");
+    assert_eq!(ctx["workspace_path"], "/Users/dev/Developer/sample-project");
+    assert_eq!(ctx["ref_base"], "origin/main");
+    assert_eq!(ctx["dependency"], "sample-dependency");
+
+    // Operator-facing hints name each known fact plus a Homeboy fix command.
+    let hints = enriched
+        .hints
+        .iter()
+        .map(|hint| hint.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        hints.iter().any(|hint| hint.contains("homeboy-lab")),
+        "missing selected runner: {hints:?}"
+    );
+    assert!(
+        hints
+            .iter()
+            .any(|hint| hint.contains("/Users/dev/Developer/sample-project")),
+        "missing workspace path: {hints:?}"
+    );
+    assert!(
+        hints.iter().any(|hint| hint.contains("origin/main")),
+        "missing ref/base: {hints:?}"
+    );
+    assert!(
+        hints.iter().any(|hint| hint.contains("sample-dependency")),
+        "missing dependency: {hints:?}"
+    );
+    assert!(
+        hints
+            .iter()
+            .any(|hint| hint.contains("homeboy runner status homeboy-lab")
+                && hint.contains("homeboy deps install")),
+        "missing concrete Homeboy fix command: {hints:?}"
+    );
+}
+
+#[test]
+fn lab_cannot_proceed_enrichment_is_idempotent() {
+    let bare = Error::validation_invalid_argument(
+        "changed_since",
+        "Lab offload cannot resolve the requested --changed-since base before dispatch",
+        Some("origin/main".to_string()),
+        None,
+    );
+    let context = LabOrchestrationContext::for_runner_workspace(
+        "homeboy-lab",
+        "/Users/dev/Developer/sample-project",
+    )
+    .with_ref_base(Some("origin/main".to_string()));
+
+    let once = enrich_lab_cannot_proceed_error(bare, &context);
+    let hints_after_first = once.hints.len();
+    let twice = enrich_lab_cannot_proceed_error(once, &context);
+
+    // Re-enriching the same error must not duplicate context or fix hints.
+    assert_eq!(twice.hints.len(), hints_after_first);
+    assert_eq!(
+        twice.details["lab_orchestration_context"]["runner_id"],
+        "homeboy-lab"
+    );
+}

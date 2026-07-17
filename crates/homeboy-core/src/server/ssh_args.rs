@@ -3,22 +3,22 @@ use crate::engine::shell;
 use super::{ManagedSshSession, Server, ServerAuthMode, SshClient};
 
 #[derive(Clone, Copy)]
-pub(crate) enum SshPortFlag {
+pub enum SshPortFlag {
     Lowercase,
     Uppercase,
 }
 
 #[derive(Clone, Copy, Default)]
-pub(crate) struct SshArgOptions<'a> {
-    pub(crate) interactive: bool,
-    pub(crate) strict_host_key_checking_no: bool,
-    pub(crate) batch_mode: bool,
-    pub(crate) connect_timeout: bool,
-    pub(crate) keepalive: bool,
-    pub(crate) exit_on_forward_failure: bool,
-    pub(crate) legacy_scp: bool,
-    pub(crate) port_flag: Option<SshPortFlag>,
-    pub(crate) command: Option<&'a str>,
+pub struct SshArgOptions<'a> {
+    pub interactive: bool,
+    pub strict_host_key_checking_no: bool,
+    pub batch_mode: bool,
+    pub connect_timeout: bool,
+    pub keepalive: bool,
+    pub exit_on_forward_failure: bool,
+    pub legacy_scp: bool,
+    pub port_flag: Option<SshPortFlag>,
+    pub command: Option<&'a str>,
 }
 
 pub(crate) fn client_ssh_args(client: &SshClient, options: SshArgOptions<'_>) -> Vec<String> {
@@ -37,7 +37,7 @@ pub(crate) fn client_ssh_args(client: &SshClient, options: SshArgOptions<'_>) ->
     args
 }
 
-pub(crate) fn client_option_args(client: &SshClient, options: SshArgOptions<'_>) -> Vec<String> {
+pub fn client_option_args(client: &SshClient, options: SshArgOptions<'_>) -> Vec<String> {
     client_connection_args(
         &client.user,
         &client.host,
@@ -48,7 +48,7 @@ pub(crate) fn client_option_args(client: &SshClient, options: SshArgOptions<'_>)
     )
 }
 
-pub(crate) fn server_option_args(server: &Server, options: SshArgOptions<'_>) -> Vec<String> {
+pub fn server_option_args(server: &Server, options: SshArgOptions<'_>) -> Vec<String> {
     let auth = server
         .auth
         .as_ref()
@@ -67,7 +67,7 @@ pub(crate) fn server_option_args(server: &Server, options: SshArgOptions<'_>) ->
     )
 }
 
-pub(crate) fn shell_join_args(args: &[String]) -> String {
+pub fn shell_join_args(args: &[String]) -> String {
     args.iter()
         .map(|arg| shell::quote_arg(arg))
         .collect::<Vec<_>>()

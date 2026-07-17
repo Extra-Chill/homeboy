@@ -14,6 +14,7 @@ mod committed_changes;
 mod fingerprint;
 mod patch;
 mod promote;
+mod run_plan_projection;
 mod types;
 
 pub use apply::{apply_materialized_workspace_patch, preflight_configured_workspace_provider};
@@ -24,6 +25,7 @@ pub(crate) use patch::{normalize_promotion_patch, validate_artifact_content};
 pub use promote::promote;
 pub use promote::promote_with_checkpoint;
 pub use promote::resume_promoted_patch;
+pub use run_plan_projection::mirror_agent_task_run_plan_aggregate;
 pub use types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,
     AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionOptions,

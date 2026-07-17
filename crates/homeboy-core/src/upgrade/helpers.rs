@@ -113,7 +113,7 @@ where
     InstallMethod::Unknown
 }
 
-pub(crate) fn version_is_newer(latest: &str, current: &str) -> bool {
+pub fn version_is_newer(latest: &str, current: &str) -> bool {
     let parse = |v: &str| -> Option<(u32, u32, u32)> {
         let parts: Vec<&str> = v.split('.').collect();
         if parts.len() >= 3 {
@@ -807,56 +807,6 @@ version = "0.0.0"
             .expect("resolved checkout");
 
         assert_eq!(resolved, dir.path());
-    }
-
-    #[test]
-    fn same_version_source_checkout_drift_reports_recovery_command() {
-        // Exercises source_checkout_build_identity, which lives behind the
-        // RunnerUpgradeProvider hook. Register the provider (normally done at CLI
-        // startup) so build-identity detection runs.
-        crate::upgrade::register_runner_upgrade();
-        let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("homeboy.json"), r#"{"id":"homeboy"}"#).unwrap();
-        std::fs::write(
-            dir.path().join("Cargo.toml"),
-            r#"[package]
-name = "homeboy"
-version = "0.0.0"
-"#,
-        )
-        .unwrap();
-        git(dir.path(), &["init", "-q"]);
-        git(dir.path(), &["add", "."]);
-        git(
-            dir.path(),
-            &[
-                "-c",
-                "user.name=homeboy-test",
-                "-c",
-                "user.email=homeboy-test@example.invalid",
-                "commit",
-                "-q",
-                "-m",
-                "fixture",
-            ],
-        );
-
-        let warning = same_version_source_checkout_drift(
-            Some("homeboy 0.0.0"),
-            Some(dir.path()),
-            false,
-            true,
-            true,
-        )
-        .expect("drift warning");
-
-        assert!(warning.detail.contains("source checkout is homeboy"));
-        assert!(warning
-            .detail
-            .contains("semver-only upgrade check skipped the local source build"));
-        assert!(warning.recovery_command.contains("--method source"));
-        assert!(warning.recovery_command.contains("--skip-runners"));
-        assert!(warning.recovery_command.contains("--no-restart-services"));
     }
 
     #[test]

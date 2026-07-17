@@ -9,8 +9,6 @@ use crate::error::{ErrorCode, Result};
 use crate::extension::manifest_config::TraceToolchainProvenanceConfig;
 use crate::extension::ExtensionExecutionContext;
 #[cfg(test)]
-use crate::runner::verify_lab_workspace;
-#[cfg(test)]
 use crate::source_snapshot::SourceSnapshot;
 
 use super::parsing::{
@@ -426,15 +424,9 @@ fn validate_managed_lab_snapshot(
     lab: serde_json::Value,
     reasons: &mut Vec<String>,
 ) -> Option<TraceCanonicalCheck> {
-    let provenance = verify_lab_workspace(expected_remote_component_path, path, snapshot, lab).map(
-        |provenance| LabWorkspaceProvenanceInfo {
-            source_revision: provenance.source_revision,
-            materialization_mode: provenance.materialization_mode,
-            runner_id: provenance.runner_id,
-            workspace_identity: provenance.workspace_identity,
-            snapshot_hash: provenance.snapshot_hash,
-        },
-    );
+    let provenance = with_lab_workspace_provenance(|provider| {
+        provider.verify_lab_workspace(expected_remote_component_path, path, snapshot, lab, false)
+    });
     verified_lab_snapshot_check(target, path, provenance, reasons)
 }
 
@@ -1030,32 +1022,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_trace_accepts_lab_dispatch_environment_for_remapped_workspace() {
-        crate::runner::register_lab_workspace_provenance_provider();
-        let (_source, remote, snapshot, lab) = lab_snapshot_fixture();
-        let mut env = crate::runner::build_lab_offload_env(&lab);
-        env.insert(
-            "HOMEBOY_SOURCE_SNAPSHOT_JSON".to_string(),
-            serde_json::to_string(&snapshot).unwrap(),
-        );
-        let _guard = TraceEnvGuard::set(env);
-        let mut reasons = Vec::new();
-
-        let check = check_managed_lab_snapshot(
-            "component",
-            remote.path(),
-            Some(&remote.path().display().to_string()),
-            &mut reasons,
-        );
-
-        assert!(reasons.is_empty());
-        let check = check.expect("Lab dispatch environment accepted");
-        assert_eq!(check.sha, snapshot.git_sha);
-        assert_eq!(check.materialization_mode.as_deref(), Some("snapshot"));
-        assert_eq!(check.runner_id.as_deref(), Some("homeboy-lab"));
-    }
-
-    #[test]
     fn canonical_trace_fails_closed_for_snapshot_lab_metadata_without_workspace_verification() {
         let (_source, remote, snapshot, mut lab) = lab_snapshot_fixture();
         lab.as_object_mut()
@@ -1270,12 +1236,13 @@ mod tests {
             synced_at: "2026-01-01T00:00:00Z".to_string(),
             sync_excludes: vec![".git".to_string(), ".git/**".to_string()],
         };
-        let workspace_content_hash =
-            crate::runner::workspace_content_hash(source.path(), &snapshot.sync_excludes).unwrap();
-        let content_hash_algorithm = crate::runner::workspace_content_hash_algorithm(
-            crate::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
-        )
-        .unwrap();
+        // The real content hash is computed by the runner's workspace-snapshot
+        // machinery (tested in the homeboy-runner crate). These canonicality
+        // tests verify the trace-canonical identity/mode/runner-id matching
+        // logic, not the hash computation, so a fixed fixture hash is sufficient
+        // and keeps this test in core (which cannot depend on the runner crate).
+        let workspace_content_hash = "0".repeat(64);
+        let content_hash_algorithm = "homeboy-workspace-content-v2+portable-content-only";
         let lab = serde_json::json!({
             "runner_id": "homeboy-lab",
             "remote_workspace": remote.path().display().to_string(),
@@ -1288,7 +1255,7 @@ mod tests {
                 "schema": "homeboy/lab-workspace-verification/v2",
                 "identity": "workspace:verified",
                 "content_hash_algorithm": content_hash_algorithm,
-                "permission_policy": crate::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+                "permission_policy": "unix-owner-executable",
                 "content_hash": workspace_content_hash,
                 "sync_excludes": [".git", ".git/**"],
                 "source_snapshot": snapshot,

@@ -10,7 +10,7 @@ mod io;
 mod policy;
 
 pub use io::{config_exists, config_path, load_config, reset_config, save_config};
-pub(crate) use policy::resolve_release_gate_local_hot_policy_from;
+pub use policy::resolve_release_gate_local_hot_policy_from;
 pub use policy::{
     resolve_release_gate_local_hot_policy, BenchConfig, BenchLocalExecutionPolicy,
     ReleaseGateConfig, ReleaseGateLocalHotPolicy, RELEASE_GATE_LOCAL_HOT_ENV,

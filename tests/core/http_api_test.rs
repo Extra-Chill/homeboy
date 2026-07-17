@@ -562,7 +562,7 @@ fn artifact_content_serves_encoded_artifact_store_locator() {
         std::fs::create_dir_all(path.parent().expect("artifact parent"))
             .expect("create artifact parent");
         std::fs::write(&path, br#"{"steps":[]}"#).expect("artifact-store file");
-        let token = crate::runner::runner_artifact_store_token("lab", &run.id, locator)
+        let token = crate::execution_contract::runner_artifact_store_token("lab", &run.id, locator)
             .rsplit('/')
             .next()
             .expect("artifact token")

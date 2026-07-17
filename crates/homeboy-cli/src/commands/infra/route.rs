@@ -12,8 +12,8 @@ use homeboy::core::observation::{
     finish_run_best_effort, NewRunRecord, ObservationStore, RunStatus,
 };
 use homeboy::core::redaction::RedactionPolicy;
-use homeboy::core::runners::{self, RunnerExecOptions};
 use homeboy::core::Error;
+use homeboy::runner::runners::{self, RunnerExecOptions};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

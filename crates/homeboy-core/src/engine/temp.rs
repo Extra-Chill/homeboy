@@ -388,7 +388,7 @@ pub fn runtime_temp_dir(prefix: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-pub(crate) fn unique_name(prefix: &str, suffix: &str) -> String {
+pub fn unique_name(prefix: &str, suffix: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())

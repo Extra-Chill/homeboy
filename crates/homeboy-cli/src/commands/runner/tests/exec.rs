@@ -8,11 +8,11 @@ use super::super::exec::{
 };
 
 use homeboy::core::observation::{NewRunRecord, ObservationStore};
-use homeboy::core::runners::{
+use homeboy::core::server;
+use homeboy::runner::runners::{
     self as runner, promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts,
     RunnerExecMode, RunnerExecOutput,
 };
-use homeboy::core::server;
 
 #[test]
 fn raw_exec_command_run_keeps_structured_output_and_presentation_streams() {

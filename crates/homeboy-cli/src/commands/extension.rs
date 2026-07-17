@@ -10,8 +10,8 @@ use homeboy::core::extension::{
 };
 use homeboy::core::git;
 use homeboy::core::project::{self, Project};
-use homeboy::core::runners::{self, RunnerKind};
 use homeboy::core::server::{self, SshClient};
+use homeboy::runner::runners::{self, RunnerKind};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
@@ -430,7 +430,7 @@ pub enum ExtensionOutput {
         output: Option<homeboy::core::engine::command::CapturedOutput>,
     },
     #[serde(rename = "extension.dev_run")]
-    DevRun(homeboy::core::extension::ExtensionDevRunOutput),
+    DevRun(homeboy::runner::dev_run::ExtensionDevRunOutput),
     #[serde(rename = "extension.set")]
     SetBatch { batch: homeboy::core::BatchResult },
 }
@@ -1082,7 +1082,7 @@ fn dev_run_extension(
     command: &[String],
 ) -> CmdResult<ExtensionOutput> {
     let (output, exit_code) =
-        homeboy::core::extension::run_extension_dev_run(extension_id, runner, source, command)?;
+        homeboy::runner::dev_run::run_extension_dev_run(extension_id, runner, source, command)?;
 
     Ok((ExtensionOutput::DevRun(output), exit_code))
 }

@@ -9,7 +9,7 @@ pub(crate) const AGENT_TASK_RUN_PLAN_LIFECYCLE_EVENT_SCHEMA: &str =
     "homeboy/agent-task-run-plan-lifecycle-event/v1";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub(crate) struct AgentTaskRunPlanLifecycleEvent {
+pub struct AgentTaskRunPlanLifecycleEvent {
     #[serde(default = "agent_task_run_plan_lifecycle_event_schema")]
     pub schema: String,
     #[serde(default)]
@@ -21,7 +21,7 @@ fn agent_task_run_plan_lifecycle_event_schema() -> String {
     AGENT_TASK_RUN_PLAN_LIFECYCLE_EVENT_SCHEMA.to_string()
 }
 
-pub(crate) fn parse_offloaded_run_plan_envelope(stdout: &str) -> Result<serde_json::Value> {
+pub fn parse_offloaded_run_plan_envelope(stdout: &str) -> Result<serde_json::Value> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) {
         return Ok(value);
     }
@@ -50,7 +50,7 @@ pub(crate) fn parse_offloaded_run_plan_envelope(stdout: &str) -> Result<serde_js
     })
 }
 
-pub(crate) fn is_agent_task_run_plan_envelope(value: &serde_json::Value) -> bool {
+pub fn is_agent_task_run_plan_envelope(value: &serde_json::Value) -> bool {
     let Some(data) = value.get("data") else {
         return false;
     };
@@ -64,7 +64,7 @@ pub(crate) fn is_agent_task_run_plan_envelope(value: &serde_json::Value) -> bool
         })
 }
 
-pub(crate) fn agent_task_run_plan_lifecycle_event_from_job_events(
+pub fn agent_task_run_plan_lifecycle_event_from_job_events(
     job_events: Option<&[JobEvent]>,
 ) -> Option<AgentTaskRunPlanLifecycleEvent> {
     job_events?.iter().rev().find_map(|event| {
@@ -134,7 +134,7 @@ pub(crate) fn agent_task_run_plan_lifecycle_event_from_persisted_job_events(
     }))
 }
 
-pub(crate) fn agent_task_run_plan_lifecycle_event_from_value(
+pub fn agent_task_run_plan_lifecycle_event_from_value(
     value: &serde_json::Value,
 ) -> Option<AgentTaskRunPlanLifecycleEvent> {
     if value.get("schema").and_then(serde_json::Value::as_str)
@@ -153,7 +153,7 @@ pub(crate) fn agent_task_run_plan_lifecycle_event_from_value(
         .and_then(agent_task_run_plan_lifecycle_event_from_value)
 }
 
-pub(crate) fn agent_task_run_plan_lifecycle_event_from_workload_result(
+pub fn agent_task_run_plan_lifecycle_event_from_workload_result(
     workload: Option<&RunnerWorkload>,
     runner_id: &str,
     runner_job_id: &str,

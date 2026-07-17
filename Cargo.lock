@@ -707,6 +707,7 @@ dependencies = [
  "homeboy-process",
  "homeboy-product-identity",
  "homeboy-redaction",
+ "homeboy-runner",
  "keyring",
  "libc",
  "regex",
@@ -761,6 +762,7 @@ dependencies = [
  "homeboy-process",
  "homeboy-product-identity",
  "homeboy-redaction",
+ "homeboy-runner",
  "homeboy-triage",
  "homeboy-tunnel",
  "libc",
@@ -915,10 +917,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-runner"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "clap",
+ "glob",
+ "glob-match",
+ "homeboy-cli-contract",
+ "homeboy-core",
+ "homeboy-product-identity",
+ "homeboy-runner-contract",
+ "libc",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shellexpand",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "homeboy-runner-contract"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]

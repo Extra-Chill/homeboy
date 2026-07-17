@@ -50,7 +50,7 @@ pub fn execute_local_command_in_dir(
     execute_local_command_in_dir_impl(command, current_dir, env, None, None)
 }
 
-pub(crate) fn execute_local_command_in_dir_with_timeout(
+pub fn execute_local_command_in_dir_with_timeout(
     command: &str,
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,

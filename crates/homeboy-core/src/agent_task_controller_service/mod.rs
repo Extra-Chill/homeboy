@@ -33,7 +33,6 @@ use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskExecutorAdapter, 
 use crate::agent_task_service::{self, AgentTaskRunResult};
 use crate::git::{pr_find, pr_view, PrFindOptions, PrState};
 use crate::plan::{HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepStatus};
-use crate::runner::{self, RunnerActiveJobState};
 use crate::{Error, Result};
 use std::collections::HashMap;
 use std::process::Command;
@@ -63,6 +62,7 @@ mod proof;
 mod reports;
 mod request;
 mod run_failure_summary;
+pub mod runner_availability;
 mod spec;
 mod spec_compile;
 mod spec_source;

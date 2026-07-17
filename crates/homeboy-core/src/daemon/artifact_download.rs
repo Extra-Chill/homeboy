@@ -9,7 +9,6 @@ use crate::error::{Error, Result};
 use crate::execution_contract::{decode_uri_component, encode_uri_component};
 use crate::observation::{ArtifactRecord, ObservationStore};
 use crate::paths;
-use crate::runner;
 
 use super::{error_response, HttpResponse};
 
@@ -132,7 +131,9 @@ fn resolve_artifact_download(
         if artifact.artifact_type == "remote_file"
             || crate::execution_contract::is_remote_runner_artifact_path(&artifact.path)
         {
-            let download = runner::download_remote_artifact(&artifact.path, None)?;
+            let download = crate::observation::runs_service::with_runner_evidence(|provider| {
+                provider.download_remote_artifact(&artifact.path, None)
+            })?;
             let filename = download
                 .output_path
                 .file_name()
@@ -216,15 +217,17 @@ fn artifact_store_download(
     artifact_token: &str,
     decoded_artifact_token: &str,
 ) -> Result<ResolvedArtifactResponse> {
-    let locator = runner::artifact_store_locator_from_runner_artifact_id(decoded_artifact_token)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact_id",
-                format!("artifact record not found: {artifact_token}"),
-                Some(artifact_token.to_string()),
-                None,
-            )
-        })?;
+    let locator = crate::execution_contract::artifact_store_locator_from_runner_artifact_id(
+        decoded_artifact_token,
+    )
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "artifact_id",
+            format!("artifact record not found: {artifact_token}"),
+            Some(artifact_token.to_string()),
+            None,
+        )
+    })?;
     let path = safe_artifact_store_path(&locator)?;
     let metadata = fs::metadata(&path).map_err(|e| {
         Error::internal_io(

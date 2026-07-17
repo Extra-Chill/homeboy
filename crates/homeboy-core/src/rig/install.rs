@@ -1149,7 +1149,7 @@ fn prepare_local_source(source: &str) -> Result<PreparedSource> {
     })
 }
 
-pub(crate) fn write_source_metadata(id: &str, metadata: &RigSourceMetadata) -> Result<()> {
+pub fn write_source_metadata(id: &str, metadata: &RigSourceMetadata) -> Result<()> {
     let path = paths::rig_source_metadata(id)?;
     let content = serde_json::to_string_pretty(metadata)
         .map_err(|e| Error::internal_json(e.to_string(), Some("serialize rig source".into())))?;

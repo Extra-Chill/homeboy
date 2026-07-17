@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use homeboy::core::runners::{self as runner};
 use homeboy::core::server::RunnerSecretEnvRef;
+use homeboy::runner::runners::{self as runner};
 
 use super::super::CmdResult;
 use super::types::{

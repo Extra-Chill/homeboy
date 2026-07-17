@@ -1139,8 +1139,8 @@ where
     serve_listener_with_analysis_runner_locked(listener, analysis_runner, owner_lock)
 }
 
-#[cfg(test)]
-pub(crate) fn serve_listener(listener: TcpListener) -> Result<DaemonState> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn serve_listener(listener: TcpListener) -> Result<DaemonState> {
     let owner_lock = acquire_daemon_owner_lock()?;
     serve_listener_with_analysis_runner_locked(listener, UnsupportedAnalysisJobRunner, owner_lock)
 }
@@ -2021,100 +2021,9 @@ mod tests {
         assert_eq!(metadata["agent_task_run_id"], "agent-task-run-123");
     }
 
-    #[test]
-    fn daemon_exec_projects_metadata_run_id_through_jobs_and_runs_without_read_side_growth() {
-        crate::runner::register_runner_daemon_exec_driver();
-        with_isolated_home(|_| {
-            let workspace = tempfile::tempdir().expect("workspace");
-            let store = JobStore::default();
-            crate::observation::ObservationStore::open_initialized().expect("observation store");
-            let accepted = route_with_job_store_and_body(
-                "POST",
-                "/exec",
-                Some(json!({
-                    "runner_id": "homeboy-lab",
-                    "cwd": workspace.path(),
-                    "command": ["/bin/sh", "-c", "sleep 2"],
-                    "metadata": { "record_run_id": "durable-run-8341" }
-                })),
-                &store,
-            );
-            assert_eq!(accepted.status_code, 200);
-            let job_id = accepted.body["body"]["job"]["id"]
-                .as_str()
-                .expect("accepted job id");
-            let job_id = Uuid::parse_str(job_id).expect("job UUID");
-            wait_for_daemon_job_status(&store, job_id, JobStatus::Running);
-
-            let jobs = route_with_job_store("GET", "/jobs", &store);
-            assert_eq!(jobs.status_code, 200);
-            let active = &jobs.body["body"]["active_runner_jobs"];
-            assert_eq!(active.as_array().expect("typed jobs").len(), 1);
-            assert_eq!(active[0]["job_id"], job_id.to_string());
-            assert_eq!(active[0]["runner_id"], "homeboy-lab");
-            assert_eq!(active[0]["durable_run_id"], "durable-run-8341");
-
-            let runs = route_with_job_store("GET", "/runs?status=running", &store);
-            assert_eq!(runs.status_code, 200);
-            assert_eq!(runs.body["body"]["runs"][0]["id"], "durable-run-8341");
-
-            let repeat_jobs = route_with_job_store("GET", "/jobs", &store);
-            let repeat_runs = route_with_job_store("GET", "/runs?status=running", &store);
-            assert_eq!(repeat_jobs.body["body"]["active_runner_job_count"], 1);
-            assert_eq!(
-                repeat_runs.body["body"]["runs"]
-                    .as_array()
-                    .expect("runs")
-                    .len(),
-                1
-            );
-
-            store.cancel(job_id, "test cleanup").expect("cancel job");
-
-            let generic = route_with_job_store_and_body(
-                "POST",
-                "/exec",
-                Some(json!({
-                    "runner_id": "homeboy-lab",
-                    "cwd": workspace.path(),
-                    "command": ["/bin/sh", "-c", "sleep 2"]
-                })),
-                &store,
-            );
-            assert_eq!(generic.status_code, 200);
-            let generic_job_id = generic.body["body"]["job"]["id"]
-                .as_str()
-                .expect("generic job id");
-            let generic_job_id = Uuid::parse_str(generic_job_id).expect("generic job UUID");
-            wait_for_daemon_job_status(&store, generic_job_id, JobStatus::Running);
-
-            let generic_jobs = route_with_job_store("GET", "/jobs", &store);
-            assert_eq!(generic_jobs.body["body"]["active_runner_job_count"], 1);
-            assert_eq!(
-                generic_jobs.body["body"]["active_runner_jobs"][0]["job_id"],
-                generic_job_id.to_string()
-            );
-            let generic_runs = route_with_job_store("GET", "/runs?status=running", &store);
-            assert!(generic_runs.body["body"]["runs"]
-                .as_array()
-                .expect("runs")
-                .is_empty());
-
-            let repeated_generic_jobs = route_with_job_store("GET", "/jobs", &store);
-            let repeated_generic_runs = route_with_job_store("GET", "/runs?status=running", &store);
-            assert_eq!(
-                repeated_generic_jobs.body["body"]["active_runner_job_count"],
-                1
-            );
-            assert!(repeated_generic_runs.body["body"]["runs"]
-                .as_array()
-                .expect("runs")
-                .is_empty());
-            store
-                .cancel(generic_job_id, "test cleanup")
-                .expect("cancel generic job");
-        });
-    }
+    // NOTE: daemon `/exec` projection is exercised end-to-end in the
+    // homeboy-runner crate's execution::tests::handoff module, which registers
+    // the runner exec-driver; core cannot register it (would be a cycle).
 
     fn wait_for_daemon_job_status(store: &JobStore, job_id: Uuid, expected: JobStatus) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

@@ -15,7 +15,7 @@ use crate::observation::{
     run_owner_pid, running_status_note, FindingListFilter, ObservationStore, RunListFilter,
     RunRecord, RunStatus,
 };
-use crate::{activity, component, git, paths, rig, runner, stack};
+use crate::{activity, component, git, paths, rig, stack};
 
 const OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES: i64 = 30;
 
@@ -371,7 +371,9 @@ fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
         if artifact.artifact_type == "remote_file"
             || crate::execution_contract::is_remote_runner_artifact_path(&artifact.path)
         {
-            let download = runner::download_remote_artifact(&artifact.path, None)?;
+            let download = crate::observation::runs_service::with_runner_evidence(|provider| {
+                provider.download_remote_artifact(&artifact.path, None)
+            })?;
             let content = std::fs::read(&download.output_path).map_err(|err| {
                 Error::internal_io(
                     err.to_string(),
@@ -460,15 +462,17 @@ fn artifact_store_content(
     artifact_id: &str,
     decoded_artifact_id: &str,
 ) -> Result<Value> {
-    let locator = runner::artifact_store_locator_from_runner_artifact_id(decoded_artifact_id)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact_id",
-                format!("artifact record not found: {artifact_id}"),
-                Some(artifact_id.to_string()),
-                None,
-            )
-        })?;
+    let locator = crate::execution_contract::artifact_store_locator_from_runner_artifact_id(
+        decoded_artifact_id,
+    )
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "artifact_id",
+            format!("artifact record not found: {artifact_id}"),
+            Some(artifact_id.to_string()),
+            None,
+        )
+    })?;
     let path = safe_artifact_store_path(&locator)?;
     let content = std::fs::read(&path).map_err(|err| {
         Error::internal_io(

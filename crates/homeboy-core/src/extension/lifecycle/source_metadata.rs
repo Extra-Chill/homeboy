@@ -10,12 +10,12 @@ pub struct SourceMetadataRepair {
 }
 
 #[derive(Debug)]
-pub(crate) struct SourceMetadataResolution {
-    pub(crate) url: String,
+pub struct SourceMetadataResolution {
+    pub url: String,
     pub(crate) repair: Option<SourceMetadataRepair>,
 }
 
-pub(crate) fn resolve_source_url(extension_id: &str) -> Result<SourceMetadataResolution> {
+pub fn resolve_source_url(extension_id: &str) -> Result<SourceMetadataResolution> {
     let extension = load_extension(extension_id)?;
     let extension_dir = paths::extension(extension_id)?;
     let metadata_url = read_source_url(&extension_dir);

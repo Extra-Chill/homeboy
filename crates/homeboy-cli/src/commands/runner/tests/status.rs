@@ -7,8 +7,10 @@ use homeboy::core::agent_runtime_manifest::{
 };
 use homeboy::core::api_jobs::{JobEvent, JobStatus};
 use homeboy::core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
-use homeboy::core::runner::{RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState};
-use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, RunnerTunnelMode};
+use homeboy::runner::runners::{
+    self as runner, RunnerSession, RunnerStatusReport, RunnerTunnelMode,
+};
+use homeboy::runner::{RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState};
 
 use super::super::jobs::format_job_event;
 use super::super::status::{
@@ -92,7 +94,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             active_child_count: None,
             active_cell_count: None,
         }],
-        active_runner_jobs: vec![homeboy::core::runners::RunnerJob {
+        active_runner_jobs: vec![homeboy::runner::runners::RunnerJob {
             runner_id: "homeboy-lab".to_string(),
             job_id: "job-123".to_string(),
             operation: "runner.exec".to_string(),
@@ -100,7 +102,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             command: "true".to_string(),
             cwd: None,
             source: "broker".to_string(),
-            lifecycle_owner: homeboy::core::runners::RunnerLifecycleOwner::Broker,
+            lifecycle_owner: homeboy::runner::runners::RunnerLifecycleOwner::Broker,
             lifecycle: None,
             started_at_ms: Some(1000),
             updated_at_ms: Some(1500),
