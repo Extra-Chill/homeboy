@@ -92,6 +92,41 @@ fn service_run_loaded_plan_persists_durable_lifecycle() {
 }
 
 #[test]
+fn lab_handoff_run_plan_executes_with_runner_provenance_after_transport_is_consumed() {
+    with_isolated_home(|_| {
+        let execution_runner = crate::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV;
+        let transport_runner = homeboy_lab_runner_contract::RUNNER_ID_ENV;
+        let previous_execution_runner = std::env::var_os(execution_runner);
+        let previous_transport_runner = std::env::var_os(transport_runner);
+        std::env::set_var(execution_runner, "homeboy-lab");
+        std::env::remove_var(transport_runner);
+
+        let result = run_loaded_plan(
+            test_plan(),
+            Some("lab-handoff-run-plan"),
+            SucceedingExecutor,
+        )
+        .expect("runner-local provider execution starts without a nested daemon connection");
+        assert_eq!(
+            agent_task_lifecycle::execution_runner_id().as_deref(),
+            Some("homeboy-lab")
+        );
+
+        match previous_execution_runner {
+            Some(value) => std::env::set_var(execution_runner, value),
+            None => std::env::remove_var(execution_runner),
+        }
+        match previous_transport_runner {
+            Some(value) => std::env::set_var(transport_runner, value),
+            None => std::env::remove_var(transport_runner),
+        }
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.value.totals.succeeded, 1);
+    });
+}
+
+#[test]
 fn lab_runner_handoff_materializes_the_run_before_preparation_failure() {
     with_isolated_home(|_| {
         let mut plan = test_plan();
