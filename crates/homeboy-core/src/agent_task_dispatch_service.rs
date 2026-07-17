@@ -314,8 +314,32 @@ pub fn resolve_dispatch_request(
 pub fn controller_resolved_execution_policy(
     request: &AgentTaskDispatchRequest,
 ) -> ResolvedAgentTaskProviderPolicy {
-    let rotation = crate::defaults::load_config().agent_task.rotation;
     let runtime_identity = selected_runtime_identity(request);
+    let explicit_backend = request
+        .backend_selection
+        .as_ref()
+        .is_some_and(|selection| selection.source == BackendSelectionSource::Cli);
+    let rotation = crate::defaults::load_config()
+        .agent_task
+        .rotation
+        .map(|mut rotation| {
+            if explicit_backend {
+                // A controller pin describes one immutable runtime. Global fallback
+                // entries for another runtime must not replace an explicit choice.
+                rotation.entries.retain(|entry| {
+                    entry
+                        .backend
+                        .as_deref()
+                        .is_none_or(|backend| backend == request.backend)
+                        && entry.selector.as_deref().is_none_or(|selector| {
+                            runtime_identity
+                                .as_ref()
+                                .is_some_and(|identity| identity.provider_id == selector)
+                        })
+                });
+            }
+            rotation
+        });
     ResolvedAgentTaskProviderPolicy {
         backend: request.backend.clone(),
         selector: request.selector.clone(),
@@ -328,7 +352,9 @@ pub fn controller_resolved_execution_policy(
             .as_ref()
             .and_then(|policy| policy.liveness_timeout_ms),
         rotation,
-        rotation_starts_with_first_entry: true,
+        // An explicit CLI backend/model is the first attempt. Default policy
+        // rotation retains its existing first-entry selection behavior.
+        rotation_starts_with_first_entry: !explicit_backend,
         runtime_identity,
     }
 }
@@ -582,5 +608,84 @@ mod tests {
         assert_eq!(selection.source, BackendSelectionSource::Policy);
         // Default-policy selections never count as an explicit override.
         assert!(!selection.overrides_default);
+    }
+
+    #[test]
+    fn explicit_backend_keeps_its_runtime_pin_when_default_rotation_targets_another_backend() {
+        crate::test_support::with_isolated_home(|home| {
+            let runtimes = home.path().join(".config/homeboy/agent-runtimes");
+            for (runtime_id, provider_id, backend) in [
+                ("opencode", "opencode.agent-task-executor", "opencode"),
+                ("codex", "codex.agent-task-executor", "codex"),
+            ] {
+                let runtime = runtimes.join(runtime_id);
+                std::fs::create_dir_all(&runtime).expect("runtime directory");
+                std::fs::write(
+                    runtime.join(format!("{runtime_id}.json")),
+                    serde_json::json!({
+                        "schema": crate::agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
+                        "id": runtime_id,
+                        "source_revision": "0123456789abcdef0123456789abcdef01234567",
+                        "agent_task_executors": [{
+                            "schema": crate::agent_task_provider::AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+                            "id": provider_id,
+                            "backend": backend,
+                            "invocation": { "argv": ["provider"] }
+                        }]
+                    })
+                    .to_string(),
+                )
+                .expect("runtime manifest");
+                for args in [
+                    vec!["init"],
+                    vec!["add", "."],
+                    vec![
+                        "-c",
+                        "user.name=Homeboy Test",
+                        "-c",
+                        "user.email=homeboy-test@example.com",
+                        "commit",
+                        "-m",
+                        "runtime manifest",
+                    ],
+                ] {
+                    let status = std::process::Command::new("git")
+                        .args(args)
+                        .current_dir(&runtime)
+                        .status()
+                        .expect("run git");
+                    assert!(status.success(), "initialize runtime source");
+                }
+            }
+
+            let mut config = crate::defaults::load_config();
+            config.agent_task.default_backend = Some("opencode".to_string());
+            config.agent_task.rotation = Some(AgentTaskProviderRotationPolicy {
+                entries: vec![
+                    crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                        backend: Some("opencode".to_string()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            });
+            crate::defaults::save_config(&config).expect("save config");
+
+            let request = resolve_dispatch_request_with_default_and_config(
+                command_with_backend(Some("codex")),
+                |_| Ok(Some("opencode".to_string())),
+                || Some("opencode".to_string()),
+            )
+            .expect("explicit Codex request");
+            let policy = controller_resolved_execution_policy(&request);
+
+            assert_eq!(policy.backend, "codex");
+            assert!(!policy.rotation_starts_with_first_entry);
+            assert!(policy.rotation.expect("rotation").entries.is_empty());
+            let identity = policy.runtime_identity.expect("Codex runtime identity");
+            assert_eq!(identity.runtime_id, "codex");
+            assert_eq!(identity.provider_id, "codex.agent-task-executor");
+            assert_eq!(identity.provider["backend"], "codex");
+        });
     }
 }
