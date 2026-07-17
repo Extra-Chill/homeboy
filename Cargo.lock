@@ -874,7 +874,12 @@ dependencies = [
 name = "homeboy-extension-contract"
 version = "0.1.0"
 dependencies = [
+ "homeboy-audit-contract",
+ "homeboy-error",
+ "homeboy-product-identity",
+ "semver",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

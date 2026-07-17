@@ -7,7 +7,6 @@ pub mod build;
 mod capability;
 mod compiler_warning_contract;
 pub mod component_script;
-mod core_compat;
 mod env_provider;
 mod execution;
 mod fingerprint;
@@ -29,7 +28,6 @@ mod refactor_protocol;
 mod registry;
 mod repair;
 mod runner;
-mod runner_contract;
 mod runtime_helper;
 mod scope;
 pub mod self_check;
@@ -40,9 +38,6 @@ pub mod trace;
 pub mod update_check;
 mod update_output;
 mod validation;
-pub mod version;
-
-pub mod exec_context;
 
 pub use capability::{
     build_scenario_runner, extract_component_extension_settings, path_list_env_value,
@@ -57,7 +52,7 @@ pub(crate) use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
 };
-pub use core_compat::{
+pub use homeboy_extension_contract::core_compat::{
     core_incompatible_error, evaluate_core_compatibility, installed_homeboy_version,
     validate_core_compatibility, CoreCompatibilityReport, CORE_COMPAT_REMEDIATION_COMMAND,
     CORE_INCOMPATIBLE_DIAGNOSTIC,
@@ -73,6 +68,12 @@ pub use fingerprint::{
     run_fingerprint_script, AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker,
     FingerprintOutput, HookRef, UnusedParam,
 };
+pub use homeboy_extension_contract::runner_contract::{
+    phase_failure_category_from_exit_code, phase_status_from_exit_code, ExtensionPhaseTiming,
+    PhaseFailure, PhaseFailureCategory, PhaseReport, PhaseStatus, RunnerStepFilter,
+    VerificationPhase, GENERIC_INFRASTRUCTURE_FAILURE_MARKERS,
+};
+pub use homeboy_extension_contract::version::{parse_extension_version, VersionConstraint};
 pub use homeboy_extension_contract::{DeployArchiveInstallPolicy, DeployRequiredHeader};
 pub use invocation_context::ResolvedExtensionInvocationContext;
 pub use lifecycle::source_metadata::resolve_source_url;
@@ -120,11 +121,6 @@ pub use registry::{
 };
 pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
 pub use runner::{ExtensionRunner, RunnerOutput};
-pub use runner_contract::{
-    phase_failure_category_from_exit_code, phase_status_from_exit_code, ExtensionPhaseTiming,
-    PhaseFailure, PhaseFailureCategory, PhaseReport, PhaseStatus, RunnerStepFilter,
-    VerificationPhase, GENERIC_INFRASTRUCTURE_FAILURE_MARKERS,
-};
 pub use runtime_helper::{
     helper_path, BASH_PREFLIGHT_ENV, COMMAND_CAPTURE_ENV, RUNNER_PRELUDE_ENV, RUNNER_STEPS_ENV,
 };
@@ -137,7 +133,8 @@ pub use update_output::{
 pub use validation::{
     extension_provides_build, validate_extension_requirements, validate_required_extensions,
 };
-pub use version::{parse_extension_version, VersionConstraint};
+
+pub use homeboy_extension_contract::{core_compat, exec_context, runner_contract, version};
 
 #[cfg(test)]
 mod tests;

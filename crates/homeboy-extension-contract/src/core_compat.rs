@@ -1,8 +1,8 @@
 use serde::Serialize;
 
-use crate::error::{Error, ErrorCode, Result};
+use homeboy_error::{Error, ErrorCode, Result};
 
-use super::version::VersionConstraint;
+use crate::version::VersionConstraint;
 
 pub const CORE_INCOMPATIBLE_DIAGNOSTIC: &str = "homeboy_core.incompatible";
 pub const CORE_COMPAT_REMEDIATION_COMMAND: &str = "homeboy upgrade";
