@@ -396,7 +396,9 @@ impl ExtensionManifest {
     pub fn structured_sidecars(&self) -> Vec<StructuredSidecarDeclaration> {
         self.structured_sidecars
             .iter()
-            .filter_map(|(name, contract)| contract.declaration(name))
+            .filter_map(|(name, contract)| {
+                super::manifest_sidecar::structured_sidecar_declaration(contract, name)
+            })
             .collect()
     }
 

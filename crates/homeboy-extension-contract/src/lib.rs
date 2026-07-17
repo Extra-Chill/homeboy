@@ -24,6 +24,7 @@ pub mod manifest_test_config;
 pub mod manifest_toolchain_config;
 pub mod notification_transport_config;
 pub mod runner_contract;
+pub mod sidecar_config;
 pub mod source_metadata_repair;
 pub mod test_drift;
 pub mod trace_config;
