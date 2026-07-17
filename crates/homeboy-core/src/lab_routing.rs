@@ -625,6 +625,7 @@ mod tests {
                 release_gate: false,
                 requires_extension_parity: true,
                 read_only_polling: false,
+                offload_only_when_hot: false,
             },
         }
     }
