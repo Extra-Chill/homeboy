@@ -5,12 +5,12 @@ use std::time::Duration;
 use crate::artifact_inputs::{self, ResolvedArtifactInput};
 use crate::component::{self, Component};
 use crate::config::{is_json_input, parse_bulk_ids};
-use crate::deploy::permissions;
 use crate::engine::run_dir::RunDir;
 use crate::error::{Error, Result};
 use crate::extension::{
     self, exec_context, ExtensionCapability, ExtensionExecutionContext, ExtensionPhaseTiming,
 };
+use crate::local_permissions;
 use crate::output::{BulkResult, BulkResultBuilder};
 use crate::paths;
 use crate::server::execute_local_command_in_dir;
@@ -500,7 +500,7 @@ fn execute_build_component(
     }
 
     // Fix local permissions before build to ensure zip has correct permissions
-    permissions::fix_local_permissions(&local_path_str);
+    local_permissions::fix_local_permissions(&local_path_str);
 
     // Execute via ExtensionRunner — uses the full exec context protocol (settings,
     // project info, context version) instead of the minimal env var set.

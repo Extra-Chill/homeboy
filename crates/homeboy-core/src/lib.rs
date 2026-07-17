@@ -148,6 +148,7 @@ pub mod keychain;
 pub mod lab_offload;
 pub mod lab_routing;
 pub mod lab_workspace_provenance;
+pub mod local_permissions;
 pub use homeboy_lifecycle_contract::lifecycle;
 pub mod loop_lifecycle;
 pub mod markdown;

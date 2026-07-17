@@ -1,40 +1,7 @@
-use std::process::Command;
-
 use crate::defaults;
 use crate::engine::shell;
 use crate::error::{Error, Result};
 use crate::server::{CommandOutput, SshClient};
-
-/// Fix local file permissions before build.
-///
-/// Ensures files have group read/write so the zip archive contains correct permissions.
-/// This addresses the issue where Claude Code sometimes creates files with 600 permissions.
-pub(crate) fn fix_local_permissions(local_path: &str) {
-    let quoted_path = shell::quote_path(local_path);
-    let perms = defaults::load_defaults().permissions.local;
-
-    log_status!(
-        "build",
-        "Fixing local file permissions in {} (files: {}, dirs: {})",
-        local_path,
-        perms.file_mode,
-        perms.dir_mode
-    );
-
-    // Fix files (configurable mode, default: g+rw)
-    let file_cmd = format!(
-        "find {} -type f -exec chmod {} {{}} + 2>/dev/null || true",
-        quoted_path, perms.file_mode
-    );
-    Command::new("sh").args(["-c", &file_cmd]).output().ok();
-
-    // Fix directories (configurable mode, default: g+rwx)
-    let dir_cmd = format!(
-        "find {} -type d -exec chmod {} {{}} + 2>/dev/null || true",
-        quoted_path, perms.dir_mode
-    );
-    Command::new("sh").args(["-c", &dir_cmd]).output().ok();
-}
 
 /// Fix file permissions after deployment.
 pub(crate) fn fix_deployed_permissions(
