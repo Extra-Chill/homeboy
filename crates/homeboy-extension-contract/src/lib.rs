@@ -12,6 +12,7 @@
 pub mod action_types;
 pub mod core_compat;
 pub mod exec_context;
+pub mod extension_contract_producer;
 pub mod manifest_action_config;
 pub mod manifest_capability_config;
 pub mod manifest_deploy_config;
