@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.289.1] - 2026-07-17
+
+### Changed
+- move ExtensionManifest data model into homeboy-extension-contract
+- point extension lint/test at homeboy-refactor-contract for AppliedRefactor
+- carry durable agent-task plan opaquely through core lab routing
+- use a local dispatch identity in daemon patch-capture
+- establish homeboy-refactor-contract crate keystone
+- split structured-sidecar types from behavior into homeboy-extension-contract
+- carry agent-task config types opaquely in core config + component
+
+### Fixed
+- reuse clean snapshots for agent task retries
+- consume Lab runner intent at handoff boundary
+- stop force-offloading cheap commands on a merely warm machine
+
 ## [0.289.0] - 2026-07-17
 
 ### Added
