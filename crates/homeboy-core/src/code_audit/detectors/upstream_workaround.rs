@@ -278,7 +278,7 @@ impl EffectiveDetectorProfile {
             // language token set (`version_compare(...)` is PHP-specific) is
             // sourced from here too, so no ecosystem token remains in core
             // (#6759).
-            let ext = crate::defaults::extension_provided_detector_profile();
+            let ext = homeboy_audit_contract::extension_provided_detector_profile();
             profile.extend_owned_strings(
                 &ext.version_guard_constants,
                 DetectorProfileField::VersionGuardConstant,

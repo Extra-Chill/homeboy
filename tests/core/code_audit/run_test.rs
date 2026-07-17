@@ -13,7 +13,6 @@ use crate::code_audit::{
     AuditAnalysisContext, AuditExecutionPlan, AuditFinding, AuditProfile, AuditSummary,
     CodeAuditResult, ConventionReport, DetectorRuntime,
 };
-use crate::plan::PlanStepStatus;
 
 fn make_finding(kind: AuditFinding, file: &str) -> Finding {
     Finding {
@@ -110,14 +109,8 @@ fn make_args(include_fixability: bool) -> AuditRunWorkflowArgs {
     }
 }
 
-fn detector_step_status<'a>(plan: &'a AuditExecutionPlan, detector: &str) -> &'a PlanStepStatus {
-    &plan
-        .plan
-        .steps
-        .iter()
-        .find(|step| step.id == format!("audit.{detector}"))
-        .unwrap_or_else(|| panic!("missing detector step: {detector}"))
-        .status
+fn detector_is_enabled(plan: &AuditExecutionPlan, detector: &str) -> bool {
+    plan.detector_enabled(detector)
 }
 
 fn make_changed_since_args() -> AuditRunWorkflowArgs {
@@ -528,35 +521,20 @@ fn execution_plan_filters_to_requested_detector_family() {
         assert_eq!(plan.detector_enabled("duplication"), duplication_enabled);
         assert!(!plan.detector_enabled("dead_code"));
         assert!(!plan.detector_enabled("compiler_warnings"));
-        assert_eq!(
-            detector_step_status(&plan, "conventions"),
-            &PlanStepStatus::Disabled
-        );
-        assert_eq!(
-            detector_step_status(&plan, ready_detector),
-            &PlanStepStatus::Ready
-        );
-        assert_eq!(
-            detector_step_status(&plan, disabled_detector),
-            &PlanStepStatus::Disabled
-        );
+        assert!(!detector_is_enabled(&plan, "conventions"));
+        assert!(detector_is_enabled(&plan, ready_detector));
+        assert!(!detector_is_enabled(&plan, disabled_detector));
     }
 }
 
 #[test]
 fn output_capture_detector_is_explicit_first_slice() {
     let default_plan = AuditExecutionPlan::full();
-    assert_eq!(
-        detector_step_status(&default_plan, "output_capture"),
-        &PlanStepStatus::Ready
-    );
+    assert!(detector_is_enabled(&default_plan, "output_capture"));
 
     let filtered_plan =
         AuditExecutionPlan::from_filters(&[AuditFinding::UnboundedOutputCapture], &[]);
-    assert_eq!(
-        detector_step_status(&filtered_plan, "output_capture"),
-        &PlanStepStatus::Ready
-    );
+    assert!(detector_is_enabled(&filtered_plan, "output_capture"));
 }
 
 #[test]
@@ -571,22 +549,13 @@ fn migrated_fingerprint_detector_descriptors_keep_filtering() {
         descriptor.runtime,
         DetectorRuntime::Fingerprint(_)
     ));
-    assert_eq!(
-        detector_step_status(&plan, "literal_shapes"),
-        &PlanStepStatus::Ready
-    );
-    assert_eq!(
-        detector_step_status(&plan, "facade_passthrough"),
-        &PlanStepStatus::Disabled
-    );
+    assert!(detector_is_enabled(&plan, "literal_shapes"));
+    assert!(!detector_is_enabled(&plan, "facade_passthrough"));
 
     let excluded_plan =
         AuditExecutionPlan::from_filters(&[], &[AuditFinding::RepeatedLiteralShape]);
 
-    assert_eq!(
-        detector_step_status(&excluded_plan, "literal_shapes"),
-        &PlanStepStatus::Disabled
-    );
+    assert!(!detector_is_enabled(&excluded_plan, "literal_shapes"));
 }
 
 #[test]
@@ -595,10 +564,7 @@ fn execution_plan_for_unwired_nested_rust_test_runs_wiring_detector() {
 
     assert!(plan.detector_enabled("test_wiring"));
     assert!(!plan.detector_enabled("test_topology"));
-    assert_eq!(
-        detector_step_status(&plan, "conventions"),
-        &PlanStepStatus::Disabled
-    );
+    assert!(!detector_is_enabled(&plan, "conventions"));
 }
 
 #[test]
@@ -613,14 +579,8 @@ fn execution_plan_for_excluded_structural_detector_disables_plan_step() {
     );
 
     assert!(!plan.detector_enabled("structural"));
-    assert_eq!(
-        detector_step_status(&plan, "structural"),
-        &PlanStepStatus::Disabled
-    );
-    assert_eq!(
-        detector_step_status(&plan, "duplication"),
-        &PlanStepStatus::Ready
-    );
+    assert!(!detector_is_enabled(&plan, "structural"));
+    assert!(detector_is_enabled(&plan, "duplication"));
 }
 
 #[test]
@@ -635,12 +595,11 @@ fn execution_plan_is_full_without_filters() {
 fn full_execution_plan_marks_all_detector_steps_ready() {
     let plan = AuditExecutionPlan::full();
 
-    assert!(!plan.plan.steps.is_empty());
-    assert!(plan
-        .plan
-        .steps
-        .iter()
-        .all(|step| { step.id == "audit.output_capture" || step.status == PlanStepStatus::Ready }));
+    let descriptors = AuditExecutionPlan::descriptors();
+    assert!(!descriptors.is_empty());
+    assert!(descriptors.iter().all(|descriptor| {
+        descriptor.id == "output_capture" || plan.detector_enabled(descriptor.id)
+    }));
 }
 
 #[test]

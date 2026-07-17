@@ -34,7 +34,10 @@ mod thin_command_adapter;
 
 pub use command_status::{CommandStatusContractConfig, CommandStatusContractScenario};
 pub use config_key_usage::{ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule};
-pub use detector_profile::{DetectorProfileConfig, VersionSource};
+pub use detector_profile::{
+    extension_provided_detector_profile, DetectorProfileConfig, ExtensionProvidedDetectorProfile,
+    VersionSource,
+};
 pub use exposure::{
     DuplicationDetectorConfig, PublicRegistryExposureConfig, RedirectValidationConfig,
 };
