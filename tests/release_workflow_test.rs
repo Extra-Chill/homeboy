@@ -478,10 +478,22 @@ fn release_finish_head_pipeline_uses_homeboy_action_head_inputs() {
 fn release_recovery_propagates_dist_opt_in_and_dirty_allowance_through_all_dist_phases() {
     let workflow = release_workflow();
     let prepare = job_section(workflow, "prepare");
+    let local_build = job_section(workflow, "build-local-artifacts");
 
     assert!(prepare.contains("recovery-release: ${{ steps.outputs.outputs.recovery-release }}"));
     assert!(prepare.contains("RECOVERY_RELEASE=\"${{ needs.check.outputs.recovery-release }}\""));
     assert!(prepare.contains("echo \"recovery-release=${RECOVERY_RELEASE}\" >> \"$GITHUB_OUTPUT\""));
+
+    let build_step = local_build
+        .find("- name: Build artifacts")
+        .expect("local artifact build step must exist");
+    let post_build = local_build
+        .find("- id: cargo-dist")
+        .expect("local artifact post-build step must exist");
+    assert!(
+        local_build[build_step..post_build].contains("shell: bash"),
+        "recovery syntax must use Bash on every matrix runner, including Windows"
+    );
 
     for job in [
         "plan",
