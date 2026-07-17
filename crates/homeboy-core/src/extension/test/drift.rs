@@ -671,7 +671,9 @@ fn is_auto_fixable(change: &ProductionChange) -> bool {
 ///
 /// For each auto-fixable change, creates a TransformRule that replaces
 /// the old symbol with the new one in test files.
-pub fn generate_transform_rules(report: &DriftReport) -> Vec<crate::refactor::TransformRule> {
+pub fn generate_transform_rules(
+    report: &DriftReport,
+) -> Vec<homeboy_refactor_contract::TransformRule> {
     let mut rules = Vec::new();
 
     for change in &report.production_changes {
@@ -743,7 +745,7 @@ pub fn generate_transform_rules(report: &DriftReport) -> Vec<crate::refactor::Tr
             _ => continue,
         };
 
-        rules.push(crate::refactor::TransformRule {
+        rules.push(homeboy_refactor_contract::TransformRule {
             id,
             description,
             find,
