@@ -767,6 +767,7 @@ dependencies = [
  "homeboy-error",
  "homeboy-finding",
  "homeboy-fuzz",
+ "homeboy-issues",
  "homeboy-lab-contract",
  "homeboy-output",
  "homeboy-paths",
@@ -921,6 +922,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "homeboy-issues"
+version = "0.1.0"
+dependencies = [
+ "homeboy-code-audit",
+ "homeboy-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

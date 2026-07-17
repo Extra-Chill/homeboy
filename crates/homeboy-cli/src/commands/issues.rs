@@ -12,7 +12,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use homeboy::core::code_audit::FindingConfidence;
-use homeboy::core::issues::{
+use homeboy::issues::{
     apply_plan, build_findings_from_native_output, reconcile_scoped, GithubTracker,
     IssueRenderContext, ReconcileConfig, ReconcileFindingsInput, ReconcilePlan, ReconcileResult,
     Tracker,
@@ -570,21 +570,21 @@ fn aggregate_reconcile_output(output: &ReconcileOutput) -> (ReconcileRunIssueTot
         let mut failures = 0;
         for execution in &result.executions {
             match execution.outcome {
-                homeboy::core::issues::apply::ExecutionOutcome::Filed { .. } => {
+                homeboy::issues::apply::ExecutionOutcome::Filed { .. } => {
                     issue_totals.issues_created += 1;
                 }
-                homeboy::core::issues::apply::ExecutionOutcome::Updated { .. }
-                | homeboy::core::issues::apply::ExecutionOutcome::UpdatedClosed { .. } => {
+                homeboy::issues::apply::ExecutionOutcome::Updated { .. }
+                | homeboy::issues::apply::ExecutionOutcome::UpdatedClosed { .. } => {
                     issue_totals.issues_updated += 1;
                 }
-                homeboy::core::issues::apply::ExecutionOutcome::Closed { .. }
-                | homeboy::core::issues::apply::ExecutionOutcome::ClosedDuplicate { .. } => {
+                homeboy::issues::apply::ExecutionOutcome::Closed { .. }
+                | homeboy::issues::apply::ExecutionOutcome::ClosedDuplicate { .. } => {
                     issue_totals.issues_closed += 1;
                 }
-                homeboy::core::issues::apply::ExecutionOutcome::Failed { .. } => {
+                homeboy::issues::apply::ExecutionOutcome::Failed { .. } => {
                     failures += 1;
                 }
-                homeboy::core::issues::apply::ExecutionOutcome::Skipped => {}
+                homeboy::issues::apply::ExecutionOutcome::Skipped => {}
             }
         }
         (issue_totals, failures)
@@ -610,11 +610,11 @@ fn aggregate_reconcile_output(output: &ReconcileOutput) -> (ReconcileRunIssueTot
 fn into_issue_groups(
     input: ReconcileFindingsInput,
     component_id: &str,
-) -> Vec<homeboy::core::issues::IssueGroup> {
+) -> Vec<homeboy::issues::IssueGroup> {
     input
         .groups
         .into_iter()
-        .map(|(category, row)| homeboy::core::issues::IssueGroup {
+        .map(|(category, row)| homeboy::issues::IssueGroup {
             command: input.command.clone(),
             component_id: component_id.to_string(),
             category,
@@ -749,7 +749,7 @@ fn parse_findings_value(value: Value) -> homeboy::core::Result<ReconcileFindings
         })?
         .to_string();
 
-    let mut groups: BTreeMap<String, homeboy::core::issues::RenderedIssueGroup> = BTreeMap::new();
+    let mut groups: BTreeMap<String, homeboy::issues::RenderedIssueGroup> = BTreeMap::new();
     if let Some(groups_value) = obj.get("groups") {
         let groups_obj = groups_value.as_object().ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
@@ -789,7 +789,7 @@ fn parse_findings_value(value: Value) -> homeboy::core::Result<ReconcileFindings
                 .and_then(parse_confidence);
             groups.insert(
                 category.clone(),
-                homeboy::core::issues::RenderedIssueGroup {
+                homeboy::issues::RenderedIssueGroup {
                     count,
                     label,
                     body,
@@ -829,7 +829,7 @@ fn render_plan_lines(plan: &ReconcilePlan) -> Vec<String> {
     plan.actions
         .iter()
         .map(|a| match a {
-            homeboy::core::issues::ReconcileAction::FileNew {
+            homeboy::issues::ReconcileAction::FileNew {
                 command,
                 component_id,
                 category,
@@ -839,13 +839,13 @@ fn render_plan_lines(plan: &ReconcilePlan) -> Vec<String> {
                 "file_new      {}: {} in {} ({})",
                 command, category, component_id, count
             ),
-            homeboy::core::issues::ReconcileAction::Update {
+            homeboy::issues::ReconcileAction::Update {
                 number,
                 category,
                 count,
                 ..
             } => format!("update        {} ({}) → #{}", category, count, number),
-            homeboy::core::issues::ReconcileAction::UpdateClosed {
+            homeboy::issues::ReconcileAction::UpdateClosed {
                 number,
                 category,
                 count,
@@ -854,10 +854,10 @@ fn render_plan_lines(plan: &ReconcilePlan) -> Vec<String> {
                 "update_closed {} ({}) → #{} (stays closed)",
                 category, count, number
             ),
-            homeboy::core::issues::ReconcileAction::Close {
+            homeboy::issues::ReconcileAction::Close {
                 number, category, ..
             } => format!("close         {} → #{}", category, number),
-            homeboy::core::issues::ReconcileAction::CloseDuplicate {
+            homeboy::issues::ReconcileAction::CloseDuplicate {
                 number,
                 keep,
                 category,
@@ -866,7 +866,7 @@ fn render_plan_lines(plan: &ReconcilePlan) -> Vec<String> {
                 "dedupe        {} → keep #{}, close #{}",
                 category, keep, number
             ),
-            homeboy::core::issues::ReconcileAction::Skip {
+            homeboy::issues::ReconcileAction::Skip {
                 category, reason, ..
             } => format!("skip          {} ({:?})", category, reason),
         })
@@ -889,8 +889,8 @@ fn summarize_plan(plan: &ReconcilePlan) -> ReconcileOutputSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::core::issues::apply::{ExecutionOutcome, ReconcileExecution};
-    use homeboy::core::issues::{ReconcilePlan, ReconcileResult};
+    use homeboy::issues::apply::{ExecutionOutcome, ReconcileExecution};
+    use homeboy::issues::{ReconcilePlan, ReconcileResult};
     use serde_json::json;
     use std::sync::Mutex;
 

@@ -1,0 +1,22 @@
+[package]
+name = "homeboy-issues"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Finding-stream to issue-tracker reconciliation (deterministic plan + GitHub tracker) for homeboy"
+repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
+
+[lib]
+name = "homeboy_issues"
+path = "src/lib.rs"
+
+[dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

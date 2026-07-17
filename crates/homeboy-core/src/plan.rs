@@ -127,10 +127,7 @@ impl HomeboyPlan {
         }
     }
 
-    pub(crate) fn builder_for_component(
-        kind: PlanKind,
-        component_id: impl Into<String>,
-    ) -> PlanBuilder {
+    pub fn builder_for_component(kind: PlanKind, component_id: impl Into<String>) -> PlanBuilder {
         PlanBuilder::from_plan(Self::for_component(kind, component_id))
     }
 
@@ -298,7 +295,7 @@ impl PlanStep {
             .skip_reason(reason)
     }
 
-    pub(crate) fn input_as<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
+    pub fn input_as<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
         self.inputs
             .get(key)
             .and_then(|value| serde_json::from_value(value.clone()).ok())
@@ -408,7 +405,7 @@ impl PlanStepBuilder {
         self
     }
 
-    pub(crate) fn blocking(mut self, blocking: bool) -> Self {
+    pub fn blocking(mut self, blocking: bool) -> Self {
         self.step.blocking = blocking;
         self
     }
