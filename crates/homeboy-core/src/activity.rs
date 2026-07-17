@@ -132,13 +132,9 @@ pub struct ActivityReport {
 }
 
 pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityReport> {
-    // Agent-task lifecycle is authoritative over the runner/session mirrors.
-    // Refresh accepted daemon handoffs first so controller wait expiry is not
-    // projected as a terminal local failure.
-    let _ = agent_task_lifecycle::reconcile_active_runner_handoffs();
     let mut collector = ActivityCollector::default();
     observation::collect(&mut collector, limit)?;
-    agent_tasks::collect(&mut collector, limit)?;
+    agent_tasks::collect(&mut collector)?;
     daemon_jobs::collect(&mut collector)?;
     runner_sessions::collect(&mut collector);
     let mut report = report_from_items(collector.items(scope, limit), "activity");
@@ -427,10 +423,22 @@ mod observation {
 
     pub(super) fn collect(collector: &mut ActivityCollector, limit: usize) -> Result<()> {
         let store = ObservationStore::open_initialized()?;
-        let records = store.list_runs(RunListFilter {
+        let mut records = store.list_runs(RunListFilter {
             limit: Some(limit as i64),
             ..Default::default()
         })?;
+        let listed_ids = records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<BTreeSet<_>>();
+        // Recent terminal records are bounded for display, but active work is
+        // always included before the canonical report applies its final limit.
+        records.extend(
+            store
+                .list_active_runs()?
+                .into_iter()
+                .filter(|record| !listed_ids.contains(&record.id)),
+        );
         for run in records {
             collector.insert(item_from_run(&store, run)?);
         }
@@ -514,11 +522,8 @@ mod observation {
 mod agent_tasks {
     use super::*;
 
-    pub(super) fn collect(collector: &mut ActivityCollector, limit: usize) -> Result<()> {
-        for record in agent_task_lifecycle::list_records()?
-            .into_iter()
-            .take(limit)
-        {
+    pub(super) fn collect(collector: &mut ActivityCollector) -> Result<()> {
+        for record in agent_task_lifecycle::list_records()? {
             collector.insert(item_from_agent_task(record));
         }
         Ok(())
@@ -785,6 +790,7 @@ mod tests {
         status, AgentTaskRunState, LabOffloadProxyPlan,
     };
     use crate::api_jobs::JobStatus;
+    use crate::observation::NewRunRecord;
     use crate::test_support::with_isolated_home;
 
     fn item(id: &str, state: ActivityState) -> ActivityItem {
@@ -1023,6 +1029,28 @@ mod tests {
                     .state,
                 AgentTaskRunState::Cancelled
             );
+        });
+    }
+
+    #[test]
+    fn observation_collection_keeps_active_runs_outside_the_recent_source_limit() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let active = store
+                .start_run(NewRunRecord::builder("active").build())
+                .expect("active run");
+            let recent_terminal = store
+                .start_run(NewRunRecord::builder("terminal").build())
+                .expect("terminal run");
+            store
+                .finish_run(&recent_terminal.id, RunStatus::Pass, None)
+                .expect("finish terminal run");
+
+            let mut collector = ActivityCollector::default();
+            observation::collect(&mut collector, 1).expect("collect activity");
+            let items = collector.items(ActivityScope::All, 10);
+
+            assert!(items.iter().any(|item| item.id == active.id));
         });
     }
 

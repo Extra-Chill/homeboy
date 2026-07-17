@@ -256,6 +256,28 @@ impl ObservationStore {
         collect_rows(rows, "collect run records")
     }
 
+    /// List every currently running run so callers can retain active work when
+    /// applying a separate display limit to recent history.
+    pub fn list_active_runs(&self) -> Result<Vec<RunRecord>> {
+        let mut statement = self
+            .connection
+            .prepare(
+                r#"
+                SELECT id, kind, component_id, started_at, finished_at, status, command, cwd,
+                       homeboy_version, git_sha, rig_id, metadata_json
+                FROM runs
+                WHERE status = ?1
+                ORDER BY started_at DESC, id DESC
+                "#,
+            )
+            .map_err(sqlite_error("prepare list active run records"))?;
+        let rows = statement
+            .query_map([RunStatus::Running.as_str()], row_to_run_record)
+            .map_err(sqlite_error("list active run records"))?;
+
+        collect_rows(rows, "collect active run records")
+    }
+
     pub fn latest_run(&self, mut filter: RunListFilter) -> Result<Option<RunRecord>> {
         filter.limit = Some(1);
         Ok(self.list_runs(filter)?.into_iter().next())
