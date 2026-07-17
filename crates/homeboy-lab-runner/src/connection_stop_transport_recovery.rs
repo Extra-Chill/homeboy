@@ -181,16 +181,30 @@ fn verify_remote_daemon_stopped(session: &RunnerSession) -> std::result::Result<
         .ok_or_else(|| "re-probe daemon after stop: runner is not SSH-backed".to_string())?;
     let status = remote_daemon::remote_daemon_status(&client, homeboy)
         .map_err(|error| format!("authoritative daemon re-probe after stop failed: {error}"))?;
-    let fallback_command =
-        remote_lease_bound_stop_recovery_command(session, runner.server_id.as_deref(), homeboy);
-
     complete_stop_transport_recovery(
         session,
         &status,
         || execute_remote_lease_bound_daemon_stop(&client, homeboy, lease_id),
         || remote_daemon::remote_daemon_status(&client, homeboy),
     )
-    .map_err(|error| format!("{error}. Recovery: {fallback_command}"))
+    .map_err(|error| {
+        // The persisted session identifies the daemon refresh intended to replace,
+        // not necessarily the daemon still active after a failed stop. Bind manual
+        // recovery only to a final authoritative daemon probe.
+        let recovery = match remote_daemon::remote_daemon_status(&client, homeboy) {
+            Ok(status) => remote_lease_bound_stop_recovery_command(
+                session,
+                &status,
+                runner.server_id.as_deref(),
+                homeboy,
+            ),
+            Err(probe_error) => format!(
+                "refusing to render a lease-bound stop command because the final authoritative daemon re-probe failed: {probe_error}. Inspect `homeboy runner status {}` before retrying",
+                shell::quote_arg(&session.runner_id)
+            ),
+        };
+        format!("{error}. Recovery: {recovery}")
+    })
 }
 
 pub(super) fn complete_stop_transport_recovery<Stop, Probe>(
@@ -206,12 +220,19 @@ where
     match confirm_remote_daemon_stopped_after_transport_error(session, initial_status) {
         Ok(()) => return Ok(()),
         Err(_initial_error) if exact_live_remote_daemon_owner(session, initial_status) => {
-            stop()
-                .map_err(|error| format!("bounded SSH lease-bound daemon stop failed: {error}"))?;
+            let stop_error = stop().err();
             let final_status = probe().map_err(|error| {
                 format!("authoritative daemon re-probe after SSH stop failed: {error}")
             })?;
-            confirm_remote_daemon_stopped_after_transport_error(session, &final_status)
+            match confirm_remote_daemon_stopped_after_transport_error(session, &final_status) {
+                Ok(()) => Ok(()),
+                Err(error) => match stop_error {
+                    Some(stop_error) => Err(format!(
+                        "bounded SSH lease-bound daemon stop failed: {stop_error}; {error}"
+                    )),
+                    None => Err(error),
+                },
+            }
         }
         Err(initial_error) => Err(initial_error),
     }
@@ -231,20 +252,50 @@ fn exact_live_remote_daemon_owner(
 
 fn remote_lease_bound_stop_recovery_command(
     session: &RunnerSession,
+    status: &remote_daemon::RemoteDaemonStatus,
     server_id: Option<&str>,
     homeboy: &str,
 ) -> String {
-    let lease_id = session
+    let persisted_lease_id = session
         .remote_daemon_lease_id
         .as_deref()
         .unwrap_or("<lease-id>");
-    match server_id {
+    let Some(daemon) = &status.daemon else {
+        return format!(
+            "refusing to render a lease-bound stop command: the persisted lease is `{persisted_lease_id}`, but the authoritative daemon re-probe reported no active daemon. Inspect `homeboy runner status {}` before retrying",
+            shell::quote_arg(&session.runner_id)
+        );
+    };
+    let Some(active_lease_id) = daemon.lease_id.as_deref() else {
+        return format!(
+            "refusing to render a lease-bound stop command: the persisted lease is `{persisted_lease_id}`, but the authoritative daemon re-probe reported an active daemon without a lease (PID {}). Inspect `homeboy runner status {}` before retrying",
+            daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable"),
+            shell::quote_arg(&session.runner_id)
+        );
+    };
+    if status.active_jobs != 0 {
+        return format!(
+            "refusing to render a lease-bound stop command: the persisted lease is `{persisted_lease_id}`, while the authoritative daemon re-probe reported active lease `{active_lease_id}` (PID {}) with {} active job(s). Inspect `homeboy runner status {}` and reconcile the active jobs before retrying",
+            daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable"),
+            status.active_jobs,
+            shell::quote_arg(&session.runner_id)
+        );
+    }
+    let command = match server_id {
         Some(server_id) => format!(
             "homeboy ssh {} -- {}",
             shell::quote_arg(server_id),
-            remote_lease_bound_daemon_stop_command(homeboy, lease_id)
+            remote_lease_bound_daemon_stop_command(homeboy, active_lease_id)
         ),
-        None => remote_lease_bound_daemon_stop_command(homeboy, lease_id),
+        None => remote_lease_bound_daemon_stop_command(homeboy, active_lease_id),
+    };
+    if active_lease_id == persisted_lease_id {
+        command
+    } else {
+        format!(
+            "the persisted lease `{persisted_lease_id}` differs from the authoritative active lease `{active_lease_id}` (PID {}); use the authoritative lease only: {command}",
+            daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable")
+        )
     }
 }
 
@@ -636,6 +687,37 @@ mod tests {
                 .expect_err("a live daemon after SSH fallback must remain protected");
 
         assert!(error.contains("still reports lease `lease-live`"));
+    }
+
+    #[test]
+    fn failed_stop_recovery_uses_the_final_authoritative_lease_not_the_persisted_lease() {
+        let session = direct_ssh_session("272459a6-e66b-4f84-9eb5-58032619bec4");
+        let final_status = remote_daemon_status(
+            true,
+            0,
+            "6d348094-c890-42a9-a601-3951d1bd5d48",
+            4167692,
+            None,
+        );
+
+        let error = complete_stop_transport_recovery(
+            &session,
+            &remote_daemon_status(true, 0, "272459a6-e66b-4f84-9eb5-58032619bec4", 4242, None),
+            || Err("stop transport failed".to_string()),
+            || Ok(final_status.clone()),
+        )
+        .expect_err("the failed stop must preserve the active daemon");
+        let recovery = remote_lease_bound_stop_recovery_command(
+            &session,
+            &final_status,
+            Some("homeboy-lab"),
+            "/home/chubes/Developer/_homeboy_binaries/homeboy-8b740329e811/target/release/homeboy",
+        );
+
+        assert!(error.contains("stop transport failed"));
+        assert!(recovery.contains("6d348094-c890-42a9-a601-3951d1bd5d48"));
+        assert!(!recovery.contains("--lease-id 272459a6-e66b-4f84-9eb5-58032619bec4"));
+        assert!(recovery.contains("PID 4167692"));
     }
 
     #[test]
