@@ -40,6 +40,7 @@ mod lifecycle_record_ops;
 mod records;
 pub mod runner_continuation;
 
+pub use crate::controller_runtime::ControllerRuntimePruneResult;
 pub use artifact_materialization::*;
 pub use cancellation::*;
 pub use failure_recording::*;
@@ -47,9 +48,7 @@ pub use health::*;
 pub use lifecycle_ops::*;
 pub use lifecycle_record_ops::cook_attempt_run_id;
 pub use records::*;
-pub use runner_continuation::{
-    register_runner_continuation_provider, RunnerContinuationProvider,
-};
+pub use runner_continuation::{register_runner_continuation_provider, RunnerContinuationProvider};
 
 pub(crate) use conversion::*;
 pub(crate) use lifecycle_record_ops::*;

@@ -21,8 +21,11 @@ use crate::error::{Error, Result};
 /// resuming a run that was handed off to a remote runner.
 pub trait RunnerContinuationProvider: Send + Sync {
     /// Durable snapshot (job + event log) for a runner job.
-    fn runner_job_log_snapshot(&self, runner_id: &str, job_id: &str)
-        -> Result<RunnerJobLogSnapshot>;
+    fn runner_job_log_snapshot(
+        &self,
+        runner_id: &str,
+        job_id: &str,
+    ) -> Result<RunnerJobLogSnapshot>;
 
     /// Whether the runner currently reports a live connection.
     fn is_runner_connected(&self, runner_id: &str) -> bool;
@@ -83,10 +86,10 @@ fn provider_slot() -> &'static Mutex<Option<Box<dyn RunnerContinuationProvider>>
 
 /// Register the runner-continuation provider. Called once at startup by the
 /// runner subsystem when it is present.
-pub fn register_runner_continuation_provider(
-    provider: Box<dyn RunnerContinuationProvider>,
-) {
-    let mut slot = provider_slot().lock().expect("runner continuation provider lock");
+pub fn register_runner_continuation_provider(provider: Box<dyn RunnerContinuationProvider>) {
+    let mut slot = provider_slot()
+        .lock()
+        .expect("runner continuation provider lock");
     *slot = Some(provider);
 }
 
@@ -95,7 +98,9 @@ pub fn register_runner_continuation_provider(
 pub(crate) fn with_runner_continuation<R>(
     f: impl FnOnce(&dyn RunnerContinuationProvider) -> R,
 ) -> R {
-    let slot = provider_slot().lock().expect("runner continuation provider lock");
+    let slot = provider_slot()
+        .lock()
+        .expect("runner continuation provider lock");
     match slot.as_deref() {
         Some(provider) => f(provider),
         None => f(&NoopProvider),

@@ -14,7 +14,27 @@ use crate::agent_task_scheduler::{
 };
 use crate::api_jobs::{JobEvent, JobEventKind};
 use crate::test_support::with_isolated_home;
-use sha2::Digest;
+use sha2::{Digest, Sha256};
+
+#[cfg(unix)]
+fn fake_controller_artifact(path: &std::path::Path, identity: &str, marker: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+
+    let identity = serde_json::to_string(identity).expect("serialize fake controller identity");
+    std::fs::write(
+        path,
+        format!(
+            "#!/bin/sh\n# {marker}\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{{\"data\":{{\"display\":{identity}}}}}'\n  exit 0\nfi\nexit 1\n"
+        ),
+    )
+    .expect("write fake controller artifact");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .expect("make fake controller artifact executable");
+    format!(
+        "{:x}",
+        Sha256::digest(std::fs::read(path).expect("read fake controller artifact"))
+    )
+}
 
 #[test]
 fn provider_run_result_reads_declared_output_alias() {
@@ -78,6 +98,201 @@ fn submit_plan_persists_queued_status() {
             loaded.tasks[0].provider_ref.as_deref(),
             Some("test:fixture")
         );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn artifact_recovery_replaces_only_the_recorded_legacy_pin() {
+    with_isolated_home(|_| {
+        let temporary = tempfile::tempdir().expect("temporary fake controller directory");
+        let identity = crate::build_identity::current().display;
+        let artifact = temporary.path().join("exact-homeboy");
+        let digest = fake_controller_artifact(&artifact, &identity, "exact artifact");
+        let legacy = temporary.path().join("legacy-homeboy");
+        std::fs::write(&legacy, b"corrupted legacy bytes").expect("write corrupted legacy pin");
+        let record = submit_plan(&test_plan(), Some("recover-exact-artifact")).expect("submit");
+        rewrite_record_for_test(&record.run_id, |record| {
+            record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+                "originating": {
+                    "build_identity": identity,
+                    "pinned_executable": legacy,
+                    "sha256": digest,
+                }
+            });
+        })
+        .expect("project legacy pin");
+
+        let recovered = recover_controller_runtime(&record.run_id, Some(&artifact), None)
+            .expect("recover exact artifact");
+        let pinned = std::path::PathBuf::from(
+            recovered["originating"]["pinned_executable"]
+                .as_str()
+                .expect("recovered pin path"),
+        );
+        assert_ne!(pinned, legacy);
+        assert!(pinned.is_file());
+        assert_eq!(
+            std::fs::read(&legacy).expect("legacy bytes retained"),
+            b"corrupted legacy bytes"
+        );
+        assert_eq!(
+            status(&record.run_id).expect("recovered record").metadata
+                [crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY],
+            recovered
+        );
+        validate_controller_runtime(&record.run_id).expect("recovered runtime validates");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn artifact_recovery_rejects_wrong_hash_and_identity_without_record_mutation() {
+    with_isolated_home(|_| {
+        let temporary = tempfile::tempdir().expect("temporary fake controller directory");
+        let identity = crate::build_identity::current().display;
+        let artifact = temporary.path().join("exact-homeboy");
+        let digest = fake_controller_artifact(&artifact, &identity, "exact artifact");
+        let legacy = temporary.path().join("legacy-homeboy");
+        std::fs::write(&legacy, b"corrupted legacy bytes").expect("write corrupted legacy pin");
+        let record = submit_plan(&test_plan(), Some("recover-reject-artifact")).expect("submit");
+
+        rewrite_record_for_test(&record.run_id, |record| {
+            record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+                "originating": {
+                    "build_identity": identity,
+                    "pinned_executable": legacy,
+                    "sha256": "00",
+                }
+            });
+        })
+        .expect("project wrong hash pin");
+        let before_hash = status(&record.run_id).expect("record before wrong hash");
+        let hash_error = recover_controller_runtime(&record.run_id, Some(&artifact), None)
+            .expect_err("wrong hash rejected");
+        assert!(hash_error.message.contains("hash mismatch"));
+        assert_eq!(
+            status(&record.run_id).expect("record after wrong hash"),
+            before_hash
+        );
+
+        rewrite_record_for_test(&record.run_id, |record| {
+            record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+                "originating": {
+                    "build_identity": "homeboy test+wrong-identity",
+                    "pinned_executable": legacy,
+                    "sha256": digest,
+                }
+            });
+        })
+        .expect("project wrong identity pin");
+        let before_identity = status(&record.run_id).expect("record before wrong identity");
+        let identity_error = recover_controller_runtime(&record.run_id, Some(&artifact), None)
+            .expect_err("wrong identity rejected");
+        assert!(identity_error.message.contains("build identity mismatch"));
+        assert_eq!(
+            status(&record.run_id).expect("record after wrong identity"),
+            before_identity
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_pin_migration_failure_leaves_durable_record_unchanged() {
+    with_isolated_home(|_| {
+        let temporary = tempfile::tempdir().expect("temporary fake controller directory");
+        let identity = crate::build_identity::current().display;
+        let legacy = temporary.path().join("legacy-homeboy");
+        let digest = fake_controller_artifact(&legacy, &identity, "legacy artifact");
+        let record = submit_plan(&test_plan(), Some("migration-failure")).expect("submit");
+        rewrite_record_for_test(&record.run_id, |record| {
+            record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+                "originating": {
+                    "build_identity": identity,
+                    "pinned_executable": legacy,
+                    "sha256": format!("{digest}00"),
+                }
+            });
+        })
+        .expect("project invalid legacy pin");
+        let before = status(&record.run_id).expect("record before migration");
+
+        let error =
+            validate_controller_runtime(&record.run_id).expect_err("migration fails closed");
+
+        assert!(error.message.contains("hash mismatch"));
+        assert_eq!(
+            status(&record.run_id).expect("record after migration"),
+            before
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn controller_runtime_retention_keeps_mutable_runs_and_reports_terminal_pins_eligible() {
+    with_isolated_home(|_| {
+        let temporary = tempfile::tempdir().expect("temporary fake controller directory");
+        let identity = crate::build_identity::current().display;
+        let active_artifact = temporary.path().join("active-homeboy");
+        let terminal_artifact = temporary.path().join("terminal-homeboy");
+        let active_digest =
+            fake_controller_artifact(&active_artifact, &identity, "active artifact");
+        let terminal_digest =
+            fake_controller_artifact(&terminal_artifact, &identity, "terminal artifact");
+
+        let active = submit_plan(&test_plan(), Some("retention-active")).expect("submit active");
+        let terminal =
+            submit_plan(&test_plan(), Some("retention-terminal")).expect("submit terminal");
+        for (record, artifact, digest) in [
+            (&active, &active_artifact, &active_digest),
+            (&terminal, &terminal_artifact, &terminal_digest),
+        ] {
+            let legacy = temporary.path().join(format!("{}-legacy", record.run_id));
+            std::fs::write(&legacy, b"corrupted legacy bytes").expect("write legacy pin");
+            rewrite_record_for_test(&record.run_id, |record| {
+                record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+                    "originating": {
+                        "build_identity": identity,
+                        "pinned_executable": legacy,
+                        "sha256": digest,
+                    }
+                });
+            })
+            .expect("project legacy pin");
+            recover_controller_runtime(&record.run_id, Some(artifact), None).expect("recover pin");
+        }
+        rewrite_record_for_test(&terminal.run_id, |record| {
+            record.state = AgentTaskRunState::Succeeded;
+        })
+        .expect("make terminal");
+
+        let active_pin = std::path::PathBuf::from(
+            status(&active.run_id).expect("active record").metadata
+                [crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
+                ["pinned_executable"]
+                .as_str()
+                .expect("active pin"),
+        );
+        let terminal_pin = std::path::PathBuf::from(
+            status(&terminal.run_id).expect("terminal record").metadata
+                [crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
+                ["pinned_executable"]
+                .as_str()
+                .expect("terminal pin"),
+        );
+        let report = crate::controller_runtime::retention_report().expect("retention report");
+        assert!(report.retained.contains(&active_pin));
+        assert!(report.eligible.contains(&terminal_pin));
+        let dry_run = prune_controller_runtime_pins(false).expect("plan pin pruning");
+        assert!(dry_run.retained.contains(&active_pin));
+        assert!(dry_run.eligible.contains(&terminal_pin));
+        assert!(dry_run.removed.is_empty());
+        let applied = prune_controller_runtime_pins(true).expect("prune terminal pin");
+        assert!(applied.removed.contains(&terminal_pin));
+        assert!(active_pin.exists());
+        assert!(!terminal_pin.exists());
     });
 }
 
