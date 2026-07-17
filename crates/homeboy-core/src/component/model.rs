@@ -7,7 +7,6 @@ use super::config::{
     ComponentReleaseConfig, ComponentScriptsConfig, DependencyStackEdge, GitDeployConfig,
     GithubConfig, ScopeConfig, ScopedExtensionConfig, VersionTarget,
 };
-use crate::agent_task_review_dossier::AgentTaskReviewProfile;
 
 /// Lifecycle state of a component.
 ///
@@ -156,8 +155,12 @@ pub struct Component {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_rules: Option<serde_json::Value>,
     /// Declarative reviewer-body policy for agent-task PR finalization.
+    ///
+    /// Carried opaquely as JSON so the core component model does not depend on
+    /// the agent-task subsystem; the agent-task review-dossier layer
+    /// deserializes it into its `AgentTaskReviewProfile`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review_profile: Option<AgentTaskReviewProfile>,
+    pub review_profile: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -245,7 +248,7 @@ struct RawComponent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     audit_rules: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    review_profile: Option<AgentTaskReviewProfile>,
+    review_profile: Option<serde_json::Value>,
 }
 
 impl From<RawComponent> for Component {

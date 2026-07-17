@@ -322,6 +322,9 @@ pub fn controller_resolved_execution_policy(
     let rotation = crate::defaults::load_config()
         .agent_task
         .rotation
+        .and_then(|rotation| {
+            serde_json::from_value::<AgentTaskProviderRotationPolicy>(rotation).ok()
+        })
         .map(|mut rotation| {
             if explicit_backend {
                 // A controller pin describes one immutable runtime. Global fallback
@@ -660,7 +663,7 @@ mod tests {
 
             let mut config = crate::defaults::load_config();
             config.agent_task.default_backend = Some("opencode".to_string());
-            config.agent_task.rotation = Some(AgentTaskProviderRotationPolicy {
+            config.agent_task.rotation = serde_json::to_value(AgentTaskProviderRotationPolicy {
                 entries: vec![
                     crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
                         backend: Some("opencode".to_string()),
@@ -668,7 +671,8 @@ mod tests {
                     },
                 ],
                 ..Default::default()
-            });
+            })
+            .ok();
             crate::defaults::save_config(&config).expect("save config");
 
             let request = resolve_dispatch_request_with_default_and_config(
