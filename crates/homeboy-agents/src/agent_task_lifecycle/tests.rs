@@ -84,12 +84,12 @@ fn submit_plan_persists_queued_status() {
         assert_eq!(record.run_id, "run_a");
         assert_eq!(loaded.state, AgentTaskRunState::Queued);
         assert_eq!(
-            loaded.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            loaded.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
                 ["requested"],
             homeboy_core::build_identity::current().display
         );
         assert!(
-            loaded.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            loaded.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
                 ["originating"]["pinned_executable"]
                 .as_str()
                 .is_some()
@@ -114,7 +114,7 @@ fn artifact_recovery_replaces_only_the_recorded_legacy_pin() {
         std::fs::write(&legacy, b"corrupted legacy bytes").expect("write corrupted legacy pin");
         let record = submit_plan(&test_plan(), Some("recover-exact-artifact")).expect("submit");
         rewrite_record_for_test(&record.run_id, |record| {
-            record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
                 "originating": {
                     "build_identity": identity,
                     "pinned_executable": legacy,
@@ -139,7 +139,7 @@ fn artifact_recovery_replaces_only_the_recorded_legacy_pin() {
         );
         assert_eq!(
             status(&record.run_id).expect("recovered record").metadata
-                [crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY],
+                [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY],
             recovered
         );
         validate_controller_runtime(&record.run_id).expect("recovered runtime validates");
@@ -159,7 +159,7 @@ fn artifact_recovery_rejects_wrong_hash_and_identity_without_record_mutation() {
         let record = submit_plan(&test_plan(), Some("recover-reject-artifact")).expect("submit");
 
         rewrite_record_for_test(&record.run_id, |record| {
-            record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
                 "originating": {
                     "build_identity": identity,
                     "pinned_executable": legacy,
@@ -178,7 +178,7 @@ fn artifact_recovery_rejects_wrong_hash_and_identity_without_record_mutation() {
         );
 
         rewrite_record_for_test(&record.run_id, |record| {
-            record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
                 "originating": {
                     "build_identity": "homeboy test+wrong-identity",
                     "pinned_executable": legacy,
@@ -237,7 +237,7 @@ fn legacy_v1_pin_migration_failures_leave_durable_record_unchanged() {
                 }
             }
             rewrite_record_for_test(&record.run_id, |record| {
-                record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+                record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
                     "originating": {
                         "build_identity": identity,
                         "pinned_executable": legacy,
@@ -290,7 +290,7 @@ fn controller_runtime_retention_keeps_mutable_runs_and_reports_terminal_pins_eli
             let legacy = temporary.path().join(format!("{}-legacy", record.run_id));
             std::fs::write(&legacy, b"corrupted legacy bytes").expect("write legacy pin");
             rewrite_record_for_test(&record.run_id, |record| {
-                record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+                record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
                     "originating": {
                         "build_identity": identity,
                         "pinned_executable": legacy,
@@ -308,19 +308,19 @@ fn controller_runtime_retention_keeps_mutable_runs_and_reports_terminal_pins_eli
 
         let active_pin = std::path::PathBuf::from(
             status(&active.run_id).expect("active record").metadata
-                [crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
+                [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
                 ["pinned_executable"]
                 .as_str()
                 .expect("active pin"),
         );
         let terminal_pin = std::path::PathBuf::from(
             status(&terminal.run_id).expect("terminal record").metadata
-                [crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
+                [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
                 ["pinned_executable"]
                 .as_str()
                 .expect("terminal pin"),
         );
-        let report = crate::controller_runtime::retention_report().expect("retention report");
+        let report = homeboy_core::controller_runtime::retention_report().expect("retention report");
         assert!(report.retained.contains(&active_pin));
         assert!(report.eligible.contains(&terminal_pin));
         let dry_run = prune_controller_runtime_pins(false).expect("plan pin pruning");
@@ -420,7 +420,7 @@ fn active_pinned_run_does_not_block_controller_promotion() {
 
         // Promotion no longer drains durable work. The record owns its pinned
         // runtime and remains available while later admissions switch.
-        crate::controller_runtime::activate_current_generation()
+        homeboy_core::controller_runtime::activate_current_generation()
             .expect("active durable run must not block promotion");
         let after = submit_plan(&test_plan(), Some("post-promotion-runtime"))
             .expect("post-switch submission");
@@ -444,7 +444,7 @@ fn pinned_runtime_recovery_retains_the_existing_lab_proxy_identity() {
         })
         .expect("runtime A created proxy");
         rewrite_record_for_test("runtime-a-lab-proxy", |record| {
-            record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
                 ["originating"]["build_identity"] = json!("homeboy runtime-a");
         })
         .expect("record runtime A provenance");

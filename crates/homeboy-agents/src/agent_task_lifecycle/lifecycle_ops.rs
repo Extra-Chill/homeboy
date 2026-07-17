@@ -306,7 +306,7 @@ pub fn submit_plan(
     submit_plan_with_runtime_admission(
         plan,
         requested_run_id,
-        crate::controller_runtime::admit_current,
+        homeboy_core::controller_runtime::admit_current,
     )
 }
 
@@ -314,7 +314,7 @@ pub(crate) trait RuntimeAdmissionEvidence {
     fn runtime(&self) -> Value;
 }
 
-impl RuntimeAdmissionEvidence for crate::controller_runtime::RuntimeAdmission {
+impl RuntimeAdmissionEvidence for homeboy_core::controller_runtime::RuntimeAdmission {
     fn runtime(&self) -> Value {
         self.runtime.clone()
     }
@@ -380,7 +380,7 @@ where
 
     match admit_runtime() {
         Ok(admission) => {
-            record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
+            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                 admission.runtime();
             store::write_record(&record)?;
         }
@@ -440,10 +440,10 @@ pub fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
 pub fn validate_controller_runtime(run_id: &str) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
     migrate_record_controller_runtime(&mut record)?;
-    crate::controller_runtime::validate(
+    homeboy_core::controller_runtime::validate(
         record
             .metadata
-            .get(crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+            .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
             .ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "controller_runtime",
@@ -461,7 +461,7 @@ pub fn validate_controller_runtime(run_id: &str) -> Result<AgentTaskRunRecord> {
 pub fn pinned_runtime_for_mutation(run_id: &str) -> Result<Option<std::path::PathBuf>> {
     let mut record = store::read_record(&resolve_run_id(run_id)?)?;
     migrate_record_controller_runtime(&mut record)?;
-    crate::controller_runtime::pinned_executable_for_mutation(
+    homeboy_core::controller_runtime::pinned_executable_for_mutation(
         &record.metadata,
         &homeboy_core::build_identity::current().display,
     )
@@ -470,7 +470,7 @@ pub fn pinned_runtime_for_mutation(run_id: &str) -> Result<Option<std::path::Pat
 /// Seal the currently executing controller into an immutable runtime before a
 /// new cook begins its local routing and admission work.
 pub fn pin_current_controller_runtime() -> Result<std::path::PathBuf> {
-    let runtime = crate::controller_runtime::pin_current()?;
+    let runtime = homeboy_core::controller_runtime::pin_current()?;
     runtime
         .pointer("/originating/pinned_executable")
         .and_then(Value::as_str)
@@ -489,20 +489,20 @@ pub fn pin_current_controller_runtime() -> Result<std::path::PathBuf> {
 /// boundary so nonterminal records remain authoritative retention roots.
 pub fn prune_controller_runtime_pins(
     apply: bool,
-) -> Result<crate::controller_runtime::ControllerRuntimePruneResult> {
-    crate::controller_runtime::prune_pins(apply)
+) -> Result<homeboy_core::controller_runtime::ControllerRuntimePruneResult> {
+    homeboy_core::controller_runtime::prune_pins(apply)
 }
 
 fn migrate_record_controller_runtime(record: &mut AgentTaskRunRecord) -> Result<()> {
     let Some(runtime) = record
         .metadata
-        .get(crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+        .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
     else {
         return Ok(());
     };
-    let migrated = crate::controller_runtime::migrate_legacy_pin(runtime)?;
+    let migrated = homeboy_core::controller_runtime::migrate_legacy_pin(runtime)?;
     if &migrated != runtime {
-        record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = migrated;
+        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = migrated;
         store::write_record(record)?;
     }
     Ok(())
@@ -517,7 +517,7 @@ pub fn recover_controller_runtime(
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
     let runtime = record
         .metadata
-        .get(crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+        .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "controller_runtime",
@@ -526,9 +526,9 @@ pub fn recover_controller_runtime(
                 None,
             )
         })?;
-    let recovered = crate::controller_runtime::recover_pin(runtime, artifact, source)?;
+    let recovered = homeboy_core::controller_runtime::recover_pin(runtime, artifact, source)?;
     // The new pin is verified before this single-record durable mutation.
-    record.metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = recovered.clone();
+    record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = recovered.clone();
     store::write_record(&record)?;
     Ok(recovered)
 }
@@ -536,7 +536,7 @@ pub fn recover_controller_runtime(
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
     migrate_record_controller_runtime(&mut record)?;
-    crate::controller_runtime::validate_for_mutation(
+    homeboy_core::controller_runtime::validate_for_mutation(
         &record.metadata,
         &homeboy_core::build_identity::current().display,
     )?;
@@ -1156,7 +1156,7 @@ impl TransportProxyRecovery {
 /// record. `None` means the run is a normal scheduler-owned plan.
 pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyRecovery>> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
-    crate::controller_runtime::validate_for_mutation(
+    homeboy_core::controller_runtime::validate_for_mutation(
         &record.metadata,
         &homeboy_core::build_identity::current().display,
     )?;

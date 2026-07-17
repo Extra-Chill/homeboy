@@ -13,7 +13,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-use homeboy_core::{build_identity, paths, Error, Result};
+use crate::{build_identity, paths, Error, Result};
 
 pub(crate) const CONTROLLER_RUNTIME_METADATA_KEY: &str = "controller_runtime";
 
@@ -49,7 +49,7 @@ pub struct ControllerRuntimePruneResult {
 /// still operate on them. The active admission generation is retained as well.
 pub fn retention_report() -> Result<ControllerRuntimeRetentionReport> {
     let root = runtime_root()?;
-    let referenced = homeboy_core::controller_pin_reference::referenced_controller_pins()?;
+    let referenced = crate::controller_pin_reference::referenced_controller_pins()?;
     let mut retained = BTreeSet::new();
 
     for path in referenced {
@@ -652,7 +652,7 @@ fn try_acquire_admission_process_guard(path: &Path) -> Option<MutexGuard<'static
 
 fn admission_owner_record(token: &str) -> Value {
     let pid = std::process::id();
-    let starttime_ticks = homeboy_core::process::linux_process_starttime_ticks(pid)
+    let starttime_ticks = crate::process::linux_process_starttime_ticks(pid)
         .ok()
         .flatten();
     json!({
@@ -1337,7 +1337,7 @@ mod tests {
     fn installed_generation_switch_publishes_b_and_retains_a_pin() {
         use std::os::unix::fs::PermissionsExt;
 
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let temporary = tempfile::tempdir().expect("temporary executable directory");
             let generation_a = temporary.path().join("homeboy-a");
             let generation_b = temporary.path().join("homeboy-b");
@@ -1391,7 +1391,7 @@ mod tests {
 
     #[test]
     fn admission_replaces_a_stale_active_generation_with_the_submitting_runtime() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let mut runtime_a = pin_current().expect("pin runtime A");
             runtime_a["originating"]["build_identity"] = json!("homeboy runtime-a");
             runtime_a["requested"] = json!("homeboy runtime-a");
@@ -1431,7 +1431,7 @@ mod tests {
     fn pinned_runtime_executes_original_controller_after_global_binary_replacement() {
         use std::os::unix::fs::PermissionsExt;
 
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let temporary = tempfile::tempdir().expect("temporary executable directory");
             let global = temporary.path().join("homeboy");
             let write_controller = |identity: &str| {
@@ -1522,7 +1522,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn legacy_v1_pin_migration_publishes_before_returning_updated_metadata() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let temporary = tempfile::tempdir().expect("temporary runtime directory");
             let legacy = temporary.path().join("legacy-homeboy");
             let identity = "homeboy test+legacy";
@@ -1621,7 +1621,7 @@ mod tests {
     fn recovery_preserves_runtime_a_after_generation_b_activation() {
         use std::os::unix::fs::PermissionsExt;
 
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let temporary = tempfile::tempdir().expect("temporary controller directory");
             let artifact_a = temporary.path().join("homeboy-a");
             let artifact_b = temporary.path().join("homeboy-b");

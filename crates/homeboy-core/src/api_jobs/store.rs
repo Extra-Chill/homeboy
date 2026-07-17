@@ -23,8 +23,6 @@ use super::types::{
     DaemonLinkedDurableRunState, Job, JobEvent, JobEventKind, JobStatus,
     LeaselessOrphanAffectedJob, LeaselessOrphanJobDiagnostics, RunnerJobProjection,
 };
-use crate::agent_task_scheduler::AgentTaskAggregateStatus;
-use crate::agent_task_service;
 use crate::error::{Error, Result};
 use crate::runner_execution_envelope::PathMaterializationPlan;
 use crate::source_snapshot::SourceSnapshot;
@@ -1724,11 +1722,29 @@ fn local_child_liveness(child: &LocalChildExecution) -> LocalChildLiveness {
 }
 
 #[derive(Clone)]
-pub(super) struct RecoveredTerminalJob {
+pub struct RecoveredTerminalJob {
     status: JobStatus,
     terminal_result: Value,
     run_id: String,
     artifacts: Vec<JobArtifactMetadata>,
+}
+
+impl RecoveredTerminalJob {
+    /// Construct a recovered terminal job. Used by the agent-task terminal
+    /// recovery provider to build this core type from a durable run's result.
+    pub fn new(
+        status: JobStatus,
+        terminal_result: Value,
+        run_id: String,
+        artifacts: Vec<JobArtifactMetadata>,
+    ) -> Self {
+        Self {
+            status,
+            terminal_result,
+            run_id,
+            artifacts,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1760,6 +1776,9 @@ impl RecoveredTerminalJob {
 /// A remote runner workload records its agent-task run ID in a typed execution
 /// envelope. That durable run is authoritative after the runner child exits.
 fn recovered_terminal_agent_task_result(stored: &StoredJob) -> Option<RecoveredTerminalJob> {
+    // Extract the durable agent-task run id from the (opaque) workload; the
+    // agent-task terminal-recovery hook resolves it into a recovered job so the
+    // job store does not depend on the agent-task subsystem.
     let run_id = stored
         .remote_runner
         .as_ref()?
@@ -1774,48 +1793,7 @@ fn recovered_terminal_agent_task_result(stored: &StoredJob) -> Option<RecoveredT
     if run_id.is_empty() {
         return None;
     }
-
-    let result = agent_task_service::terminal_run_result(&run_id).ok()??;
-    let status = match result.value.status {
-        AgentTaskAggregateStatus::Succeeded | AgentTaskAggregateStatus::CandidateRecoverable => {
-            JobStatus::Succeeded
-        }
-        AgentTaskAggregateStatus::Cancelled => JobStatus::Cancelled,
-        AgentTaskAggregateStatus::PartialRecoverable
-        | AgentTaskAggregateStatus::PartialFailure
-        | AgentTaskAggregateStatus::Failed => JobStatus::Failed,
-    };
-    let artifacts = result
-        .value
-        .artifact_bindings
-        .iter()
-        .map(|binding| JobArtifactMetadata {
-            id: binding.artifact_id.clone(),
-            name: binding.name.clone(),
-            path: binding.path.clone(),
-            url: binding.url.clone(),
-            mime: None,
-            size_bytes: None,
-            sha256: binding.sha256.clone(),
-            content_base64: None,
-            metadata: Some(serde_json::json!({
-                "kind": binding.kind,
-                "task_id": binding.task_id,
-                "durable_run_id": run_id,
-            })),
-        })
-        .collect();
-    Some(RecoveredTerminalJob {
-        status,
-        terminal_result: serde_json::json!({
-            "kind": "agent_task_aggregate",
-            "run_id": &run_id,
-            "exit_code": result.exit_code,
-            "aggregate": result.value,
-        }),
-        run_id,
-        artifacts,
-    })
+    super::agent_task_terminal_recovery::recovered_terminal_agent_task_job(&run_id)
 }
 
 impl JobHandle {
