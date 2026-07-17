@@ -321,19 +321,22 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
     with_temp_home(|| {
         let mut config = homeboy::core::defaults::load_config();
         config.agent_task.rotation = Some(
-            homeboy::core::agent_task_scheduler::AgentTaskProviderRotationPolicy {
-                entries: vec![
-                    homeboy::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
-                        model: Some("openai/gpt-5.6-terra".to_string()),
-                        ..Default::default()
-                    },
-                    homeboy::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
-                        model: Some("fallback-model".to_string()),
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            },
+            serde_json::to_value(
+                homeboy::core::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                    entries: vec![
+                        homeboy::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            model: Some("openai/gpt-5.6-terra".to_string()),
+                            ..Default::default()
+                        },
+                        homeboy::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            model: Some("fallback-model".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            )
+            .expect("serialize provider rotation policy"),
         );
         homeboy::core::defaults::save_config(&config).expect("save provider rotation");
         let temp = tempfile::tempdir().expect("tempdir");

@@ -38,26 +38,7 @@ pub struct FixApplied {
 }
 
 /// Aggregate summary of extension fix results.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FixResultsSummary {
-    pub fixes_applied: usize,
-    pub files_modified: usize,
-    pub rules: Vec<RuleFixCount>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub primitives: Vec<PrimitiveFixCount>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuleFixCount {
-    pub rule: String,
-    pub count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrimitiveFixCount {
-    pub primitive: String,
-    pub count: usize,
-}
+pub use homeboy_refactor_contract::{FixResultsSummary, PrimitiveFixCount, RuleFixCount};
 
 pub fn standard_outcome(
     mode: AutofixMode,

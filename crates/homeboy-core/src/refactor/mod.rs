@@ -37,31 +37,26 @@ pub fn resolve_root(component_id: Option<&str>, path: Option<&str>) -> crate::Re
 
 /// Shared output for refactors/fixes.
 ///
-/// `refactor --from lint/test/audit --write` are the entrypoints for fixes.
-/// Keep the applied-change reporting in refactor so commands don't invent
-/// parallel output models.
-#[derive(Debug, Clone, Serialize)]
-pub struct AppliedRefactor {
-    pub files_modified: usize,
-    pub rerun_recommended: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub changed_files: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fix_summary: Option<FixResultsSummary>,
-}
+// AppliedRefactor and its FixResultsSummary/RuleFixCount/PrimitiveFixCount
+// result-type cluster live in homeboy-refactor-contract so consumers (e.g. the
+// extension lint/test report layer) can carry refactor results without depending
+// on this engine. Re-exported here to preserve crate::refactor::AppliedRefactor
+// call sites.
+pub use homeboy_refactor_contract::AppliedRefactor;
 
-impl AppliedRefactor {
-    pub fn from_capture(
-        capture: AppliedAutofixCapture,
-        rerun_recommended: bool,
-        changed_files: Vec<String>,
-    ) -> Self {
-        Self {
-            files_modified: capture.files_modified,
-            rerun_recommended,
-            changed_files,
-            fix_summary: capture.fix_summary,
-        }
+/// Build an [`AppliedRefactor`] from an autofix capture. Lives in the refactor
+/// engine (not on the contract type) because it consumes the engine-internal
+/// `AppliedAutofixCapture`.
+pub fn applied_refactor_from_capture(
+    capture: AppliedAutofixCapture,
+    rerun_recommended: bool,
+    changed_files: Vec<String>,
+) -> AppliedRefactor {
+    AppliedRefactor {
+        files_modified: capture.files_modified,
+        rerun_recommended,
+        changed_files,
+        fix_summary: capture.fix_summary,
     }
 }
 
