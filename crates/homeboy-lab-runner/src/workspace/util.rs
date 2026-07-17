@@ -119,10 +119,40 @@ pub(crate) fn run_shell_command(command: &str, action: &str) -> Result<()> {
     if output.status.success() {
         return Ok(());
     }
+    let stdout = bounded_command_output(&output.stdout);
+    let stderr = bounded_command_output(&output.stderr);
+    let evidence = match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => "the command exited without stdout or stderr".to_string(),
+        (false, true) => format!("stdout: {stdout}"),
+        (true, false) => format!("stderr: {stderr}"),
+        (false, false) => format!("stdout: {stdout}; stderr: {stderr}"),
+    };
     Err(Error::internal_unexpected(format!(
-        "{action} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "{action} failed during command execution (exit status {}): {evidence}",
+        output.status.code().unwrap_or(-1),
     )))
+}
+
+const COMMAND_FAILURE_OUTPUT_LIMIT: usize = 4 * 1024;
+
+fn bounded_command_output(output: &[u8]) -> String {
+    if output.len() <= COMMAND_FAILURE_OUTPUT_LIMIT {
+        return String::from_utf8_lossy(output).trim().to_string();
+    }
+
+    let prefix = match std::str::from_utf8(output) {
+        Ok(output) => {
+            let end = output
+                .char_indices()
+                .map(|(index, _)| index)
+                .take_while(|index| *index <= COMMAND_FAILURE_OUTPUT_LIMIT)
+                .last()
+                .unwrap_or(0);
+            output[..end].to_string()
+        }
+        Err(_) => String::from_utf8_lossy(&output[..COMMAND_FAILURE_OUTPUT_LIMIT]).into_owned(),
+    };
+    format!("{}... [truncated]", prefix.trim())
 }
 
 pub(crate) fn shell_command_for_runner(runner: &Runner, command: &str) -> Result<String> {

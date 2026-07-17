@@ -105,6 +105,58 @@ use crate::workspace::util::git_output;
 static PATH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
+fn snapshot_command_failure_keeps_exit_status_and_silent_transport_cause() {
+    let error =
+        super::super::util::run_shell_command("exit 23", "materialize SSH workspace snapshot")
+            .expect_err("silent command failure must be actionable");
+
+    assert_eq!(
+        error.message,
+        "materialize SSH workspace snapshot failed during command execution (exit status 23): the command exited without stdout or stderr"
+    );
+}
+
+#[test]
+fn snapshot_command_failure_preserves_bounded_transport_output() {
+    let error = super::super::util::run_shell_command(
+        "printf stdout-evidence; printf stderr-evidence >&2; exit 24",
+        "materialize SSH workspace snapshot",
+    )
+    .expect_err("transport output must be retained");
+
+    assert!(error.message.contains("exit status 24"));
+    assert!(error.message.contains("stdout: stdout-evidence"));
+    assert!(error.message.contains("stderr: stderr-evidence"));
+}
+
+#[test]
+fn snapshot_command_failure_bounds_transport_output() {
+    let error = super::super::util::run_shell_command(
+        "head -c 5000 /dev/zero | tr '\\0' x; exit 25",
+        "materialize SSH workspace snapshot",
+    )
+    .expect_err("large transport output must be bounded");
+
+    assert!(error.message.contains("exit status 25"));
+    assert!(error.message.ends_with("... [truncated]"));
+    assert!(error.message.len() < 4_300);
+}
+
+#[test]
+fn snapshot_command_failure_bounds_multibyte_output_at_a_character_boundary() {
+    let error = super::super::util::run_shell_command(
+        "head -c 4095 /dev/zero | tr '\\0' Z; printf '\\342\\202\\254'; exit 26",
+        "materialize SSH workspace snapshot",
+    )
+    .expect_err("multibyte transport output must not panic while truncating");
+
+    assert!(error.message.contains("exit status 26"));
+    assert_eq!(error.message.matches('Z').count(), 4095);
+    assert!(!error.message.contains('\u{20ac}'));
+    assert!(error.message.ends_with("... [truncated]"));
+}
+
+#[test]
 fn runner_snapshot_includes_override_generated_output_excludes() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source tempdir");
