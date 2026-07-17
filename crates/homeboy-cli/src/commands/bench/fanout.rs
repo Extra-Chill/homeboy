@@ -2,10 +2,10 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use homeboy::core::agent_tasks::scheduler::{
+use homeboy::agents::agent_tasks::scheduler::{
     AgentTaskExecutionContext, AgentTaskPlan, AgentTaskScheduleOptions, AgentTaskScheduler,
 };
-use homeboy::core::agent_tasks::{
+use homeboy::agents::agent_tasks::{
     expand_agent_task_matrix, AgentTaskExecutor, AgentTaskMatrixAggregate, AgentTaskMatrixAxis,
     AgentTaskOutcomeStatus, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
     AGENT_TASK_REQUEST_SCHEMA,
@@ -22,7 +22,7 @@ pub struct BenchMatrixFanoutOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rigs: Vec<String>,
     pub executor_backend: String,
-    pub scheduler: homeboy::core::agent_tasks::AgentTaskAggregate,
+    pub scheduler: homeboy::agents::agent_tasks::AgentTaskAggregate,
     pub matrix: AgentTaskMatrixAggregate,
     pub report: BenchMatrixFanoutReport,
 }
@@ -190,7 +190,7 @@ fn apply_result_gates(
             if !result.passed {
                 matrix.passed = false;
                 cell.execution_state =
-                    homeboy::core::agent_tasks::AgentTaskMatrixExecutionState::ExecutedWithFindings;
+                    homeboy::agents::agent_tasks::AgentTaskMatrixExecutionState::ExecutedWithFindings;
                 failures.push(result.reason.clone().unwrap_or_else(|| {
                     format!(
                         "matrix cell `{}` result gate failed: {} {} {}",
@@ -207,7 +207,7 @@ fn apply_result_gates(
 
     if !failures.is_empty() {
         matrix.execution_state =
-            homeboy::core::agent_tasks::AgentTaskMatrixExecutionState::ExecutedWithFindings;
+            homeboy::agents::agent_tasks::AgentTaskMatrixExecutionState::ExecutedWithFindings;
         failures.sort();
         failures.dedup();
     }
@@ -352,16 +352,16 @@ fn matrix_template_request(
 #[derive(Clone)]
 struct LocalBenchMatrixExecutor;
 
-impl homeboy::core::agent_tasks::AgentTaskExecutorAdapter for LocalBenchMatrixExecutor {
+impl homeboy::agents::agent_tasks::AgentTaskExecutorAdapter for LocalBenchMatrixExecutor {
     fn execute(
         &self,
         request: AgentTaskRequest,
         context: AgentTaskExecutionContext,
-    ) -> homeboy::core::agent_tasks::AgentTaskOutcome {
-        homeboy::core::agent_tasks::AgentTaskOutcome {
+    ) -> homeboy::agents::agent_tasks::AgentTaskOutcome {
+        homeboy::agents::agent_tasks::AgentTaskOutcome {
             schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id.clone(),
-            status: homeboy::core::agent_tasks::AgentTaskOutcomeStatus::NoOp,
+            status: homeboy::agents::agent_tasks::AgentTaskOutcomeStatus::NoOp,
             summary: Some(format!(
                 "matrix cell scheduled for executor '{}'",
                 request.executor.backend
@@ -392,7 +392,9 @@ mod tests {
         BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
     };
     use clap::Parser;
-    use homeboy::core::agent_tasks::{AgentTaskMatrixAggregateCell, AgentTaskMatrixExecutionState};
+    use homeboy::agents::agent_tasks::{
+        AgentTaskMatrixAggregateCell, AgentTaskMatrixExecutionState,
+    };
     use homeboy::core::extension::bench::BenchGateOp;
 
     #[derive(Parser)]
@@ -600,7 +602,7 @@ mod tests {
 
     fn matrix_aggregate_with_metrics(metrics: serde_json::Value) -> AgentTaskMatrixAggregate {
         AgentTaskMatrixAggregate {
-            schema: homeboy::core::agent_tasks::AGENT_TASK_MATRIX_AGGREGATE_SCHEMA.to_string(),
+            schema: homeboy::agents::agent_tasks::AGENT_TASK_MATRIX_AGGREGATE_SCHEMA.to_string(),
             plan_id: "bench/example".to_string(),
             passed: true,
             execution_state: AgentTaskMatrixExecutionState::ExecutedClean,

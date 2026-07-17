@@ -5,7 +5,7 @@
 //! behavior directly. This adapter delegates to the runner connection,
 //! execution, and evidence functions.
 
-use homeboy_core::agent_task_lifecycle::RunnerContinuationProvider;
+use homeboy_agents::agent_task_lifecycle::RunnerContinuationProvider;
 use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
 use homeboy_core::error::Result;
 
@@ -65,7 +65,7 @@ impl RunnerContinuationProvider for RunnerContinuation {
 
 /// Register the runner continuation provider with core. Called once at startup.
 pub fn register() {
-    homeboy_core::agent_task_lifecycle::register_runner_continuation_provider(Box::new(
+    homeboy_agents::agent_task_lifecycle::register_runner_continuation_provider(Box::new(
         RunnerContinuation,
     ));
 }

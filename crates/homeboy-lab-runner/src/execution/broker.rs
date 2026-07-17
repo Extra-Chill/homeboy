@@ -148,8 +148,8 @@ pub(super) fn exec_via_reverse_broker(
         // before the response can be lost. Reconciliation reuses this same
         // operation after an intent-only crash.
         if detach_after_handoff {
-            homeboy_core::agent_task_lifecycle::record_detached_lab_run(
-                homeboy_core::agent_task_lifecycle::DetachedLabRunRecord {
+            homeboy_agents::agent_task_lifecycle::record_detached_lab_run(
+                homeboy_agents::agent_task_lifecycle::DetachedLabRunRecord {
                     run_id,
                     runner_id: &runner.id,
                     runner_job_id: &job.id.to_string(),
@@ -158,7 +158,7 @@ pub(super) fn exec_via_reverse_broker(
                 },
             )?;
         } else {
-            homeboy_core::agent_task_lifecycle::record_runner_job_identity(
+            homeboy_agents::agent_task_lifecycle::record_runner_job_identity(
                 run_id,
                 &runner.id,
                 &job.id.to_string(),

@@ -1,5 +1,5 @@
 use super::super::*;
-use homeboy::core::agent_tasks::provider::{
+use homeboy::agents::agent_tasks::provider::{
     AgentTaskExecutorProvider, AgentTaskProviderEnvPathReadiness, AgentTaskProviderRunnerReadiness,
 };
 use serde_json::json;

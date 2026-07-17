@@ -92,7 +92,7 @@ pub fn apply(
 }
 
 fn repair_managed_sources(client: &SshClient, report: &mut RunnerDoctorOutput) {
-    let contracts = homeboy::core::agent_tasks::provider::provider_runner_source_contracts();
+    let contracts = homeboy::agents::agent_tasks::provider::provider_runner_source_contracts();
     let plans = runner::plan_managed_runner_source_syncs(&contracts);
     if plans.is_empty() {
         return;

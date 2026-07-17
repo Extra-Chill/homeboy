@@ -22,7 +22,7 @@ impl LabOffloadProvider for RunnerLabOffload {
         let durable_agent_task_plan = request
             .durable_agent_task_plan
             .map(|plan| {
-                serde_json::from_value::<homeboy_core::agent_task_scheduler::AgentTaskPlan>(
+                serde_json::from_value::<homeboy_agents::agent_task_scheduler::AgentTaskPlan>(
                     plan.clone(),
                 )
             })

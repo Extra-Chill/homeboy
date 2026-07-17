@@ -2,6 +2,8 @@
 
 use std::collections::BTreeSet;
 
+use crate::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+use crate::agents::agent_tasks::provider::{default_backend, provider_requires_cwd_git_checkout};
 use crate::cli_surface::Commands;
 use crate::command_contract::CommandDescriptor;
 use crate::command_contract::{
@@ -13,8 +15,6 @@ use crate::command_contract::{
     RUNTIME_REFRESH_LAB_LABEL,
 };
 use crate::commands::{adapter, agent_task};
-use crate::core::agent_tasks::lifecycle as agent_task_lifecycle;
-use crate::core::agent_tasks::provider::{default_backend, provider_requires_cwd_git_checkout};
 use crate::core::engine::execution_context::{self, ResolveOptions};
 use crate::core::extension::ExtensionCapability;
 
@@ -408,8 +408,8 @@ pub(crate) fn agent_task_lab_extension_ids(
         return Ok(Vec::new());
     }
 
-    let plan = crate::core::agent_tasks::service::read_plan(&run_plan.plan)?;
-    Ok(crate::core::agent_tasks::required_extension_ids_for_plan(
+    let plan = crate::agents::agent_tasks::service::read_plan(&run_plan.plan)?;
+    Ok(crate::agents::agent_tasks::required_extension_ids_for_plan(
         &plan,
     ))
 }

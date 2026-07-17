@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+homeboy-agents = { version = "0.1.0", path = "../homeboy-agents" }
 homeboy-lab-runner = { version = "0.1.0", path = "../homeboy-lab-runner" }
 homeboy-fuzz = { version = "0.1.0", path = "../homeboy-fuzz" }
 homeboy-issues = { version = "0.1.0", path = "../homeboy-issues" }
@@ -57,3 +58,4 @@ sha2 = "0.10.9"
 [dev-dependencies]
 # Enable homeboy-core's shared hermetic test fixtures for this crate's test build.
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
+homeboy-agents = { version = "0.1.0", path = "../homeboy-agents" }

@@ -23,7 +23,7 @@ fn apply_patch_step_accepts_noop_mutation_return() {
 fn lost_exec_response_reconciles_the_single_accepted_durable_job() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-8525-attempt-1";
-        homeboy_core::agent_task_lifecycle::record_lab_offload_phase(
+        homeboy_agents::agent_task_lifecycle::record_lab_offload_phase(
             run_id,
             "homeboy-lab",
             "dispatching",
@@ -77,10 +77,11 @@ fn lost_exec_response_reconciles_the_single_accepted_durable_job() {
         .expect("accepted job must become an in-flight outcome");
 
         assert!(matches!(outcome, LabOffloadOutcome::InFlight { .. }));
-        let record = homeboy_core::agent_task_lifecycle::status(run_id).expect("controller record");
+        let record =
+            homeboy_agents::agent_task_lifecycle::status(run_id).expect("controller record");
         assert_eq!(
             record.state,
-            homeboy_core::agent_task_lifecycle::AgentTaskRunState::Running
+            homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Running
         );
         assert_eq!(record.runner_job_id(), Some("job-8525"));
         assert!(record.metadata.get("pre_execution_failure").is_none());

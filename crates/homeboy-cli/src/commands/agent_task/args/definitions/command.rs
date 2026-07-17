@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand, ValueEnum};
-use homeboy::core::agent_task_service::AgentTaskDiscoveryOptions;
+use homeboy::agents::agent_task_service::AgentTaskDiscoveryOptions;
 
 use super::super::super::prompts::AgentTaskPromptsArgs;
 use super::super::super::tool::AgentTaskToolArgs;

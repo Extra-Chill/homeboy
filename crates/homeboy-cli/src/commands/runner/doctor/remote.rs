@@ -201,7 +201,7 @@ pub fn report(
             local_homeboy_version,
             &homeboy,
         ));
-        let catalog = homeboy::core::agent_tasks::provider::AgentTaskProviderCatalog::discover();
+        let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
         checks.extend(probes::remote_provider_executor_resolution_checks(
             client,
             catalog.providers(),
@@ -210,11 +210,11 @@ pub fn report(
         ));
         checks.extend(probes::provider_readiness_checks(
             client,
-            &homeboy::core::agent_tasks::provider::provider_runner_readiness_contracts(),
+            &homeboy::agents::agent_tasks::provider::provider_runner_readiness_contracts(),
         ));
         checks.extend(probes::managed_runner_source_checks(
             client,
-            &homeboy::core::agent_tasks::provider::provider_runner_source_contracts(),
+            &homeboy::agents::agent_tasks::provider::provider_runner_source_contracts(),
         ));
     }
 

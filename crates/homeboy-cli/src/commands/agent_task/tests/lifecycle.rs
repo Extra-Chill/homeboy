@@ -12,7 +12,7 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
             "cook".to_string(),
         ];
         agent_task_lifecycle::record_lab_offload_planned(
-            homeboy::core::agent_tasks::lifecycle::LabOffloadProxyPlan {
+            homeboy::agents::agent_tasks::lifecycle::LabOffloadProxyPlan {
                 run_id: "run-cli-controller-proxy",
                 runner_id: "homeboy-lab",
                 remote_workspace: "/runner/workspace/repo",
@@ -53,7 +53,7 @@ fn controller_proxy_run_uses_transport_recovery_without_provider_dispatch() {
     with_temp_home(|| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
         agent_task_lifecycle::record_lab_offload_planned(
-            homeboy::core::agent_tasks::lifecycle::LabOffloadProxyPlan {
+            homeboy::agents::agent_tasks::lifecycle::LabOffloadProxyPlan {
                 run_id: "run-cli-transport-proxy",
                 runner_id: "remote-runner-42",
                 remote_workspace: "/runner/workspace/repo",
@@ -97,7 +97,7 @@ fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
     with_temp_home(|| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
         agent_task_lifecycle::record_lab_offload_planned(
-            homeboy::core::agent_tasks::lifecycle::LabOffloadProxyPlan {
+            homeboy::agents::agent_tasks::lifecycle::LabOffloadProxyPlan {
                 run_id: "run-cli-resume-transport-proxy",
                 runner_id: "remote-runner-42",
                 remote_workspace: "/runner/workspace/repo",
@@ -148,7 +148,7 @@ fn controller_proxy_run_resumes_on_its_recorded_runner_workspace() {
             ),
         ];
         agent_task_lifecycle::record_lab_offload_planned(
-            homeboy::core::agent_tasks::lifecycle::LabOffloadProxyPlan {
+            homeboy::agents::agent_tasks::lifecycle::LabOffloadProxyPlan {
                 run_id: "run-cli-runner-resume-proxy",
                 runner_id: "lab-local",
                 remote_workspace: &workspace.path().display().to_string(),
@@ -191,7 +191,7 @@ fn run_next_leaves_transport_proxy_queued_for_runner_recovery() {
     with_temp_home(|| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
         agent_task_lifecycle::record_lab_offload_planned(
-            homeboy::core::agent_tasks::lifecycle::LabOffloadProxyPlan {
+            homeboy::agents::agent_tasks::lifecycle::LabOffloadProxyPlan {
                 run_id: "run-cli-queued-proxy",
                 runner_id: "remote-runner-42",
                 remote_workspace: "/runner/workspace/repo",
@@ -1311,7 +1311,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].artifact_type, "file");
         assert_eq!(
-            homeboy::core::agent_tasks::lifecycle::verified_controller_artifact_projection_path(
+            homeboy::agents::agent_tasks::lifecycle::verified_controller_artifact_projection_path(
                 run_id,
                 task_id,
                 &aggregate.outcomes[0].artifacts[0],
@@ -1406,7 +1406,7 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
         assert_eq!(exit_code, 0);
         assert_eq!(
             observed.workspace.mode,
-            homeboy::core::agent_tasks::AgentTaskWorkspaceMode::Existing
+            homeboy::agents::agent_tasks::AgentTaskWorkspaceMode::Existing
         );
         let executor_workspace = std::path::PathBuf::from(
             observed

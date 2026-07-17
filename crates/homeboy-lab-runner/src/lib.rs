@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use homeboy_core::agent_task_secrets;
+use homeboy_agents::agent_task_secrets;
 use homeboy_core::config::{self, ConfigEntity};
 use homeboy_core::defaults;
 use homeboy_core::error::{Error, Result};
@@ -14,7 +14,7 @@ use homeboy_core::server::{self, RunnerPolicy, RunnerSecretEnvRef, RunnerSetting
 // that was mis-filed under runner. It now lives in agent_task_lifecycle; re-
 // exported here so runner-internal `super::agent_task_lifecycle_event` /
 // `crate::agent_task_lifecycle_event` call sites resolve unchanged.
-pub(crate) use homeboy_core::agent_task_lifecycle::agent_task_lifecycle_event;
+pub(crate) use homeboy_agents::agent_task_lifecycle::agent_task_lifecycle_event;
 mod apply;
 pub mod artifact_attach;
 mod availability_provider;
@@ -1475,7 +1475,7 @@ mod tests {
     #[test]
     fn runner_secret_env_refs_resolve_from_configured_homeboy_secret() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            homeboy_core::agent_task_secrets::set_config_secret(
+            homeboy_agents::agent_task_secrets::set_config_secret(
                 "HOMEBOY_DUMMY_CONFIGURED_SECRET",
                 "dummy-configured-secret",
             )

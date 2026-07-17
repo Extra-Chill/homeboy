@@ -7,13 +7,13 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use homeboy::core::agent_tasks::dispatch_service;
-use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
-use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
-use homeboy::core::agent_tasks::scheduler::{
+use homeboy::agents::agent_tasks::dispatch_service;
+use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
+use homeboy::agents::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
-use homeboy::core::agent_tasks::service as agent_task_service;
+use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::core::command_invocation::CommandInvocation;
 
 use super::super::CmdResult;
@@ -30,7 +30,7 @@ const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 /// path) without hand-digging the nested outcome JSON (#3806). The full nested
 /// payload is preserved unchanged; this only ADDS the surfaced summary.
 fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value {
-    let aggregate = homeboy::core::agent_task_artifacts::reviewer_facing_aggregate(aggregate);
+    let aggregate = homeboy::agents::agent_task_artifacts::reviewer_facing_aggregate(aggregate);
     let mut value = serde_json::to_value(&aggregate).unwrap_or(Value::Null);
     let failure_reasons = super::status::failure_reasons_from_aggregate(&aggregate);
     if !failure_reasons.is_empty() {
@@ -74,7 +74,7 @@ pub(super) fn promotion_provider(args: PromotionProviderArgs) -> CmdResult<Value
             None,
         )
     })?;
-    homeboy::core::agent_task_promotion::apply_materialized_workspace_patch(
+    homeboy::agents::agent_task_promotion::apply_materialized_workspace_patch(
         Path::new(&args.workspace),
         &request,
     )
@@ -100,7 +100,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher<E>(
     args: AgentTaskCookArgs,
     executor: E,
     attempt_dispatcher: Option<
-        Arc<dyn crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>,
+        Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
     >,
 ) -> CmdResult<Value>
 where
@@ -221,7 +221,7 @@ where
             ai_used_for: args.ai_used_for,
             attempt_dispatcher,
             harvest_context:
-                homeboy::core::agent_task_scheduler::HarvestExecutionContext::from_current_process(
+                homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process(
                 )?,
         },
         executor,

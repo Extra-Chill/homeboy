@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use homeboy_core::agent_tasks::{
+use homeboy_agents::agent_tasks::{
     provider_secret_sources_for_discovered_providers, secrets as agent_task_secrets,
 };
 use homeboy_core::engine::shell;

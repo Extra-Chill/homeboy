@@ -1,5 +1,5 @@
 use super::super::*;
-use homeboy::core::agent_tasks::provider::AgentTaskProviderRunnerSource;
+use homeboy::agents::agent_tasks::provider::AgentTaskProviderRunnerSource;
 use std::collections::BTreeMap;
 use types::RunnerDoctorStatus;
 

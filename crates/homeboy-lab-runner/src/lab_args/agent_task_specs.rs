@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use homeboy_core::agent_task_prompts;
+use homeboy_agents::agent_task_prompts;
 use homeboy_core::config::read_json_spec_to_string;
 use homeboy_core::{Error, Result};
 

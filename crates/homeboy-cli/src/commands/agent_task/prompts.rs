@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::core::agent_task_prompts;
+use homeboy::agents::agent_task_prompts;
 
 use super::super::CmdResult;
 use super::command_json_value;
@@ -54,7 +54,7 @@ struct PromptSaveReport {
 struct PromptListReport {
     schema: &'static str,
     prompt_dir: String,
-    prompts: Vec<homeboy::core::agent_task_prompts::AgentTaskPromptRecord>,
+    prompts: Vec<homeboy::agents::agent_task_prompts::AgentTaskPromptRecord>,
 }
 
 #[derive(Debug, Serialize)]

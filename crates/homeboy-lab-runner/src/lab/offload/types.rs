@@ -26,7 +26,7 @@ pub struct LabOffloadRequest<'a> {
     pub local_output_file: Option<&'a str>,
     /// The controller-materialized task plan to retain if this offload creates
     /// a durable agent-task record before the runner accepts its child job.
-    pub durable_agent_task_plan: Option<&'a homeboy_core::agent_task_scheduler::AgentTaskPlan>,
+    pub durable_agent_task_plan: Option<&'a homeboy_agents::agent_task_scheduler::AgentTaskPlan>,
     /// Controller checkout selected independently of the remote command argv.
     /// This keeps process cwd in the runner job while retaining an exact local
     /// source for Git materialization and path remapping.

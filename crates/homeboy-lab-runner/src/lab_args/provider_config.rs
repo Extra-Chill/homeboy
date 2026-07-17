@@ -9,8 +9,8 @@ use std::path::Path;
 use serde_json::Value;
 
 use clap::Parser;
-use homeboy_core::agent_task_config_materialization::materialize_provider_config_refs;
-use homeboy_core::agent_task_dispatch_service::{
+use homeboy_agents::agent_task_config_materialization::materialize_provider_config_refs;
+use homeboy_agents::agent_task_dispatch_service::{
     resolve_dispatch_request, AgentTaskDispatchCommand,
 };
 use homeboy_core::config::read_json_spec_to_string;
@@ -210,7 +210,7 @@ pub(crate) fn inject_agent_task_resolved_provider_policy_in_args(
     };
     let request = resolve_dispatch_request(dispatch)?;
     let policy =
-        homeboy_core::agent_task_dispatch_service::controller_resolved_execution_policy(&request);
+        homeboy_agents::agent_task_dispatch_service::controller_resolved_execution_policy(&request);
     let encoded = serde_json::to_string(&policy).map_err(|error| {
         Error::internal_json(
             error.to_string(),

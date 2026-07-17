@@ -184,7 +184,7 @@ fn remote_daemon_secret_env_refs_forward_controller_secrets_and_keep_runner_refs
         std::fs::create_dir_all(&workspace).expect("workspace");
         let secret_file = temp.path().join("runner-secret");
         std::fs::write(&secret_file, "dummy-runner-secret\n").expect("secret file");
-        homeboy_core::agent_task_secrets::set_config_secret(
+        homeboy_agents::agent_task_secrets::set_config_secret(
             "HOMEBOY_CONTROLLER_SECRET_TEST_KEY",
             "dummy-controller-secret",
         )

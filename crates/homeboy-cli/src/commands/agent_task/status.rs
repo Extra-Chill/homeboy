@@ -9,11 +9,11 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
-use homeboy::core::agent_task_service as agent_task_service_direct;
-use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
-use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
-use homeboy::core::agent_tasks::service as agent_task_service;
-use homeboy::core::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
+use homeboy::agents::agent_task_service as agent_task_service_direct;
+use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
+use homeboy::agents::agent_tasks::service as agent_task_service;
+use homeboy::agents::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
 use homeboy::core::engine::shell::quote_arg;
 use homeboy::runner::runners::{self as runner, RunnerKind};
 
@@ -550,7 +550,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
 }
 
 pub(super) fn recover_runtime(args: RuntimeRecoverArgs) -> CmdResult<Value> {
-    let recovered = homeboy::core::agent_task_lifecycle::recover_controller_runtime(
+    let recovered = homeboy::agents::agent_task_lifecycle::recover_controller_runtime(
         &args.run_id,
         args.artifact.as_deref().map(std::path::Path::new),
         args.source.as_deref().map(std::path::Path::new),
@@ -562,7 +562,7 @@ pub(super) fn recover_runtime(args: RuntimeRecoverArgs) -> CmdResult<Value> {
 }
 
 pub(super) fn validate_runtime(args: RuntimeValidateArgs) -> CmdResult<Value> {
-    let record = homeboy::core::agent_task_lifecycle::validate_controller_runtime(&args.run_id)?;
+    let record = homeboy::agents::agent_task_lifecycle::validate_controller_runtime(&args.run_id)?;
     Ok((
         json!({ "schema": "homeboy/controller-runtime-validation/v1", "run_id": record.run_id, "state": record.state, "executable": true }),
         0,
@@ -946,7 +946,7 @@ pub(crate) fn execution_states_from_aggregate(
     record: &Value,
 ) -> Value {
     let review =
-        homeboy::core::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone());
+        homeboy::agents::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone());
     let provider = aggregate
         .outcomes
         .iter()
@@ -979,19 +979,19 @@ pub(crate) fn execution_states_from_aggregate(
                 "no_changes_produced"
             } else {
                 match task.decision {
-                homeboy::core::agent_tasks::AgentTaskReconciliationDecision::NoOp => {
+                homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::NoOp => {
                     "no_changes_produced"
                 }
-                homeboy::core::agent_tasks::AgentTaskReconciliationDecision::ApplyCandidate => {
+                homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::ApplyCandidate => {
                     "patch_available"
                 }
-                homeboy::core::agent_tasks::AgentTaskReconciliationDecision::RetryCandidate => {
+                homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::RetryCandidate => {
                     "provider_retry_required"
                 }
-                homeboy::core::agent_tasks::AgentTaskReconciliationDecision::IssueReportCandidate => {
+                homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::IssueReportCandidate => {
                     "issue_report_required"
                 }
-                homeboy::core::agent_tasks::AgentTaskReconciliationDecision::ReviewCandidate => {
+                homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::ReviewCandidate => {
                     "review_required"
                 }
                 }
@@ -1077,7 +1077,7 @@ pub(crate) fn failure_reasons_from_aggregate(aggregate: &AgentTaskAggregate) -> 
                 | AgentTaskOutcomeStatus::UnableToRemediate
         )
     });
-    let scan: Vec<&homeboy::core::agent_tasks::AgentTaskOutcome> = failed_first.collect();
+    let scan: Vec<&homeboy::agents::agent_tasks::AgentTaskOutcome> = failed_first.collect();
 
     for outcome in scan {
         for diagnostic in &outcome.diagnostics {

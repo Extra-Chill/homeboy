@@ -1,27 +1,29 @@
 use clap::Args;
 use serde_json::Value;
 
-use homeboy::core::agent_tasks::cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
-use homeboy::core::agent_tasks::finalization::{
+use homeboy::agents::agent_tasks::cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
+use homeboy::agents::agent_tasks::finalization::{
     finalize_pr, AgentTaskGateResult, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
     AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship, AgentTaskPrVerification,
 };
-use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
-use homeboy::core::agent_tasks::promotion::{
+use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::agents::agent_tasks::promotion::{
     promote_with_checkpoint, resume_promoted_patch, AgentTaskPromotionOptions,
     AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
-use homeboy::core::agent_tasks::provider::{
+use homeboy::agents::agent_tasks::provider::{
     AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
 };
-use homeboy::core::agent_tasks::review_dossier::{
+use homeboy::agents::agent_tasks::review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
     AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind,
     AgentTaskReviewOverride, AgentTaskReviewOverrideTarget, AgentTaskReviewTestStep,
     AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
 };
-use homeboy::core::agent_tasks::service as agent_task_service;
-use homeboy::core::agent_tasks::{AgentTaskAggregate, AgentTaskAggregateReport, AgentTaskRequest};
+use homeboy::agents::agent_tasks::service as agent_task_service;
+use homeboy::agents::agent_tasks::{
+    AgentTaskAggregate, AgentTaskAggregateReport, AgentTaskRequest,
+};
 use homeboy::core::command_invocation::CommandInvocation;
 use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
@@ -542,7 +544,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     let executor = ExtensionProviderAgentTaskExecutor::from_catalog(catalog);
     let providers = executor.providers();
     let fallback_sources =
-        homeboy::core::agent_tasks::provider::provider_secret_sources_for_providers(providers);
+        homeboy::agents::agent_tasks::provider::provider_secret_sources_for_providers(providers);
     if args.validate_readiness {
         let backend = args.backend.as_deref().ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
@@ -555,7 +557,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
                 ]),
             )
         })?;
-        homeboy::core::agent_tasks::provider::validate_provider_runner_readiness_for_backend(
+        homeboy::agents::agent_tasks::provider::validate_provider_runner_readiness_for_backend(
             backend,
             args.selector.as_deref(),
         )?;
@@ -569,7 +571,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             },
             "dispatch_config_layers": dispatch_config_layers(providers),
             "provider_identity_catalog": provider_identity_catalog(providers),
-            "capability_contract": homeboy::core::agent_tasks::provider::provider_capability_contract(),
+            "capability_contract": homeboy::agents::agent_tasks::provider::provider_capability_contract(),
             "providers": providers,
             "readiness_validation": {
                 "validated": args.validate_readiness,
@@ -577,7 +579,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
                 "selector": args.selector,
             },
             "diagnostics": executor.diagnostics(),
-            "secret_env": homeboy::core::agent_tasks::secrets::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
+            "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
         }),
         0,
     ))
@@ -887,11 +889,11 @@ pub(crate) fn read_promotion_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::core::agent_tasks::promotion::{
+    use homeboy::agents::agent_tasks::promotion::{
         AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
         AgentTaskPromotionNotification, AgentTaskPromotionSource, AgentTaskPromotionTarget,
     };
-    use homeboy::core::agent_tasks::{
+    use homeboy::agents::agent_tasks::{
         AgentTaskAggregateSummary, AgentTaskDecisionRef, AgentTaskReconciliationDecision,
     };
 
@@ -1027,7 +1029,7 @@ mod tests {
             deterministic_gates: Vec::new(),
             gate_results: Vec::new(),
             verified_base: Some(
-                homeboy::core::agent_tasks::promotion::AgentTaskPromotionVerifiedBase {
+                homeboy::agents::agent_tasks::promotion::AgentTaskPromotionVerifiedBase {
                     base: "release".to_string(),
                     sha: "0123456789012345678901234567890123456789".to_string(),
                 },

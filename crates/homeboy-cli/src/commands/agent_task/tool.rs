@@ -1,7 +1,7 @@
 use std::io::Read;
 
 use clap::{Args, Subcommand};
-use homeboy::core::agent_tasks::{
+use homeboy::agents::agent_tasks::{
     dispatch_agent_tool_request, AgentToolPolicy, AgentToolRequest,
     HomeboyAgentToolControlPlaneDispatcher,
 };
@@ -70,7 +70,7 @@ fn policy_from_env() -> Result<AgentToolPolicy, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::core::agent_tasks::{
+    use homeboy::agents::agent_tasks::{
         AgentToolExecutionLocation, AgentToolResultStatus, AGENT_TOOL_POLICY_SCHEMA,
         AGENT_TOOL_REQUEST_SCHEMA,
     };

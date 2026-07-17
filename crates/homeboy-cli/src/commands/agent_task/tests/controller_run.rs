@@ -1,7 +1,7 @@
 //! Agent-task command controller run/run-next execution tests.
 
 use super::support::*;
-use crate::core::agent_task::AgentTaskTypedArtifact;
+use crate::agents::agent_task::AgentTaskTypedArtifact;
 
 #[test]
 fn controller_run_next_executes_spawn_task_plan_and_records_dedupe_lineage() {

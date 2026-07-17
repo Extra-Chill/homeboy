@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use homeboy::core::agent_tasks::agent_task_core_contract;
+use homeboy::agents::agent_tasks::agent_task_core_contract;
 
 use super::super::CmdResult;
 use super::{command_json_value, ContractArgs, ContractFormat};

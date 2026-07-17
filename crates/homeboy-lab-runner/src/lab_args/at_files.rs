@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use homeboy_core::agent_task_prompts;
+use homeboy_agents::agent_task_prompts;
 use homeboy_core::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

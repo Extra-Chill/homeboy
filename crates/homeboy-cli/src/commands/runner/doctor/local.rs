@@ -155,7 +155,7 @@ pub fn report(
     ));
 
     if options.scope == RunnerDoctorScope::LabOffload {
-        let catalog = homeboy::core::agent_tasks::provider::AgentTaskProviderCatalog::discover();
+        let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
         checks.extend(probes::local_provider_executor_resolution_checks(
             catalog.providers(),
             options.agent_backend.as_deref(),

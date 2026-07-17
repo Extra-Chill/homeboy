@@ -458,8 +458,8 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     }
 
     if selected.includes(CleanupCategoryArg::ControllerScratch) {
-        let output = homeboy::core::controller_scratch::cleanup(
-            homeboy::core::controller_scratch::ControllerScratchCleanupOptions {
+        let output = homeboy::agents::controller_scratch::cleanup(
+            homeboy::agents::controller_scratch::ControllerScratchCleanupOptions {
                 apply,
                 limit: usize::try_from(limit).unwrap_or(usize::MAX),
             },

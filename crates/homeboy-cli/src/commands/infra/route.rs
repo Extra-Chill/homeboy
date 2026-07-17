@@ -1,6 +1,6 @@
 use clap::Parser;
+use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::cli_surface::{Cli, Commands};
-use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::command_execution_plan::CommandSourceMaterialization;
 use homeboy::core::component::{self, TargetSpec};
 use homeboy::core::git;
@@ -18,7 +18,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::core::agent_task_service::DerivedCookBaselineCapability;
+use crate::agents::agent_task_service::DerivedCookBaselineCapability;
 use crate::core::io::output_file::write_output_file;
 
 pub fn route_after_parse(
@@ -301,7 +301,7 @@ fn run_split_placement_fanout(
         job_overrides: lab_job_overrides(cli)?,
     };
     let attempt_dispatcher =
-        move |options: &crate::core::agent_task_service::AgentTaskCookServiceOptions| {
+        move |options: &crate::agents::agent_task_service::AgentTaskCookServiceOptions| {
             let mut dispatcher = dispatcher.clone();
             dispatcher.source_path = options
                 .initial_plan
@@ -310,7 +310,7 @@ fn run_split_placement_fanout(
                 .and_then(|task| task.workspace.root.as_ref())
                 .map(PathBuf::from);
             Arc::new(dispatcher)
-                as Arc<dyn crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>
+                as Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
         };
     let (value, exit_code) = match &cli.command {
         Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
@@ -428,7 +428,7 @@ fn run_split_placement_cook(
     let (value, exit_code) =
         crate::commands::agent_task::run::run_cook_with_executor_and_dispatcher(
             controller,
-            homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
+            homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
             Some(dispatcher),
         )?;
     let stdout = serde_json::to_string_pretty(&value).map_err(|error| {
@@ -460,7 +460,7 @@ struct LabCookAttemptDispatcher {
 pub(crate) fn reconstruct_cook_attempt_dispatcher(
     recipe: &serde_json::Value,
 ) -> homeboy::core::Result<
-    Option<Arc<dyn crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+    Option<Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
 > {
     let kind = recipe
         .get("kind")
@@ -555,7 +555,9 @@ fn cook_attempt_source_path<'a>(
         .or(controller_source_path)
 }
 
-impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCookAttemptDispatcher {
+impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
+    for LabCookAttemptDispatcher
+{
     fn durable_recipe(&self) -> homeboy::core::Result<serde_json::Value> {
         Ok(serde_json::json!({
             "kind": "lab",
@@ -579,7 +581,7 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCook
 
     fn dispatch_attempt(
         &self,
-        plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+        plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
         run_id: &str,
         derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> homeboy::core::Result<()> {
@@ -706,7 +708,7 @@ fn lab_cook_attempt_args(serialized_plan: String, run_id: &str) -> Vec<String> {
 /// transport. The durable run record is created before handoff and receives the
 /// typed runner/job identity as soon as the daemon accepts it.
 pub(crate) fn dispatch_controller_plan_to_lab(
-    plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+    plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
     run_id: &str,
     runner_id: &str,
 ) -> homeboy::core::Result<serde_json::Value> {
@@ -726,8 +728,8 @@ pub(crate) fn dispatch_controller_plan_to_lab(
         source_path,
         job_overrides: runners::LabJobOverrides::default(),
     };
-    <LabCookAttemptDispatcher as crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>::prepare_for_cook(&dispatcher)?;
-    <LabCookAttemptDispatcher as crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>::dispatch_attempt(
+    <LabCookAttemptDispatcher as crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>::prepare_for_cook(&dispatcher)?;
+    <LabCookAttemptDispatcher as crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>::dispatch_attempt(
         &dispatcher,
         plan,
         run_id,
@@ -747,7 +749,7 @@ pub(crate) fn dispatch_controller_plan_to_lab(
 /// runner to rebuild it from command-line inputs after the durable handoff.
 fn inject_agent_task_cook_attempt_plan(
     args: &[String],
-    plan: Option<&homeboy::core::agent_tasks::scheduler::AgentTaskPlan>,
+    plan: Option<&homeboy::agents::agent_tasks::scheduler::AgentTaskPlan>,
 ) -> homeboy::core::Result<Vec<String>> {
     let Some(plan) = plan else {
         return Ok(args.to_vec());
@@ -781,7 +783,7 @@ fn inject_agent_task_cook_attempt_plan(
 /// user task a later retry must execute.
 fn materialize_agent_task_cook_plan(
     cli: &Cli,
-) -> homeboy::core::Result<Option<homeboy::core::agent_tasks::scheduler::AgentTaskPlan>> {
+) -> homeboy::core::Result<Option<homeboy::agents::agent_tasks::scheduler::AgentTaskPlan>> {
     let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
         command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
     }) = &cli.command
@@ -796,8 +798,8 @@ fn materialize_agent_task_cook_plan(
         dispatch.workspace = Some(cook.to_worktree.clone());
     }
     let mut request =
-        homeboy::core::agent_tasks::dispatch_service::resolve_dispatch_request(dispatch.into())?;
-    homeboy::core::agent_tasks::dispatch_service::build_controller_dispatch_plan(&mut request)
+        homeboy::agents::agent_tasks::dispatch_service::resolve_dispatch_request(dispatch.into())?;
+    homeboy::agents::agent_tasks::dispatch_service::build_controller_dispatch_plan(&mut request)
         .map(Some)
 }
 
@@ -811,14 +813,14 @@ fn lab_route_dispatch_timeout(command: &Commands) -> Option<std::time::Duration>
 struct AgentTaskRetryHandoff {
     args: Vec<String>,
     run_id: String,
-    plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+    plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
     primary_workspace: PathBuf,
 }
 
 #[derive(Debug)]
 struct AgentTaskRunHandoff {
     args: Vec<String>,
-    plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+    plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
     primary_workspace: PathBuf,
 }
 
@@ -872,7 +874,7 @@ fn materialize_agent_task_run_handoff(
 }
 
 fn plan_primary_workspace(
-    plan: &homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
 ) -> homeboy::core::Result<PathBuf> {
     let mut roots = BTreeSet::new();
     for task in &plan.tasks {
@@ -1039,7 +1041,7 @@ fn retry_handoff_prefix(args: &[String]) -> Vec<String> {
 }
 
 fn retry_plan_primary_workspace(
-    plan: &homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
 ) -> homeboy::core::Result<PathBuf> {
     let mut roots = BTreeSet::new();
     for task in &plan.tasks {

@@ -4,17 +4,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 
-use homeboy::core::agent_task_provider::AgentTaskProviderProfileDeclaration;
-use homeboy::core::agent_tasks::batch;
-use homeboy::core::agent_tasks::dispatch_service::{AgentTaskDispatchCommand, DispatchCoreInputs};
-use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
-use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
-use homeboy::core::agent_tasks::provider::{self, AgentTaskProviderCatalog};
-use homeboy::core::agent_tasks::scheduler::AgentTaskPlan;
-use homeboy::core::agent_tasks::service::{
+use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
+use homeboy::agents::agent_tasks::batch;
+use homeboy::agents::agent_tasks::dispatch_service::{
+    AgentTaskDispatchCommand, DispatchCoreInputs,
+};
+use homeboy::agents::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
+use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::agents::agent_tasks::provider::{self, AgentTaskProviderCatalog};
+use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
+use homeboy::agents::agent_tasks::service::{
     self as agent_task_service, AgentTaskCookServiceOptions,
 };
-use homeboy::core::agent_tasks::{
+use homeboy::agents::agent_tasks::{
     AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA,
     AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
 };
@@ -45,7 +47,7 @@ pub(super) fn fanout(args: AgentTaskFanoutArgs) -> CmdResult<Value> {
 
 type CookAttemptDispatcherFactory = dyn Fn(
         &AgentTaskCookServiceOptions,
-    ) -> std::sync::Arc<dyn crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>
+    ) -> std::sync::Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
     + Send
     + Sync;
 
@@ -167,7 +169,7 @@ fn run_batch_cook_fanout_plan_with_executor<E>(
     executor: E,
 ) -> CmdResult<Value>
 where
-    E: homeboy::core::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone + Send,
+    E: homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone + Send,
 {
     let result = agent_task_service::run_cook_batch(
         agent_task_service::AgentTaskCookBatchOptions {
@@ -180,11 +182,12 @@ where
     Ok(batch_cook_result(&plan, result))
 }
 
-fn batch_harvest_context() -> Result<homeboy::core::agent_task_scheduler::HarvestExecutionContext> {
+fn batch_harvest_context() -> Result<homeboy::agents::agent_task_scheduler::HarvestExecutionContext>
+{
     if std::env::var_os("HOMEBOY_RUNNER_HOSTED_EXEC").is_some() {
-        homeboy::core::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+        homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
     } else {
-        Ok(homeboy::core::agent_task_scheduler::HarvestExecutionContext::default())
+        Ok(homeboy::agents::agent_task_scheduler::HarvestExecutionContext::default())
     }
 }
 
@@ -412,7 +415,7 @@ fn queue_or_reuse_worktrees(
 
 fn load_fanout_agent_task_plan(
     args: &AgentTaskFanoutInputArgs,
-) -> Result<homeboy::core::agent_tasks::scheduler::AgentTaskPlan> {
+) -> Result<homeboy::agents::agent_tasks::scheduler::AgentTaskPlan> {
     agent_task_service::read_plan(&args.input)
 }
 
@@ -679,7 +682,7 @@ impl BatchCookSpec {
                 ai_used_for: self.ai_used_for.clone(),
                 attempt_dispatcher: None,
                 harvest_context:
-                    crate::core::agent_task_scheduler::HarvestExecutionContext::default(),
+                    crate::agents::agent_task_scheduler::HarvestExecutionContext::default(),
             },
         })
     }

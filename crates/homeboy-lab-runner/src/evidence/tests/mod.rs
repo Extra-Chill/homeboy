@@ -336,8 +336,8 @@ fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
             "agent-task".to_string(),
             "cook".to_string(),
         ];
-        homeboy_core::agent_task_lifecycle::record_lab_offload_planned(
-            homeboy_core::agent_task_lifecycle::LabOffloadProxyPlan {
+        homeboy_agents::agent_task_lifecycle::record_lab_offload_planned(
+            homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
                 run_id: "agent-task-lab-mirror",
                 runner_id: "lab",
                 remote_workspace: "/srv/homeboy/project",
@@ -399,7 +399,7 @@ fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
             None,
         )
         .expect("mirror terminal Lab job");
-        let lifecycle = homeboy_core::agent_task_lifecycle::status("agent-task-lab-mirror")
+        let lifecycle = homeboy_agents::agent_task_lifecycle::status("agent-task-lab-mirror")
             .expect("typed lifecycle remains readable");
 
         assert_eq!(run.kind, "agent-task");

@@ -3,8 +3,8 @@
 //! Computes the controller-action availability verdict from the runner's live
 //! status report, keeping `RunnerStatusReport` inside the runner layer.
 
-use homeboy_core::agent_task_controller_service::runner_availability::RunnerAvailabilityProvider;
-use homeboy_core::agent_task_loop_runner_policy::AgentTaskLoopRunnerAvailability;
+use homeboy_agents::agent_task_controller_service::runner_availability::RunnerAvailabilityProvider;
+use homeboy_agents::agent_task_loop_runner_policy::AgentTaskLoopRunnerAvailability;
 
 use crate::RunnerActiveJobState;
 
@@ -41,7 +41,7 @@ impl RunnerAvailabilityProvider for RunnerAvailability {
 
 /// Register the runner availability provider with core. Called once at startup.
 pub fn register() {
-    homeboy_core::agent_task_controller_service::runner_availability::register_runner_availability_provider(
+    homeboy_agents::agent_task_controller_service::runner_availability::register_runner_availability_provider(
         Box::new(RunnerAvailability),
     );
 }

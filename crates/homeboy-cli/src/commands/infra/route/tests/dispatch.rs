@@ -47,7 +47,7 @@ fn lab_cook_dispatcher_recipe_round_trips_exact_transport() {
             workspace_root: Some("/runner/workspaces".to_string()),
         },
     };
-    let recipe = crate::core::agent_task_service::AgentTaskCookAttemptDispatcher::durable_recipe(
+    let recipe = crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher::durable_recipe(
         &dispatcher,
     )
     .unwrap();
@@ -696,7 +696,7 @@ fn detached_agent_task_handoffs_do_not_use_trace_dispatch_timeout() {
 fn cook_retry_lab_source_is_the_derived_baseline_not_the_controller_workspace() {
     let baseline = tempfile::tempdir().expect("baseline");
     let controller = tempfile::tempdir().expect("controller");
-    let capability = crate::core::agent_task_service::test_derived_cook_baseline_capability(
+    let capability = crate::agents::agent_task_service::test_derived_cook_baseline_capability(
         baseline.path().to_path_buf(),
         "baseline-commit".to_string(),
         "baseline-tree".to_string(),
@@ -726,7 +726,7 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path());
-        let source_plan = homeboy::core::agent_tasks::scheduler::AgentTaskPlan::new(
+        let source_plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
             "failed-retry-source",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "retry-task",
@@ -825,7 +825,7 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
             remote.record_run_id.as_deref(),
             Some(handoff.run_id.as_str())
         );
-        let remote_plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan =
+        let remote_plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan =
             serde_json::from_str(&remote.plan).expect("serialized retry plan");
         assert_eq!(remote_plan, handoff.plan);
         assert_eq!(
@@ -851,7 +851,7 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
         let replacement = agent_task_lifecycle::status(&handoff.run_id).expect("failed retry");
         assert_eq!(
             replacement.state,
-            homeboy::core::agent_tasks::lifecycle::AgentTaskRunState::Failed
+            homeboy::agents::agent_tasks::lifecycle::AgentTaskRunState::Failed
         );
         assert_eq!(
             replacement.metadata["pre_execution_failure"]["phase"],
@@ -864,7 +864,7 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
 fn controller_owned_run_materializes_plan_for_lab_execution() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
-        let plan = homeboy::core::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
             "queued-controller-run",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "task",
@@ -905,7 +905,7 @@ fn controller_owned_run_materializes_plan_for_lab_execution() {
         assert_eq!(remote.record_run_id.as_deref(), Some("controller-queued"));
         assert_eq!(remote.timeout_ms, Some(1200));
         assert_eq!(
-            serde_json::from_str::<homeboy::core::agent_tasks::scheduler::AgentTaskPlan>(
+            serde_json::from_str::<homeboy::agents::agent_tasks::scheduler::AgentTaskPlan>(
                 &remote.plan
             )
             .expect("serialized plan"),
@@ -921,7 +921,7 @@ fn controller_owned_run_materializes_plan_for_lab_execution() {
 #[test]
 fn controller_owned_run_refuses_to_handoff_a_plan_without_a_workspace() {
     crate::test_support::with_isolated_home(|_| {
-        let plan = homeboy::core::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
             "queued-controller-run-without-workspace",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "task",
@@ -959,7 +959,7 @@ fn controller_owned_run_refuses_to_handoff_a_plan_without_a_workspace() {
 fn controller_owned_run_refuses_an_ambiguous_plan_workspace() {
     let first = tempfile::tempdir().expect("first workspace");
     let second = tempfile::tempdir().expect("second workspace");
-    let plan = homeboy::core::agent_tasks::scheduler::AgentTaskPlan::new(
+    let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
         "ambiguous-controller-run",
         vec![
             serde_json::from_value(serde_json::json!({
@@ -1181,7 +1181,7 @@ fn retry_handoff_refuses_multiple_task_workspaces() {
             }))
             .expect("task")
         };
-        let plan = homeboy::core::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
             "multiple-workspaces",
             vec![task("first", first.path()), task("second", second.path())],
         );
@@ -1212,7 +1212,7 @@ fn retry_handoff_refuses_multiple_task_workspaces() {
 #[test]
 fn retry_handoff_identifies_an_original_plan_without_a_workspace() {
     crate::test_support::with_isolated_home(|_| {
-        let plan = homeboy::core::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
             "missing-workspace",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "retry-task",
