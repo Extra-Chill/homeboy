@@ -1,8 +1,10 @@
 use crate::code_audit::report::{
-    build_audit_summary, build_changed_since_summary, compute_fixability,
-    compute_fixability_with_analysis, finding_kind_key, from_main_workflow,
-    AuditChangedSinceSummary, AuditCommandOutput,
+    build_audit_summary, build_changed_since_summary, compute_fixability, finding_kind_key,
+    from_main_workflow, AuditChangedSinceSummary, AuditCommandOutput,
 };
+// Only used by the slow-tier `test_compute_fixability_with_analysis`.
+#[cfg(feature = "slow-tests")]
+use crate::code_audit::report::compute_fixability_with_analysis;
 use crate::code_audit::test_helpers::{empty_result, make_finding};
 use crate::code_audit::{AuditFinding, Finding, FindingConfidence, Severity};
 
@@ -274,6 +276,11 @@ fn test_compute_fixability_skips_structural_only_results() {
 #[test]
 fn test_compute_fixability_counts_fixes_from_real_audit() {
     use std::fs;
+
+    // Fixability planning is inverted behind a provider the CLI registers at
+    // startup; a core lib test never runs the CLI, so register the refactor-backed
+    // provider explicitly — otherwise fixability is always unavailable (None).
+    crate::refactor::audit_fixability_provider::register();
 
     let dir = tempfile::tempdir().expect("temp dir");
     let root = dir.path();
