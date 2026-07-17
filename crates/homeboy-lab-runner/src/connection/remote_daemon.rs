@@ -188,11 +188,31 @@ pub(super) struct RemoteDaemonStatus {
     pub(super) reachable: bool,
     pub(super) active_jobs: usize,
     /// The typed `/jobs` view is independently required before replacing a
-    /// reachable stale daemon. `None` means the endpoint was unavailable or
-    /// malformed, which must fail closed for replacement.
-    pub(super) typed_unresolved_jobs: Option<usize>,
+    /// reachable stale daemon. Missing or malformed evidence fails closed.
+    pub(super) work_evidence: RemoteDaemonWorkEvidence,
     pub(super) endpoint_probe_error: Option<String>,
     pub(super) termination_evidence: Option<homeboy_core::daemon::DaemonTerminationEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RemoteDaemonWorkEvidence {
+    Unknown,
+    ActiveOrUnresolved(usize),
+    AuthoritativelyIdle,
+}
+
+impl RemoteDaemonWorkEvidence {
+    fn from_unresolved_count(count: usize) -> Self {
+        if count == 0 {
+            Self::AuthoritativelyIdle
+        } else {
+            Self::ActiveOrUnresolved(count)
+        }
+    }
+
+    fn is_authoritatively_idle(self) -> bool {
+        self == Self::AuthoritativelyIdle
+    }
 }
 
 pub(super) fn remote_daemon_recovery_freshness_from_status(
@@ -439,7 +459,7 @@ pub(super) fn remote_daemon_connect_action_with_controller_identity(
     // through Homeboy's daemon lifecycle command.
     if !status.fresh {
         if status.active_jobs == 0
-            && status.typed_unresolved_jobs == Some(0)
+            && status.work_evidence.is_authoritatively_idle()
             && status.endpoint_probe_error.is_none()
             && daemon
                 .build_identity
@@ -559,7 +579,7 @@ pub(super) fn remote_daemon_status(
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             active_jobs: remote_daemon_active_jobs(&data),
-            typed_unresolved_jobs: None,
+            work_evidence: RemoteDaemonWorkEvidence::Unknown,
             endpoint_probe_error: None,
             termination_evidence,
         });
@@ -578,7 +598,7 @@ pub(super) fn remote_daemon_status(
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             active_jobs: remote_daemon_active_jobs(&data),
-            typed_unresolved_jobs: None,
+            work_evidence: RemoteDaemonWorkEvidence::Unknown,
             endpoint_probe_error: None,
             termination_evidence,
         });
@@ -593,7 +613,7 @@ pub(super) fn remote_daemon_status(
             .and_then(Value::as_bool)
             .unwrap_or(false),
         active_jobs: remote_daemon_active_jobs(&data),
-        typed_unresolved_jobs: None,
+        work_evidence: RemoteDaemonWorkEvidence::Unknown,
         endpoint_probe_error: None,
         termination_evidence,
     })
@@ -688,7 +708,8 @@ pub(super) fn probe_remote_daemon_endpoint(client: &SshClient, status: &mut Remo
             Some("remote daemon typed job probe did not return stale_runner_jobs".to_string());
         return;
     };
-    status.typed_unresolved_jobs = Some(active.len().saturating_add(stale.len()));
+    status.work_evidence =
+        RemoteDaemonWorkEvidence::from_unresolved_count(active.len().saturating_add(stale.len()));
 }
 
 fn remote_daemon_from_state(state: &Value) -> RemoteDaemon {

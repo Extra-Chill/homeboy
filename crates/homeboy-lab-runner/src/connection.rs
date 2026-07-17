@@ -1555,7 +1555,7 @@ fn stale_reattach_warning_for_report(
     report: &DaemonFreshnessReport,
 ) -> Option<String> {
     (!report.fresh).then(|| format!(
-        "Reattached the live remote daemon lease after drift ({:?}; {}); active jobs were preserved. Refresh it explicitly with `homeboy runner refresh-homeboy {runner_id} --reconnect` when its work is complete.",
+        "Reattached the live remote daemon lease after drift ({:?}; {}); active jobs were preserved. Continue with `homeboy runner refresh-homeboy {runner_id} --reconnect` when its work is complete.",
         report.stale_reason_code,
         report.ownership_evidence.as_deref().unwrap_or("remote status freshness drift")
     ))
