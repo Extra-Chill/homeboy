@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use super::SourceMetadataRepair;
+use crate::source_metadata_repair::SourceMetadataRepair;
 
 /// Result of updating all extensions.
 #[derive(Debug, Clone, Serialize)]

@@ -14,6 +14,8 @@ pub mod exec_context;
 pub mod manifest_deploy_config;
 pub mod manifest_test_config;
 pub mod runner_contract;
+pub mod source_metadata_repair;
+pub mod update_output;
 pub mod version;
 
 pub use core_compat::{

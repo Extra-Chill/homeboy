@@ -2,12 +2,7 @@ use super::{load_extension, read_source_revision, read_source_url, write_source_
 use crate::error::{Error, Result};
 use crate::paths;
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SourceMetadataRepair {
-    pub source_url: String,
-    pub reason: String,
-    pub repair_command: String,
-}
+pub use homeboy_extension_contract::source_metadata_repair::SourceMetadataRepair;
 
 #[derive(Debug)]
 pub struct SourceMetadataResolution {
