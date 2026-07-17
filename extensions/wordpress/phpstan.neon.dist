@@ -4,6 +4,16 @@ includes:
 parameters:
     customRulesetUsed: false
 
+    # WordPress defines these request-context flags at runtime. Treating a
+    # value observed by the analysis bootstrap as immutable creates false
+    # always-true findings for canonical `defined() && CONSTANT` guards.
+    dynamicConstantNames:
+        - DOING_AJAX
+        - DOING_CRON
+        - REST_REQUEST
+        - WP_IMPORTING
+        - XMLRPC_REQUEST
+
     # Don't treat unmatched ignoreErrors patterns as failures.
     # These are config hygiene issues, not component code problems.
     # Reporting them as errors creates false failure signals (see #137).
