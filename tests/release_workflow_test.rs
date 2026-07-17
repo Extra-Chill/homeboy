@@ -342,6 +342,7 @@ fn release_prepare_uses_prepared_output_to_unlock_publish_jobs() {
 
 #[test]
 fn release_fails_loudly_when_prepared_release_does_not_publish() {
+    let plan = job_section(release_workflow(), "plan");
     let verify = job_section(release_workflow(), "verify-published");
 
     // The guard must run whenever a release was actually prepared, even if
@@ -352,6 +353,16 @@ fn release_fails_loudly_when_prepared_release_does_not_publish() {
     );
     assert!(verify.contains("needs.prepare.outputs.prepared == 'true'"));
     assert!(verify.contains("needs.prepare.outputs['release-tag'] != ''"));
+    assert!(verify.contains("- plan"));
+    assert!(verify.contains("contents: read"));
+    assert!(verify.contains("GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}"));
+    assert!(plan.contains("expected-assets: ${{ steps.plan.outputs.expected-assets }}"));
+    assert!(plan.contains(".releases[].artifacts[]? | split(\"/\") | last"));
+    assert!(plan.contains("cargo-dist planned no release assets"));
+    assert!(verify.contains("EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}"));
+    assert!(verify.contains("gh api \"repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}\""));
+    assert!(verify.contains(".state == \"uploaded\" and .size > 0"));
+    assert!(verify.contains("missing planned assets"));
 
     // It must fail the run when host did not succeed.
     assert!(verify.contains("needs.host.result"));
@@ -370,6 +381,46 @@ fn release_fails_loudly_when_prepared_release_does_not_publish() {
     let clear_failure = job_section(release_workflow(), "clear-failure");
     assert!(record_failure.contains("- verify-published"));
     assert!(clear_failure.contains("- verify-published"));
+}
+
+#[test]
+fn release_artifact_builds_survive_recovery_skips_but_fail_closed_on_required_builds() {
+    let workflow = release_workflow();
+    let local = job_section(workflow, "build-local-artifacts");
+    let global = job_section(workflow, "build-global-artifacts");
+    let host = job_section(workflow, "host");
+
+    for section in [local, global, host] {
+        assert!(section.contains("always()"));
+        assert!(section.contains("needs.prepare.result == 'success'"));
+        assert!(section.contains("needs.plan.result == 'success'"));
+        assert!(section.contains("needs.prepare.outputs.prepared == 'true'"));
+    }
+
+    assert!(local.contains("artifacts_matrix.include != null"));
+    assert!(global.contains(
+        "artifacts_matrix.include == null || needs.build-local-artifacts.result == 'success'"
+    ));
+    assert!(host.contains("needs.build-global-artifacts.result == 'success'"));
+    assert!(host.contains(
+        "artifacts_matrix.include == null || needs.build-local-artifacts.result == 'success'"
+    ));
+    assert!(!host.contains("needs.build-global-artifacts.result == 'skipped'"));
+    assert!(!host.contains("needs.build-local-artifacts.result == 'skipped'"));
+}
+
+#[test]
+fn release_host_checkout_fetches_full_history_for_finalizer_ancestry_validation() {
+    let host = job_section(release_workflow(), "host");
+    let checkout = host
+        .find("uses: actions/checkout@v4")
+        .expect("host must check out the release tag");
+    let finalizer = host
+        .find("Finish Homeboy release pipeline at tag")
+        .expect("host must finalize the release");
+
+    assert!(checkout < finalizer);
+    assert!(host[checkout..finalizer].contains("fetch-depth: 0"));
 }
 
 #[test]
