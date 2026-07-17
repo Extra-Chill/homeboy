@@ -430,6 +430,7 @@ impl JobStore {
         }
         request.validate_command_assets()?;
         let secret_env_plan = request.normalize();
+        reject_inline_durable_secret_env(&request, &secret_env_plan)?;
         super::with_runner_job_preparation(|p| {
             p.validate_lab_runner_workload_dispatch(
                 request.lab_runner_workload.as_ref(),
@@ -823,6 +824,34 @@ impl JobStore {
 
         Ok(())
     }
+}
+
+fn reject_inline_durable_secret_env(
+    request: &RemoteRunnerJobRequest,
+    secret_env_plan: &SecretEnvPlan,
+) -> Result<()> {
+    let inline_secret_names = secret_env_plan
+        .secret_env_names()
+        .into_iter()
+        .filter(|name| {
+            request
+                .env
+                .get(name)
+                .is_some_and(|value| !value.is_empty() && value != "<redacted>")
+        })
+        .collect::<Vec<_>>();
+    if inline_secret_names.is_empty() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "env",
+        "durable reverse-runner jobs cannot accept inline secret env values",
+        Some("durable_reverse_runner_inline_secret_env".to_string()),
+        Some(vec![
+            format!("Inline secret variables: {}", inline_secret_names.join(", ")),
+            "Configure named runner secret_env or SecretEnvPlan references so the worker can rehydrate secrets after replay.".to_string(),
+        ]),
+    ))
 }
 
 fn default_runner_exec_operation() -> String {
