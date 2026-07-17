@@ -89,6 +89,12 @@ pub enum AgentTaskPromotionStatus {
     VerificationPending,
     Applied,
     GateFailed,
+    /// A provider produced no patch, but the pinned candidate workspace passed
+    /// every declared deterministic verification gate.
+    VerifiedNoChanges,
+    /// A provider produced no patch and the pinned candidate workspace failed
+    /// deterministic verification. The candidate remains available for repair.
+    NoChangesGateFailed,
     NoChanges,
 }
 
@@ -113,6 +119,8 @@ impl AgentTaskPromotionStatus {
             Self::VerificationPending => "patch_promoted_verification_pending",
             Self::Applied => "patch_promoted_no_pr",
             Self::GateFailed => "patch_promoted_gates_failed",
+            Self::VerifiedNoChanges => "no_patch_verified",
+            Self::NoChangesGateFailed => "no_patch_gates_failed",
             Self::DryRun => "patch_not_promoted_dry_run",
             Self::NoChanges => "patch_not_promoted_no_changes",
         }

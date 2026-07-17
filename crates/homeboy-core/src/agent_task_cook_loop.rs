@@ -56,6 +56,7 @@ pub struct AgentTaskCookLoopReport {
 pub enum AgentTaskCookLoopStatus {
     GreenCompleted,
     NoChanges,
+    NoOpGateFailed,
     RetryRequested,
     RetriesExhausted,
 }
@@ -75,6 +76,7 @@ pub enum AgentTaskCookLoopQualityClassification {
     PatchProduced,
     LargeOrRiskyPatch,
     VerifiedPatch,
+    VerifiedNoOp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,6 +117,8 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     let follow_up_request = should_retry.then(|| build_follow_up_request(&options, &failed_gates));
     let status = if follow_up_request.is_some() {
         AgentTaskCookLoopStatus::RetryRequested
+    } else if options.promotion_report.status == AgentTaskPromotionStatus::NoChangesGateFailed {
+        AgentTaskCookLoopStatus::NoOpGateFailed
     } else if quality.classification == AgentTaskCookLoopQualityClassification::NoChanges {
         AgentTaskCookLoopStatus::NoChanges
     } else if failed_gates.is_empty() {
@@ -143,6 +147,18 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
 fn classify_cook_loop_quality(report: &AgentTaskPromotionReport) -> AgentTaskCookLoopQualityReport {
     let changed_file_count = report.changed_files.len();
     if changed_file_count == 0 {
+        if report.status == AgentTaskPromotionStatus::VerifiedNoChanges {
+            return AgentTaskCookLoopQualityReport {
+                classification: AgentTaskCookLoopQualityClassification::VerifiedNoOp,
+                summary:
+                    "provider produced no patch and the pinned candidate passed deterministic gates"
+                        .to_string(),
+                signals: vec![
+                    "changed_files=0".to_string(),
+                    "verification=passed".to_string(),
+                ],
+            };
+        }
         return AgentTaskCookLoopQualityReport {
             classification: AgentTaskCookLoopQualityClassification::NoChanges,
             summary: "cook produced no changed files; task likely still requires review or retry"
@@ -556,6 +572,44 @@ mod tests {
         );
         assert!(report.quality.summary.contains("no changed files"));
         assert!(report.follow_up_request.is_none());
+    }
+
+    #[test]
+    fn verified_no_op_completes_and_failed_no_op_is_terminal_failure() {
+        let verified = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report_with_changed_files(
+                AgentTaskPromotionStatus::VerifiedNoChanges,
+                vec![green_gate()],
+                Vec::new(),
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-verified-no-op".to_string()),
+            current_diff: String::new(),
+            metadata: Value::Null,
+        });
+        assert_eq!(verified.status, AgentTaskCookLoopStatus::GreenCompleted);
+        assert_eq!(
+            verified.quality.classification,
+            AgentTaskCookLoopQualityClassification::VerifiedNoOp
+        );
+
+        let failed = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report_with_changed_files(
+                AgentTaskPromotionStatus::NoChangesGateFailed,
+                vec![failed_gate()],
+                Vec::new(),
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-failed-no-op".to_string()),
+            current_diff: String::new(),
+            metadata: Value::Null,
+        });
+        assert_eq!(failed.status, AgentTaskCookLoopStatus::NoOpGateFailed);
+        assert!(failed.follow_up_request.is_none());
     }
 
     #[test]

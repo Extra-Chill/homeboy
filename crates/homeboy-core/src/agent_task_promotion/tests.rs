@@ -1223,6 +1223,116 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
 }
 
 #[test]
+fn empty_patch_runs_public_and_private_gates_against_pinned_candidate() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "homeboy@example.test"]);
+    git(&repo, &["config", "user.name", "Homeboy Test"]);
+    std::fs::write(repo.join("lib.rs"), "candidate\n").expect("write candidate");
+    git(&repo, &["add", "lib.rs"]);
+    git(&repo, &["commit", "-m", "candidate"]);
+    let revision = git_head(&repo, "HEAD");
+    let (source_path, source) = write_empty_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(repo.clone()),
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("run-empty".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: Some(repo.clone()),
+            base_ref: None,
+            task_base_sha: None,
+            to_worktree: "repo@candidate".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["public-check".to_string()],
+                private_verify: vec!["private-check".to_string()],
+                private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("empty candidate verifies");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::VerifiedNoChanges);
+    assert_eq!(report.target.head.as_deref(), Some(revision.as_str()));
+    assert_eq!(report.provenance["verified_revision"], revision);
+    assert_eq!(provider.apply_calls.len(), 0);
+    assert_eq!(provider.verify_calls.len(), 2);
+    assert_eq!(provider.verify_calls[0].0, repo);
+    assert_eq!(provider.verify_calls[1].2, AgentTaskGateVisibility::Private);
+    assert_eq!(
+        provider.verify_calls[1].3,
+        AgentTaskGateRevealPolicy::SummaryOnly
+    );
+}
+
+#[test]
+fn empty_patch_failing_gate_is_reported_against_pinned_candidate() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "homeboy@example.test"]);
+    git(&repo, &["config", "user.name", "Homeboy Test"]);
+    std::fs::write(repo.join("lib.rs"), "candidate\n").expect("write candidate");
+    git(&repo, &["add", "lib.rs"]);
+    git(&repo, &["commit", "-m", "candidate"]);
+    let (source_path, source) = write_empty_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(repo.clone()),
+        verify_exit_code: 7,
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("run-empty-fail".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: Some(repo.clone()),
+            base_ref: None,
+            task_base_sha: None,
+            to_worktree: "repo@candidate".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["failing-check".to_string()],
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("failed no-op gate is recorded");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::NoChangesGateFailed);
+    assert_eq!(
+        report.deterministic_gates[0].status,
+        crate::agent_task_gate::AgentTaskGateStatus::Failed
+    );
+    assert_eq!(
+        report.gate_results[0].status,
+        crate::gate::HomeboyGateStatus::Failed
+    );
+    assert_eq!(provider.apply_calls.len(), 0);
+    assert_eq!(provider.verify_calls[0].0, repo);
+}
+
+#[test]
 fn promote_no_op_outcome_uses_audited_committed_candidate() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");

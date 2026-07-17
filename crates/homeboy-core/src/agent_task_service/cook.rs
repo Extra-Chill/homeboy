@@ -654,6 +654,19 @@ where
                     1,
                 ));
             }
+            AgentTaskCookLoopStatus::NoOpGateFailed => {
+                return Ok(cook_report(
+                    cook_id,
+                    "no_op_gate_failed",
+                    attempts,
+                    None,
+                    Some(
+                        "provider produced no patch and the pinned candidate failed deterministic verification"
+                            .to_string(),
+                    ),
+                    1,
+                ));
+            }
             AgentTaskCookLoopStatus::RetryRequested => {
                 let Some(mut follow_up_request) = follow_up_request else {
                     return Ok(cook_report(
