@@ -130,6 +130,7 @@ const KNOWN_RIG_TOP_LEVEL_FIELDS: &[&str] = &[
     "requirements",
     "resources",
     "services",
+    "shared_templates",
     "shared_paths",
     "symlinks",
     "trace",
@@ -482,7 +483,13 @@ fn template_source_root(root: &Path, file: &Path) -> Result<PathBuf> {
         description: String::new(),
         rig_path: file.to_path_buf(),
     };
-    super::install::local_package_source_root_for_dependencies(root, &[rig])
+    super::install::local_package_source_root_for_dependencies(root, &[rig])?;
+    root.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("resolve rig package root {}", root.display())),
+        )
+    })
 }
 
 fn portability_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
@@ -1126,7 +1133,7 @@ mod tests {
             rig_dir.join("rig.json"),
             r#"{
                 "id": "browser-coverage",
-                "package_dependencies": ["../../shared/wordpress-plugin"],
+                "shared_templates": ["../../../../shared/wordpress-plugin"],
                 "extends": "../../../../shared/wordpress-plugin/browser-coverage.base.json",
                 "trace_profiles": { "smoke": { "scenario": "browser-coverage" } }
             }"#,
