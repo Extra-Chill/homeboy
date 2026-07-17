@@ -200,7 +200,7 @@ pub(crate) fn lab_runner_homeboy_metadata(
     status: &RunnerStatusReport,
 ) -> serde_json::Value {
     let controller_version = homeboy_product_identity::product_version();
-    let controller_build_identity = homeboy_core::build_identity::current().display;
+    let controller_build_identity = homeboy_product_identity::build_identity().display;
     let refresh_commands = vec![
         runner_homeboy_align_to_controller_command(runner_id),
         format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),

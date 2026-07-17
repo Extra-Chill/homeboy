@@ -1828,6 +1828,25 @@ mod tests {
     }
 
     #[test]
+    fn matching_product_build_runner_accepts_jobs() {
+        let availability = RunnerAvailability::from_status_parts(
+            "homeboy-lab",
+            true,
+            false,
+            0,
+            &RunnerActiveJobState::Available,
+            Some(8),
+        );
+
+        assert!(availability.accepts_jobs);
+        assert_ne!(
+            env!("CARGO_PKG_VERSION"),
+            homeboy_product_identity::product_version(),
+            "internal runner crate versions must not make matching product builds stale"
+        );
+    }
+
+    #[test]
     fn at_capacity_runner_still_rejects_even_with_failed_active_job_poll() {
         // A genuinely busy runner stays blocked; the soft active-job signal must
         // not let a saturated runner through.
