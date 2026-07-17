@@ -12,6 +12,7 @@ mod materializer;
 mod provenance;
 mod pull;
 mod snapshot;
+mod snapshot_provider;
 mod sync;
 mod types;
 mod util;
@@ -41,6 +42,7 @@ pub(crate) use provenance::{
     materialize_verified_lab_snapshot_git_baseline, verify_lab_workspace,
     verify_lab_workspace_from_env, verify_lab_workspace_git_root, VerifiedLabWorkspaceProvenance,
 };
+pub use snapshot_provider::register as register_workspace_snapshot_provider;
 pub(crate) use snapshot::{
     copy_snapshot_to_directory, effective_snapshot_excludes, local_snapshot_stats,
     materialize_snapshot, materialize_snapshot_git, snapshot_identity, workspace_content_hash,
