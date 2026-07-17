@@ -15,9 +15,6 @@ pub const EXTENSION_MATERIALIZATION_SOURCE_SCHEMA: &str =
 pub const EXTENSION_CONTRACT_PRODUCER_SCHEMA: &str = "homeboy/extension-contract-producer/v1";
 
 // Keep broad manifest wiring here while leaf config structs live in focused files.
-pub use super::manifest_action_config::{
-    ActionConfig, InputConfig, RuntimeConfig, SelectOption, SettingConfig,
-};
 pub use super::manifest_config::{
     AutofixVerifyConfig, BenchConfig, BuildConfig, CliAutoFlag, CliAutoFlagCondition, CliConfig,
     CliHelpConfig, DatabaseCliConfig, DatabaseConfig, DeployOverride, DeployOwnerHint,
@@ -29,6 +26,9 @@ pub use super::manifest_config::{
     TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
     VersionPatternConfig,
 };
+pub use homeboy_extension_contract::manifest_action_config::{
+    ActionConfig, InputConfig, RuntimeConfig, SelectOption, SettingConfig,
+};
 mod ci_config;
 pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
 pub use ci_config::{
@@ -37,36 +37,7 @@ pub use ci_config::{
 pub use homeboy_extension_contract::DeployArchiveInstallPolicy;
 pub use homeboy_extension_contract::{TestPassthroughFilter, TestPassthroughFilterStrategy};
 
-/// Type of action that can be executed by a extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ActionType {
-    Api,
-    Command,
-    Builtin,
-}
-
-/// Builtin action types for Desktop app (copy, export operations).
-/// CLI parses these but does not execute them - Desktop implements the behavior.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum BuiltinAction {
-    CopyColumn,
-    ExportCsv,
-    CopyJson,
-}
-
-/// HTTP method for API actions.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum HttpMethod {
-    #[default]
-    Get,
-    Post,
-    Put,
-    Patch,
-    Delete,
-}
+pub use homeboy_extension_contract::action_types::{ActionType, BuiltinAction, HttpMethod};
 
 // ============================================================================
 // Capability Groups

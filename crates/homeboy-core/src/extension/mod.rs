@@ -21,7 +21,6 @@ mod lifecycle;
 pub mod lint;
 mod maintenance;
 mod manifest;
-mod manifest_action_config;
 mod manifest_config;
 mod manifest_sidecar;
 mod refactor_protocol;
