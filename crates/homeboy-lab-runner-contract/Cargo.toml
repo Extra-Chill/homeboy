@@ -1,5 +1,5 @@
 [package]
-name = "homeboy-runner-contract"
+name = "homeboy-lab-runner-contract"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -9,7 +9,7 @@ repository = "https://github.com/Extra-Chill/homeboy"
 publish = false
 
 [lib]
-name = "homeboy_runner_contract"
+name = "homeboy_lab_runner_contract"
 path = "src/lib.rs"
 
 [dependencies]

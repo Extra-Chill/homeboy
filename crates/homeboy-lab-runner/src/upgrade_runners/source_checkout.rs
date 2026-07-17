@@ -5,11 +5,11 @@ use crate::RunnerExecOptions;
 use homeboy_core::upgrade::current_version;
 use homeboy_core::upgrade::InstallMethod;
 use homeboy_core::Result;
-use homeboy_runner_contract::RunnerCapabilityPreflight;
-use homeboy_runner_contract::RunnerKind;
-use homeboy_runner_contract::RunnerRequiredTool;
-use homeboy_runner_contract::RunnerWorkspaceSyncMode;
-use homeboy_runner_contract::RunnerWorkspaceSyncOptions;
+use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
+use homeboy_lab_runner_contract::RunnerKind;
+use homeboy_lab_runner_contract::RunnerRequiredTool;
+use homeboy_lab_runner_contract::RunnerWorkspaceSyncMode;
+use homeboy_lab_runner_contract::RunnerWorkspaceSyncOptions;
 use std::path::Path;
 use std::process::Command;
 

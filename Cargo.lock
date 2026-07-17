@@ -712,12 +712,12 @@ dependencies = [
  "homeboy-error",
  "homeboy-finding",
  "homeboy-lab-contract",
+ "homeboy-lab-runner",
  "homeboy-output",
  "homeboy-paths",
  "homeboy-process",
  "homeboy-product-identity",
  "homeboy-redaction",
- "homeboy-runner",
  "keyring",
  "libc",
  "regex",
@@ -769,12 +769,12 @@ dependencies = [
  "homeboy-fuzz",
  "homeboy-issues",
  "homeboy-lab-contract",
+ "homeboy-lab-runner",
  "homeboy-output",
  "homeboy-paths",
  "homeboy-process",
  "homeboy-product-identity",
  "homeboy-redaction",
- "homeboy-runner",
  "homeboy-triage",
  "homeboy-tunnel",
  "libc",
@@ -846,12 +846,12 @@ dependencies = [
  "homeboy-extension-contract",
  "homeboy-finding",
  "homeboy-lab-contract",
+ "homeboy-lab-runner-contract",
  "homeboy-output",
  "homeboy-paths",
  "homeboy-process",
  "homeboy-product-identity",
  "homeboy-redaction",
- "homeboy-runner-contract",
  "keyring",
  "libc",
  "regex",
@@ -945,6 +945,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-lab-runner"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "clap",
+ "glob",
+ "glob-match",
+ "homeboy-cli-contract",
+ "homeboy-core",
+ "homeboy-fuzz",
+ "homeboy-lab-runner-contract",
+ "homeboy-product-identity",
+ "libc",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shellexpand",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "homeboy-lab-runner-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "homeboy-output"
 version = "0.1.0"
 dependencies = [
@@ -982,39 +1015,6 @@ name = "homeboy-redaction"
 version = "0.1.0"
 dependencies = [
  "regex",
- "serde_json",
-]
-
-[[package]]
-name = "homeboy-runner"
-version = "0.1.0"
-dependencies = [
- "base64",
- "chrono",
- "clap",
- "glob",
- "glob-match",
- "homeboy-cli-contract",
- "homeboy-core",
- "homeboy-fuzz",
- "homeboy-product-identity",
- "homeboy-runner-contract",
- "libc",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "shellexpand",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "homeboy-runner-contract"
-version = "0.1.0"
-dependencies = [
- "serde",
  "serde_json",
 ]
 

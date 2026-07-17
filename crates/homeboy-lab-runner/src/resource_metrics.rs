@@ -43,7 +43,7 @@ fn require_process_tree_isolation() -> Result<()> {
 // Resource-metrics data types now live in homeboy-runner-contract (pure serde,
 // embedded in core api_jobs records) so core has no core -> runner edge.
 // Re-exported so runner-internal call sites resolve unchanged.
-pub use homeboy_runner_contract::{
+pub use homeboy_lab_runner_contract::{
     RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
 };
 

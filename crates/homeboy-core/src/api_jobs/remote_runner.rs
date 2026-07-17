@@ -17,7 +17,7 @@ use crate::runner_execution_envelope::{
 };
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
-use homeboy_runner_contract::{RunnerMutationArtifacts, RunnerResourceMetrics};
+use homeboy_lab_runner_contract::{RunnerMutationArtifacts, RunnerResourceMetrics};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobArtifactMetadata {
@@ -161,7 +161,7 @@ impl RemoteRunnerJobRequest {
             env: request
                 .env
                 .into_iter()
-                .filter(|(name, _)| !homeboy_runner_contract::is_internal_control_env(name))
+                .filter(|(name, _)| !homeboy_lab_runner_contract::is_internal_control_env(name))
                 .collect(),
             source_snapshot: request.source_snapshot,
             require_paths: request.require_paths,
@@ -202,7 +202,7 @@ impl RemoteRunnerJobRequest {
         let mut public = self.clone();
         public
             .env
-            .retain(|name, _| !homeboy_runner_contract::is_internal_control_env(name));
+            .retain(|name, _| !homeboy_lab_runner_contract::is_internal_control_env(name));
         let mut secret_env_name_values = self.secret_env_plan.secret_env_names();
         secret_env_name_values.extend(self.secret_env_names.clone());
         let secret_env_names = secret_env_name_values

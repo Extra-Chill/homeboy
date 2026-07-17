@@ -350,7 +350,7 @@ where
         "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
     });
-    if let Ok(runner_id) = std::env::var(homeboy_runner_contract::RUNNER_ID_ENV) {
+    if let Ok(runner_id) = std::env::var(homeboy_lab_runner_contract::RUNNER_ID_ENV) {
         if !runner_id.trim().is_empty() {
             metadata["runner_id"] = json!(runner_id);
         }

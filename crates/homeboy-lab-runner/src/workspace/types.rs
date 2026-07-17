@@ -31,7 +31,7 @@ pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
 // they now live in the shared runner-contract crate so core can name them
 // without a core -> runner edge. Re-exported so internal/CLI call sites resolve
 // unchanged.
-pub use homeboy_runner_contract::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
+pub use homeboy_lab_runner_contract::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerWorkspaceSyncOutput {
@@ -408,7 +408,7 @@ pub(super) struct RunnerWorkspaceMetadata {
 
 // RunnerWorkspaceCurrentSummary now lives in the shared runner-contract crate
 // (core's dev_run names it). Re-exported so runner-internal call sites resolve.
-pub use homeboy_runner_contract::RunnerWorkspaceCurrentSummary;
+pub use homeboy_lab_runner_contract::RunnerWorkspaceCurrentSummary;
 
 /// File + byte counts for a synced/snapshotted workspace tree.
 ///
@@ -417,7 +417,7 @@ pub use homeboy_runner_contract::RunnerWorkspaceCurrentSummary;
 /// `#[serde(flatten)]` to preserve the historical top-level JSON keys.
 // ByteFileCounts now lives in the shared runner-contract crate (core's dev_run
 // names it). Re-exported so runner-internal call sites resolve.
-pub use homeboy_runner_contract::ByteFileCounts;
+pub use homeboy_lab_runner_contract::ByteFileCounts;
 
 pub(super) type SnapshotStats = ByteFileCounts;
 

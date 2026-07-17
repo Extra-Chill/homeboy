@@ -1,5 +1,5 @@
 [package]
-name = "homeboy-runner"
+name = "homeboy-lab-runner"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -9,7 +9,7 @@ repository = "https://github.com/Extra-Chill/homeboy"
 publish = false
 
 [lib]
-name = "homeboy_runner"
+name = "homeboy_lab_runner"
 path = "src/lib.rs"
 
 [dependencies]
@@ -17,7 +17,7 @@ homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-fuzz = { version = "0.1.0", path = "../homeboy-fuzz" }
 homeboy-cli-contract = { version = "0.1.0", path = "../homeboy-cli-contract" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
-homeboy-runner-contract = { version = "0.1.0", path = "../homeboy-runner-contract" }
+homeboy-lab-runner-contract = { version = "0.1.0", path = "../homeboy-lab-runner-contract" }
 base64 = "0.22"
 chrono = "0.4"
 clap = { version = "4.5", features = ["derive", "string"] }

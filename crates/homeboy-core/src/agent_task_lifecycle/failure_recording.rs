@@ -827,7 +827,7 @@ pub(crate) fn project_terminal_artifacts(
                 continue;
             }
             if let Some(runner_id) = record.runner_id().filter(|runner_id| {
-                std::env::var(homeboy_runner_contract::RUNNER_ID_ENV)
+                std::env::var(homeboy_lab_runner_contract::RUNNER_ID_ENV)
                     .ok()
                     .as_deref()
                     != Some(*runner_id)

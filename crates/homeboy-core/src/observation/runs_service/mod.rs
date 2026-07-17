@@ -33,7 +33,7 @@ use crate::engine::temp::CleanupSizeTotals;
 use crate::execution_contract::EXECUTION_CONTRACT;
 use crate::Error;
 use crate::Result;
-use homeboy_runner_contract::RunnerArtifactRef;
+use homeboy_lab_runner_contract::RunnerArtifactRef;
 
 /// Output of a successful artifact byte retrieval (whether the bytes came
 /// from a locally-recorded file or from a remote runner).

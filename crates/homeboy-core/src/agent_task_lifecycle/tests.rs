@@ -2304,10 +2304,10 @@ fn status_backfills_legacy_runner_provenance_and_mirrors_a_verified_projection_i
                 }
             }
         });
-        let session = homeboy_runner_contract::RunnerSession {
+        let session = homeboy_lab_runner_contract::RunnerSession {
             runner_id: "local".to_string(),
-            mode: homeboy_runner_contract::RunnerTunnelMode::DirectSsh,
-            role: homeboy_runner_contract::RunnerSessionRole::Controller,
+            mode: homeboy_lab_runner_contract::RunnerTunnelMode::DirectSsh,
+            role: homeboy_lab_runner_contract::RunnerSessionRole::Controller,
             server_id: None,
             controller_id: None,
             broker_url: None,
@@ -2387,7 +2387,7 @@ fn status_backfills_legacy_runner_provenance_and_mirrors_a_verified_projection_i
                         content_type: Some("text/x-patch".to_string()),
                         size_bytes: Some(11),
                         sha256: Some(format!("{:x}", sha2::Sha256::digest(b"patch bytes"))),
-                        artifact_ref: homeboy_runner_contract::RunnerArtifactRef {
+                        artifact_ref: homeboy_lab_runner_contract::RunnerArtifactRef {
                             artifact_id: "patch".to_string(),
                             name: None,
                             path: Some(path.to_string()),

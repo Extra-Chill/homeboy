@@ -49,7 +49,7 @@ homeboy-product-identity = { path = "crates/homeboy-product-identity" }
 homeboy-engine-primitives = { path = "crates/homeboy-engine-primitives" }
 homeboy-cli = { path = "crates/homeboy-cli" }
 homeboy-core = { path = "crates/homeboy-core" }
-homeboy-runner = { path = "crates/homeboy-runner" }
+homeboy-lab-runner = { path = "crates/homeboy-lab-runner" }
 homeboy-lab-contract = { path = "crates/homeboy-lab-contract" }
 homeboy-redaction = { path = "crates/homeboy-redaction" }
 
