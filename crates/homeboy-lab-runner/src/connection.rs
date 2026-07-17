@@ -344,7 +344,7 @@ pub fn connect_with_orphan_adoption(
         mode: RunnerTunnelMode::DirectSsh,
         role: RunnerSessionRole::Controller,
         server_id: Some(server_id),
-        controller_id: None,
+        controller_id: Some(controller_id()),
         broker_url: None,
         remote_daemon_address: Some(daemon.address),
         local_port: Some(local_port),
@@ -730,7 +730,10 @@ fn register_reverse_session_with_broker(broker_url: &str, session: &RunnerSessio
 pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
-    let session = read_session(runner_id)?;
+    // A Cook handoff can cross controller identities after readiness accepted a
+    // direct SSH tunnel. Reuse that still-live tunnel rather than treating the
+    // controller-local record lookup as a daemon disconnect.
+    let session = read_session_or_live_peer(runner_id)?;
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
@@ -1434,7 +1437,7 @@ pub(crate) fn local_live_session(
     runner_id: &str,
     timeout: Duration,
 ) -> Result<Option<RunnerSession>> {
-    let Some(session) = read_session(runner_id)? else {
+    let Some(session) = read_session_or_live_peer(runner_id)? else {
         return Ok(None);
     };
     Ok(session_is_live_with_timeout(&session, timeout).then_some(session))

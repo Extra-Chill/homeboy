@@ -2,6 +2,9 @@ use super::*;
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonRecoveryEvidence};
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 pub(super) const REMOTE_DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(super) fn resolve_ssh_runner(runner: &Runner) -> Result<Option<(String, Server, SshClient)>> {
@@ -129,12 +132,13 @@ pub(super) fn open_loopback_tunnel(
         format!("{}@{}", server.user, server.host),
     ]);
 
-    let child = std::process::Command::new("ssh")
+    let mut command = std::process::Command::new("ssh");
+    command
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+    let child = spawn_tunnel_process(&mut command);
     match child {
         Ok(child) => SshTunnelOutput {
             pid: Some(child.id()),
@@ -147,6 +151,22 @@ pub(super) fn open_loopback_tunnel(
             success: false,
         },
     }
+}
+
+pub(super) fn spawn_tunnel_process(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    command.spawn()
 }
 
 #[derive(Debug, Clone)]

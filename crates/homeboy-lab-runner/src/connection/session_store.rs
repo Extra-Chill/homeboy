@@ -98,6 +98,20 @@ pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
     read_session_for_controller(runner_id, &controller_id())
 }
 
+/// Resolve this controller's session, or borrow a peer's live direct-SSH
+/// tunnel for an in-process handoff. Borrowing never writes a controller
+/// record, so only the original controller may later tear down that tunnel.
+pub(super) fn read_session_or_live_peer(runner_id: &str) -> Result<Option<RunnerSession>> {
+    let session = read_session(runner_id)?;
+    if session.as_ref().is_some_and(session_is_live) {
+        return Ok(session);
+    }
+
+    let directory = paths::runner_sessions_dir()?.join(runner_id);
+    let peer = live_peer_session_in(&directory, None, session_is_live)?;
+    Ok(peer.or(session))
+}
+
 pub(super) fn read_session_for_controller(
     runner_id: &str,
     controller_id: &str,
@@ -218,10 +232,60 @@ pub(super) fn has_live_peer_session(session: &RunnerSession) -> Result<bool> {
     Ok(false)
 }
 
+fn live_peer_session_in(
+    directory: &PathBuf,
+    controller_id: Option<&str>,
+    is_live: impl Fn(&RunnerSession) -> bool,
+) -> Result<Option<RunnerSession>> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some("read runner controller sessions".to_string()),
+            ))
+        }
+    };
+    let mut live_peer: Option<RunnerSession> = None;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read runner controller session".to_string()),
+            )
+        })?;
+        let Some(peer) = read_session_at(&entry.path())? else {
+            continue;
+        };
+        if controller_id
+            .is_none_or(|controller_id| peer.controller_id.as_deref() != Some(controller_id))
+            && peer.mode == RunnerTunnelMode::DirectSsh
+            && is_live(&peer)
+        {
+            if let Some(existing) = &live_peer {
+                if existing.remote_daemon_address != peer.remote_daemon_address
+                    || existing.remote_daemon_lease_id != peer.remote_daemon_lease_id
+                    || existing.remote_daemon_pid != peer.remote_daemon_pid
+                {
+                    // Two live sessions for this runner disagree on daemon
+                    // identity. Refuse an ambiguous handoff rather than route
+                    // a Cook job to an arbitrary peer tunnel.
+                    return Ok(None);
+                }
+            } else {
+                live_peer = Some(peer);
+            }
+        }
+    }
+    Ok(live_peer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{RunnerSessionRole, RunnerTunnelMode};
+    use tempfile::TempDir;
 
     fn session(controller_id: &str, lease_id: &str) -> RunnerSession {
         RunnerSession {
@@ -267,6 +331,112 @@ mod tests {
         assert_ne!(
             stale.remote_daemon_lease_id,
             replacement.remote_daemon_lease_id
+        );
+    }
+
+    #[test]
+    fn cook_handoff_adopts_a_live_peer_direct_ssh_session_without_claiming_it() {
+        let root = TempDir::new().expect("session directory");
+        let peer = session("cook-readiness", "lease-accepted");
+        write_session_at(&root.path().join("cook-readiness.json"), &peer)
+            .expect("write readiness session");
+
+        let adopted =
+            live_peer_session_in(&root.path().to_path_buf(), Some("cook-handoff"), |_| true)
+                .expect("read live peer")
+                .expect("accepted session");
+
+        assert_eq!(
+            adopted.remote_daemon_lease_id.as_deref(),
+            Some("lease-accepted")
+        );
+        assert_eq!(adopted.controller_id.as_deref(), Some("cook-readiness"));
+        assert!(root.path().join("cook-readiness.json").exists());
+        assert!(!root.path().join("cook-handoff.json").exists());
+    }
+
+    #[test]
+    fn fresh_peer_session_survives_repeated_cook_preflight_and_handoff_reads() {
+        let root = TempDir::new().expect("session directory");
+        let peer = session("cook-readiness", "lease-accepted");
+        let path = root.path().join("cook-readiness.json");
+        write_session_at(&path, &peer).expect("write readiness session");
+
+        let preflight = live_peer_session_in(&root.path().to_path_buf(), Some("cook"), |_| true)
+            .expect("read preflight session")
+            .expect("live preflight session");
+        let handoff = live_peer_session_in(&root.path().to_path_buf(), Some("cook"), |_| true)
+            .expect("read handoff session")
+            .expect("live handoff session");
+
+        assert_eq!(preflight, peer);
+        assert_eq!(handoff, peer);
+        assert_eq!(
+            read_session_at(&path).expect("read stored session"),
+            Some(peer)
+        );
+    }
+
+    #[test]
+    fn concurrent_status_observers_do_not_mutate_a_borrowed_session() {
+        use std::sync::{Arc, Barrier};
+
+        let root = TempDir::new().expect("session directory");
+        let peer = session("cook-readiness", "lease-accepted");
+        let path = root.path().join("cook-readiness.json");
+        write_session_at(&path, &peer).expect("write readiness session");
+        let directory = Arc::new(root.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(3));
+
+        let observers: Vec<_> = ["status-a", "status-b"]
+            .into_iter()
+            .map(|controller| {
+                let directory = Arc::clone(&directory);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    live_peer_session_in(&directory, Some(controller), |_| true)
+                        .expect("observe peer session")
+                        .expect("live peer session")
+                })
+            })
+            .collect();
+
+        barrier.wait();
+        for observer in observers {
+            assert_eq!(observer.join().expect("status observer"), peer);
+        }
+        assert_eq!(
+            read_session_at(&path).expect("read stored session"),
+            Some(peer)
+        );
+    }
+
+    #[test]
+    fn repeated_peer_handoffs_reject_ambiguous_daemon_ownership_without_mutation() {
+        let root = TempDir::new().expect("session directory");
+        let accepted = session("cook-readiness", "lease-accepted");
+        let conflicting = session("other-controller", "lease-other");
+        let accepted_path = root.path().join("cook-readiness.json");
+        let conflicting_path = root.path().join("other-controller.json");
+        write_session_at(&accepted_path, &accepted).expect("write accepted session");
+        write_session_at(&conflicting_path, &conflicting).expect("write conflicting session");
+
+        for _ in 0..2 {
+            assert!(
+                live_peer_session_in(&root.path().to_path_buf(), Some("cook"), |_| true)
+                    .expect("read peer sessions")
+                    .is_none()
+            );
+        }
+
+        assert_eq!(
+            read_session_at(&accepted_path).expect("read accepted session"),
+            Some(accepted)
+        );
+        assert_eq!(
+            read_session_at(&conflicting_path).expect("read conflicting session"),
+            Some(conflicting)
         );
     }
 }
@@ -353,6 +523,11 @@ pub(super) fn terminate_pid(pid: u32) {
     }
     #[cfg(unix)]
     unsafe {
-        let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        // Direct SSH tunnels lead their own group so Cook's command cleanup
+        // cannot tear them down. Stop that whole group on explicit disconnect,
+        // with a root-PID fallback for sessions recorded before isolation.
+        if libc::kill(-(pid as libc::pid_t), libc::SIGTERM) != 0 {
+            let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
     }
 }
