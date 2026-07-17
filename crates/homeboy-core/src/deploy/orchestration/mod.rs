@@ -158,6 +158,15 @@ pub(super) fn deploy_components(
         checkout.verify()?;
         checkout.hydrate_dependencies(config.skip_deps_hydration)?;
     }
+    if let Some(artifact) = config.prepared_artifact.as_ref() {
+        for checkout in &exact_ref_checkouts {
+            artifact.validate_exact_source(
+                &checkout.component.id,
+                config.expected_version.as_deref(),
+                &checkout.identity.resolved_sha,
+            )?;
+        }
+    }
     let components = if exact_ref_checkouts.is_empty() {
         components
     } else {

@@ -221,6 +221,9 @@ pub(crate) struct PreparationConfig {
     pub requested_ref: Option<String>,
     pub tagged: bool,
     pub prepared_artifact: Option<PreparedDeployArtifact>,
+    /// An exact-ref checkout was materialized by the caller and is the only
+    /// eligible local source for this payload.
+    pub exact_ref_materialized: bool,
 }
 
 impl From<&DeployConfig> for PreparationConfig {
@@ -236,6 +239,7 @@ impl From<&DeployConfig> for PreparationConfig {
             requested_ref: config.requested_ref.clone(),
             tagged: config.tagged,
             prepared_artifact: config.prepared_artifact.clone(),
+            exact_ref_materialized: false,
         }
     }
 }
@@ -457,21 +461,34 @@ fn prepare_payload(
         .unwrap_or(component);
     let exact_ref = checkout.as_ref().map(|checkout| checkout.identity.clone());
 
-    let release_artifact = match release_artifact_plan(
-        &component,
-        &DeployConfig::from_preparation(request),
-        false,
-        false,
-    ) {
-        ReleaseArtifactPlan::Reuse { tag, .. } => Some(match retained_release_artifact {
-            Some(artifact) => artifact,
-            None => resolve_planned_release_artifact(&component, &tag, release_artifacts).map_err(
-                |message| {
-                    Error::validation_invalid_argument("releaseArtifact", message, None, None)
-                },
-            )?,
-        }),
-        ReleaseArtifactPlan::LocalBuild { .. } => None,
+    // A successful extension build is not proof that it overwrote an artifact
+    // already present in the selected source tree. Remove every local candidate
+    // first: the build must produce exact-ref bytes, or preparation fails closed.
+    if exact_ref.is_some() || request.config.exact_ref_materialized {
+        remove_exact_ref_artifacts(&component)?;
+    }
+
+    let release_artifact = if request.config.exact_ref_materialized {
+        // `requested_ref` is intentionally cleared after materialization so the
+        // prepared payload does not create another worktree. Keep its source
+        // policy explicit: an exact ref cannot fall back to a release asset.
+        None
+    } else {
+        match release_artifact_plan(
+            &component,
+            &DeployConfig::from_preparation(request),
+            false,
+            false,
+        ) {
+            ReleaseArtifactPlan::Reuse { tag, .. } => Some(match retained_release_artifact {
+                Some(artifact) => artifact,
+                None => resolve_planned_release_artifact(&component, &tag, release_artifacts)
+                    .map_err(|message| {
+                        Error::validation_invalid_argument("releaseArtifact", message, None, None)
+                    })?,
+            }),
+            ReleaseArtifactPlan::LocalBuild { .. } => None,
+        }
     };
     let mut generated_source_artifact = None;
     if release_artifact.is_none() && !request.config.skip_build {
@@ -626,6 +643,85 @@ fn artifact_path(component: &Component) -> Result<PathBuf> {
                 None,
             )
         })
+}
+
+fn remove_exact_ref_artifacts(component: &Component) -> Result<()> {
+    let artifact = component.build_artifact.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "build_artifact",
+            "Component has no build artifact to prepare",
+            None,
+            None,
+        )
+    })?;
+    let source_root = Path::new(&component.local_path);
+    let pattern = if Path::new(artifact).is_absolute() {
+        PathBuf::from(artifact)
+    } else {
+        source_root.join(artifact)
+    };
+    let candidates = if artifact.contains(['*', '?', '[', ']']) {
+        glob::glob(&pattern.to_string_lossy())
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "build_artifact",
+                    format!("Invalid build artifact pattern '{}': {error}", artifact),
+                    Some(artifact.to_string()),
+                    None,
+                )
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect()
+    } else {
+        vec![pattern]
+    };
+    for candidate in candidates {
+        if !candidate.starts_with(source_root) {
+            return Err(Error::validation_invalid_argument(
+                "build_artifact",
+                format!(
+                    "Exact-ref artifact '{}' is outside verified source tree '{}'; refusing to reuse unverified package bytes",
+                    candidate.display(),
+                    source_root.display()
+                ),
+                Some(candidate.display().to_string()),
+                None,
+            ));
+        }
+        let metadata = match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(Error::internal_io(
+                    format!("Failed to inspect exact-ref artifact: {error}"),
+                    Some(candidate.display().to_string()),
+                ));
+            }
+        };
+        let result = if metadata.file_type().is_symlink() || metadata.is_file() {
+            // Unlink symlinks rather than following them outside the materialized tree.
+            std::fs::remove_file(&candidate)
+        } else if metadata.is_dir() {
+            std::fs::remove_dir_all(&candidate)
+        } else {
+            return Err(Error::validation_invalid_argument(
+                "build_artifact",
+                format!(
+                    "Exact-ref artifact '{}' has an unsupported filesystem type",
+                    candidate.display()
+                ),
+                Some(candidate.display().to_string()),
+                None,
+            ));
+        };
+        result.map_err(|error| {
+            Error::internal_io(
+                format!("Failed to invalidate exact-ref artifact: {error}"),
+                Some(candidate.display().to_string()),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 impl DeployConfig {
@@ -1319,5 +1415,128 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn exact_ref_default_extension_build_replaces_stale_artifact_and_records_source_commit() {
+        crate::test_support::with_isolated_home(|home| {
+            fn git(path: &Path, args: &[&str]) -> String {
+                let output = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(path)
+                    .output()
+                    .expect("run git");
+                assert!(output.status.success(), "git {:?}: {:?}", args, output);
+                String::from_utf8(output.stdout)
+                    .expect("git output")
+                    .trim()
+                    .to_string()
+            }
+
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions/fixture-packager");
+            std::fs::create_dir_all(&extension_dir).expect("extension directory");
+            std::fs::write(
+                extension_dir.join("fixture-packager.json"),
+                r#"{"name":"fixture-packager","version":"1.0.0","build":{"extension_script":"build.sh"}}"#,
+            )
+            .expect("extension manifest");
+            std::fs::write(
+                extension_dir.join("build.sh"),
+                "mkdir -p build\n[ -f build/fixture.zip ] || cat payload.txt > build/fixture.zip\n",
+            )
+            .expect("extension build script");
+
+            let repo = tempfile::tempdir().expect("repo");
+            git(repo.path(), &["init", "-q"]);
+            git(
+                repo.path(),
+                &["config", "user.email", "homeboy@example.test"],
+            );
+            git(repo.path(), &["config", "user.name", "Homeboy Test"]);
+            std::fs::write(repo.path().join("payload.txt"), "stale source\n")
+                .expect("stale payload");
+            std::fs::create_dir_all(repo.path().join("build")).expect("build directory");
+            std::fs::write(repo.path().join("build/fixture.zip"), "stale artifact\n")
+                .expect("stale artifact");
+            git(repo.path(), &["add", "."]);
+            git(repo.path(), &["commit", "-q", "-m", "stale artifact"]);
+
+            std::fs::write(repo.path().join("payload.txt"), "requested source\n")
+                .expect("requested payload");
+            git(repo.path(), &["commit", "-am", "requested source", "-q"]);
+            git(repo.path(), &["branch", "requested"]);
+            let requested_sha = git(repo.path(), &["rev-parse", "requested"]);
+
+            std::fs::write(repo.path().join("payload.txt"), "configured source\n")
+                .expect("configured payload");
+            git(repo.path(), &["commit", "-am", "configured source", "-q"]);
+
+            let mut component = component();
+            component.local_path = repo.path().display().to_string();
+            component.build_artifact = Some("build/fixture.zip".to_string());
+            component.remote_url = Some("https://github.com/example/fixture".to_string());
+            component.extensions = Some(HashMap::from([(
+                "fixture-packager".to_string(),
+                ScopedExtensionConfig::default(),
+            )]));
+            let mut deploy_config = config();
+            deploy_config.requested_ref = Some("requested".to_string());
+            deploy_config.skip_deps_hydration = true;
+            let request = ComponentPayloadPreparationRequest::new(&component, &deploy_config);
+            let mut collection = PreparedPayloadCollection::default();
+            let payload = collection
+                .prepare(request, &mut ReleaseArtifactStore::default())
+                .expect("prepare exact ref");
+
+            assert_eq!(
+                std::fs::read_to_string(payload.artifact.effective_path()).expect("payload bytes"),
+                "requested source\n"
+            );
+            assert_eq!(payload.source_commit, requested_sha);
+            assert_eq!(payload.artifact.source_commit, requested_sha);
+        });
+    }
+
+    #[test]
+    fn exact_ref_invalidation_removes_in_source_directories_and_unlinks_symlinks() {
+        let source = tempfile::tempdir().expect("source");
+        let artifact = source.path().join("build/artifact");
+        std::fs::create_dir_all(&artifact).expect("artifact directory");
+        std::fs::write(artifact.join("stale.txt"), "stale").expect("stale directory artifact");
+
+        let mut component = component();
+        component.local_path = source.path().display().to_string();
+        component.build_artifact = Some("build/artifact".to_string());
+        remove_exact_ref_artifacts(&component).expect("remove directory artifact");
+        assert!(
+            !artifact.exists(),
+            "exact-ref preparation must invalidate stale directory artifacts"
+        );
+
+        #[cfg(unix)]
+        {
+            let external = tempfile::tempdir().expect("external");
+            let external_artifact = external.path().join("artifact");
+            std::fs::create_dir_all(&external_artifact).expect("external artifact directory");
+            std::fs::write(external_artifact.join("preserved.txt"), "external")
+                .expect("external artifact content");
+            let symlink = source.path().join("build/artifact-link");
+            std::fs::create_dir_all(symlink.parent().expect("symlink parent"))
+                .expect("symlink parent directory");
+            std::os::unix::fs::symlink(&external_artifact, &symlink).expect("directory symlink");
+
+            component.build_artifact = Some("build/artifact-link".to_string());
+            remove_exact_ref_artifacts(&component).expect("unlink directory symlink");
+            assert!(
+                std::fs::symlink_metadata(&symlink).is_err(),
+                "exact-ref preparation must remove the in-source symlink"
+            );
+            assert!(
+                external_artifact.join("preserved.txt").is_file(),
+                "exact-ref preparation must not traverse or delete an external symlink target"
+            );
+        }
     }
 }
