@@ -41,6 +41,7 @@ pub mod report;
 mod requirements;
 pub mod run;
 mod shadow_modules;
+pub(crate) mod signature_extraction;
 mod signatures;
 mod source_locations;
 mod structural;

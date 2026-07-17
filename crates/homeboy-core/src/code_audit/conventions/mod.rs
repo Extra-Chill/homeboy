@@ -450,7 +450,7 @@ pub fn check_signature_consistency(
                 Err(_) => continue,
             };
 
-            let sigs = crate::refactor::plan::generate::extract_signatures(&content, &lang);
+            let sigs = super::signature_extraction::extract_signatures(&content, &lang);
             for sig in &sigs {
                 if conv.expected_methods.contains(&sig.name) {
                     method_sigs

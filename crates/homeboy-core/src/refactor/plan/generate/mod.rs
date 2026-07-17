@@ -30,9 +30,8 @@ pub(crate) use duplicate_fixes::{
 };
 pub(crate) use module_surface::{FileRole, ModuleSurfaceIndex};
 pub(crate) use signatures::{
-    extract_signatures, extract_signatures_from_items, find_parsed_item_by_name,
-    generate_fallback_signature, generate_method_stub, parse_items_for_dedup,
-    primary_type_name_from_declaration,
+    extract_signatures_from_items, find_parsed_item_by_name, generate_fallback_signature,
+    generate_method_stub, parse_items_for_dedup, primary_type_name_from_declaration,
 };
 
 pub fn generate_audit_fixes(

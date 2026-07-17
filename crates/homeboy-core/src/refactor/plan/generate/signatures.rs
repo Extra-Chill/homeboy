@@ -1,19 +1,13 @@
 use homeboy_engine_primitives::language::Language;
 use regex::Regex;
 
-/// Full method signature extracted from a conforming file.
-#[derive(Debug, Clone)]
-pub(crate) struct MethodSignature {
-    /// Method name.
-    pub(crate) name: String,
-    /// Full signature line (e.g., "public function execute(array $config): array").
-    pub(crate) signature: String,
-    /// The language this was extracted from.
-    pub(crate) language: Language,
-    /// Full method body (between braces), extracted from the conforming file.
-    /// None if the body couldn't be extracted.
-    pub(crate) body: Option<String>,
-}
+// Grammar-driven signature extraction (`MethodSignature`, `extract_signatures*`)
+// lives in `code_audit::signatures`, next to the fingerprinting grammar it
+// depends on. Refactor's convention-fix codegen consumes it from there, which
+// keeps the dependency pointing refactor -> code_audit (no cycle).
+pub(crate) use crate::code_audit::signature_extraction::{
+    extract_signatures_from_items, MethodSignature,
+};
 
 pub(crate) fn generate_method_stub(sig: &MethodSignature) -> String {
     // Use the real body from a conforming peer when available.
@@ -152,95 +146,4 @@ pub(crate) fn parse_items_for_dedup(
     crate::extension::run_refactor_script(&manifest, &parse_cmd)
         .and_then(|value| value.get("items").cloned())
         .and_then(|value| serde_json::from_value(value).ok())
-}
-
-pub(crate) fn extract_signatures_from_items(
-    content: &str,
-    language: &Language,
-) -> Vec<MethodSignature> {
-    let file_ext = match language {
-        Language::Php => "php",
-        Language::Rust => "rs",
-        Language::JavaScript => "js",
-        Language::TypeScript => "ts",
-        Language::Unknown => return Vec::new(),
-    };
-
-    let Some(grammar) = crate::code_audit::core_fingerprint::load_grammar_for_ext(file_ext) else {
-        return Vec::new();
-    };
-
-    let symbols = crate::extension::grammar::extract(content, &grammar);
-    let lines: Vec<&str> = content.lines().collect();
-
-    symbols
-        .into_iter()
-        .filter(|symbol| {
-            matches!(
-                symbol.concept.as_str(),
-                "function" | "free_function" | "method"
-            )
-        })
-        .filter_map(|symbol| {
-            let name = symbol.name()?.to_string();
-            let line_idx = symbol.line.checked_sub(1)?;
-            let signature = lines
-                .get(line_idx)
-                .map(|line| line.trim().to_string())
-                .filter(|line| !line.is_empty())
-                .unwrap_or_else(|| name.clone());
-
-            let body = extract_method_body(&lines, line_idx);
-
-            Some(MethodSignature {
-                name,
-                signature,
-                language: language.clone(),
-                body,
-            })
-        })
-        .collect()
-}
-
-/// Extract the body of a method from source lines, starting from the
-/// declaration line. Finds the opening `{` and walks to the matching `}`,
-/// returning the lines between them (the body content).
-fn extract_method_body(lines: &[&str], start_line: usize) -> Option<String> {
-    let mut brace_depth = 0i32;
-    let mut found_open = false;
-    let mut body_start_line = start_line + 1;
-
-    for i in start_line..lines.len() {
-        let line = lines[i];
-        for ch in line.chars() {
-            if ch == '{' {
-                if !found_open {
-                    found_open = true;
-                    // Body starts on the NEXT line after the opening brace.
-                    body_start_line = i + 1;
-                }
-                brace_depth += 1;
-            } else if ch == '}' {
-                brace_depth -= 1;
-                if found_open && brace_depth == 0 {
-                    // Collect body lines (between opening { line and closing } line).
-                    if body_start_line > i {
-                        return None; // empty body: `{ }`
-                    }
-                    let body_lines = &lines[body_start_line..i];
-                    let body = body_lines.join("\n");
-                    if body.trim().is_empty() {
-                        return None;
-                    }
-                    return Some(body);
-                }
-            }
-        }
-    }
-
-    None
-}
-
-pub(crate) fn extract_signatures(content: &str, language: &Language) -> Vec<MethodSignature> {
-    extract_signatures_from_items(content, language)
 }
