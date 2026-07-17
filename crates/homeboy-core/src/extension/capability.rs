@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use super::manifest::ExtensionManifest;
 use super::registry::{extension_path, load_extension};
 use super::runner::ExtensionRunner;
+use super::ResolvedExtensionInvocationContext;
 
 pub(crate) fn stderr_tail(stderr: &str) -> String {
     const MAX_LINES: usize = 20;
@@ -428,7 +429,7 @@ pub fn resolve_execution_context(
     capability: ExtensionCapability,
 ) -> Result<ExtensionExecutionContext> {
     let extension_id = resolve_extension_for_capability(component, capability)?;
-    execution_context_for_extension(component, capability, extension_id)
+    execution_context_for_extension(component, None, capability, extension_id)
 }
 
 /// Resolve an execution context when a linked extension provides `capability`.
@@ -442,11 +443,24 @@ pub(crate) fn resolve_execution_context_if_available(
     else {
         return Ok(None);
     };
-    execution_context_for_extension(component, capability, extension_id).map(Some)
+    execution_context_for_extension(component, None, capability, extension_id).map(Some)
+}
+
+/// Resolve a capability against a project attachment, retaining the project
+/// settings and attachment path for the runner environment.
+pub fn resolve_execution_context_for_project(
+    project: &crate::project::Project,
+    component_id: &str,
+    capability: ExtensionCapability,
+) -> Result<ExtensionExecutionContext> {
+    let component = crate::project::resolve_project_component(project, component_id)?;
+    let extension_id = resolve_extension_for_capability(&component, capability)?;
+    execution_context_for_extension(&component, Some(project.clone()), capability, extension_id)
 }
 
 fn execution_context_for_extension(
     component: &Component,
+    project: Option<crate::project::Project>,
     capability: ExtensionCapability,
     extension_id: String,
 ) -> Result<ExtensionExecutionContext> {
@@ -490,13 +504,21 @@ fn execution_context_for_extension(
         ));
     }
 
+    let invocation = ResolvedExtensionInvocationContext::for_component(
+        &extension_id,
+        project,
+        component.clone(),
+    )?;
+
     Ok(ExtensionExecutionContext {
-        component: component.clone(),
+        component: invocation
+            .component
+            .expect("capability invocation has component"),
         capability,
         extension_id: extension_id.clone(),
         extension_path,
         script_path,
-        settings: extract_component_extension_settings(component, &extension_id),
+        settings: invocation.settings.into_iter().collect(),
         accepted_setting_keys: manifest.accepted_setting_keys(),
     })
 }
@@ -581,6 +603,70 @@ mod tests {
             let err = resolve_extension_for_capability(&component, ExtensionCapability::Deps)
                 .expect_err("selected extension must provide selected capability");
             assert!(err.message.contains("does not provide it"));
+        });
+    }
+
+    #[test]
+    fn project_capability_context_applies_project_component_and_cli_settings() {
+        crate::test_support::with_isolated_home(|home| {
+            let component_dir = tempfile::tempdir().expect("component");
+            std::fs::write(
+                component_dir.path().join("homeboy.json"),
+                r#"{"id":"consumer","extensions":{"fixture":{"settings":{"winner":"component"}}}}"#,
+            )
+            .expect("portable component");
+            write_extension_manifest(home.path(), "fixture", "test");
+            let extension_dir = home.path().join(".config/homeboy/extensions/fixture");
+            let script = extension_dir.join("test.sh");
+            std::fs::write(
+                &script,
+                "#!/bin/sh\nprintf '%s' \"$HOMEBOY_SETTINGS_JSON\"\n",
+            )
+            .expect("test script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = std::fs::metadata(&script)
+                    .expect("script metadata")
+                    .permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(&script, permissions).expect("make script executable");
+            }
+            let project = crate::project::Project {
+                id: "site".to_string(),
+                extensions: Some(std::collections::HashMap::from([(
+                    "fixture".to_string(),
+                    crate::component::ScopedExtensionConfig {
+                        settings: std::collections::HashMap::from([(
+                            "winner".to_string(),
+                            serde_json::json!("project"),
+                        )]),
+                        ..Default::default()
+                    },
+                )])),
+                components: vec![crate::project::ProjectComponentAttachment {
+                    id: "consumer".to_string(),
+                    local_path: component_dir.path().to_string_lossy().to_string(),
+                    remote_path: None,
+                }],
+                ..Default::default()
+            };
+
+            let context = resolve_execution_context_for_project(
+                &project,
+                "consumer",
+                ExtensionCapability::Test,
+            )
+            .expect("project capability context");
+            let output = ExtensionRunner::for_context(context)
+                .settings(&[("winner".to_string(), "cli".to_string())])
+                .passthrough(false)
+                .run()
+                .expect("capability run");
+            let settings: serde_json::Value =
+                serde_json::from_str(&output.stdout).expect("settings JSON");
+
+            assert_eq!(settings["winner"], "cli");
         });
     }
 }

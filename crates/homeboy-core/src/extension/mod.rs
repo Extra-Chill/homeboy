@@ -12,6 +12,7 @@ mod dev_run;
 mod env_provider;
 mod execution;
 mod fingerprint;
+mod invocation_context;
 // The grammar parsing engine is a language-agnostic primitive; it now lives in
 // homeboy-engine-primitives. Re-exported here so existing
 // `crate::extension::grammar` / `crate::extension::grammar_items` paths keep
@@ -78,6 +79,7 @@ pub use fingerprint::{
     run_fingerprint_script, AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker,
     FingerprintOutput, HookRef, UnusedParam,
 };
+pub use invocation_context::ResolvedExtensionInvocationContext;
 pub(crate) use lifecycle::source_metadata::resolve_source_url;
 pub use lifecycle::source_metadata::SourceMetadataRepair;
 pub use lifecycle::{

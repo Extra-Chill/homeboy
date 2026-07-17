@@ -224,7 +224,9 @@ impl ExtensionRunner {
     pub fn run(&self) -> Result<RunnerOutput> {
         let prepared = super::execution::prepare_capability_run(
             &self.execution_context,
-            self.pre_loaded_component.as_ref(),
+            self.pre_loaded_component
+                .as_ref()
+                .or(Some(&self.execution_context.component)),
             self.path_override.as_deref(),
             &self.settings_overrides,
             &self.settings_json_overrides,

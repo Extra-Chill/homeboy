@@ -1,7 +1,7 @@
 use crate::component::{self, Component};
 use crate::engine::{template, validation};
 use crate::error::{Error, Result};
-use crate::project::{self, Project};
+use crate::project::Project;
 use crate::rig::toolchain;
 use crate::server::{
     execute_local_command_in_dir, execute_local_command_in_dir_with_timeout,
@@ -26,7 +26,7 @@ use super::manifest::{ExtensionManifest, RuntimeConfig};
 use super::read_source_revision;
 use super::runner_contract::RunnerStepFilter;
 use super::runtime_helper;
-use super::scope::ExtensionScope;
+use super::ResolvedExtensionInvocationContext;
 
 pub(crate) use action::execute_action;
 pub use readiness::{extension_ready_status, is_extension_compatible, ExtensionReadyStatus};
@@ -59,14 +59,6 @@ pub enum ExtensionExecutionMode {
 /// Result of running extension setup.
 pub struct ExtensionSetupResult {
     pub exit_code: i32,
-}
-
-struct ExtensionExecutionContext {
-    extension_id: String,
-    project_id: Option<String>,
-    component_id: Option<String>,
-    project: Option<Project>,
-    settings: HashMap<String, serde_json::Value>,
 }
 
 /// Run a extension's setup command (if defined).
@@ -236,75 +228,6 @@ fn build_args_string(
     }
     argv.extend(args);
     argv.join(" ")
-}
-
-fn resolve_extension_context(
-    extension: &ExtensionManifest,
-    extension_id: &str,
-    project_id: Option<&str>,
-    component_id: Option<&str>,
-    run_command: &str,
-) -> Result<ExtensionExecutionContext> {
-    let requires_project = extension.requires.is_some()
-        || template::is_present(run_command, "projectId")
-        || template::is_present(run_command, "sitePath")
-        || template::is_present(run_command, "cliPath")
-        || template::is_present(run_command, "domain");
-
-    let mut project = None;
-    let mut component = None;
-    let mut resolved_project_id = None;
-    let mut resolved_component_id = None;
-
-    // Handle component-only execution (no project required)
-    if let Some(cid) = component_id {
-        if let Ok(loaded_component) = component::resolve_effective(Some(cid), None, None) {
-            component = Some(loaded_component);
-            resolved_component_id = Some(cid.to_string());
-        }
-    }
-
-    if requires_project {
-        let pid = project_id.ok_or_else(|| {
-            Error::config(format!(
-                "Extension {} requires a project context, but no project ID was provided",
-                extension.id
-            ))
-        })?;
-
-        let loaded_project = project::load(pid)?;
-        ExtensionScope::validate_project_compatibility(extension, &loaded_project)?;
-
-        resolved_component_id =
-            ExtensionScope::resolve_component_scope(extension, &loaded_project, component_id)?;
-
-        if let Some(ref comp_id) = resolved_component_id {
-            component = Some(
-                component::resolve_effective(Some(comp_id), None, Some(&loaded_project)).map_err(
-                    |_| {
-                        Error::config(format!(
-                            "Component {} required by extension {} is not configured",
-                            comp_id, &extension.id
-                        ))
-                    },
-                )?,
-            );
-        }
-
-        resolved_project_id = Some(pid.to_string());
-        project = Some(loaded_project);
-    }
-
-    let settings =
-        ExtensionScope::effective_settings(extension_id, project.as_ref(), component.as_ref())?;
-
-    Ok(ExtensionExecutionContext {
-        extension_id: extension_id.to_string(),
-        project_id: resolved_project_id,
-        component_id: resolved_component_id,
-        project,
-        settings,
-    })
 }
 
 pub(crate) fn validate_capability_script_exists(
@@ -626,7 +549,7 @@ fn build_template_vars<'a>(
 
 fn build_runtime_env(
     runtime: &RuntimeConfig,
-    context: &ExtensionExecutionContext,
+    context: &ResolvedExtensionInvocationContext,
     vars: &[(&str, &str)],
     settings_json: &str,
     extension_path: &str,
@@ -639,12 +562,18 @@ fn build_runtime_env(
     let mut env = build_exec_env(
         &context.extension_id,
         context.project_id.as_deref(),
-        context.component_id.as_deref(),
+        context
+            .component
+            .as_ref()
+            .map(|component| component.id.as_str()),
         settings_json,
         Some(extension_path),
         project_base_path,
         Some(&context.settings),
-        None, // no path override in runtime context
+        context
+            .component
+            .as_ref()
+            .map(|component| component.local_path.as_str()),
     );
 
     if let Some(ref extension_env) = runtime.env {
@@ -768,7 +697,7 @@ fn execute_extension_runtime(
     )?;
 
     let args_str = build_args_string(&extension, inputs, args);
-    let context = resolve_extension_context(
+    let context = ResolvedExtensionInvocationContext::resolve_runtime(
         &extension,
         extension_id,
         project_id,
@@ -898,6 +827,114 @@ mod tests {
     use super::*;
     use crate::component::Component;
     use crate::extension::extract_component_extension_settings;
+
+    fn make_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(path)
+                .expect("script metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).expect("make script executable");
+        }
+    }
+
+    fn write_extension(home: &Path, id: &str, manifest: serde_json::Value, script: &str) {
+        let dir = home.join(".config/homeboy/extensions").join(id);
+        std::fs::create_dir_all(&dir).expect("extension dir");
+        std::fs::write(dir.join(format!("{id}.json")), manifest.to_string()).expect("manifest");
+        let script_path = dir.join("run.sh");
+        std::fs::write(&script_path, script).expect("script");
+        make_executable(&script_path);
+    }
+
+    #[test]
+    fn extension_run_preserves_project_attachment_component_path() {
+        crate::test_support::with_isolated_home(|home| {
+            let attachment = tempfile::tempdir().expect("attachment");
+            std::fs::write(
+                attachment.path().join("homeboy.json"),
+                r#"{"id":"fixture","extensions":{"fixture-extension":{"settings":{"source":"component"}}}}"#,
+            )
+            .expect("portable component");
+            write_extension(
+                home.path(),
+                "fixture-extension",
+                serde_json::json!({
+                    "name": "fixture-extension", "version": "1.0.0",
+                    "requires": { "components": ["fixture"] },
+                    "executable": { "runtime": { "run_command": "sh {{extension_path}}/run.sh" } }
+                }),
+                "#!/bin/sh\nprintf '%s' \"$HOMEBOY_COMPONENT_PATH\"\n",
+            );
+            crate::project::save(&crate::project::Project {
+                id: "site".to_string(),
+                components: vec![crate::project::ProjectComponentAttachment {
+                    id: "fixture".to_string(),
+                    local_path: attachment.path().to_string_lossy().to_string(),
+                    remote_path: None,
+                }],
+                ..Default::default()
+            })
+            .expect("project");
+
+            let result = run_extension(
+                "fixture-extension",
+                Some("site"),
+                Some("fixture"),
+                vec![],
+                vec![],
+                ExtensionExecutionMode::Captured,
+                ExtensionStepFilter::default(),
+            )
+            .expect("extension run");
+
+            assert_eq!(
+                result.output.expect("output").stdout,
+                attachment.path().to_string_lossy()
+            );
+        });
+    }
+
+    #[test]
+    fn extension_run_with_component_exports_component_identity_and_path() {
+        crate::test_support::with_isolated_home(|home| {
+            let component = tempfile::tempdir().expect("component");
+            crate::component::write_standalone_component_config(&Component::new(
+                "fixture".to_string(),
+                component.path().to_string_lossy().to_string(),
+                "fixture-extension".to_string(),
+                None,
+            ))
+            .expect("component config");
+            write_extension(
+                home.path(),
+                "fixture-extension",
+                serde_json::json!({
+                    "name": "fixture-extension", "version": "1.0.0",
+                    "executable": { "runtime": { "run_command": "sh {{extension_path}}/run.sh" } }
+                }),
+                "#!/bin/sh\nprintf '%s|%s' \"$HOMEBOY_COMPONENT_ID\" \"$HOMEBOY_COMPONENT_PATH\"\n",
+            );
+
+            let result = run_extension(
+                "fixture-extension",
+                None,
+                Some("fixture"),
+                vec![],
+                vec![],
+                ExtensionExecutionMode::Captured,
+                ExtensionStepFilter::default(),
+            )
+            .expect("extension run");
+
+            assert_eq!(
+                result.output.expect("output").stdout,
+                format!("fixture|{}", component.path().to_string_lossy()),
+            );
+        });
+    }
 
     #[test]
     fn build_exec_env_includes_runtime_runner_helper_paths() {
