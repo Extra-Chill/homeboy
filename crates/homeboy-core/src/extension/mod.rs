@@ -36,7 +36,6 @@ mod summary;
 pub mod test;
 pub mod trace;
 pub mod update_check;
-mod update_output;
 mod validation;
 
 pub use capability::{
@@ -72,6 +71,10 @@ pub use homeboy_extension_contract::runner_contract::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, ExtensionPhaseTiming,
     PhaseFailure, PhaseFailureCategory, PhaseReport, PhaseStatus, RunnerStepFilter,
     VerificationPhase, GENERIC_INFRASTRUCTURE_FAILURE_MARKERS,
+};
+pub use homeboy_extension_contract::update_output::{
+    ExtensionSourceUpdate, SourceMetadataRepairEntry, UpdateAllResult, UpdateEntry,
+    UpdateSkippedEntry,
 };
 pub use homeboy_extension_contract::version::{parse_extension_version, VersionConstraint};
 pub use homeboy_extension_contract::{DeployArchiveInstallPolicy, DeployRequiredHeader};
@@ -126,15 +129,13 @@ pub use runtime_helper::{
 };
 pub use scope::ExtensionScope;
 pub use summary::{list_summaries, ActionSummary, ExtensionSummary};
-pub use update_output::{
-    ExtensionSourceUpdate, SourceMetadataRepairEntry, UpdateAllResult, UpdateEntry,
-    UpdateSkippedEntry,
-};
 pub use validation::{
     extension_provides_build, validate_extension_requirements, validate_required_extensions,
 };
 
-pub use homeboy_extension_contract::{core_compat, exec_context, runner_contract, version};
+pub use homeboy_extension_contract::{
+    core_compat, exec_context, runner_contract, source_metadata_repair, update_output, version,
+};
 
 #[cfg(test)]
 mod tests;
