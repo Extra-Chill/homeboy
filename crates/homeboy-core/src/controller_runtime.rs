@@ -2,13 +2,15 @@
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 use crate::{build_identity, paths, Error, Result};
 
@@ -19,7 +21,8 @@ const ADMISSION_LOCK_DIR: &str = "admission.lock";
 const ADMISSION_OWNER_SCHEMA: &str = "homeboy/controller-admission-owner/v1";
 const ADMISSION_LOCK_ATTEMPTS: usize = 500;
 const ADMISSION_LOCK_RETRY: Duration = Duration::from_millis(10);
-const LEGACY_ADMISSION_LOCK_STALE_AFTER: Duration = Duration::from_secs(60);
+static ADMISSION_LOCK_PROCESS_GUARDS: OnceLock<Mutex<BTreeMap<PathBuf, &'static Mutex<()>>>> =
+    OnceLock::new();
 
 /// Report-only retention inventory for immutable controller runtime pins.
 ///
@@ -207,29 +210,22 @@ pub(crate) struct RuntimeAdmission {
 struct AdmissionLock {
     path: PathBuf,
     token: String,
+    _process_guard: MutexGuard<'static, ()>,
     #[cfg(unix)]
     file: fs::File,
 }
 
 impl Drop for AdmissionLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            // Only clear the durable owner record that this guard published.
-            // The inode remains so a second process cannot create an unlocked
-            // replacement while this process still holds the advisory lock.
-            if admission_owner_token(&self.path).as_deref() == Some(self.token.as_str()) {
-                let _ = fs::write(&self.path, b"");
-            }
-            unsafe {
-                let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
-            }
+        // The advisory lock serializes record updates, so a guard only clears
+        // the owner record that it published. The file remains as the durable
+        // coordination inode; deleting it would permit a second inode/lock.
+        if admission_owner_token(&self.path).as_deref() == Some(self.token.as_str()) {
+            let _ = fs::write(&self.path, b"");
         }
-        #[cfg(not(unix))]
-        if admission_owner_token(&self.path.join("owner.json")).as_deref()
-            == Some(self.token.as_str())
-        {
-            let _ = fs::remove_dir(&self.path);
+        #[cfg(unix)]
+        unsafe {
+            let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
         }
     }
 }
@@ -591,111 +587,108 @@ fn acquire_admission_lock_with_retry(
     attempts: usize,
     retry: Duration,
 ) -> Result<AdmissionLock> {
+    reclaim_legacy_admission_lock(path)?;
     let started = Instant::now();
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("open controller admission lock".to_string()),
+            )
+        })?;
 
-    #[cfg(unix)]
-    {
-        for _ in 0..attempts {
-            if reclaim_legacy_admission_lock(path)? {
-                std::thread::sleep(retry);
-                continue;
-            }
-            let mut file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(path)
-                .map_err(|error| {
-                    Error::internal_io(
-                        error.to_string(),
-                        Some("open controller admission lock".to_string()),
-                    )
-                })?;
-            let acquired = unsafe {
-                libc::flock(
-                    std::os::fd::AsRawFd::as_raw_fd(&file),
-                    libc::LOCK_EX | libc::LOCK_NB,
-                ) == 0
-            };
-            if acquired {
-                let token = uuid::Uuid::new_v4().to_string();
-                write_admission_owner(&mut file, &token)?;
-                return Ok(AdmissionLock {
-                    path: path.to_path_buf(),
-                    token,
-                    file,
-                });
-            }
+    for _ in 0..attempts {
+        let Some(process_guard) = try_acquire_admission_process_guard(path) else {
             std::thread::sleep(retry);
+            continue;
+        };
+        #[cfg(unix)]
+        let acquired = unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&file),
+                libc::LOCK_EX | libc::LOCK_NB,
+            ) == 0
+        };
+        #[cfg(not(unix))]
+        let acquired = file.metadata().is_ok();
+
+        if acquired {
+            let token = Uuid::new_v4().to_string();
+            let owner = admission_owner_record(&token);
+            file.set_len(0).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("clear controller admission owner record".to_string()),
+                )
+            })?;
+            file.write_all(&serde_json::to_vec(&owner).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize controller admission owner".to_string()),
+                )
+            })?)
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("write controller admission owner record".to_string()),
+                )
+            })?;
+            file.sync_data().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("sync controller admission owner record".to_string()),
+                )
+            })?;
+            return Ok(AdmissionLock {
+                path: path.to_path_buf(),
+                token,
+                _process_guard: process_guard,
+                #[cfg(unix)]
+                file,
+            });
         }
+        std::thread::sleep(retry);
     }
 
-    #[cfg(not(unix))]
-    {
-        for _ in 0..attempts {
-            if reclaim_legacy_admission_lock(path)? {
-                std::thread::sleep(retry);
-                continue;
-            }
-            match fs::create_dir(path) {
-                Ok(()) => {
-                    return create_directory_admission_lock(path);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if !admission_owner_is_live(path.join("owner.json").as_path())? {
-                        let _ = fs::remove_dir_all(path);
-                    }
-                }
-                Err(error) => {
-                    return Err(Error::internal_io(
-                        error.to_string(),
-                        Some("acquire controller admission lock".to_string()),
-                    ))
-                }
-            }
-            std::thread::sleep(retry);
-        }
-    }
-
-    Err(admission_timeout_error(path, started.elapsed()))
+    Err(Error::validation_invalid_argument(
+        "controller_admission",
+        format!(
+            "controller generation admission timed out; waited {}ms; current owner: {}",
+            started.elapsed().as_millis(),
+            admission_owner_summary(path)
+        ),
+        None,
+        None,
+    ))
 }
 
-fn write_admission_owner(file: &mut fs::File, token: &str) -> Result<()> {
-    file.set_len(0).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("clear controller admission owner record".to_string()),
-        )
-    })?;
-    file.write_all(
-        &serde_json::to_vec(&admission_owner_record(token)).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("serialize controller admission owner".to_string()),
-            )
-        })?,
-    )
-    .map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("write controller admission owner record".to_string()),
-        )
-    })?;
-    file.sync_data().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("sync controller admission owner record".to_string()),
-        )
-    })
+fn try_acquire_admission_process_guard(path: &Path) -> Option<MutexGuard<'static, ()>> {
+    let guard = {
+        let mut guards = ADMISSION_LOCK_PROCESS_GUARDS
+            .get_or_init(|| Mutex::new(BTreeMap::new()))
+            .lock()
+            .expect("controller admission process guard registry is not poisoned");
+        *guards
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))))
+    };
+    guard.try_lock().ok()
 }
 
 fn admission_owner_record(token: &str) -> Value {
     let pid = std::process::id();
+    let starttime_ticks = crate::process::linux_process_starttime_ticks(pid)
+        .ok()
+        .flatten();
     json!({
         "schema": ADMISSION_OWNER_SCHEMA,
         "token": token,
         "pid": pid,
-        "linux_starttime_ticks": crate::process::linux_process_starttime_ticks(pid).ok().flatten(),
+        "linux_starttime_ticks": starttime_ticks,
     })
 }
 
@@ -708,16 +701,6 @@ fn admission_owner_token(path: &Path) -> Option<String> {
 }
 
 fn admission_owner_summary(path: &Path) -> String {
-    if path.is_dir() {
-        return match legacy_admission_lock_age(path) {
-            Ok(age) => format!(
-                "legacy ownerless holder, age={}ms; reclamation begins after {}ms",
-                age.as_millis(),
-                LEGACY_ADMISSION_LOCK_STALE_AFTER.as_millis()
-            ),
-            Err(_) => "legacy ownerless holder".to_string(),
-        };
-    }
     let Ok(owner) = serde_json::from_slice::<Value>(&fs::read(path).unwrap_or_default()) else {
         return "unavailable".to_string();
     };
@@ -733,103 +716,61 @@ fn admission_owner_summary(path: &Path) -> String {
     }
 }
 
-fn admission_timeout_error(path: &Path, waited: Duration) -> Error {
-    Error::validation_invalid_argument(
-        "controller_admission",
-        format!(
-            "timed out waiting {}ms for controller generation admission; current owner: {}",
-            waited.as_millis(),
-            admission_owner_summary(path)
-        ),
-        None,
-        None,
-    )
-}
-
-fn reclaim_legacy_admission_lock(path: &Path) -> Result<bool> {
+fn reclaim_legacy_admission_lock(path: &Path) -> Result<()> {
     if !path.is_dir() {
-        return Ok(false);
+        return Ok(());
     }
-    if legacy_admission_lock_age(path)? < LEGACY_ADMISSION_LOCK_STALE_AFTER {
-        return Ok(true);
+    let owner = path.join("owner.json");
+    if owner.is_file() && legacy_admission_owner_is_live(&owner)? {
+        return Err(Error::validation_invalid_argument(
+            "controller_admission",
+            format!(
+                "controller admission lock is held by a live legacy owner: {}",
+                admission_owner_summary(&owner)
+            ),
+            None,
+            None,
+        ));
     }
-    match fs::remove_dir(path) {
-        Ok(()) => Ok(false),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(Error::internal_io(
-            error.to_string(),
-            Some("reclaim abandoned controller admission lock".to_string()),
-        )),
-    }
-}
-
-fn legacy_admission_lock_age(path: &Path) -> Result<Duration> {
-    let modified = fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("inspect legacy controller admission lock".to_string()),
-            )
-        })?;
-    Ok(SystemTime::now()
-        .duration_since(modified)
-        .unwrap_or(Duration::ZERO))
-}
-
-#[cfg(not(unix))]
-fn create_directory_admission_lock(path: &Path) -> Result<AdmissionLock> {
-    let result = (|| {
-        let token = uuid::Uuid::new_v4().to_string();
-        let owner = serde_json::to_vec(&admission_owner_record(&token)).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("serialize controller admission owner".to_string()),
-            )
-        })?;
-        fs::write(path.join("owner.json"), owner).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("write controller admission owner record".to_string()),
-            )
-        })?;
-        Ok(AdmissionLock {
-            path: path.to_path_buf(),
-            token,
-        })
-    })();
-    if result.is_err() {
-        rollback_created_admission_directory(path);
-    }
-    result
-}
-
-#[cfg(any(not(unix), test))]
-fn rollback_created_admission_directory(path: &Path) {
-    let _ = fs::remove_file(path.join("owner.json"));
-    let _ = fs::remove_dir(path);
-}
-
-#[cfg(not(unix))]
-fn admission_owner_is_live(path: &Path) -> Result<bool> {
-    let owner = serde_json::from_slice::<Value>(&fs::read(path).map_err(|error| {
+    fs::remove_dir_all(path).map_err(|error| {
         Error::internal_io(
             error.to_string(),
-            Some("read controller admission owner".to_string()),
+            Some("reclaim abandoned controller admission lock".to_string()),
+        )
+    })
+}
+
+fn legacy_admission_owner_is_live(path: &Path) -> Result<bool> {
+    let owner: Value = serde_json::from_slice(&fs::read(path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read legacy controller admission owner".to_string()),
         )
     })?)
     .map_err(|error| {
         Error::validation_invalid_json(
             error,
-            Some("parse controller admission owner".to_string()),
+            Some("parse legacy controller admission owner".to_string()),
             None,
         )
     })?;
-    Ok(owner
+    let Some(pid) = owner
         .get("pid")
         .and_then(Value::as_u64)
         .and_then(|pid| u32::try_from(pid).ok())
-        .is_some_and(crate::process::pid_is_running))
+    else {
+        return Ok(false);
+    };
+    if !crate::process::pid_is_running(pid) {
+        return Ok(false);
+    }
+    let Some(expected) = owner.get("linux_starttime_ticks").and_then(Value::as_u64) else {
+        return Ok(true);
+    };
+    Ok(crate::process::linux_process_starttime_ticks(pid)
+        .ok()
+        .flatten()
+        == Some(expected))
 }
 
 fn validate_pin(runtime: &Value) -> Result<()> {
@@ -1249,53 +1190,83 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn live_admission_lock_cannot_be_stolen() {
+    fn admission_lock_holder() {
+        let Ok(path) = std::env::var("HOMEBOY_ADMISSION_LOCK_HELPER_PATH") else {
+            return;
+        };
+        let release = PathBuf::from(
+            std::env::var("HOMEBOY_ADMISSION_LOCK_HELPER_RELEASE").expect("helper release path"),
+        );
+        let ready = PathBuf::from(
+            std::env::var("HOMEBOY_ADMISSION_LOCK_HELPER_READY").expect("helper ready path"),
+        );
+        let _guard = acquire_admission_lock_with_retry(Path::new(&path), 1, Duration::ZERO)
+            .expect("helper admission guard");
+        fs::write(&ready, b"ready").expect("signal helper readiness");
+        for _ in 0..1_000 {
+            if release.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("admission lock helper was not released");
+    }
+
+    #[cfg(unix)]
+    fn spawn_admission_lock_holder(path: &Path, temporary: &Path) -> std::process::Child {
+        let ready = temporary.join("ready");
+        let release = temporary.join("release");
+        let child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "controller_runtime::tests::admission_lock_holder",
+                "--nocapture",
+            ])
+            .env("HOMEBOY_ADMISSION_LOCK_HELPER_PATH", path)
+            .env("HOMEBOY_ADMISSION_LOCK_HELPER_READY", &ready)
+            .env("HOMEBOY_ADMISSION_LOCK_HELPER_RELEASE", &release)
+            .spawn()
+            .expect("spawn admission lock holder");
+        for _ in 0..500 {
+            if ready.exists() {
+                return child;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("admission lock holder did not become ready");
+    }
+
+    #[cfg(unix)]
+    fn release_admission_lock_holder(mut child: std::process::Child, temporary: &Path) {
+        fs::write(temporary.join("release"), b"release").expect("release admission lock holder");
+        assert!(child
+            .wait()
+            .expect("wait for admission lock holder")
+            .success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_admission_guard_cannot_be_stolen() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
         let path = temporary.path().join(ADMISSION_LOCK_DIR);
-        let _first = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)
-            .expect("first admission acquires the lock");
+        let child = spawn_admission_lock_holder(&path, temporary.path());
 
         let error = acquire_admission_lock_with_retry(&path, 2, Duration::ZERO)
-            .expect_err("live admission lock remains exclusive");
+            .expect_err("live admission guard must remain exclusive");
+        release_admission_lock_holder(child, temporary.path());
 
-        assert!(error.message.contains("timed out waiting"));
-        assert!(error.message.contains("current owner: pid="));
-        assert!(error
-            .message
-            .contains(&format!("pid={}", std::process::id())));
+        assert!(error.message.contains("admission timed out"));
+        assert!(error.message.contains("pid="));
+        assert!(error.message.contains("waited"));
     }
 
     #[cfg(unix)]
     #[test]
-    fn recent_legacy_admission_lock_is_not_stolen() {
-        let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
-        fs::create_dir(&path).expect("create recent legacy lock directory");
-
-        let error = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)
-            .expect_err("recent legacy lock remains protected");
-
-        assert!(path.is_dir());
-        assert!(error.message.contains("legacy ownerless holder"));
-        assert!(error.message.contains("reclamation begins after"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn aged_legacy_admission_lock_is_reclaimed() {
+    fn abandoned_legacy_admission_lock_is_reclaimed() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
         let path = temporary.path().join(ADMISSION_LOCK_DIR);
         fs::create_dir(&path).expect("create abandoned legacy lock directory");
-        fs::File::open(&path)
-            .expect("open legacy lock directory")
-            .set_times(
-                fs::FileTimes::new().set_modified(
-                    SystemTime::now()
-                        .checked_sub(LEGACY_ADMISSION_LOCK_STALE_AFTER + Duration::from_secs(1))
-                        .expect("old timestamp"),
-                ),
-            )
-            .expect("age legacy lock directory");
 
         let guard = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)
             .expect("reclaim abandoned legacy lock");
@@ -1304,39 +1275,35 @@ mod tests {
         assert_eq!(admission_owner_token(&path), Some(guard.token.clone()));
     }
 
-    #[test]
-    fn missing_legacy_admission_lock_is_a_safe_migration_race() {
-        let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
-
-        assert!(!reclaim_legacy_admission_lock(&path).expect("missing lock is safe"));
-    }
-
-    #[test]
-    fn rollback_created_admission_directory_removes_only_its_owner_file() {
-        let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
-        fs::create_dir(&path).expect("create admission directory");
-        fs::write(path.join("owner.json"), b"partial owner").expect("write partial owner");
-
-        rollback_created_admission_directory(&path);
-
-        assert!(!path.exists());
-    }
-
     #[cfg(unix)]
     #[test]
-    fn admission_lock_releases_after_post_acquisition_error() {
+    fn admission_guard_releases_after_post_acquisition_failure() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
         let path = temporary.path().join(ADMISSION_LOCK_DIR);
         let result: Result<()> = (|| {
-            let _lock = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)?;
+            let _guard = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)?;
             Err(Error::internal_unexpected("simulated pinning failure"))
         })();
         result.expect_err("simulated post-acquisition failure");
 
         acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)
-            .expect("next admission acquires released lock");
+            .expect("next admission acquires released guard");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admission_timeout_reports_owner_and_wait_duration() {
+        let temporary = tempfile::tempdir().expect("temporary runtime directory");
+        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let child = spawn_admission_lock_holder(&path, temporary.path());
+
+        let error = acquire_admission_lock_with_retry(&path, 3, Duration::from_millis(1))
+            .expect_err("second admission times out");
+        release_admission_lock_holder(child, temporary.path());
+
+        assert!(error.message.contains("waited"));
+        assert!(error.message.contains("pid="));
+        assert!(error.message.contains("token="));
     }
 
     #[test]
