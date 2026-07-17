@@ -30,7 +30,8 @@ use super::session::{
     RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
     RunnerTunnelMode,
 };
-use super::{broker_auth, broker_http};
+use super::broker_http;
+use crate::broker_auth;
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 
 const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);

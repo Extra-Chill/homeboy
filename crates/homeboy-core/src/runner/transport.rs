@@ -12,7 +12,8 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::server::{self, SshClient};
 
 use super::session::{RunnerSession, RunnerStatusReport, RunnerTunnelMode};
-use super::{broker_auth, broker_http, Runner, RunnerKind};
+use super::{broker_http, Runner, RunnerKind};
+use crate::broker_auth;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RunnerSessionHandle {

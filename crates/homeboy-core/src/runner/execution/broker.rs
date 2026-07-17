@@ -86,7 +86,7 @@ pub(super) fn exec_via_reverse_broker(
         }),
         require_paths: require_paths.clone(),
     };
-    let broker_token = super::super::broker_auth::broker_submit_token_for_runner(&runner.id)?;
+    let broker_token = crate::broker_auth::broker_submit_token_for_runner(&runner.id)?;
     let data = broker_http::post_json(
         &client,
         broker_url,

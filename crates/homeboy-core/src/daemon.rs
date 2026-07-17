@@ -23,7 +23,7 @@ use crate::paths;
 use crate::process::{
     pid_has_environment_value, pid_is_running, terminate_pid_with_sigterm_and_wait,
 };
-use crate::runner::BrokerScope;
+use crate::broker_auth::BrokerScope;
 use crate::runner_execution_envelope::PathMaterializationPlan;
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
@@ -2777,7 +2777,7 @@ where
     let mut headers_and_body = request.splitn(2, "\r\n\r\n");
     let headers = headers_and_body.next().unwrap_or_default();
     let body = headers_and_body.next().unwrap_or_default();
-    let broker_token = crate::runner::extract_bearer_token(headers);
+    let broker_token = crate::broker_auth::extract_bearer_token(headers);
     let mut parts = headers
         .lines()
         .next()

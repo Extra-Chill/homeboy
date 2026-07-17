@@ -16,9 +16,8 @@ use crate::server::{self, RunnerPolicy, RunnerSecretEnvRef, RunnerSettings, Serv
 // `crate::runner::agent_task_lifecycle_event` call sites resolve unchanged.
 pub(crate) use crate::agent_task_lifecycle::agent_task_lifecycle_event;
 mod apply;
-mod broker_auth;
 mod broker_http;
-pub use broker_auth::{
+pub use crate::broker_auth::{
     broker_submit_token_for_runner, broker_token_from_env, extract_bearer_token,
     store_path as broker_auth_store_path, BrokerAuthGrant, BrokerAuthStore, BrokerCredential,
     BrokerScope, MintedCredential, BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
