@@ -43,14 +43,14 @@ pub(crate) const RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_CANCE
 // These runner env-var markers now live in the shared runner-contract crate so
 // core can reference them without a core -> runner edge. Re-exported here so the
 // existing `runner::execution::RUNNER_*_ENV` call sites keep resolving.
-pub use homeboy_runner_contract::{
+pub use homeboy_lab_runner_contract::{
     RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV,
 };
 
 // Moved to the runner-contract crate (contract-level env classification) so
 // core can call it without a core -> runner edge. Re-exported for runner-
 // internal call sites.
-pub(crate) use homeboy_runner_contract::is_internal_control_env;
+pub(crate) use homeboy_lab_runner_contract::is_internal_control_env;
 
 mod artifact_promotion;
 mod broker;

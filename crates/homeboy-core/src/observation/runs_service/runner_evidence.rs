@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use homeboy_runner_contract::RunnerArtifactRef;
+use homeboy_lab_runner_contract::RunnerArtifactRef;
 use serde_json::Value;
 
 use crate::error::{Error, Result};

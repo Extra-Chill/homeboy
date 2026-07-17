@@ -4,7 +4,7 @@ use serde_json::Value;
 use crate::api_jobs::JobArtifactMetadata;
 use crate::artifact_ref::{artifact_uri, ArtifactRef, EvidenceRef, ARTIFACT_REF_SCHEMA};
 use crate::runner_execution_envelope::{RunnerExecutionArtifactRef, RunnerExecutionRecord};
-use homeboy_runner_contract::RunnerArtifactRef;
+use homeboy_lab_runner_contract::RunnerArtifactRef;
 
 pub const RUN_OUTCOME_ENVELOPE_SCHEMA: &str = "homeboy/run-outcome-envelope/v1";
 pub const RUN_OUTCOME_ENVELOPE_FILE: &str = "run-outcome-envelope.json";

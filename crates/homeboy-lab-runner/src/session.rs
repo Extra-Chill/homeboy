@@ -16,13 +16,13 @@ mod session_enums {
     // (dev_run, run_outcome_envelope, and the types that reference it) can name it
     // without a core -> runner edge. Re-exported so runner-internal call sites
     // resolve unchanged.
-    pub use homeboy_runner_contract::RunnerLifecycleOwner;
+    pub use homeboy_lab_runner_contract::RunnerLifecycleOwner;
 
     // Session data types (RunnerTunnelMode, RunnerSessionRole, RunnerSessionState,
     // RunnerSession) now live in homeboy-runner-contract so the core daemon can
     // build/persist sessions without a core -> runner edge. Re-exported so
     // runner-internal call sites resolve unchanged.
-    pub use homeboy_runner_contract::{
+    pub use homeboy_lab_runner_contract::{
         RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
     };
 
@@ -164,7 +164,7 @@ pub struct RunnerLeaselessRecoveryEvidence {
 // Re-exported so internal/CLI call sites resolve unchanged. The
 // From<&JobArtifactMetadata> impl stays below (orphan rule: JobArtifactMetadata
 // is core-owned).
-pub use homeboy_runner_contract::RunnerArtifactRef;
+pub use homeboy_lab_runner_contract::RunnerArtifactRef;
 
 /// Build a `RunnerArtifactRef` from a core job artifact. A free function rather
 /// than a `From` impl because both types are foreign to this crate (orphan rule).
@@ -306,7 +306,7 @@ impl RunnerJob {
 
 // RunnerWorkspaceLease now lives in the shared runner-contract crate (core's
 // dev_run names it). Re-exported so runner-internal call sites resolve.
-pub use homeboy_runner_contract::RunnerWorkspaceLease;
+pub use homeboy_lab_runner_contract::RunnerWorkspaceLease;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerNamedWorkspaceLease {
@@ -321,7 +321,7 @@ pub struct RunnerWorkspaceLeaseSet {
     pub leases: Vec<RunnerNamedWorkspaceLease>,
 }
 
-pub use homeboy_runner_contract::RunnerMutationArtifacts;
+pub use homeboy_lab_runner_contract::RunnerMutationArtifacts;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerResult {

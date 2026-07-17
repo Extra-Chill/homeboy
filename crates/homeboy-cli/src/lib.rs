@@ -16,7 +16,7 @@ pub use homeboy_core as core;
 // `homeboy::runner::*` and register its behavior with core at startup.
 pub use homeboy_fuzz as fuzz;
 pub use homeboy_issues as issues;
-pub use homeboy_runner as runner;
+pub use homeboy_lab_runner as runner;
 
 // Re-export the `log_status!` macro and is_zero serde helpers from homeboy-core
 // so `crate::log_status!` / `homeboy::log_status!` / `crate::is_zero` call sites

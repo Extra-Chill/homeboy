@@ -8,7 +8,7 @@ use homeboy_core::upgrade::ExtensionUpgradeEntry;
 use homeboy_core::upgrade::InstallMethod;
 use homeboy_core::upgrade::RunnerUpgradeEntry;
 use homeboy_core::Result;
-use homeboy_runner_contract::RunnerKind;
+use homeboy_lab_runner_contract::RunnerKind;
 use std::path::Path;
 
 pub fn upgrade_configured_runners(

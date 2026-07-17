@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use homeboy_core::lab_contract::RunnerWorkload;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
-use homeboy_runner_contract::RunnerCapabilityPreflight;
+use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
 
 use homeboy_core::api_jobs::RunnerJobPreparationProvider;
 use homeboy_core::error::Result;

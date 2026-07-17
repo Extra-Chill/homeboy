@@ -9,7 +9,7 @@ use crate::api_jobs::{
 use crate::broker_auth::{BrokerAuthStore, BrokerScope};
 use crate::error::{Error, Result};
 use crate::paths;
-use homeboy_runner_contract::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
+use homeboy_lab_runner_contract::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
 /// Per-request broker authentication context extracted from the network layer.
 ///

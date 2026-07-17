@@ -211,7 +211,7 @@ pub use workspace_root_provider::register as register_runner_workspace_root_prov
 // RunnerKind now lives in the shared runner-contract crate so core code can
 // name it without a core -> runner edge. Re-exported here so the many
 // `runner::RunnerKind` call sites (and the CLI) keep resolving unchanged.
-pub use homeboy_runner_contract::RunnerKind;
+pub use homeboy_lab_runner_contract::RunnerKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Runner {

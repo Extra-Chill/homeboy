@@ -16,7 +16,7 @@ use std::sync::Mutex;
 
 use crate::lab_contract::RunnerWorkload;
 use crate::secret_env_plan::SecretEnvPlan;
-use homeboy_runner_contract::RunnerCapabilityPreflight;
+use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
 
 use crate::error::Result;
 
