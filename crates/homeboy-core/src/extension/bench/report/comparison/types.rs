@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use serde_json::Value;
+
 use super::super::BenchArtifactRef;
-use crate::agent_task::{AgentTaskMatrixAggregate, AgentTaskMatrixPlan};
 use crate::extension::bench::diagnostic::BenchDiagnostic;
 use crate::extension::bench::parsing::{BenchMetricPhase, BenchMetricPolicy, BenchResults};
 use crate::extension::bench::run::BenchRunFailure;
@@ -52,12 +53,15 @@ pub struct BenchComparisonOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub axis_diffs: Vec<BenchAxisComparison>,
     /// Generic agent-task fan-out plan for matrix-shaped rig comparisons.
-    /// Present when compared rigs declare `bench.axes` metadata.
+    /// Present when compared rigs declare `bench.axes` metadata. Carried
+    /// opaquely as JSON so bench does not depend on the agent-task subsystem;
+    /// built by the agent-task matrix provider.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_task_plan: Option<AgentTaskMatrixPlan>,
-    /// Generic aggregate envelope keyed by the matrix plan's cell ids.
+    pub agent_task_plan: Option<Value>,
+    /// Generic aggregate envelope keyed by the matrix plan's cell ids. Carried
+    /// opaquely as JSON (see `agent_task_plan`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_task_aggregate: Option<AgentTaskMatrixAggregate>,
+    pub agent_task_aggregate: Option<Value>,
     /// Per-scenario run summary table. Promotes the variance-aware data
     /// already present under each scenario's `runs_summary` into a direct
     /// cross-rig comparison shape.

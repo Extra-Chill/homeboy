@@ -7,7 +7,6 @@ mod attempt_workspace;
 mod candidate_adoption;
 mod engine;
 mod harvest;
-pub mod lab_workspace_provenance;
 mod outcome;
 mod outcome_artifacts;
 mod outcome_status;

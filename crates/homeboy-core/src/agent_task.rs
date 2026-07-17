@@ -9,6 +9,7 @@ pub use super::agent_task_fanout::{
 };
 
 mod artifacts;
+pub mod bench_matrix_provider;
 mod executor;
 mod matrix;
 mod outcome;
