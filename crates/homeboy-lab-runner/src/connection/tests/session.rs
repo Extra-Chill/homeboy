@@ -15,6 +15,7 @@ fn first_connect_routes_to_idempotent_ensure_start_when_no_daemon_exists() {
         fresh: false,
         reachable: false,
         active_jobs: 0,
+        typed_unresolved_jobs: None,
         endpoint_probe_error: None,
         termination_evidence: None,
     };
@@ -34,6 +35,7 @@ fn missing_daemon_state_with_active_jobs_refuses_ensure_running() {
         fresh: false,
         reachable: false,
         active_jobs: 1,
+        typed_unresolved_jobs: None,
         endpoint_probe_error: None,
         termination_evidence: None,
     };

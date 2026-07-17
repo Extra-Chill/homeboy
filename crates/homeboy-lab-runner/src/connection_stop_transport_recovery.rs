@@ -473,6 +473,7 @@ mod tests {
             fresh: reachable,
             reachable,
             active_jobs,
+            typed_unresolved_jobs: None,
             endpoint_probe_error: None,
             termination_evidence: None,
         }
@@ -647,6 +648,7 @@ mod tests {
             fresh: false,
             reachable: false,
             active_jobs: 0,
+            typed_unresolved_jobs: None,
             endpoint_probe_error: None,
             termination_evidence: Some(homeboy_core::daemon::DaemonTerminationEvidence {
                 classification: homeboy_core::daemon::DaemonTerminationClassification::CleanStop,
@@ -694,6 +696,7 @@ mod tests {
             fresh: false,
             reachable: false,
             active_jobs: 0,
+            typed_unresolved_jobs: None,
             endpoint_probe_error: None,
             termination_evidence: None,
         };
