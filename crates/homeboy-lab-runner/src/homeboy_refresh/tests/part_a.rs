@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use super::*;
+use crate::{RunnerActiveJobState, RunnerSessionState, RunnerStatusReport};
 use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::test_support;
 
@@ -66,6 +67,112 @@ fn refresh_preserves_only_its_direct_controller_lease_for_orphan_recovery() {
     assert_eq!(
         refresh_owned_lease(session),
         Some("lease-refresh".to_string())
+    );
+}
+
+fn refreshed_daemon_status(connected: bool, identity: Option<&str>) -> RunnerStatusReport {
+    RunnerStatusReport {
+        runner_id: "lab".to_string(),
+        connected,
+        state: if connected {
+            RunnerSessionState::Connected
+        } else {
+            RunnerSessionState::Disconnected
+        },
+        session: identity.map(|homeboy_build_identity| RunnerSession {
+            runner_id: "lab".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: RunnerSessionRole::Controller,
+            server_id: None,
+            controller_id: None,
+            broker_url: None,
+            remote_daemon_address: None,
+            local_port: None,
+            local_url: None,
+            tunnel_pid: None,
+            remote_daemon_pid: None,
+            remote_daemon_lease_id: None,
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: Some(homeboy_build_identity.to_string()),
+            connected_at: "2026-01-01T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }),
+        stale_daemon: None,
+        daemon_freshness: None,
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        stale_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::NotQueried,
+        active_job_source: None,
+        active_job_error: None,
+        active_job_recovery_evidence: None,
+        session_path: String::new(),
+    }
+}
+
+#[test]
+fn refreshed_daemon_verification_accepts_the_post_start_health_window() {
+    let not_ready = refreshed_daemon_status(false, Some("homeboy 0.1.0+06bbf46013cf"));
+    let ready = refreshed_daemon_status(true, Some("homeboy 0.1.0+06bbf46013cf"));
+    let mut statuses = [not_ready, ready].into_iter();
+    let mut retries = 0;
+
+    verify_refreshed_daemon_identity_with(
+        "lab",
+        "06bbf46013cf",
+        || Ok(statuses.next().expect("post-start status probe")),
+        || retries += 1,
+    )
+    .expect("the persisted connected session identifies the requested daemon commit");
+    assert_eq!(retries, 1, "the initial tunnel health race is retried once");
+}
+
+#[test]
+fn refreshed_daemon_verification_rejects_commit_substring_mismatch() {
+    let status = refreshed_daemon_status(true, Some("homeboy 0.1.0+x06bbf46013cf"));
+
+    let error = verify_refreshed_daemon_status("lab", "06bbf46013cf", &status)
+        .expect_err("the daemon commit component must match exactly");
+    assert!(error.message.contains("expected commit `06bbf46013cf`"));
+}
+
+#[test]
+fn refreshed_daemon_rollback_stops_restores_and_reconnects_the_previous_binary() {
+    let operations = std::cell::RefCell::new(Vec::new());
+
+    rollback_refreshed_daemon_with(
+        Some("/stable/homeboy"),
+        || {
+            operations.borrow_mut().push("stop new daemon".to_string());
+            Ok(())
+        },
+        |path| {
+            operations
+                .borrow_mut()
+                .push(format!("restore {}", path.expect("previous binary")));
+            Ok(())
+        },
+        |path| {
+            operations
+                .borrow_mut()
+                .push(format!("reconnect {}", path.expect("previous binary")));
+            Ok(())
+        },
+    )
+    .expect("rollback converges on the previous binary");
+
+    assert_eq!(
+        operations.into_inner(),
+        [
+            "stop new daemon",
+            "restore /stable/homeboy",
+            "reconnect /stable/homeboy",
+        ]
     );
 }
 
