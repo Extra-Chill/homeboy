@@ -49,6 +49,7 @@ fn request_round_trips_generic_agent_task_shape() {
         limits: AgentTaskLimits {
             timeout_ms: Some(300_000),
             max_runtime_ms: Some(240_000),
+            execution_deadline_unix_ms: None,
             liveness_timeout_ms: None,
             max_output_bytes: Some(1_000_000),
             exclusive_resource_keys: Vec::new(),

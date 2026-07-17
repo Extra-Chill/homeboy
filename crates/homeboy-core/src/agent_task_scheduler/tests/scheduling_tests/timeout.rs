@@ -33,6 +33,56 @@ mod timeout_tests {
     }
 
     #[test]
+    fn expired_execution_deadline_skips_materialization_and_provider_dispatch() {
+        let executor = RecordingExecutor::new(HashMap::new(), Duration::ZERO);
+        let started = Arc::clone(&executor.max_seen);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.execution_budget.deadline_unix_ms =
+            Some(crate::agent_task_timeout::now_unix_ms().saturating_sub(1));
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(started.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::Timeout
+        );
+        let diagnostic = aggregate.outcomes[0]
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.class == "agent_task.execution_deadline_exceeded")
+            .expect("deadline diagnostic");
+        assert_eq!(diagnostic.data["completed_phase"], "materialization");
+        assert_eq!(diagnostic.data["remaining_budget_ms"], 0);
+    }
+
+    #[test]
+    fn execution_deadline_is_propagated_to_the_executor_request() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(ConceptPacketExecutor {
+            observed: Arc::clone(&observed),
+            emit_concept_packet: false,
+        });
+        let mut plan = plan_with_tasks(1);
+        let deadline = crate::agent_task_timeout::now_unix_ms().saturating_add(60_000);
+        plan.options.execution_budget.deadline_unix_ms = Some(deadline);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::Succeeded
+        );
+        assert_eq!(
+            observed.lock().expect("observed request")[0]
+                .limits
+                .execution_deadline_unix_ms,
+            Some(deadline)
+        );
+    }
+
+    #[test]
     fn timeout_with_completed_runtime_artifacts_is_discoverable_and_promotable() {
         let temp = tempfile::tempdir().expect("tempdir");
         let artifact_root = temp.path().join("task-1-artifacts");

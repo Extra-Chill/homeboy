@@ -87,6 +87,7 @@ where
         derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> AgentTaskAggregate {
         let mut plan = plan.canonicalize();
+        let execution_deadline_unix_ms = plan.options.execution_budget.deadline_unix_ms;
         // A scheduler without a durable run record still needs a private
         // controller-scratch namespace. Plan IDs are semantic labels and can
         // legitimately repeat across independent in-process executions.
@@ -115,6 +116,7 @@ where
             .tasks
             .drain(..)
             .map(|mut request| {
+                request.limits.execution_deadline_unix_ms = execution_deadline_unix_ms;
                 if let Some(policy) = plan_rotation.as_ref() {
                     AgentTaskScheduleSupport::apply_rotation_policy_limits(&mut request, policy);
                 }
@@ -369,6 +371,24 @@ where
                     continue;
                 }
                 let task_id = request.task_id.clone();
+                if crate::agent_task_timeout::remaining_execution_deadline_ms(
+                    execution_deadline_unix_ms,
+                ) == Some(0)
+                {
+                    let outcome = execution_deadline_outcome(
+                        task_id.clone(),
+                        execution_deadline_unix_ms.expect("checked deadline"),
+                        "materialization",
+                    );
+                    events.push(event(
+                        &task_id,
+                        AgentTaskState::TimedOut,
+                        scheduled.attempt,
+                        outcome.summary.clone(),
+                    ));
+                    record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                    continue;
+                }
                 let harvest_preflight = match prepare_committed_harvest(
                     &request,
                     derived_cook_baseline,
@@ -469,6 +489,12 @@ where
                     request.limits.timeout_ms.or(plan.options.timeout_ms),
                     request.limits.max_runtime_ms,
                 );
+                let task_timeout_ms = crate::agent_task_timeout::remaining_execution_deadline_ms(
+                    execution_deadline_unix_ms,
+                )
+                .map(|remaining| task_timeout_ms.min(remaining))
+                .unwrap_or(task_timeout_ms);
+                request.limits.execution_deadline_unix_ms = execution_deadline_unix_ms;
                 let tx = tx.clone();
                 let attempt = scheduled.attempt;
                 let context = AgentTaskExecutionContext {
@@ -505,6 +531,7 @@ where
                     attempt,
                     started_at: Instant::now(),
                     timeout_ms: Some(task_timeout_ms),
+                    execution_deadline_unix_ms,
                     timeout_cancel_requested: false,
                     rotation_index: scheduled.rotation_index,
                     rotation_attempts: scheduled.rotation_attempts,
@@ -615,7 +642,16 @@ where
                         outcome.failure_classification =
                             Some(AgentTaskFailureClassification::Timeout);
                         outcome.diagnostics.push(AgentTaskDiagnostic {
-                            class: "scheduler_timeout".to_string(),
+                            class: if running_task
+                                .execution_deadline_unix_ms
+                                .is_some_and(|deadline| {
+                                    crate::agent_task_timeout::now_unix_ms() >= deadline
+                                })
+                            {
+                                "agent_task.execution_deadline_exceeded".to_string()
+                            } else {
+                                "scheduler_timeout".to_string()
+                            },
                             message: if recovered {
                                 "provider exited after scheduler cancellation; a recoverable candidate patch was harvested".to_string()
                             } else {
@@ -624,6 +660,9 @@ where
                             data: serde_json::json!({
                                 "timeout_ms": running_task.timeout_ms,
                                 "elapsed_ms": running_task.started_at.elapsed().as_millis() as u64,
+                                "deadline_unix_ms": running_task.execution_deadline_unix_ms,
+                                "remaining_budget_ms": running_task.execution_deadline_unix_ms.map(|deadline| deadline.saturating_sub(crate::agent_task_timeout::now_unix_ms())),
+                                "completed_phase": "provider_execution",
                                 "provider_backend": running_task.request.executor.backend,
                                 "provider_model": running_task.request.executor.model(),
                                 "candidate_recoverable": recovered,
@@ -918,6 +957,7 @@ pub(super) struct RunningTask {
     pub(super) attempt: u32,
     pub(super) started_at: Instant,
     pub(super) timeout_ms: Option<u64>,
+    pub(super) execution_deadline_unix_ms: Option<u64>,
     /// Deadline cancellation has been sent; harvesting waits for TaskResult.
     pub(super) timeout_cancel_requested: bool,
     /// Rotation entries already consumed for this task (0 = original executor).
@@ -1123,6 +1163,38 @@ fn scratch_allocation_failure(task_id: String, error: String) -> AgentTaskOutcom
             class: "agent_task.controller_scratch_allocation_failed".to_string(),
             message: error,
             data: serde_json::Value::Null,
+        }],
+        outputs: serde_json::Value::Null,
+        workflow: None,
+        follow_up: None,
+        metadata: serde_json::Value::Null,
+    }
+}
+
+fn execution_deadline_outcome(
+    task_id: String,
+    deadline_unix_ms: u64,
+    completed_phase: &str,
+) -> AgentTaskOutcome {
+    AgentTaskOutcome {
+        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        task_id,
+        status: AgentTaskOutcomeStatus::Timeout,
+        summary: Some("agent-task execution deadline expired before provider dispatch".to_string()),
+        failure_classification: Some(AgentTaskFailureClassification::Timeout),
+        artifacts: Vec::new(),
+        typed_artifacts: Vec::new(),
+        evidence_refs: Vec::new(),
+        diagnostics: vec![AgentTaskDiagnostic {
+            class: "agent_task.execution_deadline_exceeded".to_string(),
+            message: format!(
+                "the total execution deadline expired during {completed_phase}; no further work will be started"
+            ),
+            data: serde_json::json!({
+                "deadline_unix_ms": deadline_unix_ms,
+                "remaining_budget_ms": 0,
+                "completed_phase": completed_phase,
+            }),
         }],
         outputs: serde_json::Value::Null,
         workflow: None,

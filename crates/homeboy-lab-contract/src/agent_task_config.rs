@@ -219,6 +219,11 @@ pub struct AgentTaskRetryPolicy {
 pub struct AgentTaskExecutionBudget {
     #[serde(default)]
     pub version: u32,
+    /// Absolute UTC Unix timestamp in milliseconds at which the entire task
+    /// lifecycle must stop. Unlike `timeout_ms`, this is not reset for retries,
+    /// provider rotation, or a remote runner handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_unix_ms: Option<u64>,
     pub max_provider_executions: u32,
     pub max_same_provider_retries: u32,
     pub max_provider_rotations: u32,
@@ -228,6 +233,7 @@ impl Default for AgentTaskExecutionBudget {
     fn default() -> Self {
         Self {
             version: Self::VERSION,
+            deadline_unix_ms: None,
             max_provider_executions: u32::MAX,
             max_same_provider_retries: u32::MAX,
             max_provider_rotations: u32::MAX,
@@ -252,10 +258,18 @@ impl AgentTaskExecutionBudget {
     ) -> Self {
         Self {
             version: Self::VERSION,
+            deadline_unix_ms: None,
             max_provider_executions,
             max_same_provider_retries,
             max_provider_rotations,
         }
+    }
+
+    /// Remaining total lifecycle budget at `now_unix_ms`. `Some(0)` means the
+    /// absolute deadline has expired; `None` preserves legacy unbounded plans.
+    pub fn remaining_deadline_ms(&self, now_unix_ms: u64) -> Option<u64> {
+        self.deadline_unix_ms
+            .map(|deadline| deadline.saturating_sub(now_unix_ms))
     }
 
     pub fn migrate_legacy(&mut self) -> std::result::Result<bool, String> {

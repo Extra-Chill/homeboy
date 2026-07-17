@@ -232,6 +232,12 @@ pub(super) fn run_materialized_provider_command_once(
     provider: &AgentTaskExecutorProvider,
 ) -> AgentTaskOutcome {
     let command = render_provider_command_display(provider);
+    let deadline_remaining_ms = crate::agent_task_timeout::remaining_execution_deadline_ms(
+        request.limits.execution_deadline_unix_ms,
+    );
+    if deadline_remaining_ms == Some(0) {
+        return execution_deadline_outcome(request, provider, &command, "provider_execution");
+    }
     let Some((program, args, provider_cwd)) = provider_command_parts(provider) else {
         return failure_outcome(
             request,
@@ -259,11 +265,20 @@ pub(super) fn run_materialized_provider_command_once(
         return preflight;
     }
 
-    let requested_timeout_ms = crate::agent_task_timeout::effective_provider_timeout_ms(
+    let attempt_timeout_ms = crate::agent_task_timeout::effective_provider_timeout_ms(
         request.limits.timeout_ms,
         request.limits.max_runtime_ms,
     );
-    let process_timeout = timeout_with_grace(requested_timeout_ms);
+    let requested_timeout_ms = deadline_remaining_ms
+        .map(|remaining| attempt_timeout_ms.min(remaining))
+        .unwrap_or(attempt_timeout_ms);
+    // Grace is for a per-attempt timeout only. An absolute execution deadline
+    // must not be extended by a process-local cleanup allowance.
+    let process_timeout = if deadline_remaining_ms.is_some() {
+        Duration::from_millis(requested_timeout_ms)
+    } else {
+        timeout_with_grace(requested_timeout_ms)
+    };
     let mut provider_request = request.clone();
     provider_request.request.limits.timeout_ms = Some(requested_timeout_ms);
     provider_request.request.normalize_artifact_declarations();
@@ -436,6 +451,13 @@ pub(super) fn run_materialized_provider_command_once(
     }
 
     if timed_out {
+        if request
+            .limits
+            .execution_deadline_unix_ms
+            .is_some_and(|deadline| crate::agent_task_timeout::now_unix_ms() >= deadline)
+        {
+            return execution_deadline_outcome(request, provider, &command, "provider_execution");
+        }
         return failure_outcome(
             request,
             AgentTaskOutcomeStatus::Timeout,
@@ -532,6 +554,31 @@ pub(super) fn run_materialized_provider_command_once(
             ),
         ),
     }
+}
+
+fn execution_deadline_outcome(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+    command: &str,
+    completed_phase: &str,
+) -> AgentTaskOutcome {
+    failure_outcome(
+        request,
+        AgentTaskOutcomeStatus::Timeout,
+        AgentTaskFailureClassification::Timeout,
+        "agent_task.execution_deadline_exceeded",
+        format!(
+            "provider '{}' was not allowed to continue because the total execution deadline expired",
+            provider.id
+        ),
+        json!({
+            "provider": provider.id,
+            "command": command,
+            "deadline_unix_ms": request.limits.execution_deadline_unix_ms,
+            "remaining_budget_ms": 0,
+            "completed_phase": completed_phase,
+        }),
+    )
 }
 
 #[cfg(test)]

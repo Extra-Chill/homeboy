@@ -279,6 +279,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
         });
     plan.options.execution_budget = AgentTaskExecutionBudget {
         version: AgentTaskExecutionBudget::VERSION,
+        deadline_unix_ms: None,
         max_provider_executions: request.core.attempts.max(1),
         max_same_provider_retries: request.core.same_provider_retries,
         max_provider_rotations: request.core.provider_rotations,

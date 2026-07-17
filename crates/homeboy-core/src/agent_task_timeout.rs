@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_TIMEOUT_GRACE_MS: u64 = 30_000;
 const MIN_TIMEOUT_GRACE_MS: u64 = 100;
@@ -7,6 +7,17 @@ const MIN_TIMEOUT_GRACE_MS: u64 = 100;
 /// task nor the plan sets an explicit timeout. Twenty minutes is generous for
 /// real agent work while still preventing silent unbounded provider hangs.
 pub const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 1_200_000;
+
+pub(crate) fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+pub(crate) fn remaining_execution_deadline_ms(deadline_unix_ms: Option<u64>) -> Option<u64> {
+    deadline_unix_ms.map(|deadline| deadline.saturating_sub(now_unix_ms()))
+}
 
 pub fn effective_provider_timeout_ms(timeout_ms: Option<u64>, max_runtime_ms: Option<u64>) -> u64 {
     timeout_ms
