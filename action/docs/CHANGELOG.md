@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.17] - 2026-07-17
+
+### Changed
+- Remove generic autofix mutation paths
+
 ## [2.8.16] - 2026-07-17
 
 ### Changed
