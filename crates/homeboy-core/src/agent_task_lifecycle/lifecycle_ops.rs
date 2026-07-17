@@ -193,6 +193,41 @@ struct DeferredCandidateLock {
     #[allow(dead_code)] // Retains the advisory lock until this guard drops.
     file: File,
 }
+
+struct LabHandoffLock {
+    // Retains the advisory lock until acceptance or expiry has been persisted.
+    #[allow(dead_code)]
+    file: File,
+}
+
+impl LabHandoffLock {
+    fn lock(run_id: &str) -> Result<Self> {
+        let lock_path = paths::homeboy_data()?
+            .join("agent-task-runs")
+            .join(run_id)
+            .join("lab-handoff.lock");
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| Error::internal_io(error.to_string(), None))?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some("open Lab handoff lock".to_string()))
+            })?;
+        #[cfg(unix)]
+        if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) } != 0 {
+            return Err(Error::internal_io(
+                std::io::Error::last_os_error().to_string(),
+                Some("lock Lab handoff".to_string()),
+            ));
+        }
+        Ok(Self { file })
+    }
+}
 impl DeferredCandidateLock {
     #[cfg(unix)]
     fn lock(file: File) -> Result<Self> {
@@ -560,6 +595,10 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let resolved_run_id = resolve_run_id(run_id)?;
     let _ = reconcile_deferred_candidate(&resolved_run_id)?;
     let mut record = store::read_record(&resolved_run_id)?;
+    if is_expired_unaccepted_lab_handoff(&record, chrono::Utc::now()) {
+        let _ = expire_unaccepted_lab_handoff(&resolved_run_id)?;
+        record = store::read_record(&resolved_run_id)?;
+    }
     let controller_plan = store::read_controller_plan(&record.run_id)?;
     let controller_plan_path = store::controller_plan_path(&record.run_id)?
         .display()
@@ -750,7 +789,8 @@ fn is_expired_unaccepted_lab_handoff(
 }
 
 fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
-    // Re-read immediately before cancellation: an accepted job is runner-owned
+    let _lock = LabHandoffLock::lock(run_id)?;
+    // Re-read while holding the handoff lock: an accepted job is runner-owned
     // and must never be terminalized by controller deadline recovery.
     let record = store::read_record(run_id)?;
     if !is_expired_unaccepted_lab_handoff(&record, chrono::Utc::now()) {
@@ -1699,6 +1739,7 @@ fn record_lab_offload_phase_metadata(
 
 pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(input.run_id);
+    let _lock = LabHandoffLock::lock(&run_id)?;
     let plan = detached_lab_plan(&run_id, &input);
     let mut record = match store::read_record(&run_id) {
         Ok(record) => record,
@@ -1713,14 +1754,24 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
         }
         Err(error) => return Err(error),
     };
-    if matches!(
-        record.state,
-        AgentTaskRunState::Succeeded
-            | AgentTaskRunState::PartialRecoverable
-            | AgentTaskRunState::PartialFailure
-            | AgentTaskRunState::Failed
-            | AgentTaskRunState::Cancelled
-    ) {
+    let expired_unaccepted_handoff = record.state == AgentTaskRunState::Cancelled
+        && record.runner_id() == Some(input.runner_id)
+        && record
+            .metadata
+            .get("handoff_acceptance")
+            .and_then(|acceptance| acceptance.get("state"))
+            .and_then(Value::as_str)
+            == Some("expired");
+    if !expired_unaccepted_handoff
+        && matches!(
+            record.state,
+            AgentTaskRunState::Succeeded
+                | AgentTaskRunState::PartialRecoverable
+                | AgentTaskRunState::PartialFailure
+                | AgentTaskRunState::Failed
+                | AgentTaskRunState::Cancelled
+        )
+    {
         // A terminal proxy must not be resurrected. A later runner job may
         // attach finalized evidence, but only from the original Lab runner.
         if record.runner_id() == Some(input.runner_id) {
