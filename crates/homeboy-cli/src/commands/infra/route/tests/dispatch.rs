@@ -543,6 +543,10 @@ fn managed_promotion_handoff_does_not_require_runner_side_artifact_hydration() {
         "agent-task-preserved-run".to_string(),
         "--to-worktree".to_string(),
         "homeboy@fix-preserved-candidate".to_string(),
+        "--task-id".to_string(),
+        "task-preserved-artifact".to_string(),
+        "--artifact-id".to_string(),
+        "patch-preserved-artifact".to_string(),
     ];
     let cli = Cli::parse_from(&normalized);
 
