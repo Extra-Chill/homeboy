@@ -156,10 +156,8 @@ pub(crate) fn fingerprint_extension_content(
     relative_path: &str,
     content: &str,
 ) -> Option<FileFingerprint> {
-    use crate::extension;
-
-    let matched_extension = extension::find_extension_for_file_ext(ext, "fingerprint")?;
-    let output = extension::run_fingerprint_script(&matched_extension, relative_path, content)?;
+    let output =
+        super::fingerprint_script_provider::fingerprint_via_script(ext, relative_path, content)?;
 
     let language = Language::from_extension(ext);
 

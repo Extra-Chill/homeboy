@@ -104,6 +104,10 @@ impl CliRuntime {
         // depending on the extension layer's loader — the seam that lets audit
         // become its own crate.
         crate::core::extension::audit_manifest_provider::register();
+        // Register the fingerprint-script provider so code_audit can fall back to
+        // extension fingerprint scripts (for files the core grammar engine can't
+        // handle) without depending on the extension script runner.
+        crate::core::extension::audit_fingerprint_script_provider::register();
         // Register the audit recorded-artifact provider so the artifact-portability
         // detector can read past runs' artifacts from the observation store without
         // code_audit depending on observation — the last seam before audit becomes

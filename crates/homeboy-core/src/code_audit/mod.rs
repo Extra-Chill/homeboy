@@ -33,6 +33,7 @@ mod execution_plan;
 pub mod extension_manifests;
 pub(crate) mod findings;
 pub mod fingerprint;
+pub mod fingerprint_script_provider;
 pub mod fixability_provider;
 mod idiomatic;
 pub(crate) mod impact;

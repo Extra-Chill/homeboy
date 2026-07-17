@@ -12,7 +12,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::code_audit::fingerprint::{self, FileFingerprint};
-use crate::{extension, Error};
+use crate::Error;
 use homeboy_engine_primitives::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
 // ============================================================================
@@ -60,7 +60,7 @@ pub struct MapClass {
     pub properties: Vec<String>,
     /// Hook references (actions and filters).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub hooks: Vec<extension::HookRef>,
+    pub hooks: Vec<homeboy_audit_contract::HookRef>,
 }
 
 /// The class hierarchy: parent → children mapping.
