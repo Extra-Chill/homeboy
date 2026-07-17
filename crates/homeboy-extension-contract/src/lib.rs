@@ -21,6 +21,7 @@ pub mod manifest_toolchain_config;
 pub mod runner_contract;
 pub mod source_metadata_repair;
 pub mod test_drift;
+pub mod trace_config;
 pub mod update_output;
 pub mod version;
 
