@@ -279,6 +279,7 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '') {
 	// provider session title from an ambient or run-scoped configuration layer.
 	content.agent.title = { ...objectValue(content.agent.title), disable: true };
 	const externalDirectoryPatterns = opencodeExternalDirectoryPatterns(request, config);
+	const workspaceReadPatterns = opencodeWorkspaceReadPatterns(request, config);
 	if (externalDirectoryPatterns.length > 0) {
 		content.permission = permissionWithExternalDirectoryAllowances(content.permission, externalDirectoryPatterns);
 		content.agent[primaryAgent] = {
@@ -289,18 +290,29 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '') {
 			),
 		};
 	}
+	if (workspaceReadPatterns.length > 0) {
+		content.permission = permissionWithWorkspaceReadAllowances(content.permission, workspaceReadPatterns);
+		content.agent[primaryAgent] = {
+			...objectValue(content.agent[primaryAgent]),
+			permission: permissionWithWorkspaceReadAllowances(
+				objectValue(content.agent[primaryAgent]).permission,
+				workspaceReadPatterns,
+				content.permission
+			),
+		};
+	}
 
 	return JSON.stringify(content);
 }
 
 function opencodeExternalDirectoryPatterns(request = {}, config = {}) {
-	const cwd = resolveOpenCodeCwd(request, config);
-	if (!isAbsolutePath(cwd)) {
+	const workspacePatterns = opencodeWorkspaceReadPatterns(request, config);
+	if (workspacePatterns.length === 0) {
 		return [];
 	}
 
-	const concreteWorkspace = concretePath(cwd);
-	const patterns = [path.join(concreteWorkspace, '**')];
+	const concreteWorkspace = concretePath(resolveOpenCodeCwd(request, config));
+	const patterns = [...workspacePatterns];
 	const attemptRoot = config.runtime_env?.TMPDIR;
 	if (isAbsolutePath(attemptRoot)) {
 		const concreteAttemptRoot = concretePath(attemptRoot);
@@ -311,6 +323,11 @@ function opencodeExternalDirectoryPatterns(request = {}, config = {}) {
 	}
 
 	return [...new Set(patterns)];
+}
+
+function opencodeWorkspaceReadPatterns(request = {}, config = {}) {
+	const cwd = resolveOpenCodeCwd(request, config);
+	return isAbsolutePath(cwd) ? [path.join(concretePath(cwd), '**')] : [];
 }
 
 function concretePath(candidate) {
@@ -350,6 +367,32 @@ function permissionWithExternalDirectoryAllowances(permission, patterns) {
 			// OpenCode resolves matching rules in order, so these task-owned paths
 			// deliberately supersede inherited catch-all rules.
 			...Object.fromEntries(patterns.map((pattern) => [pattern, 'allow'])),
+		},
+	};
+}
+
+function permissionWithWorkspaceReadAllowances(permission, patterns, inheritedPermission = {}) {
+	const rules = typeof permission === 'string'
+		? { '*': permission }
+		: objectValue(permission);
+	const inheritedRead = typeof inheritedPermission.read === 'string'
+		? { '*': inheritedPermission.read }
+		: objectValue(inheritedPermission.read);
+	const read = {
+		...inheritedRead,
+		...(typeof rules.read === 'string' ? { '*': rules.read } : objectValue(rules.read)),
+	};
+	const deniedReadRules = Object.fromEntries(
+		Object.entries(read).filter(([pattern, action]) => pattern !== '*' && action === 'deny')
+	);
+
+	return {
+		...rules,
+		read: {
+			// Permit source inspection only under the concrete task workspace.
+			'*': 'deny',
+			...Object.fromEntries(patterns.map((pattern) => [pattern, 'allow'])),
+			...deniedReadRules,
 		},
 	};
 }
