@@ -6,9 +6,9 @@ use super::{daemon_endpoint_response, error_response, HttpResponse};
 use crate::api_jobs::{
     JobArtifactMetadata, JobEventKind, JobStore, RemoteRunnerJobRequest, RemoteRunnerJobResult,
 };
+use crate::broker_auth::{BrokerAuthStore, BrokerScope};
 use crate::error::{Error, Result};
 use crate::paths;
-use crate::broker_auth::{BrokerAuthStore, BrokerScope};
 use crate::runner::{self, RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
 /// Per-request broker authentication context extracted from the network layer.
