@@ -461,6 +461,24 @@ pub fn pinned_runtime_for_mutation(run_id: &str) -> Result<Option<std::path::Pat
     )
 }
 
+/// Seal the currently executing controller into an immutable runtime before a
+/// new cook begins its local routing and admission work.
+pub fn pin_current_controller_runtime() -> Result<std::path::PathBuf> {
+    let runtime = crate::controller_runtime::pin_current()?;
+    runtime
+        .pointer("/originating/pinned_executable")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller_runtime",
+                "new controller runtime pin has no immutable executable",
+                None,
+                None,
+            )
+        })
+}
+
 /// Prune immutable controller pins through the durable lifecycle ownership
 /// boundary so nonterminal records remain authoritative retention roots.
 pub fn prune_controller_runtime_pins(
