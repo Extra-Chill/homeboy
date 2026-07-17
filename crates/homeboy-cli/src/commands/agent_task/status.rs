@@ -914,6 +914,7 @@ fn enrich_with_diagnostic_summary(value: &mut Value, run_id: &str) -> homeboy::c
     if !failure_reasons.is_empty() {
         value["failure_reasons"] = Value::Array(failure_reasons);
     }
+    value["execution_states"] = execution_states_from_aggregate(&aggregate, value);
     Ok(())
 }
 
@@ -937,6 +938,113 @@ pub(crate) fn diagnostic_summary_from_aggregate(aggregate: &AgentTaskAggregate) 
     failure_reasons_from_aggregate(aggregate).into_iter().next()
 }
 
+/// Project terminal execution facts into stable machine-readable states. These
+/// fields deliberately derive from typed outcome and lifecycle values, never
+/// provider summary prose or diagnostic messages.
+pub(crate) fn execution_states_from_aggregate(
+    aggregate: &AgentTaskAggregate,
+    record: &Value,
+) -> Value {
+    let review =
+        homeboy::core::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone());
+    let provider = aggregate
+        .outcomes
+        .iter()
+        .map(|outcome| {
+            let state = if matches!(
+                outcome.status,
+                AgentTaskOutcomeStatus::Failed
+                    | AgentTaskOutcomeStatus::ProviderError
+                    | AgentTaskOutcomeStatus::Timeout
+                    | AgentTaskOutcomeStatus::UnableToRemediate
+                    | AgentTaskOutcomeStatus::Cancelled
+            ) {
+                "failed"
+            } else {
+                "succeeded"
+            };
+            json!({
+                "task_id": outcome.task_id,
+                "state": state,
+                "outcome_status": outcome.status,
+                "failure_classification": outcome.failure_classification,
+            })
+        })
+        .collect::<Vec<_>>();
+    let candidates = review
+        .tasks
+        .iter()
+        .map(|task| {
+            let reason_code = if task.status == AgentTaskOutcomeStatus::NoOp {
+                "no_changes_produced"
+            } else {
+                match task.decision {
+                homeboy::core::agent_tasks::AgentTaskReconciliationDecision::NoOp => {
+                    "no_changes_produced"
+                }
+                homeboy::core::agent_tasks::AgentTaskReconciliationDecision::ApplyCandidate => {
+                    "patch_available"
+                }
+                homeboy::core::agent_tasks::AgentTaskReconciliationDecision::RetryCandidate => {
+                    "provider_retry_required"
+                }
+                homeboy::core::agent_tasks::AgentTaskReconciliationDecision::IssueReportCandidate => {
+                    "issue_report_required"
+                }
+                homeboy::core::agent_tasks::AgentTaskReconciliationDecision::ReviewCandidate => {
+                    "review_required"
+                }
+                }
+            };
+            json!({
+                "task_id": task.task_id,
+                "state": task.decision,
+                "reason_code": reason_code,
+            })
+        })
+        .collect::<Vec<_>>();
+    let promotion_status = record
+        .pointer("/metadata/latest_promotion/status")
+        .and_then(Value::as_str)
+        .unwrap_or("not_attempted");
+    let finalization_status = record
+        .pointer("/metadata/cook_finalization/status")
+        .and_then(Value::as_str)
+        .unwrap_or("not_attempted");
+    let patch_promoted = matches!(
+        promotion_status,
+        "verification_pending" | "applied" | "gate_failed"
+    );
+
+    json!({
+        "schema": "homeboy/agent-task-execution-states/v1",
+        "provider": provider,
+        "candidate": {
+            "state": if review.summary.apply_candidates > 0 {
+                "patch_available"
+            } else if review.summary.no_op > 0 {
+                "no_changes_produced"
+            } else {
+                "not_available"
+            },
+            "tasks": candidates,
+        },
+        "gate": {
+            "state": match promotion_status {
+                "applied" => "passed",
+                "gate_failed" => "failed",
+                "verification_pending" => "pending",
+                _ => "not_run",
+            },
+        },
+        "promotion": {
+            "state": promotion_status,
+            "patch_promoted": patch_promoted,
+        },
+        "finalization": { "state": finalization_status },
+    })
+}
+
 /// Cap the number of surfaced failure reasons so a pathological run with
 /// hundreds of nested diagnostics cannot flood the failure summary. Overflow is
 /// still available in the full nested payload (`--full` / aggregate file).
@@ -957,8 +1065,9 @@ const FAILURE_REASON_LIMIT: usize = 8;
 pub(crate) fn failure_reasons_from_aggregate(aggregate: &AgentTaskAggregate) -> Vec<Value> {
     let mut collected: Vec<CollectedDiagnostic> = Vec::new();
 
-    // Prefer failed/errored outcomes, but fall back to scanning every outcome so
-    // a root cause attached to a non-failed cell is still surfaced.
+    // Failure reasons only describe failed outcomes. Scanning successful
+    // outcomes incorrectly promoted provider success diagnostics (including
+    // exit status zero) into failure summaries.
     let failed_first = aggregate.outcomes.iter().filter(|outcome| {
         matches!(
             outcome.status,
@@ -968,13 +1077,7 @@ pub(crate) fn failure_reasons_from_aggregate(aggregate: &AgentTaskAggregate) -> 
                 | AgentTaskOutcomeStatus::UnableToRemediate
         )
     });
-    let any_failed = failed_first.clone().next().is_some();
-
-    let scan: Vec<&homeboy::core::agent_tasks::AgentTaskOutcome> = if any_failed {
-        failed_first.collect()
-    } else {
-        aggregate.outcomes.iter().collect()
-    };
+    let scan: Vec<&homeboy::core::agent_tasks::AgentTaskOutcome> = failed_first.collect();
 
     for outcome in scan {
         for diagnostic in &outcome.diagnostics {
@@ -1169,6 +1272,9 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         {
             summary["failure_reasons"] = failure_reasons.clone();
         }
+    }
+    if let Some(execution_states) = record.get("execution_states") {
+        summary["execution_states"] = execution_states.clone();
     }
     if let Some(aggregate_path) = record.get("aggregate_path") {
         if !aggregate_path.is_null() {

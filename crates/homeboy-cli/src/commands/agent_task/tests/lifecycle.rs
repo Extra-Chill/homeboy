@@ -665,6 +665,123 @@ fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
 }
 
 #[test]
+fn execution_states_distinguish_patch_noop_provider_failure_and_gate_failure() {
+    let patch = execution_states(
+        fixture_execution_outcome(
+            AgentTaskOutcomeStatus::Succeeded,
+            None,
+            vec![AgentTaskArtifact {
+                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: "patch".to_string(),
+                kind: "patch".to_string(),
+                name: None,
+                label: None,
+                role: None,
+                semantic_key: None,
+                path: None,
+                url: None,
+                mime: None,
+                size_bytes: Some(1),
+                sha256: None,
+                metadata: Value::Null,
+            }],
+            Value::Null,
+        ),
+        "applied",
+    );
+    assert_eq!(patch["provider"][0]["state"], "succeeded");
+    assert_eq!(patch["candidate"]["state"], "patch_available");
+    assert_eq!(patch["gate"]["state"], "passed");
+    assert_eq!(patch["promotion"]["state"], "applied");
+
+    let no_op_aggregate = aggregate_for_execution_outcome(fixture_execution_outcome(
+        AgentTaskOutcomeStatus::NoOp,
+        None,
+        Vec::new(),
+        json!({
+            "diagnostics": [{
+                "class": "provider_process",
+                "message": "OpenCode CLI exited with status 0."
+            }]
+        }),
+    ));
+    assert!(super::super::status::failure_reasons_from_aggregate(&no_op_aggregate).is_empty());
+    let no_op = super::super::status::execution_states_from_aggregate(
+        &no_op_aggregate,
+        &json!({ "metadata": { "latest_promotion": { "status": "no_changes" } } }),
+    );
+    assert_eq!(no_op["provider"][0]["state"], "succeeded");
+    assert_eq!(no_op["candidate"]["state"], "no_changes_produced");
+    assert_eq!(
+        no_op["candidate"]["tasks"][0]["reason_code"],
+        "no_changes_produced"
+    );
+
+    let provider_failure = aggregate_for_execution_outcome(fixture_execution_outcome(
+        AgentTaskOutcomeStatus::ProviderError,
+        Some(AgentTaskFailureClassification::Provider),
+        Vec::new(),
+        json!({
+            "diagnostics": [{
+                "class": "provider_process",
+                "message": "OpenCode CLI exited with status 1."
+            }]
+        }),
+    ));
+    assert_eq!(
+        super::super::status::failure_reasons_from_aggregate(&provider_failure)[0]["message"],
+        "OpenCode CLI exited with status 1."
+    );
+    let gate_failure = super::super::status::execution_states_from_aggregate(
+        &provider_failure,
+        &json!({ "metadata": { "latest_promotion": { "status": "gate_failed" } } }),
+    );
+    assert_eq!(gate_failure["provider"][0]["state"], "failed");
+    assert_eq!(gate_failure["gate"]["state"], "failed");
+}
+
+fn execution_states(outcome: AgentTaskOutcome, promotion_status: &str) -> Value {
+    super::super::status::execution_states_from_aggregate(
+        &aggregate_for_execution_outcome(outcome),
+        &json!({ "metadata": { "latest_promotion": { "status": promotion_status } } }),
+    )
+}
+
+fn aggregate_for_execution_outcome(outcome: AgentTaskOutcome) -> AgentTaskAggregate {
+    serde_json::from_value(json!({
+        "schema": "homeboy/agent-task-aggregate/v1",
+        "plan_id": "plan",
+        "status": "succeeded",
+        "totals": { "skipped": 0 },
+        "outcomes": [outcome],
+    }))
+    .expect("aggregate fixture")
+}
+
+fn fixture_execution_outcome(
+    status: AgentTaskOutcomeStatus,
+    failure_classification: Option<AgentTaskFailureClassification>,
+    artifacts: Vec<AgentTaskArtifact>,
+    outputs: Value,
+) -> AgentTaskOutcome {
+    AgentTaskOutcome {
+        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        task_id: String::new(),
+        status,
+        summary: None,
+        failure_classification,
+        artifacts,
+        typed_artifacts: Vec::new(),
+        evidence_refs: Vec::new(),
+        diagnostics: Vec::new(),
+        outputs,
+        workflow: None,
+        follow_up: None,
+        metadata: Value::Null,
+    }
+}
+
+#[test]
 fn generic_contract_fixtures_hydrate_local_file_and_path_evidence() {
     with_isolated_home(|home| {
         let structured_path = home.path().join("structured-result.json");
