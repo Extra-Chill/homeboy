@@ -18,6 +18,37 @@ pub struct ArtifactViewerLink {
     pub replay: Option<serde_json::Value>,
 }
 
+/// A recorded artifact produced by a run: its identity, on-disk path, optional
+/// URLs/viewer links, and metadata. A behavior-free record type shared by the
+/// observation store that persists it and report layers that carry it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactRecord {
+    pub id: String,
+    pub run_id: String,
+    pub kind: String,
+    #[serde(rename = "type", default = "default_artifact_type")]
+    pub artifact_type: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub viewer_links: Vec<ArtifactViewerLink>,
+    pub sha256: Option<String>,
+    pub size_bytes: Option<i64>,
+    pub mime: Option<String>,
+    #[serde(default)]
+    pub metadata_json: serde_json::Value,
+    pub created_at: String,
+}
+
+fn default_artifact_type() -> String {
+    "file".to_string()
+}
+
 pub const ARTIFACT_CONTRACT_SCHEMA: &str = "homeboy/artifact-contract/v1";
 pub const EVIDENCE_CONTRACT_SCHEMA: &str = "homeboy/evidence-contract/v1";
 
@@ -162,10 +193,6 @@ fn artifact_contract_schema() -> String {
 
 fn evidence_contract_schema() -> String {
     EVIDENCE_CONTRACT_SCHEMA.to_string()
-}
-
-fn default_artifact_type() -> String {
-    "file".to_string()
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
