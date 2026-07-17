@@ -13,6 +13,7 @@ pub mod action_types;
 pub mod autofix_config;
 pub mod bench_artifact;
 pub mod bench_diagnostics;
+pub mod bench_gate;
 pub mod bench_result;
 pub mod capability;
 pub use bench_artifact::{BenchArtifact, BenchArtifactViewer, BenchPreviewLifecycleMetadata};
@@ -20,6 +21,7 @@ pub use bench_diagnostics::{
     BenchDiagnostic, BenchDiagnosticSource, BenchPhaseEvent, BenchPhaseFailureClassification,
     BenchPhaseSummary,
 };
+pub use bench_gate::{BenchGate, BenchGateOp, BenchGateResult};
 pub use bench_result::{
     BenchChildCommandFailure, BenchMemory, BenchMetricDirection, BenchMetricPhase,
     BenchMetricPolicy, BenchMetrics, BenchProvenance, BenchProvenanceLink, BenchRunExecution,
