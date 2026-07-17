@@ -48,19 +48,22 @@ pub enum HookFailureMode {
 /// Resolve all hooks for a given event by merging extension-level and component-level hooks.
 ///
 /// Execution order:
-/// 1. Extension hooks (platform behavior) — from all linked extensions, in extension iteration order
+/// 1. Extension hooks (platform behavior) — from all linked extensions, sorted by extension ID
 /// 2. Component hooks (user customization)
 ///
-pub fn resolve_hooks(component: &Component, event: &str) -> Vec<String> {
+/// A configured extension is part of the component's declared behavior. Failing
+/// to load it must fail hook resolution rather than silently changing the plan.
+pub fn resolve_hooks(component: &Component, event: &str) -> Result<Vec<String>> {
     let mut commands = Vec::new();
 
     // Extension hooks first
     if let Some(ref extensions) = component.extensions {
-        for extension_id in extensions.keys() {
-            if let Ok(manifest) = extension::load_extension(extension_id) {
-                if let Some(extension_commands) = manifest.hooks.get(event) {
-                    commands.extend(extension_commands.clone());
-                }
+        let mut extension_ids: Vec<_> = extensions.keys().collect();
+        extension_ids.sort();
+        for extension_id in extension_ids {
+            let manifest = extension::load_extension(extension_id)?;
+            if let Some(extension_commands) = manifest.hooks.get(event) {
+                commands.extend(extension_commands.clone());
             }
         }
     }
@@ -70,7 +73,7 @@ pub fn resolve_hooks(component: &Component, event: &str) -> Vec<String> {
         commands.extend(component_commands.clone());
     }
 
-    commands
+    Ok(commands)
 }
 
 /// Run all hooks for a given event.
@@ -82,7 +85,7 @@ pub fn run_hooks(
     event: &str,
     failure_mode: HookFailureMode,
 ) -> Result<HookRunResult> {
-    let commands = resolve_hooks(component, event);
+    let commands = resolve_hooks(component, event)?;
     run_commands(&commands, &component.local_path, event, failure_mode)
 }
 
@@ -149,7 +152,7 @@ pub(crate) fn run_hooks_remote(
     failure_mode: HookFailureMode,
     vars: &HashMap<String, String>,
 ) -> Result<HookRunResult> {
-    let commands = resolve_hooks(component, event);
+    let commands = resolve_hooks(component, event)?;
     let expanded: Vec<String> = commands
         .iter()
         .map(|c| template::render_map(c, vars))
@@ -223,6 +226,22 @@ pub mod events {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::ScopedExtensionConfig;
+    use crate::test_support::with_isolated_home;
+    use std::collections::HashMap;
+
+    fn write_extension_with_hook(home: &std::path::Path, id: &str, command: &str) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        std::fs::write(
+            extension_dir.join(format!("{id}.json")),
+            format!(
+                r#"{{"name":"{id}","version":"1.0.0","hooks":{{"{}": ["{command}"]}}}}"#,
+                events::PRE_VERSION_BUMP
+            ),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn resolve_hooks_returns_empty_when_no_hooks() {
@@ -232,7 +251,7 @@ mod tests {
             "".to_string(),
             None,
         );
-        let commands = resolve_hooks(&component, events::PRE_VERSION_BUMP);
+        let commands = resolve_hooks(&component, events::PRE_VERSION_BUMP).unwrap();
         assert!(commands.is_empty());
     }
 
@@ -248,7 +267,7 @@ mod tests {
             events::PRE_VERSION_BUMP.to_string(),
             vec!["echo hello".to_string()],
         );
-        let commands = resolve_hooks(&component, events::PRE_VERSION_BUMP);
+        let commands = resolve_hooks(&component, events::PRE_VERSION_BUMP).unwrap();
         assert_eq!(commands, vec!["echo hello".to_string()]);
     }
 
@@ -264,8 +283,38 @@ mod tests {
             events::POST_DEPLOY.to_string(),
             vec!["echo deploy".to_string()],
         );
-        let commands = resolve_hooks(&component, events::PRE_VERSION_BUMP);
+        let commands = resolve_hooks(&component, events::PRE_VERSION_BUMP).unwrap();
         assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn resolve_hooks_sorts_extensions_and_rejects_missing_configured_extension() {
+        with_isolated_home(|home| {
+            write_extension_with_hook(home.path(), "zebra", "echo zebra");
+            write_extension_with_hook(home.path(), "alpha", "echo alpha");
+            let mut component = Component::new(
+                "test".to_string(),
+                "/tmp/test".to_string(),
+                "".to_string(),
+                None,
+            );
+            component.extensions = Some(HashMap::from([
+                ("zebra".to_string(), ScopedExtensionConfig::default()),
+                ("alpha".to_string(), ScopedExtensionConfig::default()),
+            ]));
+
+            assert_eq!(
+                resolve_hooks(&component, events::PRE_VERSION_BUMP).unwrap(),
+                vec!["echo alpha", "echo zebra"]
+            );
+
+            component
+                .extensions
+                .as_mut()
+                .unwrap()
+                .insert("missing".to_string(), ScopedExtensionConfig::default());
+            assert!(resolve_hooks(&component, events::PRE_VERSION_BUMP).is_err());
+        });
     }
 
     #[test]

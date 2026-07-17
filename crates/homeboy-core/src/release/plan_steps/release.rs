@@ -32,7 +32,7 @@ pub(in crate::release) fn build_release_steps(
     add_release_extension_diagnostics(component, extensions, &publish_targets, options, warnings);
 
     if options.pipeline.head {
-        return Ok(build_head_release_steps(
+        return build_head_release_steps(
             component,
             extensions,
             new_version,
@@ -40,7 +40,7 @@ pub(in crate::release) fn build_release_steps(
             release_scope,
             &publish_targets,
             warnings,
-        ));
+        );
     }
 
     if !publish_targets.is_empty() && !has_package_capability(extensions) {
@@ -193,7 +193,7 @@ pub(in crate::release) fn build_release_steps(
     }
 
     let post_release_hooks =
-        crate::engine::hooks::resolve_hooks(component, crate::engine::hooks::events::POST_RELEASE);
+        crate::engine::hooks::resolve_hooks(component, crate::engine::hooks::events::POST_RELEASE)?;
     if !post_release_hooks.is_empty() {
         let post_release_needs = if !options.pipeline.skip_publish && !publish_targets.is_empty() {
             if options.pipeline.deploy {
@@ -243,7 +243,7 @@ fn build_head_release_steps(
     release_scope: &ReleaseScope,
     publish_targets: &[String],
     warnings: &mut Vec<String>,
-) -> Vec<PlanStep> {
+) -> Result<Vec<PlanStep>> {
     let mut steps = Vec::new();
     let mut artifact_need = "preflight.remote_sync".to_string();
 
@@ -323,7 +323,7 @@ fn build_head_release_steps(
     }
 
     let post_release_hooks =
-        crate::engine::hooks::resolve_hooks(component, crate::engine::hooks::events::POST_RELEASE);
+        crate::engine::hooks::resolve_hooks(component, crate::engine::hooks::events::POST_RELEASE)?;
     if !post_release_hooks.is_empty() {
         let post_release_needs = if !options.pipeline.skip_publish && !publish_targets.is_empty() {
             if options.pipeline.deploy {
@@ -366,7 +366,7 @@ fn build_head_release_steps(
         ));
     }
 
-    steps
+    Ok(steps)
 }
 
 fn add_package_preflight_step(

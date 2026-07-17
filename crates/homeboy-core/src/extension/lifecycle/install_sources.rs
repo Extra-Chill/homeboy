@@ -16,7 +16,6 @@ use crate::paths;
 use homeboy_engine_primitives::local_files;
 
 use super::super::execution::run_setup;
-use super::super::load_extension;
 use super::super::manifest::ExtensionManifest;
 use super::{
     derive_id_from_url, manifest_path_for_extension, slugify_id, write_source_metadata,
@@ -144,20 +143,14 @@ pub(super) fn install_from_url(
     let extension_id = result?;
 
     // Write source metadata so it survives even when .git is discarded.
-    if let Some(ref rev) = source_revision {
-        let _ = std::fs::write(extension_dir.join(".source-revision"), rev);
-    }
-    let _ = std::fs::write(extension_dir.join(".source-url"), url);
+    write_source_metadata(&extension_dir, url, source_revision.clone());
+    super::write_requested_source_ref(&extension_dir, revision);
 
-    // Auto-run setup if extension defines a setup_command
-    // Setup is best-effort: install succeeds even if setup fails
-    if let Ok(extension) = load_extension(&extension_id) {
-        if extension
-            .runtime()
-            .is_some_and(|r| r.setup_command.is_some())
-        {
-            let _ = run_setup(&extension_id);
-        }
+    // A successful install is ready for use. Do not report a successful install
+    // if the declared setup command failed.
+    if let Err(err) = run_setup(&extension_id) {
+        let _ = std::fs::remove_dir_all(&extension_dir);
+        return Err(err);
     }
 
     let manifest_path = paths::extension_manifest(&extension_id)?;
@@ -544,6 +537,11 @@ pub(super) fn install_from_path(
         &source.to_string_lossy(),
         source_revision.clone(),
     );
+    super::write_requested_source_ref(&extension_dir, revision);
+    if let Err(err) = run_setup(&extension_id) {
+        let _ = std::fs::remove_file(&extension_dir);
+        return Err(err);
+    }
     let manifest_path = paths::extension_manifest(&extension_id)?;
     if let Err(err) = validate_installed_extension_agent_runtime_provider_discovery(&extension_id) {
         let _ = std::fs::remove_file(&extension_dir);
