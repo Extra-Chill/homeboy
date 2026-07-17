@@ -370,10 +370,7 @@ pub fn connect_with_orphan_adoption(
             session_store::terminate_pid,
         ));
     }
-    if !read_ownership(runner_id)?
-        .as_ref()
-        .is_some_and(session_is_live)
-    {
+    if claim_ownership_if_owner_not_live(&session)? {
         write_ownership(&session)?;
     }
 

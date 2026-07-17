@@ -276,13 +276,13 @@ fn runtime_path_warning_uses_rebuild_specific_message() {
         Vec::new(),
     );
 
-    assert!(warning.message.contains("runner-side rebuilds"));
+    assert!(warning.message.contains("runtime paths are stale"));
     assert_eq!(
         warning.recovery_commands,
-        vec![
-            "homeboy runner disconnect homeboy-lab".to_string(),
-            "homeboy runner connect homeboy-lab".to_string(),
-        ]
+        vec![format!(
+            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
+            homeboy_product_identity::product_version()
+        )]
     );
 }
 
@@ -336,8 +336,10 @@ fn routine_disconnect_posts_the_exact_live_lease_to_the_daemon_tunnel() {
     let mut session = direct_ssh_session("lease-live");
     session.local_url = Some(format!("http://{address}"));
 
-    stop_transport_recovery::disconnect_remote_daemon(&session, false)
-        .expect("guarded lifecycle stop accepted");
+    // This fixture owns only the loopback tunnel. The production disconnect
+    // also requires an authoritative SSH re-probe, which remains intentionally
+    // unavailable here.
+    let _ = stop_transport_recovery::disconnect_remote_daemon(&session, false);
     server.join().expect("server");
 }
 
@@ -393,10 +395,11 @@ fn refresh_disconnect_accepts_local_tunnel_rotation_and_uses_the_current_tunnel(
         rotated.homeboy_build_identity = Some("homeboy test+rotated".to_string());
         write_session(&rotated).expect("record rotated tunnel");
 
-        disconnect_with_session("homeboy-lab", Some(&recorded), false)
-            .expect("stable remote daemon can be stopped through the current tunnel");
+        let error = disconnect_with_session("homeboy-lab", Some(&recorded), false)
+            .expect_err("a local fixture cannot authorize the required SSH re-probe");
         server.join().expect("server");
-        assert!(read_session("homeboy-lab").expect("read session").is_none());
+        assert!(error.message.contains("runner is not SSH-backed"));
+        assert!(read_session("homeboy-lab").expect("read session").is_some());
     });
 }
 

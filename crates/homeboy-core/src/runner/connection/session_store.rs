@@ -95,8 +95,17 @@ pub(super) fn controller_id() -> String {
 }
 
 pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
-    let path = session_path(runner_id)?;
-    read_session_at(&path)
+    read_session_for_controller(runner_id, &controller_id())
+}
+
+pub(super) fn read_session_for_controller(
+    runner_id: &str,
+    controller_id: &str,
+) -> Result<Option<RunnerSession>> {
+    read_session_at(&paths::runner_controller_session_file(
+        runner_id,
+        controller_id,
+    )?)
 }
 
 pub(super) fn read_ownership(runner_id: &str) -> Result<Option<RunnerSession>> {
@@ -116,12 +125,25 @@ fn read_session_at(path: &PathBuf) -> Result<Option<RunnerSession>> {
 }
 
 pub(super) fn write_session(session: &RunnerSession) -> Result<()> {
-    let path = session_path(&session.runner_id)?;
-    write_session_at(&path, session)
+    let controller_id = if session.mode == RunnerTunnelMode::DirectSsh {
+        session.controller_id.clone().unwrap_or_else(controller_id)
+    } else {
+        controller_id()
+    };
+    write_session_at(
+        &paths::runner_controller_session_file(&session.runner_id, &controller_id)?,
+        session,
+    )
 }
 
 pub(super) fn write_ownership(session: &RunnerSession) -> Result<()> {
     write_session_at(&ownership_path(&session.runner_id)?, session)
+}
+
+pub(super) fn claim_ownership_if_owner_not_live(session: &RunnerSession) -> Result<bool> {
+    Ok(!read_ownership(&session.runner_id)?
+        .as_ref()
+        .is_some_and(session_is_live))
 }
 
 fn write_session_at(path: &PathBuf, session: &RunnerSession) -> Result<()> {
