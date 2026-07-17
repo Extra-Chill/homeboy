@@ -317,8 +317,16 @@ fn retained_agent_task_binding(
     record: &homeboy::core::agent_tasks::lifecycle::AgentTaskRunRecord,
     runner_id: &str,
 ) -> Option<serde_json::Value> {
-    let runner_job_id = record.runner_job_id()?;
-    (record.runner_id() == Some(runner_id)).then(|| {
+    retained_agent_task_binding_for_identity(record.runner_id(), record.runner_job_id(), runner_id)
+}
+
+fn retained_agent_task_binding_for_identity(
+    record_runner_id: Option<&str>,
+    runner_job_id: Option<&str>,
+    runner_id: &str,
+) -> Option<serde_json::Value> {
+    let runner_job_id = runner_job_id?;
+    (record_runner_id == Some(runner_id)).then(|| {
         serde_json::json!({
             "retained_runner_binding": {
                 "runner_id": runner_id,
@@ -507,10 +515,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    use homeboy::core::{
-        agent_tasks::lifecycle as agent_task_lifecycle,
-        observation::{NewRunRecord, ObservationStore, RunStatus},
-    };
+    use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
     use homeboy::test_support::with_isolated_home;
 
     use super::*;
@@ -590,6 +595,35 @@ mod tests {
             assert_eq!(artifacts.len(), 1);
             assert_eq!(artifacts[0].id, output.artifact.id);
         });
+    }
+
+    #[test]
+    fn retained_agent_task_binding_requires_exact_runner_and_persisted_job() {
+        assert_eq!(
+            retained_agent_task_binding_for_identity(
+                Some("homeboy-lab"),
+                Some("job-123"),
+                "homeboy-lab",
+            ),
+            Some(serde_json::json!({
+                "retained_runner_binding": {
+                    "runner_id": "homeboy-lab",
+                    "runner_job_id": "job-123"
+                }
+            }))
+        );
+        assert_eq!(
+            retained_agent_task_binding_for_identity(
+                Some("other-runner"),
+                Some("job-123"),
+                "homeboy-lab",
+            ),
+            None
+        );
+        assert_eq!(
+            retained_agent_task_binding_for_identity(Some("homeboy-lab"), None, "homeboy-lab"),
+            None
+        );
     }
 
     #[test]
