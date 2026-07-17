@@ -3946,7 +3946,9 @@ fn test_plan() -> AgentTaskPlan {
     )
 }
 
-fn terminal_child_snapshot(aggregate: &AgentTaskAggregate) -> crate::api_jobs::RunnerJobLogSnapshot {
+fn terminal_child_snapshot(
+    aggregate: &AgentTaskAggregate,
+) -> crate::api_jobs::RunnerJobLogSnapshot {
     let job_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("job id");
     crate::api_jobs::RunnerJobLogSnapshot {
         job: crate::api_jobs::Job {
