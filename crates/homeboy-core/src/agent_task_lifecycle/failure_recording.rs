@@ -823,6 +823,9 @@ pub(crate) fn project_terminal_artifacts(
                     "runner_provenance": artifact.metadata,
                 }
             });
+            if reusable_terminal_artifact(&store, &record.run_id, artifact, &artifact_id)? {
+                continue;
+            }
             if let Some(runner_id) = record.runner_id().filter(|runner_id| {
                 std::env::var(homeboy_runner_contract::RUNNER_ID_ENV)
                     .ok()
@@ -974,6 +977,50 @@ pub(crate) fn project_terminal_artifacts(
         }
     }
     projection_error.map_or(Ok(()), Err)
+}
+
+/// A direct artifact import can retain the same deterministic lifecycle id
+/// before terminal reconciliation. Reuse it only when its controller-local
+/// bytes prove it belongs to this artifact projection.
+fn reusable_terminal_artifact(
+    store: &crate::observation::ObservationStore,
+    run_id: &str,
+    artifact: &AgentTaskArtifact,
+    artifact_id: &str,
+) -> Result<bool> {
+    let Some(existing) = store.get_artifact(artifact_id)? else {
+        return Ok(false);
+    };
+    if existing.artifact_type != "file" {
+        return Ok(false);
+    }
+
+    let expected_size = i64::try_from(artifact.size_bytes.expect("checked above")).ok();
+    let expected_sha256 = artifact.sha256.as_deref().expect("checked above");
+    let matches = existing.run_id == run_id
+        && existing.size_bytes == expected_size
+        && existing.sha256.as_deref() == Some(expected_sha256)
+        && std::fs::metadata(&existing.path)
+            .map(|metadata| {
+                metadata.is_file() && i64::try_from(metadata.len()).ok() == expected_size
+            })
+            .unwrap_or(false)
+        && crate::artifact_metadata::sha256_file(Path::new(&existing.path))
+            .ok()
+            .as_deref()
+            == Some(expected_sha256);
+    if matches {
+        return Ok(true);
+    }
+
+    Err(Error::validation_invalid_argument(
+        "artifact_id",
+        format!(
+            "existing artifact record conflicts with terminal artifact projection: {artifact_id}"
+        ),
+        Some(artifact_id.to_string()),
+        None,
+    ))
 }
 
 /// Find finalized bytes already copied into the controller artifact root. Lab
