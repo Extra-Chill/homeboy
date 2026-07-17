@@ -7,9 +7,8 @@ use crate::extension::test::{TestBaselineComparison, TestCounts};
 use crate::refactor::{
     self,
     auto::{self, AutofixMode},
-    TransformSet,
 };
-use homeboy_refactor_contract::AppliedRefactor;
+use homeboy_refactor_contract::{AppliedRefactor, TransformSet};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
