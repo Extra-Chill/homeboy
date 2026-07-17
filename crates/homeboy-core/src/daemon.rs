@@ -23,10 +23,7 @@ use crate::paths;
 use crate::process::{
     pid_has_environment_value, pid_is_running, terminate_pid_with_sigterm_and_wait,
 };
-use crate::runner::{
-    execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process,
-    BrokerScope, Runner, RunnerProcessRequest,
-};
+use crate::runner::BrokerScope;
 use crate::runner_execution_envelope::PathMaterializationPlan;
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
@@ -38,6 +35,7 @@ mod completion_tracker;
 mod control;
 mod patch_capture;
 mod remote_runner;
+pub mod runner_exec_driver;
 pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
@@ -370,7 +368,7 @@ pub struct HttpResponse {
 struct ExecRequest {
     runner_id: String,
     #[serde(default)]
-    runner: Option<Runner>,
+    runner: Option<serde_json::Value>,
     #[serde(default)]
     project_id: Option<String>,
     #[serde(default)]
@@ -1729,7 +1727,7 @@ fn enqueue_exec_job(
             request.capture_patch,
         )
     })?;
-    let plan = prepare_daemon_local_process(RunnerProcessRequest {
+    let plan = runner_exec_driver::prepare_exec(runner_exec_driver::RunnerExecPrepareRequest {
         runner_id: request.runner_id,
         runner: request.runner,
         cwd: request.cwd,
@@ -1737,7 +1735,9 @@ fn enqueue_exec_job(
         command: request.command,
         env: request.env,
         secret_env_names: request.secret_env_names,
-        secret_env_plan: Some(secret_env_plan),
+        secret_env_plan: Some(
+            serde_json::to_value(&secret_env_plan).unwrap_or(serde_json::Value::Null),
+        ),
         capture_patch: request.capture_patch,
         raw_exec: request.raw_exec,
         source_snapshot: request.source_snapshot,
@@ -1771,7 +1771,7 @@ fn enqueue_exec_job(
             .durable_run_id = Some(durable_run_id);
     }
     let summary = json!({
-        "runner_id": plan.runner.id,
+        "runner_id": plan.runner_id,
         "cwd": plan.cwd,
         "command": plan.command,
         "capture_patch": request.capture_patch,
@@ -1787,7 +1787,7 @@ fn enqueue_exec_job(
     )
     .unwrap_or_else(|| json!({}));
     run_ref_metadata["runner_job_projection"] = json!({
-        "runner_id": plan.runner.id,
+        "runner_id": plan.runner_id,
         "command": crate::redaction::redact_argv_display(&plan.command),
         "cwd": plan.cwd,
         "source": lifecycle.as_ref().and_then(|lifecycle| lifecycle.source.clone()).unwrap_or_else(|| "runner-daemon".to_string()),
@@ -1801,7 +1801,7 @@ fn enqueue_exec_job(
             Some(run_ref_metadata),
             path_materialization_plan.clone(),
             Some(LocalRunnerJob {
-                runner_id: plan.runner.id.clone(),
+                runner_id: plan.runner_id.clone(),
                 command: plan.command.clone(),
                 cwd: Some(plan.cwd.clone()),
                 lifecycle: lifecycle.clone(),
@@ -1831,9 +1831,10 @@ fn enqueue_exec_job(
                     started_job.start_with_reserved_child_identity(pid, process_group_id, discriminator)?;
                     Ok(())
                 });
-                let process_output = execute_runner_process_until_cancelled_with_progress(
+                let cancel_job = job.clone();
+                let process_output = runner_exec_driver::execute_exec(
                     &plan,
-                    || job.is_cancelled(),
+                    Box::new(move || cancel_job.is_cancelled()),
                     Some(progress_sink),
                     true,
                     Some(child_started),
@@ -1850,7 +1851,7 @@ fn enqueue_exec_job(
                         "metrics": metrics.clone(),
                     }));
                     return Ok(json!({
-                        "runner_id": plan.runner.id.clone(),
+                        "runner_id": plan.runner_id.clone(),
                         "cwd": plan.cwd.clone(),
                         "command": plan.command.clone(),
                         "exit_code": exit_code,
@@ -1877,7 +1878,7 @@ fn enqueue_exec_job(
                 let patch = if let Some(baseline) = baseline {
                     Some(capture_patch_report(
                         job.job_id(),
-                        &plan.runner.id,
+                        &plan.runner_id,
                         &plan.cwd,
                         &plan.command,
                         source_snapshot.as_ref(),
@@ -1888,7 +1889,7 @@ fn enqueue_exec_job(
                     None
                 };
                 let result = json!({
-                    "runner_id": plan.runner.id,
+                    "runner_id": plan.runner_id,
                     "cwd": plan.cwd,
                     "command": plan.command,
                     "exit_code": exit_code,
@@ -1909,7 +1910,7 @@ fn enqueue_exec_job(
                         stderr,
                         target: TargetDetails {
                             project_id: None,
-                            server_id: Some(plan.runner.id.clone()),
+                            server_id: Some(plan.runner_id.clone()),
                             host: None,
                         },
                     }));

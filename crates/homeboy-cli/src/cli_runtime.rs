@@ -135,6 +135,10 @@ impl CliRuntime {
         // can reconcile and resume runs dispatched to a remote runner without
         // core depending on runner behavior.
         crate::core::runner::register_runner_continuation_provider();
+        // Register the runner daemon-exec driver so the daemon's /exec endpoint
+        // can prepare and run a runner job as a local child without core
+        // depending on runner process-execution behavior.
+        crate::core::runner::register_runner_daemon_exec_driver();
         // Register the runner-upgrade provider so the core upgrade flow can
         // refresh configured runners without depending on runner behavior.
         crate::core::upgrade::register_runner_upgrade();
