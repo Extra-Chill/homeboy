@@ -112,7 +112,8 @@ pub struct ReleaseExecuteArgs {
     from_artifacts: Option<String>,
 
     /// Regenerate only the release package for an existing tag at HEAD.
-    /// Writes copied artifacts and manifest under Homeboy's artifact root.
+    /// Combine with --head --tag <tag> --apply to write a durable artifact
+    /// inventory for later --head --from-artifacts finalization.
     #[arg(long)]
     package_only: bool,
 
@@ -592,14 +593,7 @@ fn run_package_only(
             None,
         ));
     }
-    if args.recover || args.retag || args.head || args.deploy || args.skip_publish {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "package-only",
-            "--package-only cannot be combined with release execution modes such as --recover, --retag, --head, --deploy, or --skip-publish",
-            None,
-            None,
-        ));
-    }
+    validate_package_only_args(&args)?;
     if args.from_artifacts.is_some() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "from-artifacts",
@@ -614,7 +608,7 @@ fn run_package_only(
             "--package-only writes release artifacts and does not support --dry-run",
             None,
             Some(vec![
-                "Use a temporary artifact root to inspect output: homeboy --artifact-root <dir> release <component-id> --package-only --tag <tag> --apply".to_string(),
+                "Use a temporary artifact root to inspect output: homeboy --artifact-root <dir> release <component-id> --head --package-only --tag <tag> --apply".to_string(),
             ]),
         ));
     }
@@ -646,6 +640,18 @@ fn run_package_only(
         }),
         0,
     ))
+}
+
+fn validate_package_only_args(args: &ReleaseExecuteArgs) -> homeboy::core::Result<()> {
+    if args.recover || args.retag || args.deploy || args.skip_publish {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "package-only",
+            "--package-only cannot be combined with --recover, --retag, --deploy, or --skip-publish",
+            None,
+            None,
+        ));
+    }
+    Ok(())
 }
 
 /// Guard `--no-github-release` as a sharp, manual override (issues #6137, #7049).
@@ -1086,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    fn package_only_rejects_publish_modes() {
+    fn package_only_accepts_head_but_rejects_publish_modes() {
         let mut args = args(&["fixture"]);
         args.dry_run_args.dry_run = false;
         args.package_only = true;
@@ -1094,10 +1100,11 @@ mod tests {
         args.head = true;
         args.tag = Some("v1.2.3".to_string());
 
-        let err = match run_package_only(args, &["fixture".to_string()]) {
-            Ok(_) => panic!("package-only is mutually exclusive with --head"),
-            Err(err) => err,
-        };
+        validate_package_only_args(&args)
+            .expect("--head confirms package-only recovery against the tagged HEAD");
+
+        args.deploy = true;
+        let err = validate_package_only_args(&args).expect_err("deploy remains mutually exclusive");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("--package-only cannot be combined"));

@@ -20,7 +20,7 @@ By default Homeboy auto-detects the bump from commit history. Use `--bump <major
 - `--apply`: Confirm risky real release modes such as `--deploy`, `--recover`, `--retag`, `--head`, or bare `--skip-checks`
 - `--deploy`: Deploy this component to all projects that use it after release
 - `--recover`: Recover from an interrupted release
-- `--package-only`: Regenerate only the release package for an existing tag at the checked-out commit
+- `--package-only`: Regenerate release assets for an existing tag at the checked-out commit; use with `--head --tag <TAG> --apply`
 - `--tag <TAG>`: Existing release tag to use with `--package-only`
 - `--head`: Finish the release pipeline for the version commit and tag already checked out at HEAD
 - `--from-artifacts <DIR>`: With `--head`, attach/publish existing artifacts from a directory instead of running `release.package`
@@ -39,7 +39,7 @@ By default Homeboy auto-detects the bump from commit history. Use `--bump <major
 
 GitHub Release asset uploads use a 30-minute timeout by default. Set `HOMEBOY_GITHUB_RELEASE_UPLOAD_TIMEOUT_SECS` to a positive number of seconds when a slower connection or larger release assets need a longer budget. When `--head` finds an existing draft release, Homeboy resumes it, verifies attached asset metadata, and publishes it only after every requested asset is present.
 
-`--package-only --tag <TAG>` is for operator recovery when the release tag already exists but its package artifact needs to be regenerated. It requires the checked-out `HEAD` to match the existing tag, runs only the extension-owned `release.package` action, copies the produced files into Homeboy's artifact root under `release-packages/<component>/<tag>/`, writes `manifest.json`, and prints both paths. It does not create tags, push, create GitHub Releases, publish registries, deploy, or clean up the component build output.
+`--head --package-only --tag <TAG> --apply` is for operator recovery when the release tag already exists but its release assets need to be regenerated. It requires the checked-out `HEAD` to match the existing tag, runs the component build and extension-owned `release.package` actions, copies every release asset into Homeboy's artifact root under `release-packages/<component>/<tag>/`, writes `manifest.json`, and prints both paths. The manifest is a versioned `homeboy.package-recovery` inventory bound to its component, tag, version, and commit; finalization rejects it unless all four match the active tagged HEAD. Other `--from-artifacts` directories remain ordinary file inventories. This recovery does not create tags, push history, create GitHub Releases, publish registries, deploy, or clean up the component build output.
 
 Risky real release modes require explicit `--apply`: `--deploy`, `--recover`, `--retag`, `--head`, and bare `--skip-checks`. Dry-run previews never require `--apply`, and granular skips such as `--skip-checks=lint` keep the normal release flow because other quality gates remain active.
 
@@ -77,7 +77,7 @@ homeboy release <component_id>
 ```sh
 # Check out the already-tagged commit, then rebuild just the release package.
 git checkout v1.2.3
-homeboy release <component_id> --package-only --tag v1.2.3 --apply
+homeboy release <component_id> --head --package-only --tag v1.2.3 --apply
 ```
 
 ### Finish an already-tagged release

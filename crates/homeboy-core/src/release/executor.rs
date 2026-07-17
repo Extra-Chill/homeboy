@@ -945,6 +945,12 @@ mod tests {
         super::artifacts::run_artifact_inventory(
             &mut state,
             &artifact_dir.path().to_string_lossy(),
+            &super::artifacts::PackageRecoveryContext {
+                component_id: "homeboy",
+                tag: "v1.2.3",
+                version: "1.2.3",
+                commit: "unused-for-external-artifacts",
+            },
         )
         .expect("inventory external artifacts");
         let component = Component {

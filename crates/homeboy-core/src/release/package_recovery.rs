@@ -7,11 +7,16 @@ use crate::error::{Error, Result};
 use crate::{git, paths};
 
 use super::context::{load_component, resolve_extensions};
+use super::executor::artifacts::{
+    PACKAGE_RECOVERY_MANIFEST_SCHEMA, PACKAGE_RECOVERY_MANIFEST_SCHEMA_VERSION,
+};
 use super::executor::run_package;
 use super::types::{ReleaseArtifact, ReleaseOptions, ReleaseState, ReleaseStepResult};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleasePackageResult {
+    pub schema: &'static str,
+    pub schema_version: u32,
     pub component_id: String,
     pub tag: String,
     pub version: String,
@@ -77,6 +82,8 @@ pub fn package_existing_tag(
     let artifacts = copy_release_artifacts(&component.local_path, &artifact_dir, &state.artifacts)?;
     let manifest_path = artifact_dir.join("manifest.json");
     let result = ReleasePackageResult {
+        schema: PACKAGE_RECOVERY_MANIFEST_SCHEMA,
+        schema_version: PACKAGE_RECOVERY_MANIFEST_SCHEMA_VERSION,
         component_id: component_id.to_string(),
         tag: tag.to_string(),
         version,

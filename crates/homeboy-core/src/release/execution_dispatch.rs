@@ -137,11 +137,24 @@ pub(super) fn execute_release_plan_step(
                 .get("dir")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
+            let commit = git::get_head_commit(&context.component.local_path)?;
+            let tag = context.state.tag.clone().unwrap_or_default();
+            let version = context.state.version.clone().unwrap_or_default();
+            let recovery_context = executor::artifacts::PackageRecoveryContext {
+                component_id: context.component_id,
+                tag: &tag,
+                version: &version,
+                commit: &commit,
+            };
             Ok(Some(
-                executor::artifacts::run_artifact_inventory(&mut context.state, dir)
-                    .unwrap_or_else(|err| {
-                        failed_result("artifacts.inventory", "artifacts.inventory", err)
-                    }),
+                executor::artifacts::run_artifact_inventory(
+                    &mut context.state,
+                    dir,
+                    &recovery_context,
+                )
+                .unwrap_or_else(|err| {
+                    failed_result("artifacts.inventory", "artifacts.inventory", err)
+                }),
             ))
         }
         "git.tag" => {
