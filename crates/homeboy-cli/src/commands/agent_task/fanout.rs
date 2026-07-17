@@ -43,6 +43,21 @@ pub(super) fn fanout(args: AgentTaskFanoutArgs) -> CmdResult<Value> {
     }
 }
 
+type CookAttemptDispatcherFactory = dyn Fn(
+        &AgentTaskCookServiceOptions,
+    ) -> std::sync::Arc<dyn crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>
+    + Send
+    + Sync;
+
+/// Runs controller-owned cook-batch coordination while dispatching its typed
+/// provider attempts through the caller-selected transport.
+pub(crate) fn cook_batch_with_attempt_dispatcher(
+    args: AgentTaskFanoutCookBatchArgs,
+    attempt_dispatcher: &CookAttemptDispatcherFactory,
+) -> CmdResult<Value> {
+    cook_batch_inner(args, Some(attempt_dispatcher))
+}
+
 fn submit_batch_cook_fanout(args: AgentTaskFanoutSubmitArgs) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input)?;
     if let Some(run_id) = args.run_id {
@@ -112,23 +127,21 @@ fn run_batch_cook_fanout(args: AgentTaskFanoutRunPlanArgs) -> CmdResult<Value> {
 
 /// Keeps durable batch coordination on the controller while routing each
 /// independent provider attempt through the selected transport.
-pub(crate) fn run_batch_cook_fanout_with_attempt_dispatcher<F>(
+pub(crate) fn run_batch_cook_fanout_with_attempt_dispatcher(
     args: AgentTaskFanoutRunPlanArgs,
-    attempt_dispatcher: F,
-) -> CmdResult<Value>
-where
-    F: Fn(
-            &AgentTaskCookServiceOptions,
-        )
-            -> std::sync::Arc<dyn crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>
-        + Clone
-        + Send
-        + Sync,
-{
+    attempt_dispatcher: &CookAttemptDispatcherFactory,
+) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input)?;
     if let Some(record_run_id) = args.record_run_id {
         plan.fanout_id = record_run_id;
     }
+    run_batch_cook_fanout_plan_with_attempt_dispatcher(plan, attempt_dispatcher)
+}
+
+fn run_batch_cook_fanout_plan_with_attempt_dispatcher(
+    plan: BatchCookFanoutPlan,
+    attempt_dispatcher: &CookAttemptDispatcherFactory,
+) -> CmdResult<Value> {
     let result = agent_task_service::run_cook_batch(
         agent_task_service::AgentTaskCookBatchOptions {
             batch_id: plan.fanout_id.clone(),
@@ -237,7 +250,14 @@ fn batch_cook_result(
     )
 }
 
-fn cook_batch(mut args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value> {
+fn cook_batch(args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value> {
+    cook_batch_inner(args, None)
+}
+
+fn cook_batch_inner(
+    mut args: AgentTaskFanoutCookBatchArgs,
+    attempt_dispatcher: Option<&CookAttemptDispatcherFactory>,
+) -> CmdResult<Value> {
     if !args.gates.has_deterministic_gate() {
         return Err(invalid_fanout(
             "agent-task fanout cook-batch requires --verify or --private-verify",
@@ -272,7 +292,12 @@ fn cook_batch(mut args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value> {
             .iter()
             .all(|row| matches!(row.status, worktree::WorktreeQueueCreateStatus::Created));
     let run_result = if args.run_plan && can_run {
-        let (value, exit_code) = run_batch_cook_fanout_plan(plan.clone())?;
+        let (value, exit_code) = match attempt_dispatcher {
+            Some(dispatcher) => {
+                run_batch_cook_fanout_plan_with_attempt_dispatcher(plan.clone(), dispatcher)?
+            }
+            None => run_batch_cook_fanout_plan(plan.clone())?,
+        };
         Some(serde_json::json!({ "exit_code": exit_code, "result": value }))
     } else {
         None

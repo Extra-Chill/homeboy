@@ -722,6 +722,9 @@ fn agent_task_fanout_cook_batch_run_plan_keeps_cook_coordinators_local() {
     assert_eq!(command.hot_label, "agent-task fanout cook-batch");
     assert!(!command.is_portable());
     assert!(!command.routing_policy.default_lab_offload);
+    // Controller coordination stays local while typed child attempts retain
+    // the selected Lab runner and its normal placement enforcement (#8519).
+    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
 }
 
 #[test]

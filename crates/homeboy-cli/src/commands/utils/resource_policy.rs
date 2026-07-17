@@ -143,7 +143,10 @@ fn severity_str(recommendation: ResourceRecommendation) -> &'static str {
 }
 
 pub fn hot_command(command: &Commands) -> Option<HotCommand> {
-    if is_plan_only_command(command) || is_read_only_agent_task(command) {
+    if is_plan_only_command(command)
+        || is_controller_owned_fanout_coordination(command)
+        || is_read_only_agent_task(command)
+    {
         return None;
     }
 
@@ -178,6 +181,19 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
             Some(HotCommand::local_only(contract.hot_label, Some(reason)))
         }
     }
+}
+
+fn is_controller_owned_fanout_coordination(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::AgentTask(agent_task::AgentTaskArgs {
+            command: agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
+                command: agent_task::AgentTaskFanoutCommand::CookBatch(
+                    agent_task::AgentTaskFanoutCookBatchArgs { run_plan: true, .. },
+                ),
+            }),
+        })
+    )
 }
 
 fn is_plan_only_command(command: &Commands) -> bool {
@@ -544,6 +560,24 @@ mod tests {
             "cargo build -j 3",
             "--dry-run",
             "https://github.com/Extra-Chill/homeboy/issues/7796",
+        ]);
+
+        assert!(hot_command(&cli.command).is_none());
+    }
+
+    #[test]
+    fn controller_owned_cook_batch_coordination_skips_hot_resource_refusal() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "homeboy",
+            "--verify",
+            "cargo test --lib",
+            "--run-plan",
+            "https://github.com/Extra-Chill/homeboy/issues/8519",
         ]);
 
         assert!(hot_command(&cli.command).is_none());
