@@ -103,6 +103,7 @@ an exhausted run records which budget stopped further execution.
 | `fanout submit-batch\|status\|artifacts` | Submit and inspect durable batches of independent `AgentTaskPlan` tasks. |
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
+| `adopt <run-or-cook-id> --candidate-ref <sha>` | Adopt an immutable commit candidate through the recorded cook gates and finalization policy. |
 | `finalize-pr` | Finalize a green cook run into a review-ready pull request. |
 | `gate-feedback` | Convert deterministic gate results into a cook retry or stop decision. |
 

@@ -26,6 +26,11 @@ pub struct AgentTaskPromotionOptions {
     /// up commits that were already present in a reused workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_base_sha: Option<String>,
+    /// An immutable commit selected by a controller-owned candidate adoption.
+    /// When present promotion derives the patch from this revision rather than
+    /// the source workspace's current HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_ref: Option<String>,
     pub to_worktree: String,
     pub task_id: Option<String>,
     pub artifact_id: Option<String>,

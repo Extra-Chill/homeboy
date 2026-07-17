@@ -23,11 +23,12 @@ pub mod status;
 pub mod tool;
 
 pub use args::{
-    ActiveArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand, AgentTaskCommand,
-    AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
-    AgentTaskControllerDispatchArgs, AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
-    AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs,
-    AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
+    ActiveArgs, AdoptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand,
+    AgentTaskCommand, AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs,
+    AgentTaskControllerCommand, AgentTaskControllerDispatchArgs, AgentTaskControllerFromSpecArgs,
+    AgentTaskControllerInitArgs, AgentTaskControllerMarkHumanReadyArgs,
+    AgentTaskControllerMaterializeArgs, AgentTaskControllerRunArgs,
+    AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
     AgentTaskControllerStatusArgs, AgentTaskControllerValidateProofArgs, AgentTaskCookArgs,
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutBatchStatusArgs,
     AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs, AgentTaskFanoutInputArgs,
@@ -82,6 +83,7 @@ pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Fanout(fanout_args) => fanout::fanout(fanout_args),
         AgentTaskCommand::Review(review_args) => review::review(review_args),
         AgentTaskCommand::Promote(promote_args) => review::promote_artifact(promote_args),
+        AgentTaskCommand::Adopt(adopt_args) => review::adopt_candidate(adopt_args),
         AgentTaskCommand::PromotionProvider(provider_args) => {
             run::promotion_provider(provider_args)
         }

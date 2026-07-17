@@ -6,9 +6,9 @@ use super::super::super::tool::AgentTaskToolArgs;
 use super::cook::{AgentTaskCookArgs, AgentTaskLoopArgs, PromotionProviderArgs};
 use super::fanout::AgentTaskFanoutArgs;
 use super::lifecycle::{
-    CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs,
-    ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs, RuntimeRecoverArgs,
-    RuntimeValidateArgs, StatusArgs, SubmitArgs,
+    AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
+    PromoteArgs, ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs,
+    RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
 };
 
 pub use super::super::auth::{
@@ -60,6 +60,8 @@ pub enum AgentTaskCommand {
     Fanout(AgentTaskFanoutArgs),
     Review(ReviewArgs),
     Promote(PromoteArgs),
+    /// Adopt an immutable commit candidate through a tracked cook's normal gates and finalization.
+    Adopt(AdoptArgs),
     #[command(hide = true)]
     PromotionProvider(PromotionProviderArgs),
     FinalizePr(FinalizePrArgs),

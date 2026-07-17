@@ -27,7 +27,7 @@ use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
 
 use super::super::CmdResult;
-use super::{FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs, ReviewArgs};
+use super::{AdoptArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs, ReviewArgs};
 
 #[derive(Args, Debug)]
 pub struct FinalizePrEvidenceArgs {
@@ -223,6 +223,7 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         source_worktree_path: None,
         base_ref: Some(args.base),
         task_base_sha: None,
+        candidate_ref: None,
         to_worktree: args.to_worktree,
         task_id: args.task_id,
         artifact_id: args.artifact_id,
@@ -304,6 +305,20 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         });
     }
 
+    Ok((value, exit_code))
+}
+
+pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
+    let result =
+        agent_task_service::adopt_cook_candidate(&args.run_or_cook_id, &args.candidate_ref)?;
+    let exit_code = result.exit_code;
+    let mut value = serde_json::to_value(result.value).unwrap_or(Value::Null);
+    value["adoption"] = serde_json::json!({
+        "schema": "homeboy/agent-task-candidate-adoption/v1",
+        "source": args.run_or_cook_id,
+        "candidate_ref": args.candidate_ref,
+        "controller_owned": true,
+    });
     Ok((value, exit_code))
 }
 
