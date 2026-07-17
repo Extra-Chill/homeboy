@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::descriptor_runtime::{run_descriptor_detectors, DetectorRunContext};
-use super::detectors::artifact_portability;
+use super::detectors::{artifact_portability, source_policy};
 use super::entry::audit_config_for;
 use super::execution_plan::AuditExecutionPlan;
 use super::findings;
@@ -193,6 +193,14 @@ pub(super) fn audit_internal(
         .iter()
         .flat_map(|(_, _, fps)| fps.iter())
         .collect();
+
+    if plan.detector_enabled("core_boundary_leaks") {
+        let rules = audit_config.core_boundary_leaks.to_source_policy_rules();
+        source_policy::validate_source_roots(&all_fingerprints, &rules)?;
+    }
+    if plan.detector_enabled("source_policy") {
+        source_policy::validate_source_roots(&all_fingerprints, &audit_config.source_policies)?;
+    }
 
     // Build convention method set ONCE — used by duplication, near-duplicate, and parallel detectors.
     // Convention-expected methods are excluded from duplication/parallel findings because identical

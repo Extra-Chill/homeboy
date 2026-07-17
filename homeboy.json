@@ -131,36 +131,34 @@
         "default_match": "token",
         "description": "Core boundary leak (core-agnostic-source) configured ecosystem term `{term}` appears at line {line} in {classification} context `{context}`",
         "exclude_path_contains": [
-          "src/core/execution_contract.rs",
-          "src/core/product_identity.rs",
-          "src/core/code_audit/conventions/",
-          "src/core/code_audit/comment_blocks.rs",
-          "src/core/code_audit/comment_hygiene.rs",
-          "src/core/code_audit/core_fingerprint/mod.rs",
-          "src/core/code_audit/core_fingerprint/relationships.rs",
-          "src/core/code_audit/detectors/test_coverage.rs",
-          "src/core/code_audit/detectors/global_env_guard.rs",
-          "src/core/runner/tool_registry.rs",
-          "src/core/cleanup.rs",
-          "src/core/cleanup/self_artifacts.rs",
-          "src/core/runner/lab_args/tests.rs",
-          "src/core/release/executor/lockfile_guard.rs",
-          "src/core/triage/tests",
-          "src/core/extension/bench/baseline.rs"
+          "crates/homeboy-core/src/execution_contract.rs",
+          "crates/homeboy-core/src/code_audit/conventions/",
+          "crates/homeboy-core/src/code_audit/comment_blocks.rs",
+          "crates/homeboy-core/src/code_audit/comment_hygiene.rs",
+          "crates/homeboy-core/src/code_audit/core_fingerprint/mod.rs",
+          "crates/homeboy-core/src/code_audit/core_fingerprint/relationships.rs",
+          "crates/homeboy-core/src/code_audit/detectors/test_coverage.rs",
+          "crates/homeboy-core/src/code_audit/detectors/global_env_guard.rs",
+          "crates/homeboy-core/src/runner/tool_registry.rs",
+          "crates/homeboy-core/src/cleanup.rs",
+          "crates/homeboy-core/src/cleanup/self_artifacts.rs",
+          "crates/homeboy-core/src/runner/lab_args/tests.rs",
+          "crates/homeboy-core/src/release/executor/lockfile_guard.rs",
+          "crates/homeboy-core/src/extension/bench/baseline.rs"
         ],
         "id": "core-agnostic-source",
         "ignore_after_line_equals": [
           "#[cfg(test)]"
         ],
         "include_path_contains": [
-          "src/core",
-          "src/commands/component.rs",
-          "src/commands/extension.rs",
-          "src/commands/lint.rs",
-          "src/commands/report.rs",
-          "src/commands/resources/mod.rs",
-          "src/commands/review/mod.rs",
-          "src/commands/test.rs"
+          "crates/homeboy-core/src/",
+          "crates/homeboy-cli/src/commands/component.rs",
+          "crates/homeboy-cli/src/commands/extension.rs",
+          "crates/homeboy-cli/src/commands/lint.rs",
+          "crates/homeboy-cli/src/commands/report.rs",
+          "crates/homeboy-cli/src/commands/resources/",
+          "crates/homeboy-cli/src/commands/review/",
+          "crates/homeboy-cli/src/commands/test.rs"
         ],
         "kind": "core_boundary_leak",
         "suggestion": "Move ecosystem-specific behavior into extension metadata/rules, or add an explicit audit allowlist for intentional examples.",
@@ -278,15 +276,15 @@
         "default_match": "token",
         "description": "Core boundary leak (detector-agnostic-source) configured ecosystem term `{term}` appears at line {line} in {classification} context `{context}`",
         "exclude_path_contains": [
-          "src/core/code_audit/detectors/test_coverage.rs",
-          "src/core/code_audit/detectors/global_env_guard.rs"
+          "crates/homeboy-core/src/code_audit/detectors/test_coverage.rs",
+          "crates/homeboy-core/src/code_audit/detectors/global_env_guard.rs"
         ],
         "id": "detector-agnostic-source",
         "ignore_after_line_equals": [
           "#[cfg(test)]"
         ],
         "include_path_contains": [
-          "src/core/code_audit/detectors"
+          "crates/homeboy-core/src/code_audit/detectors/"
         ],
         "kind": "core_boundary_leak",
         "suggestion": "Move ecosystem-specific behavior into extension metadata/rules, or add an explicit audit allowlist for intentional examples.",
