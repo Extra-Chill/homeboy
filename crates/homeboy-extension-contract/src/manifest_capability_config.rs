@@ -161,6 +161,18 @@ pub struct ExtensionToolDiagnosticDeclaration {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ExtensionDiagnosticsConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ExtensionToolDiagnosticDeclaration>,
+}
+
+impl ExtensionDiagnosticsConfig {
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeRequirementsConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

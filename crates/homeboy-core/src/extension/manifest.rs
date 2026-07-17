@@ -63,21 +63,10 @@ pub use homeboy_extension_contract::test_drift::TestDriftConfig;
 // ExtensionManifest
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct ExtensionDiagnosticsConfig {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<ExtensionToolDiagnosticDeclaration>,
-}
-
+pub use homeboy_extension_contract::manifest_capability_config::ExtensionDiagnosticsConfig;
 pub use homeboy_extension_contract::notification_transport_config::{
     NotificationTransportConfig, NOTIFICATION_TRANSPORT_SCHEMA,
 };
-
-impl ExtensionDiagnosticsConfig {
-    pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
-    }
-}
 
 /// Unified extension manifest decomposed into capability groups.
 ///
