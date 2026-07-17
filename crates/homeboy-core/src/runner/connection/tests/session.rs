@@ -155,7 +155,7 @@ fn parses_self_identity_json_envelope() {
 }
 
 #[test]
-fn stale_daemon_warning_includes_ordered_restart_recovery_commands() {
+fn stale_daemon_warning_includes_explicit_refresh_recovery_command() {
     let warning = RunnerStaleDaemonWarning::new(
         "homeboy-lab",
         "homeboy 0.201.3".to_string(),
@@ -189,7 +189,7 @@ fn stale_daemon_warning_includes_ordered_restart_recovery_commands() {
     assert_eq!(
         warning.refresh_command,
         format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect && homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab",
+            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
             homeboy_product_identity::product_version()
         )
     );
@@ -198,14 +198,10 @@ fn stale_daemon_warning_includes_ordered_restart_recovery_commands() {
     assert!(warning.message.contains("active jobs are drained"));
     assert_eq!(
         warning.recovery_commands,
-        vec![
-            format!(
-                "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-                homeboy_product_identity::product_version()
-            ),
-            "homeboy runner disconnect homeboy-lab".to_string(),
-            "homeboy runner connect homeboy-lab".to_string(),
-        ]
+        vec![format!(
+            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
+            homeboy_product_identity::product_version()
+        )]
     );
 }
 

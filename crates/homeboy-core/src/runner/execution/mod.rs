@@ -28,8 +28,9 @@ use crate::source_snapshot::SourceSnapshot;
 
 use super::resource_metrics::RunnerResourceMetrics;
 use super::{
-    select_runner_transport, status, Runner, RunnerCapabilityPreflight, RunnerHandoff, RunnerJob,
-    RunnerKind, RunnerMutationArtifacts, RunnerResult, RunnerSession, RunnerTransport,
+    select_runner_transport, status, Runner, RunnerActiveJobSource, RunnerActiveJobState,
+    RunnerCapabilityPreflight, RunnerHandoff, RunnerJob, RunnerKind, RunnerMutationArtifacts,
+    RunnerResult, RunnerSession, RunnerStatusReport, RunnerTransport,
 };
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
@@ -797,7 +798,10 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     }
 
     let connected = status(runner_id)?;
-    if connected.connected && connected.stale_daemon.is_some() {
+    if connected.connected
+        && connected.stale_daemon.is_some()
+        && !allows_idle_stale_daemon_refresh(&options, &connected)
+    {
         return Err(Error::validation_invalid_argument(
             "runner",
             format!(
@@ -805,7 +809,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
             ),
             Some(runner_id.to_string()),
             Some(vec![format!(
-                "Drain or recover known jobs, then refresh explicitly with `homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}`."
+                "Drain or recover known jobs. An explicit `homeboy runner refresh-homeboy {runner_id} --ref <version> --reconnect` can rotate this daemon only after `homeboy runner status {runner_id}` reports `active_job_count: 0` and `active_job_state: available`."
             )]),
         ));
     }
@@ -882,6 +886,23 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         append_runner_exec_diagnostic_hint(&mut output, run_id_hint);
         (output, exit_code)
     })
+}
+
+fn allows_idle_stale_daemon_refresh(
+    options: &RunnerExecOptions,
+    status: &RunnerStatusReport,
+) -> bool {
+    // A refresh replaces the daemon immediately after this command. Require both
+    // a successful /jobs poll and the daemon's authoritative zero-job count.
+    options
+        .capability_preflight
+        .as_ref()
+        .is_some_and(|preflight| preflight.command == "runner.refresh-homeboy")
+        && status.active_job_state == RunnerActiveJobState::Available
+        && status.active_job_source == Some(RunnerActiveJobSource::DirectDaemon)
+        && status.active_job_count == 0
+        && status.active_jobs.is_empty()
+        && status.active_job_error.is_none()
 }
 
 fn apply_explicit_runner_exec_run_id_env(

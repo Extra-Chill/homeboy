@@ -973,11 +973,10 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
         metadata["stale_daemon"]["job_command_binary_build_identity"],
         "homeboy 0.229.11+new"
     );
-    // The stale-daemon refresh command now leads with a version-pinned
-    // `refresh-homeboy --ref v<current> --reconnect` step before the
-    // disconnect/connect fallback (matching the connection.rs contract).
+    // The explicit refresh owns the reconnect, so the recovery command avoids
+    // a redundant disconnect/connect loop.
     let expected_refresh = format!(
-        "homeboy runner refresh-homeboy lab --ref v{} --reconnect && homeboy runner disconnect lab && homeboy runner connect lab",
+        "homeboy runner refresh-homeboy lab --ref v{} --reconnect",
         homeboy_product_identity::product_version()
     );
     assert_eq!(
