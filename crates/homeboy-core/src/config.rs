@@ -205,9 +205,6 @@ fn config_entity_registry() -> Vec<ConfigEntityMetadata> {
     let mut registry = vec![
         entity_metadata::<crate::project::Project>(),
         entity_metadata::<crate::server::Server>(),
-        // Runner is still core-owned (not yet extracted); when the runner crate
-        // lands it should register itself via `register_config_entity` instead.
-        entity_metadata::<crate::runner::Runner>(),
         entity_metadata::<crate::extension::ExtensionManifest>(),
         entity_metadata::<crate::fleet::Fleet>(),
     ];

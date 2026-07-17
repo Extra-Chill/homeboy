@@ -370,6 +370,14 @@ impl ConfigEntity for Runner {
     }
 }
 
+/// Register `Runner` as a config entity so it participates in config-id/alias
+/// collision detection. Called once at startup, mirroring how feature crates
+/// (e.g. the tunnel crate) register their own entities; when the runner crate
+/// is extracted this call moves into that crate's startup registration.
+pub fn register_runner_config_entity() {
+    config::register_config_entity::<Runner>();
+}
+
 pub fn load(id: &str) -> Result<Runner> {
     if id == "local" {
         return Ok(builtin_local_runner());
@@ -977,6 +985,24 @@ fn validate_server_runner(server_id: &str, runner: &ServerRunner) -> Result<()> 
 mod tests {
     use super::*;
     use crate::test_support;
+
+    #[test]
+    fn register_runner_config_entity_participates_in_collision_detection() {
+        // Runner is no longer hard-coded into core's config-entity seed; it
+        // self-registers. Guard the collision invariant: after registration the
+        // runner entity type is present, and registration is idempotent.
+        register_runner_config_entity();
+        register_runner_config_entity();
+        let registered = crate::config::registered_config_entity_types();
+        assert_eq!(
+            registered
+                .iter()
+                .filter(|entity_type| **entity_type == Runner::ENTITY_TYPE)
+                .count(),
+            1,
+            "runner entity type must be registered exactly once, got: {registered:?}"
+        );
+    }
 
     fn default_lab_candidate(
         id: &str,
