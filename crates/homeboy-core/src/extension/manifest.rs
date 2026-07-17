@@ -30,12 +30,12 @@ pub use super::manifest_config::{
     VersionPatternConfig,
 };
 mod ci_config;
-pub use super::manifest_deploy_config::DeployArchiveInstallPolicy;
 pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
-pub use super::manifest_test_config::{TestPassthroughFilter, TestPassthroughFilterStrategy};
 pub use ci_config::{
     CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec,
 };
+pub use homeboy_extension_contract::DeployArchiveInstallPolicy;
+pub use homeboy_extension_contract::{TestPassthroughFilter, TestPassthroughFilterStrategy};
 
 /// Type of action that can be executed by a extension.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

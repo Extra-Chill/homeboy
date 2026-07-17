@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::manifest::TestDriftConfig;
-use super::manifest_test_config::TestPassthroughFilter;
+use homeboy_extension_contract::TestPassthroughFilter;
 
 mod autofix_config;
 mod trace_config;

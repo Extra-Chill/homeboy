@@ -28,6 +28,7 @@ homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }
 homeboy-process = { version = "0.1.0", path = "../homeboy-process" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 homeboy-audit-contract = { version = "0.1.0", path = "../homeboy-audit-contract" }
+homeboy-extension-contract = { version = "0.1.0", path = "../homeboy-extension-contract" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
 homeboy-lab-contract = { version = "0.1.0", path = "../homeboy-lab-contract" }
 homeboy-runner-contract = { version = "0.1.0", path = "../homeboy-runner-contract" }
