@@ -303,7 +303,8 @@ pub mod promotion {
         promote, promote_with_checkpoint, resume_promoted_patch, AgentTaskPromotionArtifactRef,
         AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
         AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-        AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+        AgentTaskPromotionTarget, AgentTaskPromotionVerifiedBase,
+        AGENT_TASK_PROMOTION_REPORT_SCHEMA,
     };
 }
 

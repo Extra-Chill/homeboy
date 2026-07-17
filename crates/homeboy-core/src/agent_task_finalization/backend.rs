@@ -95,6 +95,104 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         Ok(AgentTaskPrResolvedBase { reference, sha })
     }
 
+    fn resolve_verified_base(
+        &mut self,
+        path: &str,
+        verified_base_sha: &str,
+    ) -> Result<AgentTaskPrResolvedBase> {
+        if !is_git_object_id(verified_base_sha) {
+            return Err(Error::validation_invalid_argument(
+                "verified_base_sha",
+                "verified base snapshot must be a full Git object ID",
+                Some(verified_base_sha.to_string()),
+                None,
+            ));
+        }
+        let sha = git_output(
+            path,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("{verified_base_sha}^{{commit}}"),
+            ],
+        )
+        .or_else(|_| {
+            let fetch = std::process::Command::new("git")
+                .args([
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "origin",
+                    verified_base_sha,
+                ])
+                .current_dir(path)
+                .output()
+                .map_err(|error| Error::git_command_failed(error.to_string()))?;
+            if !fetch.status.success() {
+                return Err(Error::validation_invalid_argument(
+                    "verified_base_sha",
+                    format!(
+                        "verified base snapshot is unavailable locally and origin could not materialize exact commit `{verified_base_sha}`; retry from a worktree with origin access: {}",
+                        String::from_utf8_lossy(&fetch.stderr).trim()
+                    ),
+                    Some(verified_base_sha.to_string()),
+                    None,
+                ));
+            }
+            git_output(
+                path,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    &format!("{verified_base_sha}^{{commit}}"),
+                ],
+            )
+            .map_err(|_| {
+                Error::validation_invalid_argument(
+                    "verified_base_sha",
+                    "origin did not materialize the persisted verified base snapshot as a commit",
+                    Some(verified_base_sha.to_string()),
+                    None,
+                )
+            })
+        })?;
+        if sha != verified_base_sha {
+            return Err(Error::validation_invalid_argument(
+                "verified_base_sha",
+                "verified base snapshot did not resolve to the supplied immutable Git object ID",
+                Some(verified_base_sha.to_string()),
+                None,
+            ));
+        }
+        Ok(AgentTaskPrResolvedBase {
+            reference: verified_base_sha.to_string(),
+            sha,
+        })
+    }
+
+    fn publication_base_sha(&mut self, path: &str, base: &str) -> Result<Option<String>> {
+        let output = std::process::Command::new("git")
+            .args([
+                "ls-remote",
+                "--heads",
+                "origin",
+                &format!("refs/heads/{base}"),
+            ])
+            .current_dir(path)
+            .output()
+            .map_err(|error| Error::git_command_failed(error.to_string()))?;
+        if !output.status.success() {
+            return Err(Error::git_command_failed(format!(
+                "could not observe live origin base `{base}` before publication: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+            .map(str::to_string))
+    }
+
     fn candidate_state(
         &mut self,
         path: &str,
@@ -306,6 +404,10 @@ fn git_output(path: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn is_git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod remote_base_tests {
     use super::*;
@@ -497,6 +599,123 @@ mod remote_base_tests {
 
         assert_eq!(resolved.sha, remote_head.trim());
         assert_eq!(resolved.reference, "refs/homeboy/finalization/base/main");
+    }
+
+    #[test]
+    fn resolve_verified_base_rejects_malformed_and_unresolvable_snapshots() {
+        let repo = repo();
+        for snapshot in ["not-a-sha", &"f".repeat(40)] {
+            let error = RealAgentTaskPrFinalizationBackend
+                .resolve_verified_base(repo.path().to_str().unwrap(), snapshot)
+                .expect_err("invalid snapshot is rejected");
+            assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
+        }
+    }
+
+    #[test]
+    fn resolve_verified_base_rematerializes_only_the_persisted_snapshot() {
+        let repo = repo();
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "--bare"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(repo.path(), &["push", "-u", "origin", "main"]);
+        git(repo.path(), &["checkout", "-b", "snapshot"]);
+        std::fs::write(repo.path().join("snapshot.txt"), "snapshot").unwrap();
+        git(repo.path(), &["add", "snapshot.txt"]);
+        git(repo.path(), &["commit", "-m", "verified snapshot"]);
+        let snapshot = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
+        git(repo.path(), &["push", "origin", "snapshot"]);
+
+        let clone = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .args([
+                "clone",
+                "--no-local",
+                "--single-branch",
+                "--branch",
+                "main",
+                remote.path().to_str().unwrap(),
+                clone.path().to_str().unwrap(),
+            ])
+            .status()
+            .unwrap()
+            .success());
+        assert!(git_output(
+            clone.path().to_str().unwrap(),
+            &["cat-file", "-e", &format!("{snapshot}^{{commit}}")],
+        )
+        .is_err());
+
+        let resolved = RealAgentTaskPrFinalizationBackend
+            .resolve_verified_base(clone.path().to_str().unwrap(), &snapshot)
+            .expect("exact snapshot rematerialized");
+        assert_eq!(resolved.sha, snapshot);
+        assert!(git_output(
+            clone.path().to_str().unwrap(),
+            &["cat-file", "-e", &format!("{}^{{commit}}", resolved.sha)],
+        )
+        .is_ok());
+
+        let unavailable = "f".repeat(40);
+        let error = RealAgentTaskPrFinalizationBackend
+            .resolve_verified_base(clone.path().to_str().unwrap(), &unavailable)
+            .expect_err("unavailable exact snapshot is rejected");
+        assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
+    }
+
+    #[test]
+    fn captured_base_survives_remote_advance_while_newer_snapshot_rejects_stale_candidate() {
+        let repo = repo();
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "--bare"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(repo.path(), &["push", "-u", "origin", "main"]);
+        let captured_base = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"])
+            .expect("captured declared base");
+
+        git(repo.path(), &["checkout", "-b", "feature"]);
+        std::fs::write(repo.path().join("feature.txt"), "feature").unwrap();
+        git(repo.path(), &["add", "feature.txt"]);
+        git(
+            repo.path(),
+            &["commit", "-m", "candidate verified by gates"],
+        );
+
+        git(repo.path(), &["checkout", "main"]);
+        std::fs::write(repo.path().join("main.txt"), "advance").unwrap();
+        git(repo.path(), &["add", "main.txt"]);
+        git(repo.path(), &["commit", "-m", "remote advance after gates"]);
+        git(repo.path(), &["push", "origin", "main"]);
+        let advanced_base = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"])
+            .expect("advanced base");
+        git(repo.path(), &["checkout", "feature"]);
+
+        let published = RealAgentTaskPrFinalizationBackend
+            .candidate_state(
+                repo.path().to_str().unwrap(),
+                &base(&captured_base, &captured_base),
+                "feature",
+            )
+            .expect("captured base validates candidate");
+        assert!(matches!(
+            published,
+            AgentTaskPrCandidateState::Committed { .. }
+        ));
+
+        let stale = RealAgentTaskPrFinalizationBackend
+            .candidate_state(
+                repo.path().to_str().unwrap(),
+                &base(&advanced_base, &advanced_base),
+                "feature",
+            )
+            .expect("newer snapshot compares candidate");
+        assert!(matches!(stale, AgentTaskPrCandidateState::Invalid { .. }));
     }
 }
 

@@ -1199,6 +1199,18 @@ fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         )))
         .collect();
     let artifact_refs = std::iter::once(promotion.patch_artifact.path.clone()).collect();
+    let verified_base = promotion
+        .verified_base
+        .as_ref()
+        .filter(|base| base.base == options.base && !base.sha.trim().is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion.verified_base",
+                "cook finalization requires the typed declared base snapshot captured before promotion gates; rerun promotion against the configured base before finalizing",
+                None,
+                None,
+            )
+        })?;
     crate::agent_task_lifecycle::record_promotion(
         successful_run_id,
         serde_json::to_value(promotion).unwrap_or(Value::Null),
@@ -1208,6 +1220,7 @@ fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             path: path.clone(),
             run_id: successful_run_id.to_string(),
             base: options.base.clone(),
+            verified_base_sha: Some(verified_base.sha.clone()),
             head: options.head.clone(),
             title: options.title.clone(),
             commit_message: options.commit_message.clone(),
@@ -1568,6 +1581,7 @@ mod tests {
             "changed_files": ["src/lib.rs"],
             "gate_results": [{"id": "gate", "name": "cargo test --locked agent_task_promotion --lib", "kind": "command", "status": "passed"}],
             "operator_notification": {"status": "completed", "message": "complete"},
+            "verified_base": {"base": "main", "sha": "verified-base"},
             "provenance": {"worktree_path": "/repo"}
         })).unwrap()
     }
@@ -1629,7 +1643,7 @@ mod tests {
                 max_attempts: 1,
                 no_finalize: false,
                 base: "main".to_string(),
-                task_base_sha: None,
+                task_base_sha: Some("task-candidate-base".to_string()),
                 head: Some("fix/8058".to_string()),
                 title: "Close #8058".to_string(),
                 commit_message: "test".to_string(),
@@ -1652,6 +1666,7 @@ mod tests {
                 "## Evidence",
                 "## AI assistance",
                 "openai/gpt-5.6-terra",
+                "Verified finalization base: main at verified-base",
                 "1. Run `cargo test --locked agent_task_promotion --lib`; expect passes.",
             ] {
                 assert!(

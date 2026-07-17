@@ -68,16 +68,6 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     }
     validate_green_gates(&options.normalized_gate_results)?;
     options.review_dossier.apply_overrides()?;
-    enrich_dossier(
-        &mut options.review_dossier,
-        &options.evidence.source_refs,
-        &options.evidence.artifact_refs,
-        &options.normalized_gate_results,
-        &options.evidence.verification.ci_expected,
-        options.evidence.lifecycle.as_ref(),
-    );
-    options.review_dossier.validate(&options.review_profile)?;
-    let proof = build_finalization_proof(&options, options.normalized_gate_results.clone());
     let current_branch = backend.current_branch(&options.path)?;
     let head = options
         .head
@@ -93,7 +83,15 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     }
     refuse_protected_head(&head, &options.protected_branches)?;
 
-    let base = backend.resolve_base(&options.path, &options.base)?;
+    let verified_base_sha = options.verified_base_sha.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "verified_base_sha",
+            "finalization requires the immutable base SHA recorded before declared gates ran",
+            None,
+            None,
+        )
+    })?;
+    let base = backend.resolve_verified_base(&options.path, verified_base_sha)?;
     let candidate = backend.candidate_state(&options.path, &base, &head)?;
     let (mut changed_files, commit_required, push_required) = match candidate {
         AgentTaskPrCandidateState::Dirty { changed_files } => (changed_files, true, true),
@@ -118,7 +116,33 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     }
     changed_files.sort();
     changed_files.dedup();
-    let intent = build_pr_publication_intent(&options, &head, &changed_files, proof.clone());
+    enrich_dossier(
+        &mut options.review_dossier,
+        &options.evidence.source_refs,
+        &options.evidence.artifact_refs,
+        &options.normalized_gate_results,
+        &options.evidence.verification.ci_expected,
+        options.evidence.lifecycle.as_ref(),
+    );
+    options.review_dossier.evidence.push(
+        crate::agent_task_review_dossier::AgentTaskReviewEvidence {
+            summary: format!(
+                "Verified finalization base: {} at {}",
+                options.base, base.sha
+            ),
+            url: None,
+        },
+    );
+    options.review_dossier.evidence.sort_by(|left, right| {
+        left.summary
+            .cmp(&right.summary)
+            .then(left.url.cmp(&right.url))
+    });
+    options.review_dossier.evidence.dedup();
+    options.review_dossier.validate(&options.review_profile)?;
+    let proof = build_finalization_proof(&options, options.normalized_gate_results.clone());
+    let mut intent =
+        build_pr_publication_intent(&options, &head, &changed_files, proof.clone(), &base);
     validate_publication_intent(&intent)?;
 
     if changed_files.is_empty() {
@@ -146,8 +170,36 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     if push_required {
         backend.push_branch(&options.path, &head)?;
     }
-    let body = render_review_dossier(&options.review_dossier, &options.review_profile);
     let existing = backend.find_open_pr(&options.path, &options.base, &head)?;
+    let publication_base_sha = backend.publication_base_sha(&options.path, &options.base)?;
+    intent.target.publication_base_sha = publication_base_sha.clone();
+    let base_observation = match publication_base_sha {
+        Some(publication_base_sha) if publication_base_sha == base.sha => format!(
+            "Base unchanged since verification: {} remains at {}.",
+            options.base, base.sha
+        ),
+        Some(publication_base_sha) => format!(
+            "Base advanced after verification: verified {} at {}; publication observed {}. Candidate ancestry was validated against the verified snapshot.",
+            options.base, base.sha, publication_base_sha
+        ),
+        None => format!(
+            "Base observation unavailable immediately before publication; candidate ancestry was validated against verified {} at {}.",
+            options.base, base.sha
+        ),
+    };
+    options.review_dossier.evidence.push(
+        crate::agent_task_review_dossier::AgentTaskReviewEvidence {
+            summary: base_observation,
+            url: None,
+        },
+    );
+    options.review_dossier.evidence.sort_by(|left, right| {
+        left.summary
+            .cmp(&right.summary)
+            .then(left.url.cmp(&right.url))
+    });
+    options.review_dossier.evidence.dedup();
+    let body = render_review_dossier(&options.review_dossier, &options.review_profile);
     let (action, pr) = match existing {
         Some(existing) => (
             "updated",
@@ -351,6 +403,7 @@ fn build_pr_publication_intent(
     head: &str,
     changed_files: &[String],
     proof: HomeboyProof,
+    base: &AgentTaskPrResolvedBase,
 ) -> AgentTaskPublicationIntent {
     AgentTaskPublicationIntent {
         schema: AGENT_TASK_PUBLICATION_INTENT_SCHEMA.to_string(),
@@ -361,6 +414,8 @@ fn build_pr_publication_intent(
             adapter: Some("github_pull_request".to_string()),
             path: Some(options.path.clone()),
             base: Some(options.base.clone()),
+            verified_base_sha: Some(base.sha.clone()),
+            publication_base_sha: None,
             head: Some(head.to_string()),
             url: None,
         },

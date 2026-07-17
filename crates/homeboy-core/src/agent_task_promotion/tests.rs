@@ -2132,6 +2132,7 @@ fn promotion_report_serializes_generic_command_evidence() {
         ])],
         deterministic_gates: Vec::new(),
         gate_results: Vec::new(),
+        verified_base: None,
         provenance: Value::Null,
         operator_notification: AgentTaskPromotionNotification {
             status: "completed".to_string(),

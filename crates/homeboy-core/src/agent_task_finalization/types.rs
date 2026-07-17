@@ -84,6 +84,12 @@ pub struct AgentTaskPublicationTarget {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// Immutable base snapshot used to verify the candidate before publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_base_sha: Option<String>,
+    /// Live base SHA observed immediately before publication, if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_base_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,6 +203,8 @@ pub struct AgentTaskPrFinalizationOptions {
     pub path: String,
     pub run_id: String,
     pub base: String,
+    /// Immutable commit SHA recorded before the declared verification gates ran.
+    pub verified_base_sha: Option<String>,
     pub head: Option<String>,
     pub title: String,
     pub commit_message: String,
@@ -262,6 +270,20 @@ pub trait AgentTaskPrFinalizationBackend {
             reference: base.to_string(),
             sha: String::new(),
         })
+    }
+    fn resolve_verified_base(
+        &mut self,
+        _path: &str,
+        verified_base_sha: &str,
+    ) -> Result<AgentTaskPrResolvedBase> {
+        Ok(AgentTaskPrResolvedBase {
+            reference: verified_base_sha.to_string(),
+            sha: verified_base_sha.to_string(),
+        })
+    }
+    /// Observes the live base without updating the immutable finalization snapshot.
+    fn publication_base_sha(&mut self, _path: &str, _base: &str) -> Result<Option<String>> {
+        Ok(None)
     }
     fn candidate_state(
         &mut self,
