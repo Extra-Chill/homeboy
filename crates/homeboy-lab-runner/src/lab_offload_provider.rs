@@ -16,6 +16,23 @@ pub struct RunnerLabOffload;
 
 impl LabOffloadProvider for RunnerLabOffload {
     fn execute_lab_offload(&self, request: LabRoutingRequest<'_>) -> Result<LabOffloadOutcome> {
+        // Core carries the durable agent-task plan opaquely as JSON so it does
+        // not depend on the agent-task subsystem. The runner layer owns the
+        // typed plan, so deserialize it here and borrow it for the offload.
+        let durable_agent_task_plan = request
+            .durable_agent_task_plan
+            .map(|plan| {
+                serde_json::from_value::<homeboy_core::agent_task_scheduler::AgentTaskPlan>(
+                    plan.clone(),
+                )
+            })
+            .transpose()
+            .map_err(|error| {
+                homeboy_core::error::Error::internal_json(
+                    error.to_string(),
+                    Some("deserialize durable agent-task plan".to_string()),
+                )
+            })?;
         crate::execute_lab_offload(LabOffloadRequest {
             command: request.command,
             normalized_args: request.normalized_args,
@@ -30,7 +47,7 @@ impl LabOffloadProvider for RunnerLabOffload {
             output_file_requested: request.output_file_requested,
             read_only_polling: request.read_only_polling,
             local_output_file: request.local_output_file,
-            durable_agent_task_plan: request.durable_agent_task_plan,
+            durable_agent_task_plan: durable_agent_task_plan.as_ref(),
             source_path: request.source_path,
             verified_cook_baseline: request.verified_cook_baseline,
             require_controller_git_bundle: request.require_controller_git_bundle,
