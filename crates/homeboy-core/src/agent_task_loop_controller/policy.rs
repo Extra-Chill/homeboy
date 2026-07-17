@@ -250,9 +250,11 @@ pub enum AgentTaskPrOwnershipState {
 pub enum AgentTaskLoopActionStatus {
     Pending,
     Running,
+    WaitingForRunner,
     AlreadySatisfied,
     Completed,
     Failed,
+    Cancelled,
     BlockedRunnerUnavailable,
     BlockedRemoteMaterialization,
     BlockedLocalFallbackDenied,

@@ -58,6 +58,24 @@ where
 
     match execute_claimed_controller_action(record, &action, executor, dispatch) {
         Ok((execution, exit_code)) => {
+            if let Some(identity) = accepted_runner_handoff_identity(&execution)? {
+                bind_controller_action_runner_handoff(record, action_id, identity, &execution)?;
+                controller::write_controller(record)?;
+                return Ok(AgentTaskRunResult {
+                    value: ControllerActionReport {
+                        schema: ACTION_RESULT_SCHEMA,
+                        loop_id: record.loop_id.clone(),
+                        claimed: true,
+                        action_id: Some(action_id.to_string()),
+                        status: Some("waiting_for_runner".to_string()),
+                        failure_summary: None,
+                        runtime_evidence: controller_action_runtime_evidence(&execution),
+                        execution: Some(execution),
+                        controller: record.clone(),
+                    },
+                    exit_code: 0,
+                });
+            }
             let mut exit_code = exit_code;
             let missing_required_artifacts = if exit_code == 0 {
                 validate_required_action_artifacts(&action, &execution)
@@ -208,46 +226,6 @@ where
         }));
     }
 
-    if let Some(AgentTaskLoopRunnerExecutionTarget::Runner(runner)) = decision.target {
-        let diagnostic = AgentTaskLoopActionDiagnostic {
-            code: "runner_action_dispatch_unimplemented".to_string(),
-            message: format!(
-                "controller action '{}' targets runner `{runner}`, but controller runner dispatch is not implemented; refusing local fallback",
-                action.action_id
-            ),
-            runner: Some(runner.clone()),
-            details: serde_json::json!({
-                "action_id": action.action_id,
-                "dedupe_key": action.dedupe_key,
-            }),
-        };
-        let execution = serde_json::json!({
-            "mode": "runner_policy",
-            "status": "failed",
-            "target": "runner",
-            "runner": runner,
-            "diagnostics": [diagnostic],
-        });
-        complete_controller_action(record, action_id, &execution, 1)?;
-        controller::write_controller(record)?;
-        return Ok(Some(AgentTaskRunResult {
-            value: ControllerActionReport {
-                schema: ACTION_RESULT_SCHEMA,
-                loop_id: record.loop_id.clone(),
-                claimed: true,
-                action_id: Some(action_id.to_string()),
-                status: Some("failed".to_string()),
-                failure_summary: Some(controller_action_failure_summary(
-                    record, action, &execution,
-                )),
-                runtime_evidence: controller_action_runtime_evidence(&execution),
-                execution: Some(execution),
-                controller: record.clone(),
-            },
-            exit_code: 1,
-        }));
-    }
-
     Ok(None)
 }
 
@@ -275,17 +253,129 @@ fn controller_runner_availability(runner_id: &str) -> AgentTaskLoopRunnerAvailab
     }
 }
 
-fn action_status_report_label(status: AgentTaskLoopActionStatus) -> &'static str {
+pub(super) fn action_status_report_label(status: AgentTaskLoopActionStatus) -> &'static str {
     match status {
         AgentTaskLoopActionStatus::Pending => "pending",
         AgentTaskLoopActionStatus::Running => "running",
+        AgentTaskLoopActionStatus::WaitingForRunner => "waiting_for_runner",
         AgentTaskLoopActionStatus::AlreadySatisfied => "already_satisfied",
         AgentTaskLoopActionStatus::Completed => "completed",
         AgentTaskLoopActionStatus::Failed => "failed",
+        AgentTaskLoopActionStatus::Cancelled => "cancelled",
         AgentTaskLoopActionStatus::BlockedRunnerUnavailable => "blocked_runner_unavailable",
         AgentTaskLoopActionStatus::BlockedRemoteMaterialization => "blocked_remote_materialization",
         AgentTaskLoopActionStatus::BlockedLocalFallbackDenied => "blocked_local_fallback_denied",
     }
+}
+
+pub(super) fn accepted_runner_handoff_identity(execution: &Value) -> Result<Option<Value>> {
+    // Spawn-task dispatch results are wrapped with their controller mode and
+    // request artifacts. The Lab handoff itself remains the typed result.
+    let handoff = execution.get("result").unwrap_or(execution);
+    if handoff.get("schema").and_then(Value::as_str)
+        != Some("homeboy/agent-task-controller-lab-handoff/v1")
+    {
+        return Ok(None);
+    }
+
+    let identity = handoff.get("identity").cloned().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "controller runner handoff",
+            "Lab accepted the controller action without a typed runner identity",
+            None,
+            None,
+        )
+    })?;
+    let run_id = identity
+        .get("run_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller runner handoff identity.run_id",
+                "Lab handoff identity requires a persisted run id",
+                Some(identity.to_string()),
+                None,
+            )
+        })?;
+    let runner_id = identity
+        .get("runner_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller runner handoff identity.runner_id",
+                "Lab handoff identity requires a runner id",
+                Some(identity.to_string()),
+                None,
+            )
+        })?;
+    let runner_job_id = identity
+        .get("runner_job_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller runner handoff identity.runner_job_id",
+                "Lab handoff identity requires a runner job id",
+                Some(identity.to_string()),
+                None,
+            )
+        })?;
+    if handoff.get("run_id").and_then(Value::as_str) != Some(run_id) {
+        return Err(Error::validation_invalid_argument(
+            "controller runner handoff run_id",
+            "Lab handoff run id does not match its typed identity",
+            Some(identity.to_string()),
+            None,
+        ));
+    }
+
+    let persisted = lifecycle::status(run_id)?;
+    if persisted.runner_id() != Some(runner_id) || persisted.runner_job_id() != Some(runner_job_id)
+    {
+        return Err(Error::validation_invalid_argument(
+            "controller runner handoff identity",
+            "Lab handoff identity does not match the persisted run/runner/job binding",
+            Some(identity.to_string()),
+            None,
+        ));
+    }
+    Ok(Some(identity))
+}
+
+fn bind_controller_action_runner_handoff(
+    record: &mut AgentTaskLoopControllerRecord,
+    action_id: &str,
+    identity: Value,
+    execution: &Value,
+) -> Result<()> {
+    let action = record
+        .next_actions
+        .iter_mut()
+        .find(|action| action.action_id == action_id)
+        .ok_or_else(|| Error::internal_unexpected("claimed controller action disappeared"))?;
+    action.status = AgentTaskLoopActionStatus::WaitingForRunner;
+    action
+        .diagnostics
+        .retain(|diagnostic| diagnostic.code != "runner_handoff");
+    action.diagnostics.push(AgentTaskLoopActionDiagnostic {
+        code: "runner_handoff".to_string(),
+        message: "Lab accepted this controller action; waiting for the authoritative runner terminal result".to_string(),
+        runner: identity
+            .get("runner_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        details: serde_json::json!({
+            "schema": "homeboy/agent-task-controller-runner-handoff/v1",
+            "identity": identity,
+            "execution": execution,
+        }),
+    });
+    push_controller_history(
+        record,
+        "controller.action.runner_handoff_accepted",
+        None,
+        serde_json::json!({ "action_id": action_id, "execution": execution }),
+    );
+    Ok(())
 }
 
 fn controller_action_failure_summary(

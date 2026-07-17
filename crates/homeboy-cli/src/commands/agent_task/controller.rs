@@ -1332,6 +1332,24 @@ where
             request,
             &self.defaults.to_overrides(),
         )?;
+        if let Some(runner_id) = request
+            .get("runner")
+            .or_else(|| request.get("runner_id"))
+            .or_else(|| request.get("lab_runner_id"))
+            .and_then(Value::as_str)
+        {
+            let run_id = command.run_id.clone().ok_or_else(|| {
+                homeboy::core::Error::internal_unexpected(
+                    "controller dispatch did not inject a durable run identity",
+                )
+            })?;
+            let mut dispatch_request = dispatch_service::resolve_dispatch_request(command)?;
+            let plan = dispatch_service::build_controller_dispatch_plan(&mut dispatch_request)?;
+            let handoff = crate::commands::infra::route::dispatch_controller_plan_to_lab(
+                plan, &run_id, runner_id,
+            )?;
+            return Ok((handoff, 0));
+        }
         dispatch_service::run_dispatch_command(command, self.executor.clone())
     }
 }

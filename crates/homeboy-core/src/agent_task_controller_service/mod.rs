@@ -25,9 +25,9 @@ use crate::agent_task_loop_controller::{
     AgentTaskLoopControllerState, AgentTaskLoopEntity, AgentTaskLoopExternalEvent,
     AgentTaskLoopGateStatus, AgentTaskLoopHistoryEvent, AgentTaskLoopPolicy,
     AgentTaskLoopPolicyAction, AgentTaskLoopPolicyActionRecord, AgentTaskLoopProvenanceRef,
-    AgentTaskLoopRunRef, AgentTaskLoopRunnerAvailability, AgentTaskLoopRunnerExecutionTarget,
-    AgentTaskLoopTaskLineage, AgentTaskLoopTerminalStatus, AgentTaskLoopTransition,
-    AgentTaskPrOwnershipRequest, AgentTaskPrOwnershipState, AgentTaskPrOwnershipStatusUpdate,
+    AgentTaskLoopRunRef, AgentTaskLoopRunnerAvailability, AgentTaskLoopTaskLineage,
+    AgentTaskLoopTerminalStatus, AgentTaskLoopTransition, AgentTaskPrOwnershipRequest,
+    AgentTaskPrOwnershipState, AgentTaskPrOwnershipStatusUpdate,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan};
 use crate::agent_task_service::{self, AgentTaskRunResult};
@@ -556,6 +556,14 @@ pub fn mark_human_ready(
 /// Apply an external event to the controller and return the resulting actions.
 pub fn apply_event(request: ControllerApplyEventRequest) -> Result<ControllerEventReport> {
     let mut record = controller::load_controller(&request.loop_id)?;
+    if replay_runner_terminal_event(&mut record, &request)? {
+        controller::write_controller(&record)?;
+        return Ok(ControllerEventReport {
+            schema: APPLY_EVENT_RESULT_SCHEMA,
+            controller: record,
+            actions: Vec::new(),
+        });
+    }
     let event_id = request
         .event_id
         .unwrap_or_else(|| format!("event-{}", record.history.len() + 1));
@@ -574,6 +582,149 @@ pub fn apply_event(request: ControllerApplyEventRequest) -> Result<ControllerEve
     })
 }
 
+/// Reconcile accepted Lab handoffs before selecting the next pending action.
+/// This is the reconnect path: lifecycle status refreshes the authoritative
+/// runner snapshot, then the same typed terminal projection is applied.
+fn reconcile_waiting_runner_actions(record: &mut AgentTaskLoopControllerRecord) -> Result<bool> {
+    let mut changed = false;
+    for action in record
+        .next_actions
+        .clone()
+        .into_iter()
+        .filter(|action| action.status == AgentTaskLoopActionStatus::WaitingForRunner)
+    {
+        let Some(identity) = runner_handoff_identity(&action) else {
+            continue;
+        };
+        let run_id = identity["run_id"].as_str().unwrap_or_default();
+        let run = lifecycle::status(run_id)?;
+        if let Some(status) = terminal_runner_action_status(run.state) {
+            project_runner_terminal_action(record, &action.action_id, &identity, status, None)?;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+fn replay_runner_terminal_event(
+    record: &mut AgentTaskLoopControllerRecord,
+    request: &ControllerApplyEventRequest,
+) -> Result<bool> {
+    if request.event_type != "agent_task.runner_terminal" {
+        return Ok(false);
+    }
+    let identity = request.payload.get("identity").cloned().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "payload.identity",
+            "runner terminal event requires identity",
+            None,
+            None,
+        )
+    })?;
+    let action = record
+        .next_actions
+        .iter()
+        .find(|action| runner_handoff_identity(action).as_ref() == Some(&identity));
+    let Some(action) = action else {
+        return Err(Error::validation_invalid_argument(
+            "payload.identity",
+            "runner terminal event does not match a controller action handoff identity",
+            Some(identity.to_string()),
+            None,
+        ));
+    };
+    let action_id = action.action_id.clone();
+    let action_status = action.status;
+    if matches!(
+        action_status,
+        AgentTaskLoopActionStatus::Completed
+            | AgentTaskLoopActionStatus::Failed
+            | AgentTaskLoopActionStatus::Cancelled
+    ) {
+        return Ok(true);
+    }
+    if action_status != AgentTaskLoopActionStatus::WaitingForRunner {
+        return Err(Error::validation_invalid_argument(
+            "payload.identity",
+            "runner terminal event matched an action that is not waiting for the runner",
+            Some(action_id.clone()),
+            None,
+        ));
+    }
+    let run_id = identity["run_id"].as_str().unwrap_or_default();
+    let run = lifecycle::status(run_id)?;
+    let status = terminal_runner_action_status(run.state).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "payload.identity",
+            "runner terminal replay requires a terminal persisted run",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    project_runner_terminal_action(
+        record,
+        &action_id,
+        &identity,
+        status,
+        Some(&request.payload),
+    )?;
+    Ok(true)
+}
+
+fn runner_handoff_identity(action: &AgentTaskLoopPolicyActionRecord) -> Option<Value> {
+    action
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "runner_handoff")?
+        .details
+        .get("identity")
+        .cloned()
+}
+
+fn terminal_runner_action_status(
+    state: lifecycle::AgentTaskRunState,
+) -> Option<AgentTaskLoopActionStatus> {
+    match state {
+        lifecycle::AgentTaskRunState::Succeeded => Some(AgentTaskLoopActionStatus::Completed),
+        lifecycle::AgentTaskRunState::Cancelled => Some(AgentTaskLoopActionStatus::Cancelled),
+        lifecycle::AgentTaskRunState::CandidateRecoverable
+        | lifecycle::AgentTaskRunState::PartialRecoverable
+        | lifecycle::AgentTaskRunState::PartialFailure
+        | lifecycle::AgentTaskRunState::Failed => Some(AgentTaskLoopActionStatus::Failed),
+        _ => None,
+    }
+}
+
+fn project_runner_terminal_action(
+    record: &mut AgentTaskLoopControllerRecord,
+    action_id: &str,
+    identity: &Value,
+    status: AgentTaskLoopActionStatus,
+    replay: Option<&Value>,
+) -> Result<()> {
+    let action = record
+        .next_actions
+        .iter_mut()
+        .find(|action| action.action_id == action_id)
+        .ok_or_else(|| Error::internal_unexpected("runner handoff action disappeared"))?;
+    if action.status != AgentTaskLoopActionStatus::WaitingForRunner {
+        return Ok(());
+    }
+    action.status = status;
+    push_controller_history(
+        record,
+        "controller.action.runner_terminal_projected",
+        None,
+        serde_json::json!({
+            "action_id": action_id,
+            "identity": identity,
+            "status": action_status_report_label(status),
+            "replay": replay,
+        }),
+    );
+    Ok(())
+}
+
 /// Claim and execute the first pending controller action, if any.
 pub fn run_next<E, D>(
     loop_id: &str,
@@ -585,6 +736,9 @@ where
     D: ControllerDispatchHook,
 {
     let mut record = controller::controller_status(loop_id)?;
+    if reconcile_waiting_runner_actions(&mut record)? {
+        controller::write_controller(&record)?;
+    }
     let Some(action_id) = first_pending_action_id(&record) else {
         return Ok(AgentTaskRunResult {
             value: ControllerActionReport {
@@ -650,7 +804,10 @@ where
 {
     let mut results = Vec::new();
     while results.len() < options.max_actions {
-        let record = controller::controller_status(loop_id)?;
+        let mut record = controller::controller_status(loop_id)?;
+        if reconcile_waiting_runner_actions(&mut record)? {
+            controller::write_controller(&record)?;
+        }
         if options.stop_on_terminal && controller_state_is_terminal(record.state) {
             return Ok(AgentTaskRunResult {
                 value: ControllerResumeReport {
