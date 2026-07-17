@@ -25,11 +25,11 @@ use homeboy_core::server::{self, Server, SshClient};
 
 use super::broker_http;
 use super::session::{
-    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
-    RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
-    RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerSession,
-    RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
-    RunnerTunnelMode,
+    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobRecoveryEvidence,
+    RunnerActiveJobSource, RunnerActiveJobState, RunnerChangedRuntimePath, RunnerConnectReport,
+    RunnerDisconnectReport, RunnerFailureKind, RunnerLeaselessRecoveryContract,
+    RunnerLeaselessRecoveryEvidence, RunnerSession, RunnerSessionRole, RunnerSessionState,
+    RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode,
 };
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 use homeboy_core::broker_auth;
@@ -734,7 +734,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
-    let daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?
+    let mut daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?
         .or_else(|| remote_daemon_recovery_freshness(runner_id, &runner));
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
     let direct_daemon_active_jobs =
@@ -792,6 +792,19 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
             None,
         )
     };
+    let (active_jobs, stale_jobs, direct_daemon_active_jobs, active_job_recovery_evidence) =
+        reconcile_terminal_phantom_activity(
+            runner_id,
+            session.as_ref(),
+            active_jobs,
+            stale_jobs,
+            direct_daemon_active_jobs,
+        );
+    if let (Some(freshness), Some(active_jobs)) =
+        (daemon_freshness.as_mut(), direct_daemon_active_jobs)
+    {
+        freshness.active_jobs = active_jobs;
+    }
     let active_job_count = direct_daemon_active_jobs.unwrap_or(active_jobs.len());
     let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
         (Some(error), _) => Some(error),
@@ -799,7 +812,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
             Some(RunnerActiveJobError {
                 code: "active_job_view_inconsistent".to_string(),
                 message: format!(
-                    "direct daemon freshness reports {authoritative_count} active job(s), but /jobs exposed {} typed runner job(s); freshness is authoritative and orphan recovery is suppressed until the views converge",
+                    "direct daemon freshness reports {authoritative_count} active job(s), but /jobs exposed {} typed runner job(s); freshness is authoritative and terminal-only reconciliation found no durable terminal handoffs",
                     active_jobs.len()
                 ),
             })
@@ -824,8 +837,99 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         active_job_state,
         active_job_source,
         active_job_error,
+        active_job_recovery_evidence,
         session_path: session_path.display().to_string(),
     })
+}
+
+fn reconcile_terminal_phantom_activity(
+    runner_id: &str,
+    session: Option<&RunnerSession>,
+    active_jobs: Vec<ActiveRunnerJobSummary>,
+    stale_jobs: Vec<ActiveRunnerJobSummary>,
+    direct_daemon_active_jobs: Option<usize>,
+) -> (
+    Vec<ActiveRunnerJobSummary>,
+    Vec<ActiveRunnerJobSummary>,
+    Option<usize>,
+    Option<RunnerActiveJobRecoveryEvidence>,
+) {
+    let Some(authoritative_count) = direct_daemon_active_jobs else {
+        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
+    };
+    if authoritative_count == active_jobs.len() {
+        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
+    }
+    let Some(local_url) = session.and_then(|session| session.local_url.as_deref()) else {
+        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
+    };
+    let Ok(client) = Client::builder().timeout(Duration::from_secs(10)).build() else {
+        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
+    };
+    let Ok(response) = client
+        .post(format!(
+            "{}/jobs/reconcile-terminal",
+            local_url.trim_end_matches('/')
+        ))
+        .send()
+    else {
+        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
+    };
+    if !response.status().is_success() {
+        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
+    }
+    let Ok(body) = response.json::<Value>() else {
+        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
+    };
+    let reconciled = body
+        .pointer("/body/reconciled_count")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let reconciled_job_ids = body
+        .pointer("/body/reconciled_job_ids")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .take(100)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if reconciled == 0
+        || reconciled_job_ids.is_empty()
+        || usize::try_from(reconciled).ok() != Some(reconciled_job_ids.len())
+    {
+        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
+    }
+    let Ok((refreshed_active_jobs, refreshed_stale_jobs)) =
+        runner_jobs(runner_id, session.expect("local URL requires session"))
+    else {
+        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
+    };
+    let Some(refreshed_count) = daemon_http_freshness(
+        local_url,
+        &session.expect("local URL requires session").homeboy_version,
+        session
+            .expect("local URL requires session")
+            .homeboy_build_identity
+            .as_deref()
+            .unwrap_or(""),
+    )
+    .ok()
+    .map(|freshness| freshness.active_jobs) else {
+        return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
+    };
+    (
+        refreshed_active_jobs,
+        refreshed_stale_jobs,
+        Some(refreshed_count),
+        Some(RunnerActiveJobRecoveryEvidence {
+            reconciled_job_ids,
+            prior_active_job_count: authoritative_count,
+            active_job_count: refreshed_count,
+        }),
+    )
 }
 
 fn should_infer_child_run_orphans(

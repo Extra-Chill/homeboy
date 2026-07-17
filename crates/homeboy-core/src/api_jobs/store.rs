@@ -500,6 +500,58 @@ impl JobStore {
         )
     }
 
+    /// Reconcile only jobs whose linked durable run has already reached a
+    /// terminal state. This deliberately does not inspect, stop, or alter live
+    /// children, so it is safe when a daemon's aggregate count includes both
+    /// stale handoffs and genuine work.
+    pub fn reconcile_terminal_linked_daemon_jobs(&self) -> Result<Vec<Uuid>> {
+        self.reconcile_terminal_linked_daemon_jobs_with_resolver(
+            recovered_terminal_agent_task_result,
+        )
+    }
+
+    pub(super) fn reconcile_terminal_linked_daemon_jobs_with_resolver(
+        &self,
+        resolve_terminal: impl Fn(&StoredJob) -> Option<RecoveredTerminalJob>,
+    ) -> Result<Vec<Uuid>> {
+        let terminal = {
+            let inner = self.inner.lock().expect("job store mutex poisoned");
+            inner
+                .jobs
+                .values()
+                .filter(|stored| {
+                    matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                })
+                .filter_map(|stored| resolve_terminal(stored).map(|result| (stored.job.id, result)))
+                .collect::<Vec<_>>()
+        };
+
+        let mut reconciled = Vec::with_capacity(terminal.len());
+        for (job_id, result) in terminal {
+            let now = timestamp_ms();
+            let mut inner = self.inner.lock().expect("job store mutex poisoned");
+            let stored = inner.jobs.get_mut(&job_id).expect("terminal job exists");
+            stored.job.status = result.status;
+            stored.job.updated_at_ms = now;
+            stored.job.finished_at_ms = Some(now);
+            stored.job.stale_reason = None;
+            for artifact in result.artifacts {
+                if !stored
+                    .job
+                    .artifacts
+                    .iter()
+                    .any(|existing| existing.id == artifact.id)
+                {
+                    stored.job.artifacts.push(artifact);
+                }
+            }
+            drop(inner);
+            self.persist()?;
+            reconciled.push(job_id);
+        }
+        Ok(reconciled)
+    }
+
     #[cfg(test)]
     pub(super) fn reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(
         &self,

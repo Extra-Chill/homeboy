@@ -93,6 +93,7 @@ pub(super) fn reverse_status(runner_id: &str) -> RunnerStatusReport {
         active_job_state: RunnerActiveJobState::Available,
         active_job_source: Some(RunnerActiveJobSource::ReverseBroker),
         active_job_error: None,
+        active_job_recovery_evidence: None,
         session_path: "/tmp/lab.json".to_string(),
     }
 }
