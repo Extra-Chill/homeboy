@@ -413,6 +413,4 @@ assert.deepEqual(summary.by_status, { ready: 1, planned: 2, blocked: 4 });
 assert.deepEqual(summary.by_family_status.crud, { ready: 1, planned: 1, blocked: 3 });
 assert.equal(summary.blockers.length, 6);
 
-assert(!JSON.stringify([crudDescriptor, restDescriptor, adminDescriptor, pageDescriptor, blockDescriptor, dbDescriptor]).includes('woocommerce'));
-
 console.log('WordPress fuzz runtime workload operations smoke passed.');

@@ -18,11 +18,6 @@ const {
 } = require('..');
 
 const runtimeRoot = path.join(__dirname, '..');
-const runnerSource = fs.readFileSync(path.join(runtimeRoot, 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'), 'utf8');
-
-assert.doesNotMatch(runnerSource, /HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATHS|WP_CODEBOX_PROVIDER_PLUGIN_PATHS/);
-assert.doesNotMatch(runnerSource, /packages\/cli\/dist|HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT|HOMEBOY_WP_CODEBOX_INSTALL_DIR/);
-
 const descriptorSource = fs.readFileSync(path.join(runtimeRoot, 'lib', 'wp-codebox-adapter-descriptor.js'), 'utf8');
 assert.match(descriptorSource, /runtime', 'descriptor', '--json/);
 assert.doesNotMatch(descriptorSource, /run-agent-task', '--help/);

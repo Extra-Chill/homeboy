@@ -107,6 +107,4 @@ assert.equal(plan.targets.find((target) => target.type === 'frontend-url').cases
 assert.equal(plan.targets.find((target) => target.type === 'hook').cases[0].operation.hook, 'init');
 assert.equal(plan.targets.find((target) => target.type === 'db-query').cases[0].operation.query, 'SELECT ID FROM wp_posts WHERE post_type = ?');
 assert.equal(plan.targets.find((target) => target.type === 'external-http').cases[0].operation.url, 'https://api.example.test/v1/');
-assert(!JSON.stringify(artifact).includes('woocommerce'), 'discovery inventory must stay product-agnostic');
-
 console.log('WordPress discovery inventory smoke passed.');

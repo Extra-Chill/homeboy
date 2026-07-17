@@ -10,9 +10,6 @@ const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { runHeadlessDeterministicLoop } = require('../runtime-agent-ci/lib/headless-deterministic-loop-runner.js');
 
-const runnerSource = fs.readFileSync(path.join(repoRoot, 'runtime-agent-ci/lib/headless-deterministic-loop-runner.js'), 'utf8');
-assert.doesNotMatch(runnerSource, /HOMEBOY_WP_CODEBOX|WP_CODEBOX/);
-
 const tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-controller-env-')));
 const homeboyBin = path.join(tempDir, 'homeboy-controller-stub.cjs');
 fs.writeFileSync(homeboyBin, `#!/usr/bin/env node

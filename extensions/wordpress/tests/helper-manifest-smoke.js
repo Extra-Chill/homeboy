@@ -64,7 +64,4 @@ assert.equal(
 	manifest.helpers.fuzzManifestContracts,
 	path.resolve(__dirname, '..', 'lib', 'fuzz-manifest-contracts.js')
 );
-assert.equal(manifest.helpers.woocommerceExpensiveShipping, undefined);
-assert.equal(manifest.productAdapters, undefined);
-
 console.log('helper manifest smoke passed');

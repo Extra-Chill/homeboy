@@ -36,8 +36,7 @@ SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../../scripts/lib" && p
 SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SHARED_LIB_DIR}/settings.sh}"
 # shellcheck source=/dev/null
 source "${SHARED_LIB_DIR}/runner-harness.sh"
-# shellcheck source=/dev/null
-source "${SHARED_LIB_DIR}/test-failures-adapter.sh"
+homeboy_runner_harness_load_adapter test-failures-adapter
 homeboy_runner_harness_init --bash 4 --sidecar-writer --failure-trap
 # shellcheck source=/dev/null
 source "$SETTINGS_HELPER"

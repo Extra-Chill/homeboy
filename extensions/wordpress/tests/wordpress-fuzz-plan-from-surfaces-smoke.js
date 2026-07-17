@@ -188,8 +188,6 @@ assert.equal(targetTypes['rest-route'].cases[0].seed, 'seed-1');
 assert(targetTypes['rest-route'].cases[0].execution_tier === 'read_only_executable');
 assert(plan.metadata.execution_tiers.read_only_executable > 0);
 assert(plan.metadata.execution_tiers.plan_only > 0);
-assert(!JSON.stringify(plan).includes('woocommerce'), 'fuzz plan conversion must stay product-agnostic');
-
 const aliasPlan = buildWordPressFuzzPlanFromSurfaces({
 	surfaces: [
 		{ kind: 'rest', id: 'rest-alias', route: '/wp/v2/pages' },

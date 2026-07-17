@@ -32,6 +32,13 @@ homeboy_runner_harness_source_command_capture() {
     source "$helper"
 }
 
+homeboy_runner_harness_load_adapter() {
+    local adapter_path
+    adapter_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$1.sh"
+    # shellcheck source=/dev/null
+    source "$adapter_path"
+}
+
 homeboy_runner_harness_source_if_file() {
     local helper="$1"
     if [ -n "$helper" ] && [ -f "$helper" ]; then

@@ -96,7 +96,7 @@ bash -c 'source "$1"; type homeboy_fix_results_capture >/dev/null; type homeboy_
 assert_file "$SETTINGS_HELPER"
 bash -c 'source "$1"; type homeboy_setting >/dev/null; type homeboy_setting_bool >/dev/null; type homeboy_setting_array >/dev/null' _ "$SETTINGS_HELPER"
 assert_file "$RUNNER_HARNESS_HELPER"
-bash -c 'source "$1"; type homeboy_runner_harness_init >/dev/null; type homeboy_runner_harness_temp >/dev/null; type homeboy_runner_harness_source_command_capture >/dev/null' _ "$RUNNER_HARNESS_HELPER"
+bash -c 'source "$1"; type homeboy_runner_harness_init >/dev/null; type homeboy_runner_harness_temp >/dev/null; type homeboy_runner_harness_source_command_capture >/dev/null; type homeboy_runner_harness_load_adapter >/dev/null; homeboy_runner_harness_load_adapter test-failures-adapter; type homeboy_test_failures_merge_file >/dev/null' _ "$RUNNER_HARNESS_HELPER"
 assert_file "$TEST_FAILURES_ADAPTER_HELPER"
 bash -c 'source "$1"; type homeboy_test_failures_merge_file >/dev/null; type homeboy_test_failure_record_json >/dev/null; type homeboy_test_failure_emit_record_json >/dev/null' _ "$TEST_FAILURES_ADAPTER_HELPER"
 assert_file "$LINT_FINDINGS_ADAPTER_HELPER"

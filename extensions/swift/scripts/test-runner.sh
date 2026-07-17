@@ -9,8 +9,7 @@ fi
 SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../scripts/lib" && pwd)}"
 # shellcheck source=/dev/null
 source "${SHARED_LIB_DIR}/runner-harness.sh"
-# shellcheck source=/dev/null
-source "${SHARED_LIB_DIR}/test-failures-adapter.sh"
+homeboy_runner_harness_load_adapter test-failures-adapter
 homeboy_runner_harness_init --component-alias COMPONENT_PATH --sidecar-writer
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
