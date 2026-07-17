@@ -320,7 +320,7 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for Mirrore
 fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
     with_temp_home(|| {
         let mut config = homeboy::core::defaults::load_config();
-        config.agent_task.rotation = Some(
+        config.agent_task.rotation = serde_json::to_value(
             homeboy::core::agent_task_scheduler::AgentTaskProviderRotationPolicy {
                 entries: vec![
                     homeboy::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
@@ -334,7 +334,8 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 ],
                 ..Default::default()
             },
-        );
+        )
+        .ok();
         homeboy::core::defaults::save_config(&config).expect("save provider rotation");
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
