@@ -20,7 +20,10 @@ use super::super::{
 use super::git::{git_snapshot, materialize_git, materialize_git_from_controller_bundle};
 use super::snapshot::{
     effective_snapshot_excludes, ensure_no_runner_workspace_metadata_collision,
-    local_snapshot_stats, materialize_snapshot, materialize_snapshot_git, snapshot_identity,
+    local_snapshot_stats, materialize_snapshot, materialize_snapshot_git,
+    materialize_snapshot_incremental, snapshot_identity, snapshot_manifest_delta,
+    workspace_content_manifest_for_policy, SnapshotManifestDelta,
+    WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
@@ -101,7 +104,7 @@ pub fn sync_workspace(
             } else {
                 "snapshot_unique_workspace"
             };
-            let materialization_plan = workspace_materialization_plan(
+            let mut materialization_plan = workspace_materialization_plan(
                 workspace_root,
                 &local_path,
                 &remote_path,
@@ -111,6 +114,11 @@ pub fn sync_workspace(
                 workspace_cleanliness,
             );
             let stats = local_snapshot_stats(&local_path, &excludes, &includes)?;
+            let content_manifest = workspace_content_manifest_for_policy(
+                &local_path,
+                &excludes,
+                WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+            )?;
             let synthetic_checkout = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
                 match materialize_snapshot_git(
                     &runner,
@@ -126,7 +134,40 @@ pub fn sync_workspace(
                     }
                 }
             } else {
-                materialize_snapshot(&runner, &local_path, &remote_path, &excludes)?;
+                let seed = compatible_incremental_snapshot(
+                    &runner,
+                    &local_path,
+                    &excludes,
+                    &content_manifest,
+                )?;
+                materialization_plan.snapshot_transfer = Some(match seed {
+                    Some((seed, delta)) => match materialize_snapshot_incremental(
+                        &runner,
+                        &local_path,
+                        &remote_path,
+                        &seed.remote_path,
+                        &delta,
+                    ) {
+                        Ok(transfer) => transfer,
+                        Err(error) => {
+                            rollback_materialized_workspace(&runner, workspace_root, &remote_path);
+                            return Err(error);
+                        }
+                    },
+                    None => {
+                        if let Err(error) =
+                            materialize_snapshot(&runner, &local_path, &remote_path, &excludes)
+                        {
+                            rollback_materialized_workspace(&runner, workspace_root, &remote_path);
+                            return Err(error);
+                        }
+                        super::types::SnapshotTransferStats {
+                            reused: ByteFileCounts::default(),
+                            transferred: stats.clone(),
+                            final_size: stats.clone(),
+                        }
+                    }
+                });
                 None
             };
             let metadata = workspace_metadata(
@@ -135,6 +176,8 @@ pub fn sync_workspace(
                 &remote_path,
                 options.mode,
                 &snapshot,
+                &excludes,
+                Some(content_manifest),
                 options.run_isolation_token.as_deref(),
                 ResourceCleanupPolicy::DeleteOnSuccess,
             );
@@ -274,6 +317,8 @@ pub fn sync_workspace(
                 &remote_path,
                 RunnerWorkspaceSyncMode::Git,
                 &git.head,
+                &excludes,
+                None,
                 options.run_isolation_token.as_deref(),
                 ResourceCleanupPolicy::DeleteOnSuccess,
             );
@@ -455,6 +500,37 @@ pub fn reuse_compatible_snapshot_workspace(
         includes,
         workspace_cleanliness: workspace_cleanliness.to_string(),
         validation_dependencies: Vec::new(),
+    }))
+}
+
+/// A seed may differ in source revision, but must have been materialized from
+/// the same controller path under the exact effective security/exclude policy.
+/// Older metadata lacks that policy and is deliberately ineligible.
+fn compatible_incremental_snapshot(
+    runner: &super::super::Runner,
+    local_path: &Path,
+    excludes: &[String],
+    controller_manifest: &super::snapshot::WorkspaceContentManifest,
+) -> Result<Option<(RunnerWorkspaceSnapshotEntry, SnapshotManifestDelta)>> {
+    let (snapshots, _) = workspace_snapshots(
+        &runner.id,
+        RunnerWorkspaceSnapshotFilters {
+            limit: usize::MAX,
+            ..Default::default()
+        },
+    )?;
+    let local_path = local_path.display().to_string();
+    Ok(snapshots.snapshots.into_iter().find_map(|snapshot| {
+        (snapshot.sync_mode == RunnerWorkspaceSyncMode::Snapshot.label()
+            && snapshot.local_path == local_path
+            && snapshot.snapshot_excludes == excludes)
+            .then(|| {
+                let manifest = snapshot.content_manifest.clone()?;
+                snapshot_manifest_delta(controller_manifest, &manifest)
+                    .ok()
+                    .map(|delta| (snapshot, delta))
+            })
+            .flatten()
     }))
 }
 
@@ -925,6 +1001,8 @@ fn workspace_snapshot_entry(
         remote_path: metadata.remote_path,
         sync_mode: metadata.sync_mode,
         snapshot_identity: metadata.snapshot_identity,
+        snapshot_excludes: metadata.snapshot_excludes,
+        content_manifest: metadata.content_manifest,
         created_at: metadata.synced_at,
         source_ref: metadata.source_ref,
         source_commit: metadata.source_commit,
@@ -968,6 +1046,8 @@ fn workspace_metadata(
     remote_path: &str,
     sync_mode: RunnerWorkspaceSyncMode,
     snapshot_identity: &str,
+    snapshot_excludes: &[String],
+    content_manifest: Option<super::snapshot::WorkspaceContentManifest>,
     run_id: Option<&str>,
     cleanup_policy: ResourceCleanupPolicy,
 ) -> RunnerWorkspaceMetadata {
@@ -982,6 +1062,8 @@ fn workspace_metadata(
         remote_path: remote_path.to_string(),
         sync_mode: sync_mode.label().to_string(),
         snapshot_identity: snapshot_identity.to_string(),
+        snapshot_excludes: snapshot_excludes.to_vec(),
+        content_manifest,
         synced_at: chrono::Utc::now().to_rfc3339(),
         source_ref: git_state.ref_name,
         source_commit: git_state.commit,

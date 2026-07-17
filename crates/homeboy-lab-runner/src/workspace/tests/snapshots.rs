@@ -181,6 +181,222 @@ fn clean_snapshot_reuse_preserves_exact_source_provenance_without_git_materializ
     });
 }
 
+#[test]
+fn incremental_snapshots_reuse_unchanged_content_and_reconcile_deltas() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_local_runner("lab-local-incremental", runner_root.path());
+        let source = tempfile::tempdir().expect("source");
+        fs::create_dir_all(source.path().join("src")).expect("source directory");
+        fs::write(source.path().join("src/unchanged.txt"), "unchanged\n").expect("unchanged");
+        fs::write(source.path().join("src/changed.txt"), "first\n").expect("changed");
+        fs::write(source.path().join("removed.txt"), "remove\n").expect("removed");
+
+        let (first, _) = sync_workspace(
+            "lab-local-incremental",
+            sync_options(
+                source.path().display().to_string(),
+                Some("first".to_string()),
+            ),
+        )
+        .expect("first snapshot");
+        fs::write(source.path().join("src/changed.txt"), "second\n").expect("small delta");
+        fs::remove_file(source.path().join("removed.txt")).expect("delete source file");
+        let (second, _) = sync_workspace(
+            "lab-local-incremental",
+            sync_options(
+                source.path().display().to_string(),
+                Some("second".to_string()),
+            ),
+        )
+        .expect("incremental snapshot");
+
+        let transfer = second
+            .materialization_plan
+            .snapshot_transfer
+            .expect("transfer accounting");
+        assert_eq!(transfer.transferred.files, 1);
+        assert_eq!(transfer.reused.files, 1);
+        assert_eq!(
+            fs::read_to_string(format!("{}/src/changed.txt", second.remote_path)).unwrap(),
+            "second\n"
+        );
+        assert!(!std::path::Path::new(&second.remote_path)
+            .join("removed.txt")
+            .exists());
+        assert_eq!(
+            fs::read_to_string(format!("{}/src/changed.txt", first.remote_path)).unwrap(),
+            "first\n"
+        );
+    });
+}
+
+#[test]
+fn incremental_snapshots_materialize_unchanged_content_without_transfer() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_local_runner("lab-local-unchanged", runner_root.path());
+        let source = tempfile::tempdir().expect("source");
+        fs::write(source.path().join("unchanged.txt"), "unchanged\n").expect("source file");
+        sync_workspace(
+            "lab-local-unchanged",
+            sync_options(
+                source.path().display().to_string(),
+                Some("first".to_string()),
+            ),
+        )
+        .expect("first snapshot");
+
+        let (second, _) = sync_workspace(
+            "lab-local-unchanged",
+            sync_options(
+                source.path().display().to_string(),
+                Some("second".to_string()),
+            ),
+        )
+        .expect("unchanged incremental snapshot");
+
+        let transfer = second
+            .materialization_plan
+            .snapshot_transfer
+            .expect("transfer accounting");
+        assert_eq!(transfer.transferred.files, 0);
+        assert_eq!(transfer.reused.files, 1);
+        assert_eq!(transfer.final_size.files, 1);
+        assert_eq!(
+            fs::read_to_string(std::path::Path::new(&second.remote_path).join("unchanged.txt"))
+                .expect("reused file"),
+            "unchanged\n"
+        );
+    });
+}
+
+#[test]
+fn incremental_snapshot_refuses_seed_when_effective_excludes_change() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_local_runner("lab-local-exclude-change", runner_root.path());
+        let source = tempfile::tempdir().expect("source");
+        fs::write(source.path().join("kept.txt"), "kept\n").expect("kept");
+        fs::write(source.path().join("secret.txt"), "secret\n").expect("secret");
+        sync_workspace(
+            "lab-local-exclude-change",
+            sync_options(
+                source.path().display().to_string(),
+                Some("first".to_string()),
+            ),
+        )
+        .expect("first snapshot");
+        // A runner policy change changes effective snapshot filtering, so the
+        // prior tree is not a compatible source for hard-link reuse.
+        crate::merge(
+            Some("lab-local-exclude-change"),
+            r#"{"policy":{"snapshot_excludes":["secret.txt"]}}"#,
+            &["policy".to_string()],
+        )
+        .expect("update runner");
+        let (second, _) = sync_workspace(
+            "lab-local-exclude-change",
+            sync_options(
+                source.path().display().to_string(),
+                Some("second".to_string()),
+            ),
+        )
+        .expect("filtered snapshot");
+        let transfer = second
+            .materialization_plan
+            .snapshot_transfer
+            .expect("transfer");
+        assert_eq!(transfer.reused.files, 0);
+        assert_eq!(transfer.transferred.files, 1);
+        assert!(!std::path::Path::new(&second.remote_path)
+            .join("secret.txt")
+            .exists());
+    });
+}
+
+#[test]
+fn incremental_snapshot_falls_back_when_seed_manifest_is_corrupt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_local_runner("lab-local-corrupt-manifest", runner_root.path());
+        let source = tempfile::tempdir().expect("source");
+        fs::write(source.path().join("file.txt"), "contents\n").expect("source file");
+        let (first, _) = sync_workspace(
+            "lab-local-corrupt-manifest",
+            sync_options(
+                source.path().display().to_string(),
+                Some("first".to_string()),
+            ),
+        )
+        .expect("first snapshot");
+        let metadata_path =
+            std::path::Path::new(&first.remote_path).join(".homeboy/runner-workspace.json");
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
+                .expect("metadata JSON");
+        metadata["content_manifest"]["entry_count"] = serde_json::json!(999);
+        fs::write(&metadata_path, metadata.to_string()).expect("corrupt manifest");
+
+        let (second, _) = sync_workspace(
+            "lab-local-corrupt-manifest",
+            sync_options(
+                source.path().display().to_string(),
+                Some("second".to_string()),
+            ),
+        )
+        .expect("safe full fallback");
+        let transfer = second
+            .materialization_plan
+            .snapshot_transfer
+            .expect("transfer accounting");
+        assert_eq!(transfer.reused.files, 0);
+        assert_eq!(transfer.transferred.files, 1);
+        assert_eq!(
+            fs::read_to_string(std::path::Path::new(&second.remote_path).join("file.txt"))
+                .expect("fallback file"),
+            "contents\n"
+        );
+    });
+}
+
+#[test]
+fn incremental_snapshot_refuses_seed_from_another_source_path() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_local_runner("lab-local-incompatible", runner_root.path());
+        let first = tempfile::tempdir().expect("first source");
+        let second = tempfile::tempdir().expect("second source");
+        fs::write(first.path().join("file.txt"), "first\n").expect("first file");
+        fs::write(second.path().join("file.txt"), "second\n").expect("second file");
+        sync_workspace(
+            "lab-local-incompatible",
+            sync_options(
+                first.path().display().to_string(),
+                Some("first".to_string()),
+            ),
+        )
+        .expect("first snapshot");
+        let (synced, _) = sync_workspace(
+            "lab-local-incompatible",
+            sync_options(
+                second.path().display().to_string(),
+                Some("second".to_string()),
+            ),
+        )
+        .expect("second snapshot");
+        assert_eq!(
+            synced
+                .materialization_plan
+                .snapshot_transfer
+                .expect("transfer")
+                .reused
+                .files,
+            0
+        );
+    });
+}
+
 fn create_local_runner(id: &str, workspace_root: &std::path::Path) {
     crate::create(
         &format!(

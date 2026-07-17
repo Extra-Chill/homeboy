@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::super::validation_dependencies::RunnerValidationDependencySyncOutput;
 use super::super::RunnerWorkspaceLease;
+use super::snapshot::WorkspaceContentManifest;
 use homeboy_core::resource_lifecycle_index::ResourceLifecycleRecord;
 
 pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
@@ -71,6 +72,17 @@ pub struct RunnerWorkspaceMaterializationContract {
     pub output_paths: RunnerWorkspaceOutputPaths,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub controller_git_bundle: Option<ControllerGitBundleProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_transfer: Option<SnapshotTransferStats>,
+}
+
+/// Content accounting for a snapshot transport. `reused` is linked from the
+/// compatible immutable seed; `transferred` is copied from the controller.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct SnapshotTransferStats {
+    pub reused: ByteFileCounts,
+    pub transferred: ByteFileCounts,
+    pub final_size: ByteFileCounts,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -182,6 +194,7 @@ impl RunnerWorkspaceMaterializationContract {
             },
             output_paths: RunnerWorkspaceOutputPaths::for_remote_path(&workspace_root, remote_path),
             controller_git_bundle: None,
+            snapshot_transfer: None,
         }
     }
 
@@ -362,6 +375,10 @@ pub struct RunnerWorkspaceSnapshotEntry {
     pub remote_path: String,
     pub sync_mode: String,
     pub snapshot_identity: String,
+    #[serde(default)]
+    pub snapshot_excludes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_manifest: Option<WorkspaceContentManifest>,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<String>,
@@ -388,6 +405,10 @@ pub(super) struct RunnerWorkspaceMetadata {
     pub remote_path: String,
     pub sync_mode: String,
     pub snapshot_identity: String,
+    #[serde(default)]
+    pub snapshot_excludes: Vec<String>,
+    #[serde(default)]
+    pub content_manifest: Option<WorkspaceContentManifest>,
     pub synced_at: String,
     #[serde(default)]
     pub source_ref: Option<String>,
