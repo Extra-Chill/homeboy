@@ -352,10 +352,8 @@ where
         "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
     });
-    if let Ok(runner_id) = std::env::var(homeboy_lab_runner_contract::RUNNER_ID_ENV) {
-        if !runner_id.trim().is_empty() {
-            metadata["runner_id"] = json!(runner_id);
-        }
+    if let Some(runner_id) = execution_runner_id() {
+        metadata["runner_id"] = json!(runner_id);
     }
     if let Some(route) = crate::notification_route::current() {
         route.insert_into_metadata(&mut metadata);
@@ -392,6 +390,12 @@ where
         }
     }
     Ok(record)
+}
+
+pub(crate) fn execution_runner_id() -> Option<String> {
+    std::env::var(crate::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV)
+        .ok()
+        .filter(|runner_id| !runner_id.trim().is_empty())
 }
 
 /// Bind an inherited route when a detached workload recreates an agent-task run.
