@@ -8,9 +8,13 @@ use crate::observation::ArtifactRecord;
 
 pub const ARTIFACT_REF_SCHEMA: &str = "homeboy/artifact-ref/v1";
 pub const EVIDENCE_REF_SCHEMA: &str = "homeboy/evidence-ref/v1";
-pub const HOMEBOY_REF_SCHEME: &str = "homeboy://";
-pub const RUNNER_ARTIFACT_REF_SCHEME: &str = "runner-artifact://";
-pub const METADATA_ONLY_REF_SCHEME: &str = "metadata-only:";
+// The artifact-ref URI schemes live in homeboy-engine-primitives (the slim
+// shared base) so the audit engine and CLI command contract can check them
+// without depending on this module. Re-exported here to preserve existing
+// crate::artifact_ref::{HOMEBOY_REF_SCHEME, ...} call sites.
+pub use homeboy_engine_primitives::artifact_ref_scheme::{
+    HOMEBOY_REF_SCHEME, METADATA_ONLY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewerFacingArtifactRefError {

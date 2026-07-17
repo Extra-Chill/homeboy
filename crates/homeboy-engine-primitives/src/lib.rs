@@ -6,6 +6,7 @@
 //! own crate so they compile as an independent unit and are re-exported under
 //! `crate::core::engine::*` in the main binary for source compatibility.
 
+pub mod artifact_ref_scheme;
 pub mod baseline;
 pub mod codebase_scan;
 pub mod command;
