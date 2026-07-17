@@ -31,7 +31,10 @@ pub fn route_after_parse(
     // recursively route back through a runner-side controller daemon.
     let managed_runner_placement =
         crate::commands::utils::resource_policy::is_managed_runner_placement_context();
-    if lab_routing::is_lab_offload_subprocess() || managed_runner_placement {
+    if lab_routing::is_lab_offload_subprocess()
+        || managed_runner_placement
+        || runner_resident_agent_task_run_plan(cli)
+    {
         return Ok(None);
     }
 
@@ -260,6 +263,18 @@ pub fn route_after_parse(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+/// A run plan handed to Lab already has a materialized local workspace. Its
+/// execution provenance must not cause a second controller daemon selection.
+fn runner_resident_agent_task_run_plan(cli: &Cli) -> bool {
+    homeboy::core::resource_policy_context::has_lab_execution_provenance()
+        && matches!(
+            &cli.command,
+            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                command: crate::commands::agent_task::AgentTaskCommand::RunPlan(_),
+            })
+        )
 }
 
 /// Fanout keeps durable batch state, worktree ownership, artifact ingestion,
