@@ -354,7 +354,11 @@ impl ArtifactManifestEntry {
         id: impl Into<String>,
         run_id: impl Into<String>,
     ) -> Result<crate::artifact_ref::ArtifactRef> {
-        Ok(self.to_artifact_contract()?.to_artifact_ref(id, run_id))
+        Ok(crate::artifact_contract::artifact_contract_to_ref(
+            &self.to_artifact_contract()?,
+            id,
+            run_id,
+        ))
     }
 }
 
