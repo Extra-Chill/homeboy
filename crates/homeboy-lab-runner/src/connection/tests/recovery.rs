@@ -81,7 +81,7 @@ fn stale_daemon_without_jobs_reattaches_without_replacement() {
     );
 }
 
-fn idle_stale_status(typed_unresolved_jobs: Option<usize>) -> RemoteDaemonStatus {
+fn idle_stale_status(work_evidence: RemoteDaemonWorkEvidence) -> RemoteDaemonStatus {
     let mut status = remote_daemon_status_for_test_with_reason(
         false,
         true,
@@ -93,13 +93,13 @@ fn idle_stale_status(typed_unresolved_jobs: Option<usize>) -> RemoteDaemonStatus
     let daemon = status.daemon.as_mut().expect("daemon");
     daemon.version = Some("0.288.13".to_string());
     daemon.build_identity = Some("homeboy 0.288.13+stale".to_string());
-    status.typed_unresolved_jobs = typed_unresolved_jobs;
+    status.work_evidence = work_evidence;
     status
 }
 
 #[test]
 fn replaces_idle_stale_daemon_when_typed_jobs_are_zero_without_lease_recovery_evidence() {
-    let status = idle_stale_status(Some(0));
+    let status = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
 
     assert_eq!(
         remote_daemon_connect_action_with_controller_identity(
@@ -118,12 +118,12 @@ fn replaces_idle_stale_daemon_when_typed_jobs_are_zero_without_lease_recovery_ev
 #[test]
 fn idle_stale_replacement_fails_closed_for_active_or_inconsistent_typed_jobs() {
     let configured = "homeboy 0.289.0+configured";
-    let mut freshness_active = idle_stale_status(Some(0));
+    let mut freshness_active = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
     freshness_active.active_jobs = 1;
-    let typed_active = idle_stale_status(Some(1));
-    let typed_unreachable = idle_stale_status(None);
+    let typed_active = idle_stale_status(RemoteDaemonWorkEvidence::ActiveOrUnresolved(1));
+    let typed_unknown = idle_stale_status(RemoteDaemonWorkEvidence::Unknown);
 
-    for status in [freshness_active, typed_active, typed_unreachable] {
+    for status in [freshness_active, typed_active, typed_unknown] {
         assert_eq!(
             remote_daemon_connect_action_with_controller_identity(None, &status, configured)
                 .expect("unsafe evidence retains the daemon"),
@@ -134,7 +134,7 @@ fn idle_stale_replacement_fails_closed_for_active_or_inconsistent_typed_jobs() {
 
 #[test]
 fn idle_stale_replacement_refuses_unreachable_daemon_evidence() {
-    let mut status = idle_stale_status(Some(0));
+    let mut status = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
     status.reachable = false;
 
     assert!(remote_daemon_connect_action_with_controller_identity(
@@ -148,7 +148,7 @@ fn idle_stale_replacement_refuses_unreachable_daemon_evidence() {
 
 #[test]
 fn reconnect_converges_to_configured_identity_and_repeated_recovery_reattaches() {
-    let mut status = idle_stale_status(Some(0));
+    let mut status = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
     let daemon = status.daemon.as_mut().expect("daemon");
     daemon.version = Some("0.289.0".to_string());
     daemon.build_identity = Some("homeboy 0.289.0+configured".to_string());
@@ -192,7 +192,9 @@ fn reattaches_live_stale_daemon_with_active_jobs_without_replacing_it() {
         .expect("stale reattach warning");
     assert!(warning.contains("VersionMismatch"));
     assert!(warning.contains("active jobs were preserved"));
-    assert!(warning.contains("refresh-homeboy homeboy-lab --reconnect"));
+    assert!(warning.contains(
+        "Continue with `homeboy runner refresh-homeboy homeboy-lab --reconnect` when its work is complete."
+    ));
     assert_eq!(
         recovery.adoption_command.as_deref(),
         Some("homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner")
