@@ -166,6 +166,12 @@ impl CliRuntime {
         // can materialize an isolated validation-dependency workspace without
         // depending on runner behavior.
         crate::runner::register_workspace_snapshot_provider();
+        // Register the agent-task controller pin-reference provider so core's
+        // controller-runtime retention report can discover which pinned
+        // executables are still referenced by nonterminal durable agent-task
+        // records without core depending on the agent-task subsystem. (This is
+        // the seam that lets agent-task become its own crate.)
+        crate::core::agent_task_lifecycle::controller_pin_reference_provider::register();
         // Register the command-label resolver so core::runner can map dispatched
         // argv to a hot-command label without depending on the full CLI parser.
         crate::runner::set_command_label_resolver(|argv| {

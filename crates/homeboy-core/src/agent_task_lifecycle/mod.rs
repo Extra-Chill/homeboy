@@ -32,6 +32,7 @@ use lifecycle_store as store;
 pub mod agent_task_lifecycle_event;
 mod artifact_materialization;
 mod cancellation;
+pub mod controller_pin_reference_provider;
 mod conversion;
 mod failure_recording;
 mod health;

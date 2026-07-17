@@ -266,6 +266,10 @@ fn legacy_v1_pin_migration_failures_leave_durable_record_unchanged() {
 #[test]
 fn controller_runtime_retention_keeps_mutable_runs_and_reports_terminal_pins_eligible() {
     with_isolated_home(|_| {
+        // Controller-runtime retention discovers referenced pins through the
+        // agent-task pin-reference provider hook; register it so the report can
+        // see this test's durable records.
+        super::controller_pin_reference_provider::register();
         let temporary = tempfile::tempdir().expect("temporary fake controller directory");
         let identity = crate::build_identity::current().display;
         let active_artifact = temporary.path().join("active-homeboy");
