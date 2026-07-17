@@ -33,6 +33,7 @@ rig package / local spec
 |---|---|
 | `list` | List declared rigs. |
 | `show <id>` | Print one rig spec as JSON. |
+| `materialize <rig.json>` | Resolve a rig's local inheritance chain as machine-readable JSON. |
 | `up <id>` | Run the rig's `up` pipeline and materialize the environment. |
 | `check <id>` | Run the rig's `check` pipeline and report all failures. |
 | `lint <target>` | Lint a rig ID, package path, or `rig.json` without touching the environment. |
@@ -68,6 +69,40 @@ homeboy rig show studio
 ```
 
 Prints the resolved rig spec. This is the fastest way to inspect a package-installed rig without opening the linked source file manually.
+
+### `materialize`
+
+```sh
+homeboy rig materialize ./packages/example/rigs/example/rig.json
+homeboy rig materialize ./custom/rig.json --source-root ./custom
+```
+
+`materialize` is the public read-only contract for package tooling that needs
+Homeboy's canonical inheritance behavior. Its JSON result has this stable shape:
+
+```json
+{
+  "variant": "materialize",
+  "payload": {
+    "command": "rig.materialize",
+    "rig": { "id": "example" }
+  }
+}
+```
+
+`payload.rig` is normalized JSON after recursive `extends`, deep object merge,
+`$append`, and `$merge_by` processing. It has no `extends` field or merge
+directives. The default source root for the standard `rigs/<id>/rig.json`
+package layout is the package root, so package-level templates resolve without
+an extra flag. For any other layout, the default is the `rig.json` directory;
+pass `--source-root` to select a wider permitted boundary. Inherited templates
+must stay inside that source root.
+
+Library consumers can use `homeboy::core::rig::materialize_rig_spec_with_default_source_root`
+for the same default-root policy, or `materialize_rig_spec` when their caller
+supplies an explicit boundary. The CLI JSON envelope is the public
+machine-readable interchange contract; downstream rig-package tooling still
+needs to migrate to this command or core API.
 
 ### `up`
 

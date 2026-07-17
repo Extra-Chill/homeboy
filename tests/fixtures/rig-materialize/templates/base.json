@@ -1,0 +1,18 @@
+{
+  "settings": {
+    "base": true,
+    "mode": "base"
+  },
+  "labels": ["base"],
+  "steps": [
+    {
+      "id": "build",
+      "command": "build",
+      "metadata": { "retries": 1 }
+    },
+    {
+      "id": "test",
+      "command": "test"
+    }
+  ]
+}

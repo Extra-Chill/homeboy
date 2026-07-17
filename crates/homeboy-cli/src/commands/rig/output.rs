@@ -15,6 +15,7 @@ use homeboy::core::rig::{self, RigResourcesSpec, RigSpec};
 pub enum RigCommandOutput {
     List(RigListOutput),
     Show(RigShowOutput),
+    Materialize(RigMaterializeOutput),
     Up(RigUpOutput),
     UpPlan(RigUpPlanOutput),
     Check(RigCheckOutput),
@@ -80,6 +81,13 @@ pub struct RigShowOutput {
     pub rig: RigSpec,
     #[serde(skip_serializing_if = "RigResourcesSpec::is_empty")]
     pub resources: RigResourcesSpec,
+}
+
+/// Canonical, inheritance-resolved rig JSON for package tooling.
+#[derive(Serialize)]
+pub struct RigMaterializeOutput {
+    pub command: &'static str,
+    pub rig: serde_json::Value,
 }
 
 pub type RigUpOutput = CommandReport<rig::UpReport>;
@@ -207,5 +215,24 @@ mod tests {
         assert!(json.contains("/Users/user/Developer/studio"));
         assert!(json.contains("studio-runtime"));
         assert!(json.contains("wordpress-server-child.mjs"));
+    }
+
+    #[test]
+    fn rig_materialize_output_uses_the_machine_readable_variant() {
+        let output = RigCommandOutput::Materialize(RigMaterializeOutput {
+            command: "rig.materialize",
+            rig: serde_json::json!({ "id": "example" }),
+        });
+
+        assert_eq!(
+            serde_json::to_value(output).expect("serialize"),
+            serde_json::json!({
+                "variant": "materialize",
+                "payload": {
+                    "command": "rig.materialize",
+                    "rig": { "id": "example" }
+                }
+            })
+        );
     }
 }

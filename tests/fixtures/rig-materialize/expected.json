@@ -1,0 +1,26 @@
+{
+  "id": "representative",
+  "labels": ["base", "derived"],
+  "settings": {
+    "base": true,
+    "mode": "derived"
+  },
+  "steps": [
+    {
+      "command": "build-fast",
+      "id": "build",
+      "metadata": {
+        "retries": 1,
+        "timeout": 60
+      }
+    },
+    {
+      "command": "test",
+      "id": "test"
+    },
+    {
+      "command": "lint",
+      "id": "lint"
+    }
+  ]
+}

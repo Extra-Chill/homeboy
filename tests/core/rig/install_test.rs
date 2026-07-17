@@ -2,7 +2,8 @@
 
 use crate::rig::install::local_package_source_root_for_dependencies;
 use crate::rig::{
-    declared_id, discover_rigs, install, list, list_ids, load, load_local_source,
+    declared_id, default_materialize_source_root, discover_rigs, install, list, list_ids, load,
+    load_local_source, materialize_rig_spec, materialize_rig_spec_with_default_source_root,
     read_source_metadata, read_stack_source_metadata, run_check, run_lint,
 };
 use crate::test_support::HomeGuard;
@@ -79,6 +80,213 @@ mod discovery {
         let metadata = read_source_metadata("alpha").expect("metadata");
         assert!(metadata.linked);
         assert_eq!(metadata.rig_path, source.to_string_lossy());
+    }
+}
+
+mod materialization {
+    use super::*;
+
+    #[test]
+    fn materialize_resolves_inheritance_append_merge_by_and_serializes_deterministically() {
+        let package = tempfile::tempdir().expect("package");
+        fs::create_dir_all(package.path().join("templates")).expect("templates");
+        fs::create_dir_all(package.path().join("rigs/child")).expect("rig dir");
+        fs::write(
+            package.path().join("templates/base.json"),
+            r#"{
+                "settings": { "base": true, "shared": "parent" },
+                "appendable": ["base"],
+                "steps": [
+                    { "id": "build", "command": "make build", "metadata": { "retries": 1 } },
+                    { "id": "test", "command": "make test" }
+                ]
+            }"#,
+        )
+        .expect("base template");
+        let child = package.path().join("rigs/child/rig.json");
+        fs::write(
+            &child,
+            r#"{
+                "extends": "../../templates/base.json",
+                "id": "child",
+                "settings": { "shared": "child" },
+                "appendable": { "$append": ["child"] },
+                "steps": {
+                    "$merge_by": "id",
+                    "entries": [
+                        { "id": "build", "command": "make build-fast", "metadata": { "timeout": 60 } },
+                        { "id": "lint", "command": "make lint" }
+                    ]
+                }
+            }"#,
+        )
+        .expect("child rig");
+
+        let materialized = materialize_rig_spec(&child, package.path()).expect("materialize");
+        assert_eq!(materialized["id"], "child");
+        assert_eq!(materialized["settings"]["base"], true);
+        assert_eq!(materialized["settings"]["shared"], "child");
+        assert_eq!(
+            materialized["appendable"],
+            serde_json::json!(["base", "child"])
+        );
+        assert_eq!(materialized["steps"][0]["command"], "make build-fast");
+        assert_eq!(
+            materialized["steps"][0]["metadata"],
+            serde_json::json!({ "retries": 1, "timeout": 60 })
+        );
+        assert_eq!(materialized["steps"][2]["id"], "lint");
+        assert!(materialized.get("extends").is_none());
+
+        let first = serde_json::to_string(&materialized).expect("serialize");
+        let second = serde_json::to_string(
+            &materialize_rig_spec(&child, package.path()).expect("materialize again"),
+        )
+        .expect("serialize again");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn materialize_default_source_root_resolves_package_templates() {
+        let package = tempfile::tempdir().expect("package");
+        let rig = package.path().join("rigs/example/rig.json");
+        fs::create_dir_all(rig.parent().expect("rig directory")).expect("rig directory");
+        fs::create_dir_all(package.path().join("templates")).expect("template directory");
+        fs::write(
+            package.path().join("templates/base.json"),
+            r#"{ "settings": { "inherited": true } }"#,
+        )
+        .expect("template");
+        fs::write(
+            &rig,
+            r#"{ "extends": "../../templates/base.json", "id": "example" }"#,
+        )
+        .expect("rig");
+
+        assert_eq!(default_materialize_source_root(&rig), package.path());
+        assert_eq!(
+            materialize_rig_spec_with_default_source_root(&rig).expect("materialize"),
+            serde_json::json!({ "id": "example", "settings": { "inherited": true } })
+        );
+    }
+
+    #[test]
+    fn materialize_default_source_root_keeps_non_standard_files_narrow() {
+        assert_eq!(
+            default_materialize_source_root(Path::new("rigs/example/template.json")),
+            std::path::PathBuf::from("rigs/example")
+        );
+    }
+
+    #[test]
+    fn materialize_matches_generic_representative_fixture() {
+        let package = tempfile::tempdir().expect("package");
+        let templates = package.path().join("templates");
+        let rig = package.path().join("rigs/representative/rig.json");
+        fs::create_dir_all(&templates).expect("template directory");
+        fs::create_dir_all(rig.parent().expect("rig directory")).expect("rig directory");
+        fs::write(
+            templates.join("base.json"),
+            include_str!("../../fixtures/rig-materialize/templates/base.json"),
+        )
+        .expect("base fixture");
+        fs::write(
+            &rig,
+            include_str!("../../fixtures/rig-materialize/rigs/representative/rig.json"),
+        )
+        .expect("rig fixture");
+
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../../fixtures/rig-materialize/expected.json"))
+                .expect("expected fixture");
+        assert_eq!(
+            materialize_rig_spec_with_default_source_root(&rig).expect("materialize"),
+            expected
+        );
+    }
+
+    #[test]
+    fn materialize_rejects_inheritance_cycles() {
+        let package = tempfile::tempdir().expect("package");
+        let first = package.path().join("first.json");
+        let second = package.path().join("second.json");
+        fs::write(&first, r#"{ "extends": "second.json" }"#).expect("first template");
+        fs::write(&second, r#"{ "extends": "first.json" }"#).expect("second template");
+
+        let error = materialize_rig_spec(&first, package.path()).expect_err("cycle rejected");
+        assert_eq!(error.details["field"], "extends");
+        assert!(error.message.contains("cycle"));
+    }
+
+    #[test]
+    fn materialize_rejects_array_directives_without_an_inherited_array() {
+        let package = tempfile::tempdir().expect("package");
+        let rig = package.path().join("rig.json");
+        fs::write(&rig, r#"{ "items": { "$append": ["unexpected"] } }"#).expect("rig");
+
+        let error = materialize_rig_spec(&rig, package.path()).expect_err("directive rejected");
+        assert_eq!(error.details["field"], "items");
+        assert!(error.message.contains("inherited array"));
+    }
+
+    #[test]
+    fn materialize_rejects_unknown_array_directives() {
+        let package = tempfile::tempdir().expect("package");
+        let base = package.path().join("base.json");
+        let rig = package.path().join("rig.json");
+        fs::write(&base, r#"{ "items": ["base"] }"#).expect("base");
+        fs::write(
+            &rig,
+            r#"{ "extends": "base.json", "items": { "$unknown": [] } }"#,
+        )
+        .expect("rig");
+
+        let error = materialize_rig_spec(&rig, package.path()).expect_err("directive rejected");
+        assert_eq!(error.details["field"], "items");
+        assert!(error
+            .message
+            .contains("Unknown rig extends array merge directive"));
+    }
+
+    #[test]
+    fn materialize_rejects_malformed_array_directives() {
+        let package = tempfile::tempdir().expect("package");
+        let base = package.path().join("base.json");
+        fs::write(&base, r#"{ "items": [{ "id": "base" }] }"#).expect("base");
+
+        for (name, directive, message) in [
+            (
+                "mixed",
+                r#"{ "$append": [], "$merge_by": "id", "entries": [] }"#,
+                "either '$append' or '$merge_by'",
+            ),
+            (
+                "append-extra",
+                r#"{ "$append": [], "entries": [] }"#,
+                "must only contain '$append'",
+            ),
+            (
+                "merge-missing",
+                r#"{ "$merge_by": "id" }"#,
+                "must include an 'entries' array",
+            ),
+            (
+                "merge-empty",
+                r#"{ "$merge_by": "", "entries": [] }"#,
+                "non-empty key field",
+            ),
+        ] {
+            let rig = package.path().join(format!("{name}.json"));
+            fs::write(
+                &rig,
+                format!(r#"{{ "extends": "base.json", "items": {directive} }}"#),
+            )
+            .expect("rig");
+
+            let error = materialize_rig_spec(&rig, package.path()).expect_err("directive rejected");
+            assert_eq!(error.details["field"], "items", "{name}");
+            assert!(error.message.contains(message), "{name}: {}", error.message);
+        }
     }
 }
 

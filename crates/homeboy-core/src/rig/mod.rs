@@ -51,9 +51,10 @@ pub use capabilities::{
 };
 pub use component_resolution::{component_ref, resolve_component, resolve_component_path};
 pub use install::{
-    discover_rigs, discover_stacks, install, read_source_metadata, read_stack_source_metadata,
-    DiscoveredRig, DiscoveredStack, InstalledStack, RigInstallResult, RigSourceMetadata,
-    StackSourceMetadata,
+    default_materialize_source_root, discover_rigs, discover_stacks, install, materialize_rig_spec,
+    materialize_rig_spec_with_default_source_root, read_source_metadata,
+    read_stack_source_metadata, DiscoveredRig, DiscoveredStack, InstalledStack, RigInstallResult,
+    RigSourceMetadata, StackSourceMetadata,
 };
 pub use lease::{
     acquire_active_run_lease, acquire_active_run_lease_with_settings, active_run_leases,
@@ -358,24 +359,7 @@ fn read_spec_from_path(
     package_root: &Path,
     source_root: &Path,
 ) -> Result<RigSpec> {
-    let value = match install::materialize_rig_spec(path, source_root)? {
-        Some(value) => value,
-        None => {
-            let content = fs::read_to_string(path).map_err(|e| {
-                Error::internal_io(
-                    e.to_string(),
-                    Some(format!("read rig spec {}", path.display())),
-                )
-            })?;
-            serde_json::from_str(&content).map_err(|e| {
-                Error::validation_invalid_json(
-                    e,
-                    Some(format!("parse rig spec {}", path.display())),
-                    Some(content.chars().take(200).collect()),
-                )
-            })?
-        }
-    };
+    let value = install::materialize_rig_spec(path, source_root)?;
     let mut spec: RigSpec = serde_json::from_value(value.clone())
         .map_err(|e| rig_spec_parse_error(e, path, Some(&value), None))?;
     if spec.id.is_empty() {

@@ -60,7 +60,7 @@ are extension hooks. See `docs/architecture/lifecycle-contracts.md`.
 
 ## Templates And Variants
 
-Rig package specs may declare `extends` to derive a concrete installed rig from one or more JSON templates in the same package source root. Homeboy resolves each parent relative to the declaring file, materializes the merged JSON during `homeboy rig install` / `rig sources update`, and writes the installed rig without the `extends` field. Runtime commands continue to load ordinary rig JSON.
+Rig package specs may declare `extends` to derive a concrete installed rig from one or more JSON templates in the same package source root. Homeboy resolves each parent relative to the declaring file, materializes the merged JSON during `homeboy rig install` / `rig sources update`, and writes the installed rig without the `extends` field. Runtime commands continue to load ordinary rig JSON. Package tools can consume the same canonical result with `homeboy rig materialize <rig.json>`; see [`rig materialize`](rig.md#materialize) for its machine-readable contract and source-root behavior.
 
 Merge rules are intentionally generic:
 
