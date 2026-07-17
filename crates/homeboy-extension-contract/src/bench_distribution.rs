@@ -14,7 +14,7 @@ pub struct BenchRunDistribution {
     pub p95: f64,
 }
 
-pub(crate) fn distribution(samples: &[f64]) -> BenchRunDistribution {
+pub fn distribution(samples: &[f64]) -> BenchRunDistribution {
     let n = samples.len() as f64;
     let mean = samples.iter().sum::<f64>() / n;
     let variance = samples
@@ -44,7 +44,7 @@ pub(crate) fn distribution(samples: &[f64]) -> BenchRunDistribution {
     }
 }
 
-pub(crate) fn percentile(samples: &[f64], pct: f64) -> f64 {
+pub fn percentile(samples: &[f64], pct: f64) -> f64 {
     let mut sorted = samples.to_vec();
     sorted.sort_by(|a, b| a.total_cmp(b));
     if sorted.len() == 1 {
@@ -62,5 +62,5 @@ pub(crate) fn percentile(samples: &[f64], pct: f64) -> f64 {
 }
 
 #[cfg(test)]
-#[path = "../../../../../tests/core/extension/bench/distribution_test.rs"]
+#[path = "bench_distribution_test.rs"]
 mod distribution_test;

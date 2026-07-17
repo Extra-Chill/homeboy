@@ -26,7 +26,7 @@ pub(crate) mod artifact_validation;
 pub mod baseline;
 pub(crate) mod budget_findings;
 pub mod diagnostic;
-pub mod distribution;
+pub use homeboy_extension_contract::bench_distribution as distribution;
 pub(crate) mod failure_diagnostic;
 pub(crate) mod gate;
 pub(crate) mod metric_policy_preset;
