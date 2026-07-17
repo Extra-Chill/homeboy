@@ -8,7 +8,7 @@ use homeboy_core::api_jobs::{
     JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata,
 };
 use homeboy_core::secret_env_plan::SecretEnvPlan;
-use homeboy_core::server::RunnerPolicy;
+use homeboy_core::server::{RunnerPolicy, RunnerSecretEnvRef};
 use homeboy_core::test_support;
 
 use super::super::run::{run_loop, run_reverse_worker};
@@ -117,15 +117,99 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
 }
 
 #[test]
-fn reverse_worker_streams_redacted_child_progress_without_trusting_stdout_lifecycle_fields() {
+fn reverse_worker_drains_fifo_jobs_after_completion_and_reconnect() {
     test_support::with_isolated_home(|_| {
         create_shell_runner();
         let store = JobStore::default();
+        let mut first = run_id_echo_request();
+        first.command[2] = "printf first".to_string();
+        first.lifecycle = Some(RunnerJobLifecycleMetadata {
+            source: Some("lab-handoff".to_string()),
+            kind: Some("agent-task".to_string()),
+            durable_run_id: Some("lab-run-first".to_string()),
+            active_child_count: None,
+            active_cell_count: None,
+        });
+        let mut second = first.clone();
+        second.command[2] = "printf second".to_string();
+        second.lifecycle.as_mut().expect("lifecycle").durable_run_id =
+            Some("lab-run-second".to_string());
+
+        let first_job = store.submit_remote_runner_job(first).expect("queue first");
+        let second_job = store
+            .submit_remote_runner_job(second)
+            .expect("queue second");
+
+        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
+        let (first_output, first_exit) =
+            run_reverse_worker(worker_options(broker_url)).expect("first worker");
+        assert_eq!(first_exit, 0);
+        assert_eq!(first_output.job.expect("first job").id, first_job.id);
+        handle.join().expect("first broker joins");
+        assert_eq!(
+            store.get(second_job.id).expect("queued second").status,
+            JobStatus::Queued
+        );
+
+        // A reconnect is only another worker claim: the broker retains the
+        // queue and its FIFO order instead of involving controller execution.
+        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
+        let (second_output, second_exit) =
+            run_reverse_worker(worker_options(broker_url)).expect("reconnected worker");
+        assert_eq!(second_exit, 0);
+        assert_eq!(second_output.job.expect("second job").id, second_job.id);
+        handle.join().expect("second broker joins");
+
+        let (broker_url, handle) = spawn_mock_broker(store.clone(), 1);
+        let (idle_output, idle_exit) =
+            run_reverse_worker(worker_options(broker_url)).expect("duplicate wake");
+        assert_eq!(idle_exit, 0);
+        assert!(!idle_output.claimed);
+        handle.join().expect("idle broker joins");
+
+        assert_eq!(
+            result_event_data(&store, first_job.id)["stdout"],
+            serde_json::json!("first")
+        );
+        assert_eq!(
+            result_event_data(&store, second_job.id)["stdout"],
+            serde_json::json!("second")
+        );
+        assert_eq!(
+            store
+                .get(second_job.id)
+                .expect("finished second")
+                .claimed_by_runner_id,
+            Some("lab".to_string())
+        );
+    });
+}
+
+#[test]
+fn reverse_worker_streams_redacted_child_progress_without_trusting_stdout_lifecycle_fields() {
+    test_support::with_isolated_home(|_| {
+        create_shell_runner();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let token_path = temp.path().join("token");
+        std::fs::write(&token_path, "child-secret\n").expect("token file");
+        crate::merge(
+            Some("lab"),
+            &serde_json::json!({
+                "secret_env": {
+                    "TOKEN": RunnerSecretEnvRef {
+                        env: None,
+                        file: Some(token_path.display().to_string()),
+                        secret: None,
+                    }
+                }
+            })
+            .to_string(),
+            &[],
+        )
+        .expect("configure named runner secret");
+        let store = JobStore::default();
         let mut request = run_id_echo_request();
         request.command[2] = "printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"import\",\"current_item\":\"%s\",\"completed\":1,\"total\":2,\"metadata\":{\"api_key\":\"%s\"}}\\n' \"$TOKEN\" \"$TOKEN\"; printf 'HOMEBOY_RUNNER_PROGRESS {not-json}\\n'; printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"done\",\"status\":\"succeeded\"}\\n'; sleep 0.1; dd if=/dev/zero bs=1024 count=4097 2>/dev/null; printf tail".to_string();
-        request
-            .env
-            .insert("TOKEN".to_string(), "child-secret".to_string());
         request.secret_env_names = vec!["TOKEN".to_string()];
         store.submit_remote_runner_job(request).expect("submit job");
         let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
@@ -139,7 +223,15 @@ fn reverse_worker_streams_redacted_child_progress_without_trusting_stdout_lifecy
         let events = store.events(job.id).expect("persisted events");
         let progress_index = events
             .iter()
-            .position(|event| event.kind == JobEventKind::Progress && event.data.is_some())
+            .position(|event| {
+                event.kind == JobEventKind::Progress
+                    && event
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("phase"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("import")
+            })
             .expect("child progress event persisted before finish");
         let result_index = events
             .iter()
@@ -245,23 +337,35 @@ fn reverse_worker_uses_metadata_run_id_for_claimed_job_env() {
 fn reverse_worker_executes_from_envelope_dispatch_fields() {
     test_support::with_isolated_home(|_| {
         create_shell_runner();
-        let store = JobStore::default();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let token_b_path = temp.path().join("token-b");
+        std::fs::write(&token_b_path, "secret-b\n").expect("token B file");
+        crate::merge(
+            Some("lab"),
+            &serde_json::json!({
+                "secret_env": {
+                    "TOKEN_B": RunnerSecretEnvRef {
+                        env: None,
+                        file: Some(token_b_path.display().to_string()),
+                        secret: None,
+                    },
+                }
+            })
+            .to_string(),
+            &[],
+        )
+        .expect("configure named runner secrets");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open_without_reconciliation(&path).expect("open durable store");
         let mut request = run_id_echo_request();
         request.command = vec![
             "sh".to_string(),
             "-c".to_string(),
-            "printf '%s|%s|%s' \"$PUBLIC_VALUE\" \"$TOKEN_A\" \"$TOKEN_B\"".to_string(),
+            "printf '%s|%s' \"$PUBLIC_VALUE\" \"$TOKEN_B\"".to_string(),
         ];
         request
             .env
             .insert("PUBLIC_VALUE".to_string(), "visible".to_string());
-        request
-            .env
-            .insert("TOKEN_A".to_string(), "secret-a".to_string());
-        request
-            .env
-            .insert("TOKEN_B".to_string(), "secret-b".to_string());
-        request.secret_env_names = vec!["TOKEN_A".to_string()];
         request.secret_env_plan = SecretEnvPlan::from_secret_env_names(["TOKEN_B".to_string()]);
         request.require_paths = vec!["/tmp".to_string()];
         request.lifecycle = Some(RunnerJobLifecycleMetadata {
@@ -272,6 +376,11 @@ fn reverse_worker_executes_from_envelope_dispatch_fields() {
             active_cell_count: Some(2),
         });
         store.submit_remote_runner_job(request).expect("submit job");
+        assert!(!std::fs::read_to_string(&path)
+            .expect("read durable job")
+            .contains("secret-b"));
+        drop(store);
+        let store = JobStore::open_without_reconciliation(&path).expect("reopen durable store");
         let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
 
         let (output, exit_code) =
@@ -282,10 +391,7 @@ fn reverse_worker_executes_from_envelope_dispatch_fields() {
         assert_eq!(job.status, JobStatus::Succeeded);
         handle.join().expect("mock broker joins");
         let result = result_event_data(&store, job.id);
-        assert_eq!(
-            result["stdout"],
-            serde_json::json!("visible|[REDACTED]|[REDACTED]")
-        );
+        assert_eq!(result["stdout"], serde_json::json!("visible|[REDACTED]"));
         assert_eq!(
             result["data"]["execution_record"]["path_materialization_plan"]["entries"][0]
                 ["remote_path"],
@@ -540,7 +646,7 @@ fn reverse_worker_skips_finish_when_cancelled_after_execution() {
             .expect("submit job");
         let seen_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (broker_url, handle) =
-            spawn_cancelling_on_second_snapshot_broker(store.clone(), 5, Some(seen_paths.clone()));
+            spawn_cancelling_on_second_snapshot_broker(store.clone(), 8, Some(seen_paths.clone()));
         write_reverse_controller_session(&broker_url);
 
         let (output, exit_code) =
@@ -614,7 +720,7 @@ fn reverse_worker_interrupts_running_job_when_broker_cancel_is_observed() {
             .expect("submit job");
         let seen_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (broker_url, handle) =
-            spawn_cancelling_on_second_snapshot_broker(store.clone(), 5, Some(seen_paths.clone()));
+            spawn_cancelling_on_second_snapshot_broker(store.clone(), 8, Some(seen_paths.clone()));
         write_reverse_controller_session(&broker_url);
 
         let (output, exit_code) =

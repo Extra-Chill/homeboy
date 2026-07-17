@@ -109,7 +109,7 @@ pub use connection::{
     connect, connect_reverse, connect_with_leaseless_orphan_reconciliation,
     connect_with_orphan_adoption, connect_with_recovery, disconnect, reverse_broker_artifact,
     reverse_broker_artifact_content, reverse_broker_reconcile, runner_artifact_content, status,
-    statuses,
+    statuses, submit_reverse_broker_job,
 };
 mod upgrade_runners;
 pub use availability_provider::register as register_runner_availability_provider;
@@ -1737,6 +1737,29 @@ mod tests {
                 capacity: Some(2),
                 reasons: vec!["capacity_reached".to_string()],
             }
+        );
+        assert!(busy.availability().is_capacity_exhausted());
+    }
+
+    #[test]
+    fn runner_availability_does_not_treat_substrate_failures_as_queueable_capacity() {
+        let availability = RunnerAvailability::from_status_parts(
+            "lab-a",
+            false,
+            false,
+            1,
+            &RunnerActiveJobState::Unavailable,
+            Some(1),
+        );
+
+        assert!(!availability.is_capacity_exhausted());
+        assert_eq!(
+            availability.reasons,
+            vec![
+                "not_connected".to_string(),
+                "capacity_reached".to_string(),
+                "active_jobs_unavailable".to_string(),
+            ]
         );
     }
 

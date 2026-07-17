@@ -282,19 +282,11 @@ fn last_known_child_event(event: &JobEvent) -> Value {
 }
 
 fn remote_runner_job_has_unrecoverable_execution_env(stored: &StoredJob) -> bool {
-    let Some(remote_runner) = stored.remote_runner.as_ref() else {
-        return false;
-    };
-    if remote_runner.execution_request.is_some() {
-        return false;
-    }
-    remote_runner.request.secret_env_names.iter().any(|name| {
-        remote_runner
-            .request
-            .env
-            .get(name)
-            .is_some_and(|value| value == "<redacted>")
-    })
+    // Remote runner jobs persist named references rather than execution values.
+    // A restart keeps queued work replayable; dispatch hydrates each name on the
+    // runner and fails closed there if the reference can no longer resolve.
+    let _ = stored;
+    false
 }
 
 /// Recover a terminal job status from a recorded `Result` event when a job was

@@ -1,4 +1,5 @@
 use super::*;
+use crate::lab_selection::allows_detached_reverse_capacity_queue;
 
 fn select(
     command: &LabOffloadCommand,
@@ -209,4 +210,74 @@ fn explicit_lab_never_allows_missing_or_busy_default_runner_to_run_local() {
     .expect_err("explicit Lab placement fails closed");
 
     assert!(error.message.contains("--placement lab requires"));
+}
+
+#[test]
+fn capacity_queue_admission_requires_detached_durable_reverse_capacity_only() {
+    let reverse = LabRunnerSelection {
+        runner_id: "homeboy-lab".to_string(),
+        source: LabRunnerSelectionSource::Explicit,
+        mode: RunnerTunnelMode::Reverse,
+    };
+    let direct = LabRunnerSelection {
+        mode: RunnerTunnelMode::DirectSsh,
+        ..reverse.clone()
+    };
+    let capacity = RunnerAvailability::from_status_parts(
+        "homeboy-lab",
+        true,
+        false,
+        1,
+        &RunnerActiveJobState::Available,
+        Some(1),
+    );
+    let disconnected = RunnerAvailability::from_status_parts(
+        "homeboy-lab",
+        false,
+        false,
+        1,
+        &RunnerActiveJobState::Available,
+        Some(1),
+    );
+    let stale = RunnerAvailability::from_status_parts(
+        "homeboy-lab",
+        true,
+        true,
+        1,
+        &RunnerActiveJobState::Available,
+        Some(1),
+    );
+    let unknown = RunnerAvailability::from_status_parts(
+        "homeboy-lab",
+        true,
+        false,
+        1,
+        &RunnerActiveJobState::Unavailable,
+        None,
+    );
+
+    assert!(allows_detached_reverse_capacity_queue(
+        true, true, &reverse, &capacity
+    ));
+    assert!(!allows_detached_reverse_capacity_queue(
+        false, true, &reverse, &capacity
+    ));
+    assert!(!allows_detached_reverse_capacity_queue(
+        true, false, &reverse, &capacity
+    ));
+    assert!(!allows_detached_reverse_capacity_queue(
+        true, true, &direct, &capacity
+    ));
+    assert!(!allows_detached_reverse_capacity_queue(
+        true,
+        true,
+        &reverse,
+        &disconnected
+    ));
+    assert!(!allows_detached_reverse_capacity_queue(
+        true, true, &reverse, &stale
+    ));
+    assert!(!allows_detached_reverse_capacity_queue(
+        true, true, &reverse, &unknown
+    ));
 }

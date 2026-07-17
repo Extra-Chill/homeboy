@@ -1,12 +1,15 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use homeboy_core::api_jobs::{Job, JobStatus, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::redaction::redact_argv;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use reqwest::blocking::Client;
+use sha2::{Digest, Sha256};
 
 use super::super::broker_http;
 use super::super::evidence::mirror_reverse_broker_evidence;
@@ -59,7 +62,7 @@ pub(super) fn exec_via_reverse_broker(
     )?;
     let redaction_env = env.clone();
     let redaction_secret_env_names = secret_env_names.clone();
-    let request = RemoteRunnerJobRequest {
+    let mut request = RemoteRunnerJobRequest {
         runner_id: runner.id.clone(),
         project_id,
         operation: "runner.exec".to_string(),
@@ -73,10 +76,14 @@ pub(super) fn exec_via_reverse_broker(
         source_snapshot: Some(source_snapshot.clone()),
         path_materialization_plan: path_materialization_plan.clone(),
         lab_runner_workload: lab_runner_workload.clone(),
-        metadata: Some(runner_exec_request_metadata(
-            run_id.as_deref(),
-            "reverse_broker",
-        )),
+        metadata: Some({
+            let mut metadata = runner_exec_request_metadata(run_id.as_deref(), "reverse_broker");
+            if let Some(run_id) = run_id.as_deref() {
+                metadata["submission_key"] =
+                    serde_json::json!(format!("agent-task:{}:{run_id}", runner.id));
+            }
+            metadata
+        }),
         lifecycle: Some(RunnerJobLifecycleMetadata {
             source: Some("reverse-broker".to_string()),
             kind: Some("runner.exec".to_string()),
@@ -86,6 +93,16 @@ pub(super) fn exec_via_reverse_broker(
         }),
         require_paths: require_paths.clone(),
     };
+    let command_assets = durable_command_assets(&command, path_materialization_plan.as_ref())?;
+    if !command_assets.is_empty() {
+        request
+            .metadata
+            .as_mut()
+            .expect("reverse broker request metadata")["command_assets"] = serde_json::json!({
+            "schema": "homeboy/reverse-runner-command-assets/v1",
+            "assets": command_assets,
+        });
+    }
     let broker_token = homeboy_core::broker_auth::broker_submit_token_for_runner(&runner.id)?;
     let data = broker_http::post_json(
         &client,
@@ -127,13 +144,26 @@ pub(super) fn exec_via_reverse_broker(
         &command,
     )?;
     if let Some(run_id) = run_id.as_deref() {
-        // Match daemon handoff behavior: the accepted remote job must be bound
-        // to its controller lifecycle before a detached response is returned.
-        homeboy_core::agent_task_lifecycle::record_runner_job_identity(
-            run_id,
-            &runner.id,
-            &job.id.to_string(),
-        )?;
+        // A detached handoff must durably transition its controller projection
+        // before the response can be lost. Reconciliation reuses this same
+        // operation after an intent-only crash.
+        if detach_after_handoff {
+            homeboy_core::agent_task_lifecycle::record_detached_lab_run(
+                homeboy_core::agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: &runner.id,
+                    runner_job_id: &job.id.to_string(),
+                    remote_workspace: &cwd,
+                    remote_command: &command,
+                },
+            )?;
+        } else {
+            homeboy_core::agent_task_lifecycle::record_runner_job_identity(
+                run_id,
+                &runner.id,
+                &job.id.to_string(),
+            )?;
+        }
     }
     let persisted_run_id = mirror_evidence
         .then(|| persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref()))
@@ -313,4 +343,148 @@ pub(super) fn exec_via_reverse_broker(
         },
         exit_code,
     ))
+}
+
+/// Preserve file-backed argv values past controller cleanup. Values are content
+/// addressed and stored only in the broker request, never in controller tempdirs.
+fn durable_command_assets(
+    command: &[String],
+    plan: Option<&PathMaterializationPlan>,
+) -> Result<Vec<serde_json::Value>> {
+    const MAX_COMMAND_ASSET_BYTES: u64 = 1_048_576;
+    const MAX_COMMAND_ASSETS_BYTES: u64 = 3_145_728;
+    let Some(plan) = plan else {
+        return Ok(Vec::new());
+    };
+    command
+        .iter()
+        .filter_map(|argument| argument.strip_prefix('@').map(|path| (argument, path)))
+        .map(|(argument, remote_path)| {
+            let entry = plan
+                .entries
+                .iter()
+                .find(|entry| {
+                    remote_path == entry.remote_path
+                        || remote_path
+                            .strip_prefix(&entry.remote_path)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "command",
+                        "file-backed command argument is outside the materialization plan",
+                        Some(argument.to_string()),
+                        None,
+                    )
+                })?;
+            let local = Path::new(entry.local_path.as_deref().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "path_materialization_plan",
+                    "command asset materialization entry has no local path",
+                    Some(entry.remote_path.clone()),
+                    None,
+                )
+            })?);
+            let source = if local.is_file() {
+                if remote_path != entry.remote_path {
+                    return Err(Error::validation_invalid_argument(
+                        "command",
+                        "file-backed command argument does not match its materialized file",
+                        Some(argument.to_string()),
+                        None,
+                    ));
+                }
+                local.to_path_buf()
+            } else {
+                let relative = remote_path
+                    .strip_prefix(&entry.remote_path)
+                    .unwrap_or_default()
+                    .trim_start_matches('/');
+                let relative = Path::new(relative);
+                if relative
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "command",
+                        "file-backed command argument has an unsafe materialized path",
+                        Some(argument.to_string()),
+                        None,
+                    ));
+                }
+                local.join(relative)
+            };
+            if !source.is_file() {
+                return Ok(None);
+            }
+            let source = source.canonicalize().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("canonicalize command asset {}", source.display())),
+                )
+            })?;
+            let local = local.canonicalize().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "canonicalize materialization root {}",
+                        local.display()
+                    )),
+                )
+            })?;
+            if !source.starts_with(&local) {
+                return Err(Error::validation_invalid_argument(
+                    "command",
+                    "file-backed command argument resolves outside the materialization root",
+                    Some(argument.to_string()),
+                    None,
+                ));
+            }
+            Ok(Some((argument, remote_path, source)))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .map({
+            let mut total = 0u64;
+            move |(argument, remote_path, source)| {
+                let size = std::fs::metadata(&source)
+                    .map_err(|err| {
+                        Error::internal_io(
+                            err.to_string(),
+                            Some(format!("stat command asset {}", source.display())),
+                        )
+                    })?
+                    .len();
+                if size > MAX_COMMAND_ASSET_BYTES
+                    || total.saturating_add(size) > MAX_COMMAND_ASSETS_BYTES
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "command",
+                        "file-backed command assets exceed the size limit",
+                        Some(argument.to_string()),
+                        None,
+                    ));
+                }
+                total += size;
+                Ok((argument, remote_path, source))
+            }
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .map(|(argument, remote_path, source)| {
+            let content = std::fs::read(&source).map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(format!("read command asset {}", source.display())),
+                )
+            })?;
+            Ok(serde_json::json!({
+                "argument": argument,
+                "remote_path": remote_path,
+                "sha256": format!("{:x}", Sha256::digest(&content)),
+                "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
+            }))
+        })
+        .collect()
 }

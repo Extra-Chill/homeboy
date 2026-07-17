@@ -66,6 +66,12 @@ pub enum RunnerRecoveryState {
 }
 
 impl RunnerAvailability {
+    /// A connected runner with an authoritative capacity limit may accept work
+    /// into its durable broker queue even though it cannot start it yet.
+    pub fn is_capacity_exhausted(&self) -> bool {
+        self.reasons == ["capacity_reached"]
+    }
+
     pub fn from_status_parts(
         runner_id: impl Into<String>,
         connected: bool,

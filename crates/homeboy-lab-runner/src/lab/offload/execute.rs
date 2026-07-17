@@ -213,7 +213,15 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     prepare_timer.finish();
     match preparation {
         LabRunnerPreparation::Ready => {
-            if let Err(error) = preflight_lab_runner_availability(&contract, &selection) {
+            // Only a detached, controller-owned agent-task plan has a durable
+            // continuation and canonical workload suitable for broker queueing.
+            // A full runner is otherwise still a readiness failure.
+            if let Err(error) = preflight_lab_runner_availability(
+                &contract,
+                &selection,
+                request.detach_after_handoff,
+                request.durable_agent_task_plan.is_some(),
+            ) {
                 if contract.routing_policy.release_gate
                     && matches!(selection.source, LabRunnerSelectionSource::Default)
                     && !release_gate_local_hot_allowed

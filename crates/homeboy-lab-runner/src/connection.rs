@@ -10,8 +10,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use homeboy_core::api_jobs::{
-    ActiveRunnerJobSummary, JobClaimMetadata, JobEventKind, JobStatus, RemoteRunnerJobResult,
-    RunnerJobSource,
+    ActiveRunnerJobSummary, Job, JobClaimMetadata, JobEventKind, JobStatus, RemoteRunnerJobRequest,
+    RemoteRunnerJobResult, RunnerJobSource,
 };
 use homeboy_core::daemon::{
     DaemonFreshnessReport, DaemonLeaselessRecoveryResult, DaemonStaleReasonCode,
@@ -1228,6 +1228,47 @@ pub fn reverse_broker_reconcile(runner_id: &str) -> Result<Value> {
         "reconcile reverse runner broker jobs",
         broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
     )
+}
+
+/// Submit a redacted, replayable request to a connected reverse broker. Secret
+/// values are intentionally absent: the worker resolves named references when
+/// it prepares the claimed process.
+pub fn submit_reverse_broker_job(runner_id: &str, request: RemoteRunnerJobRequest) -> Result<Job> {
+    if request.runner_id != runner_id {
+        return Err(Error::validation_invalid_argument(
+            "runner_id",
+            "reverse broker submission runner does not match request runner",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    let broker_url = reverse_broker_url(runner_id)?;
+    let client = broker_client("build reverse broker submission client")?;
+    let body = serde_json::to_value(&request).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize replayable reverse runner job".to_string()),
+        )
+    })?;
+    let response = broker_http::post_json(
+        &client,
+        &broker_url,
+        "/runner/jobs",
+        body,
+        "replay reverse runner job submission",
+        broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
+    )?;
+    serde_json::from_value(
+        response.get("job").cloned().ok_or_else(|| {
+            Error::internal_unexpected("reverse broker submission returned no job")
+        })?,
+    )
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse replayed reverse runner job".to_string()),
+        )
+    })
 }
 
 pub fn reverse_broker_artifact(runner_id: &str, job_id: &str, artifact_id: &str) -> Result<Value> {

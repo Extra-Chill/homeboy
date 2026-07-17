@@ -1208,9 +1208,14 @@ fn liveness_summary(record: &Value, run_id: &str) -> Value {
         .get("state")
         .and_then(Value::as_str)
         .is_some_and(|state| matches!(state, "succeeded" | "failed" | "cancelled"));
+    let waiting_for_capacity = metadata
+        .get("runner_queue")
+        .and_then(|queue| queue.get("state"))
+        .and_then(Value::as_str)
+        == Some("waiting_for_capacity");
 
     json!({
-        "status": if terminal { "terminal" } else if stale { "stale" } else { "active" },
+        "status": if terminal { "terminal" } else if stale { "stale" } else if waiting_for_capacity { "waiting_for_capacity" } else { "active" },
         "heartbeat_last_seen_at": record.pointer("/lifecycle/heartbeat/last_seen_at"),
         "runner_job_status": metadata.get("runner_job_status"),
         "runner_job_last_seen_at": metadata.get("runner_job_last_seen_at"),
@@ -1220,10 +1225,13 @@ fn liveness_summary(record: &Value, run_id: &str) -> Value {
             "runner_job_id": runner_job_id,
         },
         "stale_reason": metadata.get("stale_running_reason"),
+        "runner_queue": metadata.get("runner_queue"),
         "next_action": if terminal {
             format!("homeboy agent-task review {run_id}")
         } else if stale {
             "homeboy agent-task active --reconcile".to_string()
+        } else if waiting_for_capacity {
+            "await runner completion or reconnect; the runner will claim this FIFO queue entry under its capacity lease".to_string()
         } else {
             "homeboy agent-task status <run-id> --full".to_string()
         },

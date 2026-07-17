@@ -14,7 +14,7 @@
 
 use std::sync::Mutex;
 
-use crate::api_jobs::RunnerJobLogSnapshot;
+use crate::api_jobs::{Job, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
 use crate::error::{Error, Result};
 
 /// Runner-side operations the agent-task lifecycle needs when reconciling or
@@ -41,6 +41,13 @@ pub trait RunnerContinuationProvider: Send + Sync {
         command: &[String],
         run_id: &str,
     ) -> Result<i32>;
+
+    /// Submit a replayable reverse-broker request during lifecycle reconciliation.
+    fn submit_reverse_broker_job(
+        &self,
+        runner_id: &str,
+        request: RemoteRunnerJobRequest,
+    ) -> Result<Job>;
 }
 
 /// Default provider used when the runner subsystem is not present. Behaves like
@@ -75,6 +82,16 @@ impl RunnerContinuationProvider for NoopProvider {
     ) -> Result<i32> {
         Err(Error::internal_unexpected(
             "runner subsystem is unavailable: cannot execute runner continuation",
+        ))
+    }
+
+    fn submit_reverse_broker_job(
+        &self,
+        _runner_id: &str,
+        _request: RemoteRunnerJobRequest,
+    ) -> Result<Job> {
+        Err(Error::internal_unexpected(
+            "runner subsystem is unavailable: cannot submit reverse broker job",
         ))
     }
 }

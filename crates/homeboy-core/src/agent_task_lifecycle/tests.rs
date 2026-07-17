@@ -12,9 +12,10 @@ use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
-use crate::api_jobs::{JobEvent, JobEventKind};
+use crate::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
 use crate::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
+use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
 fn fake_controller_artifact(path: &std::path::Path, identity: &str, marker: &str) -> String {
@@ -635,6 +636,186 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
 }
 
 #[test]
+fn detached_handoff_persists_redacted_submission_intent_before_broker_ack() {
+    with_isolated_home(|_| {
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "intent-before-post",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("controller proxy");
+        record_lab_offload_submission_intent(
+            "intent-before-post",
+            "homeboy-lab",
+            "/runner/workspace/repo",
+            &command,
+            &["RUNNER_SECRET_TOKEN".to_string()],
+        )
+        .expect("persist intent");
+
+        let pending = status("intent-before-post").expect("pending intent status");
+        assert_eq!(
+            pending.metadata["runner_submission_intent"]["state"],
+            "pending"
+        );
+        assert_eq!(
+            pending.metadata["runner_submission_intent"]["submission_key"],
+            "agent-task:homeboy-lab:intent-before-post"
+        );
+        assert_eq!(pending.metadata["phase"], "waiting_for_runner_capacity");
+        assert!(!serde_json::to_string(&pending)
+            .expect("serialize record")
+            .contains("secret-value"));
+
+        let accepted = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "intent-before-post",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-replayed",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("ack binds intent");
+        assert_eq!(
+            accepted.metadata["runner_submission_intent"]["state"],
+            "accepted"
+        );
+        assert_eq!(
+            accepted.metadata["runner_submission_intent"]["runner_job_id"],
+            "job-replayed"
+        );
+    });
+}
+
+#[derive(Clone)]
+struct IntentReplayProvider {
+    store: JobStore,
+    submitted: Arc<Mutex<Vec<uuid::Uuid>>>,
+    fail_after_accept_once: Arc<Mutex<bool>>,
+}
+
+impl RunnerContinuationProvider for IntentReplayProvider {
+    fn runner_job_log_snapshot(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+    ) -> Result<crate::api_jobs::RunnerJobLogSnapshot> {
+        Err(Error::internal_unexpected(
+            "not used by submission reconciliation",
+        ))
+    }
+
+    fn is_runner_connected(&self, _runner_id: &str) -> bool {
+        true
+    }
+    fn runner_exists(&self, _runner_id: &str) -> bool {
+        true
+    }
+
+    fn run_continuation_exec(
+        &self,
+        _runner_id: &str,
+        _cwd: &str,
+        _command: &[String],
+        _run_id: &str,
+    ) -> Result<i32> {
+        Err(Error::internal_unexpected(
+            "not used by submission reconciliation",
+        ))
+    }
+
+    fn submit_reverse_broker_job(
+        &self,
+        _runner_id: &str,
+        request: RemoteRunnerJobRequest,
+    ) -> Result<Job> {
+        let job = self.store.submit_remote_runner_job(request)?;
+        self.submitted.lock().expect("submission log").push(job.id);
+        let mut fail = self.fail_after_accept_once.lock().expect("fault flag");
+        if std::mem::take(&mut *fail) {
+            return Err(Error::internal_unexpected(
+                "injected post-accept pre-ack crash",
+            ));
+        }
+        Ok(job)
+    }
+}
+
+#[test]
+fn detached_cook_intent_reconciliation_converges_both_crash_windows_without_secret_leakage() {
+    with_isolated_home(|_| {
+        let store = JobStore::default();
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let fail_after_accept_once = Arc::new(Mutex::new(false));
+        register_runner_continuation_provider(Box::new(IntentReplayProvider {
+            store: store.clone(),
+            submitted: Arc::clone(&submitted),
+            fail_after_accept_once: Arc::clone(&fail_after_accept_once),
+        }));
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+
+        for (run_id, post_accept_fault) in
+            [("fault-after-intent", false), ("fault-after-post", true)]
+        {
+            record_lab_offload_planned(LabOffloadProxyPlan {
+                run_id,
+                runner_id: "homeboy-lab",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+                durable_plan: None,
+            })
+            .expect("record Lab admission");
+            record_lab_offload_submission_intent(
+                run_id,
+                "homeboy-lab",
+                "/runner/workspace/homeboy",
+                &command,
+                &["HOMEBOY_TEST_REVERSE_SECRET".to_string()],
+            )
+            .expect("persist redacted pre-submit intent");
+
+            if post_accept_fault {
+                *fail_after_accept_once.lock().expect("fault flag") = true;
+                assert!(
+                    !reconcile_pending_runner_submission_intent(run_id).expect("fault is retained")
+                );
+            }
+            assert!(reconcile_pending_runner_submission_intent(run_id).expect("replay intent"));
+            assert!(!reconcile_pending_runner_submission_intent(run_id).expect("duplicate wake"));
+            let record = status(run_id).expect("accepted lifecycle");
+            assert_eq!(
+                record.metadata["runner_submission_intent"]["state"],
+                "accepted"
+            );
+            assert!(!serde_json::to_string(&record)
+                .expect("record JSON")
+                .contains("secret-value"));
+        }
+
+        let submitted = submitted.lock().expect("submission log");
+        assert_eq!(
+            submitted.len(),
+            3,
+            "post-accept replay reuses the broker submission key"
+        );
+        assert_eq!(submitted[1], submitted[2]);
+        let persisted = serde_json::to_string(&store.get(submitted[0]).expect("broker job"))
+            .expect("broker JSON");
+        assert!(!persisted.contains("secret-value"));
+    });
+}
+
+#[test]
 fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
     with_isolated_home(|_| {
         let command = vec![
@@ -725,6 +906,7 @@ fn detached_cook_attempt_proxy_advances_after_daemon_acceptance() {
             "controller handoff complete; awaiting authoritative runner daemon result"
         );
         assert_eq!(accepted.metadata["runner_handoff"]["state"], "in_flight");
+        assert!(accepted.metadata.get("runner_queue").is_none());
         assert_eq!(
             accepted.metadata["runner_handoff"]["continuation"]["intent"],
             "reconcile_runner_job"
@@ -1342,6 +1524,45 @@ fn reachable_running_child_clears_disconnected_liveness_and_refreshes_heartbeat(
         assert!(record.metadata.get("stale_running_reason").is_none());
         assert!(record.metadata.get("retryable").is_none());
         assert_ne!(record.lifecycle.heartbeat, disconnected_heartbeat);
+    });
+}
+
+#[test]
+fn queued_runner_child_reports_fifo_capacity_ownership_before_its_claim() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-queued-capacity",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("queued proxy");
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.job.status = crate::api_jobs::JobStatus::Queued;
+        snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
+        snapshot.events.clear();
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("queued reconciliation");
+
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(record.metadata["phase"], "waiting_for_capacity");
+        assert_eq!(record.metadata["provider_state"], "queued");
+        assert_eq!(
+            record.metadata["runner_queue"],
+            json!({
+                "owner_runner_id": "homeboy-lab",
+                "ordering": "fifo",
+                "dispatch_eligibility": "runner_capacity_lease",
+                "state": "waiting_for_capacity",
+            })
+        );
+
+        snapshot.job.status = crate::api_jobs::JobStatus::Running;
+        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("claim reconciliation");
+        assert_eq!(record.metadata["phase"], "executing");
+        assert_eq!(record.metadata["runner_queue"]["state"], "claimed");
     });
 }
 

@@ -53,7 +53,11 @@ pub(crate) fn materialize_verified_lab_snapshot_git_baseline(
         );
     }
     if materialized_workspace_path.join(".git").exists() {
-        return Err("snapshot workspace unexpectedly contains root .git metadata".to_string());
+        // A replay reaches the same accepted snapshot after a prior worker has
+        // already materialized its deterministic baseline. Reuse it only after
+        // validating every provenance and Git-root invariant.
+        verify_lab_workspace_git_root(materialized_workspace_path, &provenance)?;
+        return git(materialized_workspace_path, &["rev-parse", "HEAD"]);
     }
     if let Some(path) = nested_git_metadata(materialized_workspace_path)? {
         return Err(format!(
@@ -1119,6 +1123,43 @@ mod tests {
             .expect("candidate patch");
         assert!(uncommitted_patch.contains("-candidate"));
         assert!(uncommitted_patch.contains("+uncommitted candidate"));
+    }
+
+    #[test]
+    fn verified_snapshot_baseline_replay_reuses_only_the_matching_baseline() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        let snapshot = snapshot(workspace.path());
+        let lab = lab(workspace.path(), &snapshot);
+        let baseline = materialize_verified_lab_snapshot_git_baseline(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            lab.clone(),
+        )
+        .expect("initial snapshot baseline");
+
+        assert_eq!(
+            materialize_verified_lab_snapshot_git_baseline(
+                &workspace.path().display().to_string(),
+                workspace.path(),
+                snapshot.clone(),
+                lab.clone(),
+            )
+            .expect("replayed snapshot baseline"),
+            baseline,
+        );
+
+        let mut mismatched_snapshot = snapshot;
+        mismatched_snapshot.git_sha = Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string());
+        let error = materialize_verified_lab_snapshot_git_baseline(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            mismatched_snapshot,
+            lab,
+        )
+        .expect_err("mismatched accepted source provenance must fail");
+        assert!(!error.is_empty());
     }
 
     #[test]

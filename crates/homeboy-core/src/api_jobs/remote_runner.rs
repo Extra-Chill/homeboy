@@ -19,6 +19,12 @@ use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
 use homeboy_lab_runner_contract::{RunnerMutationArtifacts, RunnerResourceMetrics};
 
+/// Broker metadata is durable queue input. Keep command-file payloads bounded
+/// before they can be persisted or decoded by a worker.
+const MAX_COMMAND_ASSET_COUNT: usize = 16;
+const MAX_COMMAND_ASSET_BASE64_BYTES: usize = 1_400_000;
+const MAX_COMMAND_ASSETS_BASE64_BYTES: usize = 4_200_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobArtifactMetadata {
     pub id: String,
@@ -93,6 +99,18 @@ pub struct RemoteRunnerJobRequest {
 }
 
 impl RemoteRunnerJobRequest {
+    /// A caller-owned identity makes a retried POST safe across a lost response.
+    /// It deliberately lives in metadata so older clients can continue submitting
+    /// anonymous jobs while durable handoffs opt into replayable ownership.
+    pub(crate) fn submission_key(&self) -> Option<&str> {
+        self.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("submission_key"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+    }
+
     pub(crate) fn normalize(&mut self) -> SecretEnvPlan {
         let mut base_plan = self
             .lab_runner_workload
@@ -221,6 +239,73 @@ impl RemoteRunnerJobRequest {
         public
     }
 
+    fn validate_command_assets(&self) -> Result<()> {
+        let Some(assets) = self
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("command_assets"))
+            .and_then(|assets| assets.get("assets"))
+            .and_then(Value::as_array)
+        else {
+            return Ok(());
+        };
+        if assets.len() > MAX_COMMAND_ASSET_COUNT {
+            return Err(Error::validation_invalid_argument(
+                "metadata.command_assets",
+                "remote runner job has too many command assets",
+                None,
+                None,
+            ));
+        }
+        let mut total = 0usize;
+        for asset in assets {
+            let encoded = asset
+                .get("content_base64")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "metadata.command_assets",
+                        "remote runner command asset is missing base64 content",
+                        None,
+                        None,
+                    )
+                })?;
+            if encoded.len() > MAX_COMMAND_ASSET_BASE64_BYTES {
+                return Err(Error::validation_invalid_argument(
+                    "metadata.command_assets",
+                    "remote runner command asset exceeds the size limit",
+                    None,
+                    None,
+                ));
+            }
+            total = total.saturating_add(encoded.len());
+        }
+        if total > MAX_COMMAND_ASSETS_BASE64_BYTES {
+            return Err(Error::validation_invalid_argument(
+                "metadata.command_assets",
+                "remote runner command assets exceed the aggregate size limit",
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
+
+    fn dispatch_request(&self) -> Self {
+        let mut request = self.clone();
+        let secret_names = request.secret_env_plan.secret_env_names();
+        for name in secret_names {
+            if request
+                .env
+                .get(&name)
+                .is_some_and(|value| value == "<redacted>")
+            {
+                request.env.remove(&name);
+            }
+        }
+        request
+    }
+
     pub(crate) fn run_ref_metadata(&self) -> Option<Value> {
         let durable_run_id = self
             .lifecycle
@@ -343,7 +428,9 @@ impl JobStore {
                 None,
             ));
         }
+        request.validate_command_assets()?;
         let secret_env_plan = request.normalize();
+        reject_inline_durable_secret_env(&request, &secret_env_plan)?;
         super::with_runner_job_preparation(|p| {
             p.validate_lab_runner_workload_dispatch(
                 request.lab_runner_workload.as_ref(),
@@ -356,6 +443,21 @@ impl JobStore {
         })?;
 
         let now = timestamp_ms();
+        let public_request = request.public_metadata();
+        let submission_key = request.submission_key().map(str::to_string);
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        if let Some(submission_key) = submission_key.as_deref() {
+            if let Some(existing) = inner.jobs.values().find(|stored| {
+                stored
+                    .remote_runner
+                    .as_ref()
+                    .and_then(|remote| remote.request.submission_key())
+                    == Some(submission_key)
+                    && stored.job.target_runner_id.as_deref() == Some(request.runner_id.as_str())
+            }) {
+                return Ok(existing.job.clone());
+            }
+        }
         let job = Job {
             id: Uuid::new_v4(),
             operation: request.operation.clone(),
@@ -379,16 +481,17 @@ impl JobStore {
             runner_job_projection: None,
         };
 
-        let public_request = request.public_metadata();
         let run_ref_metadata = public_request.run_ref_metadata();
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
         inner.jobs.insert(
             job.id,
             StoredJob {
                 job: job.clone(),
                 events: Vec::new(),
                 remote_runner: Some(StoredRemoteRunnerJob {
-                    execution_request: Some(request),
+                    // Durable broker state intentionally contains only the
+                    // redacted request. The runner hydrates named references
+                    // immediately before dispatch.
+                    execution_request: None,
                     request: public_request,
                 }),
                 local_runner: None,
@@ -486,7 +589,7 @@ impl JobStore {
                     .execution_request
                     .as_ref()
                     .unwrap_or(&remote_runner.request)
-                    .clone();
+                    .dispatch_request();
                 claimed = Some((stored.job.id, request));
             }
         }
@@ -721,6 +824,34 @@ impl JobStore {
 
         Ok(())
     }
+}
+
+fn reject_inline_durable_secret_env(
+    request: &RemoteRunnerJobRequest,
+    secret_env_plan: &SecretEnvPlan,
+) -> Result<()> {
+    let inline_secret_names = secret_env_plan
+        .secret_env_names()
+        .into_iter()
+        .filter(|name| {
+            request
+                .env
+                .get(name)
+                .is_some_and(|value| !value.is_empty() && value != "<redacted>")
+        })
+        .collect::<Vec<_>>();
+    if inline_secret_names.is_empty() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "env",
+        "durable reverse-runner jobs cannot accept inline secret env values",
+        Some("durable_reverse_runner_inline_secret_env".to_string()),
+        Some(vec![
+            format!("Inline secret variables: {}", inline_secret_names.join(", ")),
+            "Configure named runner secret_env or SecretEnvPlan references so the worker can rehydrate secrets after replay.".to_string(),
+        ]),
+    ))
 }
 
 fn default_runner_exec_operation() -> String {

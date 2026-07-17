@@ -797,68 +797,84 @@ fn remote_runner_job_submit_targets_runner_and_project() {
 }
 
 #[test]
-fn remote_runner_job_secret_env_is_execution_only_not_public_or_persisted() {
+fn remote_runner_job_rejects_inline_secret_env_before_durable_persistence() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join("jobs.json");
     let store = JobStore::open(&path).expect("durable store opens");
-    let sentinel = "homeboy-secret-sentinel-do-not-persist";
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
-    request
-        .env
-        .insert("RUNNER_SECRET_TOKEN".to_string(), sentinel.to_string());
+    request.env.insert(
+        "RUNNER_SECRET_TOKEN".to_string(),
+        "inline-secret".to_string(),
+    );
     request
         .env
         .insert("PUBLIC_FLAG".to_string(), "1".to_string());
     request.secret_env_names = vec!["RUNNER_SECRET_TOKEN".to_string()];
 
-    let job = store
+    let error = store
         .submit_remote_runner_job(request)
-        .expect("remote runner job queues");
+        .expect_err("inline secret must be rejected before durable persistence");
 
-    {
-        let inner = store.inner.lock().expect("job store mutex poisoned");
-        let stored = inner.jobs.get(&job.id).expect("job stored");
-        let remote_runner = stored.remote_runner.as_ref().expect("remote runner job");
-        assert_eq!(
-            remote_runner.request.env.get("RUNNER_SECRET_TOKEN"),
-            Some(&"<redacted>".to_string())
-        );
-        assert_eq!(
-            remote_runner
-                .execution_request
-                .as_ref()
-                .expect("execution request")
-                .env
-                .get("RUNNER_SECRET_TOKEN"),
-            Some(&sentinel.to_string())
-        );
-    }
-
-    let persisted = fs::read_to_string(&path).expect("read durable store");
-    assert!(
-        !persisted.contains(sentinel),
-        "persisted store leaked secret"
-    );
-    assert!(persisted.contains("<redacted>"));
-
-    let reopened = JobStore::open(&path).expect("durable store reopens");
+    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
     assert_eq!(
-        reopened.get(job.id).expect("reopened job").status,
-        JobStatus::Failed
+        error.details["id"],
+        serde_json::json!("durable_reverse_runner_inline_secret_env")
     );
-    assert!(reopened
-        .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
-        .expect("claim request succeeds")
+    assert!(error
+        .message
+        .contains("cannot accept inline secret env values"));
+    assert!(error.details["tried"]
+        .as_array()
+        .expect("actionable alternatives")
+        .iter()
+        .any(|value| value
+            .as_str()
+            .is_some_and(|value| value.contains("runner secret_env"))));
+    assert!(
+        store
+            .inner
+            .lock()
+            .expect("job store mutex poisoned")
+            .jobs
+            .is_empty(),
+        "rejected inline secret must not create a durable job"
+    );
+}
+
+#[test]
+fn remote_runner_submission_key_replays_one_redacted_durable_job() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open(&path).expect("durable store");
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.secret_env_names = vec!["RUNNER_SECRET_TOKEN".to_string()];
+    request.metadata = Some(json!({ "submission_key": "agent-task:crash-window" }));
+
+    // Models POST-before-ack-persist: the recovery POST carries the same key.
+    let first = store
+        .submit_remote_runner_job(request.clone())
+        .expect("first submit");
+    let replay = store
+        .submit_remote_runner_job(request)
+        .expect("replayed submit");
+    assert_eq!(first.id, replay.id);
+    assert_eq!(
+        store
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, Some(1))
+            .expect("claim")
+            .expect("one claim")
+            .job
+            .id,
+        first.id
+    );
+    assert!(store
+        .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, Some(1))
+        .expect("duplicate wake")
         .is_none());
 
-    let claim = store
-        .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
-        .expect("claim succeeds")
-        .expect("job is claimed");
-    assert_eq!(
-        claim.request.env.get("RUNNER_SECRET_TOKEN"),
-        Some(&sentinel.to_string())
-    );
+    let persisted = fs::read_to_string(path).expect("read durable store");
+    assert!(!persisted.contains("never-persist"));
+    assert!(persisted.contains("RUNNER_SECRET_TOKEN"));
 }
 
 #[test]
