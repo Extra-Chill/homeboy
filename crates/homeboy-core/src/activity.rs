@@ -6,7 +6,6 @@ use serde_json::Value;
 
 use crate::api_jobs::{self, ActiveRunnerJobSummary, Job, JobEvent};
 use crate::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
-use crate::run_lifecycle_record::RunExecutionState;
 use crate::run_lifecycle_status::RunLifecycleStatus;
 use crate::{paths, Error, Result};
 
@@ -336,6 +335,23 @@ fn source_store_precedence(source_store: &str) -> u8 {
 }
 
 fn finalize_item(item: &mut ActivityItem) {
+    item.artifacts.sort_by(|left, right| {
+        left.uri
+            .cmp(&right.uri)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    item.evidence.sort_by(|left, right| {
+        left.uri
+            .cmp(&right.uri)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    item.next_actions.sort_by(|left, right| {
+        left.command
+            .cmp(&right.command)
+            .then_with(|| left.label.cmp(&right.label))
+    });
     item.source_projections.sort_by(|left, right| {
         source_store_precedence(&right.source_store)
             .cmp(&source_store_precedence(&left.source_store))
@@ -744,6 +760,7 @@ mod tests {
     use super::*;
     use crate::api_jobs::JobStatus;
     use crate::observation::NewRunRecord;
+    use crate::run_lifecycle_record::RunExecutionState;
     use crate::test_support::with_isolated_home;
 
     fn item(id: &str, state: ActivityState) -> ActivityItem {
@@ -846,28 +863,33 @@ mod tests {
 
     #[test]
     fn source_projection_order_and_conflicts_are_stable_across_collection_order() {
-        let mut collector = ActivityCollector::default();
-
         let mut lifecycle = item("agent-task-1", ActivityState::Queued);
         lifecycle.source_store = "agent-task.lifecycle".to_string();
         lifecycle.refs.run_id = None;
         lifecycle.refs.agent_task_run_id = Some("agent-task-1".to_string());
-        collector.insert(lifecycle);
 
         let mut observation = item("agent-task-1", ActivityState::Running);
         observation.source_store = "observation.sqlite".to_string();
-        collector.insert(observation);
 
         let mut runner = item("runner-job-1", ActivityState::Running);
         runner.source_store = "runner.session".to_string();
         runner.refs.run_id = Some("agent-task-1".to_string());
-        collector.insert(runner);
 
-        let item = collector
-            .items(ActivityScope::All, 10)
-            .into_iter()
-            .next()
-            .expect("canonical activity item");
+        let collect = |items: Vec<ActivityItem>| {
+            let mut collector = ActivityCollector::default();
+            for item in items {
+                collector.insert(item);
+            }
+            collector
+                .items(ActivityScope::All, 10)
+                .into_iter()
+                .next()
+                .expect("canonical activity item")
+        };
+        let item = collect(vec![lifecycle.clone(), observation.clone(), runner.clone()]);
+        let reverse = collect(vec![runner, observation, lifecycle]);
+
+        assert_eq!(item, reverse);
         assert_eq!(item.source_store, "agent-task.lifecycle");
         assert_eq!(item.state, ActivityState::Queued);
         assert_eq!(

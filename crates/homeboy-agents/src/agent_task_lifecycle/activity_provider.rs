@@ -105,6 +105,7 @@ fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
             })
             .collect(),
         source_projections: Vec::new(),
+        state_conflicts: Vec::new(),
         next_actions: actions_for_agent_task(&record.run_id, state),
     }
 }
