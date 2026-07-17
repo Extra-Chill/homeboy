@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::manifest::{ActionType, BuiltinAction, HttpMethod};
+use crate::action_types::{ActionType, BuiltinAction, HttpMethod};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
