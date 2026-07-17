@@ -852,6 +852,7 @@ dependencies = [
  "homeboy-process",
  "homeboy-product-identity",
  "homeboy-redaction",
+ "homeboy-refactor-contract",
  "keyring",
  "libc",
  "regex",
@@ -1026,6 +1027,14 @@ name = "homeboy-redaction"
 version = "0.1.0"
 dependencies = [
  "regex",
+ "serde_json",
+]
+
+[[package]]
+name = "homeboy-refactor-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
  "serde_json",
 ]
 

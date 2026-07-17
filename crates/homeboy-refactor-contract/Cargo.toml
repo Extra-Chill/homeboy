@@ -1,0 +1,17 @@
+[package]
+name = "homeboy-refactor-contract"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Shared refactor/autofix result types for homeboy. Behavior-free data (applied-fix reporting) that both homeboy-core's refactor engine and consumers like the extension lint/test report layer depend on, so they can carry refactor results without depending on the refactor engine's behavior."
+repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
+
+[lib]
+name = "homeboy_refactor_contract"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
