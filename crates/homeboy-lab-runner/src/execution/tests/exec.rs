@@ -10,6 +10,105 @@ use homeboy_core::runner_execution_envelope::{
 use serde_json::json;
 
 #[test]
+fn daemon_submission_recovers_a_lost_tunnel_before_resending_to_the_same_lease() {
+    let accepted = direct_daemon_session("lease-live", "http://127.0.0.1:1");
+    let submitted = std::cell::RefCell::new(Vec::new());
+    let recovered = std::cell::Cell::new(false);
+
+    let response = submit_daemon_exec_with_session_recovery(
+        "http://127.0.0.1:1",
+        Some(&accepted),
+        |endpoint| {
+            submitted.borrow_mut().push(endpoint.to_string());
+            if submitted.borrow().len() == 1 {
+                return Err(connect_error());
+            }
+            Ok(DaemonHttpTextResponse {
+                status_code: 200,
+                body: "{}".to_string(),
+            })
+        },
+        |session| {
+            recovered.set(true);
+            assert_eq!(
+                session.remote_daemon_lease_id.as_deref(),
+                Some("lease-live")
+            );
+            Ok("http://127.0.0.1:2".to_string())
+        },
+    )
+    .expect("recovered tunnel submits once to the proven daemon");
+
+    assert!(recovered.get());
+    assert_eq!(response.status_code, 200);
+    assert_eq!(
+        submitted.into_inner(),
+        ["http://127.0.0.1:1", "http://127.0.0.1:2"]
+    );
+}
+
+#[test]
+fn daemon_submission_refuses_recovery_when_the_lease_changes() {
+    let accepted = direct_daemon_session("lease-old", "http://127.0.0.1:1");
+    let submissions = std::cell::Cell::new(0);
+    let result = submit_daemon_exec_with_session_recovery(
+        "http://127.0.0.1:1",
+        Some(&accepted),
+        |_| {
+            submissions.set(submissions.get() + 1);
+            Err(connect_error())
+        },
+        |session| {
+            assert_eq!(session.remote_daemon_lease_id.as_deref(), Some("lease-old"));
+            Err(Error::new(
+                homeboy_core::error::ErrorCode::InternalUnexpected,
+                "runner `lab` recovered a different daemon lease; refusing to submit a request proven for lease `lease-old`",
+                json!({}),
+            ))
+        },
+    );
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("a replacement daemon cannot receive the old session's submission"),
+    };
+
+    assert_eq!(submissions.get(), 1);
+    assert!(error.message.contains("different daemon lease"));
+}
+
+fn direct_daemon_session(lease: &str, local_url: &str) -> RunnerSession {
+    RunnerSession {
+        runner_id: "lab".to_string(),
+        mode: RunnerTunnelMode::DirectSsh,
+        role: RunnerSessionRole::Controller,
+        server_id: Some("lab".to_string()),
+        controller_id: Some("test".to_string()),
+        broker_url: None,
+        remote_daemon_address: Some("127.0.0.1:4545".to_string()),
+        local_port: Some(4545),
+        local_url: Some(local_url.to_string()),
+        tunnel_pid: None,
+        remote_daemon_pid: Some(42),
+        remote_daemon_lease_id: Some(lease.to_string()),
+        homeboy_version: "test".to_string(),
+        homeboy_build_identity: Some("homeboy test+live".to_string()),
+        connected_at: "2026-07-17T00:00:00Z".to_string(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: None,
+        leaseless_recovery_evidence: None,
+    }
+}
+
+fn connect_error() -> Error {
+    Error::new(
+        homeboy_core::error::ErrorCode::InternalUnexpected,
+        "connection refused",
+        json!({ "daemon_transport_error": { "kind": "connect" } }),
+    )
+}
+
+#[test]
 fn explicit_refresh_allows_an_idle_stale_daemon_after_reconnect() {
     let mut status = stale_direct_daemon_status();
     status.active_job_state = RunnerActiveJobState::Unavailable;

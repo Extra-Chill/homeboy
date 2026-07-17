@@ -28,9 +28,9 @@ use homeboy_core::source_snapshot::SourceSnapshot;
 
 use super::resource_metrics::RunnerResourceMetrics;
 use super::{
-    select_runner_transport, status, LabRunnerHandoff, Runner, RunnerActiveJobSource,
-    RunnerActiveJobState, RunnerCapabilityPreflight, RunnerJob, RunnerKind,
-    RunnerMutationArtifacts, RunnerResult, RunnerSession, RunnerStatusReport, RunnerTransport,
+    select_runner_transport, LabRunnerHandoff, Runner, RunnerActiveJobSource, RunnerActiveJobState,
+    RunnerCapabilityPreflight, RunnerJob, RunnerKind, RunnerMutationArtifacts, RunnerResult,
+    RunnerSession, RunnerStatusReport, RunnerTransport, RunnerTunnelMode,
 };
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
@@ -826,9 +826,11 @@ pub(crate) fn exec_with_status_snapshot(
     let result = match select_runner_transport(&runner, Some(&connected), false) {
         RunnerTransport::DirectDaemon(handle) => {
             run_capability_preflight(&runner)?;
+            let endpoint = handle.endpoint_url().to_string();
             exec_via_daemon(
                 &runner,
-                handle.endpoint_url(),
+                &endpoint,
+                Some(handle.session),
                 cwd,
                 options.project_id,
                 options.command,
@@ -902,7 +904,21 @@ fn execution_status(
     runner_id: &str,
     status_snapshot: Option<RunnerStatusReport>,
 ) -> Result<RunnerStatusReport> {
-    status_snapshot.map(Ok).unwrap_or_else(|| status(runner_id))
+    match status_snapshot {
+        Some(status) if status.connected => Ok(status),
+        Some(status) => {
+            if status
+                .session
+                .as_ref()
+                .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
+            {
+                crate::connection::status_for_admission(runner_id)
+            } else {
+                Ok(status)
+            }
+        }
+        None => crate::connection::status_for_admission(runner_id),
+    }
 }
 
 fn allows_idle_stale_daemon_refresh(

@@ -846,6 +846,51 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     })
 }
 
+/// Resolve a direct-SSH session for work admission. A readiness observation can
+/// become stale when its controller-owned tunnel exits before submission; the
+/// reconnect transaction proves the remote daemon lease before replacing the
+/// local tunnel record.
+pub(crate) fn status_for_admission(runner_id: &str) -> Result<RunnerStatusReport> {
+    status_for_admission_with(runner_id, status, |runner_id| {
+        let (report, exit_code) = connect(runner_id)?;
+        if report.connected && exit_code == 0 {
+            return Ok(());
+        }
+
+        Err(Error::validation_invalid_argument(
+            "runner",
+            report
+                .failure_message
+                .unwrap_or_else(|| "runner reconnect did not become ready".to_string()),
+            Some(runner_id.to_string()),
+            None,
+        ))
+    })
+}
+
+fn status_for_admission_with<Status, Reconnect>(
+    runner_id: &str,
+    mut status_fn: Status,
+    mut reconnect: Reconnect,
+) -> Result<RunnerStatusReport>
+where
+    Status: FnMut(&str) -> Result<RunnerStatusReport>,
+    Reconnect: FnMut(&str) -> Result<()>,
+{
+    let status = status_fn(runner_id)?;
+    if status.connected
+        || status
+            .session
+            .as_ref()
+            .is_none_or(|session| session.mode != RunnerTunnelMode::DirectSsh)
+    {
+        return Ok(status);
+    }
+
+    reconnect(runner_id)?;
+    status_fn(runner_id)
+}
+
 fn reconcile_terminal_phantom_activity(
     runner_id: &str,
     session: Option<&RunnerSession>,

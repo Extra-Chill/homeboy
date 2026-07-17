@@ -60,6 +60,95 @@ fn refuses_to_replace_live_daemon_with_a_different_persisted_lease() {
 }
 
 #[test]
+fn admission_reconnects_a_lost_tunnel_to_the_same_proven_daemon() {
+    let session = direct_ssh_session("lease-live");
+    let daemon = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
+    assert_eq!(
+        remote_daemon_connect_action(Some(&session), &daemon).expect("matching lease reattaches"),
+        RemoteDaemonConnectAction::Reattach
+    );
+
+    let mut disconnected = admission_status(&session, false);
+    let connected = admission_status(&session, true);
+    let mut reconnects = 0;
+    let admitted = status_for_admission_with(
+        "homeboy-lab",
+        |_| {
+            let status = disconnected.clone();
+            disconnected = connected.clone();
+            Ok(status)
+        },
+        |_| {
+            reconnects += 1;
+            Ok(())
+        },
+    )
+    .expect("admission reconnects the lost tunnel");
+
+    assert_eq!(reconnects, 1);
+    assert!(admitted.connected);
+    assert_eq!(
+        admitted
+            .session
+            .as_ref()
+            .and_then(|session| session.remote_daemon_lease_id.as_deref()),
+        Some("lease-live")
+    );
+}
+
+#[test]
+fn admission_refuses_a_lease_mismatch_without_retrying_status() {
+    let session = direct_ssh_session("lease-recorded");
+    let calls = std::cell::Cell::new(0);
+    let error = status_for_admission_with(
+        "homeboy-lab",
+        |_| {
+            calls.set(calls.get() + 1);
+            Ok(admission_status(&session, false))
+        },
+        |_| {
+            Err(Error::validation_invalid_argument(
+                "runner",
+                "live remote daemon lease `lease-live` does not match persisted session lease `lease-recorded`; refusing to replace the live daemon",
+                Some("homeboy-lab".to_string()),
+                None,
+            ))
+        },
+    )
+    .expect_err("lease mismatch remains fail-closed");
+
+    assert_eq!(calls.get(), 1);
+    assert!(error
+        .message
+        .contains("does not match persisted session lease"));
+}
+
+fn admission_status(session: &RunnerSession, connected: bool) -> RunnerStatusReport {
+    RunnerStatusReport {
+        runner_id: session.runner_id.clone(),
+        connected,
+        state: if connected {
+            RunnerSessionState::Connected
+        } else {
+            RunnerSessionState::Disconnected
+        },
+        session: Some(session.clone()),
+        stale_daemon: None,
+        daemon_freshness: None,
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        stale_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::NotQueried,
+        active_job_source: None,
+        active_job_error: None,
+        active_job_recovery_evidence: None,
+        session_path: "test".to_string(),
+    }
+}
+
+#[test]
 fn legacy_session_adopts_consistent_live_daemon_identity() {
     let mut session = direct_ssh_session("lease-old");
     session.remote_daemon_lease_id = None;

@@ -30,6 +30,7 @@ use super::*;
 pub(super) fn exec_via_daemon(
     runner: &Runner,
     local_url: &str,
+    accepted_session: Option<RunnerSession>,
     cwd: String,
     project_id: Option<String>,
     command: Vec<String>,
@@ -93,14 +94,21 @@ pub(super) fn exec_via_daemon(
         "metadata": runner_exec_request_metadata(run_id.as_deref(), "daemon"),
         "lifecycle": lifecycle,
     });
-    let response = daemon_post_json_text(
-        &client,
+    let response = submit_daemon_exec_with_session_recovery(
         local_url,
-        "/exec",
-        &payload,
-        DaemonPostOptions {
-            connection_close: true,
+        accepted_session.as_ref(),
+        |endpoint| {
+            daemon_post_json_text(
+                &client,
+                endpoint,
+                "/exec",
+                &payload,
+                DaemonPostOptions {
+                    connection_close: true,
+                },
+            )
         },
+        |accepted| recovered_daemon_submission_endpoint(&runner.id, accepted),
     )
     .map_err(|err| daemon_exec_loopback_transport_error(&runner.id, err))?;
     let status_code = response.status_code;
@@ -344,6 +352,90 @@ pub(super) fn exec_via_daemon(
         },
         exit_code,
     ))
+}
+
+/// Recover only a connection that failed before the daemon could answer. A
+/// timeout or response failure may already represent an accepted non-idempotent
+/// `/exec`, so it is deliberately not retried here.
+pub(super) fn submit_daemon_exec_with_session_recovery<Submit, Recover>(
+    endpoint: &str,
+    accepted_session: Option<&RunnerSession>,
+    mut submit: Submit,
+    mut recover: Recover,
+) -> Result<DaemonHttpTextResponse>
+where
+    Submit: FnMut(&str) -> Result<DaemonHttpTextResponse>,
+    Recover: FnMut(&RunnerSession) -> Result<String>,
+{
+    match submit(endpoint) {
+        Ok(response) => Ok(response),
+        Err(error) if daemon_submission_connection_was_lost(&error) => {
+            let accepted_session = accepted_session.ok_or(error)?;
+            let recovered_endpoint = recover(accepted_session)?;
+            submit(&recovered_endpoint)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn daemon_submission_connection_was_lost(error: &Error) -> bool {
+    error
+        .details
+        .pointer("/daemon_transport_error/kind")
+        .and_then(Value::as_str)
+        == Some("connect")
+}
+
+fn recovered_daemon_submission_endpoint(
+    runner_id: &str,
+    accepted_session: &RunnerSession,
+) -> Result<String> {
+    let accepted_lease = accepted_session
+        .remote_daemon_lease_id
+        .as_deref()
+        .filter(|lease| !lease.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner",
+                format!(
+                    "runner `{runner_id}` lost its submission tunnel without a proven daemon lease; refusing to submit through a replacement session"
+                ),
+                Some(runner_id.to_string()),
+                None,
+            )
+        })?;
+    let recovered = crate::connection::status_for_admission(runner_id)?;
+    let session = recovered
+        .session
+        .filter(|_| recovered.connected)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner",
+                format!("runner `{runner_id}` did not recover a connected daemon session"),
+                Some(runner_id.to_string()),
+                None,
+            )
+        })?;
+    if session.mode != crate::RunnerTunnelMode::DirectSsh
+        || session.remote_daemon_lease_id.as_deref() != Some(accepted_lease)
+    {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            format!(
+                "runner `{runner_id}` recovered a different daemon lease; refusing to submit a request proven for lease `{accepted_lease}`"
+            ),
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    session.local_url.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            format!("runner `{runner_id}` recovered without a direct daemon endpoint"),
+            Some(runner_id.to_string()),
+            None,
+        )
+    })
 }
 
 pub(super) fn preflight_runner_capability_plan(
