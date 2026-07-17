@@ -6,12 +6,14 @@ use serde_json::Value;
 use sha2::Digest;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 
 use crate::agent_task::AgentTaskExecutor;
 use crate::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
 };
+use crate::agent_task_dispatch_plan::build_dispatch_plan;
+use crate::agent_task_dispatch_service::{self, AgentTaskDispatchCommand};
 use crate::agent_task_finalization::{
     finalize_pr_with_backend, AgentTaskPrEvidence, AgentTaskPrFinalizationBackend,
     AgentTaskPrFinalizationOptions, AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship,
@@ -105,6 +107,137 @@ pub struct AgentTaskCookReport {
     pub finalization: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
+}
+
+/// A bounded collection of independently durable cooks. Each cook retains the
+/// same dispatch, retry, promotion, and lifecycle path as `run_cook`.
+#[derive(Debug, Clone)]
+pub struct AgentTaskCookBatchOptions {
+    pub batch_id: String,
+    pub cooks: Vec<AgentTaskCookServiceOptions>,
+    pub max_concurrency: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskCookBatchCellReport {
+    pub cook_id: String,
+    pub initial_run_id: String,
+    pub exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<AgentTaskCookReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskCookBatchReport {
+    pub schema: &'static str,
+    pub batch_id: String,
+    pub status: String,
+    pub total: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub cooks: Vec<AgentTaskCookBatchCellReport>,
+}
+
+/// Resolves a generic dispatch command once, before a typed cook is scheduled.
+/// Callers compile workflow policy into the command and cook options; this
+/// routine owns the shared dispatch compilation boundary.
+pub fn compile_cook_attempt(
+    mut options: AgentTaskCookServiceOptions,
+    dispatch: AgentTaskDispatchCommand,
+) -> Result<AgentTaskCookServiceOptions> {
+    let request = agent_task_dispatch_service::resolve_dispatch_request(dispatch.into())?;
+    options.initial_plan = build_dispatch_plan(&request)?;
+    Ok(options)
+}
+
+/// Runs independently durable cooks with bounded concurrency while preserving
+/// input order for callers that join their own metadata onto the results.
+/// Batch-cook fanout is the first caller; other cook coordinators can migrate
+/// by compiling their own `AgentTaskCookServiceOptions` and using this runner.
+pub fn run_cook_batch<E>(
+    options: AgentTaskCookBatchOptions,
+    executor: E,
+) -> Result<AgentTaskRunResult<AgentTaskCookBatchReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone + Send,
+{
+    let total = options.cooks.len();
+    if total == 0 {
+        return Err(Error::validation_invalid_argument(
+            "cooks",
+            "agent-task cook batch requires at least one cook",
+            Some(options.batch_id),
+            None,
+        ));
+    }
+
+    let workers = options.max_concurrency.max(1).min(total);
+    let cooks = Arc::new(options.cooks);
+    let next = Arc::new(Mutex::new(0usize));
+    let (tx, rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let cooks = Arc::clone(&cooks);
+            let next = Arc::clone(&next);
+            let tx = tx.clone();
+            let executor = executor.clone();
+            scope.spawn(move || loop {
+                let index = {
+                    let mut next = next.lock().expect("cook batch work queue");
+                    if *next == cooks.len() {
+                        return;
+                    }
+                    let index = *next;
+                    *next += 1;
+                    index
+                };
+                let cook = cooks[index].clone();
+                let cell = match run_cook(cook.clone(), executor.clone()) {
+                    Ok(result) => AgentTaskCookBatchCellReport {
+                        cook_id: cook.cook_id,
+                        initial_run_id: cook.initial_run_id,
+                        exit_code: result.exit_code,
+                        result: Some(result.value),
+                        error: None,
+                    },
+                    Err(error) => AgentTaskCookBatchCellReport {
+                        cook_id: cook.cook_id,
+                        initial_run_id: cook.initial_run_id,
+                        exit_code: 1,
+                        result: None,
+                        error: Some(error.to_string()),
+                    },
+                };
+                let _ = tx.send((index, cell));
+            });
+        }
+    });
+    drop(tx);
+
+    let mut cells = (0..total).map(|_| None).collect::<Vec<_>>();
+    for (index, cell) in rx {
+        cells[index] = Some(cell);
+    }
+    let cooks = cells.into_iter().flatten().collect::<Vec<_>>();
+    let failed = cooks.iter().filter(|cell| cell.exit_code != 0).count();
+    Ok(AgentTaskRunResult {
+        exit_code: if failed == 0 { 0 } else { 1 },
+        value: AgentTaskCookBatchReport {
+            schema: "homeboy/agent-task-cook-batch/v1",
+            batch_id: options.batch_id,
+            status: if failed == 0 {
+                "succeeded".to_string()
+            } else {
+                "failed".to_string()
+            },
+            total,
+            succeeded: total - failed,
+            failed,
+            cooks,
+        },
+    })
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1483,6 +1616,8 @@ mod tests {
         ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
         RunLifecycleRecord,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
 
     #[test]
     fn cook_service_retry_uses_the_same_passed_context_after_ambient_mutation() {
@@ -1548,6 +1683,166 @@ mod tests {
         ) -> crate::agent_task::AgentTaskOutcome {
             panic!("accepted detached attempts must remain daemon-owned")
         }
+    }
+
+    #[derive(Debug)]
+    struct BatchAttemptDispatcher {
+        barrier: Arc<Barrier>,
+        entered: Arc<AtomicUsize>,
+        fail: bool,
+    }
+
+    impl AgentTaskCookAttemptDispatcher for BatchAttemptDispatcher {
+        fn durable_recipe(&self) -> Result<Value> {
+            Ok(serde_json::json!({ "kind": "test-batch" }))
+        }
+
+        fn dispatch_attempt(
+            &self,
+            plan: AgentTaskPlan,
+            run_id: &str,
+            _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+        ) -> Result<()> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            self.barrier.wait();
+            if self.fail {
+                return Err(Error::validation_invalid_argument(
+                    "dispatch",
+                    "fixture dispatch failure",
+                    None,
+                    None,
+                ));
+            }
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+            agent_task_lifecycle::record_detached_lab_run(
+                agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: "fixture-lab",
+                    runner_job_id: "fixture-job",
+                    remote_workspace: "/runner/workspace",
+                    remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+                },
+            )?;
+            Ok(())
+        }
+    }
+
+    fn batch_cook_options(
+        cook_id: &str,
+        dispatcher: Arc<dyn AgentTaskCookAttemptDispatcher>,
+    ) -> AgentTaskCookServiceOptions {
+        AgentTaskCookServiceOptions {
+            cook_id: cook_id.to_string(),
+            initial_run_id: format!("{cook_id}-run"),
+            initial_plan: AgentTaskPlan::new(
+                cook_id,
+                vec![AgentTaskRequest {
+                    schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                    task_id: "provider".to_string(),
+                    group_key: None,
+                    parent_plan_id: None,
+                    executor: AgentTaskExecutor {
+                        backend: "fixture".to_string(),
+                        selector: None,
+                        runtime_selection: None,
+                        required_capabilities: Vec::new(),
+                        secret_env: Vec::new(),
+                        model: None,
+                        config: Value::Null,
+                    },
+                    instructions: "complete the task".to_string(),
+                    inputs: Value::Null,
+                    source_refs: Vec::new(),
+                    workspace: AgentTaskWorkspace::default(),
+                    component_contracts: Vec::new(),
+                    policy: AgentTaskPolicy::default(),
+                    limits: AgentTaskLimits::default(),
+                    expected_artifacts: Vec::new(),
+                    artifact_declarations: Vec::new(),
+                    metadata: Value::Null,
+                }],
+            ),
+            to_worktree: format!("fixture@{cook_id}"),
+            source_worktree_path: None,
+            provider_command: None,
+            provider_invocation: None,
+            gates: VerifyGateOptions::default(),
+            max_attempts: 1,
+            no_finalize: true,
+            base: "main".to_string(),
+            task_base_sha: None,
+            head: None,
+            title: "Batch cook".to_string(),
+            commit_message: "test".to_string(),
+            source_refs: Vec::new(),
+            protected_branches: Vec::new(),
+            ai_tool: "test".to_string(),
+            ai_model: None,
+            ai_used_for: "test".to_string(),
+            attempt_dispatcher: Some(dispatcher),
+            harvest_context: Default::default(),
+        }
+    }
+
+    #[test]
+    fn cook_batch_preserves_order_concurrency_and_failure_isolation() {
+        crate::test_support::with_isolated_home(|_| {
+            let barrier = Arc::new(Barrier::new(2));
+            let entered = Arc::new(AtomicUsize::new(0));
+            let result = run_cook_batch(
+                AgentTaskCookBatchOptions {
+                    batch_id: "fixture-batch".to_string(),
+                    cooks: vec![
+                        batch_cook_options(
+                            "first",
+                            Arc::new(BatchAttemptDispatcher {
+                                barrier: Arc::clone(&barrier),
+                                entered: Arc::clone(&entered),
+                                fail: true,
+                            }),
+                        ),
+                        batch_cook_options(
+                            "second",
+                            Arc::new(BatchAttemptDispatcher {
+                                barrier,
+                                entered: Arc::clone(&entered),
+                                fail: false,
+                            }),
+                        ),
+                    ],
+                    max_concurrency: 2,
+                },
+                UnusedExecutor,
+            )
+            .expect("batch completes despite an individual cook failure");
+
+            assert_eq!(entered.load(Ordering::SeqCst), 2);
+            assert_eq!(result.exit_code, 1);
+            assert_eq!(result.value.status, "failed");
+            assert_eq!(result.value.total, 2);
+            assert_eq!(result.value.succeeded, 1);
+            assert_eq!(result.value.failed, 1);
+            assert_eq!(result.value.cooks[0].cook_id, "first");
+            assert_eq!(result.value.cooks[0].exit_code, 1);
+            assert_eq!(
+                result.value.cooks[0]
+                    .result
+                    .as_ref()
+                    .expect("failed cook report")
+                    .status,
+                "provider_failure"
+            );
+            assert_eq!(result.value.cooks[1].cook_id, "second");
+            assert_eq!(result.value.cooks[1].exit_code, 0);
+            assert_eq!(
+                result.value.cooks[1]
+                    .result
+                    .as_ref()
+                    .expect("successful cook report")
+                    .status,
+                "in_flight"
+            );
+        });
     }
 
     #[test]
