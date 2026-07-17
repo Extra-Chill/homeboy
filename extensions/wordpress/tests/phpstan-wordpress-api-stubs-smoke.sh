@@ -67,6 +67,14 @@ function homeboy_issue_393_caller(): array {
 	);
 	return array_values( $post_types );
 }
+
+function homeboy_runtime_request_guard(): bool {
+	if ( defined( 'XMLRPC_REQUEST' ) && XMLRPC_REQUEST ) {
+		return true;
+	}
+
+	return defined( 'REST_REQUEST' ) && REST_REQUEST;
+}
 PHP
 
 # Fake host-smoke stub that historically shadowed wordpress-stubs.php through
