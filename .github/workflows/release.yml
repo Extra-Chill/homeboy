@@ -619,6 +619,7 @@ jobs:
           ${{ matrix.packages_install }}
 
       - name: Build artifacts
+        shell: bash
         run: |
           if ! grep -Fqx '[package.metadata.dist]' Cargo.toml; then
             printf '\n[package.metadata.dist]\ndist = true\n' >> Cargo.toml
