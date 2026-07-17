@@ -4,6 +4,83 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.289.0] - 2026-07-17
+
+### Added
+- flag bare #[ignore] attributes that carry no reason
+- detect redundant test wrappers that only re-run another test
+- flag signature-only and discarded-call tests as vacuous
+- propagate agent-task execution deadlines
+
+### Changed
+- carry agent-task request opaquely in runner execution envelope
+- move ExtensionDiagnosticsConfig to homeboy-extension-contract
+- move extension capability structs to homeboy-extension-contract
+- move NotificationTransportConfig to homeboy-extension-contract
+- invert worktree gate-feedback baseline edge behind a hook
+- move AutofixVerifyConfig to homeboy-extension-contract
+- invert proof loop-spec-validation edge behind a hook
+- Queue busy Lab cooks with crash-safe replay
+- move CI config types to homeboy-extension-contract
+- move FuzzConfig/FuzzWorkloadConfig to homeboy-extension-contract
+- invert controller-runtime pin-reference edge behind a hook
+- extract lifecycle/artifact contract types into homeboy-lifecycle-contract
+- move trace config types to homeboy-extension-contract
+- rename RunnerWorkload*/RunnerHandoff* types to LabRunner* in lab-contract
+- move 27 manifest toolchain-config types to homeboy-extension-contract
+- Preserve direct SSH sessions through Cook handoff
+- Pin cook execution before controller admission
+- move contract-producer + materialization-source types to homeboy-extension-contract
+- move 11 pure capability/config types to homeboy-extension-contract
+- rename homeboy-runner crate to homeboy-lab-runner
+- extract issue reconciliation into a homeboy-issues crate
+- move TestDriftConfig to homeboy-extension-contract
+- remove silently-dead grammar/import tests
+- extract code_audit into the homeboy-code-audit crate
+- move action-type enums + manifest_action_config to homeboy-extension-contract
+- Recover terminal phantom runner activity
+- document why keychain/auth integration tests are ignored
+- move update_output + SourceMetadataRepair to homeboy-extension-contract
+- move extension exec/version/compat contract types to homeboy-extension-contract
+- remove signature-only no-op tests and a redundant wrapper
+- Harden controller admission locking across platforms
+- establish homeboy-extension-contract crate keystone
+- extract the fuzz subsystem into a homeboy-fuzz crate
+- Reuse accepted runner session during Homeboy refresh
+- Make detached artifact reconciliation idempotent
+- fold preview ingress/client into homeboy-tunnel crate
+- sever code_audit's plan and defaults deps on homeboy-core
+- Resolve extension artifacts for exact refs
+- remove worthless call-and-discard smoke tests in git::changes
+- extract the runner subsystem into a homeboy-runner crate
+- make code_audit self-contained for log_status and is_zero
+- relocate artifact-ref URI schemes into homeboy-engine-primitives
+- Verify exact-ref deployment artifacts
+- Reconcile expired detached Lab handoffs
+- Bound Lab runner doctor probes
+- relocate changed-since git file scoping into homeboy-engine-primitives
+- Align agent-task recovery with runner status
+
+### Fixed
+- preserve SSH snapshot failure evidence
+- own Windows dependency in homeboy-core
+- stabilize runner refresh reconnect
+- add active_job_recovery_evidence to RunnerStatusReport test initializers
+- preserve explicit agent runtime identity
+- accept external release assets during recovery
+- Fix stale controller admission recovery
+- Fix runner doctor probe watchdog cleanup
+- Fix Windows shell for release recovery builds
+- publish GitHub releases after asset verification
+- keep activity reads state-neutral
+- Fix terminal run cleanup ownership
+- fail closed for extension lifecycle setup and pins
+- unify extension invocation context
+- enforce configured audit source roots
+- allow hot-controller Lab fanout coordination
+- Fix persistence for admission failures
+- Fix complete asset recovery and ancestry validation
+
 ## [0.288.13] - 2026-07-17
 
 ### Changed
