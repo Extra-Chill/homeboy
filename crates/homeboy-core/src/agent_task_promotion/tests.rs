@@ -1215,6 +1215,134 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
 }
 
 #[test]
+fn promote_no_op_outcome_uses_audited_committed_candidate() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "agent@example.test"]);
+    git(&repo, &["config", "user.name", "Agent"]);
+    git(&repo, &["checkout", "-b", "main"]);
+    std::fs::write(repo.join("lib.rs"), "base\n").expect("write base");
+    git(&repo, &["add", "lib.rs"]);
+    git(&repo, &["commit", "-m", "base"]);
+    let base = git_head(&repo, "HEAD");
+    std::fs::write(repo.join("lib.rs"), "candidate\n").expect("write candidate");
+    git(&repo, &["commit", "-am", "agent candidate"]);
+
+    let source_path = temp.path().join("outcome.json");
+    let mut outcome = serde_json::json!({
+        "schema": AGENT_TASK_OUTCOME_SCHEMA,
+        "task_id": "task",
+        "status": "succeeded",
+        "artifacts": []
+    });
+    outcome["status"] = Value::String("no_op".to_string());
+    let source = outcome.to_string();
+    std::fs::write(&source_path, &source).expect("write mutated outcome");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(repo.clone()),
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: Some(repo.clone()),
+            base_ref: None,
+            task_base_sha: Some(base.clone()),
+            to_worktree: "repo@promotion".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["true".to_string()],
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("audited committed candidate promotes");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(report.patch_artifact.id, "committed-changes");
+    assert_eq!(report.provenance["change_source"], "local_commits");
+    assert_eq!(report.provenance["base_ref"], base);
+    assert_eq!(report.provenance["candidate"]["kind"], "git");
+    assert_eq!(
+        report.provenance["candidate"]["fingerprint"]["head"],
+        git_head(&repo, "HEAD")
+    );
+    assert_eq!(report.provenance["candidate"]["fingerprint"]["base"], base);
+    assert_eq!(report.deterministic_gates.len(), 1);
+    assert_eq!(provider.apply_calls.len(), 1);
+    assert_eq!(provider.verify_calls.len(), 1);
+}
+
+#[test]
+fn promote_no_op_outcome_without_committed_candidate_rejects_before_apply() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "agent@example.test"]);
+    git(&repo, &["config", "user.name", "Agent"]);
+    std::fs::write(repo.join("lib.rs"), "base\n").expect("write base");
+    git(&repo, &["add", "lib.rs"]);
+    git(&repo, &["commit", "-m", "base"]);
+    let base = git_head(&repo, "HEAD");
+
+    let source_path = temp.path().join("outcome.json");
+    let source = serde_json::json!({
+        "schema": AGENT_TASK_OUTCOME_SCHEMA,
+        "task_id": "task",
+        "status": "no_op",
+        "artifacts": []
+    })
+    .to_string();
+    std::fs::write(&source_path, &source).expect("write no-op outcome");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(repo.clone()),
+        ..Default::default()
+    };
+
+    let error = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: Some(repo),
+            base_ref: None,
+            task_base_sha: Some(base),
+            to_worktree: "repo@promotion".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["true".to_string()],
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect_err("no-op without an audited candidate is rejected");
+
+    assert!(error
+        .message
+        .contains("no-op promotion requires an audited committed candidate"));
+    assert!(provider.apply_calls.is_empty());
+    assert!(provider.verify_calls.is_empty());
+}
+
+#[test]
 fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");

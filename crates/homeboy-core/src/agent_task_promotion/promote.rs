@@ -271,12 +271,14 @@ pub(super) fn promote_with_provider_and_checkpoint(
 
     if !matches!(
         outcome.status,
-        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::CandidateRecoverable
+        AgentTaskOutcomeStatus::Succeeded
+            | AgentTaskOutcomeStatus::CandidateRecoverable
+            | AgentTaskOutcomeStatus::NoOp
     ) {
         return Err(Error::validation_invalid_argument(
             "source",
             format!(
-                "promotion requires a succeeded or recoverable-candidate outcome; task {} has status {:?}",
+                "promotion requires a succeeded, recoverable-candidate, or no-op outcome; task {} has status {:?}",
                 outcome.task_id, outcome.status
             ),
             None,
@@ -298,6 +300,26 @@ pub(super) fn promote_with_provider_and_checkpoint(
             None,
             None,
         ));
+    }
+
+    if outcome.status == AgentTaskOutcomeStatus::NoOp {
+        let committed_patch = committed_changes_patch(&options)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "source",
+                "no-op promotion requires an audited committed candidate after the task base",
+                None,
+                None,
+            )
+        })?;
+        return promote_committed_changes(
+            &options,
+            provider,
+            checkpoint,
+            &source_kind,
+            &outcome,
+            None,
+            committed_patch,
+        );
     }
 
     let artifact = match select_patch_artifact(&outcome, options.artifact_id.as_deref()) {
@@ -753,6 +775,16 @@ fn promote_committed_changes(
     };
     let (gates, verified_base) = verified_base;
     let operator_notification = promotion_notification(gates.status, &target);
+    let candidate = if gates.status == AgentTaskPromotionStatus::Applied {
+        applied_worktree_path
+            .as_deref()
+            .map(|path| {
+                crate::agent_task_promotion::candidate_fingerprint(&path.display().to_string())
+            })
+            .transpose()?
+    } else {
+        None
+    };
 
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
@@ -780,6 +812,7 @@ fn promote_committed_changes(
             "base_ref": committed_patch.base_ref,
             "commit_range": committed_patch.commit_range,
             "commits": committed_patch.commits,
+            "candidate": candidate,
         }),
         operator_notification,
     })
