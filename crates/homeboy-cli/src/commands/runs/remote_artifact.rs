@@ -12,7 +12,7 @@ use homeboy::core::resource_lifecycle_index::{
     ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycleRecord,
     ResourceLifecycleResourceStatus,
 };
-use homeboy::core::{server, Error};
+use homeboy::core::{agent_tasks::lifecycle as agent_task_lifecycle, server, Error};
 use homeboy::runner::artifact_attach::{
     self as runner_artifact_attach, RunnerAttachArtifactType, RunnerAttachSource,
 };
@@ -72,7 +72,7 @@ pub fn attach(args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
     validate_runner_artifact_path(&runner, &args.path)?;
 
     let source = runner_artifact_attach::copy_runner_artifact_source(&runner, &args.path)?;
-    let metadata = runner_attach_metadata(&runner, &args.path, &source);
+    let metadata = runner_attach_metadata(&runner, &args.run_id, &args.path, &source);
     let artifact = match source.artifact_type {
         RunnerAttachArtifactType::File => {
             store.record_artifact_with_metadata(&args.run_id, &args.name, &source.path, metadata)?
@@ -287,6 +287,7 @@ pub fn capture(args: RunsArtifactCaptureArgs) -> CmdResult<RunsOutput> {
 
 fn runner_attach_metadata(
     runner: &Runner,
+    run_id: &str,
     runner_path: &str,
     source: &RunnerAttachSource,
 ) -> serde_json::Value {
@@ -303,6 +304,18 @@ fn runner_attach_metadata(
         && directory_contains_html(&source.path)
     {
         metadata["role"] = serde_json::Value::String("static_site_artifact".to_string());
+    }
+    if let Ok(record) = agent_task_lifecycle::status(run_id) {
+        if record.runner_id() == Some(runner.id.as_str()) {
+            if let Some(runner_job_id) = record.runner_job_id() {
+                metadata["agent_task"] = serde_json::json!({
+                    "retained_runner_binding": {
+                        "runner_id": runner.id,
+                        "runner_job_id": runner_job_id,
+                    }
+                });
+            }
+        }
     }
     metadata
 }

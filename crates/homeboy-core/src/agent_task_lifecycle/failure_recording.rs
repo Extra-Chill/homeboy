@@ -747,6 +747,174 @@ mod tests {
             .push(artifact("second-patch", "patch", Some("runner-b")));
         assert!(runner_id_from_artifact_provenance(&aggregate).is_err());
     }
+
+    #[test]
+    fn retained_runner_attachment_requires_matching_binding_and_content_identity() {
+        crate::test_support::with_isolated_home(|home| {
+            let run_id = "retained-runner-attachment";
+            let task_id = "task-a";
+            let bytes = b"patch bytes";
+            let source = home.path().join("patch.diff");
+            std::fs::write(&source, bytes).expect("write patch");
+            crate::agent_task_lifecycle::record_detached_lab_run(
+                crate::agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: "homeboy-lab",
+                    runner_job_id: "job-123",
+                    remote_workspace: "/runner/workspace",
+                    remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+                },
+            )
+            .expect("record runner handoff");
+            let store = crate::observation::ObservationStore::open_initialized().expect("store");
+            store
+                .upsert_imported_run(&crate::observation::RunRecord {
+                    id: run_id.to_string(),
+                    kind: "agent-task".to_string(),
+                    component_id: None,
+                    started_at: "2026-07-17T00:00:00Z".to_string(),
+                    finished_at: None,
+                    status: "pass".to_string(),
+                    command: None,
+                    cwd: None,
+                    homeboy_version: None,
+                    git_sha: None,
+                    rig_id: None,
+                    metadata_json: json!({}),
+                })
+                .expect("observation run");
+            let retained = store
+                .record_artifact_with_id(
+                    run_id,
+                    "patch",
+                    &source,
+                    "attached-patch",
+                    json!({
+                        "agent_task": {
+                            "retained_runner_binding": {
+                                "runner_id": "homeboy-lab",
+                                "runner_job_id": "job-123"
+                            }
+                        }
+                    }),
+                )
+                .expect("retain attached bytes");
+            let artifact = AgentTaskArtifact {
+                schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: "patch".to_string(),
+                kind: "patch".to_string(),
+                name: None,
+                label: None,
+                role: None,
+                semantic_key: None,
+                path: Some("/runner/workspace/patch.diff".to_string()),
+                url: None,
+                mime: Some("text/x-patch".to_string()),
+                size_bytes: Some(bytes.len() as u64),
+                sha256: Some(format!("{:x}", sha2::Sha256::digest(bytes))),
+                metadata: json!({}),
+            };
+
+            assert_eq!(
+                verified_controller_artifact_projection_path(run_id, task_id, &artifact)
+                    .expect("matching retained bytes"),
+                Some(std::path::PathBuf::from(&retained.path))
+            );
+            assert_eq!(
+                verified_controller_artifact_projection_path(run_id, task_id, &artifact)
+                    .expect("idempotent retained lookup"),
+                Some(std::path::PathBuf::from(&retained.path))
+            );
+
+            let wrong_binding = store
+                .record_artifact_with_id(
+                    run_id,
+                    "patch",
+                    &source,
+                    "wrong-binding-patch",
+                    json!({
+                        "agent_task": {
+                            "retained_runner_binding": {
+                                "runner_id": "other-runner",
+                                "runner_job_id": "job-123"
+                            }
+                        }
+                    }),
+                )
+                .expect("retain wrong binding bytes");
+            assert_eq!(
+                retained_attachment_binding_matches(
+                    &wrong_binding,
+                    Some(("homeboy-lab", "job-123"))
+                ),
+                false
+            );
+            assert_eq!(
+                retained_attachment_binding_matches(
+                    &wrong_binding,
+                    Some(("other-runner", "job-999"))
+                ),
+                false
+            );
+            store
+                .delete_artifact_record(&retained.id)
+                .expect("remove matching retained record");
+            assert_eq!(
+                verified_controller_artifact_projection_path(run_id, task_id, &artifact)
+                    .expect("wrong runner binding is ignored"),
+                None
+            );
+
+            let mismatched = home.path().join("mismatched.patch");
+            std::fs::write(&mismatched, b"different patch").expect("write mismatch");
+            let mismatched = store
+                .record_artifact_with_id(
+                    run_id,
+                    "patch",
+                    &mismatched,
+                    "mismatched-patch",
+                    json!({
+                        "agent_task": {
+                            "retained_runner_binding": {
+                                "runner_id": "homeboy-lab",
+                                "runner_job_id": "job-123"
+                            }
+                        }
+                    }),
+                )
+                .expect("retain mismatched bytes");
+            assert!(
+                verified_controller_artifact_projection_path(run_id, task_id, &artifact)
+                    .expect_err("mismatched retained bytes fail closed")
+                    .message
+                    .contains("does not match the aggregate SHA-256 and size")
+            );
+            assert!(std::path::Path::new(&mismatched.path).is_file());
+
+            store
+                .record_artifact_with_id(
+                    run_id,
+                    "patch",
+                    &source,
+                    "duplicate-patch",
+                    json!({
+                        "agent_task": {
+                            "retained_runner_binding": {
+                                "runner_id": "homeboy-lab",
+                                "runner_job_id": "job-123"
+                            }
+                        }
+                    }),
+                )
+                .expect("retain duplicate bytes");
+            assert!(
+                verified_controller_artifact_projection_path(run_id, task_id, &artifact)
+                    .expect_err("ambiguous retained artifact names fail closed")
+                    .message
+                    .contains("multiple controller-side artifact projections")
+            );
+        });
+    }
 }
 
 /// Project finalized executor artifacts into the standard observation registry.
@@ -1103,22 +1271,25 @@ pub fn verified_controller_artifact_projection_path(
         return Ok(None);
     };
     let store = crate::observation::ObservationStore::open_initialized()?;
+    let record = store::read_record(run_id)?;
+    let runner_binding = record.runner_id().zip(record.runner_job_id());
     let candidates: Vec<_> = store
         .list_artifacts(run_id)?
         .into_iter()
         .filter(|candidate| {
             candidate.artifact_type == "file"
                 && candidate.kind == artifact.kind
-                && candidate
+                && (candidate
                     .metadata_json
                     .pointer("/agent_task/task_id")
                     .and_then(serde_json::Value::as_str)
                     == Some(task_id)
-                && candidate
-                    .metadata_json
-                    .pointer("/agent_task/logical_artifact_id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(artifact.id.as_str())
+                    && candidate
+                        .metadata_json
+                        .pointer("/agent_task/logical_artifact_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(artifact.id.as_str())
+                    || retained_attachment_binding_matches(candidate, runner_binding))
         })
         .collect();
     if candidates.is_empty() {
@@ -1157,6 +1328,28 @@ pub fn verified_controller_artifact_projection_path(
         ));
     }
     Ok(Some(path))
+}
+
+/// A manually retained runner artifact can become a controller projection only
+/// when the owning run's immutable runner/job binding matches. The aggregate's
+/// SHA-256 and size are checked by the caller before any bytes are consumed.
+fn retained_attachment_binding_matches(
+    candidate: &crate::observation::ArtifactRecord,
+    runner_binding: Option<(&str, &str)>,
+) -> bool {
+    let Some((runner_id, runner_job_id)) = runner_binding else {
+        return false;
+    };
+    candidate
+        .metadata_json
+        .pointer("/agent_task/retained_runner_binding/runner_id")
+        .and_then(serde_json::Value::as_str)
+        == Some(runner_id)
+        && candidate
+            .metadata_json
+            .pointer("/agent_task/retained_runner_binding/runner_job_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(runner_job_id)
 }
 
 fn unique_logical_artifact_id(
