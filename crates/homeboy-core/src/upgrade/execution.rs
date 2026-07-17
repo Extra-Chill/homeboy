@@ -919,7 +919,7 @@ fn command_output_with_timeout(
     }
 }
 
-fn active_binary_path() -> Result<PathBuf> {
+pub(crate) fn active_binary_path() -> Result<PathBuf> {
     if let Some(path) = resolve_binary_on_path() {
         return Ok(path);
     }
