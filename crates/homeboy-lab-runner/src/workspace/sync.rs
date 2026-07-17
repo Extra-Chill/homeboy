@@ -39,11 +39,12 @@ use super::util::{
     validate_absolute_path,
 };
 use homeboy_core::engine::shell;
-use homeboy_core::server::{self, SshClient};
+use homeboy_core::server::{self, is_transient_ssh_error, CommandOutput, SshClient};
 
 const WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
 const MIN_RUNNER_WORKSPACE_FREE_BYTES: u64 = 1024 * 1024 * 1024;
 const MIN_RUNNER_WORKSPACE_FREE_RATIO: f64 = 0.01;
+const METADATA_SSH_RECOVERY_ATTEMPTS: usize = 2;
 
 pub fn sync_workspace(
     runner_id: &str,
@@ -1181,8 +1182,6 @@ fn write_workspace_metadata(
             })
         }
         RunnerKind::Ssh => {
-            let (_server, mut client) = ssh_client_for_runner(runner)?;
-            client.env.extend(runner.env.clone());
             let parent = parent_remote_path(&metadata_path);
             let command = format!(
                 "remote_path={remote_path}; if [ -d \"$remote_path/.git\" ]; then mkdir -p \"$remote_path/.git/info\" && touch \"$remote_path/.git/info/exclude\" && grep -qxF '.homeboy/' \"$remote_path/.git/info/exclude\" || printf '\\n.homeboy/\\n' >> \"$remote_path/.git/info/exclude\"; fi; mkdir -p {parent} && cat > {path} <<'HOMEBOY_WORKSPACE_METADATA'\n{json}\nHOMEBOY_WORKSPACE_METADATA",
@@ -1191,7 +1190,13 @@ fn write_workspace_metadata(
                 path = shell::quote_arg(&metadata_path),
                 json = json,
             );
-            let output = client.execute(&command);
+            // A completed checkout has one idempotent post-materialization write.
+            // Recreate the client for each bounded recovery attempt so a stale
+            // SSH transport cannot force the outer cook to rematerialize it.
+            let output = retry_idempotent_ssh_operation(|| {
+                let (_server, client) = ssh_client_for_runner(runner)?;
+                Ok(client.execute(&command))
+            })?;
             if output.success {
                 Ok(())
             } else {
@@ -1202,6 +1207,25 @@ fn write_workspace_metadata(
             }
         }
     }
+}
+
+fn retry_idempotent_ssh_operation(
+    mut operation: impl FnMut() -> Result<CommandOutput>,
+) -> Result<CommandOutput> {
+    for attempt in 1..=METADATA_SSH_RECOVERY_ATTEMPTS {
+        let mut output = operation()?;
+        if output.success || !is_transient_ssh_error(&output) {
+            return Ok(output);
+        }
+        if attempt == METADATA_SSH_RECOVERY_ATTEMPTS {
+            let detail = output.stderr.trim();
+            output.stderr = format!(
+                "idempotent runner workspace metadata SSH recovery exhausted after {attempt} fresh-client attempts: {detail}"
+            );
+            return Ok(output);
+        }
+    }
+    unreachable!("bounded SSH recovery always returns from its final attempt")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1785,7 +1809,77 @@ fn local_git_state(local_path: &Path) -> LocalGitState {
 
 #[cfg(test)]
 mod tests {
-    use super::{runner_workspace_disk_is_critical, RunnerWorkspaceDiskProbe};
+    use super::{
+        retry_idempotent_ssh_operation, runner_workspace_disk_is_critical, RunnerWorkspaceDiskProbe,
+    };
+    use homeboy_core::server::CommandOutput;
+
+    fn command_output(success: bool, exit_code: i32, stderr: &str) -> CommandOutput {
+        CommandOutput {
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+            success,
+            exit_code,
+            timed_out: false,
+            child_resource: None,
+        }
+    }
+
+    #[test]
+    fn metadata_ssh_recovery_retries_a_transient_loss_with_a_fresh_operation() {
+        let mut attempts = 0;
+        let output = retry_idempotent_ssh_operation(|| {
+            attempts += 1;
+            Ok(if attempts == 1 {
+                command_output(
+                    false,
+                    255,
+                    "Connection to runner.example.test closed by remote host.\nclient_loop: send disconnect: Broken pipe",
+                )
+            } else {
+                command_output(true, 0, "")
+            })
+        })
+        .expect("retry operation");
+
+        assert!(output.success);
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn metadata_ssh_recovery_refuses_remote_command_failures() {
+        let mut attempts = 0;
+        let output = retry_idempotent_ssh_operation(|| {
+            attempts += 1;
+            Ok(command_output(
+                false,
+                1,
+                "permission denied writing metadata",
+            ))
+        })
+        .expect("retry operation");
+
+        assert!(!output.success);
+        assert_eq!(attempts, 1);
+        assert_eq!(output.stderr, "permission denied writing metadata");
+    }
+
+    #[test]
+    fn metadata_ssh_recovery_reports_transport_exhaustion() {
+        let mut attempts = 0;
+        let output = retry_idempotent_ssh_operation(|| {
+            attempts += 1;
+            Ok(command_output(false, 255, "Broken pipe"))
+        })
+        .expect("retry operation");
+
+        assert!(!output.success);
+        assert_eq!(attempts, 2);
+        assert!(output
+            .stderr
+            .contains("recovery exhausted after 2 fresh-client attempts"));
+        assert!(output.stderr.contains("Broken pipe"));
+    }
 
     #[test]
     fn runner_workspace_disk_pressure_blocks_low_absolute_free_space() {
