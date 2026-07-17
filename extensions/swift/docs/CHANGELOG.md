@@ -2,6 +2,14 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.8.0] - 2026-07-17
+
+### Added
+- add extension discovery composition metadata
+
+### Changed
+- share runner sidecar adapter loading
+
 ## [2.6.3] - 2026-07-06
 
 ### Changed
