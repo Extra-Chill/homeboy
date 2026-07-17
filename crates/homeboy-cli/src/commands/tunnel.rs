@@ -5,15 +5,15 @@ use homeboy::core::artifacts::{
     self, ArtifactOriginInspect, ArtifactOriginServeSpec, ArtifactOriginStatus, DomBoxCaptureSpec,
     DomBoxReport,
 };
-use homeboy::core::preview_client::{
+use homeboy::core::{EntityCrudOutput, MergeOutput};
+use homeboy_tunnel::preview_client::{
     self, PreviewClientAuthDiagnostic, PreviewClientReport, PreviewClientStartSpec,
 };
-use homeboy::core::preview_ingress::{
+use homeboy_tunnel::preview_consumer;
+use homeboy_tunnel::preview_ingress::{
     self, PreviewIngressInstallOptions, PreviewIngressInstallPlan, PreviewIngressInstallStatusPlan,
     PreviewIngressRoute, PreviewIngressServeSpec, PreviewIngressStatus,
 };
-use homeboy::core::{EntityCrudOutput, MergeOutput};
-use homeboy_tunnel::preview_consumer;
 use homeboy_tunnel::{
     self as tunnel, ExposeServiceTunnelSpec, ServiceTunnel, ServiceTunnelAuth,
     ServiceTunnelAuthMode, ServiceTunnelExposure, ServiceTunnelPolicy, ServiceTunnelPreviewPolicy,

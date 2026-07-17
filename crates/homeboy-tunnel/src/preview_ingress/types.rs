@@ -2,11 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Condvar, Mutex};
 
-use crate::daemon::ServiceIdentity;
-use crate::plan::HomeboyPlan;
 use crate::preview_client::{
     PreviewIngressRequest, PreviewIngressResponse, PreviewIngressResponseChunk,
 };
+use homeboy_core::daemon::ServiceIdentity;
+use homeboy_core::plan::HomeboyPlan;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreviewIngressRoute {

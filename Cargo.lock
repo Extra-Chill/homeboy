@@ -962,6 +962,7 @@ dependencies = [
 name = "homeboy-tunnel"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "glob-match",
  "homeboy-core",
@@ -971,6 +972,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "uuid",
 ]
 
 [[package]]

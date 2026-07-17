@@ -12,7 +12,9 @@
 mod entity;
 mod lifecycle;
 mod preview;
+pub mod preview_client;
 pub mod preview_consumer;
+pub mod preview_ingress;
 mod readiness;
 mod runtime;
 mod types;
@@ -37,6 +39,9 @@ homeboy_core::entity_crud!(ServiceTunnel; list_ids, merge);
 pub fn register() {
     homeboy_core::config::register_config_entity::<ServiceTunnel>();
 }
+
+#[cfg(test)]
+mod preview_ingress_tests;
 
 #[cfg(test)]
 mod tunnel_tests;

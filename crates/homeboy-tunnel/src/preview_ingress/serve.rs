@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::error::{Error, Result};
 use crate::preview_client::PreviewIngressRequest;
+use homeboy_core::error::{Error, Result};
 
 use super::http::{
     artifact_cors_headers, is_hop_by_hop_header, log_request, record_failure, write_diagnostic,

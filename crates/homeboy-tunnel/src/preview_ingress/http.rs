@@ -4,8 +4,8 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::error::{Error, Result};
 use crate::preview_client::PreviewIngressResponse;
+use homeboy_core::error::{Error, Result};
 
 use super::types::{PreviewClientSessions, PreviewIngressFailure, PreviewIngressLogLine};
 
