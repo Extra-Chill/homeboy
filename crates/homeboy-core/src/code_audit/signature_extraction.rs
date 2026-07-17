@@ -42,7 +42,7 @@ pub(crate) fn extract_signatures_from_items(
         return Vec::new();
     };
 
-    let symbols = crate::extension::grammar::extract(content, &grammar);
+    let symbols = homeboy_engine_primitives::grammar::extract(content, &grammar);
     let lines: Vec<&str> = content.lines().collect();
 
     symbols
