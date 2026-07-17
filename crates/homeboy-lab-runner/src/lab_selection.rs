@@ -91,13 +91,19 @@ pub fn prepare_explicit_lab_runner_for_offload(runner_id: &str) -> Result<()> {
 pub(super) fn preflight_lab_runner_availability(
     command: &LabOffloadCommand,
     selection: &LabRunnerSelection,
-    allow_capacity_queue: bool,
+    detach_after_handoff: bool,
+    has_durable_agent_task_plan: bool,
 ) -> Result<()> {
     let availability = preflight_lab_runner_availability_with(selection, status)?;
     if availability.accepts_jobs {
         return Ok(());
     }
-    if allows_reverse_capacity_queue(allow_capacity_queue, selection, &availability) {
+    if allows_detached_reverse_capacity_queue(
+        detach_after_handoff,
+        has_durable_agent_task_plan,
+        selection,
+        &availability,
+    ) {
         return Ok(());
     }
 
@@ -113,14 +119,16 @@ pub(super) fn preflight_lab_runner_availability(
     ))
 }
 
-/// Capacity admission is only valid for the durable reverse-broker handoff.
-/// Every other availability failure remains a preflight failure.
-pub(super) fn allows_reverse_capacity_queue(
-    allow_capacity_queue: bool,
+/// Capacity admission is only valid for a detached, durable reverse-broker
+/// handoff. Every other availability failure remains a preflight failure.
+pub(super) fn allows_detached_reverse_capacity_queue(
+    detach_after_handoff: bool,
+    has_durable_agent_task_plan: bool,
     selection: &LabRunnerSelection,
     availability: &RunnerAvailability,
 ) -> bool {
-    allow_capacity_queue
+    detach_after_handoff
+        && has_durable_agent_task_plan
         && selection.mode == RunnerTunnelMode::Reverse
         && availability.is_capacity_exhausted()
 }

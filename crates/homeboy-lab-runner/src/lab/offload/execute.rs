@@ -1,7 +1,6 @@
 //! Top-level `execute_lab_offload` orchestration and runner-support hints.
 
 use super::*;
-use crate::runner::RunnerTunnelMode;
 
 /// Record a freshly synced, remapped agent-task workspace entry: append it to
 /// the workspace mapping and emit the matching Lab plan step. Shared by the
@@ -217,12 +216,12 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             // Only a detached, controller-owned agent-task plan has a durable
             // continuation and canonical workload suitable for broker queueing.
             // A full runner is otherwise still a readiness failure.
-            let allow_capacity_queue = request.detach_after_handoff
-                && request.durable_agent_task_plan.is_some()
-                && selection.mode == RunnerTunnelMode::Reverse;
-            if let Err(error) =
-                preflight_lab_runner_availability(&contract, &selection, allow_capacity_queue)
-            {
+            if let Err(error) = preflight_lab_runner_availability(
+                &contract,
+                &selection,
+                request.detach_after_handoff,
+                request.durable_agent_task_plan.is_some(),
+            ) {
                 if contract.routing_policy.release_gate
                     && matches!(selection.source, LabRunnerSelectionSource::Default)
                     && !release_gate_local_hot_allowed

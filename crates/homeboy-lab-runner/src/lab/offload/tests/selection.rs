@@ -1,5 +1,5 @@
 use super::*;
-use crate::runner::lab_selection::allows_reverse_capacity_queue;
+use crate::runner::lab_selection::allows_detached_reverse_capacity_queue;
 
 fn select(
     command: &LabOffloadCommand,
@@ -213,7 +213,7 @@ fn explicit_lab_never_allows_missing_or_busy_default_runner_to_run_local() {
 }
 
 #[test]
-fn capacity_queue_admission_requires_detached_reverse_capacity_only() {
+fn capacity_queue_admission_requires_detached_durable_reverse_capacity_only() {
     let reverse = LabRunnerSelection {
         runner_id: "homeboy-lab".to_string(),
         source: LabRunnerSelectionSource::Explicit,
@@ -256,14 +256,28 @@ fn capacity_queue_admission_requires_detached_reverse_capacity_only() {
         None,
     );
 
-    assert!(allows_reverse_capacity_queue(true, &reverse, &capacity));
-    assert!(!allows_reverse_capacity_queue(false, &reverse, &capacity));
-    assert!(!allows_reverse_capacity_queue(true, &direct, &capacity));
-    assert!(!allows_reverse_capacity_queue(
+    assert!(allows_detached_reverse_capacity_queue(
+        true, true, &reverse, &capacity
+    ));
+    assert!(!allows_detached_reverse_capacity_queue(
+        false, true, &reverse, &capacity
+    ));
+    assert!(!allows_detached_reverse_capacity_queue(
+        true, false, &reverse, &capacity
+    ));
+    assert!(!allows_detached_reverse_capacity_queue(
+        true, true, &direct, &capacity
+    ));
+    assert!(!allows_detached_reverse_capacity_queue(
+        true,
         true,
         &reverse,
         &disconnected
     ));
-    assert!(!allows_reverse_capacity_queue(true, &reverse, &stale));
-    assert!(!allows_reverse_capacity_queue(true, &reverse, &unknown));
+    assert!(!allows_detached_reverse_capacity_queue(
+        true, true, &reverse, &stale
+    ));
+    assert!(!allows_detached_reverse_capacity_queue(
+        true, true, &reverse, &unknown
+    ));
 }
