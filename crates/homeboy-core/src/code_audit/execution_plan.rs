@@ -268,6 +268,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
             AuditFinding::InlineTestModule,
             AuditFinding::ScatteredTestFile,
             AuditFinding::VacuousTest,
+            AuditFinding::RedundantTestWrapper,
         ],
         access: DetectorAccess::RootOnly,
         runtime: DetectorRuntime::Root(RootDetectorRunner::TestTopology),
