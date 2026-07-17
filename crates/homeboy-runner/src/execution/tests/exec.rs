@@ -132,6 +132,7 @@ fn stale_direct_daemon_status() -> RunnerStatusReport {
         active_job_state: RunnerActiveJobState::Available,
         active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
         active_job_error: None,
+        active_job_recovery_evidence: None,
         session_path: "/tmp/homeboy-lab.json".to_string(),
     }
 }

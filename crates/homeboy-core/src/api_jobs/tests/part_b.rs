@@ -71,6 +71,59 @@ fn terminal_linked_run_is_authoritative_for_confirmed_recovery() {
 }
 
 #[test]
+fn terminal_linked_reconciliation_preserves_live_jobs_and_is_idempotent() {
+    let store = JobStore::default().with_daemon_lease("lease-live".to_string());
+    let first = store.create("runner.exec");
+    store.start(first.id).expect("start first terminal handoff");
+    let second = store.create("runner.exec");
+    store
+        .start(second.id)
+        .expect("start second terminal handoff");
+    let live = store.create("runner.exec");
+    store.start(live.id).expect("start live job");
+
+    let mut first_pass = store
+        .reconcile_terminal_linked_daemon_jobs_with_resolver(|stored| match stored.job.id {
+            id if id == first.id => Some(RecoveredTerminalJob::test_result(
+                JobStatus::Cancelled,
+                "run-cancelled",
+                json!({ "status": "cancelled" }),
+                Vec::new(),
+            )),
+            id if id == second.id => Some(RecoveredTerminalJob::test_result(
+                JobStatus::Failed,
+                "run-failed",
+                json!({ "status": "failed" }),
+                Vec::new(),
+            )),
+            _ => None,
+        })
+        .expect("reconcile terminal handoffs");
+    first_pass.sort();
+    let mut expected = vec![first.id, second.id];
+    expected.sort();
+    assert_eq!(first_pass, expected);
+    assert_eq!(
+        store.get(first.id).expect("first").status,
+        JobStatus::Cancelled
+    );
+    assert_eq!(
+        store.get(second.id).expect("second").status,
+        JobStatus::Failed
+    );
+    assert_eq!(store.get(live.id).expect("live").status, JobStatus::Running);
+
+    let repeated = store
+        .reconcile_terminal_linked_daemon_jobs_with_resolver(|_| None)
+        .expect("repeat reconciliation");
+    assert!(repeated.is_empty());
+    assert_eq!(
+        store.get(live.id).expect("live remains protected").status,
+        JobStatus::Running
+    );
+}
+
+#[test]
 fn reused_pid_with_a_different_start_identity_is_terminalized() {
     let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
     let job = store.create("runner.exec");

@@ -35,6 +35,7 @@ fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
                 active_job_state: RunnerActiveJobState::NotQueried,
                 active_job_source: None,
                 active_job_error: None,
+                active_job_recovery_evidence: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -105,6 +106,7 @@ fn lab_runner_preparation_uses_already_connected_runner() {
                 active_job_state: RunnerActiveJobState::NotQueried,
                 active_job_source: None,
                 active_job_error: None,
+                active_job_recovery_evidence: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -144,6 +146,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_daemon_version_without_re
                 active_job_state: RunnerActiveJobState::NotQueried,
                 active_job_source: None,
                 active_job_error: None,
+                active_job_recovery_evidence: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -186,6 +189,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_runtime_paths() {
                 active_job_state: RunnerActiveJobState::NotQueried,
                 active_job_source: None,
                 active_job_error: None,
+                active_job_recovery_evidence: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -233,6 +237,7 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
                 active_job_state: RunnerActiveJobState::NotQueried,
                 active_job_source: None,
                 active_job_error: None,
+                active_job_recovery_evidence: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -303,6 +308,7 @@ fn concurrent_stale_handoffs_preserve_the_shared_tunnel() {
                             active_job_state: RunnerActiveJobState::Available,
                             active_job_source: None,
                             active_job_error: None,
+                            active_job_recovery_evidence: None,
                             session_path: "/tmp/lab.json".to_string(),
                         })
                     },
@@ -465,6 +471,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_direct_session_without_da
                 active_job_state: RunnerActiveJobState::NotQueried,
                 active_job_source: None,
                 active_job_error: None,
+                active_job_recovery_evidence: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -506,6 +513,7 @@ fn lab_runner_preparation_errors_for_explicit_direct_session_without_daemon_url(
                 active_job_state: RunnerActiveJobState::NotQueried,
                 active_job_source: None,
                 active_job_error: None,
+                active_job_recovery_evidence: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -552,6 +560,7 @@ fn lab_runner_preparation_connects_disconnected_runner() {
                 active_job_state: RunnerActiveJobState::NotQueried,
                 active_job_source: None,
                 active_job_error: None,
+                active_job_recovery_evidence: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -614,6 +623,7 @@ fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
                 active_job_state: RunnerActiveJobState::NotQueried,
                 active_job_source: None,
                 active_job_error: None,
+                active_job_recovery_evidence: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -700,6 +710,7 @@ fn unreachable_health_status(runner_id: &str, connected: bool) -> RunnerStatusRe
         active_job_state: RunnerActiveJobState::Unavailable,
         active_job_source: None,
         active_job_error: None,
+        active_job_recovery_evidence: None,
         session_path: "/tmp/lab-unreachable-health.json".to_string(),
     }
 }

@@ -1477,6 +1477,7 @@ fn runner_status(runner_id: &str) -> Result<RunnerStatusReport> {
         active_job_state: RunnerActiveJobState::NotQueried,
         active_job_source: None,
         active_job_error: None,
+        active_job_recovery_evidence: None,
         session_path: "/tmp/homeboy-runner-session.json".to_string(),
     })
 }
@@ -1503,6 +1504,7 @@ fn stale_runner_status(runner_id: &str) -> Result<RunnerStatusReport> {
         active_job_state: RunnerActiveJobState::NotQueried,
         active_job_source: None,
         active_job_error: None,
+        active_job_recovery_evidence: None,
         session_path: "/tmp/homeboy-runner-session.json".to_string(),
     })
 }

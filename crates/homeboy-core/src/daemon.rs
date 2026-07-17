@@ -1352,6 +1352,19 @@ where
             Ok(body) => daemon_endpoint_response("jobs.exec", body),
             Err(err) => error_response(400, err),
         },
+        ("POST", "/jobs/reconcile-terminal") => {
+            match job_store.reconcile_terminal_linked_daemon_jobs() {
+                Ok(reconciled) => daemon_endpoint_response(
+                    "jobs.reconcile_terminal",
+                    json!({
+                        "reconciled_job_ids": reconciled,
+                        "reconciled_count": reconciled.len(),
+                        "policy": "linked durable runs already terminalized; live and unresolved jobs are preserved",
+                    }),
+                ),
+                Err(err) => error_response(400, err),
+            }
+        }
         ("POST", "/lifecycle/stop") => match lifecycle_stop_request(body)
             .and_then(|request| validate_lifecycle_stop_request(&request).map(|_| request))
         {
@@ -1377,7 +1390,7 @@ where
             Ok(body) => daemon_endpoint_response("files.download", body),
             Err(err) => remote_runner::auth_or_bad_request(err),
         },
-        ("GET", "/exec") => HttpResponse {
+        ("GET", "/exec") | ("GET", "/jobs/reconcile-terminal") => HttpResponse {
             status_code: 405,
             body: json!({ "error": "method_not_allowed" }),
             artifact: None,

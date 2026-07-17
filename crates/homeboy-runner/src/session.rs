@@ -135,6 +135,14 @@ pub struct RunnerActiveJobError {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerActiveJobRecoveryEvidence {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reconciled_job_ids: Vec<String>,
+    pub prior_active_job_count: usize,
+    pub active_job_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerLeaselessRecoveryContract {
@@ -424,6 +432,8 @@ pub struct RunnerStatusReport {
     pub active_job_source: Option<RunnerActiveJobSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_job_error: Option<RunnerActiveJobError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_job_recovery_evidence: Option<RunnerActiveJobRecoveryEvidence>,
     pub session_path: String,
 }
 
