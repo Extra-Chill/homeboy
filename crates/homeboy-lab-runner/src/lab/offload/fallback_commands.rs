@@ -66,9 +66,9 @@ pub(crate) fn review_lab_fallback_commands(
     }
 
     Some(ReviewLabFallbackCommands {
-        audit: fallback_command("audit", &common),
-        lint: fallback_command("lint", &common),
-        test: fallback_command("test", &common),
+        audit: fallback_command("review audit", &common),
+        lint: fallback_command("review lint", &common),
+        test: fallback_command("review test", &common),
     })
 }
 

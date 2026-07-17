@@ -128,7 +128,7 @@ fn scoped_review_runner_rejection_includes_full_gate_fallbacks() {
     let hints = unsupported_runner_hints("homeboy-lab", &args, "support".to_string());
 
     assert!(hints.iter().any(|hint| hint.contains(
-        "`homeboy audit --runner homeboy-lab --extension rust homeboy`; `homeboy lint --runner homeboy-lab --extension rust homeboy`; `homeboy test --runner homeboy-lab --extension rust homeboy`"
+        "`homeboy review audit --runner homeboy-lab --extension rust homeboy`; `homeboy review lint --runner homeboy-lab --extension rust homeboy`; `homeboy review test --runner homeboy-lab --extension rust homeboy`"
     )));
 }
 
