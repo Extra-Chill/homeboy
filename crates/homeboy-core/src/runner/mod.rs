@@ -96,11 +96,8 @@ pub use capabilities::{
     PreparedLabRunnerCapability, RunnerCapabilityPreflight, RunnerRequiredTool,
     RunnerToolCapabilityRequirement,
 };
+pub(crate) use command_path::normalize_runner_command_env_for_homeboy_path;
 pub use command_path::preflight_remote_argv_path_translation;
-pub(crate) use command_path::{
-    normalize_runner_command_env_for_homeboy_path, quote_runner_env_value,
-    remote_shell_path_preamble,
-};
 pub(crate) use connection::daemon_endpoint_identity;
 pub(crate) use connection::disconnect_with_force;
 pub(crate) use connection::local_live_session;
@@ -110,8 +107,8 @@ pub use connection::{
     reverse_broker_artifact_content, reverse_broker_reconcile, runner_artifact_content, status,
     statuses,
 };
-pub(crate) use evidence::artifact_store_locator_from_runner_artifact_id;
 pub use continuation_provider::register as register_runner_continuation_provider;
+pub(crate) use evidence::artifact_store_locator_from_runner_artifact_id;
 pub use evidence::register_runner_evidence_provider;
 pub use evidence::runner_artifact_store_token;
 pub use evidence::{

@@ -5,8 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::engine::shell;
+use crate::engine::shell::{quote_runner_env_value, remote_shell_path_preamble};
 use crate::error::{Error, Result};
-use crate::runner::{quote_runner_env_value, remote_shell_path_preamble};
 
 use super::super::session::ensure_control_path_parent;
 use super::super::ssh_args::{client_ssh_args, SshArgOptions, SshPortFlag};
