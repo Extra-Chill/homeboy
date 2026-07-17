@@ -15,6 +15,7 @@ use crate::api_jobs::{
     DaemonActiveJobRecoveryEvidence, JobStatus, JobStore, LocalRunnerJob,
     RunnerJobLifecycleMetadata,
 };
+use crate::broker_auth::BrokerScope;
 use crate::build_identity;
 use crate::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
@@ -23,7 +24,6 @@ use crate::paths;
 use crate::process::{
     pid_has_environment_value, pid_is_running, terminate_pid_with_sigterm_and_wait,
 };
-use crate::broker_auth::BrokerScope;
 use crate::runner_execution_envelope::PathMaterializationPlan;
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;

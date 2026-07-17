@@ -33,7 +33,6 @@ mod command_path;
 mod connection;
 mod continuation_provider;
 mod daemon_exec_driver;
-mod workspace_root_provider;
 mod daemon_health;
 mod daemon_http_get;
 mod evidence;
@@ -44,6 +43,7 @@ mod homeboy_refresh;
 mod job_preparation;
 mod lab;
 mod lab_workspace_provenance_provider;
+mod workspace_root_provider;
 #[cfg(test)]
 pub(crate) use lab::mirror_agent_task_run_plan_aggregate;
 mod lab_apply;
@@ -110,7 +110,6 @@ pub use connection::{
 };
 pub use continuation_provider::register as register_runner_continuation_provider;
 pub use daemon_exec_driver::register as register_runner_daemon_exec_driver;
-pub use workspace_root_provider::register as register_runner_workspace_root_provider;
 pub(crate) use evidence::artifact_store_locator_from_runner_artifact_id;
 pub use evidence::register_runner_evidence_provider;
 pub use evidence::runner_artifact_store_token;
@@ -200,6 +199,7 @@ pub(crate) use workspace::{
     workspace_content_manifest_for_policy, VerifiedLabWorkspaceProvenance,
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
+pub use workspace_root_provider::register as register_runner_workspace_root_provider;
 
 // RunnerKind now lives in the shared runner-contract crate so core code can
 // name it without a core -> runner edge. Re-exported here so the many

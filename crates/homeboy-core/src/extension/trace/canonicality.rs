@@ -1,13 +1,13 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::agent_task_scheduler::lab_workspace_provenance::{
+    with_lab_workspace_provenance, LabWorkspaceProvenanceInfo,
+};
 use crate::component::Component;
 use crate::error::{ErrorCode, Result};
 use crate::extension::manifest_config::TraceToolchainProvenanceConfig;
 use crate::extension::ExtensionExecutionContext;
-use crate::agent_task_scheduler::lab_workspace_provenance::{
-    with_lab_workspace_provenance, LabWorkspaceProvenanceInfo,
-};
 #[cfg(test)]
 use crate::runner::verify_lab_workspace;
 #[cfg(test)]

@@ -1153,8 +1153,10 @@ mod tests {
 
         assert_eq!(cooks.len(), 2);
         assert!(cooks.iter().all(|cook| cook.initial_plan.tasks.len() == 1));
-        assert!(cooks.iter().all(|cook| format!("{:?}", cook.harvest_context)
-            == "HarvestExecutionContext { source_snapshot: None, lab_offload: None }"));
+        assert!(cooks
+            .iter()
+            .all(|cook| format!("{:?}", cook.harvest_context)
+                == "HarvestExecutionContext { source_snapshot: None, lab_offload: None }"));
     }
 
     fn args() -> AgentTaskFanoutInputArgs {
