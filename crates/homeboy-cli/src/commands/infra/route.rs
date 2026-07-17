@@ -26,13 +26,12 @@ pub fn route_after_parse(
     normalized_args: &[String],
     output_file: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
-    // A managed runner executes the controller-selected command once. Explicit
-    // placement is never skipped: it must still enforce Lab routing and local
-    // safety gates even if a caller has inherited marker-like environment.
-    if cli.placement == homeboy::cli_surface::Placement::Auto
-        && (lab_routing::is_lab_offload_subprocess()
-            || crate::commands::utils::resource_policy::is_managed_runner_placement_context())
-    {
+    // A managed runner executes the controller-selected command once. Its argv
+    // retains the controller's explicit placement for provenance, but must not
+    // recursively route back through a runner-side controller daemon.
+    let managed_runner_placement =
+        crate::commands::utils::resource_policy::is_managed_runner_placement_context();
+    if lab_routing::is_lab_offload_subprocess() || managed_runner_placement {
         return Ok(None);
     }
 
