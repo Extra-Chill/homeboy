@@ -631,7 +631,7 @@ fn run_validation_dependency_lifecycle_isolated(component: &Component, path: &Pa
         .into_iter()
         .map(str::to_string)
         .collect::<Vec<_>>();
-    crate::runner::copy_snapshot_to_directory(path, &prepared_path, &excludes)?;
+    crate::workspace_snapshot::copy_snapshot_to_directory(path, &prepared_path, &excludes)?;
 
     let mut prepared = component.clone();
     prepared.local_path = prepared_path.display().to_string();
@@ -906,6 +906,13 @@ mod tests {
         git(path, &["commit", "-m", "initial"]);
     }
 
+    /// Register the runner-backed workspace-snapshot provider so tests that run
+    /// an isolated validation-dependency lifecycle can materialize the snapshot.
+    /// Production wires this at CLI startup; core tests wire it explicitly.
+    fn ensure_snapshot_provider() {
+        crate::runner::register_workspace_snapshot_provider();
+    }
+
     fn init_repo_with_upstream(path: &Path) -> tempfile::TempDir {
         let remote = tempfile::tempdir().unwrap();
         init_repo(path);
@@ -920,6 +927,7 @@ mod tests {
 
     #[test]
     fn dependency_hygiene_fast_forwards_validation_dependency_behind_upstream() {
+        ensure_snapshot_provider();
         let local = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
         let writer = tempfile::tempdir().unwrap();
@@ -1006,6 +1014,7 @@ mod tests {
 
     #[test]
     fn dependency_hygiene_allows_stale_with_explicit_opt_in() {
+        ensure_snapshot_provider();
         let local = tempfile::tempdir().unwrap();
         init_repo(local.path());
         fs::write(local.path().join("dirty.txt"), "dirty\n").unwrap();
@@ -1115,6 +1124,7 @@ mod tests {
 
     #[test]
     fn dependency_hygiene_runs_validation_dependency_lifecycle() {
+        ensure_snapshot_provider();
         crate::test_support::with_isolated_home(|_| {
             let workspace_parent = tempfile::tempdir().unwrap();
             let source = workspace_parent.path().join("source");
@@ -1170,6 +1180,7 @@ mod tests {
 
     #[test]
     fn dependency_hygiene_uses_manifest_id_for_runtime_path_dependency_lifecycle() {
+        ensure_snapshot_provider();
         crate::test_support::with_isolated_home(|_| {
             let source = tempfile::tempdir().unwrap();
             let dependency = tempfile::tempdir().unwrap();

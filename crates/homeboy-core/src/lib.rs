@@ -230,6 +230,7 @@ pub mod test_support;
 pub mod update_check_cache;
 pub mod upgrade;
 pub mod validation_progress;
+pub mod workspace_snapshot;
 pub mod worktree;
 pub mod worktree_providers;
 

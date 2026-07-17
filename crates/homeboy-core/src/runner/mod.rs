@@ -76,6 +76,7 @@ mod worker;
 pub(crate) mod workload;
 mod workspace;
 pub(crate) use workspace::copy_snapshot_to_directory;
+pub use workspace::register_workspace_snapshot_provider;
 // Only test code (extension::trace::canonicality) still calls verify_lab_workspace
 // directly; production goes through the LabWorkspaceProvenanceProvider hook.
 #[cfg(test)]
