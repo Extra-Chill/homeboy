@@ -132,8 +132,8 @@ pub use execution::{
     RunnerExecPromotedOutput, RunnerExecStructuredSummary,
 };
 pub(crate) use execution::{
-    execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process,
-    RunnerProcessRequest,
+    exec_with_status_snapshot, execute_runner_process_until_cancelled_with_progress,
+    prepare_daemon_local_process, RunnerProcessRequest,
 };
 pub use execution::{RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV};
 pub(crate) use extension_materialization::extension_source_content_hash;

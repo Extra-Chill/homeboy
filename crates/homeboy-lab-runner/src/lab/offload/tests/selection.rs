@@ -198,6 +198,82 @@ fn busy_default_runner_fails_closed_for_release_gate() {
 }
 
 #[test]
+fn explicit_connected_stale_runner_preserves_drift_diagnosis_and_recovery() {
+    let status = stale_reverse_status("homeboy-lab");
+    let availability = RunnerAvailability::from_status_parts(
+        status.runner_id.clone(),
+        status.connected,
+        status.stale_daemon.is_some(),
+        status.active_jobs.len(),
+        &status.active_job_state,
+        Some(1),
+    );
+
+    assert!(availability.connected);
+    assert!(!availability.accepts_jobs);
+    assert_eq!(availability.reasons, ["stale_daemon"]);
+
+    let error = lab_runner_availability_error(
+        "agent-task cook",
+        Some(&availability),
+        Some(&status),
+        vec![availability.clone()],
+    );
+    let refresh = status
+        .stale_daemon
+        .as_ref()
+        .expect("stale daemon warning")
+        .refresh_command
+        .clone();
+
+    assert!(error.message.contains("cannot accept jobs"));
+    assert_eq!(
+        error.details["runner_availability"]["reasons"],
+        serde_json::json!(["stale_daemon"])
+    );
+    assert_eq!(error.details["runner_status"]["connected"], true);
+    assert_eq!(
+        error.details["runner_status"]["stale_daemon"]["active_daemon_control_plane_version"],
+        "homeboy 0.228.0"
+    );
+    assert_eq!(
+        error.details["runner_status"]["stale_daemon"]["job_command_binary_version"],
+        "homeboy 0.229.11"
+    );
+    assert_eq!(error.details["stale_daemon_recovery_command"], refresh);
+    assert!(error.details["tried"][0]
+        .as_str()
+        .expect("recovery hint")
+        .contains(&refresh));
+}
+
+#[test]
+fn disconnected_runner_keeps_existing_availability_diagnosis() {
+    let availability = RunnerAvailability::from_status_parts(
+        "homeboy-lab",
+        false,
+        false,
+        0,
+        &RunnerActiveJobState::Available,
+        Some(1),
+    );
+
+    let error = lab_runner_availability_error(
+        "agent-task cook",
+        Some(&availability),
+        None,
+        vec![availability.clone()],
+    );
+
+    assert_eq!(
+        error.details["runner_availability"]["reasons"],
+        serde_json::json!(["not_connected"])
+    );
+    assert!(error.details["runner_status"].is_null());
+    assert!(error.details["stale_daemon_recovery_command"].is_null());
+}
+
+#[test]
 fn explicit_lab_never_allows_missing_or_busy_default_runner_to_run_local() {
     let error = select(
         &portable_lab_command("test"),

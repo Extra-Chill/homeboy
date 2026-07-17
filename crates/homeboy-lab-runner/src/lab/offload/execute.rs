@@ -218,56 +218,60 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     let prepare_timer = overhead.phase(LabOffloadPhase::Preflight);
     let preparation = prepare_lab_runner_for_offload(&selection)?;
     prepare_timer.finish();
-    match preparation {
+    let runner_status = match preparation {
         LabRunnerPreparation::Ready => {
             // Only a detached, controller-owned agent-task plan has a durable
             // continuation and canonical workload suitable for broker queueing.
             // A full runner is otherwise still a readiness failure.
-            if let Err(error) = preflight_lab_runner_availability(
+            let runner_status = match preflight_lab_runner_availability(
                 &contract,
                 &selection,
                 request.detach_after_handoff,
                 request.durable_agent_task_plan.is_some(),
             ) {
-                if contract.routing_policy.release_gate
-                    && matches!(selection.source, LabRunnerSelectionSource::Default)
-                    && !release_gate_local_hot_allowed
-                {
-                    return Err(release_gate_local_hot_denied_error(
+                Ok(status) => status,
+                Err(error) => {
+                    if contract.routing_policy.release_gate
+                        && matches!(selection.source, LabRunnerSelectionSource::Default)
+                        && !release_gate_local_hot_allowed
+                    {
+                        return Err(release_gate_local_hot_denied_error(
                         format!(
                             "Release gate `{}` selected default Lab runner `{}` but it cannot accept jobs ({}); `/release_gate/local_hot` is `fail_closed`, so the gate will not silently fall back to local execution",
                             contract.hot_label, selection.runner_id, error.message
                         ),
                         "release_gate",
                     ));
+                    }
+                    if request.placement == homeboy_cli_contract::Placement::Auto
+                        && matches!(selection.source, LabRunnerSelectionSource::Default)
+                    {
+                        let reason = format!("runner_unavailable: {}", error.message);
+                        overhead.set_fallback_reason(&reason);
+                        let mut metadata = lab_offload_metadata(
+                            &plan,
+                            selection.source.metadata_value(),
+                            Some(&selection.runner_id),
+                            Some(selection.mode.metadata_value()),
+                            "fallback",
+                            None,
+                            Some(&reason),
+                        );
+                        attach_lab_offload_overhead(&mut metadata, &overhead);
+                        return Ok(LabOffloadOutcome::RunLocal {
+                            metadata: Some(metadata),
+                            plan,
+                            messages: vec![format!("Lab offload: {reason}; running locally.")],
+                        });
+                    }
+                    return Err(error);
                 }
-                if request.placement == homeboy_cli_contract::Placement::Auto
-                    && matches!(selection.source, LabRunnerSelectionSource::Default)
-                {
-                    let reason = format!("runner_unavailable: {}", error.message);
-                    overhead.set_fallback_reason(&reason);
-                    let mut metadata = lab_offload_metadata(
-                        &plan,
-                        selection.source.metadata_value(),
-                        Some(&selection.runner_id),
-                        Some(selection.mode.metadata_value()),
-                        "fallback",
-                        None,
-                        Some(&reason),
-                    );
-                    attach_lab_offload_overhead(&mut metadata, &overhead);
-                    return Ok(LabOffloadOutcome::RunLocal {
-                        metadata: Some(metadata),
-                        plan,
-                        messages: vec![format!("Lab offload: {reason}; running locally.")],
-                    });
-                }
-                return Err(error);
-            }
+            };
             plan = with_step(
                 plan,
                 PlanStep::ready("lab.connect_runner", "lab.connect_runner").build(),
             );
+            runner_status
         }
         LabRunnerPreparation::FallBackLocal { reason } => {
             plan = with_step(
@@ -334,9 +338,17 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 messages: vec![format!("Lab offload: {reason}; running locally.")],
             });
         }
-    }
+    };
 
-    run_lab_offload_inner(request, selection, contract, plan, messages, overhead)
+    run_lab_offload_inner(
+        request,
+        selection,
+        contract,
+        plan,
+        messages,
+        overhead,
+        runner_status,
+    )
 }
 
 pub(crate) fn unsupported_runner_hints(
