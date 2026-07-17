@@ -721,7 +721,7 @@ fn is_include_wrapper_for_test_path(
 mod tests {
     use super::*;
     use crate::code_audit::conventions::Language;
-    use crate::extension::{BehaviorScenarioNames, IncludeWrapperPolicy};
+    use homeboy_audit_contract::{BehaviorScenarioNames, IncludeWrapperPolicy};
 
     fn make_config() -> TestMappingConfig {
         TestMappingConfig {

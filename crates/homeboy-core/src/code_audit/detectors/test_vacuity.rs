@@ -16,7 +16,7 @@ use regex::Regex;
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
-use crate::extension::{PackageNameSource, TestVacuityPolicy};
+use homeboy_audit_contract::{PackageNameSource, TestVacuityPolicy};
 
 /// Resolve a package name from a config-declared manifest source.
 ///
