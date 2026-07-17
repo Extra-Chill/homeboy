@@ -377,9 +377,26 @@ pub(super) fn promote_with_provider_and_checkpoint(
                 committed_patch,
             );
         }
-        let status = AgentTaskPromotionStatus::NoChanges;
-        let target = AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), None);
+        let worktree_path = options.source_worktree_path.as_deref();
+        let target =
+            AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), worktree_path);
+        let gates = if let Some(worktree_path) = worktree_path {
+            run_promotion_gates(&options, provider, worktree_path)?
+        } else {
+            PromotionGateRun::without_gates(options.dry_run)
+        };
+        let status = match gates.status {
+            AgentTaskPromotionStatus::Applied => AgentTaskPromotionStatus::VerifiedNoChanges,
+            AgentTaskPromotionStatus::GateFailed => AgentTaskPromotionStatus::NoChangesGateFailed,
+            _ => AgentTaskPromotionStatus::NoChanges,
+        };
         let operator_notification = promotion_notification(status, &target);
+        let verified_revision = target.head.clone();
+        let candidate = target
+            .path
+            .as_deref()
+            .map(crate::agent_task_promotion::candidate_fingerprint)
+            .transpose()?;
 
         return Ok(AgentTaskPromotionReport {
             schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
@@ -395,14 +412,16 @@ pub(super) fn promote_with_provider_and_checkpoint(
             },
             changed_files: Vec::new(),
             command_evidence: Vec::new(),
-            deterministic_gates: Vec::new(),
-            gate_results: Vec::new(),
+            deterministic_gates: gates.deterministic_gates,
+            gate_results: gates.gate_results,
             verified_base: None,
             provenance: json!({
                 "source_schema": outcome.schema,
                 "artifact_metadata": artifact.metadata,
-                "worktree_path": null,
-                "dependencies_materialized": false,
+                "worktree_path": worktree_path,
+                "verified_revision": verified_revision,
+                "dependencies_materialized": gates.dependencies_materialized,
+                "candidate": candidate,
             }),
             operator_notification,
         });
@@ -1062,6 +1081,18 @@ fn promotion_notification(
             resumable_blocker: Some(
                 "run `homeboy agent-task gate-feedback` with the promotion report, then retry the follow-up request".to_string(),
             ),
+            next_command: None,
+        },
+        AgentTaskPromotionStatus::VerifiedNoChanges => AgentTaskPromotionNotification {
+            status: "completed".to_string(),
+            message: "provider produced no patch; the pinned candidate workspace passed deterministic verification".to_string(),
+            resumable_blocker: None,
+            next_command: None,
+        },
+        AgentTaskPromotionStatus::NoChangesGateFailed => AgentTaskPromotionNotification {
+            status: "blocked".to_string(),
+            message: "provider produced no patch, but deterministic verification failed in the pinned candidate workspace".to_string(),
+            resumable_blocker: Some("repair the candidate and rerun Cook so the declared verification gates pass".to_string()),
             next_command: None,
         },
         AgentTaskPromotionStatus::DryRun => AgentTaskPromotionNotification {
