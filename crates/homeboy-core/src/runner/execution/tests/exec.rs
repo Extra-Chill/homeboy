@@ -11,7 +11,14 @@ use serde_json::json;
 
 #[test]
 fn explicit_refresh_allows_an_idle_stale_daemon_after_reconnect() {
-    let status = stale_direct_daemon_status();
+    let mut status = stale_direct_daemon_status();
+    status.active_job_state = RunnerActiveJobState::Unavailable;
+    status.active_job_source = None;
+    status.active_job_error = Some(crate::runner::RunnerActiveJobError {
+        code: "jobs_unavailable".to_string(),
+        message: "typed jobs endpoint belongs to the stale daemon".to_string(),
+    });
+    status.daemon_freshness = Some(authoritative_drained_freshness());
 
     assert!(allows_idle_stale_daemon_refresh(
         &explicit_refresh_options(),
@@ -24,11 +31,35 @@ fn explicit_refresh_keeps_active_or_uncertain_stale_daemons_protected() {
     let options = explicit_refresh_options();
     let mut active = stale_direct_daemon_status();
     active.active_job_count = 1;
+    active.daemon_freshness = Some(crate::daemon::DaemonFreshnessReport {
+        active_jobs: 1,
+        ..authoritative_drained_freshness()
+    });
     let mut unavailable = stale_direct_daemon_status();
     unavailable.active_job_state = RunnerActiveJobState::Unavailable;
 
     assert!(!allows_idle_stale_daemon_refresh(&options, &active));
     assert!(!allows_idle_stale_daemon_refresh(&options, &unavailable));
+}
+
+fn authoritative_drained_freshness() -> crate::daemon::DaemonFreshnessReport {
+    crate::daemon::DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(crate::daemon::DaemonStaleReasonCode::VersionMismatch),
+        restartable: true,
+        lease_id: Some("lease-stale".to_string()),
+        pid: Some(4242),
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: Some("0.288.8".to_string()),
+        daemon_build_identity: Some("homeboy 0.288.8+stale".to_string()),
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    }
 }
 
 fn explicit_refresh_options() -> RunnerExecOptions {
