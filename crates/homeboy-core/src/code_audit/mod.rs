@@ -185,6 +185,11 @@ mod tests {
 
     #[test]
     fn audit_config_includes_explicit_extension_overrides() {
+        // Audit reads extension manifests through the provider hook, which the
+        // CLI registers at startup. In a core lib test the CLI never runs, so
+        // register the extension-backed provider explicitly — otherwise the
+        // no-op provider is used and no saved manifest is ever seen.
+        crate::extension::audit_manifest_provider::register();
         crate::test_support::with_isolated_home(|home| {
             let mut manifest: crate::extension::ExtensionManifest =
                 serde_json::from_value(serde_json::json!({

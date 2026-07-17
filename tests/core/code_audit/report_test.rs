@@ -319,6 +319,11 @@ fn test_compute_fixability_counts_fixes_from_real_audit() {
     // enough conventions — that's acceptable for this test.
 }
 
+// Runs the full audit-with-analysis pipeline (walk + fingerprint + detectors +
+// fixability planning) over a fixture tree, matching the broad-machinery slow
+// tier described in `docs/internals/test-tiers.md` — the same tier its sibling
+// `test_compute_fixability_counts_fixes_from_real_audit` already lives in.
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_compute_fixability_with_analysis() {
     use std::fs;

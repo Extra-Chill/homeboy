@@ -78,8 +78,14 @@ const FIXTURE_COMPONENT_ID: &str = "audit-runtime-fixture";
 
 /// Absolute path to the fixture component tree, derived from the crate root so
 /// the test is independent of the current working directory.
+///
+/// The fixture data lives at the repository-root `tests/fixtures/` tree (shared
+/// with the other `tests/core/**` harnesses that are `#[path]`-included into
+/// this crate), so we walk up from `crates/homeboy-core` (`CARGO_MANIFEST_DIR`)
+/// to the workspace root before descending into `tests/fixtures/audit_runtime`.
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
         .join("tests")
         .join("fixtures")
         .join("audit_runtime")
@@ -154,6 +160,13 @@ const EXPECTED_FINDINGS: &[&str] = &[
     "unreferenced_export::src/policy_violation.rs",
 ];
 
+// Runs the full audit workflow against the fixture tree, which requires a
+// fingerprinting extension for the fixture's source language to be installed in
+// the resolved config home. That makes it a broad-machinery / real-checkout
+// test in the sense of `docs/internals/test-tiers.md`, so it lives in the slow
+// tier next to `audit_runtime_regression_is_deterministic` rather than the
+// hermetic default gate.
+#[cfg(feature = "slow-tests")]
 #[test]
 fn audit_runtime_regression_matches_snapshot() {
     let root = fixture_root();
