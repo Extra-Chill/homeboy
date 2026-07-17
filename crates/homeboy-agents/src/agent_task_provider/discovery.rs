@@ -251,3 +251,23 @@ fn parse_agent_task_executor_provider_catalog(
         diagnostics,
     }
 }
+
+/// Agent-task implementation of core's extension provider-discovery validator.
+struct ExtensionProviderDiscoveryValidatorImpl;
+
+impl homeboy_core::extension_provider_discovery::ExtensionProviderDiscoveryValidator
+    for ExtensionProviderDiscoveryValidatorImpl
+{
+    fn validate_installed_extension_provider_discovery(&self, extension_id: &str) -> Result<()> {
+        validate_installed_extension_agent_runtime_provider_discovery(extension_id)
+    }
+}
+
+/// Register the extension provider-discovery validator so core's extension
+/// install/repair can verify declared agent-runtime providers are discoverable
+/// without depending on the agent-task subsystem.
+pub fn register() {
+    homeboy_core::extension_provider_discovery::register_extension_provider_discovery_validator(
+        Box::new(ExtensionProviderDiscoveryValidatorImpl),
+    );
+}

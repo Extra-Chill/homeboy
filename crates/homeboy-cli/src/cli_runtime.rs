@@ -189,6 +189,15 @@ impl CliRuntime {
         // bench comparison can project rig entries into an agent-task matrix
         // without depending on the agent-task subsystem.
         crate::agents::agent_task::bench_matrix_provider::register();
+        // Register the agent-task terminal-recovery provider so core's job store
+        // can recover terminal jobs from durable agent-task runs.
+        crate::agents::api_jobs_terminal_recovery::register();
+        // Register the agent-task secret provider so core's trace secret
+        // resolution can consult the agent-task secret store.
+        crate::agents::agent_task_secrets::register();
+        // Register the extension provider-discovery validator so core's
+        // extension install/repair can verify declared agent-runtime providers.
+        crate::agents::agent_task_provider::discovery::register();
         // Register the command-label resolver so core::runner can map dispatched
         // argv to a hot-command label without depending on the full CLI parser.
         crate::runner::set_command_label_resolver(|argv| {

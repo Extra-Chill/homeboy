@@ -34,7 +34,7 @@ pub(crate) mod artifact_finalization;
 mod catalog;
 pub(crate) mod command_runner;
 mod config_preflight;
-mod discovery;
+pub mod discovery;
 mod executor;
 mod fixtures;
 mod outcome_normalization;
