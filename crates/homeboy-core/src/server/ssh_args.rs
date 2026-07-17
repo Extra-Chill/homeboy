@@ -154,6 +154,7 @@ mod tests {
             }),
             is_local: false,
             env: HashMap::new(),
+            probe_limits: None,
         };
 
         let rendered = shell_join_args(&client_option_args(

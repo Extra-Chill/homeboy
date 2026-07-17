@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -141,7 +142,34 @@ impl SshClient {
             auth,
             is_local,
             env: server.env.clone(),
+            probe_limits: None,
         })
+    }
+
+    /// Apply bounded execution only to a sequence of short diagnostic probes.
+    /// Ordinary runner commands retain their existing execution semantics.
+    pub fn with_probe_limits(
+        &self,
+        per_probe: Duration,
+        overall: Duration,
+        progress_prefix: impl Into<String>,
+    ) -> Self {
+        let mut client = self.clone();
+        client.probe_limits = Some(ProbeLimits {
+            per_probe,
+            overall,
+            started: Instant::now(),
+            progress_prefix: progress_prefix.into(),
+            timed_out: Arc::new(Mutex::new(Vec::new())),
+        });
+        client
+    }
+
+    pub fn timed_out_probes(&self) -> Vec<BoundedProbeTimeout> {
+        self.probe_limits
+            .as_ref()
+            .map(ProbeLimits::timed_out_probes)
+            .unwrap_or_default()
     }
 
     pub(crate) fn build_ssh_args(&self, command: Option<&str>, interactive: bool) -> Vec<String> {
@@ -329,6 +357,9 @@ impl SshClient {
     }
 
     pub fn execute(&self, command: &str) -> CommandOutput {
+        if let Some(limits) = &self.probe_limits {
+            return limits.execute(self, command);
+        }
         let effective = self.prepend_env(command);
         self.execute_with_stdin(&effective, SshStdin::None)
     }
@@ -507,6 +538,68 @@ impl SshClient {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct ProbeLimits {
+    per_probe: Duration,
+    overall: Duration,
+    started: Instant,
+    progress_prefix: String,
+    timed_out: Arc<Mutex<Vec<BoundedProbeTimeout>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BoundedProbeTimeout {
+    pub command: String,
+    pub reason_code: &'static str,
+}
+
+impl ProbeLimits {
+    fn execute(&self, client: &SshClient, command: &str) -> CommandOutput {
+        let elapsed = self.started.elapsed();
+        let remaining = self.overall.saturating_sub(elapsed);
+        let (timeout, reason_code) = if remaining.is_zero() {
+            (Duration::ZERO, "runner_doctor.overall_timeout")
+        } else if remaining < self.per_probe {
+            (remaining, "runner_doctor.overall_timeout")
+        } else {
+            (self.per_probe, "runner_doctor.probe_timeout")
+        };
+        eprintln!("[{}] probing: {}", self.progress_prefix, command);
+        if timeout.is_zero() {
+            self.record_timeout(command, reason_code);
+            return CommandOutput {
+                stdout: String::new(),
+                stderr: "Homeboy remote diagnostic overall deadline was exhausted before this probe started.".to_string(),
+                success: false,
+                exit_code: 124,
+                timed_out: true,
+                child_resource: None,
+            };
+        }
+        let output = client.execute_with_timeout(command, timeout);
+        if output.timed_out {
+            self.record_timeout(command, reason_code);
+        }
+        output
+    }
+
+    fn timed_out_probes(&self) -> Vec<BoundedProbeTimeout> {
+        self.timed_out
+            .lock()
+            .map(|probes| probes.clone())
+            .unwrap_or_default()
+    }
+
+    fn record_timeout(&self, command: &str, reason_code: &'static str) {
+        if let Ok(mut probes) = self.timed_out.lock() {
+            probes.push(BoundedProbeTimeout {
+                command: command.to_string(),
+                reason_code,
+            });
+        }
+    }
+}
+
 pub(super) fn execute_command_with_stdin_timeout(
     cmd: Command,
     stdin: Option<&[u8]>,
@@ -523,6 +616,66 @@ pub(super) fn execute_command_with_stdin_timeout(
         });
         (writer_rx, writer)
     })
+}
+
+#[cfg(test)]
+mod bounded_probe_tests {
+    use super::*;
+
+    fn localhost_client() -> SshClient {
+        SshClient::from_server(
+            &Server {
+                id: "local".to_string(),
+                aliases: Vec::new(),
+                host: "localhost".to_string(),
+                user: "tester".to_string(),
+                port: 22,
+                identity_file: None,
+                kind: None,
+                auth: None,
+                env: Default::default(),
+                runner: None,
+            },
+            "local",
+        )
+        .expect("localhost client")
+    }
+
+    #[test]
+    fn bounded_probes_preserve_healthy_output_and_record_stalled_command() {
+        let client = localhost_client().with_probe_limits(
+            Duration::from_millis(50),
+            Duration::from_secs(1),
+            "test doctor",
+        );
+
+        let healthy = client.execute("printf healthy");
+        let stalled = client.execute("sleep 1");
+
+        assert!(healthy.success);
+        assert_eq!(healthy.stdout, "healthy");
+        assert!(stalled.timed_out);
+        let timed_out = client.timed_out_probes();
+        assert_eq!(timed_out.len(), 1);
+        assert_eq!(timed_out[0].command, "sleep 1");
+        assert_eq!(timed_out[0].reason_code, "runner_doctor.probe_timeout");
+    }
+
+    #[test]
+    fn unreachable_ssh_probe_returns_a_result_within_its_budget() {
+        let mut client = localhost_client();
+        client.is_local = false;
+        client.port = 1;
+        let client = client.with_probe_limits(
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+            "test doctor",
+        );
+
+        let output = client.execute("printf unreachable");
+
+        assert!(!output.success);
+    }
 }
 
 pub(super) fn execute_command_with_writer_factory<Factory>(

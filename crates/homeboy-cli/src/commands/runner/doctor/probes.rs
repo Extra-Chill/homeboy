@@ -1277,16 +1277,38 @@ pub(super) fn daemon_exec_check(
     workspace_root: &str,
     local_url: &str,
 ) -> RunnerCheck {
+    daemon_exec_check_with_timeout(
+        runner_id,
+        workspace_root,
+        local_url,
+        std::time::Duration::from_secs(5),
+    )
+}
+
+pub(super) fn daemon_exec_check_with_timeout(
+    runner_id: &str,
+    workspace_root: &str,
+    local_url: &str,
+    timeout: std::time::Duration,
+) -> RunnerCheck {
     let mut details = BTreeMap::new();
     details.insert("url".to_string(), local_url.to_string());
     details.insert("cwd".to_string(), workspace_root.to_string());
     let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(timeout)
         .build()
     {
         Ok(client) => client,
         Err(err) => {
             details.insert("error".to_string(), err.to_string());
+            let reason_code =
+                if err.is_timeout() || err.to_string().to_ascii_lowercase().contains("timed out") {
+                    "runner_doctor.daemon_timeout"
+                } else {
+                    "runner_doctor.daemon_request_failed"
+                };
+            details.insert("reason_code".to_string(), reason_code.to_string());
+            details.insert("timeout_ms".to_string(), timeout.as_millis().to_string());
             return checks::error(
                 "daemon.exec",
                 "Could not build daemon exec probe HTTP client".to_string(),
@@ -1308,6 +1330,14 @@ pub(super) fn daemon_exec_check(
         Ok(response) => response,
         Err(err) => {
             details.insert("error".to_string(), err.to_string());
+            let reason_code =
+                if err.is_timeout() || err.to_string().to_ascii_lowercase().contains("timed out") {
+                    "runner_doctor.daemon_timeout"
+                } else {
+                    "runner_doctor.daemon_request_failed"
+                };
+            details.insert("reason_code".to_string(), reason_code.to_string());
+            details.insert("timeout_ms".to_string(), timeout.as_millis().to_string());
             return checks::error(
                 "daemon.exec",
                 "Connected runner daemon did not accept the exec probe".to_string(),
@@ -1324,6 +1354,11 @@ pub(super) fn daemon_exec_check(
         Err(err) => {
             details.insert("status".to_string(), status_code.to_string());
             details.insert("error".to_string(), err.to_string());
+            details.insert(
+                "reason_code".to_string(),
+                "runner_doctor.daemon_response_failed".to_string(),
+            );
+            details.insert("timeout_ms".to_string(), timeout.as_millis().to_string());
             return checks::error(
                 "daemon.exec",
                 "Connected runner daemon returned an invalid exec probe response".to_string(),

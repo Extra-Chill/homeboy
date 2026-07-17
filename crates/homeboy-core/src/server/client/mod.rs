@@ -23,6 +23,7 @@ pub(crate) use local_exec::{
     execute_local_command_stderr_passthrough_with_timeout,
 };
 
+#[derive(Clone)]
 pub struct SshClient {
     pub host: String,
     pub user: String,
@@ -35,6 +36,7 @@ pub struct SshClient {
     /// Environment variables to inject before remote commands.
     /// Values are passed through the shell, so `$PATH`-style expansion works.
     pub env: HashMap<String, String>,
+    pub(crate) probe_limits: Option<ssh_client::ProbeLimits>,
 }
 
 pub struct CommandOutput {

@@ -20,9 +20,26 @@ pub struct RunnerDoctorOutput {
     pub resources: RunnerResources,
     pub checks: Vec<RunnerCheck>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<RunnerDoctorDiagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_recovery: Option<homeboy::core::daemon::DaemonFreshnessReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub repairs: Vec<RunnerRepair>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerDoctorDiagnostics {
+    pub status: &'static str,
+    pub completed_checks: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub timed_out_probes: Vec<RunnerDoctorTimedOutProbe>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerDoctorTimedOutProbe {
+    pub reason_code: String,
+    pub command: String,
+    pub replay_command: String,
 }
 
 #[derive(Debug, Serialize)]

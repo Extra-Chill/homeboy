@@ -23,6 +23,16 @@ pub fn report(
         .workspace_root
         .clone()
         .unwrap_or_else(|| ".".to_string());
+    let bounded_client = if options.scope == RunnerDoctorScope::LabOffload {
+        client.with_probe_limits(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(60),
+            "runner doctor",
+        )
+    } else {
+        client.clone()
+    };
+    let client = &bounded_client;
     let artifact_root = default_artifact_root(client);
     let mut checks = Vec::new();
     let mut tools = BTreeMap::new();
@@ -244,6 +254,29 @@ pub fn report(
         declared_tools,
     };
 
+    let timed_out_probes = client
+        .timed_out_probes()
+        .into_iter()
+        .map(|probe| types::RunnerDoctorTimedOutProbe {
+            reason_code: probe.reason_code.to_string(),
+            command: probe.command.clone(),
+            replay_command: format!(
+                "homeboy ssh {} -- {}",
+                server.id,
+                shell::quote_arg(&probe.command)
+            ),
+        })
+        .collect::<Vec<_>>();
+    let diagnostics = Some(types::RunnerDoctorDiagnostics {
+        status: if timed_out_probes.is_empty() {
+            "complete"
+        } else {
+            "partial"
+        },
+        completed_checks: checks.len(),
+        timed_out_probes,
+    });
+
     RunnerDoctorOutput {
         variant: "doctor",
         command: "runner.doctor",
@@ -253,6 +286,7 @@ pub fn report(
         capabilities,
         resources,
         checks,
+        diagnostics,
         daemon_recovery: None,
         repairs: Vec::new(),
     }
@@ -314,6 +348,7 @@ pub(super) fn disconnected_report(
             remediation,
             details,
         )],
+        diagnostics: None,
         daemon_recovery,
         repairs: Vec::new(),
     }
