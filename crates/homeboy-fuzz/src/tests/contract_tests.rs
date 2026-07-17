@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::fuzz::*;
+use crate::*;
 
 #[test]
 fn core_contract_lists_product_neutral_schema_ids() {
@@ -54,7 +54,7 @@ fn core_contract_lists_product_neutral_schema_ids() {
     );
     assert_eq!(
         contract.schemas.lifecycle_contract,
-        crate::lifecycle::LIFECYCLE_CONTRACT_SCHEMA
+        homeboy_core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA
     );
     assert_eq!(contract.schemas.isolation_proof, ISOLATION_PROOF_SCHEMA);
     assert!(contract

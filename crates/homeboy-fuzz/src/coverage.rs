@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::artifact_contract::ArtifactContract;
+use homeboy_core::artifact_contract::ArtifactContract;
 
 use super::contract::{FuzzFindingStatus, FuzzSafetyClass};
 use super::schema_defaults::{

@@ -34,7 +34,6 @@ use crate::core::artifacts::{
 };
 use crate::core::change_artifact::CHANGE_ARTIFACT_SCHEMA;
 use crate::core::env_materialization_plan::ENV_MATERIALIZATION_PLAN_SCHEMA;
-use crate::core::fuzz::FUZZ_ARTIFACT_SCHEMA;
 use crate::core::matrix_artifact_summary::{
     GENERIC_MATRIX_SUMMARY_SCHEMA, MATRIX_ARTIFACT_SUMMARY_SCHEMA,
 };
@@ -46,6 +45,7 @@ use crate::core::runner_execution_envelope::{
     PATH_MATERIALIZATION_ROLE_PRIMARY_WORKSPACE, PATH_MATERIALIZATION_ROLE_REQUIRED_PATH,
     PATH_MATERIALIZATION_STATUS_MATERIALIZED, PATH_MATERIALIZATION_STATUS_VALIDATED,
 };
+use crate::fuzz::FUZZ_ARTIFACT_SCHEMA;
 
 pub const CONTRACT_CONSTANTS_SCHEMA: &str = "homeboy/contract-constants/v1";
 

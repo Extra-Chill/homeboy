@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 
-use crate::fuzz::*;
+use crate::*;
 
 #[test]
 fn parse_fuzz_case_log_contents_accepts_jsonl_entries() {

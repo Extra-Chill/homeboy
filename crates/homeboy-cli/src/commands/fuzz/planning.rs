@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
-use homeboy::core::fuzz::{
+use homeboy::fuzz::{
     fuzz_gate_profile_contract, parse_fuzz_action_model_file, parse_fuzz_exploration_policy_file,
     parse_fuzz_sequence_plan_file, FuzzExecutionRequest, FuzzOperation, FuzzOperationFamily,
     FuzzRequiredArtifact, FuzzSafetyClass, FuzzSamplingCorpusRef, FuzzSamplingReplayDeterminism,
@@ -630,14 +630,14 @@ fn lab_campaign_run_command(
 
 pub(super) fn load_sequence_plan(
     path: Option<&std::path::Path>,
-) -> homeboy::core::Result<Option<homeboy::core::fuzz::FuzzSequencePlan>> {
+) -> homeboy::core::Result<Option<homeboy::fuzz::FuzzSequencePlan>> {
     path.map(parse_fuzz_sequence_plan_file).transpose()
 }
 
 pub(super) fn with_sequence_plan_metadata(
     mut metadata: serde_json::Value,
     path: Option<&std::path::Path>,
-    plan: Option<&homeboy::core::fuzz::FuzzSequencePlan>,
+    plan: Option<&homeboy::fuzz::FuzzSequencePlan>,
 ) -> homeboy::core::Result<serde_json::Value> {
     let Some(plan) = plan else {
         return Ok(metadata);
@@ -1031,8 +1031,8 @@ pub(super) fn load_or_default_isolation_proof(
     }
 
     IsolationProof::from_value(serde_json::json!({
-        "schema": homeboy::core::fuzz::ISOLATION_PROOF_SCHEMA,
-        "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        "schema": homeboy::fuzz::ISOLATION_PROOF_SCHEMA,
+        "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
         "runtime_kind": "homeboy-fuzz-run-dir",
         "provider_ref": {
             "component": component_id,

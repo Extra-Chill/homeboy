@@ -1,0 +1,22 @@
+[package]
+name = "homeboy-fuzz"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Fuzz campaign schemas, envelopes, observations, and hotspot reconciliation for homeboy"
+repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
+
+[lib]
+name = "homeboy_fuzz"
+path = "src/lib.rs"
+
+[dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.14"
+
+[dev-dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

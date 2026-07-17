@@ -8,14 +8,14 @@ use homeboy::core::engine::execution_context;
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
-use homeboy::core::fuzz::{
+use homeboy::core::lifecycle::LifecyclePhaseStatus;
+use homeboy::core::observation::{RunRecord, RunStatus};
+use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
+use homeboy::fuzz::{
     fuzz_gate_profile_contract, parse_fuzz_results_file, FuzzArtifact, FuzzCampaign,
     FuzzExecutionRequest, FuzzFindingStatus, FuzzGateProfile, FuzzSamplingRequest,
     FuzzTargetInventory, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
 };
-use homeboy::core::lifecycle::LifecyclePhaseStatus;
-use homeboy::core::observation::{RunRecord, RunStatus};
-use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
 use uuid::Uuid;
 
 use super::planning::{load_sequence_plan, plan_inventory_selection, with_sequence_plan_metadata};
@@ -102,12 +102,12 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         workload_id.clone(),
         &target_inventory,
     )?;
-    let sequence_plan_path = homeboy::core::fuzz::persist_fuzz_sequence_plan(
+    let sequence_plan_path = homeboy::fuzz::persist_fuzz_sequence_plan(
         &run_dir,
         execution_request.sequence_plan.as_ref(),
     )?;
     let execution_request_path =
-        homeboy::core::fuzz::persist_fuzz_execution_request(&run_dir, &execution_request)?;
+        homeboy::fuzz::persist_fuzz_execution_request(&run_dir, &execution_request)?;
     let runner_output = run_fuzz_extension_script(
         &ctx,
         &args,
@@ -701,7 +701,7 @@ pub(super) fn fuzz_campaign_contract(
         minimize_command: config.and_then(|config| config.minimize_command.clone()),
         result_schema: config
             .and_then(|config| config.result_schema.clone())
-            .unwrap_or_else(|| homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string()),
+            .unwrap_or_else(|| homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string()),
         artifact_retention: config.and_then(|config| config.artifact_retention.clone()),
         unsupported,
     }
@@ -859,7 +859,7 @@ pub(super) fn persist_fuzz_run_evidence(
         )
         .collect::<Vec<_>>();
     let (_run_id, evidence_refs) =
-        homeboy::core::fuzz::persist_fuzz_run_evidence(homeboy::core::fuzz::FuzzRunEvidence {
+        homeboy::fuzz::persist_fuzz_run_evidence(homeboy::fuzz::FuzzRunEvidence {
             run: run.clone(),
             results_path: input.results_path,
             execution_request_path: input.execution_request_path,

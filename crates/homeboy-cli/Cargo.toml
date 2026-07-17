@@ -16,6 +16,7 @@ path = "src/lib.rs"
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-runner = { version = "0.1.0", path = "../homeboy-runner" }
+homeboy-fuzz = { version = "0.1.0", path = "../homeboy-fuzz" }
 homeboy-triage = { version = "0.1.0", path = "../homeboy-triage" }
 homeboy-tunnel = { version = "0.1.0", path = "../homeboy-tunnel" }
 homeboy-cli-contract = { version = "0.1.0", path = "../homeboy-cli-contract" }

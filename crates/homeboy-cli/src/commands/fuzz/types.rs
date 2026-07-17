@@ -8,7 +8,7 @@ use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
     FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL,
 };
-use homeboy::core::fuzz::FuzzGateProfile;
+use homeboy::fuzz::FuzzGateProfile;
 
 const FUZZ_PLAN_LAB_UNSUPPORTED_REASON: &str = "`fuzz plan` is controller-local planning so operators can inspect the generated request before execution. Use `homeboy fuzz plan --lab-runner <runner> ...` to emit exact Lab run commands, or pass `--execute` / use `fuzz run` with the global `--runner <runner> --lab-only` flags to execute on Lab.";
 

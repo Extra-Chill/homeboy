@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::fuzz::*;
-use crate::lifecycle::{LifecycleContract, LifecycleResultMetadata};
+use crate::*;
+use homeboy_core::lifecycle::{LifecycleContract, LifecycleResultMetadata};
 
 #[test]
 fn campaign_serializes_seeds_coverage_findings_artifacts_thresholds_and_provenance() {
@@ -45,11 +45,11 @@ fn campaign_serializes_seeds_coverage_findings_artifacts_thresholds_and_provenan
             duration_budget_seconds: Some(60),
             thresholds: Vec::new(),
             lifecycle: Some(LifecycleContract {
-                schema: crate::lifecycle::LIFECYCLE_CONTRACT_SCHEMA.to_string(),
-                version: crate::lifecycle::LIFECYCLE_CONTRACT_VERSION,
-                phases: vec![crate::lifecycle::LifecyclePhaseContract {
+                schema: homeboy_core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA.to_string(),
+                version: homeboy_core::lifecycle::LIFECYCLE_CONTRACT_VERSION,
+                phases: vec![homeboy_core::lifecycle::LifecyclePhaseContract {
                     id: "snapshot".to_string(),
-                    phase: crate::lifecycle::LifecyclePhaseKind::Snapshot,
+                    phase: homeboy_core::lifecycle::LifecyclePhaseKind::Snapshot,
                     label: None,
                     extension_hook: Some("runtime.snapshot".to_string()),
                     command: None,
@@ -208,19 +208,19 @@ fn campaign_serializes_seeds_coverage_findings_artifacts_thresholds_and_provenan
             extra: BTreeMap::new(),
         }),
         lifecycle: Some(LifecycleResultMetadata {
-            schema: crate::lifecycle::LIFECYCLE_RESULT_SCHEMA.to_string(),
-            version: crate::lifecycle::LIFECYCLE_CONTRACT_VERSION,
-            phases: vec![crate::lifecycle::LifecyclePhaseResult {
+            schema: homeboy_core::lifecycle::LIFECYCLE_RESULT_SCHEMA.to_string(),
+            version: homeboy_core::lifecycle::LIFECYCLE_CONTRACT_VERSION,
+            phases: vec![homeboy_core::lifecycle::LifecyclePhaseResult {
                 id: "snapshot".to_string(),
-                phase: crate::lifecycle::LifecyclePhaseKind::Snapshot,
-                status: crate::lifecycle::LifecyclePhaseStatus::Passed,
+                phase: homeboy_core::lifecycle::LifecyclePhaseKind::Snapshot,
+                status: homeboy_core::lifecycle::LifecyclePhaseStatus::Passed,
                 snapshot_ref: Some("snapshot-1".to_string()),
                 started_at: None,
                 finished_at: None,
                 message: None,
             }],
-            snapshot_refs: vec![crate::lifecycle::LifecycleSnapshotRef {
-                schema: crate::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA.to_string(),
+            snapshot_refs: vec![homeboy_core::lifecycle::LifecycleSnapshotRef {
+                schema: homeboy_core::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA.to_string(),
                 id: "snapshot-1".to_string(),
                 kind: "database".to_string(),
                 phase_id: Some("snapshot".to_string()),
@@ -261,10 +261,10 @@ fn campaign_serializes_seeds_coverage_findings_artifacts_thresholds_and_provenan
     assert_eq!(value["replay"]["schema"], FUZZ_REPLAY_SCHEMA);
     assert_eq!(
         value["workloads"][0]["lifecycle"]["schema"],
-        crate::lifecycle::LIFECYCLE_CONTRACT_SCHEMA
+        homeboy_core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA
     );
     assert_eq!(
         value["lifecycle"]["snapshot_refs"][0]["schema"],
-        crate::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA
+        homeboy_core::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA
     );
 }

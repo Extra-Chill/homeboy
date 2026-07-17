@@ -6,10 +6,10 @@ use std::path::Path;
 use clap::Args;
 use serde_json::Value;
 
-use homeboy::core::fuzz::{FuzzResultEnvelope, FUZZ_RESULT_ENVELOPE_SCHEMA};
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{ArtifactRecord, ObservationStore};
 use homeboy::core::Error;
+use homeboy::fuzz::{FuzzResultEnvelope, FUZZ_RESULT_ENVELOPE_SCHEMA};
 
 use crate::commands::fuzz::{compare_envelopes, FuzzCompareHotspotPolicy};
 

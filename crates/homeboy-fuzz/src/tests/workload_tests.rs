@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::fuzz::*;
+use crate::*;
 
 #[test]
 fn workload_from_value_normalizes_structural_fields() {

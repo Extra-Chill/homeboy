@@ -2,7 +2,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 use homeboy::core::extension::ExtensionCapability;
-use homeboy::core::fuzz::{
+use homeboy::fuzz::{
     default_fuzz_gates, default_fuzz_required_artifacts, fuzz_core_contract,
     fuzz_gate_profile_contract, merge_fuzz_target_inventory, parse_fuzz_target_inventory_file,
     FuzzGateProfile, FuzzProvenance, FuzzTargetInventory, FUZZ_PROVENANCE_SCHEMA,

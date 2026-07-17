@@ -8,13 +8,13 @@ use clap::Args;
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::core::fuzz::{
-    compare_fuzz_hotspot_cohorts, parse_fuzz_hotspot_set_value, parse_fuzz_observation_set_value,
-    rank_fuzz_observation_set_hotspots, FuzzHotspotCohortComparison, FuzzHotspotCohortItem,
-};
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use homeboy::core::Error;
+use homeboy::fuzz::{
+    compare_fuzz_hotspot_cohorts, parse_fuzz_hotspot_set_value, parse_fuzz_observation_set_value,
+    rank_fuzz_observation_set_hotspots, FuzzHotspotCohortComparison, FuzzHotspotCohortItem,
+};
 
 use super::common::SkippedArtifactRow;
 use super::{CmdResult, RunsOutput};

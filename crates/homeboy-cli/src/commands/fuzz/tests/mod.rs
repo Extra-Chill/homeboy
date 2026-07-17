@@ -32,19 +32,19 @@ use super::{run_contract, run_discover, FuzzArgs};
 use clap::Parser;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::FuzzConfig;
-use homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND;
-use homeboy::core::fuzz::{persist_fuzz_execution_request, persist_fuzz_sequence_plan};
-use homeboy::core::fuzz::{
-    FuzzCampaign, FuzzCase, FuzzCoverageSkip, FuzzCoverageSummary, FuzzExecutionRequest,
-    FuzzFinding, FuzzFindingStatus, FuzzSamplingRequest, FuzzSequencePlan, FuzzTargetInventory,
-    IsolationProof,
-};
 use homeboy::core::lifecycle::{
     LifecyclePhaseKind, LifecyclePhaseResult, LifecyclePhaseStatus, LifecycleResultMetadata,
     LIFECYCLE_CONTRACT_VERSION, LIFECYCLE_RESULT_SCHEMA,
 };
 use homeboy::core::observation::{ObservationStore, RunRecord};
 use homeboy::core::rig::RigSpec;
+use homeboy::fuzz::FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND;
+use homeboy::fuzz::{persist_fuzz_execution_request, persist_fuzz_sequence_plan};
+use homeboy::fuzz::{
+    FuzzCampaign, FuzzCase, FuzzCoverageSkip, FuzzCoverageSummary, FuzzExecutionRequest,
+    FuzzFinding, FuzzFindingStatus, FuzzSamplingRequest, FuzzSequencePlan, FuzzTargetInventory,
+    IsolationProof,
+};
 use homeboy::test_support::with_isolated_home;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -64,7 +64,7 @@ struct FuzzCli {
 
 fn zero_coverage_summary() -> FuzzCoverageSummary {
     FuzzCoverageSummary {
-        schema: homeboy::core::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+        schema: homeboy::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
         declared_targets: 0,
         executable_targets: 0,
         proven_targets: 0,
@@ -131,8 +131,8 @@ fn planner_args() -> FuzzPlanArgs {
 
 fn campaign_base_request() -> FuzzExecutionRequest {
     FuzzExecutionRequest {
-        schema: homeboy::core::fuzz::FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
-        version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        schema: homeboy::fuzz::FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
+        version: homeboy::fuzz::FUZZ_CONTRACT_VERSION,
         id: "base-request".to_string(),
         component: "component-a".to_string(),
         rig_id: Some("generic-rig".to_string()),
@@ -293,11 +293,11 @@ fn write_isolation_proof(path: &Path) {
 
 fn empty_fuzz_campaign() -> FuzzCampaign {
     FuzzCampaign {
-        schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
-        version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        schema: homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+        version: homeboy::fuzz::FUZZ_CONTRACT_VERSION,
         id: "campaign-1".to_string(),
         title: None,
-        safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+        safety_class: homeboy::fuzz::FuzzSafetyClass::ReadOnly,
         surfaces: Vec::new(),
         targets: Vec::new(),
         workloads: Vec::new(),
@@ -319,8 +319,8 @@ fn empty_fuzz_campaign() -> FuzzCampaign {
 fn artifact_complete_fuzz_campaign() -> FuzzCampaign {
     let mut campaign = empty_fuzz_campaign();
     campaign.coverage_summary = Some(zero_coverage_summary());
-    campaign.artifacts = vec![homeboy::core::fuzz::FuzzArtifact {
-        schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+    campaign.artifacts = vec![homeboy::fuzz::FuzzArtifact {
+        schema: homeboy::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
         id: "case-log".to_string(),
         kind: "case_log".to_string(),
         artifact: None,

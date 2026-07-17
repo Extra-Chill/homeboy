@@ -15,13 +15,13 @@ use crate::runners::{
     RunnerKind,
 };
 use homeboy_core::engine::shell;
-use homeboy_core::fuzz::{
-    parse_fuzz_observation_set_value, rank_fuzz_observation_set_hotspots, FUZZ_HOTSPOT_SET_SCHEMA,
-    FUZZ_OBSERVATION_SET_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA,
-};
 use homeboy_core::observation::{ArtifactRecord, ObservationStore};
 use homeboy_core::performance_hotspots::PERFORMANCE_HOTSPOTS_SUMMARY_SCHEMA;
 use homeboy_core::{server, Error};
+use homeboy_fuzz::{
+    parse_fuzz_observation_set_value, rank_fuzz_observation_set_hotspots, FUZZ_HOTSPOT_SET_SCHEMA,
+    FUZZ_OBSERVATION_SET_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA,
+};
 
 /// Promote declared file outputs into observation-store artifacts.
 pub fn promote_runner_exec_artifacts(

@@ -3,11 +3,11 @@ use super::*;
 #[test]
 fn fuzz_gate_evaluation_requires_case_log_evidence() {
     let campaign = FuzzCampaign {
-        schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
-        version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        schema: homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+        version: homeboy::fuzz::FUZZ_CONTRACT_VERSION,
         id: "campaign-1".to_string(),
         title: None,
-        safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+        safety_class: homeboy::fuzz::FuzzSafetyClass::ReadOnly,
         surfaces: Vec::new(),
         targets: Vec::new(),
         workloads: Vec::new(),
@@ -46,11 +46,11 @@ fn fuzz_gate_evaluation_requires_case_log_evidence() {
 #[test]
 fn fuzz_gate_evaluation_accepts_case_level_fuzz_report_evidence() {
     let campaign = FuzzCampaign {
-        schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
-        version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        schema: homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+        version: homeboy::fuzz::FUZZ_CONTRACT_VERSION,
         id: "campaign-1".to_string(),
         title: None,
-        safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+        safety_class: homeboy::fuzz::FuzzSafetyClass::ReadOnly,
         surfaces: Vec::new(),
         targets: Vec::new(),
         workloads: Vec::new(),
@@ -59,8 +59,8 @@ fn fuzz_gate_evaluation_accepts_case_level_fuzz_report_evidence() {
         coverage: Vec::new(),
         coverage_summary: Some(zero_coverage_summary()),
         findings: Vec::new(),
-        artifacts: vec![homeboy::core::fuzz::FuzzArtifact {
-            schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+        artifacts: vec![homeboy::fuzz::FuzzArtifact {
+            schema: homeboy::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
             id: "case-evidence-report".to_string(),
             kind: "fuzz_report".to_string(),
             artifact: None,
@@ -86,11 +86,11 @@ fn fuzz_gate_evaluation_accepts_case_level_fuzz_report_evidence() {
 #[test]
 fn fuzz_gate_evaluation_accepts_metadata_artifact_refs() {
     let campaign = FuzzCampaign {
-        schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
-        version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        schema: homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+        version: homeboy::fuzz::FUZZ_CONTRACT_VERSION,
         id: "campaign-1".to_string(),
         title: None,
-        safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+        safety_class: homeboy::fuzz::FuzzSafetyClass::ReadOnly,
         surfaces: Vec::new(),
         targets: Vec::new(),
         workloads: Vec::new(),
@@ -139,19 +139,19 @@ fn fuzz_gate_evaluation_accepts_metadata_artifact_refs() {
 #[test]
 fn fuzz_gate_evaluation_accepts_zero_declared_coverage_summary() {
     let campaign = FuzzCampaign {
-        schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
-        version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        schema: homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+        version: homeboy::fuzz::FUZZ_CONTRACT_VERSION,
         id: "campaign-1".to_string(),
         title: None,
-        safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+        safety_class: homeboy::fuzz::FuzzSafetyClass::ReadOnly,
         surfaces: Vec::new(),
         targets: Vec::new(),
         workloads: Vec::new(),
         cases: Vec::new(),
         seeds: Vec::new(),
         coverage: Vec::new(),
-        coverage_summary: Some(homeboy::core::fuzz::FuzzCoverageSummary {
-            schema: homeboy::core::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+        coverage_summary: Some(homeboy::fuzz::FuzzCoverageSummary {
+            schema: homeboy::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
             declared_targets: 0,
             executable_targets: 0,
             proven_targets: 0,
@@ -167,8 +167,8 @@ fn fuzz_gate_evaluation_accepts_zero_declared_coverage_summary() {
             extra: std::collections::BTreeMap::new(),
         }),
         findings: Vec::new(),
-        artifacts: vec![homeboy::core::fuzz::FuzzArtifact {
-            schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+        artifacts: vec![homeboy::fuzz::FuzzArtifact {
+            schema: homeboy::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
             id: "case-log".to_string(),
             kind: "case_log".to_string(),
             artifact: None,
@@ -207,11 +207,11 @@ fn fuzz_gate_evaluation_accepts_zero_declared_coverage_summary() {
 #[test]
 fn fuzz_coverage_completeness_fails_closed_without_summary() {
     let campaign = FuzzCampaign {
-        schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
-        version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        schema: homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+        version: homeboy::fuzz::FUZZ_CONTRACT_VERSION,
         id: "campaign-1".to_string(),
         title: None,
-        safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+        safety_class: homeboy::fuzz::FuzzSafetyClass::ReadOnly,
         surfaces: Vec::new(),
         targets: Vec::new(),
         workloads: Vec::new(),
@@ -220,8 +220,8 @@ fn fuzz_coverage_completeness_fails_closed_without_summary() {
         coverage: Vec::new(),
         coverage_summary: None,
         findings: Vec::new(),
-        artifacts: vec![homeboy::core::fuzz::FuzzArtifact {
-            schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+        artifacts: vec![homeboy::fuzz::FuzzArtifact {
+            schema: homeboy::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
             id: "case-log".to_string(),
             kind: "case_log".to_string(),
             artifact: None,
@@ -258,19 +258,19 @@ fn fuzz_coverage_completeness_fails_closed_without_summary() {
 #[test]
 fn fuzz_gate_evaluation_requires_complete_target_and_operation_coverage() {
     let mut campaign = FuzzCampaign {
-        schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
-        version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        schema: homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+        version: homeboy::fuzz::FUZZ_CONTRACT_VERSION,
         id: "campaign-1".to_string(),
         title: None,
-        safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+        safety_class: homeboy::fuzz::FuzzSafetyClass::ReadOnly,
         surfaces: Vec::new(),
         targets: Vec::new(),
         workloads: Vec::new(),
         cases: Vec::new(),
         seeds: Vec::new(),
         coverage: Vec::new(),
-        coverage_summary: Some(homeboy::core::fuzz::FuzzCoverageSummary {
-            schema: homeboy::core::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+        coverage_summary: Some(homeboy::fuzz::FuzzCoverageSummary {
+            schema: homeboy::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
             declared_targets: 2,
             executable_targets: 2,
             proven_targets: 1,
@@ -286,8 +286,8 @@ fn fuzz_gate_evaluation_requires_complete_target_and_operation_coverage() {
             extra: std::collections::BTreeMap::new(),
         }),
         findings: Vec::new(),
-        artifacts: vec![homeboy::core::fuzz::FuzzArtifact {
-            schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+        artifacts: vec![homeboy::fuzz::FuzzArtifact {
+            schema: homeboy::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
             id: "case-log".to_string(),
             kind: "case_log".to_string(),
             artifact: None,
@@ -322,36 +322,36 @@ fn fuzz_gate_evaluation_requires_complete_target_and_operation_coverage() {
 #[test]
 fn fuzz_coverage_completeness_reports_summary_counts() {
     let campaign = FuzzCampaign {
-        schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
-        version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        schema: homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+        version: homeboy::fuzz::FUZZ_CONTRACT_VERSION,
         id: "campaign-1".to_string(),
         title: None,
-        safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+        safety_class: homeboy::fuzz::FuzzSafetyClass::ReadOnly,
         surfaces: Vec::new(),
         targets: Vec::new(),
         workloads: Vec::new(),
         cases: Vec::new(),
         seeds: Vec::new(),
         coverage: Vec::new(),
-        coverage_summary: Some(homeboy::core::fuzz::FuzzCoverageSummary {
-            schema: homeboy::core::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+        coverage_summary: Some(homeboy::fuzz::FuzzCoverageSummary {
+            schema: homeboy::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
             declared_targets: 2,
             executable_targets: 1,
             proven_targets: 1,
             declared_operations: 0,
             executable_operations: 0,
             proven_operations: 0,
-            skipped_targets: vec![homeboy::core::fuzz::FuzzCoverageSkip {
+            skipped_targets: vec![homeboy::fuzz::FuzzCoverageSkip {
                 id: "target-2".to_string(),
                 reason: "auth_required".to_string(),
                 label: None,
             }],
-            skipped_operations: vec![homeboy::core::fuzz::FuzzCoverageSkip {
+            skipped_operations: vec![homeboy::fuzz::FuzzCoverageSkip {
                 id: "operation-2".to_string(),
                 reason: "config_required".to_string(),
                 label: None,
             }],
-            surface_summaries: vec![homeboy::core::fuzz::FuzzCoverageGroupSummary {
+            surface_summaries: vec![homeboy::fuzz::FuzzCoverageGroupSummary {
                 id: "surface-a".to_string(),
                 kind: "api".to_string(),
                 label: Some("Surface A".to_string()),
@@ -361,12 +361,12 @@ fn fuzz_coverage_completeness_reports_summary_counts() {
                 declared_operations: 2,
                 executable_operations: 1,
                 proven_operations: 1,
-                skipped_targets: vec![homeboy::core::fuzz::FuzzCoverageSkip {
+                skipped_targets: vec![homeboy::fuzz::FuzzCoverageSkip {
                     id: "target-2".to_string(),
                     reason: "auth_required".to_string(),
                     label: None,
                 }],
-                skipped_operations: vec![homeboy::core::fuzz::FuzzCoverageSkip {
+                skipped_operations: vec![homeboy::fuzz::FuzzCoverageSkip {
                     id: "operation-2".to_string(),
                     reason: "config_required".to_string(),
                     label: None,
@@ -374,7 +374,7 @@ fn fuzz_coverage_completeness_reports_summary_counts() {
                 metadata: serde_json::Value::Null,
                 extra: std::collections::BTreeMap::new(),
             }],
-            kind_summaries: vec![homeboy::core::fuzz::FuzzCoverageGroupSummary {
+            kind_summaries: vec![homeboy::fuzz::FuzzCoverageGroupSummary {
                 id: "read".to_string(),
                 kind: "operation_kind".to_string(),
                 label: None,

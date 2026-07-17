@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::fuzz::*;
+use crate::*;
 
 #[test]
 fn surface_normalizes_optional_fields_and_nested_inputs() {

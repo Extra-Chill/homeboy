@@ -1,15 +1,15 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use homeboy::core::fuzz::{
+use homeboy::core::performance_hotspots::{
+    summarize_performance_hotspots, PerformanceHotspotSummary, PerformanceMetricPoint,
+};
+use homeboy::fuzz::{
     fuzz_gate_profile_contract, parse_fuzz_case_log_file, parse_fuzz_observation_set_value,
     parse_fuzz_results_file, parse_fuzz_target_inventory_file, rank_fuzz_observation_set_hotspots,
     FuzzCampaign, FuzzExecutionRequest, FuzzGateProfile, FuzzHotspotSet, FuzzProvenance,
     FuzzResultEnvelope, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
     FUZZ_RESULT_ENVELOPE_SCHEMA,
-};
-use homeboy::core::performance_hotspots::{
-    summarize_performance_hotspots, PerformanceHotspotSummary, PerformanceMetricPoint,
 };
 
 use super::types::{
@@ -64,7 +64,7 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
     let status = gate_status(&gates);
     envelope.status = status.clone();
 
-    let evidence_refs = homeboy::core::fuzz::report_fuzz_result_envelope(
+    let evidence_refs = homeboy::fuzz::report_fuzz_result_envelope(
         args.run.run_id.as_deref(),
         &envelope,
         args.output_envelope.as_deref(),
@@ -127,9 +127,9 @@ pub(super) fn fuzz_result_envelope_from_campaign(
             args: run.args.clone(),
             required_artifacts: required_artifacts.clone(),
             gates: gates.clone(),
-            sampling: homeboy::core::fuzz::FuzzSamplingRequest {
+            sampling: homeboy::fuzz::FuzzSamplingRequest {
                 seed: run.seed.clone(),
-                replay: homeboy::core::fuzz::FuzzSamplingReplayDeterminism {
+                replay: homeboy::fuzz::FuzzSamplingReplayDeterminism {
                     deterministic: true,
                     seed_source: if run.seed.is_some() {
                         "caller"
@@ -159,8 +159,8 @@ pub(super) fn fuzz_result_envelope_from_campaign(
 fn report_gate_contract(
     profile: super::types::FuzzGateProfileArg,
 ) -> (
-    Vec<homeboy::core::fuzz::FuzzRequiredArtifact>,
-    Vec<homeboy::core::fuzz::FuzzGate>,
+    Vec<homeboy::fuzz::FuzzRequiredArtifact>,
+    Vec<homeboy::fuzz::FuzzGate>,
 ) {
     fuzz_gate_profile_contract(profile.as_core())
 }
@@ -180,7 +180,7 @@ pub(super) fn fuzz_result_metadata(
 
 pub(super) fn fuzz_provenance(run_id: Option<String>) -> FuzzProvenance {
     FuzzProvenance {
-        schema: homeboy::core::fuzz::FUZZ_PROVENANCE_SCHEMA.to_string(),
+        schema: homeboy::fuzz::FUZZ_PROVENANCE_SCHEMA.to_string(),
         producer: "homeboy fuzz".to_string(),
         producer_version: None,
         invocation: None,
@@ -529,9 +529,9 @@ impl FuzzGateMetrics {
 }
 
 fn coverage_ratio(
-    summary: Option<&homeboy::core::fuzz::FuzzCoverageSummary>,
-    covered: impl Fn(&homeboy::core::fuzz::FuzzCoverageSummary) -> u64,
-    total: impl Fn(&homeboy::core::fuzz::FuzzCoverageSummary) -> u64,
+    summary: Option<&homeboy::fuzz::FuzzCoverageSummary>,
+    covered: impl Fn(&homeboy::fuzz::FuzzCoverageSummary) -> u64,
+    total: impl Fn(&homeboy::fuzz::FuzzCoverageSummary) -> u64,
 ) -> f64 {
     let Some(summary) = summary else {
         return 0.0;
@@ -742,7 +742,7 @@ fn collect_value_metric_points(
 }
 
 fn fuzz_coverage_selector_summary(
-    summary: &homeboy::core::fuzz::FuzzCoverageGroupSummary,
+    summary: &homeboy::fuzz::FuzzCoverageGroupSummary,
 ) -> FuzzCoverageSelectorSummaryOutput {
     let mut skipped_reason_counts = BTreeMap::new();
     accumulate_skip_reason_counts(&mut skipped_reason_counts, &summary.skipped_targets);
@@ -779,7 +779,7 @@ fn count_ratio(covered: u64, total: u64) -> f64 {
 
 fn accumulate_skip_reason_counts(
     counts: &mut BTreeMap<String, usize>,
-    skips: &[homeboy::core::fuzz::FuzzCoverageSkip],
+    skips: &[homeboy::fuzz::FuzzCoverageSkip],
 ) {
     for skip in skips {
         let reason = skip.reason.trim();
@@ -793,7 +793,7 @@ fn open_finding_count(campaign: &FuzzCampaign) -> usize {
     campaign
         .findings
         .iter()
-        .filter(|finding| finding.status == homeboy::core::fuzz::FuzzFindingStatus::Open)
+        .filter(|finding| finding.status == homeboy::fuzz::FuzzFindingStatus::Open)
         .count()
 }
 
@@ -807,16 +807,14 @@ pub(super) fn gate_status(gates: &[FuzzGateEvaluation]) -> String {
 
 fn threshold_passes(
     observed: f64,
-    operator: homeboy::core::fuzz::FuzzThresholdOperator,
+    operator: homeboy::fuzz::FuzzThresholdOperator,
     expected: f64,
 ) -> bool {
     match operator {
-        homeboy::core::fuzz::FuzzThresholdOperator::GreaterThan => observed > expected,
-        homeboy::core::fuzz::FuzzThresholdOperator::GreaterThanOrEqual => observed >= expected,
-        homeboy::core::fuzz::FuzzThresholdOperator::LessThan => observed < expected,
-        homeboy::core::fuzz::FuzzThresholdOperator::LessThanOrEqual => observed <= expected,
-        homeboy::core::fuzz::FuzzThresholdOperator::Equal => {
-            (observed - expected).abs() < f64::EPSILON
-        }
+        homeboy::fuzz::FuzzThresholdOperator::GreaterThan => observed > expected,
+        homeboy::fuzz::FuzzThresholdOperator::GreaterThanOrEqual => observed >= expected,
+        homeboy::fuzz::FuzzThresholdOperator::LessThan => observed < expected,
+        homeboy::fuzz::FuzzThresholdOperator::LessThanOrEqual => observed <= expected,
+        homeboy::fuzz::FuzzThresholdOperator::Equal => (observed - expected).abs() < f64::EPSILON,
     }
 }

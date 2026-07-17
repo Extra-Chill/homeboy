@@ -104,7 +104,7 @@ fn fuzz_plan_selects_inventory_targets_operations_seeds_and_budgets() {
     );
     assert_eq!(
         metadata["sampling"]["schema"],
-        serde_json::json!(homeboy::core::fuzz::FUZZ_SAMPLING_REQUEST_SCHEMA)
+        serde_json::json!(homeboy::fuzz::FUZZ_SAMPLING_REQUEST_SCHEMA)
     );
     assert_eq!(metadata["sampling"]["strategy"], serde_json::json!("all"));
     assert_eq!(metadata["sampling"]["case_budget"], serde_json::json!(25));
@@ -234,7 +234,7 @@ fn fuzz_plan_cli_parses_action_model_and_exploration_policy_contracts() {
 
     assert_eq!(
         metadata["action_model"]["schema"],
-        serde_json::json!(homeboy::core::fuzz::FUZZ_ACTION_MODEL_SCHEMA)
+        serde_json::json!(homeboy::fuzz::FUZZ_ACTION_MODEL_SCHEMA)
     );
     assert_eq!(
         metadata["action_model"]["actions"][0]["input_generators"],
@@ -242,7 +242,7 @@ fn fuzz_plan_cli_parses_action_model_and_exploration_policy_contracts() {
     );
     assert_eq!(
         metadata["exploration_policy"]["schema"],
-        serde_json::json!(homeboy::core::fuzz::FUZZ_EXPLORATION_POLICY_SCHEMA)
+        serde_json::json!(homeboy::fuzz::FUZZ_EXPLORATION_POLICY_SCHEMA)
     );
     assert_eq!(
         metadata["exploration_policy"]["reset_cadence"],
@@ -819,7 +819,7 @@ fn fuzz_plan_includes_destructive_operations_with_explicit_isolation_proof() {
 #[test]
 fn fuzz_plan_workload_safety_participates_in_destructive_skip() {
     let mut inventory = planner_inventory();
-    inventory.workloads[0].safety_class = homeboy::core::fuzz::FuzzSafetyClass::Destructive;
+    inventory.workloads[0].safety_class = homeboy::fuzz::FuzzSafetyClass::Destructive;
     let mut args = planner_args();
     args.run.workload_id = Some("api-fuzz".to_string());
 
@@ -1008,7 +1008,7 @@ fn fuzz_validate_accepts_case_log_artifact() {
     std::fs::write(
         &results_file,
         serde_json::json!({
-            "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+            "schema": homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA,
             "id": "campaign-1",
             "safety_class": "read_only",
             "coverage_summary": {
@@ -1056,7 +1056,7 @@ fn fuzz_validate_rejects_invalid_case_log_artifact() {
     std::fs::write(
         &results_file,
         serde_json::json!({
-            "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+            "schema": homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA,
             "id": "campaign-1",
             "safety_class": "read_only"
         })
@@ -1088,7 +1088,7 @@ fn fuzz_validate_measurement_profile_is_non_blocking_but_strict_profile_blocks()
     std::fs::write(
         &results_file,
         serde_json::json!({
-            "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+            "schema": homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA,
             "id": "campaign-1",
             "safety_class": "read_only",
             "findings": [{
@@ -1152,7 +1152,7 @@ fn fuzz_output_contract_has_stable_variant_discriminators() {
     assert_eq!(contract["variant"], "contract");
     assert_eq!(
         contract["contract"]["schemas"]["result_envelope"],
-        homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA
+        homeboy::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA
     );
 
     let list = serde_json::to_value(FuzzOutput::List(FuzzListOutput {

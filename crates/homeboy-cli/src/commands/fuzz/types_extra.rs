@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 
 use homeboy::core::artifact_ref::EvidenceRef;
 use homeboy::core::evidence_manifest::TrackerRef;
-use homeboy::core::fuzz::{
+use homeboy::core::performance_hotspots::PerformanceHotspotSummary;
+use homeboy::fuzz::{
     FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzHotspotSet, FuzzReplayMetadata,
     FuzzRequiredArtifact, FuzzResultEnvelope, FuzzTargetInventory,
 };
-use homeboy::core::performance_hotspots::PerformanceHotspotSummary;
 
 #[derive(Serialize)]
 #[serde(tag = "variant", rename_all = "snake_case")]
@@ -90,7 +90,7 @@ pub struct FuzzInspectOutput {
     /// Raw text body when the result is not valid JSON (or `--raw` text fallback).
     pub raw: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub envelope_summary: Option<homeboy::core::fuzz::FuzzResultEnvelopeArtifactSummary>,
+    pub envelope_summary: Option<homeboy::fuzz::FuzzResultEnvelopeArtifactSummary>,
     pub candidates: Vec<FuzzInspectCandidate>,
     pub next_steps: Vec<String>,
 }
@@ -110,7 +110,7 @@ pub struct FuzzInspectCandidate {
 #[derive(Serialize)]
 pub struct FuzzContractOutput {
     pub command: String,
-    pub contract: homeboy::core::fuzz::FuzzCoreContract,
+    pub contract: homeboy::fuzz::FuzzCoreContract,
     pub required_artifacts: Vec<FuzzRequiredArtifact>,
     pub gates: Vec<FuzzGate>,
     pub gate_profiles: BTreeMap<String, FuzzContractGateProfileOutput>,
