@@ -54,6 +54,10 @@ pub enum AuditFinding {
     OrphanedTest,
     /// Test method has a placeholder/no-op body that does not exercise product code.
     VacuousTest,
+    /// Test method's entire body is a call to another test in the same file,
+    /// re-running that test for no added coverage — usually a leftover rename
+    /// shim.
+    RedundantTestWrapper,
     /// Comment starts with TODO/FIXME/HACK/XXX marker.
     TodoMarker,
     /// Comment starts with stale or legacy phrasing.
@@ -212,6 +216,7 @@ impl AuditFinding {
             "missing_test_method",
             "orphaned_test",
             "vacuous_test",
+            "redundant_test_wrapper",
             "todo_marker",
             "legacy_comment",
             "layer_ownership_violation",

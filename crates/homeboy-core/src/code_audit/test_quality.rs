@@ -97,6 +97,7 @@ fn detect_vacuous_tests(file: &str, content: &str) -> Vec<Finding> {
         .collect::<Vec<_>>();
 
     findings.extend(detect_duplicate_test_names(&file_path, &tests));
+    findings.extend(detect_redundant_test_wrappers(&file_path, &tests));
     if !inline_source_file {
         findings.extend(detect_unused_product_imports(
             &file_path,
@@ -236,6 +237,61 @@ fn detect_duplicate_test_names(file: &str, tests: &[TestFunction]) -> Vec<Findin
     }
 
     findings
+}
+
+/// Flag a test whose entire body is a bare call to another `#[test]` in the
+/// same file.
+///
+/// Such a wrapper re-runs the target test verbatim, adding no coverage — it is
+/// almost always a rename shim left behind when a test was renamed but the old
+/// name was kept as a forwarding stub. The target already executes on its own,
+/// so the wrapper just doubles the work (and doubles any flakiness for
+/// expensive tests that bind sockets, spawn threads, or touch the filesystem).
+///
+/// The check is deliberately narrow: it only fires when the body, after
+/// stripping comments, is exactly one statement of the form `other_name();`
+/// where `other_name` is another test in the same file. A wrapper that passes
+/// arguments, asserts, or does any additional work is a legitimate helper and
+/// is left alone.
+fn detect_redundant_test_wrappers(file: &str, tests: &[TestFunction]) -> Vec<Finding> {
+    let test_names: BTreeSet<&str> = tests.iter().map(|test| test.name.as_str()).collect();
+    let call_pattern = regex::Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*;?$").unwrap();
+
+    tests
+        .iter()
+        .filter_map(|test| {
+            let body = strip_comments(&test.body);
+            let statements: Vec<&str> = body
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect();
+            if statements.len() != 1 {
+                return None;
+            }
+
+            let captures = call_pattern.captures(statements[0])?;
+            let target = captures.get(1)?.as_str();
+            if target == test.name || !test_names.contains(target) {
+                return None;
+            }
+
+            Some(Finding {
+                convention: "test_quality".to_string(),
+                severity: Severity::Info,
+                file: file.to_string(),
+                description: format!(
+                    "Redundant test `{}` at line {} only calls another test `{}` in the same file, re-running it for no added coverage",
+                    test.name, test.line, target
+                ),
+                suggestion: format!(
+                    "Delete `{}` (the target `{}` already runs), or give it distinct arguments and assertions",
+                    test.name, target
+                ),
+                kind: AuditFinding::RedundantTestWrapper,
+            })
+        })
+        .collect()
 }
 
 fn detect_unused_product_imports(
@@ -786,6 +842,119 @@ fn duplicate_behavior() {
         assert!(findings.iter().any(|finding| finding
             .description
             .contains("Duplicate test name `duplicate_behavior`")));
+    }
+
+    #[test]
+    fn flags_test_that_only_calls_another_test_in_same_file() {
+        let findings = detect_vacuous_tests(
+            "tests/core/wiring_test.rs",
+            r#"
+#[test]
+fn test_run() {
+    real_behavior_test();
+}
+
+#[test]
+fn real_behavior_test() {
+    crate::thing::run();
+    assert!(true);
+}
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.kind == AuditFinding::RedundantTestWrapper
+                && finding.description.contains("Redundant test `test_run`")
+                && finding.description.contains("`real_behavior_test`")
+        }));
+    }
+
+    #[test]
+    fn keeps_test_that_calls_a_non_test_helper() {
+        // Calling a shared helper (not itself a #[test]) is a normal fixture
+        // pattern, not a redundant wrapper.
+        let findings = detect_vacuous_tests(
+            "tests/core/wiring_test.rs",
+            r#"
+#[test]
+fn exercises_behavior() {
+    run_shared_fixture();
+}
+"#,
+        );
+
+        assert!(findings
+            .iter()
+            .all(|finding| finding.kind != AuditFinding::RedundantTestWrapper));
+    }
+
+    #[test]
+    fn keeps_test_that_delegates_with_arguments() {
+        // A one-liner that passes arguments to another test is doing real work
+        // (a parameterized case), not blindly re-running it.
+        let findings = detect_vacuous_tests(
+            "tests/core/wiring_test.rs",
+            r#"
+#[test]
+fn cold_start() {
+    shared_case("cold");
+}
+
+#[test]
+fn shared_case(mode: &str) {
+    crate::thing::run(mode);
+}
+"#,
+        );
+
+        assert!(findings
+            .iter()
+            .all(|finding| finding.kind != AuditFinding::RedundantTestWrapper));
+    }
+
+    #[test]
+    fn flags_redundant_wrapper_directly() {
+        let tests = extract_test_functions(
+            r#"
+#[test]
+fn test_run() {
+    get_returns_status_headers_and_json_body();
+}
+
+#[test]
+fn get_returns_status_headers_and_json_body() {
+    crate::http::run();
+    assert!(true);
+}
+"#,
+        );
+        let findings = detect_redundant_test_wrappers("src/http_request.rs", &tests);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, AuditFinding::RedundantTestWrapper);
+        assert!(findings[0]
+            .description
+            .contains("only calls another test `get_returns_status_headers_and_json_body`"));
+    }
+
+    #[test]
+    fn keeps_multi_statement_test_that_starts_with_a_call() {
+        let tests = extract_test_functions(
+            r#"
+#[test]
+fn setup_then_assert() {
+    helper_test();
+    assert_eq!(1, 1);
+}
+
+#[test]
+fn helper_test() {
+    crate::thing::run();
+}
+"#,
+        );
+
+        assert!(detect_redundant_test_wrappers("tests/core/wiring_test.rs", &tests).is_empty());
     }
 
     #[test]
