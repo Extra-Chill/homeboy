@@ -256,7 +256,7 @@ fn release_preflight_validates_the_private_workspace_build_before_mutating_relea
         "the root package must consume the extracted core crate as a private path dependency"
     );
     assert!(
-        cargo_manifest().contains("homeboy-lab-contract = { path = \"crates/homeboy-lab-contract\" }"),
+        cargo_manifest().contains("homeboy-lab-contract = { path = \"crates/contracts/homeboy-lab-contract\" }"),
         "the root package must consume the extracted Lab contract crate as a private path dependency"
     );
     assert!(

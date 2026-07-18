@@ -13,8 +13,8 @@ name = "homeboy_audit_contract"
 path = "src/lib.rs"
 
 [dependencies]
-homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
-homeboy-finding = { version = "0.1.0", path = "../homeboy-finding" }
+homeboy-engine-primitives = { version = "0.1.0", path = "../../homeboy-engine-primitives" }
+homeboy-finding = { version = "0.1.0", path = "../../homeboy-finding" }
 regex = "1.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

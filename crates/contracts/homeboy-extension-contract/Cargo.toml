@@ -13,12 +13,12 @@ name = "homeboy_extension_contract"
 path = "src/lib.rs"
 
 [dependencies]
-homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
+homeboy-error = { version = "0.1.0", path = "../../homeboy-error" }
 homeboy-audit-contract = { version = "0.1.0", path = "../homeboy-audit-contract" }
-homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
-homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
+homeboy-product-identity = { version = "0.1.0", path = "../../homeboy-product-identity" }
+homeboy-engine-primitives = { version = "0.1.0", path = "../../homeboy-engine-primitives" }
 homeboy-lifecycle-contract = { version = "0.1.0", path = "../homeboy-lifecycle-contract" }
-homeboy-finding = { version = "0.1.0", path = "../homeboy-finding" }
+homeboy-finding = { version = "0.1.0", path = "../../homeboy-finding" }
 homeboy-refactor-contract = { version = "0.1.0", path = "../homeboy-refactor-contract" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
