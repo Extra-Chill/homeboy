@@ -71,17 +71,20 @@ pub struct ControllerRuntimePruneResult {
 /// recoverable partial records retain their pins because lifecycle recovery can
 /// still operate on them. The active admission generation is retained as well.
 pub fn retention_report() -> Result<ControllerRuntimeRetentionReport> {
-    retention_report_at(SystemTime::now())
+    let referenced = crate::controller_pin_reference::referenced_controller_pins()?;
+    retention_report_with_references_at(&referenced, SystemTime::now())
 }
 
-fn retention_report_at(now: SystemTime) -> Result<ControllerRuntimeRetentionReport> {
+fn retention_report_with_references_at(
+    referenced: &[PathBuf],
+    now: SystemTime,
+) -> Result<ControllerRuntimeRetentionReport> {
     let root = runtime_root()?;
-    let referenced = crate::controller_pin_reference::referenced_controller_pins()?;
     let mut retained = BTreeSet::new();
 
     for path in referenced {
         if content_addressed_pin_path(&root, &path) {
-            retained.insert(path);
+            retained.insert(path.clone());
         }
     }
 
@@ -194,11 +197,14 @@ pub fn prune_pins(apply: bool) -> Result<ControllerRuntimePruneResult> {
 /// the final reachability check atomic with activation and materialization.
 pub fn cleanup(options: ControllerRuntimeCleanupOptions) -> Result<ControllerRuntimePruneResult> {
     let root = runtime_root()?;
+    // Lifecycle inventory may migrate legacy records, which itself needs the
+    // admission lock. Collect reachability before taking the runtime lock.
+    let referenced = crate::controller_pin_reference::referenced_controller_pins()?;
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
     if options.apply {
         recover_cleanup_tombstones(&root)?;
     }
-    let mut report = retention_report()?;
+    let mut report = retention_report_with_references_at(&referenced, SystemTime::now())?;
     let mut total = report
         .snapshots
         .iter()
@@ -548,6 +554,21 @@ pub fn migrate_legacy_pin(runtime: &Value) -> Result<Value> {
     migrate_legacy_pin_unlocked(runtime)
 }
 
+/// Publish a migrated pin and persist its durable reference while the admission
+/// lock remains held, so cleanup cannot reclaim the new identity in between.
+pub fn migrate_legacy_pin_and_persist(
+    runtime: &Value,
+    persist: impl FnOnce(&Value) -> Result<()>,
+) -> Result<Value> {
+    let root = runtime_root()?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    let migrated = migrate_legacy_pin_unlocked(runtime)?;
+    if &migrated != runtime {
+        persist(&migrated)?;
+    }
+    Ok(migrated)
+}
+
 fn migrate_legacy_pin_unlocked(runtime: &Value) -> Result<Value> {
     let identity =
         required_runtime_string(runtime, "/originating/build_identity", "build identity")?;
@@ -612,6 +633,21 @@ pub fn recover_pin(
     let root = runtime_root()?;
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
     recover_pin_unlocked(runtime, artifact, source)
+}
+
+/// Publish a recovered pin and persist its durable reference under one
+/// admission lock, closing the publication-to-record race with cleanup.
+pub fn recover_pin_and_persist(
+    runtime: &Value,
+    artifact: Option<&Path>,
+    source: Option<&Path>,
+    persist: impl FnOnce(&Value) -> Result<()>,
+) -> Result<Value> {
+    let root = runtime_root()?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    let recovered = recover_pin_unlocked(runtime, artifact, source)?;
+    persist(&recovered)?;
+    Ok(recovered)
 }
 
 fn recover_pin_unlocked(

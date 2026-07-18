@@ -500,12 +500,14 @@ fn migrate_record_controller_runtime(record: &mut AgentTaskRunRecord) -> Result<
     else {
         return Ok(());
     };
-    let migrated = homeboy_core::controller_runtime::migrate_legacy_pin(runtime)?;
-    if &migrated != runtime {
-        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
-            migrated;
-        store::write_record(record)?;
-    }
+    let original = runtime.clone();
+    let migrated =
+        homeboy_core::controller_runtime::migrate_legacy_pin_and_persist(&original, |migrated| {
+            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
+                migrated.clone();
+            store::write_record(record)
+        })?;
+    record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = migrated;
     Ok(())
 }
 
@@ -527,11 +529,17 @@ pub fn recover_controller_runtime(
                 None,
             )
         })?;
-    let recovered = homeboy_core::controller_runtime::recover_pin(runtime, artifact, source)?;
-    // The new pin is verified before this single-record durable mutation.
-    record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
-        recovered.clone();
-    store::write_record(&record)?;
+    let runtime = runtime.clone();
+    let recovered = homeboy_core::controller_runtime::recover_pin_and_persist(
+        &runtime,
+        artifact,
+        source,
+        |recovered| {
+            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
+                recovered.clone();
+            store::write_record(&record)
+        },
+    )?;
     Ok(recovered)
 }
 
