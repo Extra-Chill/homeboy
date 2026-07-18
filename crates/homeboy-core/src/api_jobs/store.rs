@@ -1501,9 +1501,18 @@ impl JobStore {
     }
 
     pub(crate) fn fail(&self, job_id: Uuid, error: impl Into<String>) -> Result<Job> {
+        self.fail_with_data(job_id, error, None)
+    }
+
+    pub(crate) fn fail_with_data(
+        &self,
+        job_id: Uuid,
+        error: impl Into<String>,
+        data: Option<Value>,
+    ) -> Result<Job> {
         self.ensure_transition(job_id, JobStatus::Failed)?;
         let error = error.into();
-        self.append_event(job_id, JobEventKind::Error, Some(error.clone()), None)?;
+        self.append_event(job_id, JobEventKind::Error, Some(error.clone()), data)?;
         self.transition(job_id, JobStatus::Failed, error)
     }
 
@@ -1670,6 +1679,12 @@ impl JobStore {
                 }
                 Err(error) => {
                     let error_message = error.to_string();
+                    let failure_data = serde_json::json!({
+                        "phase": "local_child_worker_failed_before_child_identity",
+                        "error": error_message,
+                        "error_code": error.code.as_str(),
+                        "error_details": error.details,
+                    });
                     if worker_store
                         .get(job_id)
                         .is_ok_and(|job| job.status == JobStatus::Queued)
@@ -1678,15 +1693,10 @@ impl JobStore {
                             job_id,
                             JobEventKind::Progress,
                             Some("local child worker failed before child identity".to_string()),
-                            Some(serde_json::json!({
-                                "phase": "local_child_worker_failed_before_child_identity",
-                                "error": error_message,
-                                "error_code": error.code.as_str(),
-                                "error_details": error.details,
-                            })),
+                            Some(failure_data.clone()),
                         );
                     }
-                    let _ = worker_store.fail(job_id, error_message);
+                    let _ = worker_store.fail_with_data(job_id, error_message, Some(failure_data));
                 }
             }
         });
@@ -1748,6 +1758,12 @@ impl JobStore {
                 }
                 Err(error) => {
                     let error_message = error.to_string();
+                    let failure_data = serde_json::json!({
+                        "phase": "local_child_worker_failed_before_child_identity",
+                        "error": error_message,
+                        "error_code": error.code.as_str(),
+                        "error_details": error.details,
+                    });
                     if worker_store
                         .get(job_id)
                         .is_ok_and(|job| job.status == JobStatus::Queued)
@@ -1756,15 +1772,10 @@ impl JobStore {
                             job_id,
                             JobEventKind::Progress,
                             Some("local child worker failed before child identity".to_string()),
-                            Some(serde_json::json!({
-                                "phase": "local_child_worker_failed_before_child_identity",
-                                "error": error_message,
-                                "error_code": error.code.as_str(),
-                                "error_details": error.details,
-                            })),
+                            Some(failure_data.clone()),
                         );
                     }
-                    let _ = worker_store.fail(job_id, error_message);
+                    let _ = worker_store.fail_with_data(job_id, error_message, Some(failure_data));
                 }
             }
         });

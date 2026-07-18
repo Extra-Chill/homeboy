@@ -381,6 +381,13 @@ fn capacity_queued_agent_task_persists_typed_failure_before_child_identity() {
                 && data["error_details"]["context"] == "execute runner command"
         })
     }));
+    assert!(events.iter().any(|event| {
+        event.kind == JobEventKind::Error
+            && event.data.as_ref().is_some_and(|data| {
+                data["phase"] == "local_child_worker_failed_before_child_identity"
+                    && data["error_details"]["context"] == "execute runner command"
+            })
+    }));
     assert_eq!(
         store.get(runner.job_id).expect("job").status,
         JobStatus::Failed

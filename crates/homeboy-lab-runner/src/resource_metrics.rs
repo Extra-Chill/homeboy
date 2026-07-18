@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::process::{Command, Output, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -12,6 +13,7 @@ use homeboy_core::engine::command::{
     CommandCaptureMetadata, StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
 };
 use homeboy_core::error::{Error, Result};
+use homeboy_core::redaction::RedactionPolicy;
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(1000);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -76,9 +78,9 @@ pub(crate) fn measured_command_output(
 ) -> Result<MeasuredOutput> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let started = Instant::now();
-    let child = command.spawn().map_err(|err| {
-        Error::internal_io(err.to_string(), Some("execute runner command".to_string()))
-    })?;
+    let child = command
+        .spawn()
+        .map_err(|error| runner_command_spawn_error(command, &error))?;
     let pid = child.id();
     let collector = ResourceMetricsCollector::start(pid, started, None, None, concurrency_limit);
     let bounded_output =
@@ -110,9 +112,9 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     isolate_process_tree(command);
     let started = Instant::now();
-    let mut child = command.spawn().map_err(|err| {
-        Error::internal_io(err.to_string(), Some("execute runner command".to_string()))
-    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| runner_command_spawn_error(command, &error))?;
     let pid = child.id();
     if let Some(child_started) = child_started {
         if let Err(error) = child_started(pid) {
@@ -189,6 +191,65 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         capture,
         metrics,
     })
+}
+
+/// Build durable, secret-safe evidence for a failed pre-spawn command handoff.
+///
+/// `Command::spawn` is the last boundary before a child PID exists, so callers
+/// need its OS details and command sizing rather than a generic IO error.
+fn runner_command_spawn_error(command: &Command, error: &std::io::Error) -> Error {
+    let policy = RedactionPolicy::default();
+    let executable = os_str_bytes(command.get_program());
+    let arguments = command.get_args().collect::<Vec<_>>();
+    let argv_count = arguments.len() + 1;
+    let argv_bytes = executable
+        + arguments
+            .iter()
+            .map(|argument| os_str_bytes(argument))
+            .sum::<usize>();
+    let max_argument_bytes = arguments
+        .iter()
+        .map(|argument| os_str_bytes(argument))
+        .chain(std::iter::once(executable))
+        .max()
+        .unwrap_or_default();
+    let (environment_count, environment_bytes) =
+        command
+            .get_envs()
+            .fold((0usize, 0usize), |(count, bytes), (key, value)| {
+                let value_bytes = value.map(os_str_bytes).unwrap_or_default();
+                (count + 1, bytes + os_str_bytes(key) + 1 + value_bytes)
+            });
+    let raw_os_error = error.raw_os_error();
+
+    Error::new(
+        homeboy_core::error::ErrorCode::InternalIoError,
+        "Runner command spawn failed",
+        json!({
+            "operation": "runner_command_spawn",
+            "classification": if raw_os_error == Some(libc::E2BIG) {
+                "argv_environment_too_large"
+            } else {
+                "spawn_failed"
+            },
+            "io_error": error.to_string(),
+            "io_error_kind": format!("{:?}", error.kind()),
+            "raw_os_error": raw_os_error,
+            "executable": policy.redact_string(&command.get_program().to_string_lossy()),
+            "cwd": command
+                .get_current_dir()
+                .map(|cwd| policy.redact_string(&cwd.to_string_lossy())),
+            "argv_count": argv_count,
+            "argv_bytes": argv_bytes,
+            "max_argument_bytes": max_argument_bytes,
+            "environment_count": environment_count,
+            "environment_bytes": environment_bytes,
+        }),
+    )
+}
+
+fn os_str_bytes(value: &OsStr) -> usize {
+    value.as_encoded_bytes().len()
 }
 
 /// Terminate and reap an unrecorded child through the same bounded, verified
@@ -716,6 +777,37 @@ mod tests {
         assert_eq!(payload["process"]["root_pid"], 1234);
         assert_eq!(payload["process"]["resources"]["process_count"], 3);
         assert_eq!(payload["process"]["resources"]["child_process_count"], 2);
+    }
+
+    #[test]
+    fn spawn_error_preserves_e2big_command_sizing_without_exposing_secrets() {
+        let mut command = Command::new("runner?token=secret");
+        command
+            .arg("small")
+            .arg("x".repeat(64))
+            .current_dir("/work?token=secret")
+            .env_clear()
+            .env("PUBLIC", "value")
+            .env("TOKEN", "secret");
+
+        let error =
+            runner_command_spawn_error(&command, &std::io::Error::from_raw_os_error(libc::E2BIG));
+
+        assert_eq!(error.code.as_str(), "internal.io_error");
+        assert_eq!(error.details["operation"], "runner_command_spawn");
+        assert_eq!(
+            error.details["classification"],
+            "argv_environment_too_large"
+        );
+        assert_eq!(error.details["raw_os_error"], libc::E2BIG);
+        assert_eq!(error.details["argv_count"], 3);
+        assert_eq!(error.details["argv_bytes"], 19 + 5 + 64);
+        assert_eq!(error.details["max_argument_bytes"], 64);
+        assert_eq!(error.details["environment_count"], 2);
+        assert_eq!(error.details["environment_bytes"], 24);
+        assert_eq!(error.details["executable"], "runner?token=[REDACTED]");
+        assert_eq!(error.details["cwd"], "/work?token=[REDACTED]");
+        assert_ne!(error.details["io_error_kind"], serde_json::Value::Null);
     }
 
     #[cfg(unix)]
