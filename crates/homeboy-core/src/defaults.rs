@@ -160,6 +160,10 @@ pub struct RetentionConfig {
     pub terminal_run_days: i64,
     #[serde(default = "default_runtime_tmp_retention_days")]
     pub runtime_tmp_days: u64,
+    #[serde(default = "default_controller_runtime_retention_days")]
+    pub controller_runtime_days: u64,
+    #[serde(default = "default_controller_runtime_max_bytes")]
+    pub controller_runtime_max_bytes: u64,
     #[serde(default = "default_retention_limit")]
     pub limit: i64,
 }
@@ -169,6 +173,8 @@ impl Default for RetentionConfig {
         Self {
             terminal_run_days: default_terminal_run_retention_days(),
             runtime_tmp_days: default_runtime_tmp_retention_days(),
+            controller_runtime_days: default_controller_runtime_retention_days(),
+            controller_runtime_max_bytes: default_controller_runtime_max_bytes(),
             limit: default_retention_limit(),
         }
     }
@@ -180,6 +186,14 @@ fn default_terminal_run_retention_days() -> i64 {
 
 fn default_runtime_tmp_retention_days() -> u64 {
     7
+}
+
+fn default_controller_runtime_retention_days() -> u64 {
+    30
+}
+
+fn default_controller_runtime_max_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024
 }
 
 fn default_retention_limit() -> i64 {
