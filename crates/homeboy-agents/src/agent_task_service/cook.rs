@@ -292,7 +292,15 @@ fn resolve_adoption_target(
         .filter_map(|(attempt, exists)| (!exists).then_some(attempt))
         .collect::<Vec<_>>();
     if orphaned_attempts.is_empty() {
-        return Ok((agent_task_lifecycle::status(cook_or_run_id)?, recipe));
+        let [attempt] = recipe.attempts.as_slice() else {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "candidate adoption requires exactly one durable cook attempt",
+                Some(recipe.cook_id.clone()),
+                None,
+            ));
+        };
+        return Ok((agent_task_lifecycle::status(&attempt.run_id)?, recipe));
     }
     let [attempt] = orphaned_attempts.as_slice() else {
         return Err(Error::validation_invalid_argument(
@@ -2685,6 +2693,60 @@ mod tests {
                 record.state,
                 agent_task_lifecycle::AgentTaskRunState::Queued
             );
+        });
+    }
+
+    #[test]
+    fn adoption_by_cook_id_selects_the_existing_recipe_attempt_record() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-adopt-existing-attempt";
+            let run_id = "cook-adopt-existing-attempt-1";
+            let mut options =
+                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.initial_run_id = run_id.to_string();
+            super::super::persist_initial_recipe(&options).expect("persist recipe");
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+                .expect("persist lifecycle record");
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id)
+                .expect("link cook attempt");
+            agent_task_lifecycle::cancel(run_id).expect("cancel recorded attempt");
+
+            let (record, recipe) =
+                resolve_adoption_target(cook_id).expect("adoption resolves recorded cook attempt");
+
+            assert_eq!(recipe.cook_id, cook_id);
+            assert_eq!(record.run_id, run_id);
+            assert_eq!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+        });
+    }
+
+    #[test]
+    fn adoption_by_cook_id_rejects_multiple_recorded_recipe_attempts() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-adopt-ambiguous-attempts";
+            let first_run_id = "cook-adopt-ambiguous-attempts-1";
+            let second_run_id = "cook-adopt-ambiguous-attempts-2";
+            let mut options =
+                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.initial_run_id = first_run_id.to_string();
+            super::super::persist_initial_recipe(&options).expect("persist recipe");
+            super::super::record_recipe_attempt(cook_id, 2, second_run_id, &options.initial_plan)
+                .expect("persist second recipe attempt");
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(first_run_id))
+                .expect("persist first lifecycle record");
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(second_run_id))
+                .expect("persist second lifecycle record");
+
+            let error = resolve_adoption_target(cook_id)
+                .expect_err("ambiguous recipe adoption fails closed");
+
+            assert_eq!(error.details["field"], "cook_recipe.attempts");
+            assert!(error
+                .message
+                .contains("candidate adoption requires exactly one durable cook attempt"));
         });
     }
 
