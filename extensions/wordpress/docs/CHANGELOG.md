@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.26.8] - 2026-07-18
+
+### Changed
+- Make WordPress artifact helpers self-contained
+
 ## [3.26.7] - 2026-07-18
 
 ### Changed
