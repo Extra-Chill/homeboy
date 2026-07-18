@@ -278,6 +278,66 @@ fn cancelling_queued_runner_proxy_projects_to_accepted_daemon_job() {
 }
 
 #[test]
+fn runner_exec_run_id_creates_generic_run_on_demand() {
+    // #8447: `runner exec --run-id <new-id>` documents an explicit persisted
+    // evidence ID, but the ID was routed through agent-task lifecycle lookup and
+    // rejected as a missing agent-task record before the command executed. A new
+    // ad hoc ID must own a generic runner-execution run created on demand.
+    with_isolated_home(|_| {
+        let command = vec!["cargo".to_string(), "build".to_string()];
+
+        // (1) A new valid runner-exec ID creates and binds a generic run.
+        let created = record_runner_exec_job_identity(
+            "recovery-8447-lab-build-r3",
+            "homeboy-lab",
+            "job-1",
+            "/runner/workspace/homeboy",
+            &command,
+        )
+        .expect("new ad hoc run id creates a generic runner-exec run");
+        assert_eq!(created.metadata["kind"], RUNNER_EXEC_RUN_KIND);
+        assert_eq!(created.metadata["runner_id"], "homeboy-lab");
+        assert_eq!(created.metadata["runner_job_id"], "job-1");
+
+        // The generic run is a real durable record readable through status.
+        let loaded = status("recovery-8447-lab-build-r3").expect("generic run persisted");
+        assert_eq!(loaded.metadata["kind"], RUNNER_EXEC_RUN_KIND);
+
+        // (2) Reusing the same generic ID re-attaches without error.
+        let reused = record_runner_exec_job_identity(
+            "recovery-8447-lab-build-r3",
+            "homeboy-lab",
+            "job-2",
+            "/runner/workspace/homeboy",
+            &command,
+        )
+        .expect("existing generic run id re-binds");
+        assert_eq!(reused.metadata["runner_job_id"], "job-2");
+
+        // (3) An ID already owned by an agent-task lifecycle run is a different
+        //     owner: reusing it as a generic runner-exec run fails closed before
+        //     any runner mutation, with an ownership diagnostic.
+        submit_plan(&test_plan(), Some("agent-task-owned-8447")).expect("agent-task run submitted");
+        let collision = record_runner_exec_job_identity(
+            "agent-task-owned-8447",
+            "homeboy-lab",
+            "job-3",
+            "/runner/workspace/homeboy",
+            &command,
+        )
+        .expect_err("reusing an agent-task id as a generic runner-exec run must fail closed");
+        assert_eq!(collision.code, ErrorCode::ValidationInvalidArgument);
+        assert!(
+            collision
+                .message
+                .contains("already exists as an agent-task run"),
+            "ownership diagnostic should name the conflicting agent-task owner: {}",
+            collision.message
+        );
+    });
+}
+
+#[test]
 fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
     with_isolated_home(|_| {
         let command = vec![

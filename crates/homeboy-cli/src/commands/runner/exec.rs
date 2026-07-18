@@ -104,6 +104,7 @@ pub(super) fn exec(
             require_paths,
             lab_runner_workload: None,
             run_id: validated_run_id.clone(),
+            run_id_owns_generic_exec: true,
             detach_after_handoff: false,
             mirror_evidence: true,
             print_handoff: true,
