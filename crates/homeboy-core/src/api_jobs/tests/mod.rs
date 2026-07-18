@@ -51,7 +51,7 @@ pub(super) fn remote_runner_request(
         secret_env_plan: Default::default(),
         env_materialization: None,
         capture_patch: true,
-        source_snapshot: Some(SourceSnapshot::existing_remote(
+        source_snapshot: Some(crate::source_snapshot::existing_remote(
             runner_id,
             "/srv/extrachill",
             Some("/srv"),

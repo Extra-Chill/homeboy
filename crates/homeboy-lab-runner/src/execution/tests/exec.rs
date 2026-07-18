@@ -269,7 +269,11 @@ fn runner_execution_record_uses_dispatched_path_materialization_plan() {
         PATH_MATERIALIZATION_MODE_GIT,
         PATH_MATERIALIZATION_STATUS_MATERIALIZED,
     )]);
-    let snapshot = SourceSnapshot::existing_remote("lab", "/runner/source-snapshot", Some("/srv"));
+    let snapshot = homeboy_core::source_snapshot::existing_remote(
+        "lab",
+        "/runner/source-snapshot",
+        Some("/srv"),
+    );
     let (output, _) = exec_output(
         &ssh_runner(),
         RunnerExecMode::Daemon,
@@ -345,7 +349,7 @@ fn remote_daemon_secret_env_refs_forward_controller_secrets_and_keep_runner_refs
             secret_env_plan: None,
             capture_patch: false,
             raw_exec: false,
-            source_snapshot: Some(SourceSnapshot::existing_remote(
+            source_snapshot: Some(homeboy_core::source_snapshot::existing_remote(
                 "lab",
                 &workspace.display().to_string(),
                 Some(&workspace.display().to_string()),
@@ -393,7 +397,7 @@ fn remote_daemon_secret_env_refs_forward_controller_secrets_and_keep_runner_refs
             secret_env_plan: None,
             capture_patch: false,
             raw_exec: false,
-            source_snapshot: Some(SourceSnapshot::existing_remote(
+            source_snapshot: Some(homeboy_core::source_snapshot::existing_remote(
                 "lab",
                 &workspace.display().to_string(),
                 Some(&workspace.display().to_string()),
@@ -431,7 +435,7 @@ fn remote_daemon_secret_env_refs_require_missing_controller_refs() {
             secret_env_plan: None,
             capture_patch: false,
             raw_exec: false,
-            source_snapshot: Some(SourceSnapshot::existing_remote(
+            source_snapshot: Some(homeboy_core::source_snapshot::existing_remote(
                 "lab",
                 &workspace.display().to_string(),
                 Some(&workspace.display().to_string()),
@@ -481,7 +485,7 @@ fn daemon_read_only_runner_exec_ignores_unrelated_missing_secret_env_refs() {
             secret_env_plan: None,
             capture_patch: false,
             raw_exec: true,
-            source_snapshot: Some(SourceSnapshot::existing_remote(
+            source_snapshot: Some(homeboy_core::source_snapshot::existing_remote(
                 "lab",
                 &workspace.display().to_string(),
                 Some(&workspace.display().to_string()),
@@ -532,7 +536,7 @@ fn daemon_runner_exec_requires_declared_missing_secret_env_refs() {
             secret_env_plan: None,
             capture_patch: false,
             raw_exec: false,
-            source_snapshot: Some(SourceSnapshot::existing_remote(
+            source_snapshot: Some(homeboy_core::source_snapshot::existing_remote(
                 "lab",
                 &workspace.display().to_string(),
                 Some(&workspace.display().to_string()),

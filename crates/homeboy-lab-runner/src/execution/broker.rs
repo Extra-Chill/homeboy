@@ -43,7 +43,11 @@ pub(super) fn exec_via_reverse_broker(
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build broker HTTP client: {err}")))?;
     let source_snapshot = source_snapshot_override.unwrap_or_else(|| {
-        SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref())
+        homeboy_core::source_snapshot::existing_remote(
+            &runner.id,
+            &cwd,
+            runner.workspace_root.as_deref(),
+        )
     });
     persist_runner_execution_transition(
         &RunnerExecutionRecord::planned(

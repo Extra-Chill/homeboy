@@ -306,7 +306,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         );
     }
 
-    let mut source_snapshot = SourceSnapshot::collect_local(
+    let mut source_snapshot = homeboy_core::source_snapshot::collect_local(
         runner_id,
         Path::new(&synced.local_path),
         Some(&remote_cwd),

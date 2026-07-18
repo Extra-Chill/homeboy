@@ -954,6 +954,7 @@ dependencies = [
  "homeboy-release-contract",
  "homeboy-rig-contract",
  "homeboy-run-lifecycle-contract",
+ "homeboy-source-snapshot-contract",
  "keyring",
  "libc",
  "regex",
@@ -1288,6 +1289,14 @@ dependencies = [
 
 [[package]]
 name = "homeboy-run-lifecycle-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "homeboy-source-snapshot-contract"
 version = "0.1.0"
 dependencies = [
  "serde",

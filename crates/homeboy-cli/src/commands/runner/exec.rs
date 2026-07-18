@@ -180,7 +180,7 @@ pub(super) fn exec_workspace_context(
             run_isolation_token: None,
         },
     )?;
-    let source_snapshot = SourceSnapshot::collect_local(
+    let source_snapshot = homeboy::core::source_snapshot::collect_local(
         runner_id,
         Path::new(&synced.local_path),
         Some(&synced.remote_path),

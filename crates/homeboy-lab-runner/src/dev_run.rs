@@ -204,7 +204,7 @@ pub(crate) fn run_extension_dev_run_with(
     ];
 
     let prior_extension_state = probe_runner_extension_state(&plan, &mut exec);
-    let mut source_snapshot = SourceSnapshot::collect_local(
+    let mut source_snapshot = homeboy_core::source_snapshot::collect_local(
         &plan.runner_id,
         Path::new(&synced.local_path),
         Some(&synced.remote_path),

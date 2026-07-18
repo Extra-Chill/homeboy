@@ -522,7 +522,7 @@ fn local_child_worker_persists_typed_setup_failure_before_child_identity() {
 fn test_create_with_source_snapshot() {
     let store = JobStore::default();
     let snapshot =
-        SourceSnapshot::existing_remote("lab", "/srv/homeboy/repo", Some("/srv/homeboy"));
+        crate::source_snapshot::existing_remote("lab", "/srv/homeboy/repo", Some("/srv/homeboy"));
     let job = store.create_with_source_snapshot("runner.exec", Some(snapshot.clone()));
 
     assert_eq!(job.source_snapshot, Some(snapshot.clone()));

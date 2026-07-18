@@ -183,7 +183,7 @@ pub(super) fn sync_lab_offload_rigs(
                 .0;
                 let install_source =
                     remote_package_path(&source_root, &metadata.package_path, &synced.remote_path);
-                let source_snapshot = SourceSnapshot::collect_local(
+                let source_snapshot = homeboy_core::source_snapshot::collect_local(
                     runner_id,
                     Path::new(&synced.local_path),
                     Some(&synced.remote_path),

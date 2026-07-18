@@ -940,7 +940,7 @@ mod tests {
             &identity,
         )
         .expect("production snapshot-git materialization");
-        let mut snapshot = SourceSnapshot::collect_local(
+        let mut snapshot = homeboy_core::source_snapshot::collect_local(
             "lab",
             source.path(),
             Some(&remote.display().to_string()),

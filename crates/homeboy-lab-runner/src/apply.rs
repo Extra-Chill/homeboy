@@ -60,7 +60,7 @@ pub fn apply_change_artifact(
     force: bool,
 ) -> Result<RunnerWorkspaceApplyOutput> {
     let local_path = local_source_path(&artifact.source_snapshot)?;
-    let current = SourceSnapshot::collect_local(
+    let current = homeboy_core::source_snapshot::collect_local(
         &artifact.source_snapshot.runner_id,
         &local_path,
         artifact.source_snapshot.remote_path.as_deref(),
@@ -312,8 +312,12 @@ mod tests {
     #[test]
     fn test_apply_workspace_patch() {
         let repo = git_repo();
-        let snapshot =
-            SourceSnapshot::collect_local("lab", repo.path(), Some("/lab/repo"), "snapshot");
+        let snapshot = homeboy_core::source_snapshot::collect_local(
+            "lab",
+            repo.path(),
+            Some("/lab/repo"),
+            "snapshot",
+        );
         let input_dir = tempfile::tempdir().expect("input tempdir");
         let input = input_dir.path().join("lab-patch.json");
         fs::write(
@@ -350,8 +354,12 @@ mod tests {
     #[test]
     fn rejects_local_drift_without_force() {
         let repo = git_repo();
-        let snapshot =
-            SourceSnapshot::collect_local("lab", repo.path(), Some("/lab/repo"), "snapshot");
+        let snapshot = homeboy_core::source_snapshot::collect_local(
+            "lab",
+            repo.path(),
+            Some("/lab/repo"),
+            "snapshot",
+        );
         fs::write(repo.path().join("other.txt"), "local drift\n").expect("drift");
         let input_dir = tempfile::tempdir().expect("input tempdir");
         let input = input_dir.path().join("lab-patch.json");
@@ -385,8 +393,12 @@ mod tests {
     #[test]
     fn applies_delta_with_force_after_explicit_drift_acknowledgement() {
         let repo = git_repo();
-        let snapshot =
-            SourceSnapshot::collect_local("lab", repo.path(), Some("/lab/repo"), "snapshot");
+        let snapshot = homeboy_core::source_snapshot::collect_local(
+            "lab",
+            repo.path(),
+            Some("/lab/repo"),
+            "snapshot",
+        );
         fs::write(repo.path().join("other.txt"), "local drift\n").expect("drift");
         let input_dir = tempfile::tempdir().expect("input tempdir");
         let input = input_dir.path().join("lab-delta.json");
@@ -429,8 +441,12 @@ mod tests {
     #[test]
     fn output_serializes_flat_apply_result_with_artifact_summary() {
         let repo = git_repo();
-        let snapshot =
-            SourceSnapshot::collect_local("lab", repo.path(), Some("/lab/repo"), "snapshot");
+        let snapshot = homeboy_core::source_snapshot::collect_local(
+            "lab",
+            repo.path(),
+            Some("/lab/repo"),
+            "snapshot",
+        );
         let input_dir = tempfile::tempdir().expect("input tempdir");
         let input = input_dir.path().join("change-artifact.json");
         fs::write(
@@ -488,8 +504,12 @@ mod tests {
     #[test]
     fn rejects_delta_path_traversal() {
         let repo = git_repo();
-        let snapshot =
-            SourceSnapshot::collect_local("lab", repo.path(), Some("/lab/repo"), "snapshot");
+        let snapshot = homeboy_core::source_snapshot::collect_local(
+            "lab",
+            repo.path(),
+            Some("/lab/repo"),
+            "snapshot",
+        );
         let input_dir = tempfile::tempdir().expect("input tempdir");
         let input = input_dir.path().join("lab-delta.json");
         fs::write(

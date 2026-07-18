@@ -434,7 +434,7 @@ mod tests {
         fs::create_dir_all(workspace.path().join("docs")).expect("docs");
         fs::write(workspace.path().join("tracked.txt"), "before\n").expect("tracked");
         fs::write(workspace.path().join("docs/superpowers"), "before\n").expect("excluded");
-        let snapshot = SourceSnapshot::existing_remote("lab", "/runner/workspace", None);
+        let snapshot = crate::source_snapshot::existing_remote("lab", "/runner/workspace", None);
         let snapshot = SourceSnapshot {
             sync_excludes: vec!["docs/superpowers".to_string()],
             ..snapshot
