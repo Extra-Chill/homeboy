@@ -16,12 +16,16 @@ pub(super) const DEFAULT_EVENT_RETENTION_LIMIT: usize = 1000;
 /// Keep enough completed jobs for status and log reconciliation without letting
 /// the daemon's append-only store grow with every historical execution.
 pub(super) const DEFAULT_TERMINAL_JOB_RETENTION_LIMIT: usize = 1000;
+/// Bound terminal history independently of active jobs, whose recovery records
+/// must remain durable until they reach a terminal state.
+pub(super) const DEFAULT_TERMINAL_JOB_RETENTION_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct JobStoreCompactionEvidence {
     pub(super) timestamp_ms: u64,
     pub(super) removed_terminal_jobs: usize,
     pub(super) retained_terminal_jobs: usize,
+    pub(super) retained_terminal_bytes: usize,
     pub(super) active_jobs: usize,
 }
 
@@ -119,18 +123,37 @@ pub(super) fn write_durable_store(path: &Path, durable: &DurableJobStore) -> Res
 
 pub(super) fn compact_terminal_jobs(
     durable: &mut DurableJobStore,
+    event_retention_limit: usize,
     terminal_job_retention_limit: usize,
+    terminal_job_retention_bytes: usize,
 ) -> Option<JobStoreCompactionEvidence> {
+    for stored in &mut durable.jobs {
+        apply_event_retention(&mut stored.events, event_retention_limit);
+        stored.job.event_count = stored.events.len();
+    }
     let mut terminal = durable
         .jobs
         .iter()
         .filter(|stored| stored.job.status.is_terminal())
+        .map(|stored| {
+            let serialized_len = serde_json::to_vec(stored)
+                .expect("stored daemon job must serialize")
+                .len();
+            (stored, serialized_len)
+        })
         .collect::<Vec<_>>();
-    if terminal.len() <= terminal_job_retention_limit {
+    let original_terminal_count = terminal.len();
+    let original_terminal_bytes = terminal
+        .iter()
+        .map(|(_, serialized_len)| serialized_len)
+        .sum::<usize>();
+    if original_terminal_count <= terminal_job_retention_limit
+        && original_terminal_bytes <= terminal_job_retention_bytes
+    {
         return None;
     }
 
-    terminal.sort_unstable_by_key(|stored| {
+    terminal.sort_unstable_by_key(|(stored, _)| {
         (
             stored
                 .job
@@ -141,11 +164,19 @@ pub(super) fn compact_terminal_jobs(
             stored.job.id,
         )
     });
-    let removed_job_ids = terminal
-        .iter()
-        .take(terminal.len() - terminal_job_retention_limit)
-        .map(|stored| stored.job.id)
-        .collect::<HashSet<_>>();
+    let mut retained_terminal_jobs = original_terminal_count;
+    let mut retained_terminal_bytes = original_terminal_bytes;
+    let mut removed_job_ids = HashSet::new();
+    for (stored, serialized_len) in terminal {
+        if retained_terminal_jobs <= terminal_job_retention_limit
+            && retained_terminal_bytes <= terminal_job_retention_bytes
+        {
+            break;
+        }
+        removed_job_ids.insert(stored.job.id);
+        retained_terminal_jobs -= 1;
+        retained_terminal_bytes -= serialized_len;
+    }
     let removed_terminal_jobs = removed_job_ids.len();
     durable
         .jobs
@@ -153,13 +184,17 @@ pub(super) fn compact_terminal_jobs(
     let evidence = JobStoreCompactionEvidence {
         timestamp_ms: timestamp_ms(),
         removed_terminal_jobs,
-        retained_terminal_jobs: terminal_job_retention_limit,
-        active_jobs: durable.jobs.len() - terminal_job_retention_limit,
+        retained_terminal_jobs,
+        retained_terminal_bytes,
+        active_jobs: durable.jobs.len() - retained_terminal_jobs,
     };
     durable.compaction = Some(evidence.clone());
     eprintln!(
-        "Homeboy compacted daemon job store: removed {} terminal jobs; retained {} terminal and {} active jobs",
-        evidence.removed_terminal_jobs, evidence.retained_terminal_jobs, evidence.active_jobs,
+        "Homeboy compacted daemon job store: removed {} terminal jobs; retained {} terminal jobs ({} bytes) and {} active jobs",
+        evidence.removed_terminal_jobs,
+        evidence.retained_terminal_jobs,
+        evidence.retained_terminal_bytes,
+        evidence.active_jobs,
     );
     Some(evidence)
 }

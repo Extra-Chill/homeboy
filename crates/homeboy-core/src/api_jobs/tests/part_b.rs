@@ -844,6 +844,83 @@ fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery
 }
 
 #[test]
+fn terminal_payload_budget_bounds_high_event_history_before_child_reservation_persists() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store opens");
+    let queued = store.create("queued");
+    let running = store.create("running");
+    record_test_local_child(&store, running.id, std::process::id());
+
+    let terminal = (0..8)
+        .map(|index| {
+            let job = store.create("terminal");
+            store.start(job.id).expect("terminal job starts");
+            store
+                .complete(
+                    job.id,
+                    Some(json!({ "index": index, "output": "x".repeat(20_000) })),
+                )
+                .expect("terminal job completes");
+            job.id
+        })
+        .collect::<Vec<_>>();
+
+    let compacted = JobStore::open_without_reconciliation_with_retention_and_terminal_byte_limit(
+        &path, 10, 8, 70_000,
+    )
+    .expect("high-payload history compacts on open");
+    assert!(
+        compacted.get(queued.id).is_ok(),
+        "queued work survives compaction"
+    );
+    assert_eq!(
+        compacted
+            .get(running.id)
+            .expect("running job survives")
+            .status,
+        JobStatus::Running
+    );
+    assert!(compacted
+        .events(running.id)
+        .expect("recovery events")
+        .iter()
+        .any(|event| event
+            .data
+            .as_ref()
+            .is_some_and(|data| data["phase"] == "spawned")));
+    assert!(
+        compacted.get(terminal[0]).is_err(),
+        "oldest terminal evicts first"
+    );
+    assert!(compacted
+        .get(*terminal.last().expect("terminal jobs"))
+        .is_ok());
+    assert!(
+        fs::metadata(&path).expect("compacted store metadata").len() < 80_000,
+        "the persisted store remains bounded despite high-payload terminal events"
+    );
+
+    let reserved = compacted.create("new-child");
+    record_test_local_child(&compacted, reserved.id, std::process::id());
+    assert!(compacted
+        .events(reserved.id)
+        .expect("spawn events")
+        .iter()
+        .any(|event| event
+            .data
+            .as_ref()
+            .is_some_and(|data| data["phase"] == "spawned")));
+    assert!(
+        fs::metadata(&path)
+            .expect("reserved child store metadata")
+            .len()
+            < 80_000,
+        "reservation and PID persistence do not rewrite historical payloads"
+    );
+}
+
+#[test]
 fn remote_runner_job_submit_targets_runner_and_project() {
     let store = JobStore::default();
     let job = store
