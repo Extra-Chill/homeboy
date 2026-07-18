@@ -1546,12 +1546,32 @@ impl JobStore {
                 store: handle_store,
                 job_id,
             };
+            let _ = job_handle.progress(serde_json::json!({
+                "phase": "local_child_worker_started",
+            }));
             match run(job_handle) {
                 Ok(output) => {
                     let _ = worker_store.complete(job_id, serde_json::to_value(output).ok());
                 }
                 Err(error) => {
-                    let _ = worker_store.fail(job_id, error.to_string());
+                    let error_message = error.to_string();
+                    if worker_store
+                        .get(job_id)
+                        .is_ok_and(|job| job.status == JobStatus::Queued)
+                    {
+                        let _ = worker_store.append_event(
+                            job_id,
+                            JobEventKind::Progress,
+                            Some("local child worker failed before child identity".to_string()),
+                            Some(serde_json::json!({
+                                "phase": "local_child_worker_failed_before_child_identity",
+                                "error": error_message,
+                                "error_code": error.code.as_str(),
+                                "error_details": error.details,
+                            })),
+                        );
+                    }
+                    let _ = worker_store.fail(job_id, error_message);
                 }
             }
         });
