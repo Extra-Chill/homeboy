@@ -28,7 +28,13 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     // mutate the durable record, so we can record either a real termination or
     // deterministic operator recovery instructions (acceptance: never force
     // manual process spelunking; always surface pids + safe commands).
-    let cancellation = if record.state == AgentTaskRunState::Running {
+    // A runner-backed proxy can have an accepted daemon job while it is still
+    // queued before the provider starts. Project cancellation to that job too.
+    let cancellation = if record.state == AgentTaskRunState::Running
+        || (record.state == AgentTaskRunState::Queued
+            && record.runner_id().is_some()
+            && record.runner_job_id().is_some())
+    {
         classify_live_cancellation(&record)?
     } else {
         LiveCancellationOutcome::NotRunning
