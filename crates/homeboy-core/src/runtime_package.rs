@@ -35,7 +35,7 @@ pub fn refresh(
     let temp_dir = runtime_root.join(format!(".refresh-tmp-{runtime_id}"));
     remove_path_if_exists(&temp_dir, "clean stale runtime package refresh temp")?;
 
-    let (source_root, source_revision) = if crate::extension::is_git_url(source) {
+    let (source_root, source_revision) = if crate::extension_update_check::is_git_url(source) {
         git::clone_repo_at_ref(source, &temp_dir, revision)?;
         let source_revision = git::short_head_revision(&temp_dir);
         (temp_dir.as_path(), source_revision)

@@ -1,6 +1,7 @@
 use crate::config::{self, from_str};
 use crate::error::{Error, Result};
 use crate::extension_provider_discovery::validate_installed_extension_provider_discovery;
+use crate::extension_update_check::is_git_url;
 use crate::git;
 use crate::paths;
 use homeboy_engine_primitives::local_files;
@@ -8,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use super::execution::run_setup;
 use super::lifecycle::{
-    derive_id_from_url, install_linked_shared_assets, is_git_url, rename_dir,
-    resolve_cloned_extension, slugify_id, write_requested_source_ref, write_source_metadata,
+    derive_id_from_url, install_linked_shared_assets, rename_dir, resolve_cloned_extension,
+    slugify_id, write_requested_source_ref, write_source_metadata,
 };
 use super::manifest::ExtensionManifest;
 
