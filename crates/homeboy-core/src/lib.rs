@@ -161,7 +161,6 @@ pub mod resource_cleanup_intent;
 pub mod resource_lifecycle_index;
 pub mod resource_policy_context;
 pub mod resources;
-pub mod review;
 pub mod rig_provider;
 pub mod rig_toolchain_provider;
 pub mod run_lifecycle_record;

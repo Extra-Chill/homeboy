@@ -2,10 +2,10 @@ use std::path::Path;
 
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{merge_metadata, ActiveObservation, NewRunRecord, RunStatus};
-use homeboy::core::review::{
+use homeboy::core::ObservationOutputMetadata;
+use homeboy_review::review::{
     artifact_command, ReviewArtifactFindings, ReviewCommandOutput, ReviewStage,
 };
-use homeboy::core::ObservationOutputMetadata;
 
 use super::ReviewArgs;
 
@@ -183,7 +183,7 @@ mod tests {
     use crate::commands::utils::args::{
         BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs,
     };
-    use homeboy::core::review::{build_artifact, ReviewSummary};
+    use homeboy_review::review::{build_artifact, ReviewSummary};
 
     fn review_args() -> ReviewArgs {
         ReviewArgs {

@@ -1,6 +1,6 @@
 use crate::commands::output_runtime::CommandRun;
 use crate::commands::GlobalArgs;
-use homeboy::core::review::render;
+use homeboy_review::review::render;
 
 use super::{run_umbrella, ReviewArgs};
 
