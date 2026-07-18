@@ -3,14 +3,14 @@
 //! Audit convention requires a `test_expand_vars` method matching the sole
 //! public function of the module; additional cases cover edge conditions.
 
-use crate::paths;
-use crate::rig::expand::{
+use homeboy_core::paths;
+use crate::expand::{
     expand_resources, expand_resources_with_settings, expand_vars, expand_vars_with_settings,
 };
-use crate::rig::spec::{
+use crate::spec::{
     ComponentSpec, DiscoverSpec, RigSpec, ServiceKind, ServiceSpec, SymlinkSpec,
 };
-use crate::test_support::with_isolated_home;
+use homeboy_core::test_support::with_isolated_home;
 use std::collections::HashMap;
 use std::fs;
 

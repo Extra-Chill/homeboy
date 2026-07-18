@@ -30,7 +30,9 @@ use super::state::{
 use homeboy_core::engine::command::run_in_optional;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
-use homeboy_core::resource_lifecycle_index::{ResourceLifecycleIndex, ResourceLifecycleResourceStatus};
+use homeboy_core::resource_lifecycle_index::{
+    ResourceLifecycleIndex, ResourceLifecycleResourceStatus,
+};
 
 /// Report from `rig up`.
 #[derive(Debug, Clone, Serialize)]

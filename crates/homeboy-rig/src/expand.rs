@@ -144,11 +144,12 @@ fn resolve_token(rig: &RigSpec, token: &str, env: &BTreeMap<String, String>) -> 
         if let Some(override_path) = component_path_override_from_env(&rig.id, id) {
             return Some(override_path);
         }
-        let expanded = homeboy_core::expand::expand_with_tilde(&component.path, |token| match token {
-            "package.root" => resolve_token(rig, token, env),
-            token if token.starts_with("env.") => resolve_token(rig, token, env),
-            _ => None,
-        });
+        let expanded =
+            homeboy_core::expand::expand_with_tilde(&component.path, |token| match token {
+                "package.root" => resolve_token(rig, token, env),
+                token if token.starts_with("env.") => resolve_token(rig, token, env),
+                _ => None,
+            });
         return Some(expanded);
     }
     if let Some(name) = token.strip_prefix("env.") {

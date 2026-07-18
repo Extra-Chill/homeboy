@@ -15,7 +15,6 @@ use serde::Serialize;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::extension::trace as extension_trace;
 
-
 /// Context required to resolve rig variables when orchestrating a trace
 /// experiment. Owns only the data the orchestration needs, decoupled from the
 /// command-layer rig context type.
@@ -241,7 +240,11 @@ pub fn prepare_experiment_overlay_dir(dir: &Path) -> homeboy_core::Result<()> {
 /// Write a pre-rendered text artifact for a trace-experiment bundle. The command
 /// layer renders the content; this owns the filesystem write so persistence
 /// orchestration never accumulates in the command.
-pub fn write_experiment_file(path: &Path, content: &str, context: &str) -> homeboy_core::Result<()> {
+pub fn write_experiment_file(
+    path: &Path,
+    content: &str,
+    context: &str,
+) -> homeboy_core::Result<()> {
     std::fs::write(path, content).map_err(|err| {
         homeboy_core::Error::internal_io(
             format!("Failed to write {}: {}", path.display(), err),
@@ -257,8 +260,9 @@ pub fn write_experiment_json_file<T: Serialize>(
     value: &T,
     context: &str,
 ) -> homeboy_core::Result<()> {
-    let content = serde_json::to_string_pretty(value)
-        .map_err(|err| homeboy_core::Error::internal_json(err.to_string(), Some(context.to_string())))?;
+    let content = serde_json::to_string_pretty(value).map_err(|err| {
+        homeboy_core::Error::internal_json(err.to_string(), Some(context.to_string()))
+    })?;
     write_experiment_file(path, &(content + "\n"), context)
 }
 

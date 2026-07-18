@@ -1,13 +1,13 @@
 //! Tests for active rig run leases.
 
-use crate::error::ErrorCode;
-use crate::rig::lease::{
+use crate::lease::{
     acquire_active_run_lease, acquire_active_run_lease_with_settings, active_run_leases,
     release_active_run_lease, ReleaseLeaseOutcome, RIG_LEASE_TTL_ENV,
 };
-use crate::rig::spec::{RigResourcesSpec, RigSpec};
-use crate::rig::{run_up, RigRunLease};
-use crate::test_support::with_isolated_home;
+use crate::spec::{RigResourcesSpec, RigSpec};
+use crate::{run_up, RigRunLease};
+use homeboy_core::error::ErrorCode;
+use homeboy_core::test_support::with_isolated_home;
 
 struct EnvVarGuard {
     name: &'static str,
@@ -104,9 +104,12 @@ fn test_acquire_active_run_lease_blocks_overlapping_resources_until_drop() {
 #[test]
 fn test_resource_conflict_reports_active_run_context_when_available() {
     with_isolated_home(|_| {
-        let _run_id = EnvVarGuard::set(crate::observation::ACTIVE_RUN_ID_ENV, "trace-run-123");
+        let _run_id = EnvVarGuard::set(
+            homeboy_core::observation::ACTIVE_RUN_ID_ENV,
+            "trace-run-123",
+        );
         let _lab_metadata = EnvVarGuard::set(
-            crate::observation::LAB_OFFLOAD_METADATA_ENV,
+            homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV,
             r#"{"runner_id":"lab-runner-1"}"#,
         );
         let studio = rig("studio", resources());
@@ -266,7 +269,7 @@ fn test_acquire_active_run_lease_prunes_stale_pid() {
             runner_id: None,
             resources: resources(),
         };
-        let lease_dir = crate::paths::rig_leases_dir().expect("lease dir");
+        let lease_dir = homeboy_core::paths::rig_leases_dir().expect("lease dir");
         std::fs::create_dir_all(&lease_dir).expect("create lease dir");
         std::fs::write(
             lease_dir.join("studio.json"),
@@ -282,7 +285,7 @@ fn test_acquire_active_run_lease_prunes_stale_pid() {
 }
 
 fn write_lease(lease: &RigRunLease) {
-    let lease_dir = crate::paths::rig_leases_dir().expect("lease dir");
+    let lease_dir = homeboy_core::paths::rig_leases_dir().expect("lease dir");
     std::fs::create_dir_all(&lease_dir).expect("create lease dir");
     std::fs::write(
         lease_dir.join(format!("{}.json", lease.rig_id)),

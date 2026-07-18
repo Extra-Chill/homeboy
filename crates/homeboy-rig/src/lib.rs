@@ -17,8 +17,6 @@
 //! Deferred to later phases (see example-org/homeboy#1462+): deeper stack
 //! lifecycle automation, extension-registered service kinds, spec sharing.
 
-pub mod trace_experiment;
-pub mod provider;
 pub mod app;
 pub mod artifact_index;
 pub mod capabilities;
@@ -31,6 +29,7 @@ mod json_config;
 pub mod lease;
 pub mod lint;
 pub mod pipeline;
+pub mod provider;
 pub mod resource_lifecycle;
 pub mod runner;
 pub mod service;
@@ -39,6 +38,7 @@ pub mod spec;
 pub mod stack;
 pub mod state;
 pub mod toolchain;
+pub mod trace_experiment;
 pub mod workloads;
 
 pub use app::{AppLauncherAction, AppLauncherOptions, AppLauncherReport};
@@ -116,10 +116,10 @@ pub use workloads::{
     RigWorkloadKind, RigWorkloadPathExpansion,
 };
 
+use discovery::discover_rigs_for_install;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension::bench::parsing::{RigPackageEvidence, RigPackageFreshness};
 use homeboy_core::{git, paths};
-use discovery::discover_rigs_for_install;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};

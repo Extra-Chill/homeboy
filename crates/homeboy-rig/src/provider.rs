@@ -8,9 +8,7 @@ use std::path::Path;
 
 use homeboy_core::component::{self, Component};
 use homeboy_core::rig_provider::{register_rig_provider, RigProvider};
-use homeboy_core::rig_toolchain_provider::{
-    register_rig_toolchain_provider, RigToolchainProvider,
-};
+use homeboy_core::rig_toolchain_provider::{register_rig_toolchain_provider, RigToolchainProvider};
 use homeboy_core::scope::ScopeComponentRef;
 use homeboy_core::Result;
 use serde_json::{json, Value};

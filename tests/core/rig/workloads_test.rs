@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use crate::rig::spec::RigSpec;
-use crate::rig::{
+use crate::spec::RigSpec;
+use crate::{
     check_groups_for_extension_workloads, env_provider_extensions_for_extension_workloads,
     extension_ids_for_workloads, extension_workload_inputs, required_component_id_for_workload,
     required_extension_ids_for_workload, runner_capabilities_for_extension,
@@ -188,9 +188,9 @@ fn test_invocation_requirements_for_extension_workloads() {
     )
     .expect("parse rig spec");
 
-    let requirements = crate::rig::invocation_requirements_for_extension_workloads(
+    let requirements = crate::invocation_requirements_for_extension_workloads(
         &rig_spec,
-        crate::rig::RigWorkloadKind::Bench,
+        crate::RigWorkloadKind::Bench,
         "extension-a",
     );
 

@@ -1,8 +1,8 @@
 //! Rig component resolution helpers.
 
+use crate::expand;
 use homeboy_core::component::{self, Component};
 use homeboy_core::error::{Error, Result};
-use crate::expand;
 
 use super::spec::{ComponentSpec, RigSpec};
 

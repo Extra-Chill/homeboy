@@ -4,9 +4,9 @@ use std::fs;
 use std::path::Path;
 
 use super::ResolvedLauncher;
-use homeboy_core::error::{Error, Result};
 use crate::spec::{AppLauncherPlatform, AppLauncherPreflight};
 use crate::RigSpec;
+use homeboy_core::error::{Error, Result};
 
 pub(super) fn write_launcher(rig: &RigSpec, launcher: &ResolvedLauncher) -> Result<()> {
     match launcher.platform {

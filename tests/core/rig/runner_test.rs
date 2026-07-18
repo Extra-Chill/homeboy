@@ -15,19 +15,19 @@
 
 use std::collections::HashMap;
 
-use crate::rig::pipeline::PipelineOutcome;
-use crate::rig::runner::{
+use crate::pipeline::PipelineOutcome;
+use crate::runner::{
     head_sha_and_branch, run_check, run_check_groups, run_down, run_down_with_settings, run_repair,
     run_status, run_up, snapshot_state, CheckReport, RigStatusReport, ServiceStatusReport,
     SymlinkStatusState, UpReport,
 };
-use crate::rig::spec::{
+use crate::spec::{
     ComponentSpec, ExecutableRequirementSpec, FilesystemAssertionKind, FilesystemAssertionSpec,
     PipelineStep, RigRequirementsSpec, RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec,
     SharedPathOp, SharedPathSpec, SymlinkSpec,
 };
-use crate::rig::state::RigState;
-use crate::test_support::with_isolated_home;
+use crate::state::RigState;
+use homeboy_core::test_support::with_isolated_home;
 
 fn empty_pipeline(name: &str) -> PipelineOutcome {
     PipelineOutcome {
@@ -642,7 +642,7 @@ fn test_run_down_cleans_state_owned_shared_paths() {
             app_launcher: None,
         };
 
-        let up = crate::rig::pipeline::run_pipeline(&rig, "up", true).expect("up pipeline");
+        let up = crate::pipeline::run_pipeline(&rig, "up", true).expect("up pipeline");
         assert!(up.is_success());
         assert!(link.is_symlink());
 

@@ -337,5 +337,5 @@ fn run_step(
 }
 
 #[cfg(test)]
-#[path = "../../../tests/core/rig/pipeline_test.rs"]
+#[path = "../../../../tests/core/rig/pipeline_test.rs"]
 mod pipeline_test;

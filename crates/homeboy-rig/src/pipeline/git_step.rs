@@ -61,18 +61,20 @@ pub(super) fn run_git_step(
 }
 
 fn fail_if_git_index_unmerged(rig: &RigSpec, path: &str, completed_args: &[String]) -> Result<()> {
-    let output =
-        homeboy_core::git::execute_git_for_release(path, &["diff", "--name-only", "--diff-filter=U"])
-            .map_err(|e| {
-                Error::rig_pipeline_failed(
-                    &rig.id,
-                    "git",
-                    format!(
-                        "spawn `git diff --name-only --diff-filter=U` in {}: {}",
-                        path, e
-                    ),
-                )
-            })?;
+    let output = homeboy_core::git::execute_git_for_release(
+        path,
+        &["diff", "--name-only", "--diff-filter=U"],
+    )
+    .map_err(|e| {
+        Error::rig_pipeline_failed(
+            &rig.id,
+            "git",
+            format!(
+                "spawn `git diff --name-only --diff-filter=U` in {}: {}",
+                path, e
+            ),
+        )
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
