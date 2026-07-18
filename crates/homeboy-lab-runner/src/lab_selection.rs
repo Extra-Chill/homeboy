@@ -50,6 +50,7 @@ pub(super) enum LabRunnerPreparation {
 static HANDOFF_CONNECT_LOCKS: OnceLock<Mutex<std::collections::BTreeMap<String, Arc<Mutex<()>>>>> =
     OnceLock::new();
 const HANDOFF_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const HANDOFF_CONNECT_STATUS_CONVERGENCE_TIMEOUT: Duration = Duration::from_millis(500);
 // A reconnect owner and its contending handoff share this bounded window. The
 // owner's short automatic-connect timeout remains separate from admission.
 const HANDOFF_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -282,6 +283,23 @@ fn connect_runner_for_offload(
     }
     let (stdout, stderr, exit_code, timed_out) =
         run_runner_connect_command(runner_id, timeout, &lease)?;
+    if !timed_out && exit_code == 0 {
+        if let Some(session) =
+            wait_for_live_session(HANDOFF_CONNECT_STATUS_CONVERGENCE_TIMEOUT, |remaining| {
+                crate::local_live_session(runner_id, remaining)
+            })?
+        {
+            return connected_runner_connect_report_from_session(
+                runner_id,
+                session,
+                homeboy_core::paths::runner_session_file(runner_id)?
+                    .display()
+                    .to_string(),
+            );
+        }
+    }
+    // The live-session wait has a deadline. Read full status once afterward so
+    // an unavailable runner retains the existing detailed diagnostic.
     let status = status(runner_id)?;
 
     if status.connected {
@@ -330,6 +348,49 @@ fn connect_runner_for_offload(
     ))
 }
 
+pub(super) fn wait_for_live_session<Session>(
+    timeout: Duration,
+    session: Session,
+) -> Result<Option<super::RunnerSession>>
+where
+    Session: Fn(Duration) -> Result<Option<super::RunnerSession>>,
+{
+    wait_for_live_session_with(
+        timeout,
+        session,
+        std::time::Instant::now,
+        std::thread::sleep,
+    )
+}
+
+pub(super) fn wait_for_live_session_with<Session, Now, Pause>(
+    timeout: Duration,
+    session: Session,
+    mut now: Now,
+    mut pause: Pause,
+) -> Result<Option<super::RunnerSession>>
+where
+    Session: Fn(Duration) -> Result<Option<super::RunnerSession>>,
+    Now: FnMut() -> std::time::Instant,
+    Pause: FnMut(Duration),
+{
+    let deadline = now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        if let Some(session) = session(remaining.min(HANDOFF_CONNECT_POLL_INTERVAL))? {
+            return Ok(Some(session));
+        }
+        let remaining = deadline.saturating_duration_since(now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        pause(remaining.min(HANDOFF_CONNECT_POLL_INTERVAL));
+    }
+}
+
 pub(super) fn contended_runner_unavailable_error(runner_id: &str, lease_error: Error) -> Error {
     Error::new(
         ErrorCode::ValidationInvalidArgument,
@@ -365,21 +426,7 @@ where
     if !homeboy_core::runtime_promotion::is_contention_error(&lease_error) {
         return Err(lease_error);
     }
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return Ok(None);
-        }
-        if let Some(session) = session(remaining.min(HANDOFF_CONNECT_POLL_INTERVAL))? {
-            return Ok(Some(session));
-        }
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return Ok(None);
-        }
-        std::thread::sleep(remaining.min(HANDOFF_CONNECT_POLL_INTERVAL));
-    }
+    wait_for_live_session(timeout, session)
 }
 
 fn connected_runner_connect_report(

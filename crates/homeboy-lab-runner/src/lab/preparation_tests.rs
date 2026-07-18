@@ -1,6 +1,7 @@
 use super::super::lab_selection::{
     contended_runner_unavailable_error, prepare_lab_runner_for_offload_with,
-    wait_for_contended_runner, LabRunnerPreparation, LabRunnerSelection,
+    wait_for_contended_runner, wait_for_live_session_with, LabRunnerPreparation,
+    LabRunnerSelection,
 };
 use super::*;
 use crate::{RunnerActiveJobState, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode};
@@ -75,6 +76,61 @@ fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
             reason: "SSH connectivity check failed".to_string()
         }
     );
+}
+
+#[test]
+fn successful_connect_session_converges_after_transient_disconnection() {
+    let probes = std::cell::Cell::new(0);
+    let pauses = std::cell::Cell::new(0);
+    let elapsed = std::cell::Cell::new(std::time::Duration::ZERO);
+    let started = std::time::Instant::now();
+
+    let session =
+        wait_for_live_session_with(
+            std::time::Duration::from_millis(150),
+            |_| {
+                let probe = probes.get();
+                probes.set(probe + 1);
+                Ok((probe == 2)
+                    .then(|| connected_direct_session("lab", Some("http://127.0.0.1:1234"))))
+            },
+            || started + elapsed.get(),
+            |duration| {
+                pauses.set(pauses.get() + 1);
+                elapsed.set(elapsed.get() + duration);
+            },
+        )
+        .expect("session convergence");
+
+    assert!(session.is_some());
+    assert_eq!(probes.get(), 3);
+    assert_eq!(pauses.get(), 2);
+}
+
+#[test]
+fn successful_connect_session_convergence_exhausts_its_deadline() {
+    let probes = std::cell::Cell::new(0);
+    let pauses = std::cell::Cell::new(0);
+    let elapsed = std::cell::Cell::new(std::time::Duration::ZERO);
+    let started = std::time::Instant::now();
+
+    let session = wait_for_live_session_with(
+        std::time::Duration::from_millis(150),
+        |_| {
+            probes.set(probes.get() + 1);
+            Ok(None)
+        },
+        || started + elapsed.get(),
+        |duration| {
+            pauses.set(pauses.get() + 1);
+            elapsed.set(elapsed.get() + duration);
+        },
+    )
+    .expect("session convergence");
+
+    assert!(session.is_none());
+    assert_eq!(probes.get(), 3);
+    assert_eq!(pauses.get(), 3);
 }
 
 #[test]
