@@ -1,6 +1,6 @@
 use clap::Args;
 use homeboy::core::component::{self, TargetSpec};
-use homeboy::core::refactor::{self, RenameContext, RenameScope, RenameSpec, RenameTargeting};
+use homeboy::refactor::{self, RenameContext, RenameScope, RenameSpec, RenameTargeting};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;

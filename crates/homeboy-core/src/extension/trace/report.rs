@@ -16,8 +16,8 @@ use super::span_summary::{
     TraceSpanSummaryOutput,
 };
 use crate::execution_contract::is_reportable_artifact_evidence_path;
-use crate::rig::RigStateSnapshot;
 use homeboy_engine_primitives::detail_output::{bounded_items, DEFAULT_DETAIL_ITEM_LIMIT};
+use homeboy_lifecycle_contract::RigStateSnapshot;
 
 pub use aggregate_types::*;
 pub use builders::*;

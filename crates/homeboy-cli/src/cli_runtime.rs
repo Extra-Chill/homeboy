@@ -118,7 +118,13 @@ impl CliRuntime {
         // Register the audit fixability provider so code_audit can report how
         // fixable its findings are without calling up into the refactor engine's
         // fix planner — the seam that removes the last code_audit->refactor edge.
-        crate::core::refactor::audit_fixability_provider::register();
+        // Register the rig toolchain provider so core's extension exec-env
+        // builder can prepend the rig toolchain PATH.
+        crate::rig::provider::register();
+        crate::refactor::audit_fixability_provider::register();
+        // Register the refactor transform provider so core's extension
+        // test-drift auto-fixer can apply generated transform rules.
+        crate::refactor::transform_provider::register();
         // Register the audit component provider so code_audit can resolve the
         // component under audit (path, extension ids, audit rules, scope excludes)
         // without depending on the component layer — the last cross-layer seam
@@ -877,7 +883,7 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                         &std::env::args().collect::<Vec<_>>(),
                         selected_lab_runner,
                     ),
-                    default_lab_runner.as_deref(),
+                    selected_lab_runner,
                 ) {
                     output_runtime::emit_json_result(Err(err), output_file, 2);
                     return Some(2);
@@ -1567,6 +1573,62 @@ mod tests {
             resource_policy_runner_hint(&cli, Some("default-lab")),
             Some("selected-lab")
         );
+    }
+
+    #[test]
+    fn explicit_runner_preserves_lab_routing_for_hot_cook_and_review_commands() {
+        let cases: &[(&[&str], &str)] = &[
+            (
+                &[
+                    "homeboy",
+                    "--runner",
+                    "homeboy-lab",
+                    "agent-task",
+                    "cook",
+                    "--to-worktree",
+                    "homeboy@fix-explicit-runner",
+                    "--prompt",
+                    "fix the issue",
+                ],
+                "agent-task cook/run-plan/retry --run",
+            ),
+            (
+                &["homeboy", "--runner", "homeboy-lab", "review", "audit"],
+                "review audit",
+            ),
+            (
+                &[
+                    "homeboy",
+                    "--runner",
+                    "homeboy-lab",
+                    "review",
+                    "lint",
+                    "homeboy",
+                ],
+                "review lint",
+            ),
+            (
+                &[
+                    "homeboy",
+                    "--runner",
+                    "homeboy-lab",
+                    "review",
+                    "test",
+                    "homeboy",
+                ],
+                "review test",
+            ),
+        ];
+
+        for (args, label) in cases {
+            let cli = Cli::try_parse_from(*args).expect("parse explicit Lab runner command");
+            let hot_command = resource_policy::hot_command(&cli.command)
+                .expect("command has a resource policy contract");
+
+            assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+            assert!(hot_command.lab_offload_supported);
+            assert_eq!(hot_command.label, *label);
+        }
     }
 
     #[test]

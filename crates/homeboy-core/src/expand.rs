@@ -44,7 +44,7 @@ pub(crate) fn expand_tokens(input: &str, resolve: impl Fn(&str) -> Option<String
 }
 
 /// Expand `${...}` tokens, then apply shell-style `~` expansion.
-pub(crate) fn expand_with_tilde(input: &str, resolve: impl Fn(&str) -> Option<String>) -> String {
+pub fn expand_with_tilde(input: &str, resolve: impl Fn(&str) -> Option<String>) -> String {
     let substituted = expand_tokens(input, resolve);
     shellexpand::tilde(&substituted).into_owned()
 }

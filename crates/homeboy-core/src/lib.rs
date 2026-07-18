@@ -93,9 +93,13 @@ pub use homeboy_error as error;
 pub mod evidence_manifest;
 pub mod execution;
 pub mod execution_contract;
-pub(crate) mod expand;
+pub mod expand;
 pub mod extension;
+pub mod extension_execution;
+pub mod extension_invocation_context;
 pub mod extension_provider_discovery;
+pub mod extension_scope;
+pub mod extension_store;
 // finding moved to the internal `homeboy-finding` crate. Re-exported so existing
 // `crate::finding::*` call sites keep working unchanged.
 pub use homeboy_finding as finding;
@@ -106,7 +110,7 @@ pub mod gh_actions_cache;
 pub mod git;
 pub mod host_mutation_lifecycle;
 pub mod http_api;
-pub(crate) mod http_probe;
+pub mod http_probe;
 pub mod http_request;
 pub mod hygiene;
 pub mod io;
@@ -148,7 +152,7 @@ pub mod quality;
 // redaction moved to the internal `homeboy-redaction` crate. Re-exported here so
 // existing `crate::redaction::*` call sites keep working unchanged.
 pub use homeboy_redaction as redaction;
-pub mod refactor;
+pub mod refactor_transform_provider;
 pub mod release;
 pub mod release_set;
 pub mod report_compare;
@@ -158,7 +162,8 @@ pub mod resource_lifecycle_index;
 pub mod resource_policy_context;
 pub mod resources;
 pub mod review;
-pub mod rig;
+pub mod rig_provider;
+pub mod rig_toolchain_provider;
 pub mod run_lifecycle_record;
 pub mod run_lifecycle_status;
 pub mod run_outcome_envelope;
@@ -188,7 +193,6 @@ pub mod structured_sidecar;
 pub mod tag_gap;
 pub mod top_n;
 pub mod trace_compare;
-pub mod trace_experiment;
 pub mod trace_secrets;
 pub(crate) mod transient_workspace_policy;
 

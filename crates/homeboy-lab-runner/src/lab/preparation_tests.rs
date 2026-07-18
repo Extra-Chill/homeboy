@@ -1,6 +1,6 @@
 use super::super::lab_selection::{
-    prepare_lab_runner_for_offload_with, wait_for_contended_runner, LabRunnerPreparation,
-    LabRunnerSelection,
+    contended_runner_unavailable_error, prepare_lab_runner_for_offload_with,
+    wait_for_contended_runner, LabRunnerPreparation, LabRunnerSelection,
 };
 use super::*;
 use crate::{RunnerActiveJobState, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode};
@@ -384,31 +384,45 @@ fn concurrent_unreachable_health_handoffs_connect_once() {
 fn lease_contender_waits_for_owner_session_without_a_second_connect() {
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        Arc, Barrier,
     };
 
     let connected = Arc::new(AtomicBool::new(false));
     let connects = Arc::new(AtomicUsize::new(0));
+    let handoff_start = Arc::new(Barrier::new(2));
     let owner_connected = Arc::clone(&connected);
     let owner_connects = Arc::clone(&connects);
+    let owner_start = Arc::clone(&handoff_start);
     let owner = std::thread::spawn(move || {
+        owner_start.wait();
         owner_connects.fetch_add(1, Ordering::SeqCst);
         std::thread::sleep(std::time::Duration::from_millis(75));
         owner_connected.store(true, Ordering::SeqCst);
     });
 
-    // This is the contender branch after RuntimePromotionLease::acquire reports
-    // another process owns the reconnect transaction.
-    let lease_error = contention_error();
-    let session = wait_for_contended_runner(lease_error, std::time::Duration::from_secs(1), |_| {
-        Ok(connected.load(Ordering::SeqCst).then(|| {
-            connected_direct_session("lab-lease-contention", Some("http://127.0.0.1:63378"))
-        }))
-    })
-    .expect("wait succeeds")
-    .expect("owner publishes a healthy session");
+    let contender_connected = Arc::clone(&connected);
+    let contender_start = Arc::clone(&handoff_start);
+    let contender = std::thread::spawn(move || {
+        contender_start.wait();
+        // This is the contender handoff after RuntimePromotionLease::acquire
+        // reports that the owner is reconnecting the shared runner.
+        let session = wait_for_contended_runner(
+            contention_error(),
+            std::time::Duration::from_secs(1),
+            |_| {
+                Ok(contender_connected.load(Ordering::SeqCst).then(|| {
+                    connected_direct_session("lab-lease-contention", Some("http://127.0.0.1:63378"))
+                }))
+            },
+        )
+        .expect("wait succeeds")
+        .expect("owner publishes a healthy session");
+
+        session
+    });
 
     owner.join().expect("owner");
+    let session = contender.join().expect("contender handoff");
     assert_eq!(session.runner_id, "lab-lease-contention");
     assert_eq!(connects.load(Ordering::SeqCst), 1);
 }
@@ -443,6 +457,24 @@ fn contended_session_wait_obeys_the_deadline() {
 
     assert!(result.is_none());
     assert!(started.elapsed() < std::time::Duration::from_millis(750));
+}
+
+#[test]
+fn contended_handoff_failure_preserves_reconnect_lease_evidence() {
+    let error = contended_runner_unavailable_error("lab", contention_error());
+
+    assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+    assert_eq!(error.details["reconnect_lease"]["holder_pid"], 42);
+    assert!(error
+        .message
+        .contains("another controller owned its reconnect lease"));
+    assert!(error.details["tried"]
+        .as_array()
+        .expect("remediation list")
+        .iter()
+        .any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("Waited 30s"))));
 }
 
 #[test]

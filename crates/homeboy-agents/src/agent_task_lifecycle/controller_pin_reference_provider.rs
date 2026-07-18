@@ -28,7 +28,7 @@ impl ControllerPinReferenceProvider for AgentTaskControllerPinReferenceProvider 
         let (records, _) = list_records_with_health()?;
         let mut referenced = Vec::new();
         for record in records {
-            if !state_retains_pin(record.state) {
+            if !state_retains_pin(&record) {
                 continue;
             }
             if let Some(path) = record
@@ -47,9 +47,14 @@ impl ControllerPinReferenceProvider for AgentTaskControllerPinReferenceProvider 
 /// A record whose state can still operate on its pin retains it: queued,
 /// running, and recoverable-partial records may be re-run by lifecycle
 /// recovery, so their originating pinned executable must survive pruning.
-fn state_retains_pin(state: AgentTaskRunState) -> bool {
+fn state_retains_pin(record: &crate::agent_task_lifecycle::AgentTaskRunRecord) -> bool {
+    if record.lifecycle.artifact_retention.status
+        == homeboy_core::run_lifecycle_record::ArtifactRetentionStatus::Retained
+    {
+        return true;
+    }
     matches!(
-        state,
+        record.state,
         AgentTaskRunState::Queued
             | AgentTaskRunState::Running
             | AgentTaskRunState::CandidateRecoverable

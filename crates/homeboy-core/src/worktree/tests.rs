@@ -163,8 +163,11 @@ fn cleanup_marks_missing_worktree_record_removed() {
 fn cleanup_deletes_merged_task_branch_when_requested() {
     let dir = tempfile::tempdir().unwrap();
     let source = git_repo();
-    run_git(source.path(), &["branch", "task"]);
     let worktree = sibling_worktree_path(source.path(), "merged-branch-cleanup");
+    run_git(
+        source.path(),
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
     let store = dir.path().join("store");
     let record = fixture_record(source.path(), &worktree);
     write_record(&store, &record).unwrap();
@@ -193,6 +196,81 @@ fn cleanup_deletes_merged_task_branch_when_requested() {
         .unwrap()
         .code()
         .is_some_and(|code| code != 0));
+    assert!(!worktree.exists());
+
+    let retry = cleanup_with_store(
+        WorktreeCleanupOptions {
+            force: false,
+            dry_run: false,
+            cleanup_branches: true,
+            allow_unmerged_branches: false,
+        },
+        &store,
+    )
+    .unwrap();
+    assert_eq!(retry.counts.candidates, 0);
+    assert_eq!(retry.counts.removed, 0);
+    assert_eq!(retry.counts.branches_deleted, 0);
+}
+
+#[test]
+fn cleanup_keeps_branch_when_worktree_removal_fails_and_continues() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let locked_worktree = sibling_worktree_path(source.path(), "locked-cleanup");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "locked-task",
+            &locked_worktree.to_string_lossy(),
+        ],
+    );
+    run_git(
+        source.path(),
+        &["worktree", "lock", &locked_worktree.to_string_lossy()],
+    );
+    let store = dir.path().join("store");
+    let mut locked_record = fixture_record(source.path(), &locked_worktree);
+    locked_record.id = "fixture@locked".to_string();
+    locked_record.branch = "locked-task".to_string();
+    let removable_worktree = sibling_worktree_path(source.path(), "cleanup-continues");
+    let mut removable_record = fixture_record(source.path(), &removable_worktree);
+    removable_record.id = "fixture@removable".to_string();
+    write_record(&store, &locked_record).unwrap();
+    write_record(&store, &removable_record).unwrap();
+
+    let output = cleanup_with_store(
+        WorktreeCleanupOptions {
+            force: false,
+            dry_run: false,
+            cleanup_branches: true,
+            allow_unmerged_branches: false,
+        },
+        &store,
+    )
+    .unwrap();
+
+    assert_eq!(output.counts.candidates, 2);
+    assert_eq!(output.counts.removed, 1);
+    assert_eq!(output.counts.skipped, 1);
+    assert_eq!(output.skipped[0].record.id, locked_record.id);
+    assert_eq!(output.removed[0].record.id, removable_record.id);
+    assert!(locked_worktree.exists());
+    run_git(
+        source.path(),
+        &["show-ref", "--verify", "--quiet", "refs/heads/locked-task"],
+    );
+    assert_eq!(
+        read_record(&store, &locked_record.id).unwrap().state,
+        TaskWorktreeState::Active
+    );
+    assert_eq!(
+        read_record(&store, &removable_record.id).unwrap().state,
+        TaskWorktreeState::Removed
+    );
 }
 
 #[test]

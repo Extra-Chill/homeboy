@@ -26,7 +26,13 @@ pub(super) fn homeboy_source_checkout() -> Result<PathBuf> {
             None,
         )
     })?;
-    validate_homeboy_manifest_dir(Path::new(manifest_dir))
+    let manifest_dir = Path::new(manifest_dir);
+    for candidate in manifest_dir.ancestors() {
+        if let Ok(root) = validate_homeboy_manifest_dir(candidate) {
+            return Ok(root);
+        }
+    }
+    validate_homeboy_manifest_dir(manifest_dir)
 }
 
 pub(super) fn validate_homeboy_manifest_dir(manifest_dir: &Path) -> Result<PathBuf> {

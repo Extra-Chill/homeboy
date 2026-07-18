@@ -9,8 +9,8 @@ use crate::error::{Error, Result};
 use crate::observation::timeline::{
     ObservationEvent, ObservationSpanDefinition, ObservationSpanResult, ObservationSpanStatus,
 };
-use crate::rig::RigStateSnapshot;
 use crate::structured_sidecar;
+use homeboy_lifecycle_contract::RigStateSnapshot;
 
 use super::preview::TracePreviewMetadata;
 pub use homeboy_extension_contract::trace_parsing::{
@@ -20,44 +20,7 @@ pub use homeboy_extension_contract::trace_parsing::{
     TraceSpanResult, TraceSpanStatus, TraceStatus, TraceTemporalAssertionDefinition,
     TraceToolchainProvenance,
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct TraceResults {
-    pub component_id: String,
-    pub scenario_id: String,
-    pub status: TraceStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rig: Option<RigStateSnapshot>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence: Option<TraceEvidenceMetadata>,
-    #[serde(default)]
-    pub timeline: Vec<TraceEvent>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub span_definitions: Vec<TraceSpanDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub span_results: Vec<TraceSpanResult>,
-    #[serde(default)]
-    pub assertions: Vec<TraceAssertion>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub temporal_assertions: Vec<TraceTemporalAssertionDefinition>,
-    #[serde(default)]
-    pub artifacts: Vec<TraceArtifact>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dependencies: Vec<TraceDependencyProvenance>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metrics: BTreeMap<String, serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub toolchain: Option<TraceToolchainProvenance>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub components: Option<TraceComponentsProvenance>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preview: Option<TracePreviewMetadata>,
-}
+pub use homeboy_extension_contract::trace_results::TraceResults;
 
 pub fn parse_trace_results_file(path: &Path) -> Result<TraceResults> {
     let content = std::fs::read_to_string(path).map_err(|e| {

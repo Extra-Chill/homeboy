@@ -11,8 +11,8 @@ use crate::extension::{
     PhaseFailureCategory, PhaseReport, VerificationPhase,
 };
 use crate::finding::{FindingProducerSummary, HomeboyFinding};
-use crate::refactor::plan::RefactorSourceRun;
 use homeboy_refactor_contract::AppliedRefactor;
+use homeboy_refactor_contract::LintFixInput;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -165,7 +165,7 @@ fn producer_summary_label(producer_summaries: &[FindingProducerSummary]) -> Stri
 /// Build a [`LintCommandOutput`] from a `homeboy review lint --fix` dispatch.
 ///
 /// `--fix` is a thin alias for `homeboy refactor <component> --from lint
-/// --write`, so the fix path receives a `RefactorSourceRun` rather than the
+/// --write`, so the fix path receives a `LintFixInput` (slim view) rather than the
 /// usual lint workflow result. We surface the applied autofix via the existing
 /// `autofix` field on `LintCommandOutput` so consumers see a consistent shape
 /// regardless of which mode was requested.
@@ -173,7 +173,7 @@ fn producer_summary_label(producer_summaries: &[FindingProducerSummary]) -> Stri
 /// Exit code semantics: autofixable findings should never fail the run, so
 /// the fix dispatch returns exit 0 even when fixes were applied. Real fixer
 /// errors propagate through `Result` and never reach this builder.
-pub fn from_lint_fix(component_label: String, run: RefactorSourceRun) -> (LintCommandOutput, i32) {
+pub fn from_lint_fix(component_label: String, run: LintFixInput) -> (LintCommandOutput, i32) {
     let exit_code = 0;
     let phase = PhaseReport {
         phase: VerificationPhase::Lint,

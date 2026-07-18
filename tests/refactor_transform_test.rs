@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use homeboy::core::refactor;
+use homeboy::refactor;
 
 #[allow(dead_code)]
 mod support;

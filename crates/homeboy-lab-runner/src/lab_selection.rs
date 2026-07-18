@@ -50,6 +50,9 @@ pub(super) enum LabRunnerPreparation {
 static HANDOFF_CONNECT_LOCKS: OnceLock<Mutex<std::collections::BTreeMap<String, Arc<Mutex<()>>>>> =
     OnceLock::new();
 const HANDOFF_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+// A reconnect owner and its contending handoff share this bounded window. The
+// owner's short automatic-connect timeout remains separate from admission.
+const HANDOFF_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) fn prepare_lab_runner_for_offload(
     selection: &LabRunnerSelection,
@@ -251,43 +254,27 @@ fn connect_runner_for_offload(
     // Serialize with other controller processes before replacing a direct-SSH
     // session. The child `runner connect` receives this lease capability.
     let timeout = lab_connect_timeout(source);
-    let lease = match homeboy_core::runtime_promotion::acquire(
-        "Lab runner handoff",
-        runner_id.to_string(),
-    ) {
-        Ok(lease) => lease,
-        Err(lease_error) => {
-            if let Some(session) =
-                wait_for_contended_runner(lease_error.clone(), timeout, |remaining| {
-                    crate::local_live_session(runner_id, remaining)
-                })?
-            {
-                return connected_runner_connect_report_from_session(
-                    runner_id,
-                    session,
-                    homeboy_core::paths::runner_session_file(runner_id)?
-                        .display()
-                        .to_string(),
-                );
+    let lease =
+        match homeboy_core::runtime_promotion::acquire("Lab runner handoff", runner_id.to_string())
+        {
+            Ok(lease) => lease,
+            Err(lease_error) => {
+                if let Some(session) = wait_for_contended_runner(
+                    lease_error.clone(),
+                    HANDOFF_ADMISSION_TIMEOUT,
+                    |remaining| crate::local_live_session(runner_id, remaining),
+                )? {
+                    return connected_runner_connect_report_from_session(
+                        runner_id,
+                        session,
+                        homeboy_core::paths::runner_session_file(runner_id)?
+                            .display()
+                            .to_string(),
+                    );
+                }
+                return Err(contended_runner_unavailable_error(runner_id, lease_error));
             }
-            return Err(Error::validation_invalid_argument(
-                "runner",
-                format!(
-                    "Lab runner `{runner_id}` remained unavailable while another controller owned its reconnect lease: {}",
-                    lease_error.message
-                ),
-                Some(runner_id.to_string()),
-                Some(vec![
-                    format!(
-                        "Waited {}s for the reconnect owner to publish a healthy session; it did not complete.",
-                        timeout.as_secs()
-                    ),
-                    format!("Inspect `homeboy runner status {runner_id} --json` before retrying."),
-                    format!("Inspect `homeboy runner doctor {runner_id}` if the daemon remains unreachable."),
-                ]),
-            ));
-        }
-    };
+        };
     if let Ok(report) = status(runner_id) {
         if report.connected {
             return connected_runner_connect_report(runner_id, report);
@@ -341,6 +328,30 @@ fn connect_runner_for_offload(
         },
         exit_code,
     ))
+}
+
+pub(super) fn contended_runner_unavailable_error(runner_id: &str, lease_error: Error) -> Error {
+    Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        format!(
+            "Lab runner `{runner_id}` remained unavailable while another controller owned its reconnect lease: {}",
+            lease_error.message
+        ),
+        serde_json::json!({
+            "field": "runner",
+            "problem": "a contended reconnect did not publish a healthy runner session before the admission deadline",
+            "id": runner_id,
+            "reconnect_lease": lease_error.details,
+            "tried": [
+                format!(
+                    "Waited {}s for the reconnect owner to publish a healthy session; it did not complete.",
+                    HANDOFF_ADMISSION_TIMEOUT.as_secs()
+                ),
+                format!("Inspect `homeboy runner status {runner_id} --json` before retrying."),
+                format!("Inspect `homeboy runner doctor {runner_id}` if the daemon remains unreachable."),
+            ],
+        }),
+    )
 }
 
 pub(super) fn wait_for_contended_runner<Session>(

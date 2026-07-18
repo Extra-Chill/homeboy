@@ -851,7 +851,7 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
     let run_dir = RunDir::create().expect("run dir");
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
     let override_env =
-        homeboy::core::rig::expand::rig_component_path_override_env_name("package-fuzz", "package");
+        homeboy::rig::expand::rig_component_path_override_env_name("package-fuzz", "package");
     let override_path = temp.path().join("runner/plugins/package");
     unsafe {
         std::env::set_var(&override_env, override_path.to_string_lossy().to_string());

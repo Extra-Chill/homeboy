@@ -7,97 +7,18 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use crate::rig::{TraceNativePublicPreviewSpec, TracePublicPreviewMode, TracePublicPreviewSpec};
+pub use homeboy_extension_contract::trace_preview::{
+    TracePreviewAssetCheck, TracePreviewAssetFanoutReport, TracePreviewAssetFanoutRequest,
+    TracePreviewLogPaths, TracePreviewMetadata,
+};
+use homeboy_rig_contract::{
+    TraceNativePublicPreviewSpec, TracePublicPreviewMode, TracePublicPreviewSpec,
+};
 
 const DEFAULT_STARTUP_TIMEOUT_SECONDS: u64 = 20;
 const DEFAULT_ASSET_CHECK_TIMEOUT_SECONDS: u64 = 10;
 const DEFAULT_ASSET_FANOUT_CONCURRENCY: usize = 16;
 const DEFAULT_ASSET_FANOUT_REPEAT_COUNT: usize = 1;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TracePreviewAssetCheck {
-    pub path: String,
-    pub url: String,
-    pub status: Option<u16>,
-    pub ok: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TracePreviewAssetFanoutRequest {
-    pub path: String,
-    pub url: String,
-    pub status: Option<u16>,
-    pub ok: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_bucket: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TracePreviewAssetFanoutReport {
-    pub schema: String,
-    pub concurrency: usize,
-    pub repeat_count: usize,
-    pub asset_path_count: usize,
-    pub expected_request_count: usize,
-    pub client_request_count: usize,
-    pub success_count: usize,
-    pub failure_count: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ingress_request_count: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local_origin_request_count: Option<usize>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub status_counts: BTreeMap<String, usize>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub failure_buckets: BTreeMap<String, usize>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub requests: Vec<TracePreviewAssetFanoutRequest>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct TracePreviewMetadata {
-    pub schema: String,
-    pub requested_mode: String,
-    pub provider: String,
-    pub local_origin: String,
-    pub local_url: String,
-    pub public_origin: String,
-    pub public_url: String,
-    pub browser_effective_origin: String,
-    pub window_location_origin: String,
-    pub window_is_secure_context: bool,
-    pub require_https: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_assets: Vec<TracePreviewAssetCheck>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub asset_fanout: Option<TracePreviewAssetFanoutReport>,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process_id: Option<String>,
-    pub cleanup_status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub public_host: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ingress_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub log_paths: Option<TracePreviewLogPaths>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct TracePreviewLogPaths {
-    pub client_stdout_path: String,
-    pub client_stderr_path: String,
-}
 
 pub struct TracePublicPreviewSession {
     child: Option<Child>,
@@ -935,7 +856,7 @@ fn asset_fanout_report(
 }
 
 fn empty_asset_fanout_report(
-    fanout: &crate::rig::TracePreviewAssetFanoutSpec,
+    fanout: &homeboy_rig_contract::TracePreviewAssetFanoutSpec,
 ) -> TracePreviewAssetFanoutReport {
     TracePreviewAssetFanoutReport {
         schema: "homeboy/preview-asset-fanout/v1".to_string(),
@@ -1006,7 +927,7 @@ fn stop_child(child: &mut Option<Child>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{first_https_origin, TracePublicPreviewSession};
-    use crate::rig::{
+    use homeboy_rig_contract::{
         TraceNativePublicPreviewSpec, TracePreviewAssetFanoutSpec, TracePublicPreviewMode,
         TracePublicPreviewSpec,
     };

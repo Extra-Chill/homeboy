@@ -15,7 +15,7 @@ use homeboy::core::extension::trace::{
 };
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::observation::{ActiveObservation, NewRunRecord};
-use homeboy::core::rig::{self, RigSpec};
+use homeboy::rig::{self, RigSpec};
 
 use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};
@@ -1456,7 +1456,7 @@ fn resolve_component_id(
 }
 
 fn rig_component_path(spec: &RigSpec, component_id: &str) -> Option<String> {
-    homeboy::core::rig::resolve_component_path(spec, component_id).ok()
+    homeboy::rig::resolve_component_path(spec, component_id).ok()
 }
 
 fn rig_component_for_trace(spec: &RigSpec, component_id: &str) -> Option<Component> {
@@ -1467,7 +1467,7 @@ fn rig_component_for_trace(spec: &RigSpec, component_id: &str) -> Option<Compone
             .entry(extension_id)
             .or_insert_with(ScopedExtensionConfig::default);
     }
-    let mut resolved = homeboy::core::rig::resolve_component(spec, component_id).ok()?;
+    let mut resolved = homeboy::rig::resolve_component(spec, component_id).ok()?;
     resolved.remote_url = component.remote_url.clone().or(resolved.remote_url);
     resolved.triage_remote_url = component
         .triage_remote_url

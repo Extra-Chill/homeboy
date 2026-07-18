@@ -11,6 +11,8 @@ extern crate self as homeboy;
 // existing `crate::core::*` call sites across this layer are unchanged.
 pub use homeboy_agents as agents;
 pub use homeboy_core as core;
+pub use homeboy_refactor as refactor;
+pub use homeboy_rig as rig;
 
 // The optional Lab-offload runner subsystem lives in the homeboy-runner crate.
 // Re-exported as `runner` so CLI call sites reach it via `crate::runner::*` /

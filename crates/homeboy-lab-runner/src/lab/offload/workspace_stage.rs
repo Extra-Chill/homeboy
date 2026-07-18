@@ -1,12 +1,12 @@
 //! Workspace sync / remap staging for the standard (non-resident) offload path.
 
 use super::*;
-use homeboy_core::rig;
 use homeboy_core::runner_execution_envelope::{
     PathMaterializationEntry, PathMaterializationPlan,
     PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
     PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
+use homeboy_rig;
 
 pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) plan: HomeboyPlan,
@@ -743,15 +743,17 @@ impl RunnerCommandPlan {
             command_extensions.extend(workload.extension_overrides.iter().cloned());
             let command = match workload.kind {
                 homeboy_core::lab_contract::LabRigWorkloadKind::Bench => {
-                    rig::RigWorkloadKind::Bench
+                    homeboy_rig::RigWorkloadKind::Bench
                 }
-                homeboy_core::lab_contract::LabRigWorkloadKind::Fuzz => rig::RigWorkloadKind::Fuzz,
+                homeboy_core::lab_contract::LabRigWorkloadKind::Fuzz => {
+                    homeboy_rig::RigWorkloadKind::Fuzz
+                }
             };
             for rig_id in &workload.rig_ids {
                 let Some(spec) = load_primary_rig_spec(primary_source_path, rig_id)? else {
                     continue;
                 };
-                if matches!(command, rig::RigWorkloadKind::Bench) {
+                if matches!(command, homeboy_rig::RigWorkloadKind::Bench) {
                     accepted_settings.extend(
                         spec.bench
                             .as_ref()
@@ -762,16 +764,16 @@ impl RunnerCommandPlan {
                 if has_extension_overrides {
                     continue;
                 }
-                required_extensions.extend(rig::required_extension_ids_for_workload(
+                required_extensions.extend(homeboy_rig::required_extension_ids_for_workload(
                     &spec,
                     command,
                     workload.component.as_deref(),
                 ));
-                let workload_extensions = rig::extension_ids_for_workloads(&spec, command);
+                let workload_extensions = homeboy_rig::extension_ids_for_workloads(&spec, command);
                 if workload_extensions.len() == 1 {
                     command_extensions.extend(workload_extensions);
                 }
-                command_extensions.extend(rig::component_extension_ids_for_workload(
+                command_extensions.extend(homeboy_rig::component_extension_ids_for_workload(
                     &spec,
                     command,
                     workload.component.as_deref(),
@@ -789,19 +791,22 @@ impl RunnerCommandPlan {
     }
 }
 
-fn load_primary_rig_spec(primary_source_path: &Path, rig_id: &str) -> Result<Option<rig::RigSpec>> {
+fn load_primary_rig_spec(
+    primary_source_path: &Path,
+    rig_id: &str,
+) -> Result<Option<homeboy_rig::RigSpec>> {
     if !primary_source_path.join("rig.json").is_file() && !primary_source_path.join("rigs").is_dir()
     {
         return Ok(None);
     }
 
-    let Some(discovered) = rig::discover_rigs(primary_source_path)?
+    let Some(discovered) = homeboy_rig::discover_rigs(primary_source_path)?
         .into_iter()
         .find(|candidate| candidate.id == rig_id)
     else {
         return Ok(None);
     };
-    let spec = rig::load_local_source(
+    let spec = homeboy_rig::load_local_source(
         &discovered.rig_path.to_string_lossy(),
         Some(discovered.id.as_str()),
     )?;

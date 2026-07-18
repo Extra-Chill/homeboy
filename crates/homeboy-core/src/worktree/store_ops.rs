@@ -86,15 +86,22 @@ pub(super) fn cleanup_with_store(
         });
 
         if !options.dry_run {
-            removed.push(remove_with_store(
+            match remove_with_store(
                 WorktreeRemoveOptions {
-                    id: record.id,
+                    id: record.id.clone(),
                     force: options.force,
                     cleanup_branch: options.cleanup_branches,
                     allow_unmerged_branch: options.allow_unmerged_branches,
                 },
                 store,
-            )?);
+            ) {
+                Ok(output) => removed.push(output),
+                Err(error) => skipped.push(WorktreeCleanupSkipped {
+                    record,
+                    safety: Some(safety),
+                    reasons: vec![error.message],
+                }),
+            }
         }
     }
     let branch_delete_candidates = candidates
@@ -109,8 +116,16 @@ pub(super) fn cleanup_with_store(
         .iter()
         .filter(|output| output.branch_cleanup.deleted)
         .count();
+    let preflight_skipped = skipped
+        .iter()
+        .filter(|skipped| {
+            !candidates
+                .iter()
+                .any(|candidate| candidate.record.id == skipped.record.id)
+        })
+        .count();
     let counts = WorktreeCleanupCounts {
-        candidates: candidates.len() + skipped.len(),
+        candidates: candidates.len() + preflight_skipped,
         removed: removed.len(),
         skipped: skipped.len(),
         branch_delete_candidates,

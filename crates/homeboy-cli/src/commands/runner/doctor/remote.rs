@@ -49,7 +49,8 @@ pub fn report(
     });
 
     let homeboy_command = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
-    let local_homeboy_version = homeboy_product_identity::product_version();
+    let local_homeboy_identity = homeboy_product_identity::build_identity();
+    let local_homeboy_version = local_homeboy_identity.version.as_str();
     let homeboy = HomeboyProbe {
         version: common::remote_line(
             client,
@@ -67,6 +68,7 @@ pub fn report(
     };
     if let Some(check) = checks::homeboy_version_skew_check(
         local_homeboy_version,
+        &local_homeboy_identity.display,
         &homeboy.version,
         runner_id,
         &server.id,

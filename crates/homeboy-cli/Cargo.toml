@@ -16,6 +16,9 @@ path = "src/lib.rs"
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-agents = { version = "0.1.0", path = "../homeboy-agents" }
+homeboy-refactor = { version = "0.1.0", path = "../homeboy-refactor" }
+homeboy-rig = { version = "0.1.0", path = "../homeboy-rig" }
+homeboy-refactor-contract = { version = "0.1.0", path = "../homeboy-refactor-contract" }
 homeboy-lab-runner = { version = "0.1.0", path = "../homeboy-lab-runner" }
 homeboy-fuzz = { version = "0.1.0", path = "../homeboy-fuzz" }
 homeboy-issues = { version = "0.1.0", path = "../homeboy-issues" }

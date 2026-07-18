@@ -1,0 +1,15 @@
+[package]
+name = "homeboy-rig-contract"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Shared rig trace-spec data types (trace-dependency and public-preview specs). Sits below homeboy-core so both core (extension trace) and homeboy-rig reference them without a cycle."
+publish = false
+
+[lib]
+name = "homeboy_rig_contract"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

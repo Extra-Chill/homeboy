@@ -287,8 +287,8 @@ fn compare_cpu_desc(a: &ProcessRow, b: &ProcessRow) -> Ordering {
 }
 
 fn collect_rig_leases() -> Result<RigLeaseSummary, String> {
-    let leases = homeboy::core::rig::active_run_leases()
-        .map_err(|e| format!("rig lease probe failed: {e}"))?;
+    let leases =
+        homeboy::rig::active_run_leases().map_err(|e| format!("rig lease probe failed: {e}"))?;
     let rows: Vec<RigLeaseRow> = leases
         .into_iter()
         .map(|lease| RigLeaseRow {

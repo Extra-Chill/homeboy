@@ -10,7 +10,7 @@ pub mod component_script;
 mod env_provider;
 mod execution;
 mod fingerprint;
-mod invocation_context;
+// invocation_context relocated to crate::extension_invocation_context
 // The grammar parsing engine is a language-agnostic primitive; it now lives in
 // homeboy-engine-primitives. Re-exported here so existing
 // `crate::extension::grammar` / `crate::extension::grammar_items` paths keep
@@ -24,11 +24,12 @@ mod manifest;
 mod manifest_config;
 mod manifest_sidecar;
 mod refactor_protocol;
-mod registry;
+// Manifest store relocated to crate::extension_store (core-level; operates on
+// the contract ExtensionManifest type). Re-exported here for path stability.
 mod repair;
 mod runner;
 mod runtime_helper;
-mod scope;
+// scope relocated to crate::extension_scope (core glue over the contract manifest)
 pub mod self_check;
 mod setup_env;
 mod summary;
@@ -37,16 +38,16 @@ pub mod trace;
 pub mod update_check;
 mod validation;
 
-pub use capability::{
-    build_scenario_runner, extract_component_extension_settings, path_list_env_value,
-    resolve_execution_context, resolve_extension_for_capability, ExtensionExecutionContext,
-    ScenarioRunnerOptions,
-};
-pub(crate) use capability::{
+pub(crate) use crate::extension_execution::{
     extension_guidance_hints, has_linked_extension_for_capability,
     resolve_execution_context_if_available, stderr_tail,
 };
-pub(crate) use compiler_warning_contract::{
+pub use crate::extension_execution::{
+    extract_component_extension_settings, path_list_env_value, resolve_execution_context,
+    resolve_extension_for_capability, ExtensionExecutionContext,
+};
+pub use capability::{build_scenario_runner, ScenarioRunnerOptions};
+pub use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
 };
@@ -57,6 +58,12 @@ pub use homeboy_extension_contract::core_compat::{
 };
 pub use homeboy_extension_contract::ExtensionCapability;
 
+pub use crate::extension_invocation_context::ResolvedExtensionInvocationContext;
+pub use crate::extension_scope::ExtensionScope;
+pub use crate::extension_store::{
+    available_extension_ids, extension_path, find_extension_by_tool, find_extension_for_file_ext,
+    is_extension_linked, load_all_extensions, load_extension, merge, save_manifest,
+};
 pub(crate) use execution::{build_settings_json_from_manifest, execute_action};
 pub use execution::{
     extension_ready_status, is_extension_compatible, run_action, run_extension, run_setup,
@@ -78,7 +85,6 @@ pub use homeboy_extension_contract::update_output::{
 };
 pub use homeboy_extension_contract::version::{parse_extension_version, VersionConstraint};
 pub use homeboy_extension_contract::{DeployArchiveInstallPolicy, DeployRequiredHeader};
-pub use invocation_context::ResolvedExtensionInvocationContext;
 pub use lifecycle::source_metadata::resolve_source_url;
 pub use lifecycle::source_metadata::SourceMetadataRepair;
 pub use lifecycle::{
@@ -118,16 +124,11 @@ pub use refactor_protocol::{
     RefactorScriptFailure, RefactorScriptFailureKind, RelatedTests, ResolvedImports,
     RewrittenImport,
 };
-pub use registry::{
-    available_extension_ids, extension_path, find_extension_by_tool, find_extension_for_file_ext,
-    is_extension_linked, load_all_extensions, load_extension, merge, save_manifest,
-};
 pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
 pub use runner::{ExtensionRunner, RunnerOutput};
 pub use runtime_helper::{
     helper_path, BASH_PREFLIGHT_ENV, COMMAND_CAPTURE_ENV, RUNNER_PRELUDE_ENV, RUNNER_STEPS_ENV,
 };
-pub use scope::ExtensionScope;
 pub use summary::{list_summaries, ActionSummary, ExtensionSummary};
 pub use validation::{
     extension_provides_build, validate_extension_requirements, validate_required_extensions,

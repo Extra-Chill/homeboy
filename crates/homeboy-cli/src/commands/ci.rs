@@ -12,7 +12,7 @@ use homeboy::core::ci_scope::{
     self, GithubActionsContext, MergeBaseResolver, ResolvedScope, ScopeRequest,
 };
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
-use homeboy::core::refactor::auto::transaction::{
+use homeboy::refactor::auto::transaction::{
     self, CiContext, TransactionOutcome, TransactionRequest, AUTOFIX_COMMIT_PREFIX,
 };
 

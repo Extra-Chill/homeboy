@@ -1,0 +1,30 @@
+[package]
+name = "homeboy-rig"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rig subsystem for homeboy: reproducible multi-component dev environments (rig specs, toolchain, trace workloads/experiments, lifecycle). Depends on homeboy-core; core does not depend on it."
+publish = false
+
+[lib]
+name = "homeboy_rig"
+path = "src/lib.rs"
+
+[dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+homeboy-rig-contract = { version = "0.1.0", path = "../homeboy-rig-contract" }
+homeboy-lab-runner-contract = { version = "0.1.0", path = "../homeboy-lab-runner-contract" }
+homeboy-lifecycle-contract = { version = "0.1.0", path = "../homeboy-lifecycle-contract" }
+homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
+homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+chrono = "0.4"
+which = "6.0"
+shellexpand = "3.1"
+libc = "0.2"
+tempfile = "3.14"
+
+[dev-dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

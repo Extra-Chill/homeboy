@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use crate::engine::invocation::InvocationRequirements;
 use crate::extension::trace::baseline::TraceBaselineComparison;
-use crate::rig::TraceDependencySpec;
 use homeboy_engine_primitives::baseline::BaselineFlags;
+use homeboy_rig_contract::TraceDependencySpec;
 
 use super::super::attach::TraceAttachment;
 use super::super::canonicality::TraceCanonicalPolicy;
@@ -65,7 +65,7 @@ pub struct TraceRunnerInputs {
     pub dependencies: Vec<TraceDependencySpec>,
     pub runner_capabilities: Vec<String>,
     pub invocation_requirements: InvocationRequirements,
-    pub public_preview: Option<crate::rig::TracePublicPreviewSpec>,
+    pub public_preview: Option<homeboy_rig_contract::TracePublicPreviewSpec>,
 }
 
 #[derive(Debug, Clone, Serialize)]

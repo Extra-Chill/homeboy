@@ -7,11 +7,11 @@
 //! by the CLI, mirroring the runner-evidence / tunnel provider hooks.
 
 use super::manifest::ExtensionManifest;
-use super::registry::{load_all_extensions, load_extension};
 use crate::code_audit::extension_manifests::{
     register_audit_extension_manifest_provider, AuditExtensionManifest,
     AuditExtensionManifestProvider,
 };
+use crate::extension_store::{load_all_extensions, load_extension};
 
 /// Project a loaded `ExtensionManifest` into the audit-relevant view.
 fn project(manifest: &ExtensionManifest) -> AuditExtensionManifest {

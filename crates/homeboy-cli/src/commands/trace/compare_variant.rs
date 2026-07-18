@@ -3,8 +3,8 @@ use std::path::Path;
 
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::TraceCommandOutput;
-use homeboy::core::rig;
 use homeboy::core::trace_compare;
+use homeboy::rig;
 
 use super::aggregate::{
     aggregate_metric, aggregate_span, TraceAggregateMetricSample, TraceAggregateSpanSample,

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 use crate::extension::ExtensionExecutionContext;
-use crate::rig::TraceDependencySpec;
+use homeboy_rig_contract::TraceDependencySpec;
 
 use super::parsing::TraceDependencyProvenance;
 

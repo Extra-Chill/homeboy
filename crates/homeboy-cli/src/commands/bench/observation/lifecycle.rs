@@ -4,7 +4,7 @@ use homeboy::core::engine::run_dir::{self, RunDir};
 use homeboy::core::extension::bench::BenchRunWorkflowResult;
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{merge_metadata, ActiveObservation, NewRunRecord, RunStatus};
-use homeboy::core::rig::RigStateSnapshot;
+use homeboy::rig::RigStateSnapshot;
 
 use super::artifacts::{
     record_bench_observation_artifacts, record_if_exists, record_memory_timeline_artifacts,

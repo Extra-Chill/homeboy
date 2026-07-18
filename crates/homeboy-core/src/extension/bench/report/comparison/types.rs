@@ -9,7 +9,7 @@ use crate::extension::bench::diagnostic::BenchDiagnostic;
 use crate::extension::bench::parsing::{BenchMetricPhase, BenchMetricPolicy, BenchResults};
 use crate::extension::bench::run::BenchRunFailure;
 use crate::extension::bench::side_by_side::BenchSideBySideReport;
-use crate::rig::RigStateSnapshot;
+use homeboy_lifecycle_contract::RigStateSnapshot;
 
 /// Cross-rig comparison envelope.
 ///

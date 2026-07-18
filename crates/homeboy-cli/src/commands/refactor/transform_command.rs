@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use homeboy::core::refactor::{self, RuleResult, TransformResult};
+use homeboy::refactor::{self, RuleResult, TransformResult};
 
 use super::{run_across_targets, RefactorOutput, RefactorTargetArgs};
 use crate::commands::CmdResult;

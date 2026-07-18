@@ -1031,6 +1031,14 @@ mod tests {
     }
 
     #[test]
+    fn self_artifact_source_resolves_the_workspace_homeboy_checkout() {
+        let root = homeboy_source_checkout().expect("workspace source checkout");
+
+        assert!(root.join(".git").exists());
+        assert!(root.join("src/main.rs").is_file());
+    }
+
+    #[test]
     fn self_artifact_registry_rejection_suggests_active_checkout_when_discoverable() {
         let tmp = TempDir::new().expect("tempdir");
         fs::write(

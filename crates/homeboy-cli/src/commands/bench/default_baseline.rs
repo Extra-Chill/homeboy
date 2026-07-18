@@ -8,7 +8,7 @@
 //! fails.
 
 use homeboy::core::extension::bench::{BenchComparisonOutput, BenchDefaultBaselineExpansion};
-use homeboy::core::rig;
+use homeboy::rig;
 
 use super::{matrix, BenchRunArgs};
 

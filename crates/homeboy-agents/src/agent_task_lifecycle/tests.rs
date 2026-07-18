@@ -266,7 +266,7 @@ fn legacy_v1_pin_migration_failures_leave_durable_record_unchanged() {
 
 #[cfg(unix)]
 #[test]
-fn controller_runtime_retention_keeps_mutable_runs_and_reports_terminal_pins_eligible() {
+fn controller_runtime_retention_keeps_mutable_and_retained_terminal_runs() {
     with_isolated_home(|_| {
         // Controller-runtime retention discovers referenced pins through the
         // agent-task pin-reference provider hook; register it so the report can
@@ -305,6 +305,7 @@ fn controller_runtime_retention_keeps_mutable_runs_and_reports_terminal_pins_eli
         }
         rewrite_record_for_test(&terminal.run_id, |record| {
             record.state = AgentTaskRunState::Succeeded;
+            record.lifecycle.artifact_retention.status = ArtifactRetentionStatus::Retained;
         })
         .expect("make terminal");
 
@@ -325,15 +326,15 @@ fn controller_runtime_retention_keeps_mutable_runs_and_reports_terminal_pins_eli
         let report =
             homeboy_core::controller_runtime::retention_report().expect("retention report");
         assert!(report.retained.contains(&active_pin));
-        assert!(report.eligible.contains(&terminal_pin));
+        assert!(report.retained.contains(&terminal_pin));
         let dry_run = prune_controller_runtime_pins(false).expect("plan pin pruning");
         assert!(dry_run.retained.contains(&active_pin));
-        assert!(dry_run.eligible.contains(&terminal_pin));
+        assert!(dry_run.retained.contains(&terminal_pin));
         assert!(dry_run.removed.is_empty());
-        let applied = prune_controller_runtime_pins(true).expect("prune terminal pin");
-        assert!(applied.removed.contains(&terminal_pin));
+        let applied = prune_controller_runtime_pins(true).expect("prune unreferenced pins");
+        assert!(!applied.removed.contains(&terminal_pin));
         assert!(active_pin.exists());
-        assert!(!terminal_pin.exists());
+        assert!(terminal_pin.exists());
     });
 }
 
@@ -965,6 +966,68 @@ fn detached_cook_preacceptance_failure_terminalizes_attempt_proxy() {
                 == "Retry: homeboy agent-task retry cook-7970-attempt-1-staging-failure --run"));
         assert!(record.metadata.get("runner_job_id").is_none());
     });
+}
+
+#[test]
+fn retryable_workspace_metadata_transport_failure_builds_transient_outcome() {
+    let plan = test_plan();
+    let error = Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        "write runner workspace metadata failed during `workspace_metadata_write`",
+        json!({
+            "phase": "workspace_metadata_write",
+            "command": "write Homeboy runner workspace metadata",
+            "timeout_seconds": 30,
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": "Connection to 192.168.86.63 closed by remote host. client_loop: send disconnect: Broken pipe",
+            "transport_close_reason": "Connection to 192.168.86.63 closed by remote host. client_loop: send disconnect: Broken pipe",
+        }),
+    )
+    .with_retryable(true);
+    let outcome = build_pre_execution_failure_outcome(
+        "cook-8803-attempt-1",
+        &plan.tasks[0],
+        "lab_workspace_stage",
+        &error,
+    );
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Transient)
+    );
+    assert_eq!(outcome.diagnostics[0].data["retryable"], true);
+    assert_eq!(
+        outcome.diagnostics[0].data["details"]["phase"],
+        "workspace_metadata_write"
+    );
+    assert_eq!(outcome.outputs["retryable"], true);
+    assert_eq!(
+        outcome.outputs["details"]["transport_close_reason"],
+        error.details["transport_close_reason"]
+    );
+    assert_eq!(outcome.metadata["retryable"], true);
+    assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
+}
+
+#[test]
+fn non_retryable_pre_execution_failure_remains_invalid_input() {
+    let plan = test_plan();
+    let outcome = build_pre_execution_failure_outcome(
+        "cook-invalid-input",
+        &plan.tasks[0],
+        "controller_admission",
+        &Error::validation_invalid_argument("plan", "invalid input", None, None),
+    );
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::InvalidInput)
+    );
+    assert_eq!(outcome.diagnostics[0].data["retryable"], false);
+    assert_eq!(outcome.outputs["retryable"], false);
+    assert_eq!(outcome.metadata["retryable"], false);
+    assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
 }
 
 #[test]

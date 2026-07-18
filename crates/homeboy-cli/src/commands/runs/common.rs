@@ -10,8 +10,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
-use homeboy::core::rig::RigRunArtifactIndex;
 use homeboy::core::Error;
+use homeboy::rig::RigRunArtifactIndex;
 use homeboy::runner::runners::{
     is_reportable_artifact_evidence_path, is_retrievable_runner_artifact,
 };
@@ -56,7 +56,7 @@ pub fn run_summaries_with_artifact_indexes(
 }
 
 fn run_summary_with_artifact_index(run: RunRecord, artifacts: &[ArtifactRecord]) -> RunSummary {
-    let artifact_index = homeboy::core::rig::artifact_index_for_run_with_artifacts(&run, artifacts);
+    let artifact_index = homeboy::rig::artifact_index_for_run_with_artifacts(&run, artifacts);
     RunSummary {
         artifact_index,
         ..super::run_summary(run)

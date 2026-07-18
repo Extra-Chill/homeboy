@@ -1,7 +1,7 @@
 use crate::error::Result;
 
-use super::registry::{is_extension_linked, load_extension};
 use super::version;
+use crate::extension_store::{is_extension_linked, load_extension};
 
 /// Validate that all extensions declared in a component's `extensions` field are installed.
 ///

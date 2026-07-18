@@ -38,10 +38,7 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
     let _compare_lease = if let Some(rig_id) = args.rig.as_deref() {
         load_rig_context(Some(rig_id))?
             .map(|context| {
-                homeboy::core::rig::lease::acquire_active_run_lease(
-                    &context.rig_spec,
-                    "trace compare",
-                )
+                homeboy::rig::lease::acquire_active_run_lease(&context.rig_spec, "trace compare")
             })
             .transpose()?
             .flatten()
@@ -458,7 +455,7 @@ struct TargetAggregateBuilder {
     span_failures: BTreeMap<String, usize>,
     all_span_ids: BTreeSet<String>,
     failure_count: usize,
-    rig_state: Option<homeboy::core::rig::RigStateSnapshot>,
+    rig_state: Option<homeboy::rig::RigStateSnapshot>,
     overlays: Vec<extension_trace::TraceOverlay>,
     run_ids: Vec<String>,
 }
@@ -1131,7 +1128,7 @@ mod tests {
             assert_eq!(compare.proof_run_order[1].group, "candidate");
             assert_eq!(compare.proof_run_order[2].group, "baseline");
             assert_eq!(compare.proof_run_order[3].group, "candidate");
-            assert!(homeboy::core::rig::lease::active_run_leases()
+            assert!(homeboy::rig::lease::active_run_leases()
                 .expect("active leases")
                 .is_empty());
             let store = ObservationStore::open_initialized().expect("store");

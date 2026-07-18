@@ -127,34 +127,49 @@ pub fn path_writable_check(
 
 pub fn homeboy_version_skew_check(
     local_version: &str,
-    remote_version: &str,
+    local_build_identity: &str,
+    remote_build_identity: &str,
     runner_id: &str,
     server_id: &str,
 ) -> Option<RunnerCheck> {
     let local_version = local_version.trim();
-    let remote_version = remote_version.trim();
+    let local_build_identity = normalize_homeboy_build_identity(local_build_identity);
+    let remote_build_identity = normalize_homeboy_build_identity(remote_build_identity);
     if local_version.is_empty()
-        || remote_version.is_empty()
-        || remote_version == "unknown"
-        || local_version == remote_version
+        || local_build_identity.is_empty()
+        || remote_build_identity.is_empty()
+        || remote_build_identity == "unknown"
+        || local_build_identity == remote_build_identity
     {
         return None;
     }
 
     let mut details = BTreeMap::new();
     details.insert("local_version".to_string(), local_version.to_string());
-    details.insert("remote_version".to_string(), remote_version.to_string());
+    details.insert(
+        "local_build_identity".to_string(),
+        local_build_identity.to_string(),
+    );
+    details.insert(
+        "remote_version".to_string(),
+        remote_build_identity.to_string(),
+    );
     let quoted_runner_id = shell::quote_arg(runner_id);
     Some(warning_with_details(
         "homeboy.version_skew",
         format!(
-            "Local Homeboy {local_version} differs from remote runner Homeboy {remote_version}"
+            "Local Homeboy {local_build_identity} differs from remote runner Homeboy {remote_build_identity}"
         ),
         Some(format!(
             "Align runner `{runner_id}` to this controller with `homeboy runner refresh-homeboy {quoted_runner_id} --ref v{local_version} --reconnect`; if that fails, inspect the remote runner with `homeboy ssh {server_id} -- homeboy --version`"
         )),
         details,
     ))
+}
+
+fn normalize_homeboy_build_identity(identity: &str) -> &str {
+    let identity = identity.trim();
+    identity.strip_prefix("homeboy ").unwrap_or(identity)
 }
 
 pub fn ok(id: impl Into<String>, message: String, remediation: Option<String>) -> RunnerCheck {
