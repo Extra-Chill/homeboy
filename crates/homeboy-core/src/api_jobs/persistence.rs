@@ -169,8 +169,9 @@ pub(super) fn compact_terminal_jobs(
     let mut retained_terminal_bytes = original_terminal_bytes;
     let mut removed_job_ids = HashSet::new();
     for (stored, serialized_len) in terminal {
-        if retained_terminal_jobs <= terminal_job_retention_limit
-            && retained_terminal_bytes <= terminal_job_retention_bytes
+        if retained_terminal_jobs <= 1
+            || (retained_terminal_jobs <= terminal_job_retention_limit
+                && retained_terminal_bytes <= terminal_job_retention_bytes)
         {
             break;
         }
