@@ -178,17 +178,25 @@ fn lab_workspace_mapping_metadata_records_local_to_remote_paths() {
 }
 
 #[test]
-fn lab_offload_env_contains_workspace_mapping_metadata() {
-    let mapping = serde_json::json!({
-        "schema": LAB_WORKSPACE_MAPPING_SCHEMA,
-        "local_to_remote": {
-            "/Users/user/Developer/app": "/srv/homeboy/_lab_workspaces/app-abc"
-        },
-        "workspaces": []
-    });
+fn lab_offload_env_projects_only_subprocess_provenance() {
     let metadata = serde_json::json!({
         "schema": "homeboy/lab-offload/v1",
-        "workspace_mapping": mapping,
+        "runner_id": "lab",
+        "status": "offloaded",
+        "remote_workspace": "/srv/homeboy/workspace",
+        "sync_mode": "snapshot",
+        "source_snapshot": { "runner_id": "lab" },
+        "workspace_verification": {
+            "schema": "homeboy/lab-workspace-verification/v2",
+            "identity": "snapshot:abc",
+            "content_hash": "sha256:abc",
+            "content_manifest": { "entries": ["x".repeat(2_000_000)] },
+            "primary_workspace": {
+                "identity": "snapshot:abc",
+                "remote_path": "/srv/homeboy/workspace",
+                "local_path": "/controller/workspace"
+            }
+        },
     });
 
     let env = build_lab_offload_env(&metadata);
@@ -198,7 +206,30 @@ fn lab_offload_env_contains_workspace_mapping_metadata() {
     )
     .expect("parse lab offload metadata");
 
-    assert_eq!(parsed["workspace_mapping"], mapping);
+    assert_eq!(parsed["schema"], "homeboy/lab-offload-subprocess/v1");
+    assert_eq!(parsed["dispatch_schema"], "homeboy/lab-offload/v1");
+    assert_eq!(parsed["runner_id"], "lab");
+    assert_eq!(parsed["source_snapshot"], metadata["source_snapshot"]);
+    assert_eq!(
+        parsed["workspace_verification"]["primary_workspace"]["remote_path"],
+        "/srv/homeboy/workspace"
+    );
+    assert!(parsed
+        .pointer("/workspace_verification/content_manifest")
+        .is_none());
+    assert_eq!(
+        metadata["workspace_verification"]["content_manifest"]["entries"][0]
+            .as_str()
+            .expect("durable metadata keeps the full audit manifest")
+            .len(),
+        2_000_000
+    );
+    assert!(
+        env.get(LAB_OFFLOAD_METADATA_ENV)
+            .expect("bounded subprocess metadata")
+            .len()
+            < 16 * 1024
+    );
 }
 
 #[test]
