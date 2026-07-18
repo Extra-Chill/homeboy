@@ -21,7 +21,7 @@ function buildWpCodeboxFuzzPlanRecipe(input = {}) {
 		schema: WP_CODEBOX_WORKSPACE_RECIPE_SCHEMA,
 		inputs: objectWithEntries({
 			mounts: normalizeMounts(plan.mounts),
-			extraPlugins: normalizeArray(plan.extraPlugins || plan.extra_plugins),
+			extra_plugins: normalizeArray(plan.extra_plugins),
 			env: objectOrUndefined(plan.env),
 			wpConfigDefines: objectOrUndefined(plan.wpConfigDefines || plan.wp_config_defines),
 		}),

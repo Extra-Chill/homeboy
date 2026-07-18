@@ -65,7 +65,7 @@ if (process.argv[2] !== 'recipe-run' || recipeIndex < 0) {
   process.exit(2);
 }
 const recipe = JSON.parse(fs.readFileSync(process.argv[recipeIndex + 1], 'utf8'));
-const extraPlugins = recipe.inputs.extraPlugins || recipe.inputs.extra_plugins || [];
+const extraPlugins = recipe.inputs.extra_plugins || [];
 const plugin = extraPlugins.find((entry) => entry.slug === 'phpunit-source-root-fixture');
 if (!plugin || plugin.source !== plugin.sourceRoot || plugin.sourceSubpath !== 'plugins/phpunit-source-root-fixture') {
   process.stderr.write('monorepo source root/subpath missing from phpunit plugin recipe input\\n');

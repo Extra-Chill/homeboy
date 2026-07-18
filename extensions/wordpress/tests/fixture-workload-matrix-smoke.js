@@ -57,7 +57,7 @@ async function main() {
 			matrix,
 			artifactsDirectory: '/host/artifacts/matrix',
 			playgroundArtifactsDirectory: '/wordpress/wp-content/uploads/fixture-workload-matrix',
-			extraPlugins: [{ source: '/workspace/example-plugin', slug: 'example-plugin', activate: false }],
+			extra_plugins: [{ source: '/workspace/example-plugin', slug: 'example-plugin', activate: false }],
 			pluginActivations: ['example-plugin/example-plugin.php'],
 			workloadStep: {
 				command: 'wordpress.wp-cli',
@@ -67,6 +67,7 @@ async function main() {
 		assert.equal(recipe.schema, 'wp-codebox/workspace-recipe/v1');
 		assert.deepEqual(Object.keys(recipe).sort(), ['artifacts', 'inputs', 'runtime', 'schema', 'workflow']);
 		assert.deepEqual(recipe.inputs.extra_plugins, [{ source: '/workspace/example-plugin', slug: 'example-plugin', activate: false }]);
+		assert.equal(Object.hasOwn(recipe.inputs, 'extraPlugins'), false);
 		assert.deepEqual(recipe.workflow.steps[0].args, ['command=plugin activate example-plugin/example-plugin.php']);
 		assert.match(recipe.workflow.steps[1].args[0], /command=example validate/);
 		assert.match(recipe.workflow.steps[1].args[0], /--artifact=\/wordpress\/wp-content\/uploads\/fixture-workload-matrix\/alpha-case\/artifact.json/);

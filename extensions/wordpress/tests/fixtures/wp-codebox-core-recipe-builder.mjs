@@ -3,7 +3,7 @@ export function buildWordPressBenchRecipe(options = {}) {
 		schema: 'wp-codebox/workspace-recipe/v1',
 		inputs: {
 			mounts: normalizeRecipeMounts(options.mounts, 'readonly'),
-			extraPlugins: options.extraPlugins ?? [],
+			extra_plugins: options.extra_plugins ?? [],
 			workloads: options.workloads ?? [],
 			scenarioIds: options.scenarioIds ?? [],
 		},
