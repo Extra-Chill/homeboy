@@ -2,9 +2,9 @@ use super::*;
 use crate as runner;
 use crate::Runner;
 use crate::RunnerExecOptions;
-use homeboy_core::upgrade::InstallMethod;
-use homeboy_core::upgrade::RunnerUpgradeEntry;
 use homeboy_core::Result;
+use homeboy_upgrade::upgrade::InstallMethod;
+use homeboy_upgrade::upgrade::RunnerUpgradeEntry;
 
 /// Captures the exit code and detail produced by a failed runner upgrade attempt.
 pub struct FailedUpgradeOutcome {

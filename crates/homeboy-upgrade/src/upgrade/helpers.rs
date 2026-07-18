@@ -1,7 +1,7 @@
-use crate::defaults;
-use crate::engine::shell::quote_path;
-use crate::error::{Error, Result};
-use crate::{build_identity, extension, git};
+use homeboy_core::defaults;
+use homeboy_core::engine::shell::quote_path;
+use homeboy_core::error::{Error, Result};
+use homeboy_core::{build_identity, extension, git};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -143,7 +143,7 @@ pub fn run_upgrade_with_method(
     runner_targets: &[String],
     source_path: Option<&Path>,
 ) -> Result<UpgradeResult> {
-    let promotion_lease = crate::runtime_promotion::acquire(
+    let promotion_lease = homeboy_core::runtime_promotion::acquire(
         "controller upgrade",
         source_path
             .map(|path| path.display().to_string())
@@ -202,8 +202,8 @@ pub fn run_upgrade_with_method(
                 skip_services,
             );
             if let Some(drift) = &source_drift {
-                log_status!("upgrade", "WARNING: {}", drift.detail);
-                log_status!("upgrade", "  Run: {}", drift.recovery_command);
+                homeboy_core::log_status!("upgrade", "WARNING: {}", drift.detail);
+                homeboy_core::log_status!("upgrade", "  Run: {}", drift.recovery_command);
             }
 
             return Ok(UpgradeResult {
@@ -247,7 +247,7 @@ pub fn run_upgrade_with_method(
         // This is deliberately a short switch, not a drain: records admitted
         // before it retain their immutable runtime pin and remain executable.
         let installed_executable = super::execution::active_binary_path()?;
-        crate::controller_runtime::activate_installed_generation(&installed_executable)?;
+        homeboy_core::controller_runtime::activate_installed_generation(&installed_executable)?;
     }
 
     // Auto-update all installed extensions after the upgrade command completes.
@@ -326,7 +326,7 @@ pub fn run_upgrade_with_method(
 }
 
 // Upgrade output must remain visible when a controller captures stdout/stderr.
-// `log_status!` intentionally only writes to an interactive terminal.
+// `homeboy_core::log_status!` intentionally only writes to an interactive terminal.
 fn upgrade_phase(phase: &str) {
     eprintln!("[upgrade] {phase}");
 }
@@ -355,7 +355,7 @@ fn restart_resident_services_after_swap(
         return (Vec::new(), pending);
     }
 
-    log_status!(
+    homeboy_core::log_status!(
         "upgrade",
         "Restarting {} binary-resident service(s) to load the new binary...",
         resident_services.len()
@@ -365,7 +365,7 @@ fn restart_resident_services_after_swap(
         services::restart_resident_services(&resident_services, services::run_restart_command);
 
     for entry in &restarted {
-        log_status!("upgrade", "  {} restarted", entry.service_id);
+        homeboy_core::log_status!("upgrade", "  {} restarted", entry.service_id);
     }
     warn_pending_resident_services(&pending);
 
@@ -378,14 +378,14 @@ fn warn_pending_resident_services(pending: &[ServiceRestartEntry]) {
     for entry in pending {
         let detail = entry.detail.as_deref().unwrap_or("restart required");
         if entry.restart_command.is_empty() {
-            log_status!(
+            homeboy_core::log_status!(
                 "upgrade",
                 "  WARNING: {} not restarted ({})",
                 entry.service_id,
                 detail,
             );
         } else {
-            log_status!(
+            homeboy_core::log_status!(
                 "upgrade",
                 "  WARNING: {} not restarted ({}). Run: {}",
                 entry.service_id,
@@ -427,7 +427,7 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
         return (vec![], vec![]);
     }
 
-    log_status!(
+    homeboy_core::log_status!(
         "upgrade",
         "Updating {} installed extension(s)...",
         extension_ids.len()
@@ -464,7 +464,7 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
                         (Some(branch), _) => format!(" ({})", branch),
                         _ => String::new(),
                     };
-                    log_status!(
+                    homeboy_core::log_status!(
                         "upgrade",
                         "  {} {} → {} linked source updated{}",
                         id,
@@ -473,9 +473,15 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
                         branch_detail
                     );
                 } else if old_version != new_version {
-                    log_status!("upgrade", "  {} {} → {}", id, old_version, new_version);
+                    homeboy_core::log_status!(
+                        "upgrade",
+                        "  {} {} → {}",
+                        id,
+                        old_version,
+                        new_version
+                    );
                 } else {
-                    log_status!("upgrade", "  {} {} (up to date)", id, new_version);
+                    homeboy_core::log_status!("upgrade", "  {} {} (up to date)", id, new_version);
                 }
 
                 updated.push(ExtensionUpgradeEntry {
@@ -495,7 +501,7 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
                 });
             }
             Err(e) => {
-                log_status!("upgrade", "  {} skipped: {}", id, e.message);
+                homeboy_core::log_status!("upgrade", "  {} skipped: {}", id, e.message);
                 skipped.push(id.clone());
             }
         }
@@ -514,7 +520,7 @@ fn warn_unrefreshed_symlinked_extensions(
         return warnings;
     }
 
-    log_status!(
+    homeboy_core::log_status!(
         "upgrade",
         "WARNING: {} symlinked extension clone(s) owned by '{}' were NOT refreshed by this privileged upgrade.",
         warnings.len(),
@@ -523,7 +529,7 @@ fn warn_unrefreshed_symlinked_extensions(
             .map(|w| w.invoking_user.as_str())
             .unwrap_or("the invoking user"),
     );
-    log_status!(
+    homeboy_core::log_status!(
         "upgrade",
         "  Extension resolution is $HOME-scoped, so a sudo upgrade only refreshes root's copies. Run each recovery command below to bring the symlinked clone(s) current:",
     );
@@ -532,7 +538,7 @@ fn warn_unrefreshed_symlinked_extensions(
             .behind
             .map(|n| format!("{} commit(s) behind", n))
             .unwrap_or_else(|| "behind upstream".to_string());
-        log_status!(
+        homeboy_core::log_status!(
             "upgrade",
             "  {} ({}) -> {}: {}",
             w.extension_id,
@@ -576,7 +582,7 @@ fn detect_unrefreshed_symlinked_extensions(
     };
     let extensions_dir = invoking_home
         .join(".config")
-        .join(crate::product_identity::PRODUCT_IDENTITY.config_dirname)
+        .join(homeboy_product_identity::PRODUCT_IDENTITY.config_dirname)
         .join("extensions");
     let Ok(entries) = std::fs::read_dir(&extensions_dir) else {
         return Vec::new();
@@ -676,7 +682,7 @@ fn git_commits_behind_upstream(git_root: &Path) -> Option<u32> {
     count.trim().parse::<u32>().ok()
 }
 
-fn portable_extension_source_url(result: &crate::extension::UpdateResult) -> Option<String> {
+fn portable_extension_source_url(result: &homeboy_core::extension::UpdateResult) -> Option<String> {
     if let Some(git_root) = result.git_root.as_ref() {
         return git::remote_origin_url(git_root);
     }

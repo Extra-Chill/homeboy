@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::extension::ExtensionSourceUpdate;
+use homeboy_core::extension::ExtensionSourceUpdate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallMethod {
@@ -27,7 +27,7 @@ impl<'de> Deserialize<'de> for InstallMethod {
         D: serde::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        let secondary = crate::defaults::secondary_install_method_key();
+        let secondary = homeboy_core::defaults::secondary_install_method_key();
         match value.as_str() {
             "homebrew" => Ok(Self::Homebrew),
             "source" => Ok(Self::Source),

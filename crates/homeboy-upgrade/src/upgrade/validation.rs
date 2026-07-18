@@ -1,4 +1,4 @@
-use crate::error::Result;
+use homeboy_core::error::Result;
 
 use super::helpers::{
     current_version, detect_install_method, fetch_latest_version, version_is_newer,

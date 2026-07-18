@@ -33,7 +33,7 @@ impl InstallMethod {
         } else if *self == InstallMethod::Unknown {
             "unknown".to_string()
         } else {
-            crate::defaults::secondary_install_method_key()
+            homeboy_core::defaults::secondary_install_method_key()
         }
     }
 }
@@ -71,7 +71,7 @@ mod tests {
         assert_eq!(InstallMethod::Homebrew.as_str(), "homebrew");
         assert_eq!(
             InstallMethod::Secondary.as_str(),
-            crate::defaults::secondary_install_method_key()
+            homeboy_core::defaults::secondary_install_method_key()
         );
         assert_eq!(InstallMethod::Source.as_str(), "source");
         assert_eq!(InstallMethod::Binary.as_str(), "binary");
@@ -82,7 +82,7 @@ mod tests {
     fn test_detect_install_method_prefers_active_secondary_path_over_brew_list() {
         let secondary_path = format!(
             "/Users/user/.{}/bin/homeboy",
-            crate::defaults::secondary_install_method_key()
+            homeboy_core::defaults::secondary_install_method_key()
         );
         let method = helpers::detect_install_method_from_exe_path(&secondary_path, |cmd, args| {
             cmd == "brew" && args == ["list", "homeboy"]

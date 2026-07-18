@@ -3,7 +3,7 @@ use homeboy::cli_surface::current_command_surface_doctor_report;
 use homeboy::core::build_identity;
 use homeboy::core::engine;
 use homeboy::runner::runners::{self as runner, Runner, RunnerKind, RunnerStatusReport};
-use homeboy::core::self_status::{self, ControllerRuntimeInput, RunnerRuntimeInput};
+use homeboy_upgrade::self_status::{self, ControllerRuntimeInput, RunnerRuntimeInput};
 use serde_json::Value;
 
 use crate::commands::{docs, resources, CmdResult, GlobalArgs};

@@ -183,7 +183,6 @@ pub mod lab_contract {
     pub use homeboy_lab_contract::lab::types::*;
     pub use homeboy_lab_contract::lab::workload::*;
 }
-pub mod self_status;
 pub mod server;
 pub mod setup;
 pub mod source_snapshot;
@@ -205,7 +204,6 @@ pub(crate) mod transient_workspace_policy;
 #[allow(dead_code)]
 pub mod test_support;
 pub mod update_check_cache;
-pub mod upgrade;
 pub mod validation_progress;
 pub mod workspace_snapshot;
 pub mod worktree;

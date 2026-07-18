@@ -10,11 +10,11 @@
 //! - Config: `homeboy config set /update_check false`
 //!
 //! Cache I/O primitives are shared with the extension update check via
-//! [`crate::update_check_cache`]. The on-disk filename and JSON
+//! [`homeboy_core::update_check_cache`]. The on-disk filename and JSON
 //! schema live here and are unchanged.
 
-use crate::update_check_cache;
 use crate::upgrade;
+use homeboy_core::update_check_cache;
 use serde::{Deserialize, Serialize};
 
 const CACHE_FILENAME: &str = "update_check.json";
@@ -49,11 +49,11 @@ fn is_disabled_by_env() -> bool {
 }
 
 pub(crate) fn is_disabled_by_config() -> bool {
-    !crate::defaults::load_config().update_check
+    !homeboy_core::defaults::load_config().update_check
 }
 
 fn print_hint(latest: &str, current: &str) {
-    log_status!(
+    homeboy_core::log_status!(
         "update",
         "Homeboy {} is available (current: {}). Run `homeboy upgrade` to update.",
         latest,

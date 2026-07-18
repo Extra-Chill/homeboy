@@ -1,12 +1,12 @@
 use crate as runner;
 use crate::Runner;
 use crate::RunnerExecOptions;
-use homeboy_core::upgrade::version_is_newer;
-use homeboy_core::upgrade::InstallMethod;
 use homeboy_core::Error;
 use homeboy_core::Result;
 use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
 use homeboy_lab_runner_contract::RunnerRequiredTool;
+use homeboy_upgrade::upgrade::version_is_newer;
+use homeboy_upgrade::upgrade::InstallMethod;
 
 pub fn runner_upgrade_command(
     homeboy_path: &str,

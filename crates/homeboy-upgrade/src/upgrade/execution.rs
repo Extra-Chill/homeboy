@@ -1,8 +1,8 @@
-use crate::defaults;
-use crate::engine::shell::quote_path;
-use crate::error::{Error, Result};
-use crate::git::{run_git, run_git_output};
-use crate::stream_capture::StreamCaptureMetadata;
+use homeboy_core::defaults;
+use homeboy_core::engine::shell::quote_path;
+use homeboy_core::error::{Error, Result};
+use homeboy_core::git::{run_git, run_git_output};
+use homeboy_core::stream_capture::StreamCaptureMetadata;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
