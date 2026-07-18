@@ -16,9 +16,9 @@
 use std::collections::HashMap;
 
 use crate::component;
-use crate::extension::{self, RemotePathRootRule};
 use crate::paths as base_path;
 use crate::project::Project;
+use homeboy_extension_contract::RemotePathRootRule;
 
 /// Resolve a remote path for an ad-hoc file operation against a project.
 ///
@@ -128,7 +128,7 @@ fn project_remote_path_root_rules(project: &Project) -> Vec<RemotePathRootRule> 
         if seen_extensions.insert(id.clone(), ()).is_some() {
             continue;
         }
-        let Ok(manifest) = extension::load_extension(&id) else {
+        let Ok(manifest) = crate::extension_store::load_extension(&id) else {
             continue;
         };
         let Some(deploy) = manifest.deploy else {

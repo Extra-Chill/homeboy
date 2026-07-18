@@ -1,9 +1,10 @@
+use homeboy_extension as extension;
 use std::fmt::Write;
 
 use crate::release::types::{ReleaseState, ReleaseStepResult};
 use homeboy_core::component::GithubConfig;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::{self, ExtensionManifest};
+use homeboy_extension::{self, ExtensionManifest};
 
 use super::{build_release_payload, step_failed, step_skipped, step_success};
 
@@ -429,7 +430,7 @@ mod tests {
     use crate::release::types::ReleaseState;
     use crate::release::ReleaseStepStatus;
     use homeboy_core::component::{GithubConfig, GithubHostConfig};
-    use homeboy_core::extension::ExtensionManifest;
+    use homeboy_extension::ExtensionManifest;
     use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -494,7 +495,7 @@ mod tests {
                 "registry",
                 "printf '{\"component_id\":\"%s\",\"component_path\":\"%s\"}' \"$HOMEBOY_COMPONENT_ID\" \"$HOMEBOY_COMPONENT_PATH\"",
             );
-            homeboy_core::extension::save_manifest(&publish).expect("save publish extension");
+            homeboy_extension::save_manifest(&publish).expect("save publish extension");
 
             let result = run_publish(
                 &[publish],
@@ -528,7 +529,7 @@ mod tests {
             let component = tempfile::tempdir_in(std::env::temp_dir()).expect("component tempdir");
             let publish =
                 release_publish_extension("registry", "printf '%s' \"$HOMEBOY_SETTINGS_JSON\"");
-            homeboy_core::extension::save_manifest(&publish).expect("save publish extension");
+            homeboy_extension::save_manifest(&publish).expect("save publish extension");
             let github = GithubConfig {
                 hosts: HashMap::from([(
                     "github.enterprise.test".to_string(),

@@ -1,3 +1,4 @@
+use homeboy_extension as extension;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -7,7 +8,6 @@ use homeboy::core::artifacts::{run_artifact_postprocess_steps, ArtifactPostproce
 use homeboy::core::engine::execution_context;
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
 use homeboy::core::lifecycle::LifecyclePhaseStatus;
 use homeboy::core::observation::{RunRecord, RunStatus};
 use homeboy::fuzz::{
@@ -16,6 +16,7 @@ use homeboy::fuzz::{
     FuzzTargetInventory, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
 };
 use homeboy::rig::{self, FuzzPrepareReport, RigSpec};
+use homeboy_extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
 use uuid::Uuid;
 
 use super::planning::{load_sequence_plan, plan_inventory_selection, with_sequence_plan_metadata};
@@ -1148,7 +1149,7 @@ fn run_fuzz_extension_script(
     run_dir: &RunDir,
     execution_request_path: &Path,
     sequence_plan_path: Option<&Path>,
-) -> homeboy::core::Result<homeboy::core::extension::RunnerOutput> {
+) -> homeboy::core::Result<homeboy_extension::RunnerOutput> {
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
     let env = fuzz_runner_env(
         args,
@@ -1161,16 +1162,15 @@ fn run_fuzz_extension_script(
     )?;
 
     if ctx.component.has_script(ExtensionCapability::Fuzz) {
-        let output =
-            homeboy::core::extension::component_script::run_component_scripts_with_run_dir(
-                &ctx.component,
-                ExtensionCapability::Fuzz,
-                &ctx.source_path,
-                run_dir,
-                false,
-                &env,
-                &args.args,
-            )?;
+        let output = homeboy_extension::component_script::run_component_scripts_with_run_dir(
+            &ctx.component,
+            ExtensionCapability::Fuzz,
+            &ctx.source_path,
+            run_dir,
+            false,
+            &env,
+            &args.args,
+        )?;
         return Ok(output.into());
     }
 

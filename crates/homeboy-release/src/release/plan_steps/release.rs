@@ -7,9 +7,9 @@ use crate::release::pipeline_capabilities::{
 use crate::release::scope::ReleaseScope;
 use crate::release::types::{ReleaseChangelogPlan, ReleaseOptions};
 use homeboy_core::component::Component;
-use homeboy_core::extension::ExtensionManifest;
 use homeboy_core::plan::PlanStep;
 use homeboy_core::Result;
+use homeboy_extension::ExtensionManifest;
 
 /// Build all release steps: core steps (non-configurable) + publish steps (extension-derived).
 #[allow(clippy::too_many_arguments)]

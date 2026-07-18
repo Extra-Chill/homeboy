@@ -19,8 +19,8 @@ use serde::Serialize;
 use homeboy_core::component::{self, Component};
 use homeboy_core::deps::{self, DependencyStackPlanStep};
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension;
 use homeboy_core::git;
+use homeboy_extension as extension;
 
 use super::types::ReleaseCommandInput;
 

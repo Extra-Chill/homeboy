@@ -2,8 +2,8 @@ use crate::component::{
     discover_from_portable, inventory, load, try_discover_from_portable, Component,
 };
 use crate::error::{Error, Result};
-use crate::extension::{self, ExtensionCapability};
 use crate::git::{run_git, run_git_output};
+use homeboy_extension_contract::ExtensionCapability;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -118,7 +118,7 @@ pub fn resolve_artifact(component: &Component) -> Option<String> {
 
     if let Some(ref extensions) = component.extensions {
         for extension_id in extensions.keys() {
-            if let Ok(manifest) = crate::extension::load_extension(extension_id) {
+            if let Ok(manifest) = crate::extension_store::load_extension(extension_id) {
                 if let Some(ref build) = manifest.build {
                     if let Some(ref pattern) = build.artifact_pattern {
                         let resolved = pattern
@@ -466,7 +466,10 @@ pub fn resolve_target(spec: TargetSpec<'_>) -> Result<ResolvedTarget> {
     }
 
     let extension_id = if let Some(capability) = spec.capability {
-        Some(extension::resolve_execution_context(&component, capability)?.extension_id)
+        Some(
+            crate::extension_execution::resolve_execution_context(&component, capability)?
+                .extension_id,
+        )
     } else {
         None
     };

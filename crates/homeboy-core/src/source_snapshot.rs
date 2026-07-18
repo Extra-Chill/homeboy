@@ -235,7 +235,7 @@ fn component_extension_sync_excludes(path: &Path) -> Vec<String> {
         let mut extension_ids = extensions.keys().collect::<Vec<_>>();
         extension_ids.sort();
         for extension_id in extension_ids {
-            let Ok(extension) = crate::extension::load_extension(extension_id) else {
+            let Ok(extension) = crate::extension_store::load_extension(extension_id) else {
                 continue;
             };
             if let Some(source_snapshot) = extension.source_snapshot {

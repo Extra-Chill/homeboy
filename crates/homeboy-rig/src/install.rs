@@ -6,7 +6,8 @@
 //! linking `~/.config/homeboy/rigs/<id>.json` to the package spec.
 
 use homeboy_core::error::{Error, Result};
-use homeboy_core::{extension, git, paths};
+use homeboy_core::{git, paths};
+use homeboy_extension as extension;
 use homeboy_stack::stack;
 use serde::{Deserialize, Serialize};
 use std::fs;

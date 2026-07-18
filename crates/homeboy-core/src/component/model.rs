@@ -420,7 +420,7 @@ impl Component {
 
         let mut matches = HashSet::new();
         for extension_id in self.extensions.as_ref()?.keys() {
-            let Ok(extension) = crate::extension::load_extension(extension_id) else {
+            let Ok(extension) = crate::extension_store::load_extension(extension_id) else {
                 continue;
             };
 
@@ -444,7 +444,7 @@ impl Component {
 
     fn remote_path_inference_rule_matches(
         &self,
-        rule: &crate::extension::RemotePathInferenceRule,
+        rule: &homeboy_extension_contract::RemotePathInferenceRule,
         local: &std::path::Path,
         dir_name: &str,
     ) -> bool {
@@ -528,16 +528,19 @@ impl Component {
         self.deploy_config().remote_url
     }
 
-    pub fn script_commands(&self, capability: crate::extension::ExtensionCapability) -> &[String] {
+    pub fn script_commands(
+        &self,
+        capability: homeboy_extension_contract::ExtensionCapability,
+    ) -> &[String] {
         if let Some(scripts) = self.scripts.as_ref() {
             let commands = match capability {
-                crate::extension::ExtensionCapability::Lint => &scripts.lint,
-                crate::extension::ExtensionCapability::Test => &scripts.test,
-                crate::extension::ExtensionCapability::Build => &scripts.build,
-                crate::extension::ExtensionCapability::Bench => &scripts.bench,
-                crate::extension::ExtensionCapability::Fuzz => &scripts.fuzz,
-                crate::extension::ExtensionCapability::Trace => &scripts.trace,
-                crate::extension::ExtensionCapability::Deps => &scripts.deps,
+                homeboy_extension_contract::ExtensionCapability::Lint => &scripts.lint,
+                homeboy_extension_contract::ExtensionCapability::Test => &scripts.test,
+                homeboy_extension_contract::ExtensionCapability::Build => &scripts.build,
+                homeboy_extension_contract::ExtensionCapability::Bench => &scripts.bench,
+                homeboy_extension_contract::ExtensionCapability::Fuzz => &scripts.fuzz,
+                homeboy_extension_contract::ExtensionCapability::Trace => &scripts.trace,
+                homeboy_extension_contract::ExtensionCapability::Deps => &scripts.deps,
             };
             if !commands.is_empty() {
                 return commands;
@@ -547,7 +550,7 @@ impl Component {
         &[]
     }
 
-    pub fn has_script(&self, capability: crate::extension::ExtensionCapability) -> bool {
+    pub fn has_script(&self, capability: homeboy_extension_contract::ExtensionCapability) -> bool {
         !self.script_commands(capability).is_empty()
     }
 

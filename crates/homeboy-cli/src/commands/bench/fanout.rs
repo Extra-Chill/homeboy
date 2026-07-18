@@ -10,8 +10,8 @@ use homeboy::agents::agent_tasks::{
     AgentTaskOutcomeStatus, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
     AGENT_TASK_REQUEST_SCHEMA,
 };
-use homeboy::core::extension::bench::{BenchGate, BenchGateOp, BenchGateResult};
 use homeboy::rig::RigSpec;
+use homeboy_extension::bench::{BenchGate, BenchGateOp, BenchGateResult};
 
 use super::{matrix, BenchReportFormat, BenchRunArgs};
 
@@ -395,7 +395,7 @@ mod tests {
     use homeboy::agents::agent_tasks::{
         AgentTaskMatrixAggregateCell, AgentTaskMatrixExecutionState,
     };
-    use homeboy::core::extension::bench::BenchGateOp;
+    use homeboy_extension::bench::BenchGateOp;
 
     #[derive(Parser)]
     struct TestCli {

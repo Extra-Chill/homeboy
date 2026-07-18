@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use homeboy::core::extension::trace::trace_browser_summary_has_signal;
-use homeboy::core::extension::TraceBrowserEvidenceAdapterConfig;
+use homeboy_extension::trace::trace_browser_summary_has_signal;
+use homeboy_extension::TraceBrowserEvidenceAdapterConfig;
 
 use super::super::types::ArtifactRef;
 use super::parse::{

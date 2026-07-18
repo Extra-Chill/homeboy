@@ -29,6 +29,10 @@ pub trait ComponentBuildRunner: Send + Sync {
     /// Whether the component has a resolvable build command (used to decide
     /// if a dependency-build lifecycle step should run at all).
     fn can_build(&self, component: &Component) -> bool;
+
+    /// Build the component, returning (exit_code, error_message). Used by
+    /// artifact-input resolution to build a producer component on demand.
+    fn build_component(&self, component: &Component) -> (Option<i32>, Option<String>);
 }
 
 fn provider_slot() -> &'static Mutex<Option<Box<dyn ComponentBuildRunner>>> {
@@ -41,6 +45,18 @@ fn provider_slot() -> &'static Mutex<Option<Box<dyn ComponentBuildRunner>>> {
 pub fn register_component_build_runner(provider: Box<dyn ComponentBuildRunner>) {
     let mut slot = provider_slot().lock().expect("component build runner lock");
     *slot = Some(provider);
+}
+
+/// Build the component (exit_code, error) via the registered provider.
+pub fn build_component(component: &Component) -> (Option<i32>, Option<String>) {
+    let slot = provider_slot().lock().expect("component build runner lock");
+    match slot.as_deref() {
+        Some(provider) => provider.build_component(component),
+        None => (
+            None,
+            Some("no component-build runner registered".to_string()),
+        ),
+    }
 }
 
 /// Whether the registered provider can build the component.

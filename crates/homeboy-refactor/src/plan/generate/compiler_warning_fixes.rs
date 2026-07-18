@@ -8,7 +8,7 @@ use std::path::Path;
 use super::{tagged_line_replacement, tagged_range_removal};
 use crate::auto::{Fix, RefactorPrimitive, SkippedFile};
 use homeboy_code_audit::{AuditFinding, CodeAuditResult};
-use homeboy_core::extension::{
+use homeboy_extension::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract, ExtensionManifest,
 };

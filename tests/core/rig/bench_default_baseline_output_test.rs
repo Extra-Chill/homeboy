@@ -1,5 +1,5 @@
 use super::*;
-use crate::core::extension::bench::BenchDefaultBaselineExpansion;
+use homeboy_extension::bench::BenchDefaultBaselineExpansion;
 
 fn write_rig_with_default_baseline(
     home: &TempDir,
@@ -169,7 +169,7 @@ fn default_baseline_failure_summary_marks_implicit_baseline() {
             artifacts: Vec::new(),
             results: None,
             rig_state: None,
-            failure: Some(crate::core::extension::bench::run::BenchRunFailure {
+            failure: Some(homeboy_extension::bench::run::BenchRunFailure {
                 component_id: "studio".to_string(),
                 component_path: None,
                 scenario_id: None,

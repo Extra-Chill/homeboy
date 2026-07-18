@@ -16,11 +16,11 @@ use clap::{Args, Subcommand};
 use homeboy::core::ci_profile::{self, CiRunSelection};
 use homeboy::core::code_audit::AuditCommandOutput;
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
-use homeboy::core::extension::lint::LintCommandOutput;
-use homeboy::core::extension::test::TestCommandOutput;
 use homeboy::core::git;
 use homeboy::core::plan::PlanStep;
 use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
+use homeboy_extension::lint::LintCommandOutput;
+use homeboy_extension::test::TestCommandOutput;
 use homeboy_release::release::changelog;
 use homeboy_review::review::{
     self, ReviewArtifactFindings, ReviewCommandOutput, ReviewOutputInput, ReviewService,

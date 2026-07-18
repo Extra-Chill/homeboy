@@ -11,6 +11,7 @@ extern crate self as homeboy;
 // existing `crate::core::*` call sites across this layer are unchanged.
 pub use homeboy_agents as agents;
 pub use homeboy_core as core;
+pub use homeboy_extension as extension;
 pub use homeboy_refactor as refactor;
 pub use homeboy_release as release;
 pub use homeboy_review as review;

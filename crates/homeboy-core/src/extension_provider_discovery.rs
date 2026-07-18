@@ -50,7 +50,7 @@ pub fn register_extension_provider_discovery_validator(
 
 /// Validate an installed extension's agent-runtime provider discovery via the
 /// registered validator (or the no-op when the agent-task subsystem is absent).
-pub(crate) fn validate_installed_extension_provider_discovery(extension_id: &str) -> Result<()> {
+pub fn validate_installed_extension_provider_discovery(extension_id: &str) -> Result<()> {
     let slot = provider_slot()
         .lock()
         .expect("extension provider discovery validator lock");

@@ -21,7 +21,6 @@ slow-tests = []
 
 [dependencies]
 homeboy-cli-contract = { version = "0.1.0", path = "../contracts/homeboy-cli-contract" }
-homeboy-command-contract = { version = "0.1.0", path = "../contracts/homeboy-command-contract" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 homeboy-finding = { version = "0.1.0", path = "../homeboy-finding" }
 homeboy-output = { version = "0.1.0", path = "../homeboy-output" }
@@ -74,3 +73,4 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 [dev-dependencies]
 homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit", features = ["test-support"] }
 homeboy-release = { version = "0.1.0", path = "../homeboy-release" }
+homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }

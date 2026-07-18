@@ -13,7 +13,7 @@ use std::process::Command;
 use serde::Serialize;
 
 use homeboy_core::engine::run_dir::RunDir;
-use homeboy_core::extension::trace as extension_trace;
+use homeboy_extension::trace as extension_trace;
 
 /// Context required to resolve rig variables when orchestrating a trace
 /// experiment. Owns only the data the orchestration needs, decoupled from the

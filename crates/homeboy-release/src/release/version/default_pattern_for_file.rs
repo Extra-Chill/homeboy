@@ -5,8 +5,8 @@ use homeboy_core::engine::codebase_scan;
 use homeboy_core::engine::local_files;
 use homeboy_core::engine::text;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::load_all_extensions;
 use homeboy_core::paths::resolve_path_string;
+use homeboy_extension::load_all_extensions;
 use regex::Regex;
 use std::fs;
 use std::path::Path;
@@ -349,7 +349,7 @@ pub(crate) fn replace_since_tag_placeholders(
     component: &Component,
     new_version: &str,
 ) -> Result<usize> {
-    use homeboy_core::extension::load_extension;
+    use homeboy_extension::load_extension;
 
     // Find the extension's since_tag config
     let since_tag = component.extensions.as_ref().and_then(|extensions| {

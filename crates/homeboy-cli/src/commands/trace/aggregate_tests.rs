@@ -1,4 +1,4 @@
-use homeboy::core::extension::trace as extension_trace;
+use homeboy_extension::trace as extension_trace;
 
 use super::aggregate::aggregate_span;
 use super::aggregate_test_support::aggregate_samples;

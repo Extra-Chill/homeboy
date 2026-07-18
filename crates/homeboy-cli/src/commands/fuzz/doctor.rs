@@ -1,6 +1,6 @@
-use homeboy::core::extension::{
+use homeboy_core::extension_update_check::read_source_revision;
+use homeboy_extension::{
     check_update_available, extension_ready_status, is_extension_linked, load_extension,
-    read_source_revision,
 };
 
 use super::types::FuzzDoctorArgs;

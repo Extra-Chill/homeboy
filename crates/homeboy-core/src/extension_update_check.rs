@@ -2,11 +2,12 @@
 //! git checkout). Relocated from the extension lifecycle module - depends only on
 //! core paths/git/error + the core extension store, no extension behavior.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::Result;
 use crate::extension_store::{is_extension_linked, load_extension};
+use crate::git;
 use crate::paths;
 
 /// Check if a string looks like a git URL (vs a local path).
@@ -72,4 +73,67 @@ pub struct UpdateAvailable {
     pub extension_id: String,
     pub installed_version: String,
     pub behind_count: usize,
+}
+
+pub fn read_source_revision(extension_id: &str) -> Option<String> {
+    let extension_dir = paths::extension(extension_id).ok()?;
+    if !extension_dir.exists() {
+        return None;
+    }
+
+    // Try .git first (single-extension repos and linked extensions)
+    if let Some(rev) = git::head_sha(&extension_dir) {
+        return Some(rev);
+    }
+
+    // Fall back to source metadata files (monorepo installs and staged linked installs).
+    read_source_metadata_value(&extension_dir, "revision")
+}
+
+pub fn read_source_metadata_value(extension_dir: &Path, kind: &str) -> Option<String> {
+    let sidecar =
+        source_metadata_dir(extension_dir).join(source_metadata_file(extension_dir, kind));
+    let embedded = extension_dir.join(format!(".source-{kind}"));
+    let paths = if extension_dir.is_symlink() {
+        [sidecar, embedded]
+    } else {
+        [embedded, sidecar]
+    };
+
+    for path in paths {
+        if let Some(value) = std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+pub fn read_source_url(extension_dir: &Path) -> Option<String> {
+    read_source_metadata_value(extension_dir, "url")
+}
+
+pub fn source_metadata_dir(extension_dir: &Path) -> PathBuf {
+    if extension_dir.is_symlink() {
+        return extension_dir
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+    }
+
+    extension_dir.to_path_buf()
+}
+
+fn source_metadata_file(extension_dir: &std::path::Path, kind: &str) -> String {
+    if extension_dir.is_symlink() {
+        if let Some(name) = extension_dir.file_name().and_then(|name| name.to_str()) {
+            return format!(".{name}.source-{kind}");
+        }
+    }
+
+    format!(".source-{kind}")
 }

@@ -2,8 +2,8 @@ use serde_json::Value;
 
 use homeboy_code_audit::{homeboy_finding_from_audit, AuditCommandOutput};
 use homeboy_core::ci_profile::CiRunOutput;
-use homeboy_core::extension::lint::LintCommandOutput;
-use homeboy_core::extension::test::TestCommandOutput;
+use homeboy_extension::lint::LintCommandOutput;
+use homeboy_extension::test::TestCommandOutput;
 use homeboy_finding::HomeboyFinding;
 
 pub trait ReviewArtifactFindings {

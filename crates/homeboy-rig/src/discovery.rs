@@ -6,7 +6,7 @@
 //! item-count threshold (#5241).
 
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension;
+use homeboy_extension as extension;
 use homeboy_stack::stack;
 use serde::Serialize;
 use std::fs;

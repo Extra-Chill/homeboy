@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use homeboy::core::extension::trace::trace_browser_evidence_adapters;
-use homeboy::core::extension::TraceBrowserEvidenceAdapterConfig;
+use homeboy_extension::trace::trace_browser_evidence_adapters;
+use homeboy_extension::TraceBrowserEvidenceAdapterConfig;
 
 mod implementation;
 mod types;

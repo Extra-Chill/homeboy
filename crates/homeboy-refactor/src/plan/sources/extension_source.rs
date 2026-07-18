@@ -1,7 +1,7 @@
 use crate::auto::{self, FixApplied};
 use homeboy_core::component::Component;
-use homeboy_core::extension;
 use homeboy_core::Error;
+use homeboy_extension as extension;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 

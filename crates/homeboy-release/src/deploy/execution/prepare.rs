@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use homeboy_core::build;
 use homeboy_core::component::Component;
 use homeboy_core::context::RemoteProjectContext;
 use homeboy_core::project::Project;
+use homeboy_extension::build;
 
 use super::super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
 use super::super::path_roots::{component_remote_path, resolve_effective_remote_path};

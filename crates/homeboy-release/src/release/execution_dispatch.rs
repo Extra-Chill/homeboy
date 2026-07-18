@@ -2,9 +2,9 @@ use crate::release::executor;
 use crate::release::types::{ReleaseOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus};
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::ExtensionManifest;
 use homeboy_core::git;
 use homeboy_core::plan::{PlanStep, PlanStepStatus};
+use homeboy_extension::ExtensionManifest;
 use std::collections::BTreeSet;
 
 pub(super) struct ReleaseExecutionContext<'a> {
@@ -769,8 +769,8 @@ mod tests {
         ReleaseOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
     };
     use homeboy_core::component::{Component, ComponentScriptsConfig, VersionTarget};
-    use homeboy_core::extension::ExtensionManifest;
     use homeboy_core::plan::PlanStep;
+    use homeboy_extension::ExtensionManifest;
 
     #[test]
     fn test_release_step_is_plan_only() {
@@ -829,7 +829,7 @@ mod tests {
                  printf '[{{\"path\":\"build/fixture.zip\",\"type\":\"archive\"}}]'",
                 counter = counter.display(),
             ));
-            homeboy_core::extension::save_manifest(&package).expect("save package extension");
+            homeboy_extension::save_manifest(&package).expect("save package extension");
 
             let component = Component {
                 id: "fixture".to_string(),
@@ -891,7 +891,7 @@ mod tests {
             let package = package_extension(
                 "mkdir -p build/stage; cp plugin.php build/stage/plugin.php; (cd build && zip -q fixture.zip stage/plugin.php); printf '[{\"path\":\"build/fixture.zip\",\"type\":\"archive\"}]'",
             );
-            homeboy_core::extension::save_manifest(&package).expect("save package extension");
+            homeboy_extension::save_manifest(&package).expect("save package extension");
 
             let component = Component {
                 id: "fixture".to_string(),
@@ -1229,7 +1229,7 @@ mod tests {
     fn extension_declared_release_preflight_executes_action() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
-            let mut extension: homeboy_core::extension::ExtensionManifest =
+            let mut extension: homeboy_extension::ExtensionManifest =
                 serde_json::from_value(serde_json::json!({
                     "name": "Registry",
                     "version": "1.0.0",
@@ -1248,7 +1248,7 @@ mod tests {
                 }))
                 .expect("extension manifest");
             extension.id = "registry".to_string();
-            homeboy_core::extension::save_manifest(&extension).expect("save extension");
+            homeboy_extension::save_manifest(&extension).expect("save extension");
 
             let component = Component {
                 id: "fixture".to_string(),

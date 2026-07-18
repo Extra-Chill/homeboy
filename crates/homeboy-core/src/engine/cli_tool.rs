@@ -8,11 +8,12 @@ use crate::engine::shell;
 use crate::engine::template::{render_map, TemplateVars};
 use crate::engine::text;
 use crate::error::ErrorCode;
-use crate::extension::{find_extension_by_tool, CliAutoFlag, CliConfig};
+use crate::extension_store::find_extension_by_tool;
 use crate::project::{self, Project};
 use crate::server;
 use crate::server::{execute_local_command, CommandOutput};
 use crate::{Error, Result};
+use homeboy_extension_contract::{CliAutoFlag, CliConfig};
 
 #[derive(Serialize, Clone)]
 
@@ -85,7 +86,7 @@ fn try_run_for_component(
 fn build_component_command(
     component: &Component,
     cli_config: &CliConfig,
-    extension: &crate::extension::ExtensionManifest,
+    extension: &homeboy_extension_contract::ExtensionManifest,
     args: &[String],
 ) -> String {
     let mut variables = HashMap::new();
@@ -230,7 +231,7 @@ fn build_project_command(
     variables.insert(TemplateVars::CLI_PATH.to_string(), cli_path);
 
     // Add extension_path so {{extension_path}} resolves in command templates
-    let extension_dir = crate::extension::extension_path(extension_id);
+    let extension_dir = crate::extension_store::extension_path(extension_id);
     if extension_dir.exists() {
         variables.insert(
             TemplateVars::EXTENSION_PATH.to_string(),
@@ -365,7 +366,7 @@ fn format_subtarget_syntax(project_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::{CliAutoFlagCondition, CliHelpConfig};
+    use homeboy_extension_contract::{CliAutoFlagCondition, CliHelpConfig};
 
     fn cli_config(auto_flags: Vec<CliAutoFlag>) -> CliConfig {
         CliConfig {

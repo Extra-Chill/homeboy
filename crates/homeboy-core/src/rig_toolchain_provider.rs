@@ -40,7 +40,7 @@ pub fn register_rig_toolchain_provider(provider: Box<dyn RigToolchainProvider>) 
 
 /// The rig toolchain command-step PATH via the registered provider (or none when
 /// the rig layer is absent).
-pub(crate) fn command_step_path() -> Option<OsString> {
+pub fn command_step_path() -> Option<OsString> {
     let slot = provider_slot().lock().expect("rig toolchain provider lock");
     match slot.as_deref() {
         Some(provider) => provider.command_step_path(),

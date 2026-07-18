@@ -1,11 +1,12 @@
+use homeboy_extension as extension;
 use std::collections::HashSet;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use homeboy_core::extension::{self, grammar, grammar_items, ParsedItem};
 use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
 use homeboy_core::Result;
+use homeboy_extension::{self, grammar, grammar_items, ParsedItem};
 
 use super::move_items::{MoveOptions, MoveResult};
 
@@ -549,7 +550,7 @@ fn public_items_for_group(plan: &DecomposePlan, group: &DecomposeGroup) -> Vec<S
 }
 
 fn parse_items_for_group_export(ext: &str, content: &str, file: &str) -> Option<Vec<ParsedItem>> {
-    let manifest = homeboy_core::extension::find_extension_for_file_ext(ext, "refactor")?;
+    let manifest = homeboy_extension::find_extension_for_file_ext(ext, "refactor")?;
     crate::move_items::ext_parse_items(&manifest, content, file)
         .or_else(|| crate::move_items::core_parse_items(&manifest, content))
 }

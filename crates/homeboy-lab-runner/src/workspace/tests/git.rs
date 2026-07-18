@@ -570,7 +570,7 @@ fn git_sync_of_detached_extension_source_preserves_source_revision() {
             "HEAD"
         );
 
-        let install = homeboy_core::extension::install(
+        let install = homeboy_extension::install(
             &remote.join("wordpress").display().to_string(),
             Some("wordpress"),
         )
@@ -581,7 +581,7 @@ fn git_sync_of_detached_extension_source_preserves_source_revision() {
             Some(detached_short.as_str())
         );
         assert_eq!(
-            homeboy_core::extension::read_source_revision("wordpress").as_deref(),
+            homeboy_core::extension_update_check::read_source_revision("wordpress").as_deref(),
             Some(detached_short.as_str())
         );
     });

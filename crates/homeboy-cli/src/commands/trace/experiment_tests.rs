@@ -3,7 +3,7 @@ use std::fs;
 use crate::commands::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
 use crate::test_support::with_isolated_home;
 
-use homeboy::core::extension::trace as extension_trace;
+use homeboy_extension::trace as extension_trace;
 
 use super::test_fixture::TRACE_FIXTURE_EXTENSION_ID;
 use super::{execute_trace_run, TraceArgs, TraceSchedule, TraceVariantMatrixMode};

@@ -74,7 +74,7 @@ pub fn register_refactor_transform_provider(provider: Box<dyn RefactorTransformP
 
 /// Apply a transform set via the registered provider (or the no-op when the
 /// refactor layer is absent).
-pub(crate) fn apply_transform_set(
+pub fn apply_transform_set(
     root: &Path,
     name: &str,
     set: &TransformSet,

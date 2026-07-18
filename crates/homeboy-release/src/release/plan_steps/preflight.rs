@@ -1,10 +1,10 @@
 use super::builders::{disabled_step, ready_step, string_config, StepConfig};
 use crate::release::types::{ReleaseOptions, ReleaseSemverRecommendation};
-use homeboy_core::extension::ExtensionManifest;
 use homeboy_core::plan::PlanStep;
 use homeboy_core::quality::{
     build_quality_steps as build_shared_quality_steps, QualityPlanOptions,
 };
+use homeboy_extension::ExtensionManifest;
 
 pub(in crate::release) fn build_preflight_steps(
     options: &ReleaseOptions,

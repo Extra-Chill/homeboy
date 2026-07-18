@@ -205,7 +205,7 @@ fn config_entity_registry() -> Vec<ConfigEntityMetadata> {
     let mut registry = vec![
         entity_metadata::<crate::project::Project>(),
         entity_metadata::<crate::server::Server>(),
-        entity_metadata::<crate::extension::ExtensionManifest>(),
+        entity_metadata::<homeboy_extension_contract::ExtensionManifest>(),
         entity_metadata::<crate::fleet::Fleet>(),
     ];
     let external = EXTERNAL_CONFIG_ENTITIES
@@ -341,7 +341,7 @@ pub fn list<T: ConfigEntity>() -> Result<Vec<T>> {
     Ok(items)
 }
 
-pub(crate) fn check_id_collision(id: &str, saving_type: &str) -> Result<()> {
+pub fn check_id_collision(id: &str, saving_type: &str) -> Result<()> {
     for metadata in config_entity_registry() {
         if metadata.entity_type == saving_type {
             continue;

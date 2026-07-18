@@ -5,11 +5,11 @@ use std::process::Command;
 use crate::release::version;
 use homeboy_core::component::{self, Component};
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension;
 use homeboy_core::git;
 use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 use homeboy_core::project::{self, Project};
 use homeboy_core::server::SshClient;
+use homeboy_extension as extension;
 
 use super::types::{
     compare_deployed_versions, ComponentStatus, DeployConfig, ReleaseState, ReleaseStateBuckets,

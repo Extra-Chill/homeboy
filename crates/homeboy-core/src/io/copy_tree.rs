@@ -14,7 +14,7 @@ use crate::error::{Error, Result};
 /// How [`copy_tree`] handles non-directory entries it encounters while walking
 /// the source tree, and how it formats IO error messages.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum EntryPolicy {
+pub enum EntryPolicy {
     /// Copy every entry that is not a directory using a cheap `Path::is_dir()`
     /// check. Mirrors the historical `extension::lifecycle::copy_dir_recursive`
     /// behavior; symlinks fall through to `fs::copy` (which follows them).
@@ -38,12 +38,7 @@ pub(crate) enum EntryPolicy {
 /// dir"`, `"read dir entry"`, etc.); those were debug-only breadcrumbs not
 /// consumed by any caller, so the unified helper folds them into a single
 /// caller label for simplicity.
-pub(crate) fn copy_tree(
-    src: &Path,
-    dst: &Path,
-    error_context: &str,
-    policy: EntryPolicy,
-) -> Result<()> {
+pub fn copy_tree(src: &Path, dst: &Path, error_context: &str, policy: EntryPolicy) -> Result<()> {
     let ctx = || error_context.to_string();
 
     fs::create_dir_all(dst).map_err(|e| {

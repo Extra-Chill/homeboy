@@ -1,10 +1,11 @@
 use homeboy_core::component::Component;
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::{self, RemotePathRootRule};
 use homeboy_core::paths as base_path;
 use homeboy_core::project::Project;
 use homeboy_core::server::SshClient;
+use homeboy_extension as extension;
+use homeboy_extension::{self, RemotePathRootRule};
 use std::collections::HashSet;
 
 pub(super) fn component_remote_path(component: &Component) -> String {
@@ -328,9 +329,9 @@ fn strip_path_prefix<'a>(path: &'a str, prefix: &str) -> &'a str {
 mod tests {
     use super::*;
     use homeboy_core::component::{Component, ScopedExtensionConfig};
-    use homeboy_core::extension::{DeployCapability, ExtensionManifest};
     use homeboy_core::server::SshClient;
     use homeboy_core::test_support::with_isolated_home;
+    use homeboy_extension::{DeployCapability, ExtensionManifest};
     use std::collections::HashMap;
 
     fn component(remote_path: &str) -> Component {
@@ -361,7 +362,7 @@ mod tests {
     }
 
     fn install_extension_with_detect_command(detect_command: Option<&str>) {
-        homeboy_core::extension::save_manifest(&ExtensionManifest {
+        homeboy_extension::save_manifest(&ExtensionManifest {
             id: "package-host".to_string(),
             name: "Package Host".to_string(),
             version: "1.0.0".to_string(),

@@ -2,11 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use homeboy::core::engine::run_dir::{self, RunDir};
-use homeboy::core::extension::bench::artifact::BenchArtifact;
-use homeboy::core::extension::bench::{
-    parse_bench_results_str, BenchResults, BenchRunWorkflowResult,
-};
 use homeboy::core::observation::ObservationStore;
+use homeboy_extension::bench::artifact::BenchArtifact;
+use homeboy_extension::bench::{parse_bench_results_str, BenchResults, BenchRunWorkflowResult};
 
 use super::*;
 use crate::commands::bench::{BenchRigOrder, BenchRunArgs};
@@ -211,7 +209,7 @@ fn bench_observation_persists_success_with_metrics_and_artifacts() {
             },
         );
         let child_command_failures = vec![
-            homeboy::core::extension::bench::parsing::BenchChildCommandFailure {
+            homeboy_extension::bench::parsing::BenchChildCommandFailure {
                 argv: vec!["generic-child".to_string(), "run".to_string()],
                 command: None,
                 exit_status: Some(9),

@@ -466,7 +466,7 @@ fn cleanup_build_dependencies(
     let mut cleanup_paths = Vec::new();
     if let Some(ref extensions) = component.extensions {
         for extension_id in extensions.keys() {
-            if let Ok(manifest) = homeboy_core::extension::load_extension(extension_id) {
+            if let Ok(manifest) = homeboy_extension::load_extension(extension_id) {
                 if let Some(ref build) = manifest.build {
                     cleanup_paths.extend(build.cleanup_paths.iter().cloned());
                 }

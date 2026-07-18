@@ -1,6 +1,5 @@
 use crate::component::{discover_from_portable, portable::read_portable_config, Component};
 use crate::error::{Error, Result};
-use crate::extension;
 use crate::project;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -256,7 +255,7 @@ pub fn extension_provides_artifact_pattern(component: &Component) -> bool {
         .as_ref()
         .map(|extensions| {
             extensions.keys().any(|extension_id| {
-                extension::load_extension(extension_id)
+                crate::extension_store::load_extension(extension_id)
                     .ok()
                     .and_then(|m| m.build)
                     .and_then(|b| b.artifact_pattern)
@@ -274,7 +273,7 @@ pub(in crate::component) fn build_cleanup_paths(component: &Component) -> Vec<(S
     };
 
     for extension_id in extensions.keys() {
-        let Ok(manifest) = extension::load_extension(extension_id) else {
+        let Ok(manifest) = crate::extension_store::load_extension(extension_id) else {
             continue;
         };
         let Some(build) = manifest.build.as_ref() else {

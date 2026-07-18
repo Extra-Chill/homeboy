@@ -7,8 +7,8 @@ use crate::release::types::{
     ReleaseSemverRecommendation,
 };
 use homeboy_core::component::{Component, ScopedExtensionConfig};
-use homeboy_core::extension::ExtensionManifest;
 use homeboy_core::plan::PlanStepStatus;
+use homeboy_extension::ExtensionManifest;
 
 #[test]
 fn test_build_preflight_steps() {
