@@ -127,28 +127,60 @@ fn lab_homeboy_path_shadow_accepts_matching_bare_homeboy() {
 }
 
 #[test]
-fn homeboy_version_skew_check_is_absent_for_equal_versions() {
-    assert!(checks::homeboy_version_skew_check("0.198.7", "0.198.7", "lab", "lab").is_none());
+fn homeboy_version_skew_check_is_absent_for_matching_build_identities() {
+    assert!(checks::homeboy_version_skew_check(
+        "0.290.0",
+        "homeboy 0.290.0+00d2756ef115",
+        "0.290.0+00d2756ef115",
+        "lab",
+        "lab",
+    )
+    .is_none());
 }
 
 #[test]
-fn homeboy_version_skew_check_warns_for_different_versions() {
-    let check = checks::homeboy_version_skew_check("0.198.7", "0.197.7", "lab", "lab")
-        .expect("version skew warning");
+fn homeboy_version_skew_check_warns_for_different_build_identities() {
+    let check = checks::homeboy_version_skew_check(
+        "0.290.0",
+        "homeboy 0.290.0+00d2756ef115",
+        "0.290.0+differentbuild",
+        "lab",
+        "lab",
+    )
+    .expect("version skew warning");
 
     assert_eq!(check.id, "homeboy.version_skew");
     assert_eq!(check.status, RunnerDoctorStatus::Warning);
-    assert!(check.message.contains("0.198.7"));
-    assert!(check.message.contains("0.197.7"));
+    assert!(check.message.contains("0.290.0+00d2756ef115"));
+    assert!(check.message.contains("0.290.0+differentbuild"));
     assert_eq!(
         check.details.get("local_version").map(String::as_str),
-        Some("0.198.7")
+        Some("0.290.0")
+    );
+    assert_eq!(
+        check
+            .details
+            .get("local_build_identity")
+            .map(String::as_str),
+        Some("0.290.0+00d2756ef115")
     );
     assert_eq!(
         check.details.get("remote_version").map(String::as_str),
-        Some("0.197.7")
+        Some("0.290.0+differentbuild")
     );
     assert!(check.remediation.as_deref().is_some_and(
-        |value| value.contains("homeboy runner refresh-homeboy lab --ref v0.198.7 --reconnect")
+        |value| value.contains("homeboy runner refresh-homeboy lab --ref v0.290.0 --reconnect")
     ));
+}
+
+#[test]
+fn homeboy_version_skew_check_warns_for_different_semantic_versions() {
+    assert!(checks::homeboy_version_skew_check(
+        "0.290.0",
+        "homeboy 0.290.0+00d2756ef115",
+        "0.289.0+00d2756ef115",
+        "lab",
+        "lab",
+    )
+    .is_some());
 }
