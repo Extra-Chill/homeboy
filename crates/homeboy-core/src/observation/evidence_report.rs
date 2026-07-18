@@ -24,7 +24,7 @@ use serde_json::Value;
 use super::{run_owner_pid, running_status_note, ArtifactRecord, RunRecord};
 use crate::artifact_address::{ArtifactAddress, ArtifactAddressKind};
 use crate::artifact_preview::{html_preview_entrypoints, ArtifactPreviewEntrypoint};
-use crate::artifact_ref::{ArtifactRef, EvidenceRef};
+use crate::artifact_ref::{artifact_ref_from_record, ArtifactRef, EvidenceRef};
 use crate::artifacts::{generic_matrix_summary_from_artifacts, GenericMatrixSummary};
 use crate::evidence_manifest::{EvidenceManifest, TrackerRef, EVIDENCE_MANIFEST_SCHEMA};
 use crate::observation::disk_budget::DiskBudget;
@@ -544,7 +544,7 @@ fn public_base_configured() -> bool {
 }
 
 fn artifact_ref(artifact: &ArtifactRecord, address: &ArtifactAddress) -> ArtifactRef {
-    let mut reference = ArtifactRef::from_record(artifact);
+    let mut reference = artifact_ref_from_record(artifact);
     reference.path = address.value.clone();
     reference.url = public_url_from_address(address);
     reference.public_url = reference.url.clone();

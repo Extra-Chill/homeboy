@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use crate::FuzzResultEnvelope;
-use homeboy_core::artifact_ref::EvidenceRef;
+use homeboy_core::artifact_ref::{evidence_ref_for_artifact, EvidenceRef};
 use homeboy_core::observation::{ArtifactRecord, ObservationStore};
 
 /// Observation-store artifact kind for a persisted fuzz result envelope.
@@ -119,7 +119,7 @@ fn record_fuzz_result_envelope_artifact(
 
 /// Build the evidence reference for a persisted fuzz result-envelope artifact.
 pub fn fuzz_result_envelope_evidence_ref(artifact: &ArtifactRecord) -> EvidenceRef {
-    EvidenceRef::for_artifact(
+    evidence_ref_for_artifact(
         artifact,
         "Fuzz result envelope",
         Some("result".to_string()),
