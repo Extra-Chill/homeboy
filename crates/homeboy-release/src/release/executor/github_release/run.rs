@@ -6,8 +6,7 @@ use homeboy_core::error::{Error, Result};
 
 use super::super::step_success;
 use super::gh_cli::{
-    gh_command, gh_is_authenticated, gh_is_available, gh_release_exists,
-    github_release_artifact_paths, github_release_asset_paths,
+    gh_command, gh_is_authenticated, gh_is_available, gh_release_exists, github_release_asset_paths,
 };
 use super::notes::{
     build_github_release_body, github_changelog_url, github_release_notes_start_tag,
@@ -448,11 +447,17 @@ pub(crate) fn validate_declared_build_artifact(
                 None,
             )
         })?;
-    let is_collected = github_release_artifact_paths(state).iter().any(|path| {
-        std::path::Path::new(path)
+    let is_collected = state.artifacts.iter().any(|artifact| {
+        let has_declared_identity = std::path::Path::new(&artifact.path)
             .file_name()
             .and_then(|name| name.to_str())
-            == Some(expected_name)
+            == Some(expected_name);
+        let has_bytes = std::path::Path::new(&artifact.path).is_file()
+            || artifact
+                .durable_path
+                .as_deref()
+                .is_some_and(|path| std::path::Path::new(path).is_file());
+        has_declared_identity && has_bytes
     });
     if is_collected {
         return Ok(());
