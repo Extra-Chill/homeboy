@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.26.3] - 2026-07-18
+
+### Fixed
+- route declared standalone PHP smokes
+
 ## [3.26.1] - 2026-07-17
 
 ### Changed
