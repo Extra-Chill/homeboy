@@ -849,6 +849,12 @@ fn git_backed_snapshot_uses_runner_exact_sha_without_controller_bundle_hydration
             ],
         );
         git(author.path(), &["push", "origin", "main"]);
+        git(author.path(), &["checkout", "-b", "unrelated"]);
+        fs::write(author.path().join("unrelated.txt"), "unrelated\n").expect("unrelated file");
+        git(author.path(), &["add", "."]);
+        git(author.path(), &["commit", "-m", "unrelated"]);
+        git(author.path(), &["push", "origin", "unrelated"]);
+        git(author.path(), &["checkout", "main"]);
         git(
             source.path(),
             &[
@@ -892,6 +898,19 @@ fn git_backed_snapshot_uses_runner_exact_sha_without_controller_bundle_hydration
         assert_eq!(exit_code, 0);
         assert!(output.materialization_plan.controller_git_bundle.is_none());
         assert_eq!(git_output(remote, &["rev-parse", "HEAD"]).unwrap(), head);
+        assert!(
+            git_output(
+                remote,
+                &[
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    "refs/remotes/origin/unrelated"
+                ]
+            )
+            .is_err(),
+            "fresh exact-SHA materialization must not fetch every remote branch"
+        );
         assert_eq!(
             fs::read_to_string(remote.join("file.txt")).unwrap(),
             "dirty\n"
