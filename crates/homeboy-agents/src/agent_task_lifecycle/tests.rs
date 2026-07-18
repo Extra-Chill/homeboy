@@ -4125,6 +4125,42 @@ fn cancel_run_marks_queued_record_cancelled() {
     with_isolated_home(|_| {
         let plan = test_plan();
         submit_plan(&plan, Some("run-cancel-queued")).expect("submitted");
+        let mut record = store::read_record("run-cancel-queued").expect("record");
+        record.metadata = json!({
+            "runner_id": "homeboy-lab",
+            "runner_job_id": "queued-reservation",
+        });
+        store::write_record(&record).expect("store runner reservation");
+        let _cancel =
+            super::cancellation::test_cancel_hook::install(Box::new(|runner_id, job_id| {
+                assert_eq!(runner_id, "homeboy-lab");
+                assert_eq!(job_id, "queued-reservation");
+                Ok((
+                    homeboy_core::api_jobs::Job {
+                        id: uuid::Uuid::new_v4(),
+                        operation: "runner.exec".to_string(),
+                        status: homeboy_core::api_jobs::JobStatus::Cancelled,
+                        created_at_ms: 1,
+                        updated_at_ms: 2,
+                        started_at_ms: None,
+                        finished_at_ms: Some(2),
+                        event_count: 0,
+                        source_snapshot: None,
+                        path_materialization_plan: None,
+                        stale_reason: None,
+                        daemon_lease_id: None,
+                        target_runner_id: None,
+                        target_project_id: None,
+                        claim_id: None,
+                        claimed_by_runner_id: None,
+                        claimed_at_ms: None,
+                        claim_expires_at_ms: None,
+                        artifacts: Vec::new(),
+                        runner_job_projection: None,
+                    },
+                    Vec::new(),
+                ))
+            }));
 
         let cancelled =
             cancel_run("run-cancel-queued", Some("loser cell")).expect("queued run cancelled");
@@ -4133,6 +4169,10 @@ fn cancel_run_marks_queued_record_cancelled() {
         assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
         assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
         assert_eq!(cancelled.metadata["cancel_reason"], json!("loser cell"));
+        assert_eq!(
+            cancelled.metadata["live_cancellation"]["cancellation"],
+            "runner_job_cancel"
+        );
         assert_eq!(loaded.state, AgentTaskRunState::Cancelled);
     });
 }
