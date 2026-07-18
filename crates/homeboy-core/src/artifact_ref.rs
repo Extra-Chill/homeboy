@@ -3,8 +3,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::execution_contract::{decode_uri_component, encode_uri_component};
 use crate::observation::ArtifactRecord;
+use homeboy_engine_primitives::artifact_ref_scheme::{decode_uri_component, encode_uri_component};
 
 pub const ARTIFACT_REF_SCHEMA: &str = "homeboy/artifact-ref/v1";
 pub const EVIDENCE_REF_SCHEMA: &str = "homeboy/evidence-ref/v1";

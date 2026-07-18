@@ -15,11 +15,11 @@ use crate::agent_task::{
     AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest,
     AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
 };
-use homeboy_core::extension::bench::diagnostic::BenchDiagnostic;
-use homeboy_core::extension::bench::report::comparison::agent_task_matrix_provider::{
+use homeboy_extension::bench::diagnostic::BenchDiagnostic;
+use homeboy_extension::bench::report::comparison::agent_task_matrix_provider::{
     register_bench_agent_task_matrix_provider, BenchAgentTaskMatrixProvider,
 };
-use homeboy_core::extension::bench::report::comparison::RigBenchEntry;
+use homeboy_extension::bench::report::comparison::RigBenchEntry;
 
 struct AgentTaskBenchMatrixProvider;
 

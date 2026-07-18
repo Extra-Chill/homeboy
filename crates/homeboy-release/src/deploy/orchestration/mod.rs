@@ -1508,7 +1508,8 @@ mod tests {
             config.force = true;
             config.head = true;
 
-            let (build_exit_code, build_error) = homeboy_core::build::build_component(&component);
+            let (build_exit_code, build_error) =
+                homeboy_extension::build::build_component(&component);
             assert_eq!(build_exit_code, Some(42));
             assert!(
                 build_error.is_some(),

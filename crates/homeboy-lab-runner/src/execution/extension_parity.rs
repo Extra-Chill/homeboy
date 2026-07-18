@@ -1,8 +1,8 @@
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
-use homeboy_core::extension;
 use homeboy_core::output::MergeOutput;
 use homeboy_core::server::{self, SshClient};
+use homeboy_extension as extension;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -547,7 +547,7 @@ fn runner_extension_materialization_request(
     extension_id: &str,
     parity_error: Error,
 ) -> Result<RunnerExtensionMaterializationRequest> {
-    let local_revision = extension::read_source_revision(extension_id)
+    let local_revision = homeboy_core::extension_update_check::read_source_revision(extension_id)
         .filter(|revision| !revision.trim().is_empty())
         .ok_or_else(|| parity_error.clone())?;
     let source = extension::resolve_source_url(extension_id).map_err(|err| {
@@ -875,7 +875,7 @@ fn validate_runner_extension_revision(
         );
     }
 
-    let local_revision = extension::read_source_revision(extension_id);
+    let local_revision = homeboy_core::extension_update_check::read_source_revision(extension_id);
     let remote_revision = remote_extension_source_revision(remote_stdout);
     if matches!(
         (

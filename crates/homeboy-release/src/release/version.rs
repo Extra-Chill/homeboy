@@ -25,7 +25,7 @@ use homeboy_core::engine::hooks::{self, HookFailureMode};
 use homeboy_core::engine::local_files;
 use homeboy_core::engine::text;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::ExtensionManifest;
+use homeboy_extension::ExtensionManifest;
 use serde_json::Value;
 use std::path::Path;
 

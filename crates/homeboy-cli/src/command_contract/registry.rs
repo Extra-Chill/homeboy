@@ -171,12 +171,12 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         rust_type: "homeboy::command_contract::LabRunnerHandoffArtifactManifestRef",
     },
     ContractRegistryEntry {
-        schema_id: crate::core::extension::EXTENSION_MATERIALIZATION_SOURCE_SCHEMA,
+        schema_id: homeboy_extension_contract::extension_contract_producer::EXTENSION_MATERIALIZATION_SOURCE_SCHEMA,
         name: "extension-materialization-source",
         title: "Extension materialization source",
         owner: "homeboy-core",
         summary: "Records where an installed extension was materialized from in a generic source contract.",
-        rust_type: "homeboy::core::extension::ExtensionMaterializationSourceContract",
+        rust_type: "homeboy_extension_contract::ExtensionMaterializationSourceContract",
     },
     ContractRegistryEntry {
         schema_id: crate::agents::agent_task_provider::RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA,

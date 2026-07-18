@@ -321,7 +321,7 @@ pub fn execute_local_command_passthrough(
     execute_local_command_passthrough_impl(command, current_dir, env, None)
 }
 
-pub(crate) fn execute_local_command_passthrough_with_timeout(
+pub fn execute_local_command_passthrough_with_timeout(
     command: &str,
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
@@ -346,7 +346,7 @@ fn execute_local_command_passthrough_impl(
     )
 }
 
-pub(crate) fn execute_local_command_stderr_passthrough(
+pub fn execute_local_command_stderr_passthrough(
     command: &str,
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
@@ -354,7 +354,7 @@ pub(crate) fn execute_local_command_stderr_passthrough(
     execute_local_command_stderr_passthrough_impl(command, current_dir, env, None)
 }
 
-pub(crate) fn execute_local_command_stderr_passthrough_with_timeout(
+pub fn execute_local_command_stderr_passthrough_with_timeout(
     command: &str,
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,

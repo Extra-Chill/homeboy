@@ -6,8 +6,9 @@
 
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::ExtensionCapability;
-use homeboy_core::extension::{self, ExtensionManifest};
+use homeboy_extension as extension;
+use homeboy_extension::ExtensionCapability;
+use homeboy_extension::{self, ExtensionManifest};
 use std::path::{Path, PathBuf};
 
 use super::super::types::{ReleaseArtifact, ReleaseState, ReleaseStepResult};
@@ -125,7 +126,7 @@ fn build_declared_component_artifact(
         return Ok(false);
     }
 
-    let (exit_code, build_error) = homeboy_core::build::build_component(component);
+    let (exit_code, build_error) = homeboy_extension::build::build_component(component);
     if let Some(error) = build_error {
         return Err(Error::validation_invalid_argument(
             "scripts.build",

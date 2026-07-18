@@ -404,7 +404,7 @@ pub(crate) fn resolve_audit_reference_paths(source_ctx: &ExecutionContext) -> Ve
 
     let mut reference_paths = Vec::new();
     for ext_id in extensions.keys() {
-        let ext_manifest = match homeboy::core::extension::load_extension(ext_id) {
+        let ext_manifest = match homeboy_extension::load_extension(ext_id) {
             Ok(m) => m,
             Err(_) => continue,
         };
@@ -415,7 +415,7 @@ pub(crate) fn resolve_audit_reference_paths(source_ctx: &ExecutionContext) -> Ve
         };
 
         // Resolve script path relative to extension directory
-        let ext_path = homeboy::core::extension::extension_path(ext_id);
+        let ext_path = homeboy_extension::extension_path(ext_id);
         if !ext_path.is_dir() {
             continue;
         }

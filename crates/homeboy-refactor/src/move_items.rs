@@ -23,15 +23,16 @@ pub use types::{
 pub use whole_file_move::move_file;
 
 use extension_integration::find_refactor_extension;
+use homeboy_extension as extension;
 
 use std::path::{Path, PathBuf};
 
 use homeboy_core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use homeboy_core::engine::symbol_graph::module_path_from_file;
-use homeboy_core::extension::{
+use homeboy_core::Result;
+use homeboy_extension::{
     self, AdjustedItem, ExtensionManifest, ParsedItem, RelatedTests, ResolvedImports,
 };
-use homeboy_core::Result;
 
 impl ItemKind {
     fn from_str(s: &str) -> Self {

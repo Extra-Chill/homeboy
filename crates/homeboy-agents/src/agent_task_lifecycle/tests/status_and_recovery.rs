@@ -985,6 +985,35 @@ fn record_health_migrates_legacy_and_quarantines_conflicting_projections() {
 }
 
 #[test]
+fn malformed_typed_pending_handoff_is_health_malformed_and_unreconciled() {
+    with_isolated_home(|_| {
+        submit_plan(&test_plan(), Some("malformed-typed-pending")).expect("submitted");
+        rewrite_record_for_test("malformed-typed-pending", |record| {
+            record.lab_handoff = Some(AgentTaskLabHandoff {
+                state: AgentTaskLabHandoffState::Pending,
+                authority: AgentTaskLabHandoffAuthority::Controller,
+                runner_id: "homeboy-lab".to_string(),
+                runner_job_id: None,
+                submitted_at: Some("invalid".to_string()),
+                acceptance_deadline_at: None,
+                accepted_at: None,
+                expired_at: None,
+            });
+        })
+        .expect("malformed typed state stored");
+
+        let health = record_health_summary().expect("health report");
+        assert_eq!(health.malformed, 1);
+        let report = reconcile_record_health(false).expect("quarantine malformed state");
+        assert_eq!(report.quarantined, 1);
+        assert_eq!(
+            report.records[0].reason,
+            AgentTaskRecordHealthReason::MalformedMetadata
+        );
+    });
+}
+
+#[test]
 fn artifact_refs_treat_empty_url_as_missing_and_fall_back_to_path() {
     let outcomes = vec![outcome_with_refs(
         "task-a",

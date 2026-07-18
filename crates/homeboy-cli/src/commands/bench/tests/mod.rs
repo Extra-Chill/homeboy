@@ -2,7 +2,7 @@ use super::*;
 use crate::test_support::{git_fixture_output, run_git_fixture_command, with_isolated_home};
 use clap::error::ErrorKind;
 use clap::Parser;
-use homeboy::core::extension::bench::aggregate_comparison;
+use homeboy_extension::bench::aggregate_comparison;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;

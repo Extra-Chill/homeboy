@@ -1,6 +1,6 @@
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy::core::extension::trace as extension_trace;
 use homeboy::rig;
+use homeboy_extension::trace as extension_trace;
 
 use super::{execute_trace_run_impl, TraceArgs};
 

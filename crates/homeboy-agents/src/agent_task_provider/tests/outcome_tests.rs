@@ -347,6 +347,62 @@ fn homeboy_local_artifact_normalization_measures_empty_nonempty_and_unavailable_
 }
 
 #[test]
+fn empty_patch_with_substantive_evidence_is_flagged_for_review_not_noop() {
+    // #7719: a successful cook whose patch artifact is empty but which produced
+    // substantive work evidence (transcript/report) must NOT be silently
+    // collapsed to NoOp, which would discard real (possibly committed) work.
+    // It is surfaced as a recoverable candidate for controller review/salvage.
+    let root = tempfile::tempdir().expect("artifact root");
+    let empty_patch_path = root.path().join("cook.patch");
+    let transcript_path = root.path().join("transcript.md");
+    fs::write(&empty_patch_path, "").expect("empty patch");
+    fs::write(
+        &transcript_path,
+        "# transcript\nreal provider work happened\n",
+    )
+    .expect("transcript");
+
+    let provenance = AgentTaskArtifactsPathProvenance {
+        owner: "homeboy".to_string(),
+        locality: "runner".to_string(),
+        plan_id: "plan".to_string(),
+        run_id: None,
+        task_id: "opencode-empty-patch-with-evidence".to_string(),
+        attempt: 1,
+    };
+
+    let mut empty_patch =
+        fixture_artifact("patch", "patch", &empty_patch_path, Some("text/x-patch"));
+    empty_patch.size_bytes = None;
+    let mut transcript = fixture_artifact(
+        "transcript",
+        "transcript",
+        &transcript_path,
+        Some("text/markdown"),
+    );
+    transcript.size_bytes = None;
+
+    let mut outcome = failed_outcome_with_run_result(Value::Null);
+    outcome.status = AgentTaskOutcomeStatus::Succeeded;
+    outcome.failure_classification = None;
+    outcome.artifacts = vec![empty_patch, transcript];
+    normalize_homeboy_local_artifact_sizes(&mut outcome, root.path(), &provenance);
+
+    assert_eq!(
+        outcome.status,
+        AgentTaskOutcomeStatus::CandidateRecoverable,
+        "empty patch beside substantive evidence must be reviewable, not NoOp"
+    );
+    assert_eq!(outcome.artifacts[0].size_bytes, Some(0));
+    assert!(outcome.artifacts[1].size_bytes.unwrap_or_default() > 0);
+    assert!(outcome
+        .summary
+        .as_deref()
+        .unwrap_or_default()
+        .contains("needs review"));
+}
+
+#[test]
 fn declared_sandbox_result_contract_rejects_private_runtime_result_shape() {
     let (_, mut provider) = request("task-sandbox-private", "node provider.js".to_string());
     provider.backend = "runtime-provider".to_string();

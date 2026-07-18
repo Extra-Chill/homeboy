@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 use homeboy_core::error::Error;
-use homeboy_core::redaction::{redact_argv, redact_argv_display};
+use homeboy_core::redaction::{redact_argv, redact_argv_shell_display};
 
 #[allow(unused_imports)]
 use super::*;
@@ -22,7 +22,7 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
         .unwrap_or("runner command exited non-zero")
         .to_string();
     let execution = serde_json::to_value(output).unwrap_or(Value::Null);
-    let command = redact_argv_display(&output.argv);
+    let command = redact_argv_shell_display(&output.argv);
     let redacted_argv = redact_argv(&output.argv);
     let mut details = json!({
         "runner_id": output.runner_id,
@@ -176,7 +176,7 @@ pub(super) fn runner_exec_failure_context_hint(output: &RunnerExecOutput) -> Str
         .unwrap_or("unknown persisted run");
     let mut hint = format!(
         "Canonical failed command: `{}`; runner job: `{job}`; persisted run: `{run}`",
-        redact_argv_display(&context.command)
+        redact_argv_shell_display(&context.command)
     );
     append_failure_context_error_summary(&mut hint, &context);
     hint.push('.');

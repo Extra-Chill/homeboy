@@ -1,6 +1,7 @@
 use homeboy_core::component::{self, Component};
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::{self, ExtensionManifest};
+use homeboy_extension as extension;
+use homeboy_extension::{self, ExtensionManifest};
 
 use super::types::ReleaseOptions;
 

@@ -1,5 +1,5 @@
-use homeboy::core::extension::trace as extension_trace;
-use homeboy::core::extension::trace::TraceCommandOutput;
+use homeboy_extension::trace as extension_trace;
+use homeboy_extension::trace::TraceCommandOutput;
 
 use super::TraceArgs;
 use crate::commands::CmdResult;

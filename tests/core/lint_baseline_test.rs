@@ -1,5 +1,5 @@
-use crate::extension::lint::baseline as lint_baseline;
-use crate::finding::HomeboyFinding;
+use crate::lint::baseline as lint_baseline;
+use homeboy_core::finding::HomeboyFinding;
 use std::path::Path;
 
 fn lint_finding(id: &str, category: &str, message: &str) -> HomeboyFinding {

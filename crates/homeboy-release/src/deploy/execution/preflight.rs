@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::release::version;
 use homeboy_core::component::Component;
 use homeboy_core::engine::command;
-use homeboy_core::extension::build::resolve_artifact_path_from_root;
+use homeboy_extension::build::resolve_artifact_path_from_root;
 
 use super::super::types::{ComponentDeployResult, DeployConfig};
 use super::super::version_overrides::{

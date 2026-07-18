@@ -7,8 +7,8 @@ use homeboy_core::defaults;
 use homeboy_core::engine::shell;
 use homeboy_core::engine::template::{render_map, TemplateVars};
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::DeployVerification;
 use homeboy_core::server::SshClient;
+use homeboy_extension::DeployVerification;
 
 use super::transfer::{upload_directory, upload_file};
 use super::types::{DeployEffect, DeployResult};
@@ -472,8 +472,8 @@ mod tests {
         deploy_artifact, ensure_not_double_nested, flatten_double_nested_dir, remote_basename,
         render_extract_command, DANGEROUS_PATH_SUFFIXES,
     };
-    use homeboy_core::extension::DeployVerification;
     use homeboy_core::server::SshClient;
+    use homeboy_extension::DeployVerification;
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::fs;

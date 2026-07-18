@@ -10,7 +10,6 @@
 use crate::component::Component;
 use crate::engine::template;
 use crate::error::{Error, Result};
-use crate::extension;
 use crate::server::{execute_local_command_in_dir, SshClient};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -61,7 +60,7 @@ pub fn resolve_hooks(component: &Component, event: &str) -> Result<Vec<String>> 
         let mut extension_ids: Vec<_> = extensions.keys().collect();
         extension_ids.sort();
         for extension_id in extension_ids {
-            let manifest = extension::load_extension(extension_id)?;
+            let manifest = crate::extension_store::load_extension(extension_id)?;
             if let Some(extension_commands) = manifest.hooks.get(event) {
                 commands.extend(extension_commands.clone());
             }

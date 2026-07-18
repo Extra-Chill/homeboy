@@ -3,7 +3,7 @@ use crate::plan::verify::rewrite_callers_after_dedup;
 use crate::auto::verify::{applied_files_from_chunks, capture_pre_apply_snapshot, run_verify_gate};
 use crate::auto::{ApplyChunkResult, ChunkStatus, Fix, NewFile};
 use homeboy_core::engine::undo::InMemoryRollback;
-use homeboy_core::extension::AutofixVerifyConfig;
+use homeboy_extension::AutofixVerifyConfig;
 use std::path::Path;
 
 // ============================================================================

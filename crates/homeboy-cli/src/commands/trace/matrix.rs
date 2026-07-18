@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use homeboy::core::extension::trace as extension_trace;
-use homeboy::core::extension::trace::TraceCommandOutput;
 use homeboy::core::trace_compare::{
     prepare_matrix_cell_dir, prepare_matrix_output_dir, prepare_variant_matrix_output_dir,
     write_json_artifact, write_matrix_summary, write_variant_matrix_summary,
 };
+use homeboy_extension::trace as extension_trace;
+use homeboy_extension::trace::TraceCommandOutput;
 
 use super::output::{
     compare_trace_aggregates_with_focus, render_matrix_markdown, TraceAggregateIdentity,

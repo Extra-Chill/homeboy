@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use homeboy::core::component;
-use homeboy::core::extension::trace as extension_trace;
-use homeboy::core::extension::trace::{TraceCheckoutProvenance, TraceCommandOutput};
 use homeboy::core::git;
 use homeboy::core::observation::{NewRunRecord, RunStatus};
 use homeboy::core::trace_compare::{self, CompareArtifactSet, CompareObservation};
+use homeboy_extension::trace as extension_trace;
+use homeboy_extension::trace::{TraceCheckoutProvenance, TraceCommandOutput};
 
 use super::aggregate::{
     aggregate_metric, aggregate_span, TraceAggregateMetricSample, TraceAggregateSpanSample,

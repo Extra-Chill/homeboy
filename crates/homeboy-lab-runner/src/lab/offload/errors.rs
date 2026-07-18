@@ -357,8 +357,8 @@ pub(crate) fn missing_mutation_patch_error(
     exec_output: &super::super::super::RunnerExecOutput,
 ) -> Error {
     let flag_label = mutation_flag.unwrap_or("write");
-    let original_command = redact_argv_display(normalized_args);
-    let remote_command = redact_argv_display(&exec_output.argv);
+    let original_command = redact_argv_shell_display(normalized_args);
+    let remote_command = redact_argv_shell_display(&exec_output.argv);
     let patch_artifact_id = exec_output
         .patch
         .as_ref()
@@ -428,7 +428,7 @@ pub(crate) fn append_runner_failure_context_summary(
         .unwrap_or("unknown persisted run");
     let mut summary = format!(
         "Lab offload failure context: command `{}` failed on runner `{}`; runner job `{job}`; persisted run `{run}`",
-        redact_argv_display(&context.command),
+        redact_argv_shell_display(&context.command),
         context.runner_id
     );
     append_failure_context_error_summary(&mut summary, &context);

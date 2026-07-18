@@ -12,9 +12,10 @@ path = "src/lib.rs"
 
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
 homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit" }
-homeboy-refactor-contract = { version = "0.1.0", path = "../homeboy-refactor-contract" }
-homeboy-audit-contract = { version = "0.1.0", path = "../homeboy-audit-contract" }
+homeboy-refactor-contract = { version = "0.1.0", path = "../contracts/homeboy-refactor-contract" }
+homeboy-audit-contract = { version = "0.1.0", path = "../contracts/homeboy-audit-contract" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 serde = { version = "1.0", features = ["derive"] }

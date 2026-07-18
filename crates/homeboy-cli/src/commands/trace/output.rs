@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
-use homeboy::core::extension::trace as extension_trace;
-use homeboy::core::extension::trace::TraceCommandOutput;
+use homeboy_extension::trace as extension_trace;
+use homeboy_extension::trace::TraceCommandOutput;
 
 use super::bundle::{write_trace_experiment_bundle, TraceExperimentBundleRequest};
 use super::TraceArgs;

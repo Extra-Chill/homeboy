@@ -26,6 +26,7 @@ pub trait RunnerUpgradeProvider: Send + Sync {
         method_override: Option<InstallMethod>,
         source_path: Option<&Path>,
         explicit_source_path: bool,
+        expected_controller_identity: Option<&str>,
         runner_targets: &[String],
         extension_updates: &[ExtensionUpgradeEntry],
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)>;
@@ -46,6 +47,7 @@ impl RunnerUpgradeProvider for NoopRunnerUpgradeProvider {
         _method_override: Option<InstallMethod>,
         _source_path: Option<&Path>,
         _explicit_source_path: bool,
+        _expected_controller_identity: Option<&str>,
         _runner_targets: &[String],
         _extension_updates: &[ExtensionUpgradeEntry],
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {

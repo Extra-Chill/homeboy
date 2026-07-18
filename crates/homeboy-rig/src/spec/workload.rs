@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use homeboy_core::extension::trace::{TraceProbeConfig, TraceSpanMetadata};
+use homeboy_extension::trace::{TraceProbeConfig, TraceSpanMetadata};
 
 use super::{
     ArtifactPostprocessSpec, TraceDependencySpec, TraceGuardrailSpec, TracePublicPreviewSpec,

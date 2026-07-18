@@ -32,6 +32,8 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) runtime_overlay_env: Vec<(String, String)>,
     /// Offload-evidence metadata for the synced runtime overlays.
     pub(crate) runtime_overlay_metadata: serde_json::Value,
+    /// Per-job runner root for mutable rig registry state.
+    pub(crate) rig_registry_root: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -330,10 +332,12 @@ fn prepare_lab_offload_workspace_stage_inner(
         );
     }
 
+    let candidate_rig_registry_root = remote_lab_rig_registry_root(&remote_cwd);
     let synced_rigs = rig_materialization::sync_lab_offload_rigs(
         runner_id,
         homeboy_path,
         &remote_cwd,
+        &candidate_rig_registry_root,
         &changed_since_preflight.args,
         rig_materialization::LabOffloadPrimaryRigSource {
             local_path: &synced.local_path,
@@ -350,11 +354,13 @@ fn prepare_lab_offload_workspace_stage_inner(
                     PlanValues::new()
                         .json("count", synced_rigs.len())
                         .string("source_snapshot_remote_path", &remote_cwd)
+                        .string("registry_root", &candidate_rig_registry_root)
                         .json("rigs", &synced_rigs),
                 )
                 .build(),
         );
     }
+    let rig_registry_root = (!synced_rigs.is_empty()).then_some(candidate_rig_registry_root);
 
     let rig_component_sync = rig_materialization::sync_lab_offload_rig_component_dependencies(
         runner_id,
@@ -500,6 +506,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         dependency_cache_saves,
         runtime_overlay_env,
         runtime_overlay_metadata,
+        rig_registry_root,
     })
 }
 
@@ -888,6 +895,22 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
+
+    #[test]
+    fn same_rig_jobs_derive_distinct_registry_roots_from_unique_workspaces() {
+        let first = remote_lab_rig_registry_root("/runner/_lab_workspaces/app-job-one");
+        let second = remote_lab_rig_registry_root("/runner/_lab_workspaces/app-job-two");
+
+        assert_ne!(first, second);
+        assert_eq!(
+            first,
+            "/runner/_lab_workspaces/app-job-one-homeboy-artifacts/rig-registry"
+        );
+        assert_eq!(
+            second,
+            "/runner/_lab_workspaces/app-job-two-homeboy-artifacts/rig-registry"
+        );
+    }
 
     fn rig_workload(
         kind: homeboy_core::lab_contract::LabRigWorkloadKind,

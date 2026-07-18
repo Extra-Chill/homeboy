@@ -44,6 +44,7 @@ pub fn upgrade_configured_runners_with_explicit_source_path(
     method_override: Option<InstallMethod>,
     source_path: Option<&Path>,
     explicit_source_path: bool,
+    expected_controller_identity: Option<&str>,
     runner_targets: &[String],
     extension_updates: &[ExtensionUpgradeEntry],
 ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
@@ -67,16 +68,19 @@ pub fn upgrade_configured_runners_with_explicit_source_path(
         "Updating {} configured runner(s)...",
         runners.len()
     );
-    Ok(upgrade_runners_with_executor_and_source_materializer(
-        &runners,
-        force,
-        method_override,
-        source_path,
-        extension_updates,
-        runner::exec,
-        runner::status,
-        materialize_explicit_runner_source_path,
-    ))
+    Ok(
+        upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
+            &runners,
+            force,
+            method_override,
+            source_path,
+            extension_updates,
+            runner::exec,
+            runner::status,
+            materialize_explicit_runner_source_path,
+            expected_controller_identity,
+        ),
+    )
 }
 
 pub fn runner_upgrade_targets(runner_targets: &[String]) -> Result<Vec<Runner>> {
@@ -120,11 +124,35 @@ pub fn upgrade_runners_with_executor_and_source_materializer(
     method_override: Option<InstallMethod>,
     source_path: Option<&Path>,
     extension_updates: &[ExtensionUpgradeEntry],
+    exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+    status: impl Fn(&str) -> Result<RunnerStatusReport>,
+    materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
+) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
+    upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
+        runners,
+        force,
+        method_override,
+        source_path,
+        extension_updates,
+        exec,
+        status,
+        materialize_source_path,
+        None,
+    )
+}
+
+fn upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
+    runners: &[Runner],
+    force: bool,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&Path>,
+    extension_updates: &[ExtensionUpgradeEntry],
     mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
     status: impl Fn(&str) -> Result<RunnerStatusReport>,
     mut materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
+    expected_controller_identity: Option<&str>,
 ) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
-    upgrade_runners_with_executor_source_materializer_and_path_updater(
+    upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(
         runners,
         force,
         method_override,
@@ -134,6 +162,7 @@ pub fn upgrade_runners_with_executor_and_source_materializer(
         status,
         &mut materialize_source_path,
         update_runner_homeboy_path,
+        expected_controller_identity,
     )
 }
 
@@ -143,12 +172,38 @@ pub fn upgrade_runners_with_executor_source_materializer_and_path_updater(
     method_override: Option<InstallMethod>,
     source_path: Option<&Path>,
     extension_updates: &[ExtensionUpgradeEntry],
+    exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+    status: impl Fn(&str) -> Result<RunnerStatusReport>,
+    materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
+    update_homeboy_path: impl FnMut(&str, &str) -> Result<()>,
+) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
+    upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(
+        runners,
+        force,
+        method_override,
+        source_path,
+        extension_updates,
+        exec,
+        status,
+        materialize_source_path,
+        update_homeboy_path,
+        None,
+    )
+}
+
+fn upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(
+    runners: &[Runner],
+    force: bool,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&Path>,
+    extension_updates: &[ExtensionUpgradeEntry],
     mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
     status: impl Fn(&str) -> Result<RunnerStatusReport>,
     mut materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
     mut update_homeboy_path: impl FnMut(&str, &str) -> Result<()>,
+    expected_controller_identity: Option<&str>,
 ) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
-    upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector(
+    upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector_with_expected_controller_identity(
         runners,
         force,
         method_override,
@@ -159,10 +214,39 @@ pub fn upgrade_runners_with_executor_source_materializer_and_path_updater(
         reconnect_runner_daemon,
         &mut materialize_source_path,
         &mut update_homeboy_path,
+        expected_controller_identity,
     )
 }
 
 pub fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector(
+    runners: &[Runner],
+    force: bool,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&Path>,
+    extension_updates: &[ExtensionUpgradeEntry],
+    exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+    status: impl Fn(&str) -> Result<RunnerStatusReport>,
+    reconnect_stale_daemon: impl FnMut(&str) -> Result<String>,
+    materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
+    update_homeboy_path: impl FnMut(&str, &str) -> Result<()>,
+) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
+    upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector_with_expected_controller_identity(
+        runners,
+        force,
+        method_override,
+        source_path,
+        extension_updates,
+        exec,
+        status,
+        reconnect_stale_daemon,
+        materialize_source_path,
+        update_homeboy_path,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector_with_expected_controller_identity(
     runners: &[Runner],
     force: bool,
     method_override: Option<InstallMethod>,
@@ -173,6 +257,7 @@ pub fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconn
     mut reconnect_stale_daemon: impl FnMut(&str) -> Result<String>,
     mut materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
     mut update_homeboy_path: impl FnMut(&str, &str) -> Result<()>,
+    expected_controller_identity: Option<&str>,
 ) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
     let mut updated = Vec::new();
     let mut skipped = Vec::new();
@@ -189,6 +274,7 @@ pub fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconn
             &mut reconnect_stale_daemon,
             &mut materialize_source_path,
             &mut update_homeboy_path,
+            expected_controller_identity,
         );
         if entry.success {
             homeboy_core::log_status!(
@@ -218,6 +304,7 @@ pub fn upgrade_runner_with_executor(
     reconnect_stale_daemon: &mut impl FnMut(&str) -> Result<String>,
     materialize_source_path: &mut impl FnMut(&Runner, &Path) -> Result<String>,
     update_homeboy_path: &mut impl FnMut(&str, &str) -> Result<()>,
+    expected_controller_identity: Option<&str>,
 ) -> RunnerUpgradeEntry {
     let original_homeboy_path = runner
         .settings
@@ -227,11 +314,13 @@ pub fn upgrade_runner_with_executor(
     let previous_version = runner_homeboy_version(runner, &original_homeboy_path, exec)
         .ok()
         .flatten();
-    let expected_source_identity = if method_override == Some(InstallMethod::Source) {
-        source_path.and_then(source_checkout_build_identity)
-    } else {
-        None
-    };
+    let expected_build_identity = expected_controller_identity
+        .map(str::to_string)
+        .or_else(|| {
+            (method_override == Some(InstallMethod::Source))
+                .then(|| source_path.and_then(source_checkout_build_identity))
+                .flatten()
+        });
     let command_source_path = match runner_upgrade_source_path(
         runner,
         method_override,
@@ -340,7 +429,7 @@ pub fn upgrade_runner_with_executor(
         command_source_path.as_deref(),
         &upgrade_homeboy_path,
         new_version.as_deref(),
-        expected_source_identity.as_deref(),
+        expected_build_identity.as_deref(),
         exec,
     ) {
         match update_homeboy_path(&runner.id, &realignment.homeboy_path) {
@@ -408,8 +497,29 @@ pub fn upgrade_runner_with_executor(
         }
     }
 
+    let mut source_identity_drift = if path_drift.is_none() {
+        runner_build_identity_drift(
+            runner,
+            &homeboy_path,
+            expected_build_identity.as_deref(),
+            exec,
+        )
+    } else {
+        None
+    };
+    if path_drift.is_none() {
+        path_drift = source_identity_drift.clone();
+    }
     let (extensions_synced, mut extensions_skipped, mut extensions_failed) =
-        sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
+        if let Some(drift) = path_drift.as_deref() {
+            (
+                Vec::new(),
+                defer_runner_extensions_for_binary_drift(extension_updates, drift),
+                Vec::new(),
+            )
+        } else {
+            sync_runner_extensions(runner, &homeboy_path, extension_updates, exec)
+        };
     if path_drift.is_some() && is_auto_realignable_homeboy_path(&homeboy_path) {
         let refreshed_bare_homeboy_version =
             runner_bare_homeboy_version(runner, &homeboy_path, exec);
@@ -473,6 +583,17 @@ pub fn upgrade_runner_with_executor(
     );
     if path_drift.is_none() {
         path_drift = local_version_drift;
+    }
+    // PATH alignment is semver-only. Re-check the final configured executable
+    // so an equal-version bare binary cannot erase source identity divergence.
+    source_identity_drift = runner_build_identity_drift(
+        runner,
+        &homeboy_path,
+        expected_build_identity.as_deref(),
+        exec,
+    );
+    if path_drift.is_none() {
+        path_drift = source_identity_drift.clone();
     }
 
     defer_extension_failures_for_path_drift(

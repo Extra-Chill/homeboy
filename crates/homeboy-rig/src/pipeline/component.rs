@@ -29,11 +29,11 @@ fn resolve_rig_component(rig: &RigSpec, component_id: &str) -> Result<Component>
 
 pub(super) fn run_build_step(rig: &RigSpec, component_id: &str) -> Result<()> {
     let component = resolve_rig_component(rig, component_id)?;
-    let (result, exit_code) = homeboy_core::build::run_component(&component)?;
+    let (result, exit_code) = homeboy_extension::build::run_component(&component)?;
 
     if exit_code != 0 {
         let detail = match &result {
-            homeboy_core::build::BuildResult::Single(output) => {
+            homeboy_extension::build::BuildResult::Single(output) => {
                 let tail = output
                     .output
                     .stderr
@@ -51,7 +51,7 @@ pub(super) fn run_build_step(rig: &RigSpec, component_id: &str) -> Result<()> {
                     format!("exit {} — {}", exit_code, tail)
                 }
             }
-            homeboy_core::build::BuildResult::Bulk(_) => format!("exit {}", exit_code),
+            homeboy_extension::build::BuildResult::Bulk(_) => format!("exit {}", exit_code),
         };
         return Err(Error::rig_pipeline_failed(
             &rig.id,

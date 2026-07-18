@@ -10,13 +10,13 @@ use homeboy_core::engine::hooks::{self, HookFailureMode};
 use homeboy_core::engine::shell;
 use homeboy_core::engine::template::{render_map, TemplateVars};
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::{
-    load_all_extensions, DeployArchiveInstallPolicy, DeployOverride, DeployVerification,
-    ExtensionManifest,
-};
 use homeboy_core::paths as base_path;
 use homeboy_core::project::Project;
 use homeboy_core::server::SshClient;
+use homeboy_extension::{
+    load_all_extensions, DeployArchiveInstallPolicy, DeployOverride, DeployVerification,
+    ExtensionManifest,
+};
 
 use super::path_roots::resolve_effective_remote_path;
 use super::transfer::scp_file;
@@ -699,11 +699,11 @@ pub(super) fn run_post_deploy_hooks(
 mod tests {
     use super::*;
     use homeboy_core::component::VersionTarget;
-    use homeboy_core::extension::{
+    use homeboy_core::server::SshClient;
+    use homeboy_extension::{
         DeployArchiveInstallPolicy, DeployOverride, DeployRequiredHeader, DeployVerification,
         ExtensionManifest,
     };
-    use homeboy_core::server::SshClient;
     use std::collections::HashMap;
     use std::fs;
     use std::io::Write;

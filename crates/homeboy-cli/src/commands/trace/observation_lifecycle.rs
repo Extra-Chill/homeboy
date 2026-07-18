@@ -11,12 +11,12 @@
 use std::path::Path;
 
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::observation::{
     finish_run_best_effort, ActiveObservation, NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord,
     ObservationStore, RunStatus,
 };
 use homeboy::rig;
+use homeboy_extension::trace as extension_trace;
 
 use super::observations::{self, record_trace_artifacts};
 use super::{

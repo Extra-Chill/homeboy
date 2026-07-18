@@ -1,8 +1,8 @@
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
 use homeboy::rig;
 use homeboy::rig::trace_experiment::{self, TraceExperimentContext};
+use homeboy_extension::trace as extension_trace;
 
 use super::{TraceArgs, TraceRigContext};
 

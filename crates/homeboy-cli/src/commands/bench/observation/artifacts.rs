@@ -1,14 +1,14 @@
 use std::path::PathBuf;
 
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy::core::extension::bench::{self, BenchDiagnostic};
 use homeboy::core::observation::ArtifactRecord;
+use homeboy_extension::bench::{self, BenchDiagnostic};
 
 use super::lifecycle::BenchObservation;
 
 pub(super) fn record_bench_observation_artifacts(
     observation: &BenchObservation,
-    workflow: &mut homeboy::core::extension::bench::BenchRunWorkflowResult,
+    workflow: &mut homeboy_extension::bench::BenchRunWorkflowResult,
     run_dir: &RunDir,
 ) {
     bench::record_bench_observation_artifacts(&observation.0, workflow, run_dir);
@@ -26,7 +26,7 @@ pub(in crate::commands::bench::observation) fn apply_recorded_bench_artifact_lin
     scenario_id: &str,
     run_index: Option<usize>,
     name: &str,
-    artifact: &mut homeboy::core::extension::bench::BenchArtifact,
+    artifact: &mut homeboy_extension::bench::BenchArtifact,
     record: &ArtifactRecord,
 ) -> Option<BenchDiagnostic> {
     bench::apply_recorded_bench_artifact_links(scenario_id, run_index, name, artifact, record)

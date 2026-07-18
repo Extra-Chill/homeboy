@@ -985,7 +985,59 @@ pub(crate) fn materialize_snapshot_git(
     snapshot: &str,
 ) -> Result<SyntheticCheckoutIdentity> {
     materialize_snapshot(runner, local_path, remote_path, excludes)?;
-    initialize_synthetic_git_checkout(runner, local_path, remote_path, snapshot)
+    let source_dirty = !git_output(local_path, &["status", "--porcelain=v1"])?
+        .trim()
+        .is_empty();
+    initialize_synthetic_git_checkout(runner, local_path, remote_path, snapshot, source_dirty)
+}
+
+/// Apply a filtered controller snapshot over an existing runner checkout while
+/// preserving its runner-created Git directory. The overlay is staged before
+/// replacing worktree content so an interrupted transfer cannot leave a
+/// partially extracted archive behind.
+pub(crate) fn materialize_snapshot_overlay(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    excludes: &[String],
+) -> Result<()> {
+    let target = format!(
+        "sh -c {}",
+        shell::quote_arg(&snapshot_overlay_install_command(remote_path))
+    );
+    match runner.kind {
+        RunnerKind::Local => materialize_snapshot_piped(
+            local_path,
+            &target,
+            excludes,
+            "apply local Git workspace snapshot overlay",
+        ),
+        RunnerKind::Ssh => {
+            let (_server, client) = ssh_client_for_runner(runner)?;
+            if client.is_local {
+                materialize_snapshot_piped(
+                    local_path,
+                    &target,
+                    excludes,
+                    "apply local Git workspace snapshot overlay",
+                )
+            } else {
+                let remote = format!("{}@{}", client.user, client.host);
+                let command = snapshot_overlay_install_command(remote_path);
+                materialize_snapshot_piped(
+                    local_path,
+                    &format!(
+                        "ssh {} {} {}",
+                        ssh_args(&client),
+                        shell::quote_arg(&remote),
+                        shell::quote_arg(&command),
+                    ),
+                    excludes,
+                    "apply SSH Git workspace snapshot overlay",
+                )
+            }
+        }
+    }
 }
 
 /// Identity of the synthetic git checkout materialized for a `snapshot-git`
@@ -1005,6 +1057,7 @@ fn initialize_synthetic_git_checkout(
     local_path: &Path,
     remote_path: &str,
     snapshot: &str,
+    source_dirty: bool,
 ) -> Result<SyntheticCheckoutIdentity> {
     let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"]).ok();
     let source_head = git_output(local_path, &["rev-parse", "HEAD"]).ok();
@@ -1013,6 +1066,7 @@ fn initialize_synthetic_git_checkout(
         snapshot,
         remote_url.as_deref(),
         source_head.as_deref(),
+        source_dirty,
     );
 
     match runner.kind {
@@ -1102,6 +1156,7 @@ fn synthetic_git_checkout_command(
     snapshot: &str,
     remote_url: Option<&str>,
     source_head: Option<&str>,
+    source_dirty: bool,
 ) -> String {
     let remote_path = shell::quote_arg(remote_path);
     let snapshot = shell::quote_arg(snapshot);
@@ -1119,7 +1174,7 @@ fn synthetic_git_checkout_command(
     format!(
         "git -C {remote_path} init && git -C {remote_path} config user.email homeboy-snapshot@localhost && git -C {remote_path} config user.name 'Homeboy Snapshot' && git -C {remote_path} add -A && env GIT_AUTHOR_NAME='Homeboy Snapshot' GIT_AUTHOR_EMAIL=homeboy-snapshot@localhost GIT_COMMITTER_NAME='Homeboy Snapshot' GIT_COMMITTER_EMAIL=homeboy-snapshot@localhost GIT_AUTHOR_DATE='1970-01-01T00:00:00Z' GIT_COMMITTER_DATE='1970-01-01T00:00:00Z' git -C {remote_path} commit --allow-empty -m {message} --no-gpg-sign && git -C {remote_path} notes --ref=homeboy-snapshot add -m {note} HEAD{set_remote}",
         message = shell::quote_arg(&format!("Homeboy snapshot {snapshot}")),
-        note = shell::quote_arg(&format!("snapshot_identity={snapshot}\nsource_head={source_head}")),
+        note = shell::quote_arg(&format!("snapshot_identity={snapshot}\nsource_head={source_head}\nsource_dirty={source_dirty}")),
     )
 }
 
@@ -1256,4 +1311,11 @@ pub(super) fn snapshot_install_command(remote_path: &str) -> String {
         .op(WorkspaceMaterializationOperation::AtomicReplaceTemp)
         .restore_owner()
         .command()
+}
+
+fn snapshot_overlay_install_command(remote_path: &str) -> String {
+    let remote_path = shell::quote_arg(remote_path);
+    format!(
+        "dest={remote_path}; tmp=\"${{dest}}.overlay.$$\"; rm -rf \"$tmp\" && mkdir -p \"$tmp\" && trap 'rm -rf \"$tmp\"' EXIT && tar -C \"$tmp\" -xf - && find \"$dest\" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {{}} + && cp -a \"$tmp\"/. \"$dest\"/"
+    )
 }

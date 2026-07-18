@@ -1,6 +1,7 @@
 use crate::auto as fixer;
 use homeboy_code_audit::CodeAuditResult;
 use homeboy_core::engine::undo::UndoSnapshot;
+use homeboy_extension as extension;
 use serde::Serialize;
 use std::path::Path;
 
@@ -137,11 +138,9 @@ pub fn run_audit_refactor(
     })
 }
 
-fn resolve_verify_config(
-    component_id: &str,
-) -> Option<homeboy_core::extension::AutofixVerifyConfig> {
+fn resolve_verify_config(component_id: &str) -> Option<homeboy_extension::AutofixVerifyConfig> {
     use homeboy_core::component;
-    use homeboy_core::extension;
+    use homeboy_extension;
 
     let comp = component::load(component_id).ok()?;
     let extensions = comp.extensions.as_ref()?;

@@ -161,6 +161,38 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
         assert_eq!(record.metadata["runner_id"], "homeboy-lab");
         assert_eq!(record.metadata["artifact_projection"]["status"], "complete");
 
+        let remote_id = "runner-patch-reference";
+        store
+            .import_artifact(&homeboy_core::observation::ArtifactRecord {
+                id: remote_id.to_string(),
+                run_id: run_id.to_string(),
+                kind: "patch".to_string(),
+                artifact_type: "remote_file".to_string(),
+                path: "runner-artifact://homeboy-lab/recovered-typed-lab-run/patch".to_string(),
+                url: None,
+                public_url: None,
+                viewer_url: None,
+                viewer_links: Vec::new(),
+                sha256: Some(sha256_hex(VALID_PATCH)),
+                size_bytes: Some(VALID_PATCH.len() as i64),
+                mime: Some("text/x-patch".to_string()),
+                metadata_json: serde_json::json!({
+                    "agent_task": {
+                        "task_id": task_id,
+                        "logical_artifact_id": artifact_id,
+                    }
+                }),
+                created_at: "2026-07-16T00:00:01Z".to_string(),
+            })
+            .expect("remote patch reference");
+        let selected_id = crate::agent_task_lifecycle::resolve_promotion_patch_artifact_id(
+            run_id,
+            Some(task_id),
+            remote_id,
+        )
+        .expect("persisted remote record resolves to the logical patch id");
+        assert_eq!(selected_id, artifact_id);
+
         let temp = tempfile::tempdir().expect("promotion tempdir");
         let mut provider = FakePromotionWorkspaceProvider {
             workspace_path: Some(temp.path().join("target")),
@@ -177,7 +209,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
                 candidate_ref: None,
                 to_worktree: "homeboy@recovered-promotion".to_string(),
                 task_id: Some(task_id.to_string()),
-                artifact_id: Some(artifact_id.to_string()),
+                artifact_id: Some(selected_id),
                 dry_run: false,
                 gates: VerifyGateOptions::default(),
                 provider_command: None,
@@ -535,8 +567,10 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
         "schema": "homeboy/agent-task-promotion-report/v1",
         "status": "verification_pending",
         "source_run_id": "run-8307",
+        "source": { "task_id": "task-1" },
         "to_worktree": "repo@fix-8307",
         "target": { "worktree": "repo@fix-8307", "path": target },
+        "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
     });
 
     let report = resume_promoted_patch(options, &target, &previous).expect("resume proof");

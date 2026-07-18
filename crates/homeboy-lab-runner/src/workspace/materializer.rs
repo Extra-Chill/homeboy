@@ -330,6 +330,10 @@ fn sync_git_checkout_command(
     fetch_refs: &[String],
     allow_dirty: bool,
 ) -> String {
+    if changed_since_base.is_none() && fetch_refs.is_empty() {
+        return fresh_exact_git_checkout_command(remote_url, head, branch, allow_dirty);
+    }
+
     let fetch_changed_since = changed_since_base
         .map(|base| {
             format!(
@@ -367,6 +371,36 @@ fn sync_git_checkout_command(
     );
     format!(
         "if [ -d \"$dest\"/.git ]; then {dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git clone {remote_url} \"$dest\" && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_extra_refs}{fetch_changed_since} && {checkout} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx",
+        remote_url = shell::quote_arg(remote_url),
+        head = shell::quote_arg(head),
+        checkout = checkout,
+    )
+}
+
+fn fresh_exact_git_checkout_command(
+    remote_url: &str,
+    head: &str,
+    branch: Option<&str>,
+    allow_dirty: bool,
+) -> String {
+    let checkout = branch.map_or_else(
+        || {
+            format!(
+                "git -C \"$dest\" checkout --detach {head}",
+                head = shell::quote_arg(head)
+            )
+        },
+        |branch| {
+            format!(
+                "git -C \"$dest\" checkout -B {branch} {head}",
+                branch = shell::quote_arg(branch),
+                head = shell::quote_arg(head),
+            )
+        },
+    );
+    format!(
+        "if [ -d \"$dest\"/.git ]; then {dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git init \"$dest\" && git -C \"$dest\" remote add origin {remote_url} && git -C \"$dest\" fetch --filter=blob:none origin {head}; fi && {checkout} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx",
+        dirty_guard = dirty_git_workspace_guard("$dest", allow_dirty),
         remote_url = shell::quote_arg(remote_url),
         head = shell::quote_arg(head),
         checkout = checkout,

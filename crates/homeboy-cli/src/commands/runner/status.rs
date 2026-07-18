@@ -6,7 +6,7 @@ use homeboy::core::agent_runtime_manifest::{
     AgentRuntimeRuntimeDiagnosticDeclaration, AgentRuntimeSourceConsistencyDiagnostic,
     AgentRuntimeToolDiagnosticDeclaration,
 };
-use homeboy::core::daemon::DaemonStaleReasonCode;
+use homeboy::core::daemon::{DaemonRecoveryEvidence, DaemonStaleReasonCode};
 use homeboy::runner::runners::{
     self as runner, RunnerActiveJobState, RunnerAvailability, RunnerBinarySource, RunnerSession,
     RunnerStatusReport, RunnerTunnelMode, RuntimeMaterializationStatus,
@@ -1100,6 +1100,24 @@ pub(super) fn runner_status_operator_commands(
                 job_id: None,
                 command: command.clone(),
                 description: "Reconcile the stale daemon split view only after the remote owner-lock, process, and listener probes prove no daemon-owned process remains alive.".to_string(),
+            });
+        }
+    }
+
+    // A fresh, authoritatively idle remote daemon whose controller session was
+    // lost is recoverable by a plain reconnect (#8694). Surface the reconnect
+    // command so operators are not left with a disconnected, non-restartable
+    // runner and no actionable path.
+    if let Some(freshness) = report.daemon_freshness.as_ref().filter(|freshness| {
+        freshness.recovery_evidence == Some(DaemonRecoveryEvidence::Recoverable)
+    }) {
+        if let Some(command) = freshness.adoption_command.as_ref() {
+            commands.push(RunnerOperatorCommand {
+                scope: "daemon_reconnect_fresh_idle",
+                runner_id: report.runner_id.clone(),
+                job_id: None,
+                command: command.clone(),
+                description: "Reconnect the controller session to the fresh, idle remote daemon; it reports zero authoritatively idle jobs and needs no replacement.".to_string(),
             });
         }
     }

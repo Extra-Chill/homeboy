@@ -4,10 +4,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::command_invocation::COMMAND_INVOCATION_SCHEMA;
-use crate::extension::{
-    self, load_all_extensions, load_extension, ExtensionManifest, RequirementsConfig,
-};
+use crate::extension_store::{load_all_extensions, load_extension};
 use crate::{config, paths, Error, Result};
+use homeboy_extension_contract::{ExtensionManifest, RequirementsConfig};
 
 pub const AGENT_RUNTIME_MANIFEST_SCHEMA: &str = "homeboy/agent-runtime-manifest/v1";
 pub const AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA: &str =
@@ -587,7 +586,7 @@ pub(crate) fn discover_agent_runtime_catalog_from_extensions(
                 Some(&extension.id),
                 extension.extension_path.as_deref(),
                 runtime_core_constraint(runtime, extension),
-                extension::read_source_revision(&extension.id),
+                crate::extension_update_check::read_source_revision(&extension.id),
             ) {
                 diagnostics.push(diagnostic);
                 continue;
@@ -627,7 +626,7 @@ pub(crate) fn discover_agent_runtime_catalog_from_extensions(
                 requires: runtime_requires(runtime, extension),
                 extension_path: extension.extension_path.clone(),
                 runtime_path: extension.extension_path.clone(),
-                source_revision: extension::read_source_revision(&extension.id)
+                source_revision: crate::extension_update_check::read_source_revision(&extension.id)
                     .filter(|revision| is_immutable_revision(revision)),
                 extra: runtime
                     .extra
@@ -676,7 +675,7 @@ pub fn is_immutable_revision(value: &str) -> bool {
 }
 
 fn runtime_requires(
-    runtime: &crate::extension::AgentRuntimeManifestConfig,
+    runtime: &homeboy_extension_contract::AgentRuntimeManifestConfig,
     extension: &ExtensionManifest,
 ) -> Option<RequirementsConfig> {
     runtime
@@ -687,7 +686,7 @@ fn runtime_requires(
 }
 
 fn runtime_core_constraint<'a>(
-    runtime: &'a crate::extension::AgentRuntimeManifestConfig,
+    runtime: &'a homeboy_extension_contract::AgentRuntimeManifestConfig,
     extension: &'a ExtensionManifest,
 ) -> Option<&'a str> {
     runtime
@@ -710,7 +709,9 @@ fn agent_runtime_core_incompatible_diagnostic(
     requires_homeboy: Option<&str>,
     source_revision: Option<String>,
 ) -> Option<AgentRuntimeDiscoveryDiagnostic> {
-    let report = extension::evaluate_core_compatibility(requires_homeboy, source_revision).ok()?;
+    let report =
+        homeboy_extension_contract::evaluate_core_compatibility(requires_homeboy, source_revision)
+            .ok()?;
     (report.status == "incompatible").then(|| AgentRuntimeDiscoveryDiagnostic {
         class: "agent_runtime_manifest.core_incompatible".to_string(),
         message: format!(
@@ -722,7 +723,7 @@ fn agent_runtime_core_incompatible_diagnostic(
             report
                 .remediation_command
                 .as_deref()
-                .unwrap_or(extension::CORE_COMPAT_REMEDIATION_COMMAND)
+                .unwrap_or(homeboy_extension_contract::core_compat::CORE_COMPAT_REMEDIATION_COMMAND)
         ),
         runtime_id: Some(runtime_id.to_string()),
         extension_id: extension_id.map(str::to_string),

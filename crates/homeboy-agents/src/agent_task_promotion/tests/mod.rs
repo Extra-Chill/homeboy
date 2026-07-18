@@ -56,6 +56,7 @@ pub(super) struct FakePromotionWorkspaceProvider {
     verify_exit_code: i32,
     verify_transport_error: bool,
     force_add_ignored_file: bool,
+    apply_to_git: bool,
 }
 
 impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
@@ -74,6 +75,9 @@ impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
                 None,
             )
         })?;
+        if self.apply_to_git {
+            git(&path, &["apply", &request.patch_path]);
+        }
         if self.force_add_ignored_file {
             git(&path, &["apply", &request.patch_path]);
             std::fs::write(path.join(".git/info/exclude"), "ignored/\n")

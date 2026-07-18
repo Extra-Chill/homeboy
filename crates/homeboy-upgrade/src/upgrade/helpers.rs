@@ -1,7 +1,8 @@
 use homeboy_core::defaults;
 use homeboy_core::engine::shell::quote_path;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::{build_identity, extension, git};
+use homeboy_core::{build_identity, git};
+use homeboy_extension as extension;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -143,6 +144,10 @@ pub fn run_upgrade_with_method(
     runner_targets: &[String],
     source_path: Option<&Path>,
 ) -> Result<UpgradeResult> {
+    if !runner_targets.is_empty() {
+        return run_targeted_runner_upgrade(force, method_override, runner_targets, source_path);
+    }
+
     let promotion_lease = homeboy_core::runtime_promotion::acquire(
         "controller upgrade",
         source_path
@@ -189,6 +194,7 @@ pub fn run_upgrade_with_method(
                         runner_method_override,
                         source_upgrade_path.as_deref(),
                         source_path.is_some(),
+                        None,
                         runner_targets,
                         &extensions_updated,
                     )
@@ -269,6 +275,7 @@ pub fn run_upgrade_with_method(
                 runner_method_override,
                 source_upgrade_path.as_deref(),
                 source_path.is_some(),
+                None,
                 runner_targets,
                 &extensions_updated,
             )
@@ -323,6 +330,202 @@ pub fn run_upgrade_with_method(
         services_restarted,
         services_pending_restart,
     })
+}
+
+/// Upgrade only explicitly selected runners without promoting the controller.
+/// Source controllers pin their checkout identity; packaged controllers retain
+/// the runner's existing install-method contract.
+fn run_targeted_runner_upgrade(
+    force: bool,
+    method_override: Option<InstallMethod>,
+    runner_targets: &[String],
+    source_path: Option<&Path>,
+) -> Result<UpgradeResult> {
+    let previous_version = current_version().to_string();
+    let previous_build_identity = build_identity::current().display;
+    let install_method = method_override.unwrap_or_else(detect_install_method);
+    if install_method == InstallMethod::Unknown {
+        return Err(Error::validation_invalid_argument(
+            "install_method",
+            "Could not detect installation method",
+            None,
+            None,
+        )
+        .with_hint("Pass --method to select the runner upgrade policy."));
+    }
+    let runner_method_override = runner_method_override_for_method(method_override, install_method);
+    let source_checkout = if runner_method_override == Some(InstallMethod::Source) {
+        Some(initiating_controller_source_checkout(
+            source_path,
+            &previous_build_identity,
+        )?)
+    } else {
+        None
+    };
+    let (runners_updated, runners_skipped) = super::with_runner_upgrade(|provider| {
+        provider.upgrade_configured_runners_with_explicit_source_path(
+            force,
+            runner_method_override,
+            source_checkout.as_deref(),
+            source_checkout.is_some(),
+            Some(&previous_build_identity),
+            runner_targets,
+            &installed_extension_catalog(),
+        )
+    })?;
+
+    Ok(UpgradeResult {
+        command: "upgrade".to_string(),
+        install_method,
+        previous_version: previous_version.clone(),
+        new_version: Some(previous_version),
+        previous_build_identity: Some(previous_build_identity.clone()),
+        new_build_identity: Some(previous_build_identity),
+        source_revision: None,
+        upgraded: false,
+        message: if source_checkout.is_some() {
+            "Selected runners refreshed from the initiating controller source identity".to_string()
+        } else {
+            "Selected runners refreshed without promoting the initiating controller".to_string()
+        },
+        restart_required: false,
+        extensions_updated: Vec::new(),
+        extensions_skipped: Vec::new(),
+        runners_updated,
+        runners_skipped,
+        extensions_unrefreshed: Vec::new(),
+        services_restarted: Vec::new(),
+        services_pending_restart: Vec::new(),
+    })
+}
+
+/// Read extension provenance without refreshing local extension sources. Entries
+/// lacking a reproducible URL or revision are forwarded as unrefreshable so the
+/// runner can report that condition explicitly.
+fn installed_extension_catalog() -> Vec<ExtensionUpgradeEntry> {
+    installed_extension_catalog_for(&extension::available_extension_ids())
+}
+
+fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpgradeEntry> {
+    extension_ids
+        .iter()
+        .cloned()
+        .map(
+            |extension_id| match extension::load_extension(&extension_id) {
+                Ok(manifest) => {
+                    let (source_url, update_note) =
+                        match extension::resolve_source_url_read_only(&extension_id) {
+                            Ok(source_url) if extension::is_git_url(&source_url) => {
+                                (Some(source_url), None)
+                            }
+                            Ok(source_url) => (
+                                None,
+                                Some(format!(
+                                    "unrefreshable extension provenance: local source `{source_url}` cannot be materialized on a runner"
+                                )),
+                            ),
+                            Err(err) => (
+                                None,
+                                Some(format!(
+                                    "unrefreshable extension provenance: {}",
+                                    err.message
+                                )),
+                            ),
+                        };
+                    ExtensionUpgradeEntry {
+                        extension_id: extension_id.clone(),
+                        old_version: manifest.version.clone(),
+                        new_version: manifest.version,
+                        linked: extension::is_extension_linked(&extension_id),
+                        source_path: manifest.extension_path,
+                        git_root: None,
+                        source_url,
+                        source_revision: homeboy_core::extension_update_check::read_source_revision(&extension_id),
+                        source_update: homeboy_extension::ExtensionSourceUpdate {
+                            update_note,
+                            ..Default::default()
+                        },
+                    }
+                }
+                Err(err) => ExtensionUpgradeEntry {
+                    extension_id,
+                    old_version: String::new(),
+                    new_version: String::new(),
+                    linked: false,
+                    source_path: None,
+                    git_root: None,
+                    source_url: None,
+                    source_revision: None,
+                    source_update: homeboy_extension::ExtensionSourceUpdate {
+                        update_note: Some(format!(
+                            "unrefreshable extension manifest: {}",
+                            err.message
+                        )),
+                        ..Default::default()
+                    },
+                },
+            },
+        )
+        .collect()
+}
+
+fn initiating_controller_source_checkout(
+    source_path: Option<&Path>,
+    expected_identity: &str,
+) -> Result<PathBuf> {
+    let checkout = if let Some(path) = source_path {
+        resolve_source_workspace(Some(path))?
+    } else {
+        let executable_checkout = std::env::current_exe()
+            .ok()
+            .and_then(|path| workspace_from_executable_path(&path));
+        executable_checkout
+            .or_else(|| resolve_source_workspace(None).ok())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "upgrade-runner",
+                    "Runner-only upgrade requires the source checkout that built the initiating controller",
+                    None,
+                    None,
+                )
+                .with_hint("Run from the controller source checkout or pass --source-path <PATH>.")
+            })?
+    };
+    let identity =
+        super::with_runner_upgrade(|provider| provider.source_checkout_build_identity(&checkout))
+            .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "source_path",
+                "Runner-only upgrade source checkout has no verifiable build identity",
+                Some(checkout.display().to_string()),
+                None,
+            )
+        })?;
+    if identity != expected_identity {
+        return Err(Error::validation_invalid_argument(
+            "source_path",
+            format!(
+                "Runner-only upgrade source identity `{identity}` does not match initiating controller `{expected_identity}`"
+            ),
+            Some(checkout.display().to_string()),
+            None,
+        )
+        .with_hint("Pass the exact source checkout that built the initiating controller."));
+    }
+    Ok(checkout)
+}
+
+fn workspace_from_executable_path(exe_path: &Path) -> Option<PathBuf> {
+    let parent = exe_path.parent()?;
+    let build_dir = parent.file_name()?.to_string_lossy();
+    if build_dir != "release" && build_dir != "debug" {
+        return None;
+    }
+    let target_dir = parent.parent()?;
+    if target_dir.file_name()?.to_string_lossy() != "target" {
+        return None;
+    }
+    target_dir.parent().map(Path::to_path_buf)
 }
 
 // Upgrade output must remain visible when a controller captures stdout/stderr.
@@ -453,7 +656,7 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<String>) {
                     .source_update
                     .new_source_revision
                     .clone()
-                    .or_else(|| extension::read_source_revision(id));
+                    .or_else(|| homeboy_core::extension_update_check::read_source_revision(id));
 
                 if result.linked {
                     let branch_detail = match (
@@ -682,7 +885,7 @@ fn git_commits_behind_upstream(git_root: &Path) -> Option<u32> {
     count.trim().parse::<u32>().ok()
 }
 
-fn portable_extension_source_url(result: &homeboy_core::extension::UpdateResult) -> Option<String> {
+fn portable_extension_source_url(result: &homeboy_extension::UpdateResult) -> Option<String> {
     if let Some(git_root) = result.git_root.as_ref() {
         return git::remote_origin_url(git_root);
     }
@@ -777,6 +980,134 @@ mod runner_source_upgrade_tests {
         }
     }
 
+    fn write_extension(dir: &Path, id: &str, manifest: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(format!("{id}.json")), manifest).unwrap();
+    }
+
+    #[test]
+    fn installed_extension_catalog_reads_provenance_without_mutating_metadata() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extensions = home.path().join(".config/homeboy/extensions");
+            write_extension(
+                &extensions.join("manifest"),
+                "manifest",
+                r#"{"name":"manifest","version":"1.0.0","source_url":" https://example.test/manifest.git "}"#,
+            );
+            write_extension(
+                &extensions.join("alias"),
+                "alias",
+                r#"{"name":"alias","version":"1.0.0","sourceUrl":"https://example.test/alias.git"}"#,
+            );
+            write_extension(
+                &extensions.join("sidecar"),
+                "sidecar",
+                r#"{"name":"sidecar","version":"1.0.0"}"#,
+            );
+            std::fs::write(
+                extensions.join("sidecar/.source-url"),
+                "https://example.test/sidecar.git\n",
+            )
+            .unwrap();
+            write_extension(
+                &extensions.join("local"),
+                "local",
+                r#"{"name":"local","version":"1.0.0","source_url":"/Users/chris/Developer/local-extension"}"#,
+            );
+
+            let catalog = installed_extension_catalog();
+            assert_eq!(catalog.len(), 4);
+            assert_eq!(
+                catalog
+                    .iter()
+                    .find(|entry| entry.extension_id == "manifest")
+                    .unwrap()
+                    .source_url
+                    .as_deref(),
+                Some("https://example.test/manifest.git")
+            );
+            assert_eq!(
+                catalog
+                    .iter()
+                    .find(|entry| entry.extension_id == "alias")
+                    .unwrap()
+                    .source_url
+                    .as_deref(),
+                Some("https://example.test/alias.git")
+            );
+            assert_eq!(
+                catalog
+                    .iter()
+                    .find(|entry| entry.extension_id == "sidecar")
+                    .unwrap()
+                    .source_url
+                    .as_deref(),
+                Some("https://example.test/sidecar.git")
+            );
+            let local = catalog
+                .iter()
+                .find(|entry| entry.extension_id == "local")
+                .unwrap();
+            assert!(local.source_url.is_none());
+            assert!(local
+                .source_update
+                .update_note
+                .as_deref()
+                .unwrap()
+                .contains("cannot be materialized on a runner"));
+            assert!(catalog.iter().all(|entry| entry.source_revision.is_none()));
+            assert!(!extensions.join("manifest/.source-url").exists());
+            assert!(!extensions.join("alias/.source-url").exists());
+            assert!(!extensions.join("local/.source-url").exists());
+            assert_eq!(
+                std::fs::read_to_string(extensions.join("sidecar/.source-url")).unwrap(),
+                "https://example.test/sidecar.git\n"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_extension_catalog_keeps_linked_and_broken_extensions_unrefreshable() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extensions = home.path().join(".config/homeboy/extensions");
+            let linked = home.path().join("linked");
+            write_extension(&linked, "linked", r#"{"name":"linked","version":"1.0.0"}"#);
+            git(&linked, &["init"]);
+            git(
+                &linked,
+                &["remote", "add", "origin", "https://example.test/linked.git"],
+            );
+            std::fs::create_dir_all(&extensions).unwrap();
+            std::os::unix::fs::symlink(&linked, extensions.join("linked")).unwrap();
+            std::os::unix::fs::symlink(home.path().join("missing"), extensions.join("broken"))
+                .unwrap();
+
+            let catalog =
+                installed_extension_catalog_for(&["linked".to_string(), "broken".to_string()]);
+            let linked = catalog
+                .iter()
+                .find(|entry| entry.extension_id == "linked")
+                .unwrap();
+            assert_eq!(
+                linked.source_url.as_deref(),
+                Some("https://example.test/linked.git")
+            );
+            assert!(linked.source_revision.is_none());
+            let broken = catalog
+                .iter()
+                .find(|entry| entry.extension_id == "broken")
+                .unwrap();
+            assert!(broken.source_url.is_none());
+            assert!(broken
+                .source_update
+                .update_note
+                .as_deref()
+                .unwrap()
+                .contains("unrefreshable extension manifest"));
+        });
+    }
+
     #[test]
     fn detected_source_install_forwards_source_method_to_runners() {
         assert_eq!(
@@ -791,6 +1122,17 @@ mod runner_source_upgrade_tests {
             runner_method_override_for_method(Some(InstallMethod::Binary), InstallMethod::Source),
             Some(InstallMethod::Binary)
         );
+        for method in [
+            InstallMethod::Homebrew,
+            InstallMethod::Secondary,
+            InstallMethod::Binary,
+        ] {
+            assert_eq!(runner_method_override_for_method(None, method), None);
+            assert_eq!(
+                runner_method_override_for_method(Some(method), method),
+                Some(method)
+            );
+        }
     }
 
     #[test]

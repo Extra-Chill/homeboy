@@ -9,7 +9,7 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::execution_contract::{encode_uri_component, EXECUTION_CONTRACT};
 use homeboy_core::notification_route::NotificationRoute;
 use homeboy_core::observation::{ArtifactRecord, ObservationStore, RunRecord, RunStatus};
-use homeboy_core::redaction::redact_argv_display;
+use homeboy_core::redaction::redact_argv_shell_display;
 
 use super::super::execution::{canonical_daemon_body, daemon_api_get, result_event_data};
 use super::super::{load, Runner};
@@ -367,7 +367,7 @@ pub(super) fn mirror_job_run(
         started_at: ms_to_rfc3339(job.started_at_ms.unwrap_or(job.created_at_ms)),
         finished_at: job.finished_at_ms.map(ms_to_rfc3339),
         status: job_status_as_run_status(job.status).to_string(),
-        command: Some(redact_argv_display(command)),
+        command: Some(redact_argv_shell_display(command)),
         cwd: Some(cwd.to_string()),
         homeboy_version: None,
         git_sha: None,

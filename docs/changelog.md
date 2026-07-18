@@ -4,6 +4,64 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.291.5] - 2026-07-18
+
+### Fixed
+- recover expired handoff candidate adoption
+
+## [0.291.4] - 2026-07-18
+
+### Changed
+- Preserve source identity across SnapshotGit runner builds
+- Allow adoption from orphaned cook recipes
+- extract command-invocation contract into homeboy-command-contract
+- Recover orphaned cook recipes
+- group contract crates under crates/contracts/
+- Isolate Lab rig registries per job
+- Keep runner-only upgrades pinned to controller identity
+
+### Fixed
+- resolve recorded cook adoption attempts
+- parse raw snapshot commit messages
+- Fix mirrored patch artifact promotion
+- preserve accepted Lab handoffs across controller session loss
+- don't collapse an empty patch with real work evidence to NoOp
+- promote Lab artifacts via artifact runner provenance after reconnect
+
+## [0.291.3] - 2026-07-18
+
+### Changed
+- Make runner reconnect failure converge
+- Scope runs show mirror refresh
+- Render Lab commands safely (#8949)
+- Add file evidence I/O context
+- Bound Lab subprocess provenance metadata
+- type durable Lab handoff authority
+
+### Fixed
+- retry daemon health probe through transient startup on reconnect
+- keep every cook-batch fanout coordinator controller-owned
+- make a fresh, idle remote daemon recoverable by reconnect
+- classify dropped SSH materialization transport as retryable
+- Fix canonical Lab run label resolution
+
+## [0.291.2] - 2026-07-18
+
+### Changed
+- Allow adoption after transport failures
+- Add explicit runner lease recovery
+- Preserve authoritative Lab runner sessions
+- Add exact recovery for PID-less daemon jobs
+- Instrument capacity-queued child failures
+- Support force-added ignored promotion candidates
+- Persist typed pre-spawn runner failure evidence
+
+### Fixed
+- gate Lab dispatch on authoritative availability not bare connected flag
+- cancel queued runner reservations
+- persist authoritative candidate paths (#8935)
+- Fix agent task child capacity admission
+
 ## [0.291.1] - 2026-07-18
 
 ### Changed

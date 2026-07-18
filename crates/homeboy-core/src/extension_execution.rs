@@ -10,7 +10,7 @@ use crate::extension_invocation_context::ResolvedExtensionInvocationContext;
 use crate::extension_store::{extension_path, load_extension};
 use homeboy_extension_contract::{ExtensionCapability, ExtensionManifest};
 
-pub(crate) fn stderr_tail(stderr: &str) -> String {
+pub fn stderr_tail(stderr: &str) -> String {
     const MAX_LINES: usize = 20;
     let lines: Vec<&str> = stderr.lines().collect();
     let start = lines.len().saturating_sub(MAX_LINES);
@@ -89,7 +89,7 @@ fn capability_missing_error(component: &Component, capability: ExtensionCapabili
     err
 }
 
-pub(crate) fn extension_guidance_hints(
+pub fn extension_guidance_hints(
     component: &Component,
     capability: Option<ExtensionCapability>,
 ) -> Vec<String> {
@@ -273,7 +273,7 @@ fn resolve_extension_for_capability_if_available(
 ///
 /// Callers that can safely skip an optional capability use this to distinguish
 /// an absent provider from invalid explicit capability ownership.
-pub(crate) fn has_linked_extension_for_capability(
+pub fn has_linked_extension_for_capability(
     component: &Component,
     capability: ExtensionCapability,
 ) -> Result<bool> {
@@ -307,7 +307,7 @@ pub fn resolve_execution_context(
 /// Resolve an execution context when a linked extension provides `capability`.
 /// A missing optional capability is represented as `Ok(None)`; malformed
 /// explicit ownership and ambiguous providers remain validation errors.
-pub(crate) fn resolve_execution_context_if_available(
+pub fn resolve_execution_context_if_available(
     component: &Component,
     capability: ExtensionCapability,
 ) -> Result<Option<ExtensionExecutionContext>> {

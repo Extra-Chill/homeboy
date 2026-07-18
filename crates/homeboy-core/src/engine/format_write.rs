@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::error::{Error, Result};
-use crate::extension;
 
 /// Result of a post-write format operation.
 #[derive(Debug, Clone, Serialize)]
@@ -168,12 +167,16 @@ fn scoped_format_arg(root: &Path, path: &Path) -> String {
 }
 
 /// Find an installed extension that handles a file extension and has scripts.format.
-fn find_extension_with_format(file_ext: &str) -> Option<extension::ExtensionManifest> {
-    extension::load_all_extensions().ok().and_then(|manifests| {
-        manifests
-            .into_iter()
-            .find(|m| m.handles_file_extension(file_ext) && m.format_script().is_some())
-    })
+fn find_extension_with_format(
+    file_ext: &str,
+) -> Option<homeboy_extension_contract::ExtensionManifest> {
+    crate::extension_store::load_all_extensions()
+        .ok()
+        .and_then(|manifests| {
+            manifests
+                .into_iter()
+                .find(|m| m.handles_file_extension(file_ext) && m.format_script().is_some())
+        })
 }
 
 #[cfg(test)]

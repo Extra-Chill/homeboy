@@ -1,0 +1,38 @@
+[package]
+name = "homeboy-extension"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "The homeboy extension subsystem: manifest-driven component operation (bench/trace/test/lint/build phase execution, runner, lifecycle) that extends the core engine."
+repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
+
+[lib]
+name = "homeboy_extension"
+path = "src/lib.rs"
+
+[dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
+homeboy-lifecycle-contract = { version = "0.1.0", path = "../contracts/homeboy-lifecycle-contract" }
+homeboy-audit-contract = { version = "0.1.0", path = "../contracts/homeboy-audit-contract" }
+homeboy-refactor-contract = { version = "0.1.0", path = "../contracts/homeboy-refactor-contract" }
+homeboy-rig-contract = { version = "0.1.0", path = "../contracts/homeboy-rig-contract" }
+homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
+homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_path_to_error = "0.1"
+chrono = "0.4"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "socks", "http2", "charset", "system-proxy"] }
+glob = "0.3"
+glob-match = "0.2"
+sha2 = "0.10.9"
+libc = "0.2"
+shellexpand = "3.1"
+tempfile = "3.14"
+
+[dev-dependencies]
+homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

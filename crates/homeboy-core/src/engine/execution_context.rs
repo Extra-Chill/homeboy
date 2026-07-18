@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::component::{self, Component, ScopedExtensionConfig};
 use crate::error::{Error, ErrorCode, Result};
-use crate::extension::{self, ExtensionCapability};
+use homeboy_extension_contract::ExtensionCapability;
 
 /// Unified execution context for extension-backed commands.
 ///
@@ -298,8 +298,9 @@ pub fn resolve_with_component(
                 let settings = no_extension_settings(options);
                 (None, None, settings, Vec::new())
             } else {
-                let ext_context = extension::resolve_execution_context(&component, capability)
-                    .map_err(|err| {
+                let ext_context =
+                    crate::extension_execution::resolve_execution_context(&component, capability)
+                        .map_err(|err| {
                         add_extension_override_hints(
                             err,
                             &options.extension_overrides,

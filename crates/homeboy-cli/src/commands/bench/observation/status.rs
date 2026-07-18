@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy::core::extension::bench::BenchRunWorkflowResult;
+use homeboy_extension::bench::BenchRunWorkflowResult;
 
 use super::lifecycle::BenchObservation;
 use crate::commands::bench::BenchRunArgs;

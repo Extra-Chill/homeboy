@@ -1,4 +1,4 @@
-use homeboy::core::extension::trace as extension_trace;
+use homeboy_extension::trace as extension_trace;
 
 #[derive(Clone)]
 pub(super) struct TraceAggregateSpanSample {

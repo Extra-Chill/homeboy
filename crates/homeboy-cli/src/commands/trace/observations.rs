@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::observation::{NewFindingRecord, ObservationStore};
+use homeboy_extension::trace as extension_trace;
 
 use extension_trace::resolve_declared_trace_artifact_path;
 
@@ -281,8 +281,8 @@ mod tests {
 
     use super::*;
     use homeboy::core::engine::run_dir::RunDir;
-    use homeboy::core::extension::trace::parsing::{TraceArtifact, TraceResults, TraceStatus};
     use homeboy::core::observation::{NewRunRecord, ObservationStore};
+    use homeboy_extension::trace::parsing::{TraceArtifact, TraceResults, TraceStatus};
 
     fn sample_results(artifacts: Vec<TraceArtifact>) -> TraceResults {
         TraceResults {

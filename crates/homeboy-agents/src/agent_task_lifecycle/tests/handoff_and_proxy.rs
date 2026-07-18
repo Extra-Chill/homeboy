@@ -194,6 +194,111 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
 }
 
 #[test]
+fn accepted_handoff_replays_idempotently_and_rejects_a_different_identity() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "immutable-handoff",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("planned handoff");
+        let input = DetachedLabRunRecord {
+            run_id: "immutable-handoff",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-immutable",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        };
+        let accepted = record_detached_lab_run(input.clone()).expect("accepted handoff");
+        let replay = record_detached_lab_run(input).expect("idempotent replay");
+        assert_eq!(replay, accepted);
+
+        let error = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "immutable-handoff",
+            runner_id: "other-runner",
+            runner_job_id: "other-job",
+            remote_workspace: "/other/workspace",
+            remote_command: &command,
+        })
+        .expect_err("different accepted identity is rejected");
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        let stored = status("immutable-handoff").expect("accepted record retained");
+        assert_eq!(stored.runner_id(), Some("homeboy-lab"));
+        assert_eq!(stored.runner_job_id(), Some("job-immutable"));
+    });
+}
+
+#[test]
+fn pending_handoff_rejects_acceptance_from_a_different_runner_without_mutation() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let planned = record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "pending-runner-identity",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("planned handoff");
+
+        let error = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "pending-runner-identity",
+            runner_id: "other-runner",
+            runner_job_id: "job-other",
+            remote_workspace: "/other/workspace",
+            remote_command: &command,
+        })
+        .expect_err("different runner cannot accept pending handoff");
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        let stored = status("pending-runner-identity").expect("pending handoff retained");
+        assert_eq!(stored, planned);
+    });
+}
+
+#[test]
+fn accepted_proxy_resume_rejects_a_different_runner_without_rewriting_legacy_projection() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "immutable-proxy",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("planned handoff");
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "immutable-proxy",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-proxy",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("accepted handoff");
+
+        let error = record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "immutable-proxy",
+            runner_id: "other-runner",
+            remote_workspace: "/other/workspace",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect_err("different runner resume is rejected");
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        let stored = status("immutable-proxy").expect("accepted record retained");
+        assert_eq!(stored.metadata["runner_id"], "homeboy-lab");
+        assert_eq!(stored.metadata["runner_job_id"], "job-proxy");
+        assert_eq!(
+            stored.metadata["runner_execution_record"]["status"],
+            "running"
+        );
+    });
+}
+
+#[test]
 fn detached_cook_attempt_proxy_advances_after_daemon_acceptance() {
     with_isolated_home(|_| {
         let command = vec![
@@ -562,6 +667,7 @@ fn detached_runner_failure_transitions_parent_and_task_terminal() {
         provider_handles: Vec::new(),
         latest_executor_evidence: None,
         lifecycle: lifecycle_for_submitted_plan(&plan),
+        lab_handoff: None,
         metadata: json!({ "runner_id": "homeboy-lab", "runner_job_id": "job-123" }),
     };
     record.tasks[0].state = AgentTaskState::Running;

@@ -176,6 +176,11 @@ pub enum DaemonStaleReasonCode {
 #[serde(rename_all = "snake_case")]
 pub enum DaemonRecoveryEvidence {
     ProvenDead,
+    /// The remote daemon is fresh and authoritatively idle (zero active jobs);
+    /// the controller merely lost its session and can safely reconnect. This is
+    /// a benign recovery, distinct from `Unavailable`, which withholds an action
+    /// because ownership/liveness could not be established.
+    Recoverable,
     Unavailable,
 }
 
@@ -291,11 +296,19 @@ pub struct DaemonLeaselessOrphanReconciliationResult {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DaemonStopResult {
     pub stopped: bool,
+    /// The exact requested lease was already absent after an idle-work check.
+    /// This is a successful idempotent lease-bound stop, not a failed stop.
+    #[serde(skip_serializing_if = "is_false")]
+    pub already_absent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub state_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub termination_evidence: Option<DaemonTerminationEvidence>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -888,6 +901,7 @@ pub fn force_stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult>
         remove_lease_if_identity_matches(&path, &identity)?;
         return Ok(DaemonStopResult {
             stopped: false,
+            already_absent: true,
             pid: Some(state.pid),
             state_path: state_path_display,
             termination_evidence: None,
@@ -930,6 +944,7 @@ pub fn force_stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult>
     remove_lease_if_identity_matches(&path, &identity)?;
     Ok(DaemonStopResult {
         stopped: true,
+        already_absent: false,
         pid: Some(state.pid),
         state_path: state_path_display,
         termination_evidence: Some(evidence),
@@ -959,7 +974,18 @@ fn stop_with_force_for_lease(expected_lease_id: &str, force: bool) -> Result<Dae
             None,
         ));
     }
-    stop_unlocked_with_force(force)
+    let mut result = stop_unlocked_with_force(force)?;
+    if !result.stopped {
+        // A stale-but-live lease is not a successful completion. Re-probe so
+        // only disappearance or replacement of the exact requested owner is
+        // reported as idempotent absence.
+        let status = read_status()?;
+        result.already_absent = status
+            .state
+            .as_ref()
+            .is_none_or(|state| state.lease_id != expected_lease_id);
+    }
+    Ok(result)
 }
 
 /// A lease-bound stop can be replayed after a previous stop removed a dead
@@ -992,6 +1018,7 @@ fn reconcile_absent_lease_stop(
     }
     Ok(DaemonStopResult {
         stopped: false,
+        already_absent: true,
         pid: None,
         state_path,
         termination_evidence: None,
@@ -1015,6 +1042,7 @@ fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> {
     let Some(state) = validation.state.as_ref() else {
         return Ok(DaemonStopResult {
             stopped: false,
+            already_absent: false,
             pid: None,
             state_path: state_path_display,
             termination_evidence: None,
@@ -1027,6 +1055,7 @@ fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> {
         }
         return Ok(DaemonStopResult {
             stopped: false,
+            already_absent: false,
             pid: Some(state.pid),
             state_path: state_path_display,
             termination_evidence: None,
@@ -1098,6 +1127,7 @@ fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> {
 
     Ok(DaemonStopResult {
         stopped,
+        already_absent: false,
         pid: Some(pid),
         state_path: state_path_display,
         termination_evidence: None,

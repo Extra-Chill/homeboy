@@ -402,6 +402,16 @@ fn validate_remote_lease_bound_daemon_stop_output(
     {
         return Err("remote lease-bound daemon stop returned an unexpected response".to_string());
     }
+    let completed = envelope.data.as_ref().is_some_and(|data| {
+        data.get("stopped").and_then(Value::as_bool) == Some(true)
+            || data.get("already_absent").and_then(Value::as_bool) == Some(true)
+    });
+    if !completed {
+        return Err(
+            "remote lease-bound daemon stop returned `stopped:false` without proving the exact lease already absent"
+                .to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -844,5 +854,39 @@ mod tests {
         let malformed_error = validate_remote_lease_bound_daemon_stop_output(&malformed)
             .expect_err("malformed SSH stop output must fail closed");
         assert!(malformed_error.contains("invalid JSON"));
+    }
+
+    #[test]
+    fn lease_bound_ssh_stop_rejects_successful_stopped_false_response() {
+        let output = homeboy_core::server::CommandOutput {
+            stdout: r#"{"success":true,"data":{"action":"stop","stopped":false}}"#.to_string(),
+            stderr: String::new(),
+            success: true,
+            exit_code: 0,
+            timed_out: false,
+            child_resource: None,
+        };
+
+        let error = validate_remote_lease_bound_daemon_stop_output(&output)
+            .expect_err("a lease-bound stop must prove completion");
+
+        assert!(error.contains("stopped:false"));
+    }
+
+    #[test]
+    fn lease_bound_ssh_stop_accepts_proven_already_absent_response() {
+        let output = homeboy_core::server::CommandOutput {
+            stdout:
+                r#"{"success":true,"data":{"action":"stop","stopped":false,"already_absent":true}}"#
+                    .to_string(),
+            stderr: String::new(),
+            success: true,
+            exit_code: 0,
+            timed_out: false,
+            child_resource: None,
+        };
+
+        validate_remote_lease_bound_daemon_stop_output(&output)
+            .expect("an exact already-absent lease is an idempotent completion");
     }
 }

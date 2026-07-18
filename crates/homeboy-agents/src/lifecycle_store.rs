@@ -326,12 +326,21 @@ pub(super) fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
             json!({ "context": run.id }),
         )
     })?;
-    serde_json::from_value(value.clone()).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some(format!("parse agent-task run {}", run.id)),
-        )
-    })
+    let mut record: AgentTaskRunRecord =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some(format!("parse agent-task run {}", run.id)),
+            )
+        })?;
+    record.hydrate_legacy_lab_handoff();
+    if let Some(problem) = record.lab_handoff_validation_error() {
+        return Err(Error::internal_json(
+            problem,
+            Some(format!("validate agent-task Lab handoff {}", run.id)),
+        ));
+    }
+    Ok(record)
 }
 
 fn read_mirrored_aggregate(run_id: &str) -> Result<Option<AgentTaskAggregate>> {

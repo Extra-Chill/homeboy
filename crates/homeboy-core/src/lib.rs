@@ -91,12 +91,12 @@ pub use homeboy_lab_contract::env_materialization_plan;
 pub use homeboy_error as error;
 pub mod build_artifact_path;
 pub mod component_build_provider;
+pub mod component_install_provider;
 pub mod component_script_provider;
 pub mod evidence_manifest;
 pub mod execution;
 pub mod execution_contract;
 pub mod expand;
-pub mod extension;
 pub mod extension_execution;
 pub mod extension_invocation_context;
 pub mod extension_provider_discovery;
@@ -221,8 +221,6 @@ mod paths_tests;
 
 // Public extensions for CLI access
 pub mod defaults;
-
-pub use extension::build;
 
 // Re-export relocated modules so existing `homeboy::api`, `homeboy::auth`, etc. paths keep working.
 // Consumers within the crate have been updated to canonical paths; these re-exports

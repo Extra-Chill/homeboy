@@ -4,7 +4,7 @@
 //! The core grammar engine fingerprints a file by loading a grammar
 //! (`grammar.toml`/`grammar.json`) shipped by the extension that handles the
 //! file's extension. Audit used to resolve that by calling
-//! `homeboy_core::extension::find_extension_for_file_ext` directly and reading the
+//! `homeboy_extension::find_extension_for_file_ext` directly and reading the
 //! matched manifest's `extension_path`, coupling `code_audit` to the extension
 //! registry.
 //!

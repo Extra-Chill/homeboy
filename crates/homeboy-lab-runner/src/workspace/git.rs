@@ -9,6 +9,7 @@ use homeboy_core::error::{Error, Result};
 
 use super::super::{Runner, RunnerKind};
 use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializer};
+use super::snapshot::materialize_snapshot_overlay;
 use super::types::ControllerGitBundleProvenance;
 use super::types::GitSnapshot;
 use super::util::{git_output, run_shell_command, ssh_args, ssh_client_for_runner};
@@ -231,6 +232,101 @@ pub(super) fn materialize_git_from_controller_bundle(
         // The controller tempdir is removed as soon as the transfer finishes.
         cleanup_ttl: "PT0S",
     })
+}
+
+/// Materialize a controller Git workspace as its exact captured commit, then
+/// apply its filtered working-tree contents. Prefer the runner's configured
+/// remote so partial controller clones never need to hydrate historical
+/// promisor objects. An unpublished commit falls back to a controller bundle.
+pub(super) fn materialize_git_snapshot_from_controller_bundle(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    excludes: &[String],
+) -> Result<Option<ControllerGitBundleProvenance>> {
+    let head = git_output(local_path, &["rev-parse", "HEAD"])?;
+    let branch = git_output(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .filter(|branch| branch != "HEAD");
+    let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"]).ok();
+    if let Some(remote_url) = remote_url.as_deref().filter(|url| !url.trim().is_empty()) {
+        match materialize_git(
+            runner,
+            remote_path,
+            remote_url,
+            &head,
+            branch.as_deref(),
+            None,
+            &[],
+            false,
+        ) {
+            Ok(()) => {
+                materialize_snapshot_overlay(runner, local_path, remote_path, excludes)?;
+                return Ok(None);
+            }
+            Err(runner_error) => {
+                return materialize_git_snapshot_from_controller_bundle_fallback(
+                    runner,
+                    local_path,
+                    remote_path,
+                    excludes,
+                    &head,
+                    branch.as_deref(),
+                    remote_url,
+                    Some(runner_error),
+                );
+            }
+        }
+    }
+    materialize_git_snapshot_from_controller_bundle_fallback(
+        runner,
+        local_path,
+        remote_path,
+        excludes,
+        &head,
+        branch.as_deref(),
+        "homeboy-controller-bundle",
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_git_snapshot_from_controller_bundle_fallback(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    excludes: &[String],
+    head: &str,
+    branch: Option<&str>,
+    remote_url: &str,
+    runner_error: Option<Error>,
+) -> Result<Option<ControllerGitBundleProvenance>> {
+    let result = materialize_git_from_controller_bundle(
+        runner,
+        local_path,
+        remote_path,
+        head,
+        branch,
+        remote_url,
+        None,
+        &[],
+        false,
+    );
+    let provenance = match result {
+        Ok(provenance) => provenance,
+        Err(bundle_error) => {
+            let runner_diagnostic = runner_error.map_or_else(
+                || "runner-side exact-SHA materialization was unavailable because the source has no origin remote".to_string(),
+                |error| error.message,
+            );
+            return Err(Error::internal_unexpected(format!(
+                "could not materialize exact Git commit `{head}`: runner-side checkout failed: {runner_diagnostic}; controller bundle fallback failed: {}",
+                bundle_error.message
+            )));
+        }
+    };
+    materialize_snapshot_overlay(runner, local_path, remote_path, excludes)?;
+    Ok(Some(provenance))
 }
 
 fn sha256_file(path: &Path) -> Result<String> {

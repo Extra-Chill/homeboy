@@ -218,6 +218,11 @@ pub fn redact_argv_display(argv: &[String]) -> String {
     redact_argv(argv).join(" ")
 }
 
+/// Render redacted argv as a command that is safe to copy into a POSIX shell.
+pub fn redact_argv_shell_display(argv: &[String]) -> String {
+    homeboy_engine_primitives::shell::quote_args(&redact_argv(argv))
+}
+
 fn redact_argv_with_policy(argv: &[String], policy: &RedactionPolicy) -> Vec<String> {
     let mut redacted = Vec::with_capacity(argv.len());
     let mut redact_next_for: Option<String> = None;
@@ -479,5 +484,33 @@ mod tests {
                 "--url=https://example.test/?token=[REDACTED]&ok=1".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn shell_display_redacts_before_quoting_copyable_argv() {
+        let argv = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run".to_string(),
+            "#8949".to_string(),
+            "path with spaces".to_string(),
+            "O'Brien".to_string(),
+            "$HOME/work".to_string(),
+            "--provider-auth-token".to_string(),
+            "secret-value".to_string(),
+        ];
+
+        let display = redact_argv_shell_display(&argv);
+
+        assert_eq!(
+            display,
+            "homeboy agent-task run '#8949' 'path with spaces' 'O'\\''Brien' '$HOME/work' --provider-auth-token '[REDACTED]'"
+        );
+        assert!(!display.contains("secret-value"));
+        assert!(std::process::Command::new("sh")
+            .args(["-n", "-c", &display])
+            .status()
+            .expect("shell is available")
+            .success());
     }
 }

@@ -29,46 +29,48 @@ pub(super) fn forward_release_ci_env(env: &mut HashMap<String, String>) {
 }
 
 pub(crate) fn build_lab_offload_env(lab_metadata: &serde_json::Value) -> HashMap<String, String> {
-    let metadata = lab_offload_metadata_for_environment(lab_metadata);
     HashMap::from([(
         LAB_OFFLOAD_METADATA_ENV.to_string(),
-        serde_json::to_string(&metadata).unwrap_or_default(),
+        serde_json::to_string(&subprocess_lab_offload_metadata(lab_metadata)).unwrap_or_default(),
     )])
 }
 
-/// Keep optional per-entry workspace diagnostics out of the process environment
-/// once they exceed a bounded transport budget. The content hash remains in the
-/// metadata and is the authoritative snapshot-integrity check.
-fn lab_offload_metadata_for_environment(lab_metadata: &serde_json::Value) -> serde_json::Value {
-    let mut metadata = lab_metadata.clone();
-    let serialized_bytes = serde_json::to_vec(&metadata)
-        .map(|value| value.len())
-        .unwrap_or_default();
-    if serialized_bytes <= LAB_OFFLOAD_METADATA_ENV_MAX_BYTES {
-        return metadata;
-    }
+/// Project durable Lab evidence into the small provenance envelope a subprocess
+/// needs. The complete dossier remains on the dispatch record; workspace content
+/// manifests and other audit artifacts are not safe to duplicate into `execve`.
+fn subprocess_lab_offload_metadata(lab_metadata: &serde_json::Value) -> serde_json::Value {
+    let workspace_verification = lab_metadata
+        .get("workspace_verification")
+        .map(|verification| {
+            serde_json::json!({
+                "schema": verification.get("schema"),
+                "identity": verification.get("identity"),
+                "content_hash_algorithm": verification.get("content_hash_algorithm"),
+                "permission_policy": verification.get("permission_policy"),
+                "content_hash": verification.get("content_hash"),
+                "sync_excludes": verification.get("sync_excludes"),
+                "source_snapshot": verification.get("source_snapshot"),
+                "primary_workspace": {
+                    "identity": verification.pointer("/primary_workspace/identity"),
+                    "remote_path": verification.pointer("/primary_workspace/remote_path"),
+                },
+            })
+        });
 
-    let Some(verification) = metadata
-        .get_mut("workspace_verification")
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        return metadata;
-    };
-    let Some(content_manifest) = verification.remove("content_manifest") else {
-        return metadata;
-    };
-    verification.insert(
-        "content_manifest_transport".to_string(),
-        serde_json::json!({
-            "status": "excluded_from_environment",
-            "reason": "metadata_exceeds_environment_budget",
-            "entry_count": content_manifest.get("entry_count"),
-            "serialized_bytes": serde_json::to_vec(&content_manifest)
-                .map(|value| value.len())
-                .unwrap_or_default(),
-        }),
-    );
-    metadata
+    serde_json::json!({
+        "schema": "homeboy/lab-offload-subprocess/v1",
+        "dispatch_schema": lab_metadata.get("schema"),
+        "runner_id": lab_metadata.get("runner_id"),
+        "runner_mode": lab_metadata.get("runner_mode"),
+        "status": lab_metadata.get("status"),
+        "remote_workspace": lab_metadata.get("remote_workspace"),
+        "sync_mode": lab_metadata.get("sync_mode"),
+        "source_snapshot": lab_metadata.get("source_snapshot"),
+        "workspace_cleanliness": {
+            "allow_dirty_lab_workspace": lab_metadata.pointer("/workspace_cleanliness/allow_dirty_lab_workspace"),
+        },
+        "workspace_verification": workspace_verification,
+    })
 }
 
 /// Forward the preview metadata/public-url passthroughs plus release CI context
@@ -502,10 +504,6 @@ mod tests {
         assert!(transported["workspace_verification"]
             .get("content_manifest")
             .is_none());
-        assert_eq!(
-            transported["workspace_verification"]["content_manifest_transport"]["status"],
-            "excluded_from_environment"
-        );
         assert_eq!(
             transported["workspace_verification"]["content_hash"],
             "sha256:authoritative"

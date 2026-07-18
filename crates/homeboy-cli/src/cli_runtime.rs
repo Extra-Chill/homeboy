@@ -13,7 +13,7 @@ use crate::commands::cli;
 use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
 use crate::commands::GlobalArgs;
-use crate::core::extension::{
+use homeboy::extension::{
     list_summaries, load_all_extensions, CliConfig,
     ExtensionManifest as InstalledExtensionManifest, ExtensionSummary,
 };
@@ -110,13 +110,14 @@ impl CliRuntime {
         // behavior through the hook. Moves out with deploy/release when they
         // become the homeboy-release crate.
         crate::release::provider_impl::register();
-        crate::core::extension::audit_manifest_provider::register();
-        crate::core::extension::component_script::register_component_script_runner();
-        crate::core::extension::build::register_component_build_runner();
+        homeboy_extension::audit_manifest_provider::register();
+        homeboy_extension::component_script::register_component_script_runner();
+        homeboy_extension::build::register_component_build_runner();
+        homeboy_extension::lifecycle::register_component_install_runner();
         // Register the fingerprint-script provider so code_audit can fall back to
         // extension fingerprint scripts (for files the core grammar engine can't
         // handle) without depending on the extension script runner.
-        crate::core::extension::audit_fingerprint_script_provider::register();
+        homeboy_extension::audit_fingerprint_script_provider::register();
         // Register the audit recorded-artifact provider so the artifact-portability
         // detector can read past runs' artifacts from the observation store without
         // code_audit depending on observation — the last seam before audit becomes
@@ -918,7 +919,7 @@ fn run_startup_update_checks(command: &Commands) {
         Commands::Upgrade(_) | Commands::Daemon(_) | Commands::SelfCmd(_)
     ) {
         homeboy_upgrade::upgrade::update_check::run_startup_check();
-        crate::core::extension::update_check::run_startup_check();
+        homeboy_extension::update_check::run_startup_check();
     }
 }
 

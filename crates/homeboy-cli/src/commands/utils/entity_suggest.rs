@@ -1,7 +1,8 @@
 //! Entity suggestion utilities for unrecognized CLI subcommands.
 
 use homeboy::core::engine::text::levenshtein;
-use homeboy::core::{component, extension, project, server};
+use homeboy::core::{component, project, server};
+use homeboy_extension as extension;
 use std::sync::{OnceLock, RwLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

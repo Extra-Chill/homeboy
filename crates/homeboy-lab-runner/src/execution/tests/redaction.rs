@@ -148,6 +148,37 @@ fn runner_exec_failure_error_surfaces_canonical_failure_context() {
 }
 
 #[test]
+fn runner_exec_failure_hint_renders_copyable_redacted_shell_command() {
+    let mut output = failed_runner_exec_output("", "runner failed");
+    output.argv = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "run".to_string(),
+        "#8949".to_string(),
+        "path with spaces".to_string(),
+        "O'Brien".to_string(),
+        "$HOME/work".to_string(),
+        "--provider-auth-token".to_string(),
+        "secret-value".to_string(),
+    ];
+
+    let err = runner_exec_failure_error(&output).expect("runner failure error");
+    let hints = err
+        .hints
+        .iter()
+        .map(|hint| hint.message.as_str())
+        .collect::<Vec<_>>();
+    let command_hint = hints
+        .iter()
+        .find(|hint| hint.contains("Canonical failed command:"))
+        .expect("canonical command hint");
+
+    assert!(command_hint.contains("'#8949' 'path with spaces' 'O'\\''Brien' '$HOME/work'"));
+    assert!(command_hint.contains("--provider-auth-token '[REDACTED]'"));
+    assert!(!command_hint.contains("secret-value"));
+}
+
+#[test]
 fn runner_exec_failure_error_surfaces_resource_guard_message() {
     let mut output = failed_runner_exec_output("", "");
     output.metrics = Some(RunnerResourceMetrics {

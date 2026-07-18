@@ -15,6 +15,8 @@ path = "src/lib.rs"
 
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
+homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
 homeboy-release = { version = "0.1.0", path = "../homeboy-release" }
 homeboy-stack = { version = "0.1.0", path = "../homeboy-stack" }
 homeboy-review = { version = "0.1.0", path = "../homeboy-review" }
@@ -22,13 +24,13 @@ homeboy-upgrade = { version = "0.1.0", path = "../homeboy-upgrade" }
 homeboy-agents = { version = "0.1.0", path = "../homeboy-agents" }
 homeboy-refactor = { version = "0.1.0", path = "../homeboy-refactor" }
 homeboy-rig = { version = "0.1.0", path = "../homeboy-rig" }
-homeboy-refactor-contract = { version = "0.1.0", path = "../homeboy-refactor-contract" }
+homeboy-refactor-contract = { version = "0.1.0", path = "../contracts/homeboy-refactor-contract" }
 homeboy-lab-runner = { version = "0.1.0", path = "../homeboy-lab-runner" }
 homeboy-fuzz = { version = "0.1.0", path = "../homeboy-fuzz" }
 homeboy-issues = { version = "0.1.0", path = "../homeboy-issues" }
 homeboy-triage = { version = "0.1.0", path = "../homeboy-triage" }
 homeboy-tunnel = { version = "0.1.0", path = "../homeboy-tunnel" }
-homeboy-cli-contract = { version = "0.1.0", path = "../homeboy-cli-contract" }
+homeboy-cli-contract = { version = "0.1.0", path = "../contracts/homeboy-cli-contract" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 homeboy-finding = { version = "0.1.0", path = "../homeboy-finding" }
 homeboy-output = { version = "0.1.0", path = "../homeboy-output" }
@@ -36,7 +38,7 @@ homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }
 homeboy-process = { version = "0.1.0", path = "../homeboy-process" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
-homeboy-lab-contract = { version = "0.1.0", path = "../homeboy-lab-contract" }
+homeboy-lab-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-contract" }
 homeboy-redaction = { version = "0.1.0", path = "../homeboy-redaction" }
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
@@ -65,4 +67,5 @@ sha2 = "0.10.9"
 [dev-dependencies]
 # Enable homeboy-core's shared hermetic test fixtures for this crate's test build.
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
+homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
 homeboy-agents = { version = "0.1.0", path = "../homeboy-agents", features = ["test-support"] }

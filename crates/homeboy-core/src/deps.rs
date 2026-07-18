@@ -1,5 +1,4 @@
 use crate::component::{self, Component};
-use crate::extension;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -341,9 +340,9 @@ pub fn dependency_install_plan(path: &Path) -> Result<Vec<DependencyInstallPlanS
         match provider::resolve_dependency_providers_optional(&component, &resolved_path) {
             Ok(providers) => providers,
             Err(error) => {
-                if !extension::has_linked_extension_for_capability(
+                if !crate::extension_execution::has_linked_extension_for_capability(
                     &component,
-                    crate::extension::ExtensionCapability::Deps,
+                    homeboy_extension_contract::ExtensionCapability::Deps,
                 )? {
                     Vec::new()
                 } else {
@@ -375,7 +374,7 @@ fn dependency_install_invocation(argv: Vec<String>) -> Result<DependencyInstallI
             ));
         }
     }
-    for extension in extension::load_all_extensions()? {
+    for extension in crate::extension_store::load_all_extensions()? {
         let Some(root) = extension.extension_path else {
             continue;
         };
