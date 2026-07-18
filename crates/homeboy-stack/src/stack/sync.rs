@@ -31,8 +31,8 @@
 use serde::Serialize;
 use std::collections::HashSet;
 
-use crate::error::{Error, Result};
-use crate::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
+use homeboy_core::error::{Error, Result};
+use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
 
 const STACK_SYNC_DROP_KIND: &str = "stack.sync.drop";
 const STACK_SYNC_REPLAY_KIND: &str = "stack.sync.replay";

@@ -27,7 +27,7 @@ impl PlanValues {
         self
     }
 
-    pub(crate) fn bool(mut self, key: impl Into<String>, value: bool) -> Self {
+    pub fn bool(mut self, key: impl Into<String>, value: bool) -> Self {
         self.values
             .insert(key.into(), serde_json::Value::Bool(value));
         self
