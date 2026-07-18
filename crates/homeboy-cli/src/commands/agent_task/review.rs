@@ -218,11 +218,25 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
             None => None,
         },
     };
+    let artifact_id = if let Some(run_id) = source_run_id.as_deref() {
+        args.artifact_id
+            .as_deref()
+            .map(|artifact_id| {
+                agent_task_lifecycle::resolve_promotion_patch_artifact_id(
+                    run_id,
+                    args.task_id.as_deref(),
+                    artifact_id,
+                )
+            })
+            .transpose()?
+    } else {
+        args.artifact_id.clone()
+    };
     if let Some(run_id) = source_run_id.as_deref() {
         agent_task_lifecycle::materialize_recovered_patch_artifact(
             run_id,
             args.task_id.as_deref(),
-            args.artifact_id.as_deref(),
+            artifact_id.as_deref(),
         )?;
     }
     let promotion_options = AgentTaskPromotionOptions {
@@ -235,7 +249,7 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         candidate_ref: None,
         to_worktree: args.to_worktree,
         task_id: args.task_id,
-        artifact_id: args.artifact_id,
+        artifact_id,
         dry_run: args.dry_run,
         gates: args.gates.into(),
         provider_command: args.provider_command,
