@@ -671,6 +671,127 @@ pub fn record_runner_job_identity(
     Ok(record)
 }
 
+/// Metadata `kind` marker for a generic runner-execution run. It distinguishes
+/// an ad hoc `runner exec --run-id` durable run from an agent-task lifecycle
+/// record so ownership collisions are detectable (#8447).
+pub const RUNNER_EXEC_RUN_KIND: &str = "runner_exec";
+
+fn record_run_kind(record: &AgentTaskRunRecord) -> Option<&str> {
+    record.metadata.get("kind").and_then(Value::as_str)
+}
+
+/// Bind a runner job to an ad hoc `runner exec --run-id` identity. Unlike
+/// [`record_runner_job_identity`], this owns a *generic* runner-execution run:
+/// a caller-supplied ID that has no prior record creates one on demand rather
+/// than failing closed as a missing agent-task record. Reusing an ID that is
+/// already owned by an agent-task lifecycle run fails before runner mutation
+/// with an explicit ownership diagnostic (#8447).
+pub fn record_runner_exec_job_identity(
+    run_id: &str,
+    runner_id: &str,
+    runner_job_id: &str,
+    remote_workspace: &str,
+    remote_command: &[String],
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let mut record = match store::read_record(&run_id) {
+        Ok(record) => {
+            // An existing record must be a generic runner-exec run. An agent-task
+            // record with the same ID is a different owner: fail closed rather
+            // than mutating it under generic runner-exec semantics.
+            match record_run_kind(&record) {
+                Some(RUNNER_EXEC_RUN_KIND) => record,
+                other => {
+                    return Err(Error::validation_invalid_argument(
+                        "run_id",
+                        format!(
+                            "run '{run_id}' already exists as {} and cannot be reused as a generic runner-exec run",
+                            other
+                                .map(|kind| format!("an agent-task run (kind '{kind}')"))
+                                .unwrap_or_else(|| "an agent-task run".to_string())
+                        ),
+                        Some(run_id.clone()),
+                        Some(vec![
+                            "Pass a distinct --run-id for ad hoc runner exec evidence.".to_string(),
+                        ]),
+                    ));
+                }
+            }
+        }
+        Err(error) if error.code == ErrorCode::ValidationInvalidArgument => submit_plan(
+            &runner_exec_plan(&run_id, runner_id, remote_workspace, remote_command),
+            Some(&run_id),
+        )?,
+        Err(error) => return Err(error),
+    };
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("kind".to_string(), json!(RUNNER_EXEC_RUN_KIND));
+    metadata.insert("runner_id".to_string(), json!(runner_id));
+    metadata.insert("runner_job_id".to_string(), json!(runner_job_id));
+    store::write_record(&record)?;
+    Ok(record)
+}
+
+fn runner_exec_plan(
+    run_id: &str,
+    runner_id: &str,
+    remote_workspace: &str,
+    remote_command: &[String],
+) -> AgentTaskPlan {
+    let task = AgentTaskRequest {
+        schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+        task_id: format!("{run_id}-runner-exec"),
+        group_key: Some("runner-exec".to_string()),
+        parent_plan_id: None,
+        executor: AgentTaskExecutor {
+            backend: "homeboy-lab".to_string(),
+            selector: Some(runner_id.to_string()),
+            runtime_selection: None,
+            required_capabilities: Vec::new(),
+            secret_env: Vec::new(),
+            model: None,
+            config: Value::Null,
+        },
+        instructions: "Ad hoc runner exec evidence bound to a generic runner-execution run."
+            .to_string(),
+        inputs: json!({
+            "runner_id": runner_id,
+            "remote_workspace": remote_workspace,
+            "remote_command": remote_command,
+        }),
+        source_refs: vec![AgentTaskSourceRef {
+            kind: "runner-exec".to_string(),
+            uri: format!("homeboy://runner/{runner_id}/exec/{run_id}"),
+            revision: None,
+        }],
+        workspace: AgentTaskWorkspace {
+            mode: AgentTaskWorkspaceMode::Existing,
+            root: Some(remote_workspace.to_string()),
+            kind: Some("runner-exec".to_string()),
+            cleanup: Some("preserve".to_string()),
+            materialization: json!({ "runner_id": runner_id }),
+            ..AgentTaskWorkspace::default()
+        },
+        component_contracts: Vec::new(),
+        policy: AgentTaskPolicy::default(),
+        limits: AgentTaskLimits::default(),
+        expected_artifacts: Vec::new(),
+        artifact_declarations: Vec::new(),
+        metadata: json!({
+            "kind": RUNNER_EXEC_RUN_KIND,
+            "runner_id": runner_id,
+        }),
+    };
+    let mut plan = AgentTaskPlan::new(format!("{run_id}-runner-exec"), vec![task]);
+    plan.group_key = Some("runner-exec".to_string());
+    plan.metadata = json!({
+        "kind": RUNNER_EXEC_RUN_KIND,
+        "runner_id": runner_id,
+        "remote_workspace": remote_workspace,
+    });
+    plan
+}
+
 /// Persist redacted submission ownership before a reverse-broker POST. The
 /// command itself is canonical controller provenance; secret values are never
 /// copied here, only the names the runner must hydrate at dispatch.

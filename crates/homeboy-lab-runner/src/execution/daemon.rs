@@ -42,6 +42,7 @@ pub(super) fn exec_via_daemon(
     require_paths: Vec<String>,
     lab_runner_workload: Option<LabRunnerWorkload>,
     run_id: Option<String>,
+    run_id_owns_generic_exec: bool,
     detach_after_handoff: bool,
     mirror_evidence: bool,
     print_handoff_output: bool,
@@ -158,11 +159,21 @@ pub(super) fn exec_via_daemon(
         // The daemon has durably accepted this child. Bind it before waiting so
         // a lost controller still leaves cancellation and reconciliation with a
         // concrete runner job identity.
-        homeboy_agents::agent_task_lifecycle::record_runner_job_identity(
-            run_id,
-            &runner.id,
-            &job.id.to_string(),
-        )?;
+        if run_id_owns_generic_exec {
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+                run_id,
+                &runner.id,
+                &job.id.to_string(),
+                &cwd,
+                &command,
+            )?;
+        } else {
+            homeboy_agents::agent_task_lifecycle::record_runner_job_identity(
+                run_id,
+                &runner.id,
+                &job.id.to_string(),
+            )?;
+        }
     }
     let persisted_run_id = mirror_evidence
         .then(|| persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref()))

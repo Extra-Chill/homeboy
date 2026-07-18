@@ -100,6 +100,7 @@ pub(super) fn run_rig_source_management_on_runner(
             require_paths: Vec::new(),
             lab_runner_workload: None,
             run_id: None,
+            run_id_owns_generic_exec: false,
             detach_after_handoff: false,
             mirror_evidence: true,
             print_handoff: true,

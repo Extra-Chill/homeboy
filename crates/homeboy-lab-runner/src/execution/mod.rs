@@ -136,6 +136,12 @@ pub struct RunnerExecOptions {
     pub require_paths: Vec<String>,
     pub lab_runner_workload: Option<LabRunnerWorkload>,
     pub run_id: Option<String>,
+    /// The supplied `run_id` is an ad hoc runner-execution identity that owns its
+    /// own generic durable run rather than an existing agent-task lifecycle
+    /// record. When set, the runner binds evidence to a generic runner-exec run,
+    /// creating it on demand if absent, instead of failing closed on a missing
+    /// agent-task record (Extra-Chill/homeboy#8447).
+    pub run_id_owns_generic_exec: bool,
     pub detach_after_handoff: bool,
     pub mirror_evidence: bool,
     pub print_handoff: bool,
@@ -163,6 +169,7 @@ impl Default for RunnerExecOptions {
             require_paths: Vec::new(),
             lab_runner_workload: None,
             run_id: None,
+            run_id_owns_generic_exec: false,
             detach_after_handoff: false,
             mirror_evidence: true,
             print_handoff: true,
@@ -851,6 +858,7 @@ pub(crate) fn exec_with_status_snapshot(
                 options.require_paths,
                 options.lab_runner_workload,
                 options.run_id,
+                options.run_id_owns_generic_exec,
                 options.detach_after_handoff,
                 options.mirror_evidence,
                 options.print_handoff,
@@ -876,6 +884,7 @@ pub(crate) fn exec_with_status_snapshot(
                 options.require_paths,
                 options.lab_runner_workload,
                 options.run_id,
+                options.run_id_owns_generic_exec,
                 options.detach_after_handoff,
                 options.mirror_evidence,
                 options.print_handoff,

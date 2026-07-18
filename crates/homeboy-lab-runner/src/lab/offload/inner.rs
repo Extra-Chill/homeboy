@@ -282,6 +282,7 @@ fn lab_runner_exec_options(
         require_paths: Vec::new(),
         lab_runner_workload: context.lab_runner_workload.clone(),
         run_id: context.agent_task_run_id.clone(),
+        run_id_owns_generic_exec: false,
         detach_after_handoff: context.detach_after_handoff,
         mirror_evidence: context.mirror_evidence,
         print_handoff: context.print_handoff,

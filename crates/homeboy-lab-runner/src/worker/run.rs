@@ -617,6 +617,7 @@ fn runner_exec_options_from_envelope(
         require_paths: dispatch.require_paths,
         lab_runner_workload: envelope.lab_runner_workload,
         run_id,
+        run_id_owns_generic_exec: false,
         detach_after_handoff: false,
         mirror_evidence: true,
         print_handoff: true,
