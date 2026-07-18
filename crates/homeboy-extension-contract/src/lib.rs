@@ -65,7 +65,13 @@ pub use trace_parsing::{
 };
 pub mod ci_config;
 pub mod ci_context;
+pub mod lint_result;
+pub mod lint_results;
 pub use ci_context::CiContext;
+pub use lint_result::{
+    FormattingFindings, LintSummaryOutput, SelfCheckCaptureMetadata, StreamCaptureMetadata,
+};
+pub use lint_results::LintCommandOutput;
 pub mod core_compat;
 pub mod exec_context;
 pub mod extension_contract_producer;

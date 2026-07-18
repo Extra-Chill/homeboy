@@ -9,18 +9,5 @@
 //! defined once and the serialized contract stays consistent across every
 //! capture site.
 
+pub use homeboy_extension_contract::StreamCaptureMetadata;
 use serde::{Deserialize, Serialize};
-
-/// Truncation metadata describing how much of a captured stream was retained.
-///
-/// `seen_bytes` is the total observed length of the source; `retained_bytes`
-/// is how many bytes survived the `limit_bytes` cap; `truncated` records
-/// whether the source exceeded the cap (so the overflow is observable rather
-/// than silently dropped).
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StreamCaptureMetadata {
-    pub limit_bytes: usize,
-    pub seen_bytes: usize,
-    pub retained_bytes: usize,
-    pub truncated: bool,
-}
