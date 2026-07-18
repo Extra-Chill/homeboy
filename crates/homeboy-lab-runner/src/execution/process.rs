@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -414,7 +413,7 @@ pub(crate) fn prepare_daemon_local_process(
 pub(crate) fn execute_runner_process(plan: &PreparedRunnerProcess) -> Result<ProcessOutput> {
     let mut command = std::process::Command::new(&plan.command[0]);
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
-    apply_runner_process_env(&mut command, plan);
+    apply_runner_process_env(&mut command, plan)?;
 
     command_output(&mut command, plan.runner.settings.concurrency_limit)
 }
@@ -428,7 +427,7 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
 ) -> Result<ProcessOutput> {
     let mut command = std::process::Command::new(&plan.command[0]);
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
-    apply_runner_process_env(&mut command, plan);
+    apply_runner_process_env(&mut command, plan)?;
 
     command_output_until_cancelled_with_progress(
         &mut command,
@@ -445,21 +444,11 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
 pub(super) fn apply_runner_process_env(
     command: &mut std::process::Command,
     plan: &PreparedRunnerProcess,
-) {
-    apply_runner_process_env_with_inherited(command, plan, std::env::vars_os());
-}
-
-pub(super) fn apply_runner_process_env_with_inherited(
-    command: &mut std::process::Command,
-    plan: &PreparedRunnerProcess,
-    inherited: impl IntoIterator<Item = (OsString, OsString)>,
-) {
-    let inherited = inherited.into_iter().collect::<HashMap<_, _>>();
-    report_pruned_inherited_environment(&inherited);
+) -> Result<()> {
     command.env_clear();
     for key in inherited_runner_process_env_keys() {
         if !plan.env.contains_key(*key) {
-            if let Some(value) = inherited.get(&OsString::from(key)) {
+            if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
         }
@@ -468,23 +457,56 @@ pub(super) fn apply_runner_process_env_with_inherited(
         homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
         serde_json::to_string(&plan.source_snapshot).unwrap_or_default(),
     );
+    validate_child_spawn_environment(command)
 }
 
-/// Child processes receive only explicit job values plus the minimal host
-/// baseline below. This avoids carrying a daemon's unrelated inherited payload
-/// into `execve`, where it can exceed the platform argument/environment limit.
-fn report_pruned_inherited_environment(inherited: &HashMap<OsString, OsString>) {
-    const DIAGNOSTIC_THRESHOLD_BYTES: usize = 128 * 1024;
-
-    let inherited = inherited
-        .iter()
-        .map(|(name, value)| name.to_string_lossy().len() + value.to_string_lossy().len() + 2)
-        .sum::<usize>();
-    if inherited >= DIAGNOSTIC_THRESHOLD_BYTES {
-        eprintln!(
-            "runner child spawn environment bounded: omitted {inherited} bytes of inherited environment; only explicit job variables and the minimal host baseline are forwarded"
-        );
+fn validate_child_spawn_environment(command: &std::process::Command) -> Result<()> {
+    const SPAWN_HEADROOM_BYTES: usize = 128 * 1024;
+    let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
+    if arg_max <= 0 {
+        return Ok(());
     }
+    let argument_bytes = command
+        .get_args()
+        .map(|value| value.to_string_lossy().len() + 1)
+        .sum::<usize>();
+    let mut environment = command
+        .get_envs()
+        .filter_map(|(name, value)| {
+            value.as_ref().map(|value| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    name.to_string_lossy().len() + value.to_string_lossy().len() + 2,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let environment_bytes = environment.iter().map(|(_, bytes)| bytes).sum::<usize>();
+    let total_bytes =
+        argument_bytes + environment_bytes + environment.len() * std::mem::size_of::<usize>();
+    let safe_limit = (arg_max as usize).saturating_sub(SPAWN_HEADROOM_BYTES);
+    if total_bytes <= safe_limit {
+        return Ok(());
+    }
+
+    environment.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    let largest_keys = environment
+        .into_iter()
+        .take(5)
+        .map(|(name, bytes)| format!("{name} ({bytes} bytes)"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(Error::validation_invalid_argument(
+        "env",
+        format!(
+            "runner child environment is {total_bytes} bytes, exceeding the {safe_limit}-byte safe spawn limit (ARG_MAX {arg_max}); largest entries: {largest_keys}"
+        ),
+        None,
+        Some(vec![
+            "Move oversized job inputs to a file and pass the file path in the job environment.".to_string(),
+            "Keep required runtime values in explicit job environment entries; Homeboy does not drop them during spawn normalization.".to_string(),
+        ]),
+    ))
 }
 
 fn validate_runner_inherited_secret_env(

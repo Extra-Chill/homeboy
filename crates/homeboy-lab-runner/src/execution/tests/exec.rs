@@ -10,24 +10,16 @@ use homeboy_core::runner_execution_envelope::{
 use serde_json::json;
 use std::collections::HashMap;
 
+#[cfg(unix)]
 #[test]
-fn bounded_child_environment_omits_oversized_inheritance_and_preserves_job_values() {
-    let inherited = (0..8)
-        .map(|index| {
-            (
-                format!("HOMEBOY_TEST_OVERSIZED_INHERITED_{index}").into(),
-                "x".repeat(64 * 1024).into(),
-            )
-        })
-        .collect::<Vec<_>>();
-
+fn daemon_child_identity_starts_with_required_job_environment() {
     let plan = PreparedRunnerProcess {
         runner: local_runner("/".to_string()),
         cwd: "/".to_string(),
         command: vec![
             "sh".to_string(),
             "-c".to_string(),
-            "printf '%s:%s' \"$HOMEBOY_TEST_REQUIRED_JOB_VALUE\" \"${HOMEBOY_TEST_OVERSIZED_INHERITED_0-unset}\"".to_string(),
+            "printf '%s' \"$HOMEBOY_TEST_REQUIRED_JOB_VALUE\"".to_string(),
         ],
         env: HashMap::from([(
             "HOMEBOY_TEST_REQUIRED_JOB_VALUE".to_string(),
@@ -38,15 +30,58 @@ fn bounded_child_environment_omits_oversized_inheritance_and_preserves_job_value
         require_paths: Vec::new(),
     };
 
-    let mut command = std::process::Command::new(&plan.command[0]);
-    command.args(&plan.command[1..]).current_dir(&plan.cwd);
-    apply_runner_process_env_with_inherited(&mut command, &plan, inherited);
-    let output = command
-        .output()
-        .expect("child starts with a bounded environment");
+    let child_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let callback_started = std::sync::Arc::clone(&child_started);
+    let output = execute_runner_process_until_cancelled_with_progress(
+        &plan,
+        || false,
+        None,
+        false,
+        Some(std::sync::Arc::new(move |_| {
+            callback_started.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })),
+    )
+    .expect("daemon child starts with its required job environment");
 
-    assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "preserved:unset");
+    assert!(child_started.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(output.stdout, "preserved");
+}
+
+#[test]
+fn oversized_explicit_job_environment_fails_before_child_identity() {
+    let plan = PreparedRunnerProcess {
+        runner: local_runner("/".to_string()),
+        cwd: "/".to_string(),
+        command: vec!["unused".to_string()],
+        env: (0..24)
+            .map(|index| (format!("JOB_INPUT_{index}"), "x".repeat(128 * 1024)))
+            .collect(),
+        secret_env_names: Vec::new(),
+        source_snapshot: Default::default(),
+        require_paths: Vec::new(),
+    };
+    let child_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let callback_started = std::sync::Arc::clone(&child_started);
+
+    let result = execute_runner_process_until_cancelled_with_progress(
+        &plan,
+        || false,
+        None,
+        false,
+        Some(std::sync::Arc::new(move |_| {
+            callback_started.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })),
+    );
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("oversized explicit job environment is rejected before spawn"),
+    };
+
+    assert!(!child_started.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(error.message.contains("runner child environment"));
+    assert!(error.message.contains("JOB_INPUT_"));
 }
 
 #[test]
