@@ -420,7 +420,7 @@ impl PlanStepBuilder {
         self
     }
 
-    pub(crate) fn needs_kind(mut self, needs_kind: PlanStepDependencyKind) -> Self {
+    pub fn needs_kind(mut self, needs_kind: PlanStepDependencyKind) -> Self {
         self.step.needs_kind = needs_kind;
         self
     }

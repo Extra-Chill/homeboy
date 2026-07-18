@@ -919,6 +919,7 @@ dependencies = [
  "homeboy-extension",
  "homeboy-extension-contract",
  "homeboy-finding",
+ "homeboy-gate-contract",
  "homeboy-lab-contract",
  "homeboy-lab-runner-contract",
  "homeboy-lifecycle-contract",
@@ -1042,6 +1043,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "homeboy-gate-contract"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
