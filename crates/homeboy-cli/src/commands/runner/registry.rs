@@ -204,6 +204,8 @@ pub(super) struct RunnerConnectInput {
     pub(super) broker_url: Option<String>,
     pub(super) adopt_orphan_lease: Option<String>,
     pub(super) confirm_pid_dead: bool,
+    pub(super) adopt_live_lease: Option<String>,
+    pub(super) expected_live_pid: Option<u32>,
     pub(super) confirm_untracked_child_dead: Vec<uuid::Uuid>,
     pub(super) reconcile_leaseless_orphans: bool,
     pub(super) confirm_no_daemon_owner: bool,
@@ -220,6 +222,8 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
         broker_url,
         adopt_orphan_lease,
         confirm_pid_dead,
+        adopt_live_lease,
+        expected_live_pid,
         confirm_untracked_child_dead,
         reconcile_leaseless_orphans,
         confirm_no_daemon_owner,
@@ -234,6 +238,22 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
             "--adopt-orphan-lease requires --confirm-pid-dead",
             None,
             Some(vec!["Inspect `homeboy daemon status` on the runner before adopting its exact dead lease.".to_string()]),
+        ));
+    }
+    if adopt_live_lease.is_some() != expected_live_pid.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "adopt_live_lease",
+            "--adopt-live-lease requires --expected-live-pid, and vice versa",
+            None,
+            None,
+        ));
+    }
+    if reverse && adopt_live_lease.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "adopt_live_lease",
+            "live daemon adoption only applies to direct SSH runner connections",
+            None,
+            None,
         ));
     }
     if !confirm_untracked_child_dead.is_empty() && adopt_orphan_lease.is_none() {
@@ -270,11 +290,12 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
     }
     let recovery_mode_count = usize::from(adopt_orphan_lease.is_some())
         + usize::from(reconcile_leaseless_orphans)
-        + usize::from(recover_missing_lease_state.is_some());
+        + usize::from(recover_missing_lease_state.is_some())
+        + usize::from(adopt_live_lease.is_some());
     if recovery_mode_count > 1 {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "recovery_mode",
-            "--adopt-orphan-lease, --reconcile-leaseless-orphans, and --recover-missing-lease-state are mutually exclusive",
+            "--adopt-orphan-lease, --adopt-live-lease, --reconcile-leaseless-orphans, and --recover-missing-lease-state are mutually exclusive",
             None,
             None,
         ));
@@ -315,15 +336,20 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
             broker_url,
         })?
     } else {
-        runner::connect_with_orphan_adoption(
-            id,
-            adopt_orphan_lease.as_deref(),
-            &confirm_untracked_child_dead,
-            reconcile_leaseless_orphans,
-            recover_missing_lease_state.as_deref(),
-            recorded_pid,
-            recorded_endpoint.as_deref(),
-        )?
+        match (adopt_live_lease.as_deref(), expected_live_pid) {
+            (Some(lease_id), Some(pid)) => {
+                runner::connect_with_live_lease_adoption(id, lease_id, pid)?
+            }
+            _ => runner::connect_with_orphan_adoption(
+                id,
+                adopt_orphan_lease.as_deref(),
+                &confirm_untracked_child_dead,
+                reconcile_leaseless_orphans,
+                recover_missing_lease_state.as_deref(),
+                recorded_pid,
+                recorded_endpoint.as_deref(),
+            )?,
+        }
     };
     Ok((
         RunnerOutput {
@@ -375,6 +401,8 @@ mod tests {
             broker_url: None,
             adopt_orphan_lease: None,
             confirm_pid_dead: false,
+            adopt_live_lease: None,
+            expected_live_pid: None,
             confirm_untracked_child_dead: Vec::new(),
             reconcile_leaseless_orphans: false,
             confirm_no_daemon_owner: false,
@@ -428,6 +456,21 @@ mod tests {
             },
         )
         .expect_err("reverse recovery is unsupported");
+        assert!(error.message.contains("direct SSH"));
+    }
+
+    #[test]
+    fn reverse_connections_cannot_adopt_live_daemons() {
+        let error = connect(
+            "runner",
+            RunnerConnectInput {
+                reverse: true,
+                adopt_live_lease: Some("lease-live".to_string()),
+                expected_live_pid: Some(42),
+                ..input()
+            },
+        )
+        .expect_err("reverse connections have no direct SSH daemon ownership");
         assert!(error.message.contains("direct SSH"));
     }
 

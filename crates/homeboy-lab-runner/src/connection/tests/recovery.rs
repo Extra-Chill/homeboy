@@ -72,13 +72,12 @@ fn tunnel_only_failure_reattaches_the_persisted_daemon() {
 }
 
 #[test]
-fn stale_daemon_without_jobs_reattaches_without_replacement() {
+fn stale_daemon_without_a_matching_session_fails_closed_without_replacement() {
     let status = remote_daemon_status_for_test(false, true, 0, "lease-stale", 4444);
 
-    assert_eq!(
-        remote_daemon_connect_action(None, &status).expect("reattach stale daemon"),
-        RemoteDaemonConnectAction::Reattach
-    );
+    assert!(remote_daemon_connect_action(None, &status)
+        .expect_err("stale daemon ownership is unknown")
+        .contains("--adopt-live-lease lease-stale --expected-live-pid 4444"));
 }
 
 fn idle_stale_status(work_evidence: RemoteDaemonWorkEvidence) -> RemoteDaemonStatus {
@@ -124,10 +123,10 @@ fn idle_stale_replacement_fails_closed_for_active_or_inconsistent_typed_jobs() {
     let typed_unknown = idle_stale_status(RemoteDaemonWorkEvidence::Unknown);
 
     for status in [freshness_active, typed_active, typed_unknown] {
-        assert_eq!(
+        assert!(
             remote_daemon_connect_action_with_controller_identity(None, &status, configured)
-                .expect("unsafe evidence retains the daemon"),
-            RemoteDaemonConnectAction::Reattach,
+                .expect_err("unsafe evidence fails closed")
+                .contains("runner ownership is not proven")
         );
     }
 }
@@ -168,7 +167,7 @@ fn reconnect_converges_to_configured_identity_and_repeated_recovery_reattaches()
 }
 
 #[test]
-fn reattaches_live_stale_daemon_with_active_jobs_without_replacing_it() {
+fn stale_active_daemon_without_a_matching_session_fails_closed_without_replacing_it() {
     let status = remote_daemon_status_for_test_with_reason(
         false,
         true,
@@ -178,9 +177,9 @@ fn reattaches_live_stale_daemon_with_active_jobs_without_replacing_it() {
         Some(DaemonStaleReasonCode::VersionMismatch),
     );
 
-    let action = remote_daemon_connect_action(None, &status).expect("reattach live daemon");
-
-    assert_eq!(action, RemoteDaemonConnectAction::Reattach);
+    assert!(remote_daemon_connect_action(None, &status)
+        .expect_err("stale active daemon ownership is unknown")
+        .contains("runner ownership is not proven"));
     let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
     assert!(!recovery.fresh);
     assert_eq!(recovery.active_jobs, 1);
@@ -936,9 +935,17 @@ fn idle_stale_replacement_uses_actual_endpoint_envelopes_and_reprobes_the_new_ow
         "lease-new",
         "homeboy 0.289.0+configured",
         |client, homeboy, configured_identity, argv_path| {
-            let daemon =
-                ensure_remote_daemon(client, homeboy, None, configured_identity, None, &[])
-                    .expect("replacement succeeds");
+            let daemon = ensure_remote_daemon(
+                client,
+                homeboy,
+                "homeboy-lab",
+                None,
+                configured_identity,
+                None,
+                &[],
+                None,
+            )
+            .expect("replacement succeeds");
             assert_eq!(daemon.lease_id.as_deref(), Some("lease-new"));
             assert_eq!(daemon.pid, Some(222));
             assert_eq!(daemon.build_identity.as_deref(), Some(configured_identity));
@@ -957,8 +964,17 @@ fn idle_stale_replacement_refuses_a_post_stop_owner_or_identity_change() {
         "lease-raced",
         "homeboy 0.288.13+stale",
         |client, homeboy, configured_identity, _| {
-            let error = ensure_remote_daemon(client, homeboy, None, configured_identity, None, &[])
-                .expect_err("concurrent stale daemon is refused");
+            let error = ensure_remote_daemon(
+                client,
+                homeboy,
+                "homeboy-lab",
+                None,
+                configured_identity,
+                None,
+                &[],
+                None,
+            )
+            .expect_err("concurrent stale daemon is refused");
             assert!(error.contains("ownership changed"));
         },
     );
@@ -971,8 +987,17 @@ fn idle_stale_replacement_refuses_a_post_stop_identity_change() {
         "lease-new",
         "homeboy 0.288.13+stale",
         |client, homeboy, configured_identity, _| {
-            let error = ensure_remote_daemon(client, homeboy, None, configured_identity, None, &[])
-                .expect_err("stale replacement identity is refused");
+            let error = ensure_remote_daemon(
+                client,
+                homeboy,
+                "homeboy-lab",
+                None,
+                configured_identity,
+                None,
+                &[],
+                None,
+            )
+            .expect_err("stale replacement identity is refused");
             assert!(error.contains("does not match configured runner binary"));
         },
     );

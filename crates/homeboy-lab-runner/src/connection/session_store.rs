@@ -279,23 +279,7 @@ pub(super) fn claim_ownership_if_owner_not_live(session: &RunnerSession) -> Resu
 }
 
 fn write_session_at(path: &PathBuf, session: &RunnerSession) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some(format!("create {}", parent.display())),
-            )
-        })?;
-    }
-    let body = serde_json::to_string_pretty(session).map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("serialize runner session".to_string()),
-        )
-    })?;
-    std::fs::write(&path, body).map_err(|err| {
-        Error::internal_io(err.to_string(), Some(format!("write {}", path.display())))
-    })
+    homeboy_core::engine::local_files::write_json_file(path, session)
 }
 
 pub(super) fn remove_session(runner_id: &str) -> Result<()> {

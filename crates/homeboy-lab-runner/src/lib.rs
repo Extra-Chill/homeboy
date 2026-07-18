@@ -106,9 +106,9 @@ pub(crate) use connection::daemon_endpoint_identity;
 pub(crate) use connection::disconnect_with_force;
 pub use connection::{
     connect, connect_reverse, connect_with_leaseless_orphan_reconciliation,
-    connect_with_orphan_adoption, connect_with_recovery, disconnect, reverse_broker_artifact,
-    reverse_broker_artifact_content, reverse_broker_reconcile, runner_artifact_content, status,
-    statuses, submit_reverse_broker_job,
+    connect_with_live_lease_adoption, connect_with_orphan_adoption, connect_with_recovery,
+    disconnect, reverse_broker_artifact, reverse_broker_artifact_content, reverse_broker_reconcile,
+    runner_artifact_content, status, statuses, submit_reverse_broker_job,
 };
 pub(crate) use connection::{local_live_session, status_for_admission};
 mod upgrade_runners;
