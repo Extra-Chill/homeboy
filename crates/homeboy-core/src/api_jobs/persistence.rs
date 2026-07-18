@@ -1,7 +1,9 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -11,6 +13,17 @@ use super::types::{JobEvent, JobEventKind, JobStatus};
 use crate::error::{Error, Result};
 
 pub(super) const DEFAULT_EVENT_RETENTION_LIMIT: usize = 1000;
+/// Keep enough completed jobs for status and log reconciliation without letting
+/// the daemon's append-only store grow with every historical execution.
+pub(super) const DEFAULT_TERMINAL_JOB_RETENTION_LIMIT: usize = 1000;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct JobStoreCompactionEvidence {
+    pub(super) timestamp_ms: u64,
+    pub(super) removed_terminal_jobs: usize,
+    pub(super) retained_terminal_jobs: usize,
+    pub(super) active_jobs: usize,
+}
 
 pub(super) fn request_metadata_string(
     request: &RemoteRunnerJobRequest,
@@ -102,6 +115,53 @@ pub(super) fn write_durable_store(path: &Path, durable: &DurableJobStore) -> Res
             )),
         )
     })
+}
+
+pub(super) fn compact_terminal_jobs(
+    durable: &mut DurableJobStore,
+    terminal_job_retention_limit: usize,
+) -> Option<JobStoreCompactionEvidence> {
+    let mut terminal = durable
+        .jobs
+        .iter()
+        .filter(|stored| stored.job.status.is_terminal())
+        .collect::<Vec<_>>();
+    if terminal.len() <= terminal_job_retention_limit {
+        return None;
+    }
+
+    terminal.sort_unstable_by_key(|stored| {
+        (
+            stored
+                .job
+                .finished_at_ms
+                .unwrap_or(stored.job.updated_at_ms),
+            stored.job.updated_at_ms,
+            stored.job.created_at_ms,
+            stored.job.id,
+        )
+    });
+    let removed_job_ids = terminal
+        .iter()
+        .take(terminal.len() - terminal_job_retention_limit)
+        .map(|stored| stored.job.id)
+        .collect::<HashSet<_>>();
+    let removed_terminal_jobs = removed_job_ids.len();
+    durable
+        .jobs
+        .retain(|stored| !removed_job_ids.contains(&stored.job.id));
+    let evidence = JobStoreCompactionEvidence {
+        timestamp_ms: timestamp_ms(),
+        removed_terminal_jobs,
+        retained_terminal_jobs: terminal_job_retention_limit,
+        active_jobs: durable.jobs.len() - terminal_job_retention_limit,
+    };
+    durable.compaction = Some(evidence.clone());
+    eprintln!(
+        "Homeboy compacted daemon job store: removed {} terminal jobs; retained {} terminal and {} active jobs",
+        evidence.removed_terminal_jobs, evidence.retained_terminal_jobs, evidence.active_jobs,
+    );
+    Some(evidence)
 }
 
 #[cfg(test)]
