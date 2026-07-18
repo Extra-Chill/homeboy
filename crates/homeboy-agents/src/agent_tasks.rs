@@ -258,14 +258,14 @@ pub mod lifecycle {
         record_promotion, record_remote_dispatch_failure, record_run_aggregate,
         record_runner_job_identity, resolve_promotion_patch_artifact_id, retry,
         run_id_for_aggregate_path, run_record_exists, run_record_exists_resolved, run_status,
-        status, submit_plan,
-        verified_controller_artifact_projection_path, AgentTaskArtifactRef, AgentTaskCookIndex,
-        AgentTaskCookIndexAttempt, AgentTaskEventEnvelope, AgentTaskPreDispatchFailure,
-        AgentTaskRecordHealthItem, AgentTaskRecordHealthReason, AgentTaskRecordHealthSummary,
-        AgentTaskRecordReconciliationItem, AgentTaskRecordReconciliationReport,
-        AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunLog,
-        AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunStatus,
-        AgentTaskRunTask, ControllerRuntimePruneResult, DetachedLabRunRecord, LabOffloadProxyPlan,
+        status, submit_plan, verified_controller_artifact_projection_path, AgentTaskArtifactRef,
+        AgentTaskCookIndex, AgentTaskCookIndexAttempt, AgentTaskEventEnvelope,
+        AgentTaskPreDispatchFailure, AgentTaskRecordHealthItem, AgentTaskRecordHealthReason,
+        AgentTaskRecordHealthSummary, AgentTaskRecordReconciliationItem,
+        AgentTaskRecordReconciliationReport, AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts,
+        AgentTaskRunLog, AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState,
+        AgentTaskRunStatus, AgentTaskRunTask, ControllerRuntimePruneResult, DetachedLabRunRecord,
+        LabOffloadProxyPlan,
     };
 }
 
