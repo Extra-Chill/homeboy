@@ -11,7 +11,7 @@ pub(super) use super::super::super::lab_workspaces::{
     workspace_mapping_entry, LAB_WORKSPACE_MAPPING_SCHEMA,
 };
 pub(super) use super::*;
-pub(super) use crate::verify_lab_workspace_from_env;
+pub(super) use crate::verify_lab_workspace;
 pub(super) use crate::{
     RunnerActiveJobSource, RunnerActiveJobState, RunnerAvailability, RunnerExecMode,
     RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
@@ -20,7 +20,7 @@ pub(super) use crate::{
 };
 pub(super) use homeboy_core::engine::command::{CaptureMetadata, CommandCaptureMetadata};
 pub(super) use homeboy_core::observation::{
-    LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADATA_ENV,
+    RunContext, LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADATA_ENV,
 };
 pub(super) use homeboy_core::plan::PlanKind;
 pub(super) use homeboy_core::runner_execution_envelope::{

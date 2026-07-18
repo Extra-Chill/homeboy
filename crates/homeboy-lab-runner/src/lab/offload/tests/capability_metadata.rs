@@ -202,7 +202,7 @@ fn lab_offload_env_contains_workspace_mapping_metadata() {
 }
 
 #[test]
-fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() {
+fn lab_offload_workspace_verification_metadata_compacts_for_process_env_hydration() {
     let source = tempfile::tempdir().expect("source workspace");
     let remote = tempfile::tempdir().expect("materialized workspace");
     std::fs::write(source.path().join("README.md"), "verified contents\n").expect("source file");
@@ -273,6 +273,14 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         },
     )
     .expect("build verifier metadata");
+    let verified = verify_lab_workspace(
+        &remote_path.display().to_string(),
+        remote.path(),
+        snapshot.clone(),
+        metadata.clone(),
+    )
+    .expect("full metadata verifies the workspace");
+    assert_eq!(verified.workspace_identity, "snapshot:verified");
 
     let env = build_lab_offload_env(&metadata);
     let prior_lab = std::env::var(LAB_OFFLOAD_METADATA_ENV).ok();
@@ -287,9 +295,21 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         serde_json::to_string(&snapshot).expect("source snapshot process env"),
     );
 
-    let verified = verify_lab_workspace_from_env(&remote_path.display().to_string(), remote.path())
-        .expect("verifier accepts hydrated Lab process metadata");
-    assert_eq!(verified.workspace_identity, "snapshot:verified");
+    let subprocess_context = RunContext::subprocess_compatibility_from_env();
+    let subprocess_metadata = subprocess_context
+        .provenance
+        .lab_offload
+        .expect("subprocess metadata parses");
+    assert_eq!(
+        subprocess_metadata["workspace_verification"]["content_manifest"]
+            ["entries_omitted_from_env"],
+        true
+    );
+    assert!(
+        subprocess_metadata["workspace_verification"]["content_manifest"]
+            .get("entries")
+            .is_none()
+    );
     assert_eq!(
         metadata["workspace_verification"]["identity"],
         "snapshot:verified"
@@ -344,8 +364,13 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
 
     std::fs::write(remote.path().join("README.md"), "changed contents\n")
         .expect("change remote file");
-    let error = verify_lab_workspace_from_env(&remote_path.display().to_string(), remote.path())
-        .expect_err("changed remote content must fail verification");
+    let error = verify_lab_workspace(
+        &remote_path.display().to_string(),
+        remote.path(),
+        snapshot,
+        metadata,
+    )
+    .expect_err("changed remote content must fail verification");
     assert!(error.contains("homeboy-workspace-content-v3+"));
     assert!(error.contains("expected sha256:"));
     assert!(error.contains("got sha256:"));

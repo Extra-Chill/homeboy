@@ -30,8 +30,30 @@ pub(super) fn forward_release_ci_env(env: &mut HashMap<String, String>) {
 pub(crate) fn build_lab_offload_env(lab_metadata: &serde_json::Value) -> HashMap<String, String> {
     HashMap::from([(
         LAB_OFFLOAD_METADATA_ENV.to_string(),
-        serde_json::to_string(lab_metadata).unwrap_or_default(),
+        serde_json::to_string(&subprocess_compatibility_lab_metadata(lab_metadata))
+            .unwrap_or_default(),
     )])
+}
+
+/// Keep complete metadata in the control plane while bounding the compatibility
+/// copy inherited by subprocesses. The manifest inventory remains available to
+/// workspace verification before this projection is created.
+fn subprocess_compatibility_lab_metadata(lab_metadata: &serde_json::Value) -> serde_json::Value {
+    let mut compatibility = lab_metadata.clone();
+    let Some(manifest) = compatibility
+        .pointer_mut("/workspace_verification/content_manifest")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return compatibility;
+    };
+
+    if manifest.remove("entries").is_some() {
+        manifest.insert(
+            "entries_omitted_from_env".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+    compatibility
 }
 
 /// Forward the preview metadata/public-url passthroughs plus release CI context
@@ -437,6 +459,74 @@ mod tests {
             diagnostics["forwarded_environment"][0]["value_preview"],
             "<redacted>"
         );
+    }
+
+    #[test]
+    fn lab_offload_env_compacts_workspace_manifest_entries() {
+        let entries = (0..12_000)
+            .map(|index| serde_json::json!({"path": format!("fixtures/{index:05}/{}.txt", "x".repeat(200)), "kind": "file"}))
+            .collect::<Vec<_>>();
+        let metadata = serde_json::json!({
+            "schema": "homeboy/lab-offload/v1",
+            "workspace_verification": {
+                "schema": "homeboy/lab-workspace-verification/v2",
+                "content_hash_algorithm": "homeboy-workspace-content-v3",
+                "permission_policy": "portable-content-only",
+                "content_hash": "sha256:full-workspace",
+                "content_manifest": {
+                    "entry_count": entries.len(),
+                    "digest": "sha256:manifest",
+                    "entries": entries,
+                },
+            },
+        });
+        let full = serde_json::to_string(&metadata).expect("full metadata serializes");
+        let env = build_lab_offload_env(&metadata);
+        let compact = env
+            .get(LAB_OFFLOAD_METADATA_ENV)
+            .expect("subprocess metadata is present");
+        let parsed: serde_json::Value = serde_json::from_str(compact).expect("metadata parses");
+
+        assert!(full.len() > 1_000_000);
+        assert!(compact.len() < 2_000);
+        assert_eq!(
+            metadata["workspace_verification"]["content_manifest"]["entries"]
+                .as_array()
+                .map(Vec::len),
+            Some(12_000)
+        );
+        assert_eq!(
+            parsed["workspace_verification"]["schema"],
+            "homeboy/lab-workspace-verification/v2"
+        );
+        assert_eq!(
+            parsed["workspace_verification"]["content_hash_algorithm"],
+            "homeboy-workspace-content-v3"
+        );
+        assert_eq!(
+            parsed["workspace_verification"]["permission_policy"],
+            "portable-content-only"
+        );
+        assert_eq!(
+            parsed["workspace_verification"]["content_hash"],
+            "sha256:full-workspace"
+        );
+        assert_eq!(
+            parsed["workspace_verification"]["content_manifest"]["entry_count"],
+            12_000
+        );
+        assert_eq!(
+            parsed["workspace_verification"]["content_manifest"]["digest"],
+            "sha256:manifest"
+        );
+        assert_eq!(
+            parsed["workspace_verification"]["content_manifest"]["entries_omitted_from_env"],
+            true
+        );
+        assert!(parsed["workspace_verification"]["content_manifest"]
+            .get("entries")
+            .is_none());
+        assert!(!compact.contains("fixtures/00000/"));
     }
 
     #[test]
