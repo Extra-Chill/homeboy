@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.291.3] - 2026-07-18
+
+### Changed
+- Make runner reconnect failure converge
+- Scope runs show mirror refresh
+- Render Lab commands safely (#8949)
+- Add file evidence I/O context
+- Bound Lab subprocess provenance metadata
+- type durable Lab handoff authority
+
+### Fixed
+- retry daemon health probe through transient startup on reconnect
+- keep every cook-batch fanout coordinator controller-owned
+- make a fresh, idle remote daemon recoverable by reconnect
+- classify dropped SSH materialization transport as retryable
+- Fix canonical Lab run label resolution
+
 ## [0.291.2] - 2026-07-18
 
 ### Changed
