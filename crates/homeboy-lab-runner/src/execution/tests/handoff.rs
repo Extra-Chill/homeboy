@@ -592,6 +592,7 @@ fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
         let (output, exit_code) = exec_via_daemon(
             &ssh_runner(),
             &daemon_url,
+            None,
             workspace.path().display().to_string(),
             None,
             vec![
@@ -1206,6 +1207,7 @@ fn daemon_exec_failure_without_error_field_is_actionable() {
     let err = exec_via_daemon(
         &ssh_runner(),
         &format!("http://{addr}"),
+        None,
         "/srv/homeboy/project".to_string(),
         None,
         vec!["homeboy".to_string(), "--version".to_string()],
@@ -1514,6 +1516,7 @@ fn daemon_exec_empty_envelope_over_http_is_actionable_not_null() {
     let err = exec_via_daemon(
         &ssh_runner(),
         &format!("http://{addr}"),
+        None,
         "/srv/homeboy/project".to_string(),
         None,
         vec!["homeboy".to_string(), "--version".to_string()],

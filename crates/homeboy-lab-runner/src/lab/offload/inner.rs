@@ -840,10 +840,11 @@ pub(crate) fn run_lab_offload_inner(
     mut plan: HomeboyPlan,
     mut messages: Vec<String>,
     mut overhead: LabOffloadOverhead,
-    runner_status: RunnerStatusReport,
+    _runner_status: RunnerStatusReport,
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner = load(runner_id)?;
+    let runner_status = status_for_admission(runner_id)?;
     if runner.kind != super::super::super::RunnerKind::Ssh {
         return Err(Error::validation_invalid_argument(
             "runner",

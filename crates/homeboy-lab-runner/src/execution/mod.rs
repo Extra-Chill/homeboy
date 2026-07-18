@@ -28,9 +28,9 @@ use homeboy_core::source_snapshot::SourceSnapshot;
 
 use super::resource_metrics::RunnerResourceMetrics;
 use super::{
-    select_runner_transport, status, LabRunnerHandoff, Runner, RunnerActiveJobSource,
-    RunnerActiveJobState, RunnerCapabilityPreflight, RunnerJob, RunnerKind,
-    RunnerMutationArtifacts, RunnerResult, RunnerSession, RunnerStatusReport, RunnerTransport,
+    select_runner_transport, LabRunnerHandoff, Runner, RunnerActiveJobSource, RunnerActiveJobState,
+    RunnerCapabilityPreflight, RunnerJob, RunnerKind, RunnerMutationArtifacts, RunnerResult,
+    RunnerSession, RunnerStatusReport, RunnerTransport, RunnerTunnelMode,
 };
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
@@ -756,6 +756,13 @@ pub(crate) fn exec_with_status_snapshot(
     );
     let requested_setting_keys = requested_setting_keys_for_command(&options.command);
     let accepted_extension_settings = options.accepted_extension_settings.clone();
+    // Extension parity uses daemon-backed runner commands. Recover the direct
+    // session before that preparation so admission cannot fail before `/exec`.
+    let connected = if should_force_diagnostic_ssh(&runner, &options) {
+        None
+    } else {
+        Some(execution_status(runner_id, status_snapshot)?)
+    };
 
     let extension_parity_plan = plan_extension_parity(
         runner_id,
@@ -810,11 +817,8 @@ pub(crate) fn exec_with_status_snapshot(
         );
     }
 
-    let connected = execution_status(runner_id, status_snapshot)?;
-    if connected.connected
-        && connected.stale_daemon.is_some()
-        && !allows_idle_stale_daemon_refresh(&options, &connected)
-    {
+    let connected = connected.expect("diagnostic SSH returned before daemon admission");
+    if refuses_stale_daemon_execution(&options, &connected) {
         return Err(Error::validation_invalid_argument(
             "runner",
             format!(
@@ -829,9 +833,11 @@ pub(crate) fn exec_with_status_snapshot(
     let result = match select_runner_transport(&runner, Some(&connected), false) {
         RunnerTransport::DirectDaemon(handle) => {
             run_capability_preflight(&runner)?;
+            let endpoint = handle.endpoint_url().to_string();
             exec_via_daemon(
                 &runner,
-                handle.endpoint_url(),
+                &endpoint,
+                Some(handle.session),
                 cwd,
                 options.project_id,
                 options.command,
@@ -905,7 +911,21 @@ fn execution_status(
     runner_id: &str,
     status_snapshot: Option<RunnerStatusReport>,
 ) -> Result<RunnerStatusReport> {
-    status_snapshot.map(Ok).unwrap_or_else(|| status(runner_id))
+    match status_snapshot {
+        Some(status) if status.connected => Ok(status),
+        Some(status) => {
+            if status
+                .session
+                .as_ref()
+                .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
+            {
+                crate::connection::status_for_admission(runner_id)
+            } else {
+                Ok(status)
+            }
+        }
+        None => crate::connection::status_for_admission(runner_id),
+    }
 }
 
 fn allows_idle_stale_daemon_refresh(
@@ -925,6 +945,21 @@ fn allows_idle_stale_daemon_refresh(
                 && status.active_job_count == 0
                 && status.active_jobs.is_empty()
                 && status.active_job_error.is_none()))
+}
+
+fn refuses_stale_daemon_execution(
+    options: &RunnerExecOptions,
+    status: &RunnerStatusReport,
+) -> bool {
+    status.connected
+        && status.stale_daemon.is_some()
+        // The live daemon probe is authoritative over a controller-scoped
+        // session projection. Missing or stale evidence remains fail-closed.
+        && !status
+            .daemon_freshness
+            .as_ref()
+            .is_some_and(|freshness| freshness.fresh)
+        && !allows_idle_stale_daemon_refresh(options, status)
 }
 
 fn apply_explicit_runner_exec_run_id_env(
