@@ -81,6 +81,7 @@ echo "Dep fixture:  $DEP_FIXTURE_DIR"
 echo ""
 
 source_hash_before=$(tar -C "$(dirname "$HOST_FIXTURE_DIR")" -cf - "$(basename "$HOST_FIXTURE_DIR")" | shasum -a 256)
+set +e
 runner_output=$(HOMEBOY_COMPONENT_ID=test-db-activation-host \
     HOMEBOY_COMPONENT_PATH="$HOST_FIXTURE_DIR" \
     HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
@@ -90,7 +91,14 @@ runner_output=$(HOMEBOY_COMPONENT_ID=test-db-activation-host \
     HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
     HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="$ARTIFACTS_DIR" \
     bash "${SCRIPT_DIR}/test-runner.sh" 2>&1)
+runner_status=$?
+set -e
 printf '%s\n' "$runner_output"
+
+if [ "$runner_status" -ne 0 ]; then
+    echo "ERROR: WP Codebox PHPUnit runner exited with status ${runner_status}" >&2
+    exit "$runner_status"
+fi
 
 if [[ "$runner_output" != *"WP Codebox test run complete."* ]]; then
     echo "ERROR: expected WP Codebox PHPUnit runner success classification" >&2
