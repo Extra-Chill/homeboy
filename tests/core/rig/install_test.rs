@@ -385,9 +385,9 @@ mod install_flows {
         assert!(installed.exists());
         #[cfg(unix)]
         assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
-        assert_eq!(homeboy_core::stack::list().expect("stack list").len(), 1);
+        assert_eq!(homeboy_stack::stack::list().expect("stack list").len(), 1);
         assert_eq!(
-            homeboy_core::stack::load("studio-combined")
+            homeboy_stack::stack::load("studio-combined")
                 .expect("load stack")
                 .component,
             "studio"

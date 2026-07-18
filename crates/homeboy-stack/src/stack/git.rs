@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use crate::error::Result;
-use crate::git;
+use homeboy_core::error::Result;
+use homeboy_core::git;
 
 pub(crate) fn run_git(path: &str, args: &[&str]) -> Result<std::process::Output> {
     git::run_git_output(Path::new(path), args, &format!("git {}", args.join(" ")))

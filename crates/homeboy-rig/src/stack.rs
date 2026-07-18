@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use super::spec::RigSpec;
 use homeboy_core::error::{ErrorCode, Result};
 use homeboy_core::plan::HomeboyPlan;
-use homeboy_core::stack::{self, StackSpec, SyncOutput};
+use homeboy_stack::stack::{self, StackSpec, SyncOutput};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RigStackPlanEntry {

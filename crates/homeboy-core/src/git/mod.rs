@@ -172,7 +172,7 @@ pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::error::R
 ///    `homeboy.json` at CWD or git root. This is what makes
 ///    `homeboy git status` (and friends) work without arguments when
 ///    run from inside a checkout.
-pub(crate) fn resolve_target(
+pub fn resolve_target(
     component_id: Option<&str>,
     path_override: Option<&str>,
 ) -> crate::error::Result<(String, String)> {

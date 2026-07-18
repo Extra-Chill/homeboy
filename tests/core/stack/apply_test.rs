@@ -11,7 +11,7 @@
 
 use crate::stack::apply::{checkout_force, cherry_pick, rebase, url_matches, CherryPickResult};
 use crate::stack::{save, GitRef, StackSpec};
-use crate::test_support::with_isolated_home;
+use homeboy_core::test_support::with_isolated_home;
 use std::fs;
 use std::process::Command;
 

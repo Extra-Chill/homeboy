@@ -6,7 +6,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::core::stack::{
+use homeboy_stack::stack::{
     self, ApplyOutput, DiffOutput, GitRef, InspectOptions, InspectOutput, PushOutput, RebaseOutput,
     StackPrEntry, StackSpec, StatusOutput, SyncOutput,
 };

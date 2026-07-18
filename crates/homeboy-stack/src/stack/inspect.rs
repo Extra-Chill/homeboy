@@ -18,8 +18,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::error::{Error, Result};
-use crate::git::{self, resolve_target};
+use homeboy_core::error::{Error, Result};
+use homeboy_core::git::{self, resolve_target};
 
 /// Per-commit detail row for the inspect output.
 #[derive(Debug, Clone, Serialize)]

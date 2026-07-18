@@ -15,7 +15,7 @@ use crate::observation::{
     run_owner_pid, running_status_note, FindingListFilter, ObservationStore, RunListFilter,
     RunRecord, RunStatus,
 };
-use crate::{activity, component, git, paths, stack};
+use crate::{activity, component, git, paths};
 
 const OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES: i64 = 30;
 
@@ -207,17 +207,16 @@ where
         }
         HttpEndpoint::Stacks => json!({
             "command": "api.stacks.list",
-            "stacks": stack::list()?,
+            "stacks": crate::stack_provider::stack_list_json()?,
         }),
         HttpEndpoint::Stack { id } => json!({
             "command": "api.stacks.show",
-            "stack": stack::load(id)?,
+            "stack": crate::stack_provider::stack_show_json(id)?,
         }),
         HttpEndpoint::StackStatus { id } => {
-            let spec = stack::load(id)?;
             json!({
                 "command": "api.stacks.status",
-                "report": stack::status(&spec)?,
+                "report": crate::stack_provider::stack_status_json(id)?,
             })
         }
         HttpEndpoint::Runs => json!({

@@ -826,6 +826,7 @@ dependencies = [
  "homeboy-refactor",
  "homeboy-refactor-contract",
  "homeboy-rig",
+ "homeboy-stack",
  "homeboy-triage",
  "homeboy-tunnel",
  "homeboy-upgrade",
@@ -1128,6 +1129,7 @@ dependencies = [
  "homeboy-lifecycle-contract",
  "homeboy-product-identity",
  "homeboy-rig-contract",
+ "homeboy-stack",
  "libc",
  "serde",
  "serde_json",
@@ -1143,6 +1145,17 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "homeboy-stack"
+version = "0.1.0"
+dependencies = [
+ "homeboy-core",
+ "homeboy-error",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

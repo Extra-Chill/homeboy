@@ -171,6 +171,7 @@ pub mod runner_execution_envelope;
 pub mod runtime_package;
 pub mod runtime_promotion;
 pub mod scope;
+pub mod stack_provider;
 pub use homeboy_lab_contract::secret_env_plan;
 
 /// Flattened re-export of the lab-contract crate's Lab types (workload, handoff,
@@ -186,7 +187,6 @@ pub mod lab_contract {
 pub mod server;
 pub mod setup;
 pub mod source_snapshot;
-pub mod stack;
 pub mod stream_capture;
 pub mod structured_sidecar;
 pub mod tag_gap;

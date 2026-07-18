@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::spec::{ComponentSpec, RigSpec};
 use homeboy_core::error::Error;
 use homeboy_core::plan::{HomeboyPlan, PlanKind};
-use homeboy_core::stack::{GitRef, StackPrEntry, StackSpec, SyncOutput, SyncPreview};
+use homeboy_stack::stack::{GitRef, StackPrEntry, StackSpec, SyncOutput, SyncPreview};
 
 use super::{plan_stack_sync, run_component_sync, run_sync_with, validate_component_stack_path};
 
