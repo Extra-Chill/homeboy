@@ -535,11 +535,9 @@ fn repo_artifacts_category(apply: bool) -> homeboy::core::Result<CleanupInventor
         .map(|component| PathBuf::from(component.local_path))
         .collect();
     let include_source_checkout = configured_roots.is_empty();
-    let mut output = cleanup_repo_artifact_roots(repo_artifact_roots(
-        configured_roots,
-        include_source_checkout,
-        apply,
-    ));
+    let collected_roots = repo_artifact_roots(configured_roots, include_source_checkout, apply);
+    let mut output = cleanup_repo_artifact_roots(collected_roots.roots);
+    output.diagnostics.extend(collected_roots.diagnostics);
     if !include_source_checkout
         && output
             .diagnostics
@@ -547,7 +545,7 @@ fn repo_artifacts_category(apply: bool) -> homeboy::core::Result<CleanupInventor
             .all(|diagnostic| !diagnostic.success)
     {
         let source_output =
-            cleanup_repo_artifact_roots(repo_artifact_roots(Vec::new(), true, apply));
+            cleanup_repo_artifact_roots(repo_artifact_roots(Vec::new(), true, apply).roots);
         output.candidate_count += source_output.candidate_count;
         output.applied_count += source_output.applied_count;
         output.skipped_count += source_output.skipped_count;
@@ -597,6 +595,11 @@ struct RepoArtifactRootsCleanup {
     reclaimed_bytes: u64,
 }
 
+struct RepoArtifactRootCollection {
+    roots: Vec<(&'static str, ArtifactCleanupOptions)>,
+    diagnostics: Vec<RepoArtifactRootDiagnostic>,
+}
+
 fn cleanup_repo_artifact_roots(
     roots: Vec<(&'static str, ArtifactCleanupOptions)>,
 ) -> RepoArtifactRootsCleanup {
@@ -640,15 +643,28 @@ fn repo_artifact_roots(
     configured_roots: Vec<PathBuf>,
     include_source_checkout: bool,
     apply: bool,
-) -> Vec<(&'static str, ArtifactCleanupOptions)> {
-    let mut roots = Vec::new();
+) -> RepoArtifactRootCollection {
+    let mut collection = RepoArtifactRootCollection {
+        roots: Vec::new(),
+        diagnostics: Vec::new(),
+    };
     let mut seen = HashSet::new();
     for path in configured_roots {
+        if !path.is_absolute() {
+            collection.diagnostics.push(RepoArtifactRootDiagnostic {
+                scope: "configured_component",
+                path: Some(path.to_string_lossy().to_string()),
+                success: false,
+                output: None,
+                error: Some("configured component local_path must be absolute".to_string()),
+            });
+            continue;
+        }
         let root = homeboy::core::git::repo_root(&path)
             .and_then(|root| std::fs::canonicalize(root).ok())
             .unwrap_or(path);
         if seen.insert(root.clone()) {
-            roots.push((
+            collection.roots.push((
                 "configured_component",
                 ArtifactCleanupOptions {
                     path: Some(root),
@@ -663,7 +679,7 @@ fn repo_artifact_roots(
         }
     }
     if include_source_checkout {
-        roots.push((
+        collection.roots.push((
             "homeboy_source_checkout",
             ArtifactCleanupOptions {
                 path: None,
@@ -676,7 +692,7 @@ fn repo_artifact_roots(
             },
         ));
     }
-    roots
+    collection
 }
 
 fn category_from_output<T: Serialize>(
@@ -1235,14 +1251,15 @@ mod tests {
         ];
         let roots = repo_artifact_roots(configured.clone(), true, false);
 
-        assert_eq!(roots.len(), 3);
-        assert_eq!(roots[0].0, "configured_component");
-        assert_eq!(roots[0].1.path.as_ref(), Some(&configured[0]));
-        assert_eq!(roots[1].0, "configured_component");
-        assert_eq!(roots[1].1.path.as_ref(), Some(&configured[1]));
-        assert_eq!(roots[2].0, "homeboy_source_checkout");
-        assert!(roots[2].1.self_artifacts);
+        assert_eq!(roots.roots.len(), 3);
+        assert_eq!(roots.roots[0].0, "configured_component");
+        assert_eq!(roots.roots[0].1.path.as_ref(), Some(&configured[0]));
+        assert_eq!(roots.roots[1].0, "configured_component");
+        assert_eq!(roots.roots[1].1.path.as_ref(), Some(&configured[1]));
+        assert_eq!(roots.roots[2].0, "homeboy_source_checkout");
+        assert!(roots.roots[2].1.self_artifacts);
         assert!(roots
+            .roots
             .iter()
             .all(|(_, options)| options.path.is_some() || options.self_artifacts));
     }
@@ -1252,10 +1269,26 @@ mod tests {
         let root = PathBuf::from("/configured/root");
         let roots = repo_artifact_roots(vec![root.clone(), root], false, true);
 
-        assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0].0, "configured_component");
-        assert_eq!(roots[0].1.path, Some(PathBuf::from("/configured/root")));
-        assert!(roots[0].1.apply);
+        assert_eq!(roots.roots.len(), 1);
+        assert_eq!(roots.roots[0].0, "configured_component");
+        assert_eq!(
+            roots.roots[0].1.path,
+            Some(PathBuf::from("/configured/root"))
+        );
+        assert!(roots.roots[0].1.apply);
+    }
+
+    #[test]
+    fn aggregate_repo_artifact_roots_reject_relative_persisted_paths() {
+        let roots = repo_artifact_roots(vec![PathBuf::from(".")], false, false);
+
+        assert!(roots.roots.is_empty());
+        assert_eq!(roots.diagnostics.len(), 1);
+        assert_eq!(roots.diagnostics[0].path.as_deref(), Some("."));
+        assert_eq!(
+            roots.diagnostics[0].error.as_deref(),
+            Some("configured component local_path must be absolute")
+        );
     }
 
     #[test]
@@ -1275,9 +1308,9 @@ mod tests {
             false,
         );
 
-        assert_eq!(roots.len(), 1);
+        assert_eq!(roots.roots.len(), 1);
         assert_eq!(
-            roots[0].1.path.as_deref(),
+            roots.roots[0].1.path.as_deref(),
             Some(
                 repository
                     .path()
@@ -1308,7 +1341,7 @@ mod tests {
             false,
             false,
         );
-        let output = cleanup_repo_artifact_roots(roots);
+        let output = cleanup_repo_artifact_roots(roots.roots);
 
         assert_eq!(output.diagnostics.len(), 2);
         assert!(!output.diagnostics[0].success);
