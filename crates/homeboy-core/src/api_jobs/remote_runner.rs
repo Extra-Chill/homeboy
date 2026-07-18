@@ -26,40 +26,7 @@ const MAX_COMMAND_ASSET_COUNT: usize = 16;
 const MAX_COMMAND_ASSET_BASE64_BYTES: usize = 1_400_000;
 const MAX_COMMAND_ASSETS_BASE64_BYTES: usize = 4_200_000;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct JobArtifactMetadata {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mime: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_base64: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerJobLifecycleMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub durable_run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_child_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_cell_count: Option<u64>,
-}
+pub use homeboy_api_jobs_contract::metadata::{JobArtifactMetadata, RunnerJobLifecycleMetadata};
 
 /// Caller-owned identity required to cancel one daemon-local runner projection.
 /// This is deliberately distinct from the operator-facing job cancellation API.

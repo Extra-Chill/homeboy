@@ -790,6 +790,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-api-jobs-contract"
+version = "0.1.0"
+dependencies = [
+ "homeboy-lab-contract",
+ "homeboy-source-snapshot-contract",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "homeboy-artifact-ref-contract"
 version = "0.1.0"
 dependencies = [
@@ -928,6 +939,7 @@ dependencies = [
  "glob-match",
  "heck",
  "homeboy-agents-contract",
+ "homeboy-api-jobs-contract",
  "homeboy-artifact-ref-contract",
  "homeboy-audit-contract",
  "homeboy-cli-contract",
