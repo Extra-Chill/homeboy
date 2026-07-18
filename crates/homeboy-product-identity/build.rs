@@ -96,7 +96,8 @@ fn synthetic_snapshot_provenance(root: &Path) -> Option<SyntheticSnapshotProvena
     {
         return None;
     }
-    let message = git_output_raw(root, &["show", "-s", "--format=%B", "HEAD"])?;
+    let commit_object = git_output_raw(root, &["cat-file", "commit", "HEAD"])?;
+    let (_, message) = commit_object.split_once("\n\n")?;
     let message = message.strip_suffix('\n')?;
     if message.ends_with('\n') {
         return None;
