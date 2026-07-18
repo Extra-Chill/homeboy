@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
-use crate::deploy::{self, DeployConfig, ReleaseStateStatus};
+use crate::deploy::{self, DeployConfig};
 use crate::project;
 use crate::release::version;
 use crate::server::health::{self, ServerHealth};
+use homeboy_release_contract::ReleaseStateStatus;
 use serde::Serialize;
 
 // ============================================================================
