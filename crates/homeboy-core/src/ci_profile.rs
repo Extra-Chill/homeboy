@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 use crate::extension::{
     self, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec, ExtensionManifest,
 };
+pub use homeboy_extension_contract::CiContext;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CiInventory {
@@ -86,17 +87,6 @@ pub struct CiResolvedJob {
     pub extension_id: String,
     pub id: String,
     pub spec: CiJobSpec,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct CiContext {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-    pub job_id: String,
-    #[serde(flatten)]
-    pub mapping: CiJobMapping,
-    #[serde(flatten)]
-    pub local_context: CiLocalContext,
 }
 
 pub fn list_for_extension(source_path: &Path, extension_id: &str) -> Result<CiInventory> {

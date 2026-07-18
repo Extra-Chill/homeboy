@@ -59,6 +59,8 @@ pub use trace_parsing::{
     TraceToolchainProvenance,
 };
 pub mod ci_config;
+pub mod ci_context;
+pub use ci_context::CiContext;
 pub mod core_compat;
 pub mod exec_context;
 pub mod extension_contract_producer;
