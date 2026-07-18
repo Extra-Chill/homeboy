@@ -964,6 +964,7 @@ dependencies = [
  "homeboy-finding",
  "homeboy-lifecycle-contract",
  "homeboy-product-identity",
+ "homeboy-refactor-contract",
  "semver",
  "serde",
  "serde_json",

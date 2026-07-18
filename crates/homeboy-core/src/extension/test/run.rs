@@ -17,6 +17,7 @@ use crate::validation_progress::{write_command_artifact, ValidationProgressRecor
 use homeboy_engine_primitives::baseline::BaselineFlags;
 use homeboy_engine_primitives::local_files;
 use homeboy_engine_primitives::output_parse::ParseSpec;
+pub use homeboy_extension_contract::test_results::TestRunWorkflowResult;
 pub use homeboy_extension_contract::test_workflow::RawTestOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use serde::Serialize;
@@ -40,30 +41,6 @@ pub struct TestRunWorkflowArgs {
     pub restore_checkout: bool,
     pub ci_env: Vec<(String, String)>,
     pub passthrough_args: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TestRunWorkflowResult {
-    pub status: String,
-    pub component: String,
-    pub exit_code: i32,
-    pub test_counts: Option<TestCounts>,
-    pub findings: Option<Vec<HomeboyFinding>>,
-    #[serde(skip)]
-    pub failure_analysis_input: Option<TestAnalysisInput>,
-    pub coverage: Option<CoverageOutput>,
-    pub baseline_comparison: Option<TestBaselineComparison>,
-    pub analysis: Option<TestAnalysis>,
-    pub autofix: Option<AppliedRefactor>,
-    pub hints: Option<Vec<String>>,
-    pub test_scope: Option<TestScopeOutput>,
-    pub summary: Option<TestSummaryOutput>,
-    /// Tail of the runner's stdout/stderr, surfaced when tests fail so users
-    /// can see runner output (bootstrap errors, stack traces) without
-    /// having to re-run with a different flag. (#1143)
-    pub raw_output: Option<RawTestOutput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
 }
 
 const RAW_OUTPUT_TAIL_LINES: usize = 80;
