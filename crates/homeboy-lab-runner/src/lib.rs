@@ -406,6 +406,10 @@ pub fn load(id: &str) -> Result<Runner> {
         return load_server_runner(&runner_id);
     }
 
+    if let Some(runner) = execution_context_runner(id) {
+        return Ok(runner);
+    }
+
     Err(Error::runner_not_found(
         id.to_string(),
         runner_suggestions(id),
@@ -491,6 +495,18 @@ fn builtin_local_runner() -> Runner {
     }
 }
 
+/// Materialize the current Lab execution host as a local runner only when a
+/// nested command asks for the runner that selected this process. The configured
+/// registry always wins, so controller-side and ordinary local lookup retain
+/// their existing behavior.
+fn execution_context_runner(id: &str) -> Option<Runner> {
+    let runner_id = homeboy_core::resource_policy_context::lab_execution_runner_id()?;
+    (runner_id == id).then(|| Runner {
+        id: runner_id,
+        ..builtin_local_runner()
+    })
+}
+
 pub fn effective_env(id: &str) -> Result<HashMap<String, String>> {
     let runner = load(id)?;
     Ok(RunnerSpec::from_runner(&runner).effective_env())
@@ -510,6 +526,12 @@ pub fn list() -> Result<Vec<Runner>> {
             .filter(|server| server.runner.is_some())
             .map(|server| runner_from_server(&server.id, server.runner.expect("checked above"))),
     );
+    if let Some(runner) = homeboy_core::resource_policy_context::lab_execution_runner_id()
+        .and_then(|runner_id| execution_context_runner(&runner_id))
+        .filter(|runner| !runners.iter().any(|configured| configured.id == runner.id))
+    {
+        runners.push(runner);
+    }
     runners.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(runners)
 }
@@ -1080,6 +1102,27 @@ mod tests {
             assert_eq!(runner.kind, RunnerKind::Local);
             assert_eq!(runner.server_id, None);
             assert!(runner.workspace_root.is_some());
+        });
+    }
+
+    #[test]
+    fn runner_lookup_and_list_resolve_current_lab_execution_context() {
+        test_support::with_isolated_home(|_| {
+            let execution_runner = homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV;
+            let previous = std::env::var_os(execution_runner);
+            std::env::set_var(execution_runner, "homeboy-lab");
+
+            let runner = load("homeboy-lab").expect("nested lookup resolves current runner");
+            let listed = list().expect("nested runner list resolves current runner");
+
+            match previous {
+                Some(value) => std::env::set_var(execution_runner, value),
+                None => std::env::remove_var(execution_runner),
+            }
+
+            assert_eq!(runner.id, "homeboy-lab");
+            assert_eq!(runner.kind, RunnerKind::Local);
+            assert!(listed.iter().any(|runner| runner.id == "homeboy-lab"));
         });
     }
 

@@ -33,7 +33,7 @@ pub fn route_after_parse(
         crate::commands::utils::resource_policy::is_managed_runner_placement_context();
     if lab_routing::is_lab_offload_subprocess()
         || managed_runner_placement
-        || runner_resident_agent_task_run_plan(cli)
+        || runner_resident_execution(cli)
     {
         return Ok(None);
     }
@@ -265,16 +265,19 @@ pub fn route_after_parse(
     }
 }
 
-/// A run plan handed to Lab already has a materialized local workspace. Its
-/// execution provenance must not cause a second controller daemon selection.
-fn runner_resident_agent_task_run_plan(cli: &Cli) -> bool {
-    homeboy::core::resource_policy_context::has_lab_execution_provenance()
-        && matches!(
+/// A runner-resident plan, or a nested command targeting the runner that
+/// selected this process, executes in place. The execution-provenance marker
+/// survives the parent handoff, while controller transport markers are
+/// intentionally consumed before provider code runs.
+fn runner_resident_execution(cli: &Cli) -> bool {
+    homeboy::core::resource_policy_context::lab_execution_runner_id().is_some_and(|runner_id| {
+        matches!(
             &cli.command,
             Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
                 command: crate::commands::agent_task::AgentTaskCommand::RunPlan(_),
             })
-        )
+        ) || cli.runner.as_deref() == Some(runner_id.as_str())
+    })
 }
 
 /// Fanout keeps durable batch state, worktree ownership, artifact ingestion,
