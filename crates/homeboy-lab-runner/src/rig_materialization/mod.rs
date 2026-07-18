@@ -16,7 +16,7 @@ use super::{
 mod rig_source_install;
 use rig_source_install::{
     remote_package_path, remove_runner_installed_rig_source, rig_install_capability_preflight,
-    validate_installed_rig_source,
+    rig_registry_env, runner_rig_install_command, validate_installed_rig_source,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +99,7 @@ pub(super) fn sync_lab_offload_rigs(
     runner_id: &str,
     command_path: &str,
     remote_cwd: &str,
+    registry_root: &str,
     args: &[String],
     primary: LabOffloadPrimaryRigSource<'_>,
 ) -> Result<Vec<LabOffloadRigSync>> {
@@ -229,17 +230,15 @@ pub(super) fn sync_lab_offload_rigs(
                 )
             };
 
-        let removed_source =
-            remove_runner_installed_rig_source(runner_id, command_path, remote_cwd, rig_id)?;
+        let removed_source = remove_runner_installed_rig_source(
+            runner_id,
+            command_path,
+            remote_cwd,
+            registry_root,
+            rig_id,
+        )?;
 
-        let install_command = vec![
-            command_path.to_string(),
-            "rig".to_string(),
-            "install".to_string(),
-            source.clone(),
-            "--id".to_string(),
-            rig_id.clone(),
-        ];
+        let install_command = runner_rig_install_command(command_path, &source, rig_id);
 
         // Path-translation preflight: the rig install source has already been
         // resolved to a runner-side remote path (primary snapshot remote path or
@@ -264,6 +263,7 @@ pub(super) fn sync_lab_offload_rigs(
             // runner and fails early otherwise (#5285).
             RunnerExecOptions::command(install_command)
                 .with_cwd(remote_cwd)
+                .with_env(rig_registry_env(registry_root))
                 .with_capability_preflight(rig_install_capability_preflight()),
         )?;
 
