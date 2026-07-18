@@ -85,8 +85,11 @@ pub(super) fn exec_diagnostic_ssh(
             client.execute_with_secret_env_and_timeout(&command_line, &secret_env, timeout)
         })
         .unwrap_or_else(|| client.execute_with_secret_env(&command_line, &secret_env));
-    let source_snapshot =
-        SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref());
+    let source_snapshot = homeboy_core::source_snapshot::existing_remote(
+        &runner.id,
+        &cwd,
+        runner.workspace_root.as_deref(),
+    );
     Ok(exec_output(
         runner,
         RunnerExecMode::DiagnosticSsh,
@@ -270,15 +273,17 @@ pub(crate) fn prepare_runner_process(
     let source_snapshot = request
         .source_snapshot
         .unwrap_or_else(|| match runner.kind {
-            RunnerKind::Local => SourceSnapshot::collect_local(
+            RunnerKind::Local => homeboy_core::source_snapshot::collect_local(
                 &runner.id,
                 Path::new(&cwd),
                 Some(&cwd),
                 PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
             ),
-            RunnerKind::Ssh => {
-                SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref())
-            }
+            RunnerKind::Ssh => homeboy_core::source_snapshot::existing_remote(
+                &runner.id,
+                &cwd,
+                runner.workspace_root.as_deref(),
+            ),
         });
     validate_required_paths(
         &runner,
@@ -391,7 +396,7 @@ pub(crate) fn prepare_daemon_local_process(
         runner.settings.homeboy_path.as_deref(),
     );
     let source_snapshot = request.source_snapshot.unwrap_or_else(|| {
-        SourceSnapshot::collect_local(
+        homeboy_core::source_snapshot::collect_local(
             &runner.id,
             Path::new(&cwd),
             Some(&cwd),

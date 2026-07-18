@@ -1894,7 +1894,7 @@ fn exec_capture_patch_records_remote_delta_artifact() {
     let _home = create_lab_local_runner();
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::write(workspace.path().join("file.txt"), "before\n").expect("seed file");
-    let source_snapshot = SourceSnapshot::existing_remote(
+    let source_snapshot = crate::source_snapshot::existing_remote(
         "lab-local",
         &workspace.path().display().to_string(),
         Some(workspace.path().display().to_string().as_str()),

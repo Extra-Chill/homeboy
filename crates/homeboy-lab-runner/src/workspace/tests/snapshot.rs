@@ -176,7 +176,7 @@ fn git_backed_snapshot_reports_checkout_provenance_for_committed_harvest() {
                 .expect("materialized SHA"),
             source_revision
         );
-        let mut snapshot = SourceSnapshot::collect_local(
+        let mut snapshot = homeboy_core::source_snapshot::collect_local(
             "lab-snapshot-harvest",
             source.path(),
             Some(&synced.remote_path),

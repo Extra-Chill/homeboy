@@ -137,7 +137,7 @@ mod tests {
         std::fs::write(repo.path().join("file.txt"), "before\n").expect("seed file");
         git(repo.path(), &["add", "."]);
         git(repo.path(), &["commit", "-m", "base"]);
-        let snapshot = SourceSnapshot::collect_local(
+        let snapshot = homeboy_core::source_snapshot::collect_local(
             "lab",
             repo.path(),
             Some("/srv/homeboy/_lab_workspaces/repo-abc"),
@@ -204,7 +204,7 @@ mod tests {
             .expect("seed manifest");
         git(repo.path(), &["add", "."]);
         git(repo.path(), &["commit", "-m", "base"]);
-        let snapshot = SourceSnapshot::collect_local(
+        let snapshot = homeboy_core::source_snapshot::collect_local(
             "lab",
             repo.path(),
             Some("/srv/homeboy/_lab_workspaces/repo-abc"),
@@ -279,8 +279,12 @@ mod tests {
             .expect("seed side effect");
         git(repo.path(), &["add", "."]);
         git(repo.path(), &["commit", "-m", "base"]);
-        let snapshot =
-            SourceSnapshot::collect_local("lab", repo.path(), Some("/runner/workspace"), "lab");
+        let snapshot = homeboy_core::source_snapshot::collect_local(
+            "lab",
+            repo.path(),
+            Some("/runner/workspace"),
+            "lab",
+        );
         let artifact_dir = tempfile::tempdir().expect("artifact tempdir");
         let patch_path = artifact_dir.path().join("patch.diff");
         std::fs::write(

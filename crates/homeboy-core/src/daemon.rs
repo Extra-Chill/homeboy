@@ -2291,7 +2291,7 @@ mod tests {
                 request.command,
                 request.env,
                 request.secret_env_names,
-                SourceSnapshot::existing_remote(&request.runner_id, &cwd, None),
+                crate::source_snapshot::existing_remote(&request.runner_id, &cwd, None),
                 request.require_paths,
                 Some(1),
                 Arc::new(()),

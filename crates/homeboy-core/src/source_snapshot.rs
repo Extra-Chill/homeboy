@@ -1,208 +1,136 @@
+//! Source-snapshot collection behavior.
+//!
+//! The `SourceSnapshot` / `SourceSnapshotPolicy` data types live in the leaf
+//! `homeboy-source-snapshot-contract` crate. The collection behavior below
+//! (git status/sha hashing, component/extension/gitignore-driven exclude
+//! discovery, env-driven policy) reaches into git, the component inventory, the
+//! extension store, and the filesystem, so it stays in core as free functions.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub use homeboy_source_snapshot_contract::source_snapshot::{
+    default_sync_excludes, SourceSnapshot, SourceSnapshotPolicy,
+};
+
+use crate::git;
 use crate::runner_execution_envelope::PATH_MATERIALIZATION_MODE_EXISTING_REMOTE;
 #[cfg(test)]
 use crate::runner_execution_envelope::PATH_MATERIALIZATION_MODE_SNAPSHOT;
 
-use crate::git;
-
 const SOURCE_SYNC_EXCLUDES_ENV: &str = "HOMEBOY_SOURCE_SYNC_EXCLUDES";
 
-const DEFAULT_SYNC_EXCLUDES: &[&str] = &[
-    ".git/",
-    ".homeboy-build/",
-    ".homeboy-bin/",
-    ".homeboy/",
-    ".DS_Store",
-    "._*",
-    "**/._*",
-    ".env",
-    ".env.*",
-];
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SourceSnapshotPolicy {
-    pub sync_excludes: Vec<String>,
+/// Build a policy from the base defaults plus env-configured excludes.
+pub fn policy_from_env() -> SourceSnapshotPolicy {
+    let mut policy = SourceSnapshotPolicy::default();
+    policy.extend_sync_excludes(split_env_list(SOURCE_SYNC_EXCLUDES_ENV));
+    policy
 }
 
-impl SourceSnapshotPolicy {
-    pub fn from_env() -> Self {
-        let mut policy = Self::default();
-        policy.extend_sync_excludes(split_env_list(SOURCE_SYNC_EXCLUDES_ENV));
-        policy
-    }
+/// Build a policy for a specific path: env excludes plus component-extension and
+/// gitignore-derived excludes discovered from that path.
+pub fn policy_for_path(path: &Path) -> SourceSnapshotPolicy {
+    let mut policy = policy_from_env();
+    policy.extend_sync_excludes(component_extension_sync_excludes(path));
+    policy.extend_sync_excludes(gitignore_sync_excludes(path));
+    policy
+}
 
-    pub fn for_path(path: &Path) -> Self {
-        let mut policy = Self::from_env();
-        policy.extend_sync_excludes(component_extension_sync_excludes(path));
-        policy.extend_sync_excludes(gitignore_sync_excludes(path));
-        policy
-    }
+pub fn collect_local(
+    runner_id: &str,
+    path: &Path,
+    remote_path: Option<&str>,
+    sync_mode: &str,
+) -> SourceSnapshot {
+    let policy = policy_for_path(path);
+    collect_local_with_policy(runner_id, path, remote_path, sync_mode, &policy)
+}
 
-    pub fn with_sync_excludes<I, S>(mut self, excludes: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.extend_sync_excludes(excludes.into_iter().map(Into::into));
-        self
-    }
+pub(crate) fn collect_local_with_policy(
+    runner_id: &str,
+    path: &Path,
+    remote_path: Option<&str>,
+    sync_mode: &str,
+    policy: &SourceSnapshotPolicy,
+) -> SourceSnapshot {
+    let local_path = path.display().to_string();
+    let git_root = git::toplevel(path);
+    let git_branch = git::current_branch(path)
+        .filter(|branch| !branch.is_empty())
+        .or_else(|| git::output_optional(path, &["rev-parse", "--abbrev-ref", "HEAD"]));
+    let git_sha = git::head_sha(path);
+    let status = git::status_porcelain_bytes(path).unwrap_or_default();
+    let dirty = !status.is_empty();
+    let snapshot_hash = if git_sha.is_some() {
+        git_snapshot_hash(path, git_sha.as_deref(), &status)
+    } else {
+        generic_snapshot_hash(&local_path)
+    };
 
-    pub(crate) fn extend_sync_excludes<I, S>(&mut self, excludes: I)
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        for exclude in excludes.into_iter().map(Into::into) {
-            if !exclude.trim().is_empty() && !self.sync_excludes.contains(&exclude) {
-                self.sync_excludes.push(exclude);
-            }
-        }
+    SourceSnapshot {
+        runner_id: runner_id.to_string(),
+        local_path: Some(local_path),
+        remote_path: remote_path.map(str::to_string),
+        workspace_root: git_root,
+        git_branch,
+        git_sha,
+        dirty,
+        sync_mode: sync_mode.to_string(),
+        workspace_snapshot_identity: None,
+        synthetic_checkout_commit: None,
+        synthetic_checkout_ref: None,
+        synthetic_checkout_tree: None,
+        snapshot_hash,
+        synced_at: chrono::Utc::now().to_rfc3339(),
+        sync_excludes: policy.sync_excludes.clone(),
     }
 }
 
-impl Default for SourceSnapshotPolicy {
-    fn default() -> Self {
-        Self {
-            sync_excludes: default_sync_excludes(),
-        }
-    }
+pub fn existing_remote(
+    runner_id: &str,
+    remote_path: &str,
+    workspace_root: Option<&str>,
+) -> SourceSnapshot {
+    let policy = policy_from_env();
+    existing_remote_with_policy(runner_id, remote_path, workspace_root, &policy)
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SourceSnapshot {
-    pub runner_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub local_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub remote_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_root: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub git_branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub git_sha: Option<String>,
-    pub dirty: bool,
-    pub sync_mode: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_snapshot_identity: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub synthetic_checkout_commit: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub synthetic_checkout_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub synthetic_checkout_tree: Option<String>,
-    pub snapshot_hash: String,
-    pub synced_at: String,
-    pub sync_excludes: Vec<String>,
-}
-
-impl SourceSnapshot {
-    pub fn collect_local(
-        runner_id: &str,
-        path: &Path,
-        remote_path: Option<&str>,
-        sync_mode: &str,
-    ) -> Self {
-        let policy = SourceSnapshotPolicy::for_path(path);
-        Self::collect_local_with_policy(runner_id, path, remote_path, sync_mode, &policy)
-    }
-
-    pub(crate) fn collect_local_with_policy(
-        runner_id: &str,
-        path: &Path,
-        remote_path: Option<&str>,
-        sync_mode: &str,
-        policy: &SourceSnapshotPolicy,
-    ) -> Self {
-        let local_path = path.display().to_string();
-        let git_root = git::toplevel(path);
-        let git_branch = git::current_branch(path)
-            .filter(|branch| !branch.is_empty())
-            .or_else(|| git::output_optional(path, &["rev-parse", "--abbrev-ref", "HEAD"]));
-        let git_sha = git::head_sha(path);
-        let status = git::status_porcelain_bytes(path).unwrap_or_default();
-        let dirty = !status.is_empty();
-        let snapshot_hash = if git_sha.is_some() {
-            git_snapshot_hash(path, git_sha.as_deref(), &status)
-        } else {
-            generic_snapshot_hash(&local_path)
-        };
-
-        Self {
-            runner_id: runner_id.to_string(),
-            local_path: Some(local_path),
-            remote_path: remote_path.map(str::to_string),
-            workspace_root: git_root,
-            git_branch,
-            git_sha,
-            dirty,
-            sync_mode: sync_mode.to_string(),
-            workspace_snapshot_identity: None,
-            synthetic_checkout_commit: None,
-            synthetic_checkout_ref: None,
-            synthetic_checkout_tree: None,
-            snapshot_hash,
-            synced_at: chrono::Utc::now().to_rfc3339(),
-            sync_excludes: policy.sync_excludes.clone(),
-        }
-    }
-
-    pub fn existing_remote(
-        runner_id: &str,
-        remote_path: &str,
-        workspace_root: Option<&str>,
-    ) -> Self {
-        let policy = SourceSnapshotPolicy::from_env();
-        Self::existing_remote_with_policy(runner_id, remote_path, workspace_root, &policy)
-    }
-
-    pub(crate) fn existing_remote_with_policy(
-        runner_id: &str,
-        remote_path: &str,
-        workspace_root: Option<&str>,
-        policy: &SourceSnapshotPolicy,
-    ) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(PATH_MATERIALIZATION_MODE_EXISTING_REMOTE.as_bytes());
+pub(crate) fn existing_remote_with_policy(
+    runner_id: &str,
+    remote_path: &str,
+    workspace_root: Option<&str>,
+    policy: &SourceSnapshotPolicy,
+) -> SourceSnapshot {
+    let mut hasher = Sha256::new();
+    hasher.update(PATH_MATERIALIZATION_MODE_EXISTING_REMOTE.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(runner_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(remote_path.as_bytes());
+    if let Some(workspace_root) = workspace_root {
         hasher.update(b"\0");
-        hasher.update(runner_id.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(remote_path.as_bytes());
-        if let Some(workspace_root) = workspace_root {
-            hasher.update(b"\0");
-            hasher.update(workspace_root.as_bytes());
-        }
-
-        Self {
-            runner_id: runner_id.to_string(),
-            local_path: None,
-            remote_path: Some(remote_path.to_string()),
-            workspace_root: workspace_root.map(str::to_string),
-            git_branch: None,
-            git_sha: None,
-            dirty: false,
-            sync_mode: PATH_MATERIALIZATION_MODE_EXISTING_REMOTE.to_string(),
-            workspace_snapshot_identity: None,
-            synthetic_checkout_commit: None,
-            synthetic_checkout_ref: None,
-            synthetic_checkout_tree: None,
-            snapshot_hash: format!("sha256:{:x}", hasher.finalize()),
-            synced_at: chrono::Utc::now().to_rfc3339(),
-            sync_excludes: policy.sync_excludes.clone(),
-        }
+        hasher.update(workspace_root.as_bytes());
     }
-}
 
-pub(crate) fn default_sync_excludes() -> Vec<String> {
-    DEFAULT_SYNC_EXCLUDES
-        .iter()
-        .map(|value| value.to_string())
-        .collect()
+    SourceSnapshot {
+        runner_id: runner_id.to_string(),
+        local_path: None,
+        remote_path: Some(remote_path.to_string()),
+        workspace_root: workspace_root.map(str::to_string),
+        git_branch: None,
+        git_sha: None,
+        dirty: false,
+        sync_mode: PATH_MATERIALIZATION_MODE_EXISTING_REMOTE.to_string(),
+        workspace_snapshot_identity: None,
+        synthetic_checkout_commit: None,
+        synthetic_checkout_ref: None,
+        synthetic_checkout_tree: None,
+        snapshot_hash: format!("sha256:{:x}", hasher.finalize()),
+        synced_at: chrono::Utc::now().to_rfc3339(),
+        sync_excludes: policy.sync_excludes.clone(),
+    }
 }
 
 pub fn declared_sync_excludes_for_path(path: &Path) -> Vec<String> {
@@ -395,12 +323,8 @@ mod tests {
     #[test]
     fn source_snapshot_policy_allows_product_specific_excludes() {
         let policy = SourceSnapshotPolicy::default().with_sync_excludes([".sampleplugin/"]);
-        let snapshot = SourceSnapshot::existing_remote_with_policy(
-            "lab",
-            "/srv/homeboy/repo",
-            Some("/srv/homeboy"),
-            &policy,
-        );
+        let snapshot =
+            existing_remote_with_policy("lab", "/srv/homeboy/repo", Some("/srv/homeboy"), &policy);
 
         assert!(snapshot.sync_excludes.contains(&".git/".to_string()));
         assert!(snapshot
@@ -440,7 +364,7 @@ mod tests {
             ],
         );
 
-        let snapshot = SourceSnapshot::collect_local(
+        let snapshot = collect_local(
             "lab-local",
             source_path,
             Some("/srv/homeboy/repo"),
@@ -474,7 +398,7 @@ mod tests {
         fs::write(tempdir.path().join("homeboy.txt"), "source fixture")
             .expect("writes source fixture file");
 
-        let snapshot = SourceSnapshot::collect_local(
+        let snapshot = collect_local(
             "lab-local",
             tempdir.path(),
             Some("/srv/homeboy/repo"),
@@ -494,8 +418,7 @@ mod tests {
 
     #[test]
     fn existing_remote_snapshot_is_explicit() {
-        let snapshot =
-            SourceSnapshot::existing_remote("lab", "/srv/homeboy/repo", Some("/srv/homeboy"));
+        let snapshot = existing_remote("lab", "/srv/homeboy/repo", Some("/srv/homeboy"));
 
         assert_eq!(snapshot.runner_id, "lab");
         assert_eq!(snapshot.remote_path.as_deref(), Some("/srv/homeboy/repo"));
