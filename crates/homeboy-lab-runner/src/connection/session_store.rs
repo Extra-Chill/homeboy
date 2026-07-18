@@ -5,6 +5,27 @@ pub(super) fn session_is_live(session: &RunnerSession) -> bool {
 }
 
 pub(super) fn session_is_live_with_timeout(session: &RunnerSession, timeout: Duration) -> bool {
+    session_is_live_with_probe(session, timeout, |session, probe_timeout| {
+        let Some(local_url) = session.local_url.as_deref() else {
+            return false;
+        };
+        session.local_port.is_some_and(|port| {
+            wait_for_tcp(port, probe_timeout)
+                && super::connection_daemon::daemon_http_health_matches_with_timeout(
+                    local_url,
+                    session.remote_daemon_lease_id.as_deref(),
+                    session.remote_daemon_pid,
+                    probe_timeout,
+                )
+        })
+    })
+}
+
+fn session_is_live_with_probe(
+    session: &RunnerSession,
+    timeout: Duration,
+    probe: impl Fn(&RunnerSession, Duration) -> bool,
+) -> bool {
     if session.mode != RunnerTunnelMode::DirectSsh {
         return false;
     }
@@ -13,18 +34,24 @@ pub(super) fn session_is_live_with_timeout(session: &RunnerSession, timeout: Dur
             return false;
         }
     }
-    let Some(local_url) = session.local_url.as_deref() else {
+    if session.local_url.is_none() || session.local_port.is_none() {
         return false;
-    };
-    session.local_port.is_some_and(|port| {
-        wait_for_tcp(port, timeout)
-            && super::connection_daemon::daemon_http_health_matches_with_timeout(
-                local_url,
-                session.remote_daemon_lease_id.as_deref(),
-                session.remote_daemon_pid,
-                timeout,
-            )
-    })
+    }
+
+    const ATTEMPTS: u32 = 3;
+    let deadline = std::time::Instant::now() + timeout;
+    for _ in 0..ATTEMPTS {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        // A healthy daemon may use most of this bounded budget to answer.
+        // Fast failures still leave time for the remaining attempts.
+        if probe(session, remaining) {
+            return true;
+        }
+    }
+    false
 }
 
 pub(super) fn reverse_controller_session_is_live(session: &RunnerSession) -> bool {
@@ -61,9 +88,7 @@ pub(super) fn session_state(session: Option<&RunnerSession>) -> RunnerSessionSta
 }
 
 pub(super) fn hostname_fallback() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .unwrap_or_else(|_| "unknown-host".to_string())
+    system_hostname().unwrap_or_else(|| "unknown-host".to_string())
 }
 
 pub(super) fn session_path(runner_id: &str) -> Result<PathBuf> {
@@ -77,18 +102,68 @@ pub(super) fn ownership_path(runner_id: &str) -> Result<PathBuf> {
 pub(super) fn controller_id() -> String {
     controller_id_from_scope(
         std::env::var("HOMEBOY_CONTROLLER_ID").ok().as_deref(),
-        hostname_fallback(),
+        controller_scope(),
     )
 }
 
-fn controller_id_from_scope(explicit_scope: Option<&str>, hostname: String) -> String {
+fn controller_id_from_scope(explicit_scope: Option<&str>, controller_scope: String) -> String {
     explicit_scope
         .map(str::trim)
         .filter(|scope| !scope.is_empty())
         .map(str::to_string)
         // A controller may promote its binary or change cwd while a daemon
-        // tunnel remains authenticated. Keep that tunnel in one host scope.
-        .unwrap_or(hostname)
+        // tunnel remains authenticated. Keep that tunnel in one OS-derived,
+        // per-user scope rather than trusting optional shell environment.
+        .unwrap_or(controller_scope)
+}
+
+fn controller_scope() -> String {
+    controller_scope_from_host_and_uid(system_hostname().as_deref(), effective_uid())
+}
+
+fn controller_scope_from_host_and_uid(hostname: Option<&str>, uid: u32) -> String {
+    let host = hostname
+        .map(str::trim)
+        .filter(|hostname| !hostname.is_empty())
+        .unwrap_or("local");
+    format!("{host}-uid-{uid}")
+}
+
+fn system_hostname() -> Option<String> {
+    #[cfg(unix)]
+    {
+        let mut buffer = [0_u8; 256];
+        // `gethostname` does not depend on the optional HOSTNAME environment
+        // variable, which launchd and other non-interactive macOS shells omit.
+        let result = unsafe {
+            libc::gethostname(
+                buffer.as_mut_ptr().cast::<libc::c_char>(),
+                buffer.len() as libc::size_t,
+            )
+        };
+        if result != 0 {
+            return None;
+        }
+        let length = buffer.iter().position(|byte| *byte == 0)?;
+        std::str::from_utf8(&buffer[..length])
+            .ok()
+            .map(str::to_string)
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::var("COMPUTERNAME").ok()
+    }
+}
+
+fn effective_uid() -> u32 {
+    #[cfg(unix)]
+    {
+        unsafe { libc::geteuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
@@ -126,7 +201,28 @@ fn resolve_session_or_live_peer_in(
     }
 
     let peer = live_peer_session_in(directory, Some(controller_id), is_live)?;
+    if session
+        .as_ref()
+        .zip(peer.as_ref())
+        .is_some_and(|(session, peer)| same_direct_daemon_identity(session, peer))
+    {
+        // A current tunnel that only timed out must not be displaced by an
+        // older alias for the same daemon. The next status/read gets a fresh,
+        // bounded probe of this controller's authoritative tunnel.
+        return Ok(session);
+    }
     Ok(peer.or(session))
+}
+
+fn same_direct_daemon_identity(left: &RunnerSession, right: &RunnerSession) -> bool {
+    left.mode == RunnerTunnelMode::DirectSsh
+        && right.mode == RunnerTunnelMode::DirectSsh
+        && left.remote_daemon_address.is_some()
+        && left.remote_daemon_lease_id.is_some()
+        && left.remote_daemon_pid.is_some()
+        && left.remote_daemon_address == right.remote_daemon_address
+        && left.remote_daemon_lease_id == right.remote_daemon_lease_id
+        && left.remote_daemon_pid == right.remote_daemon_pid
 }
 
 pub(super) fn read_session_for_controller(
@@ -465,6 +561,44 @@ mod tests {
     }
 
     #[test]
+    fn direct_session_liveness_retries_a_transient_probe_failure() {
+        let mut live = session("controller", "lease-live");
+        live.local_port = Some(49152);
+        live.local_url = Some("http://127.0.0.1:49152".to_string());
+        let attempts = std::cell::Cell::new(0);
+
+        assert!(session_is_live_with_probe(
+            &live,
+            Duration::from_millis(90),
+            |_, probe_timeout| {
+                assert!(probe_timeout > Duration::ZERO);
+                attempts.set(attempts.get() + 1);
+                attempts.get() == 2
+            },
+        ));
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn direct_session_liveness_caps_failed_probes_at_three_attempts() {
+        let mut live = session("controller", "lease-live");
+        live.local_port = Some(49152);
+        live.local_url = Some("http://127.0.0.1:49152".to_string());
+        let attempts = std::cell::Cell::new(0);
+
+        assert!(!session_is_live_with_probe(
+            &live,
+            Duration::from_millis(90),
+            |_, probe_timeout| {
+                assert!(probe_timeout > Duration::ZERO);
+                attempts.set(attempts.get() + 1);
+                false
+            },
+        ));
+        assert_eq!(attempts.get(), 3);
+    }
+
+    #[test]
     fn cook_handoff_adopts_a_live_peer_direct_ssh_session_without_claiming_it() {
         let root = TempDir::new().expect("session directory");
         let peer = session("cook-readiness", "lease-accepted");
@@ -517,64 +651,126 @@ mod tests {
     }
 
     #[test]
-    fn promoted_controller_scope_resolves_status_and_cancel_to_the_same_live_session() {
+    fn sequential_daemon_phases_keep_the_os_scoped_live_session_across_runtime_churn() {
         let root = TempDir::new().expect("session directory");
-        let status_alias = session("cargo-homeboy@worktree-a", "lease-live");
-        let stale_mutation_alias = session("cargo-homeboy@worktree-b", "lease-stale");
-        let status_path = root.path().join("cargo-homeboy@worktree-a.json");
-        let mutation_path = root.path().join("cargo-homeboy@worktree-b.json");
-        write_session_at(&status_path, &status_alias).expect("write status session");
-        write_session_at(&mutation_path, &stale_mutation_alias)
-            .expect("write stale mutation session");
+        let controller = controller_scope_from_host_and_uid(Some("macbook-pro"), 501);
+        let connected = session(&controller, "lease-live");
+        let session_path = root.path().join(format!("{controller}.json"));
+        write_session_at(&session_path, &connected).expect("write connected session");
 
-        let status = resolve_session_or_live_peer_in(
-            &root.path().to_path_buf(),
-            "cargo-homeboy@worktree-a",
-            read_session_at(&status_path).expect("read status session"),
-            |candidate| candidate.remote_daemon_lease_id.as_deref() == Some("lease-live"),
-        )
-        .expect("resolve status session")
-        .expect("authoritative status session");
-        let cancellation = resolve_session_or_live_peer_in(
-            &root.path().to_path_buf(),
-            "cargo-homeboy@worktree-b",
-            read_session_at(&mutation_path).expect("read mutation session"),
-            |candidate| candidate.remote_daemon_lease_id.as_deref() == Some("lease-live"),
-        )
-        .expect("resolve mutation session")
-        .expect("authoritative mutation session");
+        // These phases may run binaries from different promoted paths and CWDs.
+        // They share the OS controller scope, so all resolve the original tunnel.
+        let status = read_session_at(&session_path)
+            .expect("read status session")
+            .expect("authoritative status session");
+        let read = read_session_at(&session_path)
+            .expect("read daemon job session")
+            .expect("authoritative daemon job session");
+        let mutation = read_session_at(&session_path)
+            .expect("read mutation session")
+            .expect("authoritative mutation session");
 
+        assert_eq!(status.remote_daemon_lease_id.as_deref(), Some("lease-live"));
+        assert_eq!(read.remote_daemon_lease_id, status.remote_daemon_lease_id);
         assert_eq!(
-            status.remote_daemon_lease_id,
-            Some("lease-live".to_string())
-        );
-        assert_eq!(
-            cancellation.remote_daemon_lease_id,
+            mutation.remote_daemon_lease_id,
             status.remote_daemon_lease_id
         );
+        assert_eq!(mutation.remote_daemon_address, status.remote_daemon_address);
         assert_eq!(
-            cancellation.remote_daemon_address,
-            status.remote_daemon_address
+            read_session_at(&session_path).expect("read stored session"),
+            Some(connected)
+        );
+    }
+
+    #[test]
+    fn stale_runtime_controller_alias_borrows_the_same_authoritative_session() {
+        let root = TempDir::new().expect("session directory");
+        let connected = session("macbook-pro-uid-501", "lease-live");
+        let stale_alias = session("homeboy@old-worktree", "lease-stale");
+        let connected_path = root.path().join("macbook-pro-uid-501.json");
+        let stale_path = root.path().join("homeboy@old-worktree.json");
+        write_session_at(&connected_path, &connected).expect("write connected session");
+        write_session_at(&stale_path, &stale_alias).expect("write stale alias");
+
+        let resolved = resolve_session_or_live_peer_in(
+            &root.path().to_path_buf(),
+            "homeboy@old-worktree",
+            read_session_at(&stale_path).expect("read stale alias"),
+            |candidate| candidate.remote_daemon_lease_id.as_deref() == Some("lease-live"),
+        )
+        .expect("resolve live peer")
+        .expect("authoritative session");
+
+        assert_eq!(resolved, connected);
+        assert_eq!(
+            read_session_at(&stale_path).expect("read stale alias after resolution"),
+            Some(stale_alias)
+        );
+    }
+
+    #[test]
+    fn transient_current_probe_does_not_yield_to_same_daemon_aliases() {
+        let root = TempDir::new().expect("session directory");
+        let current = session("mac_lan-uid-501", "lease-live");
+        let legacy = session("unknown-host", "lease-live");
+        let second_alias = session("prior-worktree", "lease-live");
+        write_session_at(&root.path().join("mac_lan-uid-501.json"), &current)
+            .expect("write current session");
+        write_session_at(&root.path().join("unknown-host.json"), &legacy)
+            .expect("write legacy alias");
+        write_session_at(&root.path().join("prior-worktree.json"), &second_alias)
+            .expect("write second alias");
+        let current_probe_attempts = std::cell::Cell::new(0);
+
+        let resolved = resolve_session_or_live_peer_in(
+            &root.path().to_path_buf(),
+            "mac_lan-uid-501",
+            Some(current.clone()),
+            |candidate| {
+                if candidate.controller_id == current.controller_id {
+                    current_probe_attempts.set(current_probe_attempts.get() + 1);
+                    return false;
+                }
+                true
+            },
+        )
+        .expect("resolve session")
+        .expect("current session remains authoritative");
+
+        assert_eq!(current_probe_attempts.get(), 1);
+        assert_eq!(resolved, current);
+        assert_eq!(
+            read_session_at(&root.path().join("unknown-host.json")).expect("read legacy alias"),
+            Some(legacy)
         );
         assert_eq!(
-            read_session_at(&mutation_path).expect("read stale mutation session"),
-            Some(stale_mutation_alias)
+            read_session_at(&root.path().join("prior-worktree.json")).expect("read second alias"),
+            Some(second_alias)
         );
     }
 
     #[test]
     fn controller_scope_ignores_runtime_path_and_cwd_churn() {
         assert_eq!(
-            controller_id_from_scope(None, "controller-host".to_string()),
-            "controller-host"
+            controller_scope_from_host_and_uid(Some("controller-host"), 501),
+            "controller-host-uid-501"
         );
         assert_eq!(
-            controller_id_from_scope(Some("  controller-a  "), "controller-host".to_string()),
+            controller_id_from_scope(
+                Some("  controller-a  "),
+                "controller-host-uid-501".to_string()
+            ),
             "controller-a"
         );
         assert_eq!(
-            controller_id_from_scope(Some("   "), "controller-host".to_string()),
-            "controller-host"
+            controller_id_from_scope(Some("   "), "controller-host-uid-501".to_string()),
+            "controller-host-uid-501"
+        );
+        assert_eq!(
+            controller_scope_from_host_and_uid(None, 501),
+            "local-uid-501",
+            "the scope remains per-user when hostname lookup is unavailable"
         );
     }
 
