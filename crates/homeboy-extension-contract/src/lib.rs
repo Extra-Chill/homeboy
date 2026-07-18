@@ -20,6 +20,7 @@ pub mod bench_responsiveness;
 pub mod bench_result;
 pub mod bench_results;
 pub mod capability;
+pub mod test_analysis;
 pub mod trace_parsing;
 pub use bench_artifact::{BenchArtifact, BenchArtifactViewer, BenchPreviewLifecycleMetadata};
 pub use bench_diagnostics::{
@@ -38,6 +39,9 @@ pub use bench_result::{
 };
 pub use bench_results::{BenchResults, BenchRunMetadata, BenchRunSnapshot, BenchScenario};
 pub use capability::ExtensionCapability;
+pub use test_analysis::{
+    FailureCategory, FailureCluster, TestAnalysis, TestAnalysisInput, TestFailure,
+};
 pub use trace_parsing::{
     TraceArtifact, TraceAssertion, TraceAssertionStatus, TraceCanonicalCheck,
     TraceComponentsProvenance, TraceDependencyProvenance, TraceEvent, TraceEvidenceMetadata,
