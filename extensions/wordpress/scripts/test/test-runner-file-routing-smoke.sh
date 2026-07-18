@@ -244,6 +244,20 @@ assert_contains "${TMPDIR}/smoke-file.out" "HOST_SMOKE_BEGIN:tests/import-agent-
 assert_contains "${TMPDIR}/smoke-file.out" "standalone smoke ran"
 assert_not_contains "${TMPDIR}/smoke-file.out" "WP_CODEBOX_STUB"
 
+cat > "${component}/homeboy-test-manifest.json" <<'JSON'
+{
+  "schema": "homeboy/test-manifest/v1",
+  "tests": {
+    "tests/import-agent-ability-smoke.php": {
+      "environment": "standalone-php"
+    },
+    "tests/queue-routing-smoke.php": {
+      "environment": "wordpress"
+    }
+  }
+}
+JSON
+
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
@@ -255,10 +269,34 @@ HOMEBOY_TEST_SCOPE_ENV_NAME="HOMEBOY_WORDPRESS_HOST_SMOKE_FILES" \
 HOMEBOY_TEST_SCOPE_ENV_VALUE=$'tests/import-agent-ability-smoke.php\ntests/queue-routing-smoke.php' \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/changed-smoke-files.out"
 
-assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
+assert_contains "${TMPDIR}/changed-smoke-files.out" "PHP_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
+assert_contains "${TMPDIR}/changed-smoke-files.out" "PHP_SMOKE_OK:tests/import-agent-ability-smoke.php"
+assert_contains "${TMPDIR}/changed-smoke-files.out" "PHP_SMOKE_SUMMARY:passed=1 failed=0"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_BEGIN:tests/queue-routing-smoke.php"
-assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_SUMMARY:passed=2 failed=0"
+assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_SUMMARY:passed=1 failed=0"
+assert_not_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
 assert_not_contains "${TMPDIR}/changed-smoke-files.out" "WP_CODEBOX_STUB"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP="${TMPDIR}/stubs/host-smoke-wp.sh" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/import-agent-ability-smoke.php > "${TMPDIR}/declared-standalone-smoke-file.out"
+
+assert_contains "${TMPDIR}/declared-standalone-smoke-file.out" "PHP_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
+assert_contains "${TMPDIR}/declared-standalone-smoke-file.out" "PHP_SMOKE_OK:tests/import-agent-ability-smoke.php"
+assert_not_contains "${TMPDIR}/declared-standalone-smoke-file.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP="${TMPDIR}/stubs/host-smoke-wp.sh" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/queue-routing-smoke.php > "${TMPDIR}/declared-wordpress-smoke-file.out"
+
+assert_contains "${TMPDIR}/declared-wordpress-smoke-file.out" "HOST_SMOKE_BEGIN:tests/queue-routing-smoke.php"
+assert_not_contains "${TMPDIR}/declared-wordpress-smoke-file.out" "PHP_SMOKE_BEGIN:tests/queue-routing-smoke.php"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \

@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "3.26.1",
+  "version": "3.26.2",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -1058,7 +1058,7 @@
   },
   "testing": {
     "backend": "wp-codebox",
-      "description": "WordPress tests always run through WP Codebox against real WordPress, routed by file type: tests/**/*Test.php and tests/**/test-*.php run as PHPUnit; tests/**/*-smoke.php standalone scripts run via wordpress.run-php with WordPress booted. There is no bare-host/no-WordPress backend."
+      "description": "WordPress PHPUnit tests run through WP Codebox against real WordPress. PHP smoke files selected by changed-file routing use the component's homeboy-test-manifest.json environment declaration: standalone-php files run directly with PHP and wordpress files run through wordpress.run-php. Undeclared PHP smokes default to WordPress."
   },
   "ci": {
     "profiles": {

@@ -4,8 +4,8 @@ set -euo pipefail
 # Test runner router for WordPress Homeboy extension.
 #
 # Plugin/theme PHPUnit tests and core-dev checkouts run through the selected
-# WordPress runtime backend. Pure host-PHP smoke suites can explicitly use the
-# host-smoke backend.
+# WordPress runtime backend. PHP smoke scripts can declare a standalone PHP
+# environment in the component's test manifest.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:?HOMEBOY_RUNTIME_RUNNER_PRELUDE is required}"
@@ -32,6 +32,69 @@ fi
 # WordPress. The default suite is PHPUnit. Standalone smoke scripts are
 # diagnostic/operator targets and run only when selected explicitly with --file,
 # --host-smoke-file, or the HOMEBOY_WORDPRESS_HOST_SMOKE_FILES scope environment.
+
+homeboy_wordpress_test_environment() {
+    local test_file="$1"
+    local manifest_path="${HOMEBOY_WORDPRESS_TEST_MANIFEST:-${PLUGIN_PATH}/homeboy-test-manifest.json}"
+
+    if [ ! -e "$manifest_path" ]; then
+        printf '%s\n' "wordpress"
+        return 0
+    fi
+
+    jq -er --arg testFile "$test_file" '
+        if type != "object" or .schema != "homeboy/test-manifest/v1" then
+            error("expected schema homeboy/test-manifest/v1")
+        elif (.tests | type) != "object" then
+            error("expected tests object")
+        else
+            (.tests[$testFile].environment // "wordpress") as $environment
+            | if $environment == "wordpress" or $environment == "standalone-php" then
+                $environment
+            else
+                error("unsupported environment " + ($environment | tostring))
+              end
+        end
+    ' "$manifest_path" 2>/dev/null || {
+        echo "ERROR: invalid WordPress test manifest: ${manifest_path}" >&2
+        return 2
+    }
+}
+
+homeboy_wordpress_run_standalone_php_smoke_files() {
+    local smoke_files_raw="$1"
+    local php_bin="${HOMEBOY_PHP_BIN:-php}"
+    local smoke_file smoke_abs rel_path exit_code
+    local passed=0
+    local failed=0
+    local last_failure_exit=0
+
+    echo "Running standalone PHP smoke tests..."
+    echo "  Component: ${HOMEBOY_COMPONENT_ID:-$(basename "$PLUGIN_PATH")} (${PLUGIN_PATH})"
+    echo "  Backend: standalone-php"
+
+    while IFS= read -r smoke_file; do
+        [ -n "$smoke_file" ] || continue
+        if ! smoke_abs="$(homeboy_wordpress_rel_test_file "$smoke_file")"; then
+            echo "ERROR: requested standalone PHP smoke file not found or outside the component: ${smoke_file}" >&2
+            return 2
+        fi
+        rel_path="$smoke_abs"
+        echo "PHP_SMOKE_BEGIN:${rel_path}"
+        if "$php_bin" "${PLUGIN_PATH}/${rel_path}"; then
+            echo "PHP_SMOKE_OK:${rel_path}"
+            passed=$((passed + 1))
+        else
+            exit_code=$?
+            echo "PHP_SMOKE_FAIL:${rel_path}:exit=${exit_code}"
+            failed=$((failed + 1))
+            last_failure_exit="$exit_code"
+        fi
+    done <<< "$smoke_files_raw"
+
+    echo "PHP_SMOKE_SUMMARY:passed=${passed} failed=${failed}"
+    [ "$failed" -eq 0 ] || return "$last_failure_exit"
+}
 
 show_usage() {
     cat <<'EOF'
@@ -368,7 +431,30 @@ fi
 
 if [ -z "$TARGET_FILE" ] && [ "${HOMEBOY_TEST_SCOPE_KIND:-}" = "exclusive_env" ]; then
     if [ "${HOMEBOY_TEST_SCOPE_ENV_NAME:-}" = "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES" ] && [ -n "${HOMEBOY_TEST_SCOPE_ENV_VALUE:-}" ]; then
-        HOMEBOY_WORDPRESS_HOST_SMOKE_FILES="$HOMEBOY_TEST_SCOPE_ENV_VALUE" exec bash "$SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+        standalone_php_smoke_files=""
+        wordpress_smoke_files=""
+        while IFS= read -r scoped_smoke_file; do
+            [ -n "$scoped_smoke_file" ] || continue
+            if ! scoped_smoke_rel="$(homeboy_wordpress_rel_test_file "$scoped_smoke_file")"; then
+                echo "ERROR: requested PHP smoke file not found or outside the component: ${scoped_smoke_file}" >&2
+                exit 2
+            fi
+            scoped_environment="$(homeboy_wordpress_test_environment "$scoped_smoke_rel")" || exit $?
+            if [ "$scoped_environment" = "standalone-php" ]; then
+                standalone_php_smoke_files+="${standalone_php_smoke_files:+$'\n'}${scoped_smoke_rel}"
+            else
+                wordpress_smoke_files+="${wordpress_smoke_files:+$'\n'}${scoped_smoke_rel}"
+            fi
+        done <<< "$HOMEBOY_TEST_SCOPE_ENV_VALUE"
+
+        scope_status=0
+        if [ -n "$standalone_php_smoke_files" ]; then
+            homeboy_wordpress_run_standalone_php_smoke_files "$standalone_php_smoke_files" || scope_status=$?
+        fi
+        if [ -n "$wordpress_smoke_files" ]; then
+            HOMEBOY_WORDPRESS_HOST_SMOKE_FILES="$wordpress_smoke_files" bash "$SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}" || scope_status=$?
+        fi
+        exit "$scope_status"
     fi
 fi
 
@@ -449,7 +535,12 @@ if [ -n "$TARGET_FILE" ]; then
         tests/*.php|tests/*/*.php|tests/*/*/*.php|tests/*/*/*/*.php)
             case "$target_base" in
                 *-smoke.php)
-                    HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="$target_rel" exec bash "$SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+                    target_environment="$(homeboy_wordpress_test_environment "$target_rel")" || exit $?
+                    if [ "$target_environment" = "standalone-php" ]; then
+                        homeboy_wordpress_run_standalone_php_smoke_files "$target_rel"
+                    else
+                        HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="$target_rel" exec bash "$SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+                    fi
                     ;;
                 *Test.php|test-*.php)
                     WORDPRESS_RUNTIME_RUNNER="$(homeboy_wordpress_runtime_runner)" || exit $?
