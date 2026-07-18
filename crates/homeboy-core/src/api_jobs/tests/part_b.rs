@@ -281,6 +281,96 @@ fn dead_lease_reconciliation_requires_exact_confirmation_for_untracked_children(
 }
 
 #[test]
+fn exact_daemon_loss_recovery_requires_the_complete_pidless_active_set_and_persists_evidence() {
+    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+    let first = store.create("runner.exec");
+    store.start(first.id).expect("first starts");
+    let second = store.create("runner.exec");
+    store.start(second.id).expect("second starts");
+
+    for ids in [&[first.id][..], &[first.id, Uuid::new_v4()][..]] {
+        let error = store
+            .reconcile_exact_daemon_loss_jobs("lease-dead", ids, 4242)
+            .expect_err("omitted or unknown active jobs are refused");
+        assert!(error.message.contains("exact active durable-job set"));
+    }
+    assert_eq!(
+        store.get(first.id).expect("first").status,
+        JobStatus::Running
+    );
+
+    let diagnostics = store
+        .reconcile_exact_daemon_loss_jobs("lease-dead", &[first.id, second.id], 4242)
+        .expect("the exact complete set reconciles");
+    assert_eq!(
+        diagnostics.matching_job_ids,
+        [first.id, second.id]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    );
+    for id in [first.id, second.id] {
+        assert_eq!(
+            store.get(id).expect("terminal job").status,
+            JobStatus::Failed
+        );
+        assert!(store
+            .events(id)
+            .expect("durable events")
+            .iter()
+            .any(|event| {
+                event.data.as_ref().is_some_and(|data| {
+                    data["reason"] == "operator_confirmed_daemon_loss_after_unexpected_termination"
+                        && data["daemon_lease_id"] == "lease-dead"
+                        && data["daemon_pid"] == 4242
+                        && data["operator_confirmed_workload_processes_absent"] == true
+                })
+            }));
+    }
+    assert!(store
+        .reconcile_exact_daemon_loss_jobs("lease-dead", &[first.id, second.id], 4242)
+        .expect_err("replay refuses because the named jobs are no longer active")
+        .message
+        .contains("exact active durable-job set"));
+}
+
+#[test]
+fn exact_daemon_loss_recovery_refuses_persisted_child_process_evidence() {
+    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+    let job = store.create("runner.exec");
+    record_test_local_child(&store, job.id, u32::MAX);
+
+    let error = store
+        .reconcile_exact_daemon_loss_jobs("lease-dead", &[job.id], 4242)
+        .expect_err("live-process evidence contradicts no-PID recovery");
+
+    assert!(error.message.contains("child-process evidence"));
+    assert_eq!(
+        store.get(job.id).expect("protected job").status,
+        JobStatus::Running
+    );
+}
+
+#[test]
+fn exact_daemon_loss_recovery_accepts_a_reservation_without_process_identity() {
+    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+    let job = store.create("runner.exec");
+    store
+        .reserve_local_child_at(job.id, 100)
+        .expect("pre-spawn reservation persists");
+
+    store
+        .reconcile_exact_daemon_loss_jobs("lease-dead", &[job.id], 4242)
+        .expect("a reservation without process identity remains a PID-less job");
+
+    assert_eq!(
+        store.get(job.id).expect("terminal job").status,
+        JobStatus::Failed
+    );
+}
+
+#[test]
 fn dead_lease_reconciliation_is_idempotent_after_terminalizing_a_dead_child() {
     let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
     let job = store.create("runner.exec");
@@ -840,6 +930,51 @@ fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery
     assert_eq!(
         restarted.get(running.id).expect("running job").status,
         JobStatus::Running
+    );
+}
+
+#[test]
+fn legacy_compaction_evidence_without_retained_bytes_reopens() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store opens");
+    let job = store.create("terminal");
+    store.start(job.id).expect("terminal job starts");
+    store
+        .complete(job.id, None)
+        .expect("terminal job completes");
+
+    let mut durable: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("durable store is readable"))
+            .expect("durable store is valid JSON");
+    durable["compaction"] = json!({
+        "timestamp_ms": 100,
+        "removed_terminal_jobs": 1,
+        "retained_terminal_jobs": 1,
+        "active_jobs": 0
+    });
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&durable).expect("legacy store serializes"),
+    )
+    .expect("legacy store persists");
+
+    let reopened = JobStore::open_without_reconciliation(&path)
+        .expect("legacy compaction evidence remains readable");
+    assert_eq!(
+        reopened.get(job.id).expect("job survives").status,
+        JobStatus::Succeeded
+    );
+    assert_eq!(
+        reopened
+            .inner
+            .lock()
+            .expect("job store mutex")
+            .compaction
+            .as_ref()
+            .expect("compaction evidence survives")
+            .retained_terminal_bytes,
+        0
     );
 }
 

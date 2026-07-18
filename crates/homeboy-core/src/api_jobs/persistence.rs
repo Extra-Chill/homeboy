@@ -25,6 +25,7 @@ pub(super) struct JobStoreCompactionEvidence {
     pub(super) timestamp_ms: u64,
     pub(super) removed_terminal_jobs: usize,
     pub(super) retained_terminal_jobs: usize,
+    #[serde(default)]
     pub(super) retained_terminal_bytes: usize,
     pub(super) active_jobs: usize,
 }
