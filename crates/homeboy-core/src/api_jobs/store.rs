@@ -10,9 +10,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::persistence::{
-    apply_event_retention, job_not_found, recovered_terminal_from_result,
+    apply_event_retention, compact_terminal_jobs, job_not_found, recovered_terminal_from_result,
     stale_after_restart_classification, timestamp_ms, validate_transition, write_durable_store,
-    DEFAULT_EVENT_RETENTION_LIMIT,
+    JobStoreCompactionEvidence, DEFAULT_EVENT_RETENTION_LIMIT,
+    DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
 };
 #[cfg(test)]
 use super::persistence::{read_durable_store, reconcile_stale_jobs};
@@ -44,11 +45,13 @@ pub struct JobStore {
 pub(super) struct JobStorePersistence {
     pub(super) path: PathBuf,
     pub(super) event_retention_limit: usize,
+    pub(super) terminal_job_retention_limit: usize,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct JobStoreInner {
     pub(super) jobs: HashMap<Uuid, StoredJob>,
+    pub(super) compaction: Option<JobStoreCompactionEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +106,8 @@ pub(crate) enum LocalChildStartDiscriminator {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(super) struct DurableJobStore {
     pub(super) jobs: Vec<StoredJob>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) compaction: Option<JobStoreCompactionEvidence>,
 }
 
 #[derive(Debug)]
@@ -141,7 +146,11 @@ impl JobStore {
 
     #[cfg(test)]
     pub(crate) fn open(path: impl Into<PathBuf>) -> Result<Self> {
-        Self::open_with_event_retention(path, DEFAULT_EVENT_RETENTION_LIMIT)
+        Self::open_with_retention(
+            path,
+            DEFAULT_EVENT_RETENTION_LIMIT,
+            DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
+        )
     }
 
     #[cfg(test)]
@@ -149,10 +158,25 @@ impl JobStore {
         path: impl Into<PathBuf>,
         event_retention_limit: usize,
     ) -> Result<Self> {
+        Self::open_with_retention(
+            path,
+            event_retention_limit,
+            DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_retention(
+        path: impl Into<PathBuf>,
+        event_retention_limit: usize,
+        terminal_job_retention_limit: usize,
+    ) -> Result<Self> {
         let path = path.into();
         let mut durable = read_durable_store(&path)?;
         let event_retention_limit = event_retention_limit.max(1);
+        let terminal_job_retention_limit = terminal_job_retention_limit.max(1);
         let next_sequence = reconcile_stale_jobs(&mut durable, event_retention_limit);
+        compact_terminal_jobs(&mut durable, terminal_job_retention_limit);
         let store = Self {
             inner: Arc::new(Mutex::new(JobStoreInner {
                 jobs: durable
@@ -160,11 +184,13 @@ impl JobStore {
                     .into_iter()
                     .map(|stored| (stored.job.id, stored))
                     .collect(),
+                compaction: durable.compaction,
             })),
             next_event_sequence: Arc::new(AtomicU64::new(next_sequence)),
             persistence: Some(Arc::new(JobStorePersistence {
                 path,
                 event_retention_limit,
+                terminal_job_retention_limit,
             })),
             daemon_lease_id: None,
         };
@@ -197,30 +223,81 @@ impl JobStore {
         path: impl Into<PathBuf>,
         raw: &[u8],
     ) -> Result<Self> {
+        Self::open_without_reconciliation_from_bytes_with_retention(
+            path,
+            raw,
+            DEFAULT_EVENT_RETENTION_LIMIT,
+            DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_without_reconciliation_with_retention(
+        path: impl Into<PathBuf>,
+        event_retention_limit: usize,
+        terminal_job_retention_limit: usize,
+    ) -> Result<Self> {
         let path = path.into();
-        let durable: DurableJobStore = serde_json::from_slice(raw)
+        let raw = fs::read(&path).unwrap_or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                b"{\"jobs\":[]}".to_vec()
+            } else {
+                Vec::new()
+            }
+        });
+        if raw.is_empty() && path.exists() {
+            return Err(Error::internal_io(
+                "read durable job store",
+                Some(path.display().to_string()),
+            ));
+        }
+        Self::open_without_reconciliation_from_bytes_with_retention(
+            path,
+            &raw,
+            event_retention_limit,
+            terminal_job_retention_limit,
+        )
+    }
+
+    fn open_without_reconciliation_from_bytes_with_retention(
+        path: impl Into<PathBuf>,
+        raw: &[u8],
+        event_retention_limit: usize,
+        terminal_job_retention_limit: usize,
+    ) -> Result<Self> {
+        let path = path.into();
+        let mut durable: DurableJobStore = serde_json::from_slice(raw)
             .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))?;
+        let event_retention_limit = event_retention_limit.max(1);
+        let terminal_job_retention_limit = terminal_job_retention_limit.max(1);
+        let compacted = compact_terminal_jobs(&mut durable, terminal_job_retention_limit);
         let next_sequence = durable
             .jobs
             .iter()
             .flat_map(|stored| stored.events.iter().map(|event| event.sequence))
             .max()
             .unwrap_or(0);
-        Ok(Self {
+        let store = Self {
             inner: Arc::new(Mutex::new(JobStoreInner {
                 jobs: durable
                     .jobs
                     .into_iter()
                     .map(|stored| (stored.job.id, stored))
                     .collect(),
+                compaction: durable.compaction,
             })),
             next_event_sequence: Arc::new(AtomicU64::new(next_sequence)),
             persistence: Some(Arc::new(JobStorePersistence {
                 path,
-                event_retention_limit: DEFAULT_EVENT_RETENTION_LIMIT,
+                event_retention_limit,
+                terminal_job_retention_limit,
             })),
             daemon_lease_id: None,
-        })
+        };
+        if compacted.is_some() {
+            store.persist()?;
+        }
+        Ok(store)
     }
 
     pub(crate) fn with_daemon_lease(mut self, daemon_lease_id: String) -> Self {
@@ -1432,12 +1509,24 @@ impl JobStore {
         });
         stored.job.event_count = stored.events.len();
         if let Some(persistence) = &self.persistence {
-            let durable = DurableJobStore {
+            let mut durable = DurableJobStore {
                 jobs: inner.jobs.values().cloned().collect(),
+                compaction: inner.compaction.clone(),
             };
+            let compacted =
+                compact_terminal_jobs(&mut durable, persistence.terminal_job_retention_limit);
             if let Err(error) = write_durable_store(&persistence.path, &durable) {
                 inner.jobs.insert(job_id, prior);
                 return Err(error);
+            }
+            if compacted.is_some() {
+                inner.jobs = durable
+                    .jobs
+                    .iter()
+                    .cloned()
+                    .map(|stored| (stored.job.id, stored))
+                    .collect();
+                inner.compaction = durable.compaction;
             }
         }
         Ok(())
@@ -1693,12 +1782,24 @@ impl JobStore {
         };
 
         if let Some(persistence) = &self.persistence {
-            let durable = DurableJobStore {
+            let mut durable = DurableJobStore {
                 jobs: inner.jobs.values().cloned().collect(),
+                compaction: inner.compaction.clone(),
             };
+            let compacted =
+                compact_terminal_jobs(&mut durable, persistence.terminal_job_retention_limit);
             if let Err(error) = write_durable_store(&persistence.path, &durable) {
                 *inner.jobs.get_mut(&job_id).expect("job exists") = prior;
                 return Err(error);
+            }
+            if compacted.is_some() {
+                inner.jobs = durable
+                    .jobs
+                    .iter()
+                    .cloned()
+                    .map(|stored| (stored.job.id, stored))
+                    .collect();
+                inner.compaction = durable.compaction;
             }
         }
         Ok(started)
@@ -1755,19 +1856,35 @@ impl JobStore {
             .unwrap_or(usize::MAX)
     }
 
+    fn terminal_job_retention_limit(&self) -> usize {
+        self.persistence
+            .as_ref()
+            .map(|persistence| persistence.terminal_job_retention_limit)
+            .unwrap_or(usize::MAX)
+    }
+
     pub(super) fn persist(&self) -> Result<()> {
         let Some(persistence) = &self.persistence else {
             return Ok(());
         };
 
-        let durable = {
-            let inner = self.inner.lock().expect("job store mutex poisoned");
-            DurableJobStore {
-                jobs: inner.jobs.values().cloned().collect(),
-            }
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let mut durable = DurableJobStore {
+            jobs: inner.jobs.values().cloned().collect(),
+            compaction: inner.compaction.clone(),
         };
-
-        write_durable_store(&persistence.path, &durable)
+        let compacted = compact_terminal_jobs(&mut durable, self.terminal_job_retention_limit());
+        write_durable_store(&persistence.path, &durable)?;
+        if compacted.is_some() {
+            inner.jobs = durable
+                .jobs
+                .iter()
+                .cloned()
+                .map(|stored| (stored.job.id, stored))
+                .collect();
+            inner.compaction = durable.compaction;
+        }
+        Ok(())
     }
 }
 

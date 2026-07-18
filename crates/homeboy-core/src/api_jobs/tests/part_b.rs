@@ -779,6 +779,71 @@ fn test_open_with_event_retention() {
 }
 
 #[test]
+fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery_evidence() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store opens");
+    let queued = store.create("queued");
+    let running = store.create("running");
+    store.start(running.id).expect("running job starts");
+    let terminal = (0..4)
+        .map(|_| {
+            let job = store.create("terminal");
+            store.start(job.id).expect("terminal job starts");
+            store
+                .complete(job.id, None)
+                .expect("terminal job completes");
+            job.id
+        })
+        .collect::<Vec<_>>();
+    {
+        let mut inner = store.inner.lock().expect("job store mutex poisoned");
+        for (index, job_id) in terminal.iter().enumerate() {
+            let stored = inner.jobs.get_mut(job_id).expect("terminal job exists");
+            let timestamp = (index as u64 + 1) * 100;
+            stored.job.created_at_ms = timestamp;
+            stored.job.updated_at_ms = timestamp;
+            stored.job.finished_at_ms = Some(timestamp);
+        }
+    }
+    store.persist().expect("seed store persists");
+
+    let compacted = JobStore::open_without_reconciliation_with_retention(&path, 3, 2)
+        .expect("existing store compacts on open");
+    assert!(compacted.get(queued.id).is_ok());
+    assert_eq!(
+        compacted.get(running.id).expect("running job").status,
+        JobStatus::Running
+    );
+    assert!(compacted.get(terminal[0]).is_err());
+    assert!(compacted.get(terminal[1]).is_err());
+    assert!(compacted.get(terminal[2]).is_ok());
+    assert!(compacted.get(terminal[3]).is_ok());
+
+    let persisted = fs::read_to_string(&path).expect("compacted store persists");
+    assert_eq!(persisted.matches("\"operation\": \"terminal\"").count(), 2);
+    assert!(persisted.contains("\"removed_terminal_jobs\": 2"));
+    assert!(persisted.contains("\"active_jobs\": 2"));
+
+    let restarted = JobStore::open_without_reconciliation_with_retention(&path, 3, 2)
+        .expect("compacted store restarts");
+    assert_eq!(restarted.list().len(), 4);
+    for _ in 0..5 {
+        let job = restarted.create("terminal");
+        restarted.start(job.id).expect("new terminal job starts");
+        restarted
+            .complete(job.id, None)
+            .expect("new terminal job completes");
+    }
+    assert_eq!(restarted.list().len(), 4, "terminal history stays bounded");
+    assert!(restarted.get(queued.id).is_ok());
+    assert_eq!(
+        restarted.get(running.id).expect("running job").status,
+        JobStatus::Running
+    );
+}
+
+#[test]
 fn remote_runner_job_submit_targets_runner_and_project() {
     let store = JobStore::default();
     let job = store
