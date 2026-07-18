@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::error::Error;
 
 #[derive(Debug, Clone)]
-pub(crate) struct HttpProbeError {
+pub struct HttpProbeError {
     pub message: String,
     pub is_connect: bool,
 }
@@ -18,7 +18,7 @@ pub(crate) fn blocking_client(timeout: Duration) -> reqwest::Result<reqwest::blo
         .build()
 }
 
-pub(crate) fn get_status(url: &str, timeout: Duration) -> std::result::Result<u16, HttpProbeError> {
+pub fn get_status(url: &str, timeout: Duration) -> std::result::Result<u16, HttpProbeError> {
     let client = blocking_client(timeout).map_err(|e| HttpProbeError {
         message: Error::internal_unexpected(format!("build http client: {}", e)).message,
         is_connect: false,
@@ -38,7 +38,7 @@ pub(crate) fn get_status(url: &str, timeout: Duration) -> std::result::Result<u1
 /// (e.g. the post-deploy smoke check verifying a real page rendered). The
 /// blocking reqwest client has no cookie store, so each call is a fresh,
 /// cookie-less request — matching a first-time visitor.
-pub(crate) fn get_status_and_body(
+pub fn get_status_and_body(
     url: &str,
     timeout: Duration,
 ) -> std::result::Result<(u16, String), HttpProbeError> {

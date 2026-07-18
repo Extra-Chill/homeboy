@@ -12,8 +12,8 @@ use homeboy::core::resource_lifecycle_index::{
     ResourceLifecycleIndex, ResourceLifecycleRecord, ResourceLifecycleResourceStatus,
     RESOURCE_LIFECYCLE_INDEX_SCHEMA,
 };
-use homeboy::core::rig::lease::{RigRunLeaseDiagnostic, RigRunLeaseProcessLiveness};
 use homeboy::core::{Error, Result};
+use homeboy::rig::lease::{RigRunLeaseDiagnostic, RigRunLeaseProcessLiveness};
 use serde::{Deserialize, Serialize};
 
 use super::{CmdResult, RunsOutput};
@@ -526,7 +526,7 @@ fn load_observation_store_index(
 
 fn rig_lease_resources(run_id: Option<&str>) -> Result<Vec<ResourceLifecycleRecord>> {
     let mut resources = Vec::new();
-    for diagnostic in homeboy::core::rig::lease::run_lease_diagnostics()? {
+    for diagnostic in homeboy::rig::lease::run_lease_diagnostics()? {
         if run_id.is_some_and(|run_id| diagnostic.run_id.as_deref() != Some(run_id)) {
             continue;
         }
@@ -610,7 +610,7 @@ fn load_runtime_diagnostics(
 
     let store = ObservationStore::open_initialized()?;
     let mut outputs = Vec::new();
-    for diagnostic in homeboy::core::rig::lease::run_lease_diagnostics()? {
+    for diagnostic in homeboy::rig::lease::run_lease_diagnostics()? {
         if args
             .run_id
             .as_deref()
@@ -842,8 +842,8 @@ mod tests {
     use homeboy::core::observation::{NewRunRecord, ObservationStore};
     use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
     use homeboy::core::resource_lifecycle_index::resource_lifecycle_record_is_cleanup_eligible_at;
-    use homeboy::core::rig::lease::RigRunLease;
-    use homeboy::core::rig::spec::RigResourcesSpec;
+    use homeboy::rig::lease::RigRunLease;
+    use homeboy::rig::spec::RigResourcesSpec;
 
     use super::*;
 
@@ -1126,7 +1126,7 @@ mod tests {
 
             let diagnostic = rig_lease_diagnostic_output(
                 &store,
-                homeboy::core::rig::lease::run_lease_diagnostics()
+                homeboy::rig::lease::run_lease_diagnostics()
                     .expect("lease diagnostics")
                     .remove(0),
             )
@@ -1145,7 +1145,7 @@ mod tests {
             write_rig_lease(rig_lease("studio", u32::MAX, Some("stale-run".to_string())));
 
             let diagnostics =
-                homeboy::core::rig::lease::run_lease_diagnostics().expect("lease diagnostics");
+                homeboy::rig::lease::run_lease_diagnostics().expect("lease diagnostics");
             assert_eq!(diagnostics.len(), 1);
             assert!(diagnostics[0].reclaimable_without_force);
             assert_eq!(
@@ -1181,7 +1181,7 @@ mod tests {
             );
 
             let diagnostics =
-                homeboy::core::rig::lease::run_lease_diagnostics().expect("lease diagnostics");
+                homeboy::rig::lease::run_lease_diagnostics().expect("lease diagnostics");
             assert!(diagnostics[0].inspect_command.is_none());
             assert!(diagnostics[0].safe_cleanup_command.is_none());
             assert!(diagnostics[0]

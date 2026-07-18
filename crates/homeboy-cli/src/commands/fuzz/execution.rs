@@ -10,12 +10,12 @@ use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
 use homeboy::core::lifecycle::LifecyclePhaseStatus;
 use homeboy::core::observation::{RunRecord, RunStatus};
-use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
 use homeboy::fuzz::{
     fuzz_gate_profile_contract, parse_fuzz_results_file, FuzzArtifact, FuzzCampaign,
     FuzzExecutionRequest, FuzzFindingStatus, FuzzGateProfile, FuzzSamplingRequest,
     FuzzTargetInventory, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
 };
+use homeboy::rig::{self, FuzzPrepareReport, RigSpec};
 use uuid::Uuid;
 
 use super::planning::{load_sequence_plan, plan_inventory_selection, with_sequence_plan_metadata};
@@ -437,7 +437,7 @@ fn fuzz_artifact_postprocess_steps(
     rig_context: Option<&FuzzRigContext>,
     extension_id: Option<&str>,
     workload: Option<&FuzzWorkloadOutput>,
-) -> Vec<homeboy::core::rig::ArtifactPostprocessSpec> {
+) -> Vec<homeboy::rig::ArtifactPostprocessSpec> {
     let Some((context, extension_id, workload)) =
         rig_context
             .zip(extension_id)
@@ -1845,7 +1845,7 @@ fn expanded_fuzz_component_path(
     component_id: &str,
     fallback: &str,
 ) -> String {
-    let env_name = crate::core::rig::expand::rig_component_path_override_env_name(
+    let env_name = crate::rig::expand::rig_component_path_override_env_name(
         &rig_context.spec.id,
         component_id,
     );
@@ -1855,7 +1855,7 @@ fn expanded_fuzz_component_path(
             return shellexpand::tilde(trimmed).to_string();
         }
     }
-    if let Ok(path) = crate::core::rig::resolve_component_path(&rig_context.spec, component_id) {
+    if let Ok(path) = crate::rig::resolve_component_path(&rig_context.spec, component_id) {
         return path;
     }
     expand_fuzz_rig_string(rig_context, fallback)

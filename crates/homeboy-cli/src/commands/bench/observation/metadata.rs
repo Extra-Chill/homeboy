@@ -1,7 +1,7 @@
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::bench::{BenchResults, BenchRunWorkflowResult};
 use homeboy::core::observation::merge_metadata;
-use homeboy::core::rig::RigStateSnapshot;
+use homeboy::rig::RigStateSnapshot;
 
 use crate::commands::bench::BenchRunArgs;
 use crate::commands::utils::resource_policy;

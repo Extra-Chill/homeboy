@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::fs;
 
-use crate::rig::app::{install_inner, uninstall_inner, AppLauncherAction, AppLauncherOptions};
-use crate::rig::spec::{
+use crate::app::{install_inner, uninstall_inner, AppLauncherAction, AppLauncherOptions};
+use crate::spec::{
     AppLauncherPlatform, AppLauncherPreflight, AppLauncherSpec, ComponentSpec, RigSpec,
 };
 
@@ -279,7 +279,7 @@ fn test_uninstall_removes_generated_linux_desktop_file_from_temp_dir() {
 fn test_public_linux_install_refuses_on_non_linux_hosts() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let rig = rig_with_linux_launcher(&tmp.path().to_string_lossy());
-    let result = crate::rig::app::install(&rig, AppLauncherOptions { dry_run: false });
+    let result = crate::app::install(&rig, AppLauncherOptions { dry_run: false });
     if cfg!(target_os = "linux") {
         assert!(result.is_ok(), "Linux should allow install");
     } else {
@@ -292,8 +292,8 @@ fn test_public_linux_install_refuses_on_non_linux_hosts() {
 fn test_update_reports_update_action() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let rig = rig_with_launcher(&tmp.path().to_string_lossy());
-    let report = crate::rig::app::update(&rig, AppLauncherOptions { dry_run: true })
-        .expect("update dry-run");
+    let report =
+        crate::app::update(&rig, AppLauncherOptions { dry_run: true }).expect("update dry-run");
     assert_eq!(report.action, AppLauncherAction::Update);
     assert!(report.dry_run);
 }
@@ -302,7 +302,7 @@ fn test_update_reports_update_action() {
 fn test_public_install_refuses_unsupported_platforms() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let rig = rig_with_launcher(&tmp.path().to_string_lossy());
-    let result = crate::rig::app::install(&rig, AppLauncherOptions { dry_run: false });
+    let result = crate::app::install(&rig, AppLauncherOptions { dry_run: false });
     if cfg!(target_os = "macos") {
         assert!(result.is_ok(), "macOS should allow install");
     } else {
@@ -315,8 +315,8 @@ fn test_public_install_refuses_unsupported_platforms() {
 fn test_public_install_dry_run_is_cross_platform_preview() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let rig = rig_with_launcher(&tmp.path().to_string_lossy());
-    let report = crate::rig::app::install(&rig, AppLauncherOptions { dry_run: true })
-        .expect("dry-run preview");
+    let report =
+        crate::app::install(&rig, AppLauncherOptions { dry_run: true }).expect("dry-run preview");
     assert!(report.dry_run);
     assert!(!tmp.path().join("Studio (Dev).app").exists());
 }

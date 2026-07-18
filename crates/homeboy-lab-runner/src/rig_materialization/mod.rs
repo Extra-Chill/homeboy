@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use homeboy_core::rig;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use homeboy_core::{Error, Result};
+use homeboy_rig;
 
 use super::{
     dependency_cache_save_request, exec, load, materialize_git_dependency,
@@ -30,7 +30,7 @@ pub(super) struct RigComponentDependency {
     pub remote_url: Option<String>,
     pub pinned_ref: Option<String>,
     pub component_ref: Option<String>,
-    pub dependency_cache: Option<homeboy_core::rig::spec::DependencyCacheSpec>,
+    pub dependency_cache: Option<homeboy_rig::spec::DependencyCacheSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -148,7 +148,7 @@ pub(super) fn sync_lab_offload_rigs(
                     primary.source_snapshot.clone(),
                 )
             } else {
-                let metadata = rig::read_source_metadata(rig_id).ok_or_else(|| {
+                let metadata = homeboy_rig::read_source_metadata(rig_id).ok_or_else(|| {
                     Error::validation_invalid_argument(
                         "rig",
                         format!(
@@ -388,7 +388,7 @@ fn primary_source_rig_ids(primary_local_path: &str) -> Result<HashSet<String>> {
     if !path.join("rig.json").is_file() && !path.join("rigs").is_dir() {
         return Ok(HashSet::new());
     }
-    Ok(rig::discover_rigs(path)?
+    Ok(homeboy_rig::discover_rigs(path)?
         .into_iter()
         .map(|discovered| discovered.id)
         .collect())
@@ -543,14 +543,14 @@ fn rig_component_env_overrides(
 ) -> Vec<(String, String)> {
     vec![
         (
-            homeboy_core::rig::expand::rig_component_path_override_env_name(
+            homeboy_rig::expand::rig_component_path_override_env_name(
                 &dependency.rig_id,
                 &dependency.component_id,
             ),
             effective_remote_component_path(dependency, primary_local_path, primary_remote_path),
         ),
         (
-            homeboy_core::rig::expand::rig_component_checkout_root_override_env_name(
+            homeboy_rig::expand::rig_component_checkout_root_override_env_name(
                 &dependency.rig_id,
                 &dependency.component_id,
             ),
@@ -567,7 +567,7 @@ pub(super) fn lab_offload_rig_component_checkout_root(args: &[String]) -> Result
     if rig_ids.len() != 1 {
         return Ok(None);
     }
-    let spec = rig::load(&rig_ids[0])?;
+    let spec = homeboy_rig::load(&rig_ids[0])?;
     if spec.components.len() != 1 {
         return Ok(None);
     }
@@ -592,7 +592,7 @@ pub(super) fn lab_offload_rig_component_dependencies(
     let mut dependencies = Vec::new();
     let component_path_override = component_path_override(args);
     for rig_id in lab_offload_rig_ids(args) {
-        let spec = rig::load(&rig_id)?;
+        let spec = homeboy_rig::load(&rig_id)?;
         let single_component = spec.components.len() == 1;
         for (component_id, component) in &spec.components {
             let (checkout_root, local_checkout_root, local_component_path) = if single_component {
@@ -610,8 +610,10 @@ pub(super) fn lab_offload_rig_component_dependencies(
                         local_component_path,
                     )
                 } else {
-                    let resolved_component_path = rig::resolve_component_path(&spec, component_id)
-                        .or_else(|error| primary_component_path(primary_workspace).ok_or(error))?;
+                    let resolved_component_path =
+                        homeboy_rig::resolve_component_path(&spec, component_id).or_else(
+                            |error| primary_component_path(primary_workspace).ok_or(error),
+                        )?;
                     let declared_checkout_root = component
                         .checkout_root
                         .clone()
@@ -625,7 +627,8 @@ pub(super) fn lab_offload_rig_component_dependencies(
                     )
                 }
             } else {
-                let resolved_component_path = rig::resolve_component_path(&spec, component_id)?;
+                let resolved_component_path =
+                    homeboy_rig::resolve_component_path(&spec, component_id)?;
                 let declared_checkout_root = component
                     .checkout_root
                     .clone()
@@ -657,8 +660,8 @@ pub(super) fn lab_offload_rig_component_dependencies(
                 declared_checkout_root: checkout_root.to_string(),
                 required_subpath,
                 remote_url: component.remote_url.clone(),
-                pinned_ref: rig::component_ref(component),
-                component_ref: rig::component_ref(component),
+                pinned_ref: homeboy_rig::component_ref(component),
+                component_ref: homeboy_rig::component_ref(component),
                 dependency_cache: component.dependency_cache.clone(),
             });
         }
@@ -667,14 +670,15 @@ pub(super) fn lab_offload_rig_component_dependencies(
 }
 
 fn declared_required_component_subpath(
-    spec: &rig::RigSpec,
+    spec: &homeboy_rig::RigSpec,
     component_id: &str,
-    component: &rig::ComponentSpec,
+    component: &homeboy_rig::ComponentSpec,
 ) -> Result<Option<String>> {
     let Some(declared_checkout_root) = component.checkout_root.as_deref() else {
         return Ok(None);
     };
-    let Ok(resolved_component_path) = rig::resolve_component_path(spec, component_id) else {
+    let Ok(resolved_component_path) = homeboy_rig::resolve_component_path(spec, component_id)
+    else {
         return Ok(None);
     };
     required_component_subpath(
@@ -714,8 +718,8 @@ fn checkout_root_for_component_path_override(
     checkout_root.display().to_string()
 }
 
-fn expanded_local_path(spec: &rig::RigSpec, value: &str) -> String {
-    rig::expand::expand_vars(spec, value)
+fn expanded_local_path(spec: &homeboy_rig::RigSpec, value: &str) -> String {
+    homeboy_rig::expand::expand_vars(spec, value)
 }
 
 fn remote_checkout_root_for_local(
@@ -1274,9 +1278,9 @@ mod tests {
             .expect("save rig");
             std::fs::create_dir_all(homeboy_core::paths::rig_sources().expect("rig sources"))
                 .expect("create rig sources");
-            homeboy_core::rig::install::write_source_metadata(
+            homeboy_rig::install::write_source_metadata(
                 "studio-web-product-matrix",
-                &homeboy_core::rig::install::RigSourceMetadata {
+                &homeboy_rig::install::RigSourceMetadata {
                     source: checkout.display().to_string(),
                     source_root: Some(checkout.display().to_string()),
                     package_path: checkout.display().to_string(),

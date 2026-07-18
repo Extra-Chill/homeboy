@@ -334,10 +334,7 @@ fn push_compare_proof_markdown(out: &mut String, compare: &extension_trace::Trac
     }
 }
 
-fn push_trace_refs_markdown(
-    out: &mut String,
-    rig_state: Option<&homeboy::core::rig::RigStateSnapshot>,
-) {
+fn push_trace_refs_markdown(out: &mut String, rig_state: Option<&homeboy::rig::RigStateSnapshot>) {
     let Some(rig_state) = rig_state else {
         return;
     };

@@ -1,13 +1,13 @@
 //! Rig install lifecycle tests. Covers `src/core/rig/install.rs`.
 
-use crate::rig::install::local_package_source_root_for_dependencies;
-use crate::rig::{
+use crate::install::local_package_source_root_for_dependencies;
+use crate::{
     declared_id, default_materialize_source_root, discover_rigs, install, list, list_ids, load,
     load_local_source, materialize_rig_spec, materialize_rig_spec_with_default_source_root,
     read_source_metadata, read_stack_source_metadata, run_check, run_lint,
 };
-use crate::test_support::HomeGuard;
-use crate::ErrorCode;
+use homeboy_core::test_support::HomeGuard;
+use homeboy_core::ErrorCode;
 use std::fs;
 use std::path::Path;
 
@@ -68,7 +68,7 @@ mod discovery {
         assert_eq!(result.installed.len(), 1);
         assert_eq!(result.installed[0].id, "alpha");
 
-        let installed = crate::paths::rig_config("alpha").expect("rig path");
+        let installed = homeboy_core::paths::rig_config("alpha").expect("rig path");
         assert!(installed.exists());
         #[cfg(unix)]
         assert_eq!(fs::read_link(&installed).expect("symlink"), source);
@@ -381,13 +381,13 @@ mod install_flows {
         assert_eq!(result.installed.len(), 1);
         assert_eq!(result.installed_stacks.len(), 1);
         assert_eq!(result.installed_stacks[0].id, "studio-combined");
-        let installed = crate::paths::stack_config("studio-combined").expect("stack path");
+        let installed = homeboy_core::paths::stack_config("studio-combined").expect("stack path");
         assert!(installed.exists());
         #[cfg(unix)]
         assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
-        assert_eq!(crate::stack::list().expect("stack list").len(), 1);
+        assert_eq!(homeboy_core::stack::list().expect("stack list").len(), 1);
         assert_eq!(
-            crate::stack::load("studio-combined")
+            homeboy_core::stack::load("studio-combined")
                 .expect("load stack")
                 .component,
             "studio"
@@ -425,7 +425,8 @@ mod install_flows {
                 .expect("reinstall replaces owned stack link");
 
             assert_eq!(result.installed_stacks.len(), 1);
-            let installed = crate::paths::stack_config("studio-combined").expect("stack path");
+            let installed =
+                homeboy_core::paths::stack_config("studio-combined").expect("stack path");
             assert!(installed.exists());
             #[cfg(unix)]
             assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
@@ -710,7 +711,7 @@ mod install_flows {
 
         assert!(report.success, "direct rig.json check should pass");
         assert_eq!(
-            crate::rig::expand::expand_vars(&rig, "${package.root}/marker.txt"),
+            crate::expand::expand_vars(&rig, "${package.root}/marker.txt"),
             package.path().join("marker.txt").to_string_lossy()
         );
         assert!(read_source_metadata("direct-alpha").is_none());
@@ -752,7 +753,7 @@ mod install_flows {
         let result = install(package.path().to_str().unwrap(), None, false).expect("install");
 
         assert_eq!(result.installed.len(), 1);
-        let installed_path = crate::paths::rig_config("alpha").expect("rig config");
+        let installed_path = homeboy_core::paths::rig_config("alpha").expect("rig config");
         #[cfg(unix)]
         assert!(fs::read_link(&installed_path).is_err());
         let installed = fs::read_to_string(&installed_path).expect("installed rig");
@@ -1060,7 +1061,7 @@ mod install_flows {
 
             install(package.path().to_str().unwrap(), None, false).expect("install");
 
-            let installed_path = crate::paths::rig_config(id).expect("rig config");
+            let installed_path = homeboy_core::paths::rig_config(id).expect("rig config");
             let installed = fs::read_to_string(&installed_path).expect("installed rig");
             assert!(!installed.contains("$append"));
             assert!(!installed.contains("$merge_by"));
@@ -1118,7 +1119,7 @@ mod install_flows {
         );
 
         install(package.path().to_str().unwrap(), None, false).expect("install");
-        let installed_path = crate::paths::rig_config("replacer").expect("rig config");
+        let installed_path = homeboy_core::paths::rig_config("replacer").expect("rig config");
         let installed = fs::read_to_string(&installed_path).expect("installed rig");
         let value: serde_json::Value = serde_json::from_str(&installed).expect("materialized json");
         let labels: Vec<&str> = value["pipeline"]["check"]
@@ -1223,8 +1224,8 @@ mod multi_rig {
             install(package.path().to_str().unwrap(), Some("beta"), false).expect("install");
         assert_eq!(result.installed.len(), 1);
         assert_eq!(result.installed[0].id, "beta");
-        assert!(crate::paths::rig_config("beta").unwrap().exists());
-        assert!(!crate::paths::rig_config("alpha").unwrap().exists());
+        assert!(homeboy_core::paths::rig_config("beta").unwrap().exists());
+        assert!(!homeboy_core::paths::rig_config("alpha").unwrap().exists());
     }
 
     #[test]
@@ -1248,10 +1249,10 @@ mod multi_rig {
         assert_eq!(result.installed.len(), 1);
         assert_eq!(result.installed[0].id, "alpha");
         assert!(result.installed_stacks.is_empty());
-        assert!(crate::paths::rig_config("alpha").unwrap().exists());
-        assert!(!crate::paths::rig_config("beta").unwrap().exists());
+        assert!(homeboy_core::paths::rig_config("alpha").unwrap().exists());
+        assert!(!homeboy_core::paths::rig_config("beta").unwrap().exists());
         assert_eq!(
-            fs::read_link(crate::paths::stack_config("stale-stack").unwrap())
+            fs::read_link(homeboy_core::paths::stack_config("stale-stack").unwrap())
                 .expect("stale stack symlink remains reported by sources list"),
             stale_stack
         );
@@ -1275,8 +1276,8 @@ mod multi_rig {
 
         assert_eq!(result.installed.len(), 1);
         assert_eq!(result.installed[0].id, "alpha");
-        assert!(crate::paths::rig_config("alpha").unwrap().exists());
-        assert!(!crate::paths::rig_config("broken").unwrap().exists());
+        assert!(homeboy_core::paths::rig_config("alpha").unwrap().exists());
+        assert!(!homeboy_core::paths::rig_config("broken").unwrap().exists());
     }
 
     #[test]
@@ -1302,8 +1303,8 @@ mod multi_rig {
 
         let result = install(package.path().to_str().unwrap(), None, true).expect("install");
         assert_eq!(result.installed.len(), 2);
-        assert!(crate::paths::rig_config("alpha").unwrap().exists());
-        assert!(crate::paths::rig_config("beta").unwrap().exists());
+        assert!(homeboy_core::paths::rig_config("alpha").unwrap().exists());
+        assert!(homeboy_core::paths::rig_config("beta").unwrap().exists());
     }
 }
 
@@ -1317,9 +1318,9 @@ mod refresh_and_identity {
         let refreshed = minimal_rig("alpha").replace("alpha rig", "alpha rig refreshed");
         write_rig(package.path(), "alpha", &refreshed);
 
-        fs::create_dir_all(crate::paths::rigs().expect("rigs dir")).expect("rigs dir");
+        fs::create_dir_all(homeboy_core::paths::rigs().expect("rigs dir")).expect("rigs dir");
         fs::write(
-            crate::paths::rig_config("alpha").expect("alpha rig path"),
+            homeboy_core::paths::rig_config("alpha").expect("alpha rig path"),
             minimal_rig("alpha"),
         )
         .expect("stale installed rig");
@@ -1327,8 +1328,8 @@ mod refresh_and_identity {
         let result = install(package.path().to_str().unwrap(), None, false).expect("refresh");
 
         assert_eq!(result.installed.len(), 1);
-        let installed =
-            fs::read_to_string(crate::paths::rig_config("alpha").unwrap()).expect("installed rig");
+        let installed = fs::read_to_string(homeboy_core::paths::rig_config("alpha").unwrap())
+            .expect("installed rig");
         assert!(installed.contains("alpha rig refreshed"));
         assert_eq!(
             read_source_metadata("alpha").expect("metadata").rig_path,
@@ -1344,8 +1345,8 @@ mod refresh_and_identity {
         let refreshed = minimal_rig("alpha").replace("alpha rig", "alpha rig refreshed");
         let source = write_rig(package.path(), "alpha", &refreshed);
 
-        fs::create_dir_all(crate::paths::rigs().expect("rigs dir")).expect("rigs dir");
-        let installed = crate::paths::rig_config("alpha").expect("alpha rig path");
+        fs::create_dir_all(homeboy_core::paths::rigs().expect("rigs dir")).expect("rigs dir");
+        let installed = homeboy_core::paths::rig_config("alpha").expect("alpha rig path");
         std::os::unix::fs::symlink(package.path().join("missing-rig.json"), &installed)
             .expect("broken rig symlink");
 
@@ -1363,9 +1364,9 @@ mod refresh_and_identity {
         let package = tempfile::tempdir().expect("package");
         write_rig(package.path(), "alpha", &minimal_rig("alpha"));
 
-        fs::create_dir_all(crate::paths::rigs().expect("rigs dir")).expect("rigs dir");
+        fs::create_dir_all(homeboy_core::paths::rigs().expect("rigs dir")).expect("rigs dir");
         fs::write(
-            crate::paths::rig_config("alpha").expect("alpha rig path"),
+            homeboy_core::paths::rig_config("alpha").expect("alpha rig path"),
             minimal_rig("beta"),
         )
         .expect("conflicting installed rig");
@@ -1381,9 +1382,9 @@ mod refresh_and_identity {
         write_rig(package.path(), "studio", &minimal_rig("studio"));
         let stack_path = write_stack(package.path(), "studio-combined", "studio");
 
-        fs::create_dir_all(crate::paths::stacks().expect("stacks dir")).expect("stacks dir");
+        fs::create_dir_all(homeboy_core::paths::stacks().expect("stacks dir")).expect("stacks dir");
         fs::write(
-            crate::paths::stack_config("studio-combined").expect("stack path"),
+            homeboy_core::paths::stack_config("studio-combined").expect("stack path"),
             fs::read_to_string(&stack_path).expect("package stack"),
         )
         .expect("existing stack");
@@ -1404,8 +1405,9 @@ mod refresh_and_identity {
         write_stack(package.path(), "studio-combined", "studio");
         let manual_stack = minimal_stack("studio-combined", "other");
 
-        fs::create_dir_all(crate::paths::stacks().expect("stacks dir")).expect("stacks dir");
-        let stack_config = crate::paths::stack_config("studio-combined").expect("stack path");
+        fs::create_dir_all(homeboy_core::paths::stacks().expect("stacks dir")).expect("stacks dir");
+        let stack_config =
+            homeboy_core::paths::stack_config("studio-combined").expect("stack path");
         fs::write(&stack_config, &manual_stack).expect("conflicting stack");
 
         let err =
@@ -1420,9 +1422,9 @@ mod refresh_and_identity {
     #[test]
     fn installed_filename_is_runtime_identity_when_declared_id_differs() {
         let _home = HomeGuard::new();
-        fs::create_dir_all(crate::paths::rigs().expect("rigs dir")).expect("rigs dir");
+        fs::create_dir_all(homeboy_core::paths::rigs().expect("rigs dir")).expect("rigs dir");
         fs::write(
-            crate::paths::rig_config("replacement").expect("replacement rig path"),
+            homeboy_core::paths::rig_config("replacement").expect("replacement rig path"),
             minimal_rig("alpha"),
         )
         .expect("replacement rig");
@@ -1459,14 +1461,16 @@ mod refresh_and_identity {
     #[test]
     fn rig_list_ids_skip_non_json_files() {
         let _home = HomeGuard::new();
-        fs::create_dir_all(crate::paths::rigs().expect("rigs dir")).expect("rigs dir");
+        fs::create_dir_all(homeboy_core::paths::rigs().expect("rigs dir")).expect("rigs dir");
         fs::write(
-            crate::paths::rig_config("alpha").expect("alpha rig path"),
+            homeboy_core::paths::rig_config("alpha").expect("alpha rig path"),
             minimal_rig("alpha"),
         )
         .expect("alpha rig");
         fs::write(
-            crate::paths::rigs().expect("rigs dir").join("ignore.txt"),
+            homeboy_core::paths::rigs()
+                .expect("rigs dir")
+                .join("ignore.txt"),
             "not json",
         )
         .expect("non-json rig sidecar");
@@ -1505,14 +1509,14 @@ mod git_url {
         assert!(result.installed[0]
             .spec_path
             .ends_with("packages/studio/rig.json"));
-        assert!(crate::paths::rig_config("studio").unwrap().exists());
-        assert!(!crate::paths::rig_config("other").unwrap().exists());
+        assert!(homeboy_core::paths::rig_config("studio").unwrap().exists());
+        assert!(!homeboy_core::paths::rig_config("other").unwrap().exists());
         assert_eq!(result.installed_stacks.len(), 1);
         assert_eq!(result.installed_stacks[0].id, "studio-combined");
-        assert!(crate::paths::stack_config("studio-combined")
+        assert!(homeboy_core::paths::stack_config("studio-combined")
             .unwrap()
             .exists());
-        assert!(!crate::paths::stack_config("root-combined")
+        assert!(!homeboy_core::paths::stack_config("root-combined")
             .unwrap()
             .exists());
 

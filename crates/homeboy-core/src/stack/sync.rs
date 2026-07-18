@@ -436,7 +436,7 @@ fn sync_pr_step(
     }
 }
 
-pub(crate) fn sync_plan_would_mutate(plan: &HomeboyPlan) -> bool {
+pub fn sync_plan_would_mutate(plan: &HomeboyPlan) -> bool {
     SyncPlanView::new(plan).would_mutate()
 }
 

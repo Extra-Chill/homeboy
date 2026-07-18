@@ -168,9 +168,7 @@ pub(super) fn run_list(args: FuzzListArgs) -> homeboy::core::Result<FuzzListOutp
     let rig_context = load_rig(args.rig.as_deref(), &args.setting_args)?;
     if let Some(context) = rig_context.as_ref() {
         let prepare_settings = fuzz_list_prepare_settings(&args);
-        if let Some(prepare) =
-            homeboy::core::rig::run_fuzz_prepare(&context.spec, &prepare_settings)?
-        {
+        if let Some(prepare) = homeboy::rig::run_fuzz_prepare(&context.spec, &prepare_settings)? {
             if !prepare.success {
                 return Err(homeboy::core::Error::rig_pipeline_failed(
                     &context.spec.id,

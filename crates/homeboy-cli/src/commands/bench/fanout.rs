@@ -11,7 +11,7 @@ use homeboy::agents::agent_tasks::{
     AGENT_TASK_REQUEST_SCHEMA,
 };
 use homeboy::core::extension::bench::{BenchGate, BenchGateOp, BenchGateResult};
-use homeboy::core::rig::RigSpec;
+use homeboy::rig::RigSpec;
 
 use super::{matrix, BenchReportFormat, BenchRunArgs};
 
@@ -143,7 +143,7 @@ pub(super) fn run_matrix_fanout(
 fn declared_result_gates(run_args: &BenchRunArgs) -> homeboy::core::Result<Vec<BenchGate>> {
     let mut gates = Vec::new();
     for rig_id in &run_args.rig {
-        let spec = homeboy::core::rig::load(rig_id)?;
+        let spec = homeboy::rig::load(rig_id)?;
         gates.extend(result_gates_for_rig(&spec));
     }
     Ok(gates)
@@ -260,7 +260,7 @@ fn effective_matrix_component(run_args: &BenchRunArgs) -> homeboy::core::Result<
     }
 
     if run_args.rig.len() == 1 {
-        let spec = homeboy::core::rig::load(&run_args.rig[0])?;
+        let spec = homeboy::rig::load(&run_args.rig[0])?;
         if let Some(component) = spec
             .bench
             .as_ref()

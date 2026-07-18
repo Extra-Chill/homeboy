@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::rig::spec::DependencyCacheSpec;
+use homeboy_rig::spec::DependencyCacheSpec;
 
 use super::{
     workspace::{
@@ -1097,7 +1097,7 @@ mod tests {
         runner
             .resources
             .insert("arch".to_string(), serde_json::json!("x86_64"));
-        let spec = homeboy_core::rig::spec::DependencyCacheSpec {
+        let spec = homeboy_rig::spec::DependencyCacheSpec {
             step_id: "deps".to_string(),
             paths: vec!["vendor/cache".to_string()],
             lockfiles: vec!["lock.txt".to_string()],

@@ -3,8 +3,8 @@
 //! End-to-end pipeline runs exercise real services + filesystem mutations
 //! and are covered by the manual smoke documented in #1468.
 
-use crate::rig::pipeline::{run_pipeline, run_pipeline_check_groups, run_pipeline_with_settings};
-use crate::rig::spec::RigSpec;
+use crate::pipeline::{run_pipeline, run_pipeline_check_groups, run_pipeline_with_settings};
+use crate::spec::RigSpec;
 
 #[test]
 fn test_run_pipeline_check_groups() {
@@ -805,8 +805,8 @@ mod dag {
     use std::collections::HashMap;
     use std::fs;
 
-    use crate::rig::pipeline::run_pipeline;
-    use crate::rig::spec::{ComponentSpec, PipelineStep, RigSpec, StackOp};
+    use crate::pipeline::run_pipeline;
+    use crate::spec::{ComponentSpec, PipelineStep, RigSpec, StackOp};
 
     fn command(id: &str, depends_on: &[&str], cmd: String, cwd: Option<String>) -> PipelineStep {
         PipelineStep::Command {
@@ -1105,8 +1105,8 @@ mod git_steps {
     use std::fs;
     use std::process::Command;
 
-    use crate::rig::pipeline::run_pipeline;
-    use crate::rig::spec::{ComponentSpec, GitOp, PipelineStep, RigSpec};
+    use crate::pipeline::run_pipeline;
+    use crate::spec::{ComponentSpec, GitOp, PipelineStep, RigSpec};
 
     fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
         let output = Command::new("git")
@@ -1234,10 +1234,10 @@ mod extension_lifecycle {
     use std::collections::HashMap;
     use std::fs;
 
-    use crate::component::ScopedExtensionConfig;
-    use crate::rig::pipeline::run_pipeline;
-    use crate::rig::spec::{ComponentSpec, PipelineStep, RigSpec};
-    use crate::test_support;
+    use crate::pipeline::run_pipeline;
+    use crate::spec::{ComponentSpec, PipelineStep, RigSpec};
+    use homeboy_core::component::ScopedExtensionConfig;
+    use homeboy_core::test_support;
 
     fn rig_with_step(component_path: String, step: PipelineStep) -> RigSpec {
         let mut component_settings = HashMap::new();
@@ -1393,10 +1393,10 @@ mod command_env {
     use std::collections::HashMap;
     use std::fs;
 
-    use crate::rig::pipeline::run_pipeline;
-    use crate::rig::spec::{PipelineStep, RigSpec};
-    use crate::rig::toolchain;
-    use crate::test_support::home_env_guard;
+    use crate::pipeline::run_pipeline;
+    use crate::spec::{PipelineStep, RigSpec};
+    use crate::toolchain;
+    use homeboy_core::test_support::home_env_guard;
 
     fn rig_with_command(cmd: String, env: HashMap<String, String>) -> RigSpec {
         let mut pipeline = HashMap::new();
