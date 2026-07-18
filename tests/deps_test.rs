@@ -3,6 +3,15 @@ use homeboy::core::deps::{self, DependencyInstallInvocation, DependencyUpdateOpt
 use std::fs;
 use tempfile::tempdir;
 
+// The component-script/build runners live in the extension subsystem, which is
+// a separate crate registered at binary startup via `cli_runtime`. Integration
+// tests that exercise extension-backed dependency behavior must register those
+// providers explicitly (registration is an idempotent Mutex-backed slot).
+fn register_component_script_runner() {
+    homeboy_extension::component_script::register_component_script_runner();
+    homeboy_extension::build::register_component_build_runner();
+}
+
 fn write_file(path: &std::path::Path, contents: &str) {
     fs::write(path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
@@ -251,6 +260,7 @@ fn stack_plan_compatibility_fields_are_serialized_from_homeboy_plan() {
 
 #[test]
 fn stack_plan_derives_edges_from_provider_reported_dependency_identities() {
+    register_component_script_runner();
     let dir = tempdir().unwrap();
     let upstream_path = dir.path().join("upstream");
     let downstream_path = dir.path().join("downstream");
@@ -305,6 +315,7 @@ fn stack_plan_derives_edges_from_provider_reported_dependency_identities() {
 
 #[test]
 fn stack_plan_keeps_explicit_edge_config_when_provider_edge_matches() {
+    register_component_script_runner();
     let dir = tempdir().unwrap();
     let upstream_path = dir.path().join("upstream");
     let downstream_path = dir.path().join("downstream");
@@ -443,6 +454,7 @@ fn non_composer_component_returns_clear_unsupported_error() {
 
 #[test]
 fn update_runs_component_provider_install_and_optional_rebuild() {
+    register_component_script_runner();
     let dir = tempdir().unwrap();
     let root = dir.path();
     fs::create_dir_all(root.join("scripts")).unwrap();
