@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::component::{self, Component};
 use crate::deps::provider;
 use crate::error::{Error, ErrorCode, Result, ValidationErrorItem};
-use crate::extension::{build, ExtensionCapability};
+use crate::extension::ExtensionCapability;
 
 const LAB_SOURCE_EVIDENCE_FILE: &str = ".homeboy/lab-source-evidence.json";
 const DEPENDENCY_LIFECYCLE_ARTIFACT_DIR: &str = ".homeboy/dependency-lifecycle";
@@ -650,12 +650,12 @@ fn run_dependency_install_lifecycle(component: &Component, path: &Path) -> Resul
 
 fn run_dependency_build_lifecycle(component: &Component, path: &Path) -> Result<()> {
     if !component.has_script(ExtensionCapability::Build)
-        && build::resolve_build_command(component).is_err()
+        && !crate::component_build_provider::can_build(component)
     {
         return Ok(());
     }
 
-    let (result, exit_code) = build::run_component(component)?;
+    let (result, exit_code) = crate::component_build_provider::run_component_build(component)?;
     if exit_code == 0 {
         return Ok(());
     }

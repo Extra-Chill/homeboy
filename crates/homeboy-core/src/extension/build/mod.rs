@@ -968,6 +968,10 @@ impl crate::component_build_provider::ComponentBuildRunner for ExtensionComponen
         })?;
         Ok((value, exit_code))
     }
+
+    fn can_build(&self, component: &crate::component::Component) -> bool {
+        resolve_build_command(component).is_ok()
+    }
 }
 
 /// Register the extension component-build runner with core. Call once at
