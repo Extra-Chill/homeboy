@@ -214,7 +214,7 @@ function buildBundle(results, scenario, config, bundlePath, resultsPath, episode
 			file: scenario.file,
 			manifest: metadata.scenario_manifest || metadata.manifest || metadata.scenario,
 		}),
-		initial_blueprint: config.wp_codebox_blueprint || {},
+		initial_blueprint: config.wordpress_runtime_blueprint || {},
 		prompt: config.prompt,
 		runner_config: config,
 		provider: config.provider || metadata.provider,

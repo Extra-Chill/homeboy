@@ -22,7 +22,7 @@ In the agent runner config JSON:
     "/host/path/homeboy-extensions/wordpress/tests/fixtures/runtime-agent-driver/runtime-agent-driver.php:/wordpress/wp-content/plugins/runtime-agent-driver/runtime-agent-driver.php:readonly"
   ],
   "transcript_dir": "/wordpress/wp-content/plugins/runtime-agent-driver/artifacts/<agent-slug>",
-  "wp_codebox_workloads": [
+  "wordpress_runtime_workloads": [
     {
       "id": "<scenario-id>",
       "label": "<human label>",

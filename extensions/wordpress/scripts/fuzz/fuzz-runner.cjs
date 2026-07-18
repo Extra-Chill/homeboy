@@ -180,23 +180,10 @@ function requiresCodeboxTaskAdapter(request) {
 		return false;
 	}
 	const config = request.executor?.config || {};
-	const runtimeRequirements = config.runtime_requirements || config.runtimeRequirements || {};
+	const runtimeRequirements = config.runtime_requirements || {};
 	return [
-		config.component_contracts,
-		config.componentContracts,
-		config.runtime_overlays,
-		config.runtimeOverlays,
-		config.runtime_mounts,
-		config.runtimeMounts,
 		runtimeRequirements.extra_plugins,
-		runtimeRequirements.extraPlugins,
-		runtimeRequirements.component_contracts,
-		runtimeRequirements.componentContracts,
 		runtimeRequirements.runtime_mounts,
-		runtimeRequirements.runtimeMounts,
-		runtimeRequirements.mounts,
-		runtimeRequirements.plugins,
-		runtimeRequirements.components,
 	].some((value) => Array.isArray(value) && value.length > 0);
 }
 

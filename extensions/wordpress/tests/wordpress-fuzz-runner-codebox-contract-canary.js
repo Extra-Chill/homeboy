@@ -61,9 +61,8 @@ const workload = {
 					path: checkoutRoot,
 					extensions: {
 						wordpress: {
-							wp_codebox_source_path: '${env.HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE}',
 							wp_codebox_source_root: '${env.HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE}',
-							wp_codebox_source_subdir: 'plugins/woocommerce',
+							wp_codebox_source_subpath: 'plugins/woocommerce',
 							wp_codebox_mount_slug: 'woocommerce',
 							wp_codebox_plugin_file: 'woocommerce/woocommerce.php',
 						},
@@ -205,8 +204,8 @@ assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.expected
 assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.expected_artifacts.includes('coverage-summary'), true);
 assert.equal(observedRequest.metadata.homeboy_agent_task_request, undefined);
 const observedPlugin = observedRequest.metadata.runtime_requirements.extra_plugins[0];
-assert.equal(observedPlugin.sourcePath, checkoutRoot);
-assert.equal(observedPlugin.sourceSubdir, 'plugins/woocommerce');
+assert.equal(observedPlugin.source, checkoutRoot);
+assert.equal(observedPlugin.sourceSubpath, 'plugins/woocommerce');
 assert.equal(observedPlugin.mountSlug, 'woocommerce');
 assert.equal(observedPlugin.pluginFile, 'woocommerce/woocommerce.php');
 assert.notEqual(observedPlugin.pluginFile, 'woocommerce.php');

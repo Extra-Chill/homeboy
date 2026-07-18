@@ -75,7 +75,6 @@ module.exports = {
 		...require('./lib/wp-codebox-resolver'),
 		...require('./lib/wp-codebox-fuzz-plan'),
 		...require('./lib/wp-codebox-artifacts'),
-		...require('./lib/wp-codebox-browser-coverage'),
 		...require('./lib/wp-codebox-fuzz-run'),
 		buildWpCodeboxStaticVisualParityRecipe: staticVisualParity.buildWpCodeboxStaticVisualParityRecipe,
 		createWpCodeboxStaticVisualParityRuntimeProvider: staticVisualParity.createWpCodeboxStaticVisualParityRuntimeProvider,

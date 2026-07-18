@@ -1381,14 +1381,13 @@ function validateWpCodeboxRuntimeRequirementMounts(runtimeRequirements = {}, opt
 	for (const [collection, entries] of Object.entries({
 		runtime_mounts: runtimeRequirements.runtime_mounts,
 		extra_plugins: runtimeRequirements.extra_plugins,
-		component_contracts: runtimeRequirements.component_contracts,
 	})) {
 		for (const [index, entry] of normalizeArray(entries).entries()) {
 			const requirement = objectOrUndefined(entry);
 			if (!requirement) {
 				continue;
 			}
-			const source = requirement.sourcePath || requirement.sourceRoot || requirement.source || requirement.path;
+			const source = requirement.source;
 			if (!isLocalAbsolutePath(source) || fs.existsSync(source)) {
 				continue;
 			}
@@ -1477,7 +1476,7 @@ function wpCodeboxArtifactPostprocessRoot(options = {}) {
 }
 
 function wpCodeboxRuntimePluginSlug(runtimeRequirements = {}) {
-	for (const plugin of [...normalizeArray(runtimeRequirements.extra_plugins), ...normalizeArray(runtimeRequirements.component_contracts)]) {
+	for (const plugin of normalizeArray(runtimeRequirements.extra_plugins)) {
 		const slug = objectOrUndefined(plugin)?.slug;
 		if (typeof slug === 'string' && slug.trim()) {
 			return slug.trim();

@@ -19,6 +19,10 @@ for (const settingId of ['package_artifacts', 'package_excludes']) {
 	assert.ok(settingIds.has(settingId), `wordpress manifest declares ${settingId}`);
 }
 
+for (const legacySettingId of ['wp_codebox_blueprint', 'wp_codebox_workloads', 'wp_codebox_recipe_prepare_steps', 'wp_codebox_recipe_post_steps']) {
+	assert.equal(settingIds.has(legacySettingId), false, `wordpress manifest no longer accepts ${legacySettingId}`);
+}
+
 const fuzzEnv = new Set(manifest.fuzz.env);
 for (const envKey of ['HOMEBOY_SETTINGS_JSON', 'HOMEBOY_SETTINGS_WP_CODEBOX_BIN', 'HOMEBOY_WP_CODEBOX_BIN', 'WP_CODEBOX_BIN']) {
 	assert.ok(
