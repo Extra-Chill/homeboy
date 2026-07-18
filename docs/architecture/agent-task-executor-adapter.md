@@ -2,7 +2,7 @@
 
 Agent task executor adapters are the boundary between Homeboy core and the
 systems that actually run agent work. Core owns the provider-neutral request,
-outcome, artifact, and lifecycle types in `src/core/agent_task.rs`; concrete
+outcome, artifact, and lifecycle types in `crates/homeboy-agents/src/agent_task.rs`; concrete
 backends own launch mechanics, credentials, process/session IDs, and provider
 payload parsing.
 

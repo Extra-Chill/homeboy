@@ -40,7 +40,7 @@ component path so existing runner helpers can identify the source.
 
 Extensions may omit any capability. Detection uses `has_lint()` /
 `has_test()` / `has_build()` accessors on the manifest (see
-`src/core/extension/manifest.rs`). If a capability is missing, the
+`crates/homeboy-core/src/extension/manifest.rs`). If a capability is missing, the
 corresponding homeboy command exits cleanly with a "not applicable"
 message rather than failing.
 
@@ -67,7 +67,7 @@ fi
 
 Step names are extension-chosen; core only enforces the filter
 semantics. The contract type lives at
-`src/core/extension/runner_contract.rs` (`RunnerStepFilter`) and
+`crates/homeboy-extension-contract/src/runner_contract.rs` (`RunnerStepFilter`) and
 serializes to the env pair above.
 
 ## Environment inputs
@@ -205,7 +205,7 @@ Trace runners also receive trace-specific variables when invoked by `homeboy tra
 ## Core-provided runtime helpers
 
 Core ships shell helpers as embedded assets
-(`src/core/extension/runtime/`) and injects their absolute paths via
+(`crates/homeboy-core/src/extension/runtime/`) and injects their absolute paths via
 `HOMEBOY_RUNTIME_*` env vars. Extensions source them at the top of the
 runner script with a fallback to a bundled copy:
 
@@ -354,7 +354,7 @@ Each produces a distinct `FAILED_STEP` label and either dumps
 diagnostics or replays the tool output.
 
 **Consolidation target:** factor this classifier into a future shared
-runtime helper under `src/core/extension/runtime/` (tracked in
+runtime helper under `crates/homeboy-core/src/extension/runtime/` (tracked in
 [Extra-Chill/homeboy#1459](https://github.com/Extra-Chill/homeboy/issues/1459))
 so rust, swift, and future extensions produce the same categorized
 surface without re-implementing the logic. The helper does not exist
@@ -404,7 +404,7 @@ When `--attach` is present, core observes the declared already-running local tar
 Runs entirely in core. No extension script invoked. Audit rules read
 the component's manifest for configuration
 (`audit.feature_patterns`, `audit.test_mapping`, etc.) but the detectors
-themselves live in `src/core/code_audit/`.
+themselves live in `crates/homeboy-code-audit/src/`.
 
 ## Authoring a new runner
 

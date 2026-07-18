@@ -44,7 +44,7 @@ by the immediately preceding comment block. Non-comment code and string literals
 
 ## Extending the symbol table
 
-The WP-core symbol table lives in `src/core/code_audit/requirements.rs`. Add new rows as
+The WP-core symbol table lives in `crates/homeboy-code-audit/src/requirements.rs`. Add new rows as
 `(symbol_name, introduced_in_encoded_version, kind)` — `kind` is `'f'` for functions, `'c'` for
 classes, `'k'` for constants. Version is encoded as `major * 100 + minor` (e.g. 6.9 → 609).
 

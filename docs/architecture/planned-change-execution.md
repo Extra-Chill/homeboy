@@ -11,7 +11,7 @@ plan -> execute -> artifact -> approve -> apply -> publish
 
 ## Core Contract
 
-The contract types live in `src/core/execution.rs` and are intentionally usable
+The contract types live in `crates/homeboy-core/src/execution.rs` and are intentionally usable
 without changing existing command JSON output shapes.
 
 - `ExecutionRequest` captures the subject, selected `ExecutionMode`, optional

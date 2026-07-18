@@ -63,7 +63,7 @@ Primitive command output should include a phase report:
 - `findings`
 - `infrastructure`
 
-The core Rust contract lives in `src/core/extension/runner_contract.rs`:
+The core Rust contract lives in `crates/homeboy-extension-contract/src/runner_contract.rs`:
 
 - `VerificationPhase`
 - `PhaseStatus`
