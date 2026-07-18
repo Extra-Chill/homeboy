@@ -53,15 +53,6 @@ pub fn derive_id_from_url(url: &str) -> Result<String> {
     slugify_id(segment)
 }
 
-/// Check if a string looks like a git URL (vs a local path).
-pub fn is_git_url(source: &str) -> bool {
-    source.starts_with("http://")
-        || source.starts_with("https://")
-        || source.starts_with("git@")
-        || source.starts_with("ssh://")
-        || source.ends_with(".git")
-}
-
 /// Returns the path to a extension's manifest file: {extension_dir}/{id}.json
 fn manifest_path_for_extension(extension_dir: &Path, id: &str) -> PathBuf {
     extension_dir.join(format!("{}.json", id))
@@ -80,7 +71,7 @@ pub fn install_with_revision(
     id_override: Option<&str>,
     revision: Option<&str>,
 ) -> Result<InstallResult> {
-    if is_git_url(source) {
+    if crate::extension_update_check::is_git_url(source) {
         install_from_url(source, id_override, revision)
     } else {
         install_from_path(source, id_override, None, revision)
@@ -163,7 +154,7 @@ pub fn refresh(
         None => derive_id_from_url(source)?,
     };
 
-    let local_source_revision = if is_git_url(source) {
+    let local_source_revision = if crate::extension_update_check::is_git_url(source) {
         None
     } else {
         git::short_head_revision(&absolute_source_path(source)?)
@@ -193,7 +184,7 @@ pub fn refresh(
 }
 
 fn durable_refresh_source(source: &str, extension_id: &str) -> Result<String> {
-    if is_git_url(source) {
+    if crate::extension_update_check::is_git_url(source) {
         return Ok(source.to_string());
     }
 
@@ -325,9 +316,7 @@ mod update;
 use update::is_extension_update_workdir_clean;
 pub(crate) use update::write_requested_source_ref;
 pub(crate) use update::write_source_metadata;
-pub use update::{
-    check_update_available, read_source_revision, read_source_url, update, UpdateAvailable,
-};
+pub use update::{read_source_revision, read_source_url, update};
 
 /// Uninstall a extension. Automatically detects symlinks vs cloned directories.
 /// - Symlinked extensions: removes symlink only (source preserved)

@@ -1,3 +1,4 @@
+pub use crate::extension_update_check::{check_update_available, is_git_url, UpdateAvailable};
 pub mod audit_compiler_warning_provider;
 pub mod audit_fingerprint_script_provider;
 pub mod audit_grammar_source_provider;
@@ -89,10 +90,9 @@ pub use homeboy_extension_contract::{DeployArchiveInstallPolicy, DeployRequiredH
 pub use lifecycle::source_metadata::resolve_source_url;
 pub use lifecycle::source_metadata::SourceMetadataRepair;
 pub use lifecycle::{
-    check_update_available, derive_id_from_url, install, install_for_component,
-    install_with_revision, is_git_url, read_source_revision, read_source_url, refresh, slugify_id,
-    uninstall, update, InstallForComponentResult, InstallResult, RefreshResult, UpdateAvailable,
-    UpdateResult,
+    derive_id_from_url, install, install_for_component, install_with_revision,
+    read_source_revision, read_source_url, refresh, slugify_id, uninstall, update,
+    InstallForComponentResult, InstallResult, RefreshResult, UpdateResult,
 };
 pub use maintenance::{exec_tool, update_all};
 pub use manifest::{

@@ -98,7 +98,7 @@ pub fn run_startup_check() {
     let mut extensions_behind: HashMap<String, usize> = HashMap::new();
 
     for id in &extension_ids {
-        if let Some(update) = extension::check_update_available(id) {
+        if let Some(update) = crate::extension_update_check::check_update_available(id) {
             extensions_behind.insert(update.extension_id, update.behind_count);
         }
     }
