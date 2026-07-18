@@ -37,8 +37,17 @@ fn root_package_version(manifest: &Path) -> String {
 
 fn emit_git_identity(root: &Path) {
     let git_dir = resolve_git_dir(root).unwrap_or_else(|| root.join(".git"));
+    let common_dir = git_common_dir(root, &git_dir).unwrap_or_else(|| git_dir.clone());
     println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
     println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        common_dir.join("refs/notes/homeboy-snapshot").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        common_dir.join("packed-refs").display()
+    );
     if let Ok(head) = fs::read_to_string(git_dir.join("HEAD")) {
         if let Some(reference) = head.trim().strip_prefix("ref: ") {
             println!(
@@ -48,15 +57,96 @@ fn emit_git_identity(root: &Path) {
         }
     }
 
-    if let Some(commit) = git_output(root, &["rev-parse", "--short=12", "HEAD"]) {
-        println!("cargo:rustc-env=HOMEBOY_PRODUCT_GIT_COMMIT={commit}");
-    }
-    if let Some(status) = git_output(root, &["status", "--porcelain"]) {
+    if let Some(provenance) = synthetic_snapshot_provenance(root) {
+        println!(
+            "cargo:rustc-env=HOMEBOY_PRODUCT_GIT_COMMIT={}",
+            provenance.commit
+        );
         println!(
             "cargo:rustc-env=HOMEBOY_PRODUCT_GIT_DIRTY={}",
-            if status.is_empty() { "false" } else { "true" }
+            provenance.dirty
         );
+    } else {
+        if let Some(commit) = git_output(root, &["rev-parse", "--short=12", "HEAD"]) {
+            println!("cargo:rustc-env=HOMEBOY_PRODUCT_GIT_COMMIT={commit}");
+        }
+        if let Some(status) = git_output(root, &["status", "--porcelain"]) {
+            println!(
+                "cargo:rustc-env=HOMEBOY_PRODUCT_GIT_DIRTY={}",
+                if status.is_empty() { "false" } else { "true" }
+            );
+        }
     }
+}
+
+struct SyntheticSnapshotProvenance {
+    commit: String,
+    dirty: bool,
+}
+
+fn synthetic_snapshot_provenance(root: &Path) -> Option<SyntheticSnapshotProvenance> {
+    let head = git_output(root, &["rev-parse", "HEAD"])?;
+    if git_output(root, &["rev-list", "--parents", "-n", "1", "HEAD"])?
+        .split_whitespace()
+        .count()
+        != 1
+        || git_output(root, &["show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD"])?
+            != "Homeboy Snapshot <homeboy-snapshot@localhost>|Homeboy Snapshot <homeboy-snapshot@localhost>"
+        || git_output(root, &["show", "-s", "--format=%at|%ct", "HEAD"])? != "0|0"
+    {
+        return None;
+    }
+    let message = git_output_raw(root, &["show", "-s", "--format=%B", "HEAD"])?;
+    let message = message.strip_suffix('\n')?;
+    if message.ends_with('\n') {
+        return None;
+    }
+    let snapshot = message.strip_prefix("Homeboy snapshot ")?;
+    if !is_snapshot_identity(snapshot) {
+        return None;
+    }
+    let note = git_output_raw(root, &["notes", "--ref=homeboy-snapshot", "show", &head])?;
+    let note = note.strip_suffix('\n').unwrap_or(&note);
+    if note.ends_with('\n') {
+        return None;
+    }
+    let expected_prefix = format!("snapshot_identity={snapshot}\nsource_head=");
+    let source_head = note.strip_prefix(&expected_prefix)?;
+    let (source_head, dirty) = source_head.split_once("\nsource_dirty=")?;
+    if source_head.len() != 40
+        || !source_head
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return None;
+    }
+    let dirty = match dirty {
+        "true" => true,
+        "false" => false,
+        _ => return None,
+    };
+    Some(SyntheticSnapshotProvenance {
+        commit: source_head[..12].to_string(),
+        dirty,
+    })
+}
+
+fn git_common_dir(root: &Path, _git_dir: &Path) -> Option<PathBuf> {
+    let common_dir = git_output(root, &["rev-parse", "--git-common-dir"])?;
+    let common_dir = PathBuf::from(common_dir);
+    Some(if common_dir.is_absolute() {
+        common_dir
+    } else {
+        root.join(common_dir).canonicalize().ok()?
+    })
+}
+
+fn is_snapshot_identity(value: &str) -> bool {
+    value.len() == 25
+        && value.starts_with("snapshot:")
+        && value[9..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
@@ -80,6 +170,11 @@ fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Option<String> {
+    let output = git_output_raw(root, args)?;
+    Some(output.trim().to_string())
+}
+
+fn git_output_raw(root: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -89,5 +184,5 @@ fn git_output(root: &Path, args: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
 }
