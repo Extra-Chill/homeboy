@@ -339,19 +339,17 @@ fn terminal_lab_artifact_attachment_refuses_runner_provenance_mismatch() {
 }
 
 #[test]
-fn accepted_handoff_projects_remote_failure_and_cancellation_without_a_lifecycle_event() {
+fn accepted_handoff_waits_for_authoritative_aggregate_after_terminal_daemon_status() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-        for (run_id, job_status, expected_state) in [
+        for (run_id, job_status) in [
             (
                 "agent-task-remote-failure",
                 homeboy_core::api_jobs::JobStatus::Failed,
-                AgentTaskRunState::Failed,
             ),
             (
                 "agent-task-remote-cancellation",
                 homeboy_core::api_jobs::JobStatus::Cancelled,
-                AgentTaskRunState::Cancelled,
             ),
         ] {
             let mut record = record_detached_lab_run(DetachedLabRunRecord {
@@ -367,10 +365,15 @@ fn accepted_handoff_projects_remote_failure_and_cancellation_without_a_lifecycle
             snapshot.events.clear();
 
             reconcile_runner_job_snapshot(&mut record, &snapshot)
-                .expect("terminal daemon result reconciles");
+                .expect("terminal daemon result records pending synchronization");
 
-            assert_eq!(record.state, expected_state);
+            assert_eq!(record.state, AgentTaskRunState::Running);
             assert_eq!(record.metadata["runner_job_status"], json!(job_status));
+            assert_eq!(
+                record.metadata["runner_result_synchronization"]["state"],
+                "pending"
+            );
+            assert_eq!(record.metadata["phase"], "awaiting_runner_synchronization");
         }
     });
 }

@@ -1596,17 +1596,41 @@ pub(crate) fn reconcile_runner_job_snapshot(
             if let Some(event) = terminal_runner_lifecycle_event(&reconciled, snapshot)? {
                 project_terminal_runner_lifecycle_event(&mut reconciled, snapshot, &event)?;
             } else {
-                apply_runner_job_terminal_state(
-                    &mut reconciled,
-                    snapshot.job.status,
-                    &snapshot.events,
-                );
+                record_pending_runner_synchronization(&mut reconciled, snapshot);
                 store::write_record(&reconciled)?;
             }
         }
     }
     *record = reconciled;
     Ok(())
+}
+
+/// A terminal daemon transport result is not an agent-task result on its own.
+/// Keep the controller record live until the daemon publishes the aggregate
+/// lifecycle event, which is the single authoritative terminal projection.
+fn record_pending_runner_synchronization(
+    record: &mut AgentTaskRunRecord,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) {
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("runner_job_status".to_string(), json!(snapshot.job.status));
+    metadata.insert("runner_job_events".to_string(), json!(snapshot.events));
+    metadata.insert(
+        "phase".to_string(),
+        json!("awaiting_runner_synchronization"),
+    );
+    metadata.insert(
+        "phase_activity".to_string(),
+        json!("runner job is terminal; awaiting its authoritative agent-task aggregate"),
+    );
+    metadata.insert("provider_state".to_string(), json!("synchronizing"));
+    metadata.insert(
+        "runner_result_synchronization".to_string(),
+        json!({
+            "state": "pending",
+            "runner_job_status": snapshot.job.status,
+        }),
+    );
 }
 
 fn terminal_runner_lifecycle_event(
@@ -1834,6 +1858,7 @@ fn aggregate_projection_plan_from_outcomes(aggregate: &AgentTaskAggregate) -> Ag
     AgentTaskPlan::new(&aggregate.plan_id, tasks)
 }
 
+#[cfg(test)]
 pub(crate) fn apply_runner_job_terminal_state(
     record: &mut AgentTaskRunRecord,
     status: homeboy_core::api_jobs::JobStatus,
