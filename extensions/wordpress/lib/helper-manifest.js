@@ -22,6 +22,7 @@ const HELPER_PATHS = Object.freeze({
 	fidelityComparison: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'fidelity-comparison.js'),
 	fixtureSetup: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'fixture-setup.js'),
 	fuzzManifestContracts: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'fuzz-manifest-contracts.js'),
+	wpCodeboxArtifacts: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'wp-codebox-artifacts.js'),
 });
 
 function getWordPressHelperManifest() {
