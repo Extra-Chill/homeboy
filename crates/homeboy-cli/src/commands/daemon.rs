@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use homeboy::core::daemon::{
-    self, BrokerConfig, BrokerConfigOptions, DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStateLossRecoveryResult, DaemonStatus, DaemonStopResult,
+    self, BrokerConfig, BrokerConfigOptions, DaemonExactOrphanRecoveryResult, DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStateLossRecoveryResult, DaemonStatus, DaemonStopResult,
     ServiceIdentity,
 };
 use homeboy::core::Error;
@@ -45,6 +45,19 @@ enum DaemonCommand {
         /// Confirm the one expired PID-less reservation to terminalize before replacement.
         #[arg(long = "confirm-untracked-child-dead")]
         confirm_untracked_child_dead: Vec<Uuid>,
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+    },
+    /// Reconcile an exact PID-less job set after one proven unexpected daemon exit
+    ReconcileDeadLeaseOrphans {
+        #[arg(long)]
+        lease_id: String,
+        #[arg(long = "job-id", required = true)]
+        job_ids: Vec<Uuid>,
+        #[arg(long)]
+        confirm_pid_dead: bool,
+        #[arg(long)]
+        confirm_workload_processes_absent: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
@@ -157,6 +170,7 @@ pub enum DaemonOutput {
     Start(DaemonStartResult),
     EnsureRunning(DaemonStartResult),
     AdoptOrphan(DaemonOrphanAdoptionResult),
+    ReconcileDeadLeaseOrphans(DaemonExactOrphanRecoveryResult),
     RecoverMissingChildIdentity(homeboy::core::api_jobs::Job),
     ReconcileLeaselessOrphans(DaemonLeaselessRecoveryResult),
     RecoverMissingLeaseState(DaemonStateLossRecoveryResult),
@@ -210,6 +224,12 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
                 0,
             ))
         }
+        DaemonCommand::ReconcileDeadLeaseOrphans { lease_id, job_ids, confirm_pid_dead, confirm_workload_processes_absent, addr } => Ok((
+            DaemonOutput::ReconcileDeadLeaseOrphans(daemon::reconcile_dead_lease_orphans(
+                &lease_id, &job_ids, confirm_pid_dead, confirm_workload_processes_absent, &addr,
+            )?),
+            0,
+        )),
         DaemonCommand::RecoverMissingChildIdentity { lease_id, recorded_daemon_pid, recorded_daemon_endpoint, job_id, child_pid, child_starttime_ticks } => Ok((
             DaemonOutput::RecoverMissingChildIdentity(daemon::recover_missing_child_identity(&lease_id, recorded_daemon_pid, &recorded_daemon_endpoint, job_id, child_pid, child_starttime_ticks)?),
             0,
@@ -364,6 +384,42 @@ mod tests {
         assert!(Cli::try_parse_from([
             "homeboy", "daemon", "recover-missing-child-identity", "--lease-id", "lease", "--recorded-daemon-pid", "42", "--recorded-daemon-endpoint", "127.0.0.1:1", "--job-id", "00000000-0000-0000-0000-000000000001", "--child-pid", "43", "--child-starttime-ticks", "1",
         ]).is_ok());
+    }
+
+    #[test]
+    fn exact_dead_lease_recovery_requires_both_operator_confirmations() {
+        for args in [
+            vec![
+                "homeboy",
+                "daemon",
+                "reconcile-dead-lease-orphans",
+                "--lease-id",
+                "lease-dead",
+                "--job-id",
+                "00000000-0000-0000-0000-000000000001",
+            ],
+            vec![
+                "homeboy",
+                "daemon",
+                "reconcile-dead-lease-orphans",
+                "--lease-id",
+                "lease-dead",
+                "--job-id",
+                "00000000-0000-0000-0000-000000000001",
+                "--confirm-pid-dead",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).expect("recovery command parses");
+            let Commands::Daemon(args) = cli.command else {
+                panic!("expected daemon command");
+            };
+            let error = run(args, &crate::commands::GlobalArgs {})
+                .expect_err("missing operator confirmation is rejected before state access");
+            assert!(
+                error.message.contains("confirm-pid-dead")
+                    || error.message.contains("confirm-workload-processes-absent")
+            );
+        }
     }
 
     #[test]

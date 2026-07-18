@@ -20,10 +20,10 @@ use crate::process::pid_is_running;
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
     read_status, repair_legacy_lease_for_start, stop_unlocked, try_acquire_daemon_owner_lock,
-    DaemonLeaselessOrphanReconciliationResult, DaemonLeaselessRecoveryResult,
-    DaemonOrphanAdoptionResult, DaemonProcessCandidate, DaemonProcessOwnership,
-    DaemonStaleReasonCode, DaemonStartResult, DaemonTerminationClassification,
-    DaemonTerminationEvidence, DAEMON_STARTUP_TOKEN_ENV,
+    DaemonExactOrphanRecoveryResult, DaemonLeaselessOrphanReconciliationResult,
+    DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonProcessCandidate,
+    DaemonProcessOwnership, DaemonStaleReasonCode, DaemonStartResult,
+    DaemonTerminationClassification, DaemonTerminationEvidence, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 /// Enumerate foreground daemon processes without inferring ownership from a
@@ -978,6 +978,149 @@ pub fn adopt_orphaned_lease(
         },
         || start_or_return_live_unlocked(addr),
     )
+}
+
+/// Explicit recovery for the otherwise irreconcilable case where a proven-dead
+/// daemon lost jobs before it could persist a child identity. This never widens
+/// automatic adoption: the operator must name every active job and attest that
+/// workload processes were inspected and are absent.
+pub fn reconcile_dead_lease_orphans(
+    lease_id: &str,
+    job_ids: &[uuid::Uuid],
+    confirm_pid_dead: bool,
+    confirm_workload_processes_absent: bool,
+    addr: &str,
+) -> Result<DaemonExactOrphanRecoveryResult> {
+    if !confirm_pid_dead {
+        return Err(Error::validation_invalid_argument(
+            "confirm_pid_dead",
+            "exact dead-lease recovery requires --confirm-pid-dead",
+            None,
+            None,
+        ));
+    }
+    if !confirm_workload_processes_absent {
+        return Err(Error::validation_invalid_argument("confirm_workload_processes_absent", "exact dead-lease recovery requires --confirm-workload-processes-absent after inspecting workload processes", None, None));
+    }
+    parse_bind_addr(addr)?;
+    let _lock = acquire_daemon_operation_lock()?;
+    reconcile_dead_lease_orphans_with_operations(
+        lease_id,
+        job_ids,
+        read_status,
+        pid_is_running,
+        try_acquire_daemon_owner_lock,
+        || prove_no_daemon_owner(addr),
+        |pid| {
+            let store =
+                super::JobStore::open_without_reconciliation(crate::paths::daemon_jobs_file()?)?;
+            store.reconcile_exact_daemon_loss_jobs(lease_id, job_ids, pid)
+        },
+        || start_or_return_live_unlocked(addr),
+    )
+}
+
+fn reconcile_dead_lease_orphans_with_operations<
+    Status,
+    PidIsRunning,
+    AcquireOwner,
+    OwnerLock,
+    ProveNoOwner,
+    Reconcile,
+    Start,
+>(
+    lease_id: &str,
+    _job_ids: &[uuid::Uuid],
+    status: Status,
+    pid_is_running: PidIsRunning,
+    acquire_owner: AcquireOwner,
+    prove_no_owner: ProveNoOwner,
+    reconcile: Reconcile,
+    start: Start,
+) -> Result<DaemonExactOrphanRecoveryResult>
+where
+    Status: FnOnce() -> Result<super::DaemonStatus>,
+    PidIsRunning: Fn(u32) -> bool,
+    AcquireOwner: FnOnce() -> Result<Option<OwnerLock>>,
+    ProveNoOwner: FnOnce() -> Result<Vec<String>>,
+    Reconcile: FnOnce(u32) -> Result<crate::api_jobs::DaemonLeaseJobDiagnostics>,
+    Start: FnOnce() -> Result<super::DaemonStartResult>,
+{
+    let status = status()?;
+    let state = status.state.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "lease_id",
+            "exact dead-lease recovery requires a persisted daemon lease",
+            Some(lease_id.to_string()),
+            None,
+        )
+    })?;
+    if state.lease_id != lease_id {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            "recorded daemon lease does not match requested dead lease",
+            Some(lease_id.to_string()),
+            None,
+        ));
+    }
+    if status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::PidDead)
+        || pid_is_running(state.pid)
+    {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            "recorded daemon PID is live or not proven dead",
+            Some(lease_id.to_string()),
+            None,
+        ));
+    }
+    let termination = status.termination_evidence.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "termination_evidence",
+            "exact dead-lease recovery requires persisted unexpected-termination evidence",
+            Some(lease_id.to_string()),
+            None,
+        )
+    })?;
+    if termination.classification != DaemonTerminationClassification::UnexpectedExit
+        || termination.stop_requested
+        || termination.lease_id.as_deref() != Some(lease_id)
+        || termination.pid != Some(state.pid)
+    {
+        return Err(Error::validation_invalid_argument(
+            "termination_evidence",
+            "persisted termination evidence does not prove this lease's unexpected daemon exit",
+            Some(lease_id.to_string()),
+            None,
+        ));
+    }
+    let owner_lock = acquire_owner()?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "lease_id",
+            "daemon owner lock is held; refusing exact dead-lease recovery",
+            Some(lease_id.to_string()),
+            None,
+        )
+    })?;
+    if pid_is_running(state.pid) {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            "recorded daemon PID became live or was reused during recovery",
+            Some(lease_id.to_string()),
+            None,
+        ));
+    }
+    let ownership_proof = prove_no_owner()?;
+    let reconciled = reconcile(state.pid)?;
+    drop(owner_lock);
+    let replacement = start()?;
+    Ok(DaemonExactOrphanRecoveryResult {
+        recovered_lease_id: lease_id.to_string(),
+        dead_pid: state.pid,
+        reconciled_job_ids: reconciled.matching_job_ids,
+        termination_evidence: termination,
+        ownership_proof,
+        replacement,
+    })
 }
 
 /// Recover one legacy durable job only after an operator supplies the exact

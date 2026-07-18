@@ -641,6 +641,121 @@ impl JobStore {
         )
     }
 
+    /// Terminalize an operator-supplied, complete set of PID-less jobs after a
+    /// daemon's unexpected death has been proven by the lifecycle controller.
+    /// This is deliberately separate from automatic reconciliation: every
+    /// active job must be named, owned by the exact lease, and have no child
+    /// identity that could contradict the operator's absence confirmation.
+    pub fn reconcile_exact_daemon_loss_jobs(
+        &self,
+        expected_lease_id: &str,
+        expected_job_ids: &[Uuid],
+        daemon_pid: u32,
+    ) -> Result<DaemonLeaseJobDiagnostics> {
+        let expected = expected_job_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        if expected.is_empty() || expected.len() != expected_job_ids.len() {
+            return Err(Error::validation_invalid_argument(
+                "job_id",
+                "dead-daemon recovery requires a non-empty, unique exact active job set",
+                None,
+                None,
+            ));
+        }
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let active = inner
+            .jobs
+            .values()
+            .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
+            .map(|stored| stored.job.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        if active != expected {
+            return Err(Error::validation_invalid_argument(
+                "job_id",
+                format!(
+                    "dead-daemon recovery job IDs must name the exact active durable-job set; expected {:?}, found {:?}",
+                    expected, active
+                ),
+                Some(expected_lease_id.to_string()),
+                None,
+            ));
+        }
+        for job_id in &expected {
+            let stored = inner.jobs.get(job_id).expect("active job exists");
+            if stored.job.daemon_lease_id.as_deref() != Some(expected_lease_id) {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    format!("job `{job_id}` is not owned by daemon lease `{expected_lease_id}`"),
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            if stored
+                .local_child
+                .as_ref()
+                .and_then(|child| child.process.as_ref())
+                .is_some()
+            {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    format!("job `{job_id}` has persisted child-process evidence; refusing operator no-PID recovery"),
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+        }
+        let now = timestamp_ms();
+        for job_id in &expected {
+            let stored = inner.jobs.get_mut(job_id).expect("active job exists");
+            stored.job.status = JobStatus::Failed;
+            stored.job.updated_at_ms = now;
+            stored.job.finished_at_ms = Some(now);
+            stored.job.stale_reason = Some(
+                "daemon lost after unexpected termination; operator confirmed workloads absent"
+                    .to_string(),
+            );
+            let data = serde_json::json!({
+                "status": JobStatus::Failed,
+                "reason": "operator_confirmed_daemon_loss_after_unexpected_termination",
+                "daemon_lease_id": expected_lease_id,
+                "daemon_pid": daemon_pid,
+                "operator_confirmed_workload_processes_absent": true,
+                "exact_active_job_set": expected,
+            });
+            for (kind, message) in [
+                (
+                    JobEventKind::Error,
+                    "daemon lost after unexpected termination",
+                ),
+                (
+                    JobEventKind::Status,
+                    "job marked failed after exact operator daemon-loss reconciliation",
+                ),
+            ] {
+                let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                stored.events.push(JobEvent {
+                    sequence,
+                    job_id: *job_id,
+                    kind,
+                    timestamp_ms: now,
+                    message: Some(message.to_string()),
+                    data: Some(data.clone()),
+                });
+            }
+            apply_event_retention(&mut stored.events, self.event_retention_limit());
+            stored.job.event_count = stored.events.len();
+        }
+        drop(inner);
+        self.persist()?;
+        Ok(DaemonLeaseJobDiagnostics {
+            expected_lease_id: expected_lease_id.to_string(),
+            matching_job_ids: expected.into_iter().collect(),
+            ..DaemonLeaseJobDiagnostics::default()
+        })
+    }
+
     /// Terminalize one explicitly confirmed pre-spawn reservation after its
     /// daemon owner is proven dead. This intentionally refuses every other
     /// active job so orphan adoption cannot infer ownership or bulk-recover.

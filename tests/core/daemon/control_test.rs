@@ -14,6 +14,7 @@ use crate::api_jobs::{JobEventKind, JobStatus, JobStore};
 use crate::build_identity::BuildIdentity;
 use crate::daemon::{
     DaemonFreshnessReport, DaemonRuntimeSnapshot, DaemonStaleReasonCode, DaemonState, DaemonStatus,
+    DaemonTerminationClassification, DaemonTerminationEvidence,
 };
 use crate::test_support::with_isolated_home;
 
@@ -1127,6 +1128,87 @@ fn exact_adoption_keeps_legacy_missing_identity_blocked() {
 }
 
 #[test]
+fn exact_no_pid_recovery_requires_unexpected_termination_and_refuses_process_contradiction() {
+    let daemon = fake_daemon(4242, "lease-dead");
+    let mismatch = super::reconcile_dead_lease_orphans_with_operations(
+        "other-lease",
+        &[uuid::Uuid::new_v4()],
+        || Ok(dead_status_with_unexpected_termination(daemon.clone())),
+        |_| false,
+        || Ok(Some(())),
+        || unreachable!("lease mismatch blocks owner probe"),
+        |_| unreachable!("lease mismatch blocks mutation"),
+        || unreachable!("lease mismatch blocks replacement"),
+    )
+    .expect_err("mismatched lease is refused");
+    assert!(mismatch.message.contains("does not match"));
+
+    let missing = super::reconcile_dead_lease_orphans_with_operations(
+        "lease-dead",
+        &[uuid::Uuid::new_v4()],
+        || Ok(fake_dead_status(daemon.clone())),
+        |_| false,
+        || Ok(Some(())),
+        || Ok(vec!["no owner".to_string()]),
+        |_| unreachable!("missing evidence blocks mutation"),
+        || unreachable!("missing evidence blocks replacement"),
+    )
+    .expect_err("missing unexpected-exit evidence is refused");
+    assert!(missing.message.contains("unexpected-termination evidence"));
+
+    let job = uuid::Uuid::new_v4();
+    let status = dead_status_with_unexpected_termination(daemon.clone());
+    let contradiction = super::reconcile_dead_lease_orphans_with_operations(
+        "lease-dead",
+        &[job],
+        || Ok(status),
+        |_| false,
+        || Ok(Some(())),
+        || {
+            Err(crate::error::Error::validation_invalid_argument(
+                "owner_probe",
+                "live workload process evidence contradicts operator confirmation",
+                None,
+                None,
+            ))
+        },
+        |_| unreachable!("contradictory process evidence blocks mutation"),
+        || unreachable!("contradictory process evidence blocks replacement"),
+    )
+    .expect_err("contradictory process evidence is refused");
+    assert!(contradiction.message.contains("contradicts"));
+}
+
+#[test]
+fn exact_no_pid_recovery_starts_only_after_reconciliation() {
+    let daemon = fake_daemon(4242, "lease-dead");
+    let job = uuid::Uuid::new_v4();
+    let result = super::reconcile_dead_lease_orphans_with_operations(
+        "lease-dead",
+        &[job],
+        || Ok(dead_status_with_unexpected_termination(daemon)),
+        |_| false,
+        || Ok(Some(())),
+        || Ok(vec!["owner lock acquired".to_string()]),
+        |_| {
+            Ok(crate::api_jobs::DaemonLeaseJobDiagnostics {
+                expected_lease_id: "lease-dead".to_string(),
+                matching_job_ids: vec![job],
+                ..Default::default()
+            })
+        },
+        || Ok(fake_daemon(4343, "replacement")),
+    )
+    .expect("exact reconciliation succeeds before replacement");
+    assert_eq!(result.reconciled_job_ids, vec![job]);
+    assert_eq!(
+        result.termination_evidence.classification,
+        DaemonTerminationClassification::UnexpectedExit
+    );
+    assert_eq!(result.replacement.lease_id, "replacement");
+}
+
+#[test]
 fn fetch_artifact_to_path_downloads_daemon_byte_alias() {
     with_isolated_home(|home| {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
@@ -1892,6 +1974,26 @@ fn fake_dead_status(daemon: super::DaemonStartResult) -> DaemonStatus {
         active_job_recovery_evidence: Vec::new(),
         termination_evidence: None,
     }
+}
+
+fn dead_status_with_unexpected_termination(daemon: super::DaemonStartResult) -> DaemonStatus {
+    let mut status = fake_dead_status(daemon.clone());
+    status.termination_evidence = Some(DaemonTerminationEvidence {
+        classification: DaemonTerminationClassification::UnexpectedExit,
+        observed_at: "2026-01-01T00:00:00Z".to_string(),
+        lease_id: Some(daemon.lease_id),
+        pid: Some(daemon.pid),
+        binary_identity: None,
+        active_jobs: 1,
+        resource_evidence: "test".to_string(),
+        os_evidence: "test".to_string(),
+        exit_code: None,
+        signal: Some(libc::SIGTERM),
+        stdout: None,
+        stderr: None,
+        stop_requested: false,
+    });
+    status
 }
 
 fn fake_daemon_state(daemon: super::DaemonStartResult) -> DaemonState {

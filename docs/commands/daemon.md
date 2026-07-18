@@ -65,6 +65,23 @@ The released `adopt-orphan --recover-missing-child-identity` and
 aliases. They must be supplied together when used, return the exact command and
 all required evidence fields above, and never mutate jobs.
 
+For a proven unexpected daemon exit where exact active jobs have no persisted
+child identity, use the explicit all-active-job-set recovery command. It requires
+the dead lease, every active job ID, PID-death confirmation, and an operator
+attestation that workload processes were inspected and absent. It refuses a live
+or reused daemon PID, missing or mismatched unexpected-exit evidence, a held
+daemon owner lock, conflicting daemon-process evidence, child identities, or an
+omitted/extra/non-active job ID. Each named job receives durable typed
+daemon-loss failure evidence before the replacement daemon starts:
+
+```sh
+homeboy daemon reconcile-dead-lease-orphans \
+  --lease-id <exact-dead-lease> \
+  --job-id <active-job-id> \
+  --confirm-pid-dead \
+  --confirm-workload-processes-absent
+```
+
 ## VPS Reverse Runner Broker
 
 `homeboy daemon broker-config` renders the code-backed deployment shape for a
