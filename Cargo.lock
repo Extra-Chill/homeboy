@@ -790,6 +790,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-artifact-ref-contract"
+version = "0.1.0"
+dependencies = [
+ "homeboy-engine-primitives",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "homeboy-audit-contract"
 version = "0.1.0"
 dependencies = [
@@ -900,6 +909,7 @@ dependencies = [
  "glob-match",
  "heck",
  "homeboy-agents-contract",
+ "homeboy-artifact-ref-contract",
  "homeboy-audit-contract",
  "homeboy-cli-contract",
  "homeboy-code-audit",
