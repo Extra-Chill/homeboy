@@ -816,6 +816,87 @@ fn durable_finalization_requires_successful_provider_run_and_hydrates_model() {
 }
 
 #[test]
+fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adoption_recovery() {
+    let recovery_lifecycle = RunLifecycleRecord {
+        execution: RunExecutionLifecycle {
+            state: RunExecutionState::Cancelled,
+            started_at: None,
+            finished_at: Some("2026-01-01T00:00:00Z".to_string()),
+            updated_at: None,
+        },
+        ..RunLifecycleRecord::default()
+    };
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(recovery_lifecycle.clone()),
+        gate_proof: Some(pre_provider_adoption_gate_proof()),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+    let report = finalize_pr_with_backend(finalization_options, &mut backend)
+        .expect("authenticated recovery publishes");
+    assert_eq!(report.status, "review_ready");
+    assert_eq!(report.review_dossier.ai_assistance.model, "GPT-5.5");
+    assert!(backend.committed && backend.pushed && backend.created);
+
+    let rejected = |lifecycle: RunLifecycleRecord, gate_proof: AgentTaskPrDurableGateProof| {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            lifecycle: Some(lifecycle),
+            gate_proof: Some(gate_proof),
+            ..Default::default()
+        };
+        let mut finalization_options = options();
+        finalization_options.manual_finalization = false;
+        let error = finalize_pr_with_backend(finalization_options, &mut backend)
+            .expect_err("unsafe recovery is blocked");
+        assert!(error.message.contains("durable run must have succeeded"));
+        assert!(!backend.committed && !backend.pushed && !backend.created);
+    };
+
+    rejected(recovery_lifecycle.clone(), successful_gate_proof());
+
+    let mut provider_executed = recovery_lifecycle.clone();
+    provider_executed
+        .provider_runtime
+        .push(ProviderRuntimeLifecycle {
+            task_id: "task".to_string(),
+            backend: "provider".to_string(),
+            state: ProviderRuntimeState::Cancelled,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: serde_json::Value::Null,
+        });
+    rejected(provider_executed, pre_provider_adoption_gate_proof());
+
+    let mut legacy = pre_provider_adoption_gate_proof();
+    legacy.promotion.provenance["adoption"]["recovery"] = serde_json::Value::Null;
+    rejected(recovery_lifecycle.clone(), legacy);
+
+    let mut mismatched = pre_provider_adoption_gate_proof();
+    mismatched.promotion.provenance["adoption"]["source_run_id"] = json!("other-run");
+    rejected(recovery_lifecycle.clone(), mismatched);
+
+    let mut unbound_candidate = pre_provider_adoption_gate_proof();
+    unbound_candidate.promotion.provenance["candidate"] = serde_json::Value::Null;
+    rejected(recovery_lifecycle.clone(), unbound_candidate);
+
+    let mut mismatched_head = pre_provider_adoption_gate_proof();
+    mismatched_head.promotion.provenance["candidate"]["fingerprint"]["head"] =
+        json!("0000000000000000000000000000000000000000");
+    rejected(recovery_lifecycle.clone(), mismatched_head);
+
+    let mut missing_head = pre_provider_adoption_gate_proof();
+    missing_head.promotion.provenance["candidate"]["fingerprint"]["head"] = json!("");
+    rejected(recovery_lifecycle.clone(), missing_head);
+
+    let mut non_green = pre_provider_adoption_gate_proof();
+    non_green.promotion.gate_results[0].status = HomeboyGateStatus::Failed;
+    rejected(recovery_lifecycle, non_green);
+}
+
+#[test]
 fn durable_finalization_publishes_clean_synced_recovered_candidate() {
     let mut gate_proof = successful_gate_proof();
     gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
@@ -1365,6 +1446,28 @@ fn successful_gate_proof() -> AgentTaskPrDurableGateProof {
             "gate_results": [{ "id": "gate", "name": "cargo test", "kind": "command", "status": "passed" }]
         })).expect("promotion proof"),
     }
+}
+
+fn pre_provider_adoption_gate_proof() -> AgentTaskPrDurableGateProof {
+    let mut proof = successful_gate_proof();
+    proof.promotion.provenance = json!({
+        "candidate": {
+            "kind": "git",
+            "fingerprint": {
+                "head": "7f76933ef002d195ee1cc5bf21069e0f40b1c972"
+            }
+        },
+        "adoption": {
+            "source_run_id": "cook-3678",
+            "candidate_ref": "7f76933ef002d195ee1cc5bf21069e0f40b1c972",
+            "recovery": {
+                "schema": "homeboy/agent-task-candidate-adoption-recovery/v1",
+                "reason": "pre_provider_transport_failure",
+                "provider_executions_consumed": 0
+            }
+        }
+    });
+    proof
 }
 
 #[test]

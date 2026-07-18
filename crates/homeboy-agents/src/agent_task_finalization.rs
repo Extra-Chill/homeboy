@@ -42,7 +42,6 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     let mut durable_changed_files = Vec::new();
     if !options.manual_finalization {
         let lifecycle = backend.hydrate_run(&options.run_id)?;
-        validate_durable_publication_eligibility(&lifecycle)?;
         let gate_proof = backend.hydrate_gate_proof(&options.run_id)?;
         if gate_proof.run_id != options.run_id {
             return Err(Error::validation_invalid_argument(
@@ -53,6 +52,8 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             ));
         }
         validate_gate_proof_binding(&gate_proof, &options)?;
+        let eligibility =
+            validate_durable_publication_eligibility(&lifecycle, &gate_proof.promotion)?;
         durable_changed_files = gate_proof.promotion.changed_files.clone();
         options.normalized_gate_results = gate_proof.promotion.gate_results;
         if options.normalized_gate_results.is_empty() {
@@ -63,7 +64,9 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
                 None,
             ));
         }
-        options.review_dossier.ai_assistance.model = durable_model(&lifecycle)?;
+        if eligibility == DurablePublicationEligibility::ProviderRun {
+            options.review_dossier.ai_assistance.model = durable_model(&lifecycle)?;
+        }
         options.evidence.lifecycle = Some(lifecycle);
     }
     validate_green_gates(&options.normalized_gate_results)?;
@@ -499,18 +502,58 @@ fn report(
     }
 }
 
-fn validate_durable_publication_eligibility(lifecycle: &RunLifecycleRecord) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurablePublicationEligibility {
+    ProviderRun,
+    PreProviderCandidateAdoptionRecovery,
+}
+
+fn validate_durable_publication_eligibility(
+    lifecycle: &RunLifecycleRecord,
+    promotion: &AgentTaskPromotionReport,
+) -> Result<DurablePublicationEligibility> {
     use homeboy_core::run_lifecycle_record::{ProviderRuntimeState, RunExecutionState};
-    if lifecycle.execution.state != RunExecutionState::Succeeded
-        || lifecycle.provider_runtime.is_empty()
-        || lifecycle
+    if lifecycle.execution.state == RunExecutionState::Succeeded
+        && !lifecycle.provider_runtime.is_empty()
+        && lifecycle
             .provider_runtime
             .iter()
-            .any(|runtime| runtime.state != ProviderRuntimeState::Succeeded)
+            .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded)
     {
-        return Err(Error::validation_invalid_argument("run_id", "durable run must have succeeded execution and succeeded provider runtime before publication", None, None));
+        return Ok(DurablePublicationEligibility::ProviderRun);
     }
-    Ok(())
+
+    let recovery = promotion.provenance.pointer("/adoption/recovery");
+    let candidate_ref = promotion.provenance["adoption"]["candidate_ref"].as_str();
+    let candidate_head = promotion
+        .provenance
+        .pointer("/candidate/fingerprint/head")
+        .and_then(serde_json::Value::as_str);
+    let authenticated_adoption = lifecycle.execution.state == RunExecutionState::Cancelled
+        && lifecycle.provider_runtime.is_empty()
+        && promotion.provenance["adoption"]["source_run_id"]
+            == promotion.source.run_id.clone().unwrap_or_default()
+        && candidate_ref.is_some_and(is_git_commit_identity)
+        && candidate_ref == candidate_head
+        && recovery.is_some_and(|recovery| {
+            recovery["schema"] == "homeboy/agent-task-candidate-adoption-recovery/v1"
+                && recovery["reason"] == "pre_provider_transport_failure"
+                && recovery["provider_executions_consumed"] == 0
+        })
+        && !promotion.gate_results.is_empty()
+        && promotion
+            .gate_results
+            .iter()
+            .all(|gate| gate.status == HomeboyGateStatus::Passed);
+    if authenticated_adoption {
+        return Ok(DurablePublicationEligibility::PreProviderCandidateAdoptionRecovery);
+    }
+
+    Err(Error::validation_invalid_argument("run_id", "durable run must have succeeded execution and succeeded provider runtime before publication; the only exception is an applied, green, fingerprinted candidate-adoption recovery with durable zero-execution pre-provider transport provenance", None, None))
+}
+
+fn is_git_commit_identity(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn durable_model(lifecycle: &RunLifecycleRecord) -> Result<String> {

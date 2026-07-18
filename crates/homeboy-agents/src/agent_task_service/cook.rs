@@ -156,12 +156,13 @@ pub fn adopt_cook_candidate_with_dispatcher(
             None,
         ));
     }
-    let (source, source_path) =
+    let (source, source_path, recovery) =
         if let Ok((source, path)) = agent_task_lifecycle::aggregate_source(&record.run_id) {
-            (source, Some(path))
+            (source, Some(path), None)
         } else if let Some(outcome) =
             agent_task_lifecycle::candidate_adoption_recovery_outcome(&record, &source_request)
         {
+            let recovery = outcome.metadata["candidate_adoption_recovery"].clone();
             (
                 serde_json::to_string(&outcome).map_err(|error| {
                     Error::internal_json(
@@ -170,9 +171,11 @@ pub fn adopt_cook_candidate_with_dispatcher(
                     )
                 })?,
                 None,
+                Some(recovery),
             )
         } else {
-            promotion_source(&record.run_id)?
+            let (source, path) = promotion_source(&record.run_id)?;
+            (source, path, None)
         };
     let promotion = promote_with_checkpoint(
         AgentTaskPromotionOptions {
@@ -208,6 +211,7 @@ pub fn adopt_cook_candidate_with_dispatcher(
         "candidate_ref": candidate_ref,
         "source_worktree_path": options.source_worktree_path,
         "recorded_task_base": options.task_base_sha,
+        "recovery": recovery,
     });
     agent_task_lifecycle::record_promotion(&record.run_id, promotion_value)?;
     let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
@@ -2723,6 +2727,11 @@ mod tests {
             assert_eq!(
                 promoted.metadata["latest_promotion"]["provenance"]["adoption"]["candidate_ref"],
                 candidate
+            );
+            assert_eq!(
+                promoted.metadata["latest_promotion"]["provenance"]["adoption"]["recovery"]
+                    ["provider_executions_consumed"],
+                0
             );
         });
     }
