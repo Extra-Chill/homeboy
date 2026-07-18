@@ -986,6 +986,7 @@ mod tests {
                     exclude: Vec::new(),
                     older_than_days: None,
                     limit: None,
+                    cursor: None,
                     command: None,
                 },
                 &crate::commands::GlobalArgs {},

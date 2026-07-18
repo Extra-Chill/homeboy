@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Args, Subcommand, ValueEnum};
 use homeboy::core::cleanup::{
@@ -47,6 +48,10 @@ pub struct CleanupArgs {
     #[arg(long, value_name = "N")]
     pub limit: Option<i64>,
 
+    /// Continue a bounded shared-store cleanup inventory from this cursor.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<CleanupCommand>,
 }
@@ -62,6 +67,7 @@ pub enum CleanupCategoryArg {
     RemoteLabWorkspaces,
     RuntimeTmp,
     ControllerScratch,
+    SharedCargoTargets,
     ControllerRuntimes,
 }
 
@@ -205,6 +211,9 @@ pub struct CleanupRetentionManifest {
     pub schema: &'static str,
     pub terminal_run_days: i64,
     pub runtime_tmp_days: u64,
+    pub shared_store_days: u64,
+    pub shared_store_max_bytes: u64,
+    pub shared_store_lease_seconds: u64,
     pub controller_runtime_days: u64,
     pub controller_runtime_max_bytes: u64,
     pub limit: i64,
@@ -315,6 +324,14 @@ const CONTROLLER_SCRATCH_METADATA: CleanupInventoryCategoryMetadata =
         include_arg: "controller-scratch",
         dry_run_command: "homeboy cleanup --include controller-scratch",
         apply_command: "homeboy cleanup --include controller-scratch --apply",
+    };
+
+const SHARED_CARGO_TARGETS_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "shared_cargo_targets",
+        include_arg: "shared-cargo-targets",
+        dry_run_command: "homeboy cleanup --include shared-cargo-targets",
+        apply_command: "homeboy cleanup --include shared-cargo-targets --apply",
     };
 
 const CONTROLLER_RUNTIMES_METADATA: CleanupInventoryCategoryMetadata =
@@ -498,6 +515,29 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         )?);
     }
 
+    if selected.includes(CleanupCategoryArg::SharedCargoTargets) {
+        let output = cleanup::cleanup_shared_cargo_targets(cleanup::CargoTargetCleanupOptions {
+            root: None,
+            apply,
+            older_than: Duration::from_secs(configured.shared_store_days.saturating_mul(86_400)),
+            max_bytes: configured.shared_store_max_bytes,
+            limit: usize::try_from(limit).unwrap_or(usize::MAX),
+            cursor: args.cursor.clone(),
+            now: std::time::SystemTime::now(),
+            lease_ttl: Duration::from_secs(configured.shared_store_lease_seconds),
+        })?;
+        categories.push(category_from_output(
+            SHARED_CARGO_TARGETS_METADATA,
+            apply,
+            output.candidate_count,
+            output.applied_count,
+            output.skipped_count,
+            output.candidates.iter().map(|store| store.size_bytes).sum(),
+            output.reclaimed_bytes,
+            output,
+        )?);
+    }
+
     let candidate_count = categories
         .iter()
         .map(|category| category.candidate_count)
@@ -532,6 +572,9 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             schema: "homeboy/retention-manifest/v1",
             terminal_run_days,
             runtime_tmp_days: configured.runtime_tmp_days,
+            shared_store_days: configured.shared_store_days,
+            shared_store_max_bytes: configured.shared_store_max_bytes,
+            shared_store_lease_seconds: configured.shared_store_lease_seconds,
             controller_runtime_days: configured.controller_runtime_days,
             controller_runtime_max_bytes: configured.controller_runtime_max_bytes,
             limit,
@@ -1437,6 +1480,13 @@ mod tests {
                 "runtime-tmp",
                 "homeboy self cleanup-runtime-tmp",
                 "homeboy self cleanup-runtime-tmp --apply",
+            ),
+            (
+                SHARED_CARGO_TARGETS_METADATA,
+                "shared_cargo_targets",
+                "shared-cargo-targets",
+                "homeboy cleanup --include shared-cargo-targets",
+                "homeboy cleanup --include shared-cargo-targets --apply",
             ),
             (
                 CONTROLLER_RUNTIMES_METADATA,

@@ -14,6 +14,11 @@ use crate::worktree_providers::{
 };
 use crate::{git, Error, Result};
 
+mod cargo_targets;
+pub use cargo_targets::{
+    acquire_shared_cargo_target, cleanup_shared_cargo_targets, CargoTargetCleanupOptions,
+    CargoTargetCleanupOutput, SharedCargoTargetLease,
+};
 mod self_artifacts;
 
 #[cfg(test)]
