@@ -16,6 +16,12 @@ use uuid::Uuid;
 use crate::{build_identity, paths, Error, Result};
 
 pub const CONTROLLER_RUNTIME_METADATA_KEY: &str = "controller_runtime";
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV: &str =
+    "HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE";
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const TEST_CONTROLLER_RUNTIME_IDENTITY_ENV: &str =
+    "HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY";
 
 const ACTIVE_GENERATION_FILE: &str = "active.json";
 const ADMISSION_LOCK_DIR: &str = "admission.lock";
@@ -425,13 +431,22 @@ pub fn pin_current() -> Result<Value> {
 
 fn pin_current_unlocked() -> Result<Value> {
     let identity = build_identity::current();
-    let executable = std::env::current_exe().map_err(|error| {
+    let executable = current_executable()?;
+    pin_executable(&executable, &identity.display)
+}
+
+fn current_executable() -> Result<PathBuf> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(executable) = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV) {
+        return Ok(PathBuf::from(executable));
+    }
+
+    std::env::current_exe().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("resolve controller executable".to_string()),
         )
-    })?;
-    pin_executable(&executable, &identity.display)
+    })
 }
 
 fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
@@ -1122,17 +1137,9 @@ fn verify_self_status_identity(path: &Path, expected: &str) -> Result<()> {
 }
 
 fn executable_identity(path: &Path) -> Result<String> {
-    #[cfg(test)]
-    if std::env::current_exe().ok().is_some_and(|current| {
-        executable_digest(&current)
-            .ok()
-            .zip(executable_digest(path).ok())
-            .is_some_and(|(current, candidate)| current == candidate)
-    }) {
-        // Unit tests run inside the libtest executable, not the Homeboy CLI.
-        // Pins are byte-identical copies, so accept them without recursively
-        // launching the test harness. Explicit fake controllers still execute.
-        return Ok(build_identity::current().display);
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(identity) = test_controller_identity(path) {
+        return identity;
     }
     let output = Command::new(path)
         .args(["self", "identity"])
@@ -1165,6 +1172,31 @@ fn executable_identity(path: &Path) -> Result<String> {
         ));
     }
     Ok(actual.expect("identity was checked above"))
+}
+
+/// Test-support uses a copied libtest executable as its fixture. The contract
+/// is limited to byte-identical copies of its explicit source executable, so
+/// arbitrary fake controller binaries still execute and fail closed.
+#[cfg(any(test, feature = "test-support"))]
+fn test_controller_identity(path: &Path) -> Option<Result<String>> {
+    let source = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV)?;
+    let identity = std::env::var(TEST_CONTROLLER_RUNTIME_IDENTITY_ENV).ok()?;
+    let source_digest = executable_digest(Path::new(&source)).map_err(|error| {
+        Error::validation_invalid_argument(
+            "controller_runtime",
+            format!("test controller source cannot be hashed: {error}"),
+            Some(PathBuf::from(&source).display().to_string()),
+            None,
+        )
+    });
+    let candidate_digest = executable_digest(path);
+    match (source_digest, candidate_digest) {
+        (Ok(source_digest), Ok(candidate_digest)) if source_digest == candidate_digest => {
+            Some(Ok(identity))
+        }
+        (Err(error), _) | (_, Err(error)) => Some(Err(error)),
+        _ => None,
+    }
 }
 
 fn activated_executable_identity(path: &Path) -> Result<String> {
@@ -1690,6 +1722,36 @@ mod tests {
             )
             .expect("parse refreshed active generation");
             assert_eq!(active["originating"]["build_identity"], current);
+        });
+    }
+
+    #[test]
+    fn pin_current_uses_the_explicit_test_controller_fixture() {
+        crate::test_support::with_isolated_home(|_| {
+            let runtime = pin_current().expect("pin explicit controller fixture");
+            let source = runtime
+                .pointer("/originating/executable")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .expect("controller fixture source");
+            let pinned = runtime
+                .pointer("/originating/pinned_executable")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .expect("pinned executable");
+
+            assert_eq!(
+                source,
+                crate::test_support::controller_runtime_test_executable()
+            );
+            assert_ne!(
+                source,
+                std::env::current_exe().expect("current test executable")
+            );
+            assert_eq!(
+                executable_identity(&pinned).expect("fixture identity"),
+                build_identity::current().display
+            );
         });
     }
 
