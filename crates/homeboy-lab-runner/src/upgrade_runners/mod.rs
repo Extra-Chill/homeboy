@@ -45,6 +45,7 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
         method_override: Option<InstallMethod>,
         source_path: Option<&Path>,
         explicit_source_path: bool,
+        expected_controller_identity: Option<&str>,
         runner_targets: &[String],
         extension_updates: &[ExtensionUpgradeEntry],
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
@@ -53,6 +54,7 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
             method_override,
             source_path,
             explicit_source_path,
+            expected_controller_identity,
             runner_targets,
             extension_updates,
         )

@@ -193,6 +193,7 @@ pub fn run_upgrade_with_method(
                         runner_method_override,
                         source_upgrade_path.as_deref(),
                         source_path.is_some(),
+                        None,
                         runner_targets,
                         &extensions_updated,
                     )
@@ -273,6 +274,7 @@ pub fn run_upgrade_with_method(
                 runner_method_override,
                 source_upgrade_path.as_deref(),
                 source_path.is_some(),
+                None,
                 runner_targets,
                 &extensions_updated,
             )
@@ -365,8 +367,9 @@ fn run_targeted_runner_upgrade(
             runner_method_override,
             source_checkout.as_deref(),
             source_checkout.is_some(),
+            Some(&previous_build_identity),
             runner_targets,
-            &[],
+            &installed_extension_catalog(),
         )
     })?;
 
@@ -393,6 +396,32 @@ fn run_targeted_runner_upgrade(
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
     })
+}
+
+/// Read extension provenance without refreshing local extension sources. Entries
+/// lacking a reproducible URL or revision are forwarded as unrefreshable so the
+/// runner can report that condition explicitly.
+fn installed_extension_catalog() -> Vec<ExtensionUpgradeEntry> {
+    extension::available_extension_ids()
+        .into_iter()
+        .filter_map(|extension_id| {
+            let manifest = extension::load_extension(&extension_id).ok()?;
+            Some(ExtensionUpgradeEntry {
+                extension_id: extension_id.clone(),
+                old_version: manifest.version.clone(),
+                new_version: manifest.version,
+                linked: false,
+                source_path: None,
+                git_root: None,
+                source_url: manifest
+                    .extension_path
+                    .as_deref()
+                    .and_then(|path| extension::read_source_url(Path::new(path))),
+                source_revision: extension::read_source_revision(&extension_id),
+                source_update: Default::default(),
+            })
+        })
+        .collect()
 }
 
 fn initiating_controller_source_checkout(

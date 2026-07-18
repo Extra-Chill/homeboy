@@ -492,6 +492,69 @@ fn rejects_stale_source_runner_identity_before_extension_sync() {
 }
 
 #[test]
+fn reports_unrefreshable_extensions_when_runner_binary_drift_defers_sync() {
+    let extensions = vec![ExtensionUpgradeEntry {
+        extension_id: "local-extension".to_string(),
+        old_version: "1.0.0".to_string(),
+        new_version: "1.0.0".to_string(),
+        linked: false,
+        source_path: None,
+        git_root: None,
+        source_url: None,
+        source_revision: None,
+        source_update: Default::default(),
+    }];
+
+    let skipped = defer_runner_extensions_for_binary_drift(&extensions, "identity mismatch");
+
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].extension_id, "local-extension");
+    assert!(skipped[0]
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains("unrefreshable"));
+}
+
+#[test]
+fn rejects_packaged_runner_with_same_version_but_different_controller_identity() {
+    let runner = ssh_runner("lab", Some("/opt/homeboy/homeboy"));
+    let extensions = vec![extension_update("required-extension", "48517ac3")];
+    let mut calls = 0;
+
+    let entry = upgrade_runner_with_executor(
+        &runner,
+        true,
+        Some(InstallMethod::Binary),
+        None,
+        &extensions,
+        &mut |runner_id, options| {
+            calls += 1;
+            let stdout = match calls {
+                1 | 3 => format!("homeboy {}\n", current_version()),
+                2 => "{\"success\":true}\n".to_string(),
+                _ => format!("homeboy {}+other-build\n", current_version()),
+            };
+            Ok((exec_output(runner_id, options.command, &stdout, "", 0), 0))
+        },
+        &runner_status,
+        &mut |_| Ok("reconnected".to_string()),
+        &mut |_, _| Ok("unused".to_string()),
+        &mut |_, _| Ok(()),
+        Some("controller-build"),
+    );
+
+    assert!(!entry.success);
+    assert!(entry
+        .path_drift
+        .as_deref()
+        .unwrap()
+        .contains("controller-build"));
+    assert_eq!(entry.extensions_synced.len(), 0);
+    assert_eq!(entry.extensions_skipped.len(), 1);
+}
+
+#[test]
 fn runner_source_prepare_detached_checkout_ignores_default_branch_checked_out_elsewhere() {
     let fixture = remote_source_fixture();
     let primary = fixture.root.path().join("primary");

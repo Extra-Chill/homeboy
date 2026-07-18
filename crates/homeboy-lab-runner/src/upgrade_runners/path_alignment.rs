@@ -121,17 +121,13 @@ pub fn source_upgrade_homeboy_path_realignment(
     None
 }
 
-pub fn source_runner_identity_drift(
+pub fn runner_build_identity_drift(
     runner: &Runner,
     homeboy_path: &str,
-    method_override: Option<InstallMethod>,
-    expected_source_identity: Option<&str>,
+    expected_build_identity: Option<&str>,
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> Option<String> {
-    if method_override != Some(InstallMethod::Source) {
-        return None;
-    }
-    let expected_identity = expected_source_identity?;
+    let expected_identity = expected_build_identity?;
     let actual_identity = runner_homeboy_identity(runner, homeboy_path, exec)
         .ok()
         .flatten();
@@ -139,7 +135,7 @@ pub fn source_runner_identity_drift(
         return None;
     }
     Some(format!(
-        "configured runner executable `{homeboy_path}` did not converge to initiating source identity `{expected_identity}`; observed `{}`",
+        "configured runner executable `{homeboy_path}` did not converge to initiating controller identity `{expected_identity}`; observed `{}`",
         actual_identity.as_deref().unwrap_or("unverifiable build identity")
     ))
 }
