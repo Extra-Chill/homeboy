@@ -418,7 +418,11 @@ where
     }
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
-    super::persist_initial_recipe(&options)?;
+    let recipe = super::persist_initial_recipe(&options)?;
+    // A recipe can survive an interruption before its first lifecycle record.
+    // Resume from the validated durable inputs so ambient transport state cannot
+    // turn replay into a conflicting new cook.
+    let options = super::reconstruct_options_with_dispatcher(&recipe, options.attempt_dispatcher)?;
     let max_attempts = options.max_attempts.max(1);
     let mut attempts = Vec::new();
     let mut run_id = options.initial_run_id.clone();
@@ -441,7 +445,9 @@ where
                         | agent_task_lifecycle::AgentTaskRunState::PartialFailure
                         | agent_task_lifecycle::AgentTaskRunState::Failed
                         | agent_task_lifecycle::AgentTaskRunState::Cancelled
-                )
+                ) && !record.lab_handoff.as_ref().is_some_and(|handoff| {
+                    handoff.state == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
+                })
             })
             .unwrap_or(true);
         if needs_execution {
@@ -1873,6 +1879,37 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct RecordingDetachedAttemptDispatcher {
+        dispatches: Arc<AtomicUsize>,
+    }
+
+    impl AgentTaskCookAttemptDispatcher for RecordingDetachedAttemptDispatcher {
+        fn durable_recipe(&self) -> Result<Value> {
+            Ok(serde_json::json!({ "kind": "test-recording-detached" }))
+        }
+
+        fn dispatch_attempt(
+            &self,
+            plan: AgentTaskPlan,
+            run_id: &str,
+            _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+        ) -> Result<()> {
+            self.dispatches.fetch_add(1, Ordering::SeqCst);
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+            agent_task_lifecycle::record_detached_lab_run(
+                agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: "fixture-lab",
+                    runner_job_id: "recording-daemon-job",
+                    remote_workspace: "/runner/workspace",
+                    remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+                },
+            )?;
+            Ok(())
+        }
+    }
+
     #[derive(Clone)]
     struct UnusedExecutor;
 
@@ -2376,6 +2413,46 @@ mod tests {
             );
             assert_eq!(record.runner_id(), Some("fixture-lab"));
             assert_eq!(record.runner_job_id(), Some("accepted-daemon-job"));
+        });
+    }
+
+    #[test]
+    fn orphaned_recipe_materializes_once_and_rejects_changed_inputs() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-orphan-recovery";
+            let run_id = "cook-orphan-recovery-attempt-1";
+            let dispatches = Arc::new(AtomicUsize::new(0));
+            let mut options = batch_cook_options(
+                cook_id,
+                Arc::new(RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::clone(&dispatches),
+                }),
+            );
+            options.initial_run_id = run_id.to_string();
+            options.provider_command = Some("fixture-provider".to_string());
+
+            // Simulate interruption after the immutable recipe commit and before
+            // the dispatcher creates the first run record.
+            super::super::persist_initial_recipe(&options).expect("persist orphaned recipe");
+            assert!(!agent_task_lifecycle::run_record_exists(run_id).expect("check orphan"));
+
+            let recovered = run_cook(options.clone(), UnusedExecutor).expect("recover orphan");
+            assert_eq!(recovered.value.status, "in_flight");
+            assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+            let record = agent_task_lifecycle::status(run_id).expect("materialized run record");
+            assert_eq!(record.runner_job_id(), Some("recording-daemon-job"));
+
+            let replayed = run_cook(options.clone(), UnusedExecutor).expect("idempotent replay");
+            assert_eq!(replayed.value.status, "in_flight");
+            assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+            assert_eq!(agent_task_lifecycle::status(run_id).unwrap(), record);
+
+            let mut changed = options;
+            changed.title = "changed immutable finalization title".to_string();
+            let error = run_cook(changed, UnusedExecutor).expect_err("changed recipe rejected");
+            assert!(error
+                .message
+                .contains("durable cook recipe already exists with different execution inputs"));
         });
     }
 

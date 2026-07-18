@@ -156,6 +156,9 @@ pub fn persist_initial_recipe(
         let mut expected = recipe.clone();
         expected.attempts = existing.attempts.clone();
         expected.sensitive_mappings = existing.sensitive_mappings.clone();
+        // Harvest transport belongs to the original controller execution. A
+        // replay must use that persisted context rather than ambient state.
+        expected.harvest_context = existing.harvest_context.clone();
         if existing != expected || existing.attempts.first() != recipe.attempts.first() {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe",
