@@ -858,6 +858,20 @@ fn force_stop_default_non_force_behavior_remains_unchanged() {
 }
 
 #[test]
+fn lease_bound_stop_does_not_report_live_stale_owner_as_already_absent() {
+    let _home = HomeGuard::new();
+    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    state.binary_sha256 = Some("stale-binary-hash".to_string());
+    write_daemon_state_for_test(&state);
+
+    let result = stop_for_lease(&state.lease_id).expect("lease-bound stale stop");
+
+    assert!(!result.stopped);
+    assert!(!result.already_absent);
+    assert!(state_path().expect("state path").exists());
+}
+
+#[test]
 fn lease_bound_stop_reconciles_an_absent_lease_idempotently_without_jobs() {
     let _home = HomeGuard::new();
 
@@ -866,6 +880,8 @@ fn lease_bound_stop_reconciles_an_absent_lease_idempotently_without_jobs() {
 
     assert!(!normal.stopped);
     assert!(!forced.stopped);
+    assert!(normal.already_absent);
+    assert!(forced.already_absent);
     assert_eq!(normal.pid, None);
     assert_eq!(forced.pid, None);
 }

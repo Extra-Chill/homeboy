@@ -426,7 +426,7 @@ pub fn refresh_homeboy_binary(
         ) {
             Ok(result) => result,
             Err(error) => {
-                return rollback_refresh_error(
+                return rollback_refresh_connect_error(
                     &plan.runner_id,
                     previous_homeboy_path.as_deref(),
                     error,
@@ -1187,6 +1187,50 @@ fn rollback_refresh_error<T>(
 ) -> Result<T> {
     rollback_refresh_error_with(primary_error, || {
         restore_runner_homeboy_path(runner_id, previous_homeboy_path)
+    })
+}
+
+/// Once the old daemon has been stopped, restoring only the configured binary
+/// leaves no valid controller session. Restore and reconnect as one
+/// compensation step so a later request cannot carry stale lease proof.
+fn rollback_refresh_connect_error<T>(
+    runner_id: &str,
+    previous_homeboy_path: Option<&str>,
+    primary_error: Error,
+) -> Result<T> {
+    rollback_refresh_connect_error_with(
+        primary_error,
+        || restore_runner_homeboy_path(runner_id, previous_homeboy_path),
+        || {
+            let (report, exit_code) =
+                connect_with_orphan_adoption(runner_id, None, &[], false, None, None, None)?;
+            if exit_code != 0 || !report.connected {
+                return Err(Error::validation_invalid_argument(
+                    "reconnect",
+                    report.failure_message.unwrap_or_else(|| {
+                        "rollback reconnect did not persist an active daemon session".to_string()
+                    }),
+                    Some(runner_id.to_string()),
+                    None,
+                ));
+            }
+            Ok(())
+        },
+    )
+}
+
+fn rollback_refresh_connect_error_with<T, Restore, Reconnect>(
+    primary_error: Error,
+    restore: Restore,
+    reconnect: Reconnect,
+) -> Result<T>
+where
+    Restore: FnOnce() -> Result<()>,
+    Reconnect: FnOnce() -> Result<()>,
+{
+    rollback_refresh_error_with(primary_error, || {
+        restore()?;
+        reconnect()
     })
 }
 
