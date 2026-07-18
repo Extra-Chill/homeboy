@@ -89,6 +89,104 @@ fn expired_local_child_reservation_releases_capacity_and_persists_retryable_fail
 }
 
 #[test]
+fn explicit_dead_lease_recovery_terminalizes_only_one_expired_pidless_reservation() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path)
+        .expect("store")
+        .with_daemon_lease("lease-dead".to_string());
+    let job = store.create("runner.exec");
+    store
+        .reserve_local_child_at(job.id, 0)
+        .expect("persist expired reservation");
+
+    let recovered = store
+        .recover_expired_pidless_reservation_for_dead_daemon_lease("lease-dead", &[job.id])
+        .expect("exact expired reservation recovers");
+
+    assert_eq!(recovered.matching_job_ids, vec![job.id]);
+    assert_eq!(
+        store.get(job.id).expect("terminal job").status,
+        JobStatus::Failed
+    );
+    let events = JobStore::open_without_reconciliation(&path)
+        .expect("reopen durable store")
+        .events(job.id)
+        .expect("durable evidence");
+    assert!(events.iter().any(|event| {
+        event.kind == JobEventKind::Result
+            && event.data.as_ref().is_some_and(|data| {
+                data["reason"]
+                    == "operator_confirmed_expired_pidless_reservation_after_dead_daemon_lease"
+                    && data["retryable"] == true
+                    && data["expected_lease_id"] == "lease-dead"
+            })
+    }));
+}
+
+#[test]
+fn explicit_dead_lease_pidless_recovery_refuses_ambiguous_unexpired_or_identified_jobs() {
+    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+    let selected = store.create("runner.exec");
+    store
+        .reserve_local_child_at(selected.id, 0)
+        .expect("reserve selected");
+    let additional = store.create("runner.exec");
+    store
+        .reserve_local_child_at(additional.id, 0)
+        .expect("reserve additional");
+    let before = store.events(selected.id).expect("events").len();
+
+    let ambiguity = store
+        .recover_expired_pidless_reservation_for_dead_daemon_lease("lease-dead", &[selected.id])
+        .expect_err("additional active reservation is ambiguous");
+    assert!(ambiguity.message.contains("only active job"));
+    assert_eq!(store.events(selected.id).expect("events").len(), before);
+
+    let single = JobStore::default().with_daemon_lease("lease-dead".to_string());
+    let unexpired = single.create("runner.exec");
+    single
+        .reserve_local_child(unexpired.id)
+        .expect("reserve job");
+    let error = single
+        .recover_expired_pidless_reservation_for_dead_daemon_lease("lease-dead", &[unexpired.id])
+        .expect_err("unexpired reservation fails closed");
+    assert!(error.message.contains("not an expired PID-less"));
+    assert_eq!(
+        single.get(unexpired.id).expect("job").status,
+        JobStatus::Queued
+    );
+    let wrong_lease = single
+        .recover_expired_pidless_reservation_for_dead_daemon_lease("wrong-lease", &[unexpired.id])
+        .expect_err("wrong lease fails closed");
+    assert!(wrong_lease.message.contains("only active job"));
+    let wrong_job = single
+        .recover_expired_pidless_reservation_for_dead_daemon_lease("lease-dead", &[Uuid::new_v4()])
+        .expect_err("wrong job fails closed");
+    assert!(wrong_job.message.contains("only active job"));
+
+    let identified = JobStore::default().with_daemon_lease("lease-dead".to_string());
+    let job = identified.create("runner.exec");
+    identified
+        .reserve_local_child_at(job.id, 0)
+        .expect("reserve job");
+    identified
+        .start_with_reserved_child_identity(
+            job.id,
+            u32::MAX,
+            None,
+            super::store::LocalChildStartDiscriminator::Unsupported {
+                evidence: "test identity".to_string(),
+            },
+        )
+        .expect("persist identity");
+    let error = identified
+        .recover_expired_pidless_reservation_for_dead_daemon_lease("lease-dead", &[job.id])
+        .expect_err("persisted child identity fails closed");
+    assert!(error.message.contains("not an expired PID-less"));
+}
+
+#[test]
 fn pid_bound_local_child_is_not_expired_by_its_former_reservation_deadline() {
     let store = JobStore::default();
     let job = store.create("runner.exec");

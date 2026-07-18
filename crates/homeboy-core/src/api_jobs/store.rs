@@ -641,6 +641,118 @@ impl JobStore {
         )
     }
 
+    /// Terminalize one explicitly confirmed pre-spawn reservation after its
+    /// daemon owner is proven dead. This intentionally refuses every other
+    /// active job so orphan adoption cannot infer ownership or bulk-recover.
+    pub fn recover_expired_pidless_reservation_for_dead_daemon_lease(
+        &self,
+        expected_lease_id: &str,
+        confirmed_job_ids: &[Uuid],
+    ) -> Result<DaemonLeaseJobDiagnostics> {
+        let [job_id] = confirmed_job_ids else {
+            return Err(Error::validation_invalid_argument(
+                "confirm_untracked_child_dead",
+                "exactly one job ID must be confirmed for expired PID-less reservation recovery",
+                Some(expected_lease_id.to_string()),
+                None,
+            ));
+        };
+        let now = timestamp_ms();
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let active_job_ids = inner
+            .jobs
+            .values()
+            .filter(|stored| {
+                matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                    && stored.job.daemon_lease_id.as_deref() == Some(expected_lease_id)
+            })
+            .map(|stored| stored.job.id)
+            .collect::<Vec<_>>();
+        if active_job_ids.as_slice() != [*job_id] {
+            return Err(Error::validation_invalid_argument(
+                "confirm_untracked_child_dead",
+                format!(
+                    "expired PID-less reservation recovery requires the only active job for lease `{expected_lease_id}`; active jobs: {}",
+                    active_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                ),
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        let stored = inner
+            .jobs
+            .get_mut(job_id)
+            .expect("confirmed active job exists");
+        let reservation = stored.local_child.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "confirm_untracked_child_dead",
+                "confirmed job has no local child reservation",
+                Some(job_id.to_string()),
+                None,
+            )
+        })?;
+        if stored.job.status != JobStatus::Queued
+            || reservation.process.is_some()
+            || reservation
+                .reservation_expires_at_ms
+                .is_none_or(|expires_at| expires_at > now)
+        {
+            return Err(Error::validation_invalid_argument(
+                "confirm_untracked_child_dead",
+                "confirmed job is not an expired PID-less pre-spawn reservation",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        let terminal_result = serde_json::json!({
+            "status": JobStatus::Failed,
+            "reason": "operator_confirmed_expired_pidless_reservation_after_dead_daemon_lease",
+            "retryable": true,
+            "expected_lease_id": expected_lease_id,
+            "reservation_id": reservation.reservation_id,
+            "reservation_expires_at_ms": reservation.reservation_expires_at_ms,
+            "operator_confirmation": true,
+        });
+        stored.job.status = JobStatus::Failed;
+        stored.job.updated_at_ms = now;
+        stored.job.finished_at_ms = Some(now);
+        stored.job.stale_reason =
+            Some("local child reservation lease expired before spawn".to_string());
+        for (kind, message) in [
+            (
+                JobEventKind::Error,
+                "expired PID-less reservation recovered after dead daemon lease",
+            ),
+            (
+                JobEventKind::Result,
+                "retryable terminal reservation recovery",
+            ),
+            (
+                JobEventKind::Status,
+                "job marked failed after explicit expired reservation recovery",
+            ),
+        ] {
+            let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+            stored.events.push(JobEvent {
+                sequence,
+                job_id: *job_id,
+                kind,
+                timestamp_ms: now,
+                message: Some(message.to_string()),
+                data: Some(terminal_result.clone()),
+            });
+        }
+        apply_event_retention(&mut stored.events, self.event_retention_limit());
+        stored.job.event_count = stored.events.len();
+        drop(inner);
+        self.persist()?;
+        Ok(DaemonLeaseJobDiagnostics {
+            expected_lease_id: expected_lease_id.to_string(),
+            matching_job_ids: vec![*job_id],
+            ..DaemonLeaseJobDiagnostics::default()
+        })
+    }
+
     /// Reconcile only jobs whose linked durable run has already reached a
     /// terminal state. This deliberately does not inspect, stop, or alter live
     /// children, so it is safe when a daemon's aggregate count includes both
