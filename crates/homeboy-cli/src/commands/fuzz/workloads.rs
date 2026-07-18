@@ -330,6 +330,30 @@ mod tests {
             Some("/workspace/current")
         );
     }
+
+    #[test]
+    fn fuzz_execution_inputs_preserve_workload_env_providers() {
+        let context = FuzzRigContext {
+            spec: serde_json::from_value(serde_json::json!({
+                "id": "package-fuzz",
+                "fuzz_workloads": {
+                    "generic-runtime": [{
+                        "path": "/tmp/workload.json",
+                        "env_provider_extensions": ["environment-helper"]
+                    }]
+                }
+            }))
+            .expect("parse rig spec"),
+            package_root: None,
+        };
+
+        let inputs = fuzz_execution_inputs(Some(&context), Some("generic-runtime"));
+
+        assert_eq!(
+            inputs.env_provider_extensions,
+            vec!["environment-helper".to_string()]
+        );
+    }
 }
 
 pub(super) fn fuzz_workloads(
@@ -378,11 +402,11 @@ pub(super) fn fuzz_workloads(
     workloads
 }
 
-pub(super) fn fuzz_invocation_requirements(
+pub(super) fn fuzz_execution_inputs(
     rig_context: Option<&FuzzRigContext>,
     extension_id: Option<&str>,
-) -> InvocationRequirements {
-    fuzz_rig_workload_inputs(rig_context, extension_id).invocation_requirements
+) -> rig::RigExtensionWorkloadInputs {
+    fuzz_rig_workload_inputs(rig_context, extension_id)
 }
 
 fn fuzz_rig_workload_inputs(

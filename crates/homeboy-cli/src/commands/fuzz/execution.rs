@@ -29,9 +29,8 @@ use super::types::{
     FuzzPlanStrategy, FuzzRunArgs, FuzzRunOutput, FuzzRunnerContract, FuzzWorkloadOutput,
 };
 use super::workloads::{
-    build_target_inventory, fuzz_invocation_requirements, fuzz_workloads, load_rig,
-    resolve_component_id, resolve_fuzz_context, resolve_profile_workload_id, select_workload,
-    FuzzRigContext,
+    build_target_inventory, fuzz_execution_inputs, fuzz_workloads, load_rig, resolve_component_id,
+    resolve_fuzz_context, resolve_profile_workload_id, select_workload, FuzzRigContext,
 };
 
 pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
@@ -89,8 +88,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         args.run_id.clone(),
         args.inventory.as_deref(),
     )?;
-    let invocation_requirements =
-        fuzz_invocation_requirements(rig_context.as_ref(), ctx.extension_id.as_deref());
+    let workload_inputs = fuzz_execution_inputs(rig_context.as_ref(), ctx.extension_id.as_deref());
     let run_dir = RunDir::create()?;
     let rig_id = rig_context.as_ref().map(|context| context.spec.id.clone());
     let workload_id = selected_workload
@@ -114,7 +112,8 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         &args,
         rig_context.as_ref(),
         selected_workload,
-        invocation_requirements,
+        workload_inputs.env_provider_extensions,
+        workload_inputs.invocation_requirements,
         &run_dir,
         &execution_request_path,
         sequence_plan_path.as_deref(),
@@ -1145,6 +1144,7 @@ fn run_fuzz_extension_script(
     args: &FuzzRunArgs,
     rig_context: Option<&FuzzRigContext>,
     workload: Option<&FuzzWorkloadOutput>,
+    env_provider_extensions: Vec<String>,
     invocation_requirements: InvocationRequirements,
     run_dir: &RunDir,
     execution_request_path: &Path,
@@ -1196,6 +1196,7 @@ fn run_fuzz_extension_script(
         .settings_json(&args.setting_args.setting_json)
         .path_override(args.comp.path.clone())
         .with_run_dir(run_dir)
+        .env_provider_extensions(&env_provider_extensions)
         .invocation_requirements(invocation_requirements)
         .timeout(fuzz_max_duration(args.max_duration.as_deref())?)
         .script_args(&args.args);
