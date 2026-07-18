@@ -10,6 +10,19 @@ pub fn record_pre_execution_failure(
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let mut record = store::read_record(&run_id)?;
+
+    // Once a Lab handoff is accepted, the runner daemon owns the durable job
+    // and remains the authority until it reports a terminal result. A transient
+    // controller-session loss (e.g. a concurrent runner refresh) must not be
+    // recorded as a pre-execution failure, which would discard authoritative
+    // in-flight remote work as `provider_executions_consumed: 0` and no
+    // candidate (#8824). Preserve the accepted handoff as a retryable in-flight
+    // state so later reconciliation can project the real runner result exactly
+    // once.
+    if record.has_accepted_lab_handoff() {
+        return retain_accepted_handoff_after_pre_execution_disruption(record, phase, error);
+    }
+
     let task_count = plan.tasks.len();
     let failed = task_count;
     let retryable = error.retryable == Some(true);
@@ -81,6 +94,37 @@ pub fn record_pre_execution_failure(
     );
     store::write_record(&failed_record)?;
     Ok(failed_record)
+}
+
+/// Preserve an accepted-handoff run when a would-be pre-execution failure is
+/// raised after acceptance. The accepted handoff and its runner job identity
+/// remain untouched (the runner daemon is still the authority); the record is
+/// annotated as a retryable, disconnected in-flight state and left non-terminal
+/// so `reconcile_active_lab_runner_handoffs` / `status` can project the real
+/// runner result later.
+fn retain_accepted_handoff_after_pre_execution_disruption(
+    mut record: AgentTaskRunRecord,
+    phase: &str,
+    error: &Error,
+) -> Result<AgentTaskRunRecord> {
+    record.annotate_runner_disconnected();
+    let metadata = record.ensure_metadata_object();
+    // Always mark retryable: acceptance means the durable runner job exists and
+    // the disruption is controller-side, independent of `annotate_runner_disconnected`'s
+    // state/runner-backed preconditions.
+    metadata.insert("retryable".to_string(), json!(true));
+    metadata.insert(
+        "accepted_handoff_pre_execution_disruption".to_string(),
+        json!({
+            "phase": phase,
+            "error_code": error.code.as_str(),
+            "message": error.message,
+            "controller_identity": homeboy_core::build_identity::current().display,
+            "at": now_timestamp(),
+        }),
+    );
+    store::write_record(&record)?;
+    Ok(record)
 }
 
 pub(crate) fn build_pre_execution_failure_outcome(
