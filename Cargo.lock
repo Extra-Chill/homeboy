@@ -725,6 +725,7 @@ dependencies = [
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-error",
+ "homeboy-extension",
  "homeboy-finding",
  "homeboy-lab-contract",
  "homeboy-lab-runner",
@@ -764,6 +765,7 @@ dependencies = [
  "homeboy-agents-contract",
  "homeboy-core",
  "homeboy-error",
+ "homeboy-extension",
  "homeboy-lab-contract",
  "homeboy-lab-runner-contract",
  "libc",
@@ -814,6 +816,8 @@ dependencies = [
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-error",
+ "homeboy-extension",
+ "homeboy-extension-contract",
  "homeboy-finding",
  "homeboy-fuzz",
  "homeboy-issues",
@@ -869,6 +873,7 @@ dependencies = [
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-error",
+ "homeboy-extension",
  "homeboy-finding",
  "homeboy-paths",
  "homeboy-product-identity",
@@ -879,14 +884,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "toml 1.1.2+spec-1.1.0",
-]
-
-[[package]]
-name = "homeboy-command-contract"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -906,9 +903,9 @@ dependencies = [
  "homeboy-audit-contract",
  "homeboy-cli-contract",
  "homeboy-code-audit",
- "homeboy-command-contract",
  "homeboy-engine-primitives",
  "homeboy-error",
+ "homeboy-extension",
  "homeboy-extension-contract",
  "homeboy-finding",
  "homeboy-lab-contract",
@@ -964,6 +961,32 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "homeboy-extension"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "glob",
+ "glob-match",
+ "homeboy-audit-contract",
+ "homeboy-core",
+ "homeboy-engine-primitives",
+ "homeboy-extension-contract",
+ "homeboy-lifecycle-contract",
+ "homeboy-product-identity",
+ "homeboy-refactor-contract",
+ "homeboy-rig-contract",
+ "libc",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "sha2",
+ "shellexpand",
+ "tempfile",
 ]
 
 [[package]]
@@ -1032,6 +1055,7 @@ dependencies = [
  "homeboy-agents",
  "homeboy-cli-contract",
  "homeboy-core",
+ "homeboy-extension",
  "homeboy-fuzz",
  "homeboy-lab-runner-contract",
  "homeboy-product-identity",
@@ -1117,6 +1141,7 @@ dependencies = [
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-error",
+ "homeboy-extension",
  "homeboy-refactor-contract",
  "regex",
  "reqwest",
@@ -1143,6 +1168,7 @@ dependencies = [
  "glob-match",
  "homeboy-core",
  "homeboy-error",
+ "homeboy-extension",
  "homeboy-product-identity",
  "homeboy-release-contract",
  "regex",
@@ -1172,6 +1198,7 @@ dependencies = [
  "homeboy-code-audit",
  "homeboy-core",
  "homeboy-error",
+ "homeboy-extension",
  "homeboy-finding",
  "serde",
  "serde_json",
@@ -1184,6 +1211,7 @@ dependencies = [
  "chrono",
  "homeboy-core",
  "homeboy-error",
+ "homeboy-extension",
  "homeboy-lab-runner-contract",
  "homeboy-lifecycle-contract",
  "homeboy-product-identity",
@@ -1250,6 +1278,7 @@ version = "0.1.0"
 dependencies = [
  "homeboy-core",
  "homeboy-error",
+ "homeboy-extension",
  "homeboy-product-identity",
  "libc",
  "regex",

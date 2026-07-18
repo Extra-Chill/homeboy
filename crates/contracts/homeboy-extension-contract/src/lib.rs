@@ -6,9 +6,20 @@
 //! lightweight crate that others can depend on without pulling in the whole
 //! core compile unit.
 //!
-//! Modules and types are re-exported from `homeboy_core::extension` so existing
+//! Modules and types are re-exported from `homeboy_extension` so existing
 //! `crate::extension::*` call sites keep working unchanged.
 
+pub use ci_config::{
+    CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec,
+};
+pub use manifest_capability_config::{DiscoveryMarkerConfig, ScriptsConfig};
+pub use manifest_toolchain_config::{
+    CliAutoFlag, CliAutoFlagCondition, CliHelpConfig, DatabaseCliConfig, DeployVerification,
+    LintChangedFileRoute, RemotePathRootRule, RequirementsConfig,
+};
+pub use action_types::HttpMethod;
+pub use manifest_capability_config::AgentRuntimeManifestConfig;
+pub use manifest_toolchain_config::{CliConfig, RemotePathInferenceRule};
 pub mod action_types;
 pub mod autofix_config;
 pub mod bench_artifact;

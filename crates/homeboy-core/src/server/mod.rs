@@ -1,23 +1,23 @@
 pub mod api;
 pub mod auth;
 pub mod auth_profiles;
-mod client;
+pub mod client;
 mod connection;
 pub mod health;
-pub(crate) mod http;
+pub mod http;
 mod keys;
 mod process_cleanup;
 mod session;
 pub mod ssh_args;
 pub mod transfer;
 
-pub(crate) use client::DELEGATED_RUN_STATUS_FILE_ENV;
+pub use client::DELEGATED_RUN_STATUS_FILE_ENV;
 pub use client::{
     execute_local_command, execute_local_command_in_dir, execute_local_command_in_dir_with_timeout,
     execute_local_command_interactive, execute_local_command_passthrough, is_transient_ssh_error,
     CommandOutput, SshClient,
 };
-pub(crate) use client::{
+pub use client::{
     execute_local_command_passthrough_with_timeout, execute_local_command_stderr_passthrough,
     execute_local_command_stderr_passthrough_with_timeout,
 };

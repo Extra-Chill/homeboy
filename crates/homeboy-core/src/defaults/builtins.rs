@@ -2,7 +2,7 @@ use super::{
     DeployConfig, InstallMethodConfig, InstallMethodsConfig, PermissionModes, PermissionsConfig,
     VersionCandidateConfig,
 };
-use crate::extension::TestDriftConfig;
+use homeboy_extension_contract::TestDriftConfig;
 use serde::Deserialize;
 use std::fs;
 use std::sync::OnceLock;
@@ -67,11 +67,11 @@ pub(super) fn default_version_candidates() -> Vec<VersionCandidateConfig> {
     extension_provided_defaults().version_candidates.clone()
 }
 
-pub(crate) fn extension_provided_test_drift_config() -> TestDriftConfig {
+pub fn extension_provided_test_drift_config() -> TestDriftConfig {
     extension_provided_defaults().test_drift.clone()
 }
 
-pub(crate) fn extension_provided_direct_test_file_suffixes() -> Vec<String> {
+pub fn extension_provided_direct_test_file_suffixes() -> Vec<String> {
     extension_provided_defaults()
         .direct_test_file_suffixes
         .clone()

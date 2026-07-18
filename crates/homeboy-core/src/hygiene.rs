@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::component::{self, Component};
 use crate::deps::provider;
 use crate::error::{Error, ErrorCode, Result, ValidationErrorItem};
-use crate::extension::ExtensionCapability;
+use homeboy_extension_contract::ExtensionCapability;
 
 const LAB_SOURCE_EVIDENCE_FILE: &str = ".homeboy/lab-source-evidence.json";
 const DEPENDENCY_LIFECYCLE_ARTIFACT_DIR: &str = ".homeboy/dependency-lifecycle";

@@ -2,9 +2,9 @@ use crate::auto::FixResultsSummary;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::engine::undo::UndoSnapshot;
-use homeboy_core::extension::test::compute_changed_test_files;
 use homeboy_core::git;
 use homeboy_core::Error;
+use homeboy_extension::test::compute_changed_test_files;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
@@ -98,7 +98,7 @@ pub struct LintSourceOptions {
     pub selected_files: Option<Vec<String>>,
     pub file: Option<String>,
     pub glob: Option<String>,
-    pub sniff_filters: homeboy_core::extension::lint::LintSniffFilters,
+    pub sniff_filters: homeboy_extension::lint::LintSniffFilters,
     pub category: Option<String>,
 }
 

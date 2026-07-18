@@ -6,14 +6,14 @@ use std::thread;
 
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy::core::extension::bench as extension_bench;
-use homeboy::core::extension::bench::{
+use homeboy::rig::{self, RigSpec};
+use homeboy_extension::bench as extension_bench;
+use homeboy_extension::bench::{
     aggregate_comparison_with_axes, BenchCommandOutput, BenchComparisonOutput,
     BenchComparisonSummaryOutput, BenchListProfile, BenchListWorkflowArgs, BenchListWorkflowResult,
     RigBenchEntry, DEFAULT_REGRESSION_THRESHOLD_PERCENT,
 };
-use homeboy::core::extension::ExtensionCapability;
-use homeboy::rig::{self, RigSpec};
+use homeboy_extension::ExtensionCapability;
 
 use super::utils::args::{
     filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, PassthroughCommand,

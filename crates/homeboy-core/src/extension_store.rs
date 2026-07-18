@@ -7,10 +7,10 @@ use std::path::PathBuf;
 use homeboy_extension_contract::ExtensionManifest;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BrokenExtensionLink {
-    pub(crate) id: String,
-    pub(crate) path: PathBuf,
-    pub(crate) target: PathBuf,
+pub struct BrokenExtensionLink {
+    pub id: String,
+    pub path: PathBuf,
+    pub target: PathBuf,
 }
 
 pub fn load_extension(id: &str) -> Result<ExtensionManifest> {
@@ -37,7 +37,7 @@ pub fn load_all_extensions() -> Result<Vec<ExtensionManifest>> {
     Ok(extensions_with_paths)
 }
 
-pub(crate) fn broken_extension_links() -> Vec<BrokenExtensionLink> {
+pub fn broken_extension_links() -> Vec<BrokenExtensionLink> {
     let Ok(dir) = paths::extensions() else {
         return Vec::new();
     };
@@ -245,5 +245,24 @@ mod tests {
             assert_eq!(broken[0].id, "sample-runtime");
             assert_eq!(broken[0].target, target);
         });
+    }
+}
+
+impl crate::config::ConfigEntity for ExtensionManifest {
+    const ENTITY_TYPE: &'static str = "extension";
+    const DIR_NAME: &'static str = "extensions";
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn set_id(&mut self, id: String) {
+        self.id = id;
+    }
+    fn not_found_error(id: String, suggestions: Vec<String>) -> crate::Error {
+        crate::Error::extension_not_found(id, suggestions)
+    }
+
+    fn config_path(id: &str) -> crate::Result<std::path::PathBuf> {
+        crate::paths::extension_manifest(id)
     }
 }

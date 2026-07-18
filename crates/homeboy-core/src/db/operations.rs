@@ -10,9 +10,10 @@ use crate::context::require_project_base_path;
 use crate::engine::executor::execute_for_project;
 use crate::engine::template::{render_map, TemplateVars};
 use crate::engine::text;
-use crate::extension::{load_all_extensions, DatabaseCliConfig};
+use crate::extension_store::load_all_extensions;
 use crate::project::{self, Project};
 use crate::{Error, Result};
+use homeboy_extension_contract::DatabaseCliConfig;
 
 #[derive(Serialize, Clone)]
 pub struct DbResult {

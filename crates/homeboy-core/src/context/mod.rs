@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 
 use crate::component;
 use crate::error::{Error, Result};
-use crate::extension::{self, DiscoveryMarkerConfig, ExtensionManifest};
 use crate::project::{self, Project};
 use crate::server::SshClient;
 use crate::server::{self, Server};
+use homeboy_extension_contract::{DiscoveryMarkerConfig, ExtensionManifest};
 
 pub mod report;
 
@@ -229,7 +229,7 @@ pub fn build_component_info(component: &component::Component) -> ContainedCompon
         .as_ref()
         .map(|extensions| {
             extensions.keys().any(|extension_id| {
-                extension::load_extension(extension_id)
+                crate::extension_store::load_extension(extension_id)
                     .ok()
                     .is_some_and(|m| m.has_build())
             })
@@ -326,7 +326,7 @@ pub fn build_component_info(component: &component::Component) -> ContainedCompon
 }
 
 fn extension_suggestions_for_path(local_path: &Path) -> Vec<String> {
-    extension::load_all_extensions()
+    crate::extension_store::load_all_extensions()
         .map(|extensions| extension_suggestions_from_manifests(local_path, &extensions))
         .unwrap_or_default()
 }

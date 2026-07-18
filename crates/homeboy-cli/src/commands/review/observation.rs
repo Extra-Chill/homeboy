@@ -222,8 +222,8 @@ mod tests {
     #[test]
     fn finish_metadata_captures_aggregate_and_linkable_stages() {
         use homeboy::core::code_audit::AuditCommandOutput;
-        use homeboy::core::extension::lint::LintCommandOutput;
-        use homeboy::core::extension::test::TestCommandOutput;
+        use homeboy_extension::lint::LintCommandOutput;
+        use homeboy_extension::test::TestCommandOutput;
 
         let initial = serde_json::json!({
             "schema": "homeboy/review-observation/v1",

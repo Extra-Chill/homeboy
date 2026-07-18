@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::component;
 use crate::deps::{self, DependencyInstallResult};
-use crate::extension::{self, is_extension_linked};
+use crate::extension_store::is_extension_linked;
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,7 +90,8 @@ pub fn component_setup(
 
     let extensions = match options.extension_source {
         Some(source) => {
-            let result = extension::install_for_component(&component, source)?;
+            let result =
+                crate::component_install_provider::install_for_component(&component, source)?;
             Some(ExtensionSetupSummary {
                 source: result.source,
                 installed: result

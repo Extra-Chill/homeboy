@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use homeboy_core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
-use homeboy_core::extension;
 use homeboy_core::Error;
+use homeboy_extension as extension;
 
 // ============================================================================
 // Types

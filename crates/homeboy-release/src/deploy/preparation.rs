@@ -493,7 +493,7 @@ fn prepare_payload(
     let mut generated_source_artifact = None;
     if release_artifact.is_none() && !request.config.skip_build {
         let cleanup = GeneratedSourceArtifactCleanup::new(&component)?;
-        let (build_exit_code, build_error) = homeboy_core::build::build_component(&component);
+        let (build_exit_code, build_error) = homeboy_extension::build::build_component(&component);
         if let Some(message) = build_error {
             return Err(Error::validation_invalid_argument(
                 "build",
@@ -624,7 +624,7 @@ fn copy_prepared_artifact(source: &Path) -> Result<(PathBuf, PreparedArtifactCle
 
 fn artifact_path(component: &Component) -> Result<PathBuf> {
     let artifact = artifact_pattern(component)?;
-    homeboy_core::extension::build::resolve_artifact_path_from_root(
+    homeboy_extension::build::resolve_artifact_path_from_root(
         &artifact,
         Some(Path::new(&component.local_path)),
     )

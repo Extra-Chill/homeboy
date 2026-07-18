@@ -34,7 +34,7 @@
 
 use crate::auto::{ApplyChunkResult, ChunkStatus};
 use homeboy_core::engine::undo::InMemoryRollback;
-use homeboy_core::extension::AutofixVerifyConfig;
+use homeboy_extension::AutofixVerifyConfig;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};

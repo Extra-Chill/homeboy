@@ -15,8 +15,8 @@ use homeboy_core::agent_runtime_manifest::{
     AgentRuntimeManifest,
 };
 use homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA;
-use homeboy_core::extension::{load_extension, ExtensionManifest};
 use homeboy_core::{Error, Result};
+use homeboy_extension::{load_extension, ExtensionManifest};
 
 use super::{
     AgentTaskExecutorProvider, AgentTaskProviderRunnerSource, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,

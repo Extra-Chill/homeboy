@@ -4,9 +4,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::component::{self, Component};
-use crate::extension::{
-    extension_ready_status, is_extension_compatible, is_extension_linked, load_all_extensions,
-};
+use crate::extension_readiness::{extension_ready_status, is_extension_compatible};
+use crate::extension_store::{is_extension_linked, load_all_extensions};
 use crate::project::{self, Project};
 use crate::release_provider::{self, ReleaseStateEntry};
 use crate::server::{self, Server};
@@ -530,7 +529,7 @@ fn build_actionable_next_steps(
     components: &[ComponentWithState],
     projects: &[ProjectListItem],
     linked_extension_ids: &HashSet<String>,
-    all_extensions: &[crate::extension::ExtensionManifest],
+    all_extensions: &[homeboy_extension_contract::ExtensionManifest],
 ) -> Vec<String> {
     let mut next_steps = Vec::new();
 

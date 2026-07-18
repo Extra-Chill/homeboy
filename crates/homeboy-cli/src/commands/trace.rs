@@ -7,15 +7,15 @@ use homeboy::core::engine::baseline::BaselineFlags;
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy::core::extension::trace as extension_trace;
-use homeboy::core::extension::trace::{
+use homeboy::core::observation::{ActiveObservation, NewRunRecord};
+use homeboy::rig::{self, RigSpec};
+use homeboy_extension::trace as extension_trace;
+use homeboy_extension::trace::{
     TraceAttachment, TraceCanonicalPolicy, TraceCheckoutProvenance, TraceCommandOutput,
     TraceListWorkflowArgs, TraceOverlayRequest, TraceRunWorkflowArgs, TraceRunnerInputs,
     TraceSpanDefinition,
 };
-use homeboy::core::extension::ExtensionCapability;
-use homeboy::core::observation::{ActiveObservation, NewRunRecord};
-use homeboy::rig::{self, RigSpec};
+use homeboy_extension::ExtensionCapability;
 
 use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};

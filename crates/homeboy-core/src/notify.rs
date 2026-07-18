@@ -101,7 +101,7 @@ pub fn dispatch(event: &NotifyEvent) -> NotifyOutcome {
         };
     };
 
-    let extensions = match crate::extension::load_all_extensions() {
+    let extensions = match crate::extension_store::load_all_extensions() {
         Ok(extensions) => extensions,
         Err(err) => return missing_transport(&transport_id, err.message),
     };
@@ -169,19 +169,19 @@ mod tests {
     use super::*;
 
     fn install_transport(id: &str, command: Vec<&str>) {
-        let mut manifest: crate::extension::ExtensionManifest =
+        let mut manifest: homeboy_extension_contract::ExtensionManifest =
             serde_json::from_value(serde_json::json!({
                 "name": "Test transport",
                 "version": "1.0.0",
                 "notification_transports": [{
-                    "schema": crate::extension::NOTIFICATION_TRANSPORT_SCHEMA,
+                    "schema": homeboy_extension_contract::notification_transport_config::NOTIFICATION_TRANSPORT_SCHEMA,
                     "id": id,
                     "command": command,
                 }]
             }))
             .unwrap();
         manifest.id = "test-transport".to_string();
-        crate::extension::save_manifest(&manifest).unwrap();
+        crate::extension_store::save_manifest(&manifest).unwrap();
     }
 
     #[test]

@@ -1,0 +1,86 @@
+//! Structured-sidecar declaration resolution.
+//!
+//! The pure contract types live in `homeboy-extension-contract`; this module
+//! re-exports them and provides the resolution logic that depends on core's
+//! run-dir file constants and `structured_sidecar` defaults.
+
+use homeboy_core::{engine::run_dir, structured_sidecar};
+
+pub use homeboy_extension_contract::sidecar_config::{
+    StructuredSidecarContract, StructuredSidecarDeclaration, StructuredSidecarDetail,
+};
+
+/// Resolve a structured-sidecar contract into a concrete declaration for the
+/// given sidecar name, applying core's default paths and producers.
+pub(super) fn structured_sidecar_declaration(
+    contract: &StructuredSidecarContract,
+    name: &str,
+) -> Option<StructuredSidecarDeclaration> {
+    match contract {
+        StructuredSidecarContract::Enabled(true) => Some(StructuredSidecarDeclaration {
+            name: name.to_string(),
+            path: default_structured_sidecar_path(name),
+            schema_version: structured_sidecar::default_schema_version(name).map(str::to_string),
+            producer: default_structured_sidecar_producer(name),
+        }),
+        StructuredSidecarContract::Enabled(false) => None,
+        StructuredSidecarContract::Detail(detail) => {
+            if !detail.enabled {
+                return None;
+            }
+
+            Some(StructuredSidecarDeclaration {
+                name: name.to_string(),
+                path: detail
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| default_structured_sidecar_path(name)),
+                schema_version: detail.schema_version.clone(),
+                producer: detail
+                    .producer
+                    .clone()
+                    .or_else(|| default_structured_sidecar_producer(name)),
+            })
+        }
+    }
+}
+
+fn default_structured_sidecar_path(name: &str) -> String {
+    if let Some(path) = structured_sidecar::default_path(name) {
+        return path.to_string();
+    }
+
+    match name {
+        "lint.findings" => run_dir::files::LINT_FINDINGS,
+        "lint.producers" => run_dir::files::LINT_PRODUCERS,
+        "test.results" => run_dir::files::TEST_RESULTS,
+        "test.failures" => run_dir::files::TEST_FAILURES,
+        "test.coverage" => run_dir::files::COVERAGE,
+        "bench.results" => run_dir::files::BENCH_RESULTS,
+        "fuzz.results" => run_dir::files::FUZZ_RESULTS,
+        "trace.results" => run_dir::files::TRACE_RESULTS,
+        "trace.artifacts" => "artifacts",
+        "resource.summary" => run_dir::files::RESOURCE_SUMMARY,
+        "producer.summary" => "producer-summary.json",
+        "findings" => "findings.json",
+        "annotations" => run_dir::files::ANNOTATIONS_DIR,
+        _ => name,
+    }
+    .to_string()
+}
+
+fn default_structured_sidecar_producer(name: &str) -> Option<String> {
+    if let Some(producer) = structured_sidecar::default_producer(name) {
+        return Some(producer.to_string());
+    }
+
+    match name {
+        "lint.findings" | "lint.producers" => Some("lint"),
+        "test.results" | "test.failures" | "test.coverage" => Some("test"),
+        "bench.results" => Some("bench"),
+        "fuzz.results" => Some("fuzz"),
+        "trace.results" | "trace.artifacts" => Some("trace"),
+        _ => None,
+    }
+    .map(str::to_string)
+}

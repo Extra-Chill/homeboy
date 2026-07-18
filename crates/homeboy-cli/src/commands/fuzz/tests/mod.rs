@@ -31,7 +31,6 @@ use super::workloads::{
 use super::{run_contract, run_discover, FuzzArgs};
 use clap::Parser;
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy::core::extension::FuzzConfig;
 use homeboy::core::lifecycle::{
     LifecyclePhaseKind, LifecyclePhaseResult, LifecyclePhaseStatus, LifecycleResultMetadata,
     LIFECYCLE_CONTRACT_VERSION, LIFECYCLE_RESULT_SCHEMA,
@@ -46,6 +45,7 @@ use homeboy::fuzz::{
 };
 use homeboy::rig::RigSpec;
 use homeboy::test_support::with_isolated_home;
+use homeboy_extension::FuzzConfig;
 use std::fs;
 use std::path::{Path, PathBuf};
 

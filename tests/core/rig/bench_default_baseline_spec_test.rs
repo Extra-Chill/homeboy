@@ -5,7 +5,7 @@
 //! tooling) read this directly off disk.
 
 use crate::spec::{BenchMetricGateCondition, BenchSpec, RigSpec, WorkloadSpec};
-use homeboy_core::extension::bench::BenchGateOp;
+use homeboy_extension::bench::BenchGateOp;
 
 /// Parses a minimal RigSpec JSON via serde and returns the embedded
 /// `BenchSpec` (or panics).

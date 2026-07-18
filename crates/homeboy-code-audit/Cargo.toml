@@ -31,5 +31,6 @@ tempfile = "3.14"
 # dev-dependency cycle (core depends on this crate normally), which Cargo
 # permits because dev-deps are excluded from the normal dependency graph.
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
+homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
 chrono = "0.4"
 toml = "1.0.3"

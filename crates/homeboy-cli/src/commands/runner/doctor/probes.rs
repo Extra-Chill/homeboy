@@ -1,6 +1,7 @@
 use super::*;
 use homeboy::core::agent_runtime_manifest::{self, AgentRuntimeManifest};
-use homeboy::core::extension::{self, ExtensionManifest};
+use homeboy_extension as extension;
+use homeboy_extension::{self, ExtensionManifest};
 use types::{DiskProbe, HomeboyProbe, MemoryProbe, RunnerCapabilities, RunnerCheck, ToolProbe};
 
 pub fn tool_specs(runner: &Runner) -> Vec<RunnerToolSpec> {

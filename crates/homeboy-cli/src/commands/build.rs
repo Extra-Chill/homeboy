@@ -1,10 +1,10 @@
 use clap::Args;
-use homeboy::core::build;
 use homeboy::core::component;
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
-use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::project;
 use homeboy::core::scope::{self, Scope};
+use homeboy_extension::build;
+use homeboy_extension::ExtensionCapability;
 
 use crate::commands::utils::resolve::resolve_project_components;
 use crate::commands::CmdResult;

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use homeboy::core::engine::text;
-use homeboy::core::extension::load_all_extensions;
+use homeboy_core::extension_store::load_all_extensions;
 
 include!(concat!(env!("OUT_DIR"), "/generated_docs.rs"));
 

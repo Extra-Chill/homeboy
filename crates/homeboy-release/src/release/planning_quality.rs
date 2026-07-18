@@ -1,7 +1,8 @@
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{CommandEvidence, Error, Result};
-use homeboy_core::extension::{self, ExtensionCapability};
+use homeboy_extension as extension;
+use homeboy_extension::{self, ExtensionCapability};
 use std::path::Path;
 
 /// Maximum captured stdout/stderr bytes retained per stream in command
@@ -155,9 +156,8 @@ pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome
     }
 
     let source_path = std::path::Path::new(&component.local_path);
-    let findings =
-        homeboy_core::extension::lint::baseline::parse_findings_file(&lint_findings_file)
-            .unwrap_or_default();
+    let findings = homeboy_extension::lint::baseline::parse_findings_file(&lint_findings_file)
+        .unwrap_or_default();
 
     // A non-zero exit with zero parsed findings is a harness/infra failure, not
     // a real lint failure — the linter found nothing to report. The underlying
@@ -168,8 +168,8 @@ pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome
         };
     }
 
-    if let Some(baseline) = homeboy_core::extension::lint::baseline::load_baseline(source_path) {
-        let comparison = homeboy_core::extension::lint::baseline::compare(&findings, &baseline);
+    if let Some(baseline) = homeboy_extension::lint::baseline::load_baseline(source_path) {
+        let comparison = homeboy_extension::lint::baseline::compare(&findings, &baseline);
         if comparison.drift_increased {
             homeboy_core::log_status!(
                 "release",
@@ -371,7 +371,7 @@ mod tests {
         validate_lint_quality, validate_test_quality, LintQualityOutcome,
     };
     use homeboy_core::component::{Component, ComponentScriptsConfig};
-    use homeboy_core::extension::RunnerOutput;
+    use homeboy_extension::RunnerOutput;
     use std::fs;
     use std::path::Path;
 

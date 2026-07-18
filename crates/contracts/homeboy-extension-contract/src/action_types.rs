@@ -1,7 +1,7 @@
 //! Action-type contract enums for extension manifests.
 //!
 //! Pure serde enums describing the shape of manifest-declared actions. The CLI
-//! parses these; execution behavior lives in `homeboy_core::extension`.
+//! parses these; execution behavior lives in `homeboy_extension`.
 
 use serde::{Deserialize, Serialize};
 

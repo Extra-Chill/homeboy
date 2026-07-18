@@ -40,7 +40,7 @@ struct ResolvedArtifactInputSource {
     source_artifact: PathBuf,
 }
 
-pub(crate) fn apply_to_component_artifact(
+pub fn apply_to_component_artifact(
     consumer: &Component,
     consumer_artifact: &Path,
 ) -> Result<Vec<ResolvedArtifactInput>> {
@@ -117,7 +117,7 @@ fn build_and_resolve_producer_artifact(
 ) -> Result<std::path::PathBuf> {
     validate_input(input, consumer_id)?;
     let producer = component::resolve_effective(Some(&input.component), None, None)?;
-    let (exit_code, build_error) = crate::build::build_component(&producer);
+    let (exit_code, build_error) = crate::component_build_provider::build_component(&producer);
     if let Some(error) = build_error {
         return Err(Error::validation_invalid_argument(
             "artifact_inputs.component",

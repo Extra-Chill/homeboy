@@ -1,9 +1,9 @@
 use std::fs;
 
 use homeboy::core::engine::run_dir::{self, RunDir};
-use homeboy::core::extension::bench::artifact::BenchArtifact;
-use homeboy::core::extension::bench::result_types::BenchRunMetadata;
-use homeboy::core::extension::bench::{BenchRunExecution, BenchRunWorkflowResult};
+use homeboy_extension::bench::artifact::BenchArtifact;
+use homeboy_extension::bench::result_types::BenchRunMetadata;
+use homeboy_extension::bench::{BenchRunExecution, BenchRunWorkflowResult};
 
 use super::tests::{bench_args, bench_results, XdgGuard};
 use super::{finish_success, start, BenchObservationStart};

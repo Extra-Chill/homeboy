@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
+homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
 homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit" }
 homeboy-finding = { version = "0.1.0", path = "../homeboy-finding" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }

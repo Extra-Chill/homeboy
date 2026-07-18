@@ -1,17 +1,18 @@
 use clap::{Args, Subcommand};
+use homeboy_extension as extension;
 use serde::{Deserialize, Serialize};
 
 use homeboy::core::agent_runtime_manifest::{
     discover_agent_runtime_catalog, AgentRuntimeDiagnosticsContract,
 };
-use homeboy::core::extension::{
-    self, extension_ready_status, is_extension_linked, load_extension, run_setup, ExtensionSummary,
-    UpdateEntry,
-};
 use homeboy::core::git;
 use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
 use homeboy::runner::runners::{self, RunnerKind};
+use homeboy_extension::{
+    self, extension_ready_status, is_extension_linked, load_extension, run_setup, ExtensionSummary,
+    UpdateEntry,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
@@ -391,13 +392,13 @@ pub enum ExtensionOutput {
         #[serde(skip_serializing_if = "Option::is_none")]
         git_root: Option<String>,
         #[serde(flatten)]
-        source_update: homeboy::core::extension::ExtensionSourceUpdate,
+        source_update: homeboy_extension::ExtensionSourceUpdate,
         #[serde(skip_serializing_if = "Option::is_none")]
         old_version: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         new_version: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        repaired_source_metadata: Option<homeboy::core::extension::SourceMetadataRepair>,
+        repaired_source_metadata: Option<homeboy_extension::SourceMetadataRepair>,
     },
     #[serde(rename = "extension.update_all")]
     UpdateAll {
@@ -449,9 +450,9 @@ pub struct ExtensionDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
     pub runtime: String,
-    pub core_compatibility: homeboy::core::extension::CoreCompatibilityReport,
+    pub core_compatibility: homeboy_extension::CoreCompatibilityReport,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_requirements: Option<homeboy::core::extension::RuntimeRequirementsConfig>,
+    pub runtime_requirements: Option<homeboy_extension::RuntimeRequirementsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_setup: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -470,16 +471,15 @@ pub struct ExtensionDetail {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionDetail>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub inputs: Vec<homeboy::core::extension::InputConfig>,
+    pub inputs: Vec<homeboy_extension::InputConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub settings: Vec<homeboy::core::extension::SettingConfig>,
+    pub settings: Vec<homeboy_extension::SettingConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub structured_sidecars: Vec<homeboy::core::extension::StructuredSidecarDeclaration>,
+    pub structured_sidecars: Vec<homeboy_extension::StructuredSidecarDeclaration>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub materialization_source:
-        Option<homeboy::core::extension::ExtensionMaterializationSourceContract>,
+    pub materialization_source: Option<homeboy_extension::ExtensionMaterializationSourceContract>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub contract_producers: Vec<homeboy::core::extension::ExtensionContractProducer>,
+    pub contract_producers: Vec<homeboy_extension::ExtensionContractProducer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires: Option<RequiresDetail>,
 }
@@ -507,11 +507,11 @@ pub struct ActionDetail {
     pub id: String,
     pub label: String,
     #[serde(rename = "type")]
-    pub action_type: homeboy::core::extension::ActionType,
+    pub action_type: homeboy_extension::ActionType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub method: Option<homeboy::core::extension::HttpMethod>,
+    pub method: Option<homeboy_extension::HttpMethod>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
 }
@@ -787,7 +787,7 @@ fn read_source_url_metadata(path: &str) -> Option<String> {
     if path.is_empty() {
         return None;
     }
-    homeboy::core::extension::read_source_url(Path::new(path))
+    homeboy_core::extension_update_check::read_source_url(Path::new(path))
 }
 
 fn local_source_path(source: &str) -> Option<String> {
@@ -897,8 +897,8 @@ fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
         components: r.components.clone(),
     });
 
-    let source_revision = homeboy::core::extension::read_source_revision(&extension.id);
-    let core_compatibility = homeboy::core::extension::evaluate_core_compatibility(
+    let source_revision = homeboy_core::extension_update_check::read_source_revision(&extension.id);
+    let core_compatibility = homeboy_extension::evaluate_core_compatibility(
         extension
             .requires
             .as_ref()
@@ -933,7 +933,7 @@ fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
         actions,
         inputs: extension.inputs().to_vec(),
         settings: extension.settings.clone(),
-        structured_sidecars: homeboy::core::extension::structured_sidecars(&extension),
+        structured_sidecars: homeboy_extension::structured_sidecars(&extension),
         materialization_source: extension.materialization_source.clone(),
         contract_producers: extension.contract_producers.clone(),
         requires,
@@ -954,7 +954,7 @@ fn run_extension(
     step: Option<String>,
     skip: Option<String>,
 ) -> CmdResult<ExtensionOutput> {
-    use homeboy::core::extension::{ExtensionExecutionMode, ExtensionStepFilter};
+    use homeboy_extension::{ExtensionExecutionMode, ExtensionStepFilter};
 
     let mode = if no_stream {
         ExtensionExecutionMode::Captured
@@ -966,7 +966,7 @@ fn run_extension(
 
     let filter = ExtensionStepFilter { step, skip };
 
-    let result = homeboy::core::extension::run_extension(
+    let result = homeboy_extension::run_extension(
         extension_id,
         project.as_deref(),
         component.as_deref(),
@@ -993,11 +993,8 @@ fn install_extension(
     replace: bool,
 ) -> CmdResult<ExtensionOutput> {
     if replace {
-        let result = homeboy::core::extension::replace_with_revision(
-            source,
-            id.as_deref(),
-            revision.as_deref(),
-        )?;
+        let result =
+            homeboy_extension::replace_with_revision(source, id.as_deref(), revision.as_deref())?;
         return Ok((
             ExtensionOutput::Replace {
                 extension_id: result.extension_id,
@@ -1012,11 +1009,8 @@ fn install_extension(
         ));
     }
 
-    let result = homeboy::core::extension::install_with_revision(
-        source,
-        id.as_deref(),
-        revision.as_deref(),
-    )?;
+    let result =
+        homeboy_extension::install_with_revision(source, id.as_deref(), revision.as_deref())?;
     let linked = is_extension_linked(&result.extension_id);
 
     Ok((
@@ -1037,7 +1031,7 @@ fn refresh_extension(
     id: Option<&str>,
     revision: Option<&str>,
 ) -> CmdResult<ExtensionOutput> {
-    let result = homeboy::core::extension::refresh(source, id, revision)?;
+    let result = homeboy_extension::refresh(source, id, revision)?;
     let linked = is_extension_linked(&result.extension_id);
 
     Ok((
@@ -1059,7 +1053,7 @@ fn refresh_extension(
 }
 
 fn relink_extension(extension_id: &str, source: &str) -> CmdResult<ExtensionOutput> {
-    let result = homeboy::core::extension::relink(extension_id, source)?;
+    let result = homeboy_extension::relink(extension_id, source)?;
 
     Ok((
         ExtensionOutput::Replace {
@@ -1089,7 +1083,7 @@ fn dev_run_extension(
 
 fn install_for_component(source: &str, path: Option<&str>) -> CmdResult<ExtensionOutput> {
     let component = resolve_install_component(path)?;
-    let result = homeboy::core::extension::install_for_component(&component, source)?;
+    let result = homeboy_extension::install_for_component(&component, source)?;
 
     let installed = result
         .installed
@@ -1195,7 +1189,7 @@ fn update_all_extensions(force: bool) -> CmdResult<ExtensionOutput> {
 
 fn uninstall_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
     let was_linked = is_extension_linked(extension_id);
-    let path = homeboy::core::extension::uninstall(extension_id)?;
+    let path = homeboy_extension::uninstall(extension_id)?;
 
     Ok((
         ExtensionOutput::Uninstall {
@@ -1229,8 +1223,8 @@ fn extension_runtime_diagnostics(
         .as_ref()
         .and_then(|extension| extension.extension_path.clone())
         .unwrap_or_default();
-    let source_revision =
-        source_revision.or_else(|| homeboy::core::extension::read_source_revision(extension_id));
+    let source_revision = source_revision
+        .or_else(|| homeboy_core::extension_update_check::read_source_revision(extension_id));
     let matching_manifests = discover_agent_runtime_catalog()
         .manifests
         .into_iter()
@@ -1323,7 +1317,7 @@ fn run_action(
     project_id: Option<String>,
     data: Option<String>,
 ) -> CmdResult<ExtensionOutput> {
-    let response = homeboy::core::extension::run_action(
+    let response = homeboy_extension::run_action(
         extension_id,
         action_id,
         project_id.as_deref(),
@@ -1346,7 +1340,7 @@ fn set_extension(
     json: &str,
     replace_fields: &[String],
 ) -> CmdResult<ExtensionOutput> {
-    match homeboy::core::extension::merge(extension_id, json, replace_fields)? {
+    match homeboy_extension::merge(extension_id, json, replace_fields)? {
         homeboy::core::MergeOutput::Single(result) => Ok((
             ExtensionOutput::Set {
                 extension_id: result.id,
@@ -1486,7 +1480,7 @@ mod tests {
 
             assert_eq!(
                 source.source_kind,
-                homeboy::core::extension::ExtensionMaterializationSourceKind::Git
+                homeboy_extension::ExtensionMaterializationSourceKind::Git
             );
             assert_eq!(source.revision.as_deref(), Some("abc1234"));
             assert_eq!(
@@ -1540,11 +1534,11 @@ mod tests {
             assert_eq!(extension.contract_producers[0].id, "handoff-envelope");
             assert_eq!(
                 extension.contract_producers[0].phase,
-                homeboy::core::extension::ExtensionContractProducerPhase::Handoff
+                homeboy_extension::ExtensionContractProducerPhase::Handoff
             );
             assert_eq!(
                 extension.contract_producers[0].produces[0].kind,
-                homeboy::core::extension::ExtensionContractProducerOutputKind::RunnerEnvelopeAddition
+                homeboy_extension::ExtensionContractProducerOutputKind::RunnerEnvelopeAddition
             );
         });
     }
@@ -1613,7 +1607,7 @@ mod tests {
             description: String::new(),
             runtime: "platform".to_string(),
             compatible: true,
-            core_compatibility: homeboy::core::extension::CoreCompatibilityReport::undeclared(None),
+            core_compatibility: homeboy_extension::CoreCompatibilityReport::undeclared(None),
             ready: true,
             ready_reason: None,
             ready_detail: None,
@@ -1668,9 +1662,7 @@ mod tests {
                 description: String::new(),
                 runtime: "platform".to_string(),
                 compatible: true,
-                core_compatibility: homeboy::core::extension::CoreCompatibilityReport::undeclared(
-                    None,
-                ),
+                core_compatibility: homeboy_extension::CoreCompatibilityReport::undeclared(None),
                 ready: true,
                 ready_reason: None,
                 ready_detail: None,
@@ -1714,9 +1706,7 @@ mod tests {
                 description: String::new(),
                 runtime: "platform".to_string(),
                 compatible: true,
-                core_compatibility: homeboy::core::extension::CoreCompatibilityReport::undeclared(
-                    None,
-                ),
+                core_compatibility: homeboy_extension::CoreCompatibilityReport::undeclared(None),
                 ready: true,
                 ready_reason: None,
                 ready_detail: None,

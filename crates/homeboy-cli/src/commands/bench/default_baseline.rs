@@ -7,8 +7,8 @@
 //! annotate errors and comparison output when the implicit baseline rig
 //! fails.
 
-use homeboy::core::extension::bench::{BenchComparisonOutput, BenchDefaultBaselineExpansion};
 use homeboy::rig;
+use homeboy_extension::bench::{BenchComparisonOutput, BenchDefaultBaselineExpansion};
 
 use super::{matrix, BenchRunArgs};
 

@@ -16,9 +16,9 @@ use crate::plan::verify::AuditConvergenceScoring;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::engine::undo::UndoSnapshot;
-use homeboy_core::extension;
 use homeboy_core::git;
 use homeboy_core::Error;
+use homeboy_extension as extension;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -361,8 +361,7 @@ pub(super) fn run_lint_stage(
         // No cached findings — run the diagnostic pass.
         build_lint_runner(diagnostic_glob.as_deref())?.run()?;
 
-        homeboy_core::extension::lint::baseline::parse_findings_file(&findings_file)
-            .unwrap_or_default()
+        homeboy_extension::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default()
     };
 
     let lint_source_result = serde_json::json!({
@@ -439,7 +438,7 @@ pub(super) fn run_lint_stage(
         if !scope_outcome.changed_files.is_empty() {
             build_lint_runner(fix_glob.as_deref())?.run()?;
             let remaining_findings =
-                homeboy_core::extension::lint::baseline::parse_findings_file(&findings_file)?;
+                homeboy_extension::lint::baseline::parse_findings_file(&findings_file)?;
             reject_remaining_lint_fix_findings(&remaining_findings)?;
         }
 

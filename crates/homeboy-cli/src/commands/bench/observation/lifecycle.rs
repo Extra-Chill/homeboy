@@ -1,10 +1,10 @@
 use std::path::Path;
 
 use homeboy::core::engine::run_dir::{self, RunDir};
-use homeboy::core::extension::bench::BenchRunWorkflowResult;
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{merge_metadata, ActiveObservation, NewRunRecord, RunStatus};
 use homeboy::rig::RigStateSnapshot;
+use homeboy_extension::bench::BenchRunWorkflowResult;
 
 use super::artifacts::{
     record_bench_observation_artifacts, record_if_exists, record_memory_timeline_artifacts,
@@ -117,8 +117,8 @@ pub(in crate::commands::bench) fn finish_success(
 /// downstream tools can locate the full evidence (#3257, #3260).
 pub(in crate::commands::bench) fn persisted_run_pointer(
     summary: &BenchObservationSummary,
-) -> homeboy::core::extension::bench::BenchPersistedRun {
-    homeboy::core::extension::bench::BenchPersistedRun {
+) -> homeboy_extension::bench::BenchPersistedRun {
+    homeboy_extension::bench::BenchPersistedRun {
         run_id: summary.run_id.clone(),
         component_id: (!summary.component_id.is_empty()).then(|| summary.component_id.clone()),
         rig_id: summary.rig_id.clone(),

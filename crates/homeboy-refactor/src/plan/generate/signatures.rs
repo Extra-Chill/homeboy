@@ -79,9 +79,9 @@ fn normalize_item_name(name: &str) -> String {
 }
 
 pub(crate) fn find_parsed_item_by_name<'a>(
-    items: &'a [homeboy_core::extension::ParsedItem],
+    items: &'a [homeboy_extension::ParsedItem],
     requested_name: &str,
-) -> Option<&'a homeboy_core::extension::ParsedItem> {
+) -> Option<&'a homeboy_extension::ParsedItem> {
     if let Some(exact) = items.iter().find(|item| item.name == requested_name) {
         return Some(exact);
     }
@@ -122,20 +122,20 @@ pub(crate) fn parse_items_for_dedup(
     file_ext: &str,
     content: &str,
     file_path: &str,
-) -> Option<Vec<homeboy_core::extension::ParsedItem>> {
+) -> Option<Vec<homeboy_extension::ParsedItem>> {
     if let Some(grammar) = homeboy_code_audit::core_fingerprint::load_grammar_for_ext(file_ext) {
-        let items = homeboy_core::extension::grammar_items::parse_items(content, &grammar);
+        let items = homeboy_extension::grammar_items::parse_items(content, &grammar);
         if !items.is_empty() {
             return Some(
                 items
                     .into_iter()
-                    .map(homeboy_core::extension::ParsedItem::from)
+                    .map(homeboy_extension::ParsedItem::from)
                     .collect(),
             );
         }
     }
 
-    let manifest = homeboy_core::extension::find_extension_for_file_ext(file_ext, "refactor")?;
+    let manifest = homeboy_extension::find_extension_for_file_ext(file_ext, "refactor")?;
     let parse_cmd = serde_json::json!({
         "command": "parse_items",
         "file_path": file_path,
@@ -143,7 +143,7 @@ pub(crate) fn parse_items_for_dedup(
         "items": [],
     });
 
-    homeboy_core::extension::run_refactor_script(&manifest, &parse_cmd)
+    homeboy_extension::run_refactor_script(&manifest, &parse_cmd)
         .and_then(|value| value.get("items").cloned())
         .and_then(|value| serde_json::from_value(value).ok())
 }

@@ -94,6 +94,7 @@ sha2 = "0.10.9"
 # Enable homeboy-core's shared hermetic test fixtures for this crate's test build
 # (integration tests reach them via `homeboy::test_support`).
 homeboy-core = { version = "0.1.0", path = "crates/homeboy-core", features = ["test-support"] }
+homeboy-extension = { version = "0.1.0", path = "crates/homeboy-extension" }
 
 [features]
 default = []

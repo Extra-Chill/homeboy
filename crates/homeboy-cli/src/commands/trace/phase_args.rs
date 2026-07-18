@@ -1,5 +1,5 @@
-use homeboy::core::extension::trace as extension_trace;
-use homeboy::core::extension::trace::TraceSpanDefinition;
+use homeboy_extension::trace as extension_trace;
+use homeboy_extension::trace::TraceSpanDefinition;
 
 use super::workload::trace_workload_scenario_id;
 use super::{trace_scenario, TraceArgs, TraceRigContext};

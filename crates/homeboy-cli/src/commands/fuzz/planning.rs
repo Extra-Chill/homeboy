@@ -24,7 +24,7 @@ use super::workloads::{
     build_target_inventory, fuzz_workloads, load_rig, resolve_component_id, resolve_fuzz_context,
     resolve_profile_workload_id, select_workload,
 };
-use homeboy::core::extension::ExtensionCapability;
+use homeboy_extension::ExtensionCapability;
 
 pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutput> {
     let rig_context = load_rig(args.run.rig.as_deref(), &args.run.setting_args)?;
@@ -43,7 +43,7 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
     let fuzz_config = ctx
         .extension_id
         .as_deref()
-        .and_then(|extension_id| homeboy::core::extension::load_extension(extension_id).ok())
+        .and_then(|extension_id| homeboy_extension::load_extension(extension_id).ok())
         .and_then(|manifest| manifest.fuzz);
     let workloads = fuzz_workloads(
         &ctx.component,

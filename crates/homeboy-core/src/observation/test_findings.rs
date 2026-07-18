@@ -1,5 +1,5 @@
-use crate::extension::test::{FailureCategory, FailureCluster, TestAnalysisInput, TestFailure};
 use crate::finding::{FindingSource, HomeboyFinding};
+use homeboy_extension_contract::{FailureCategory, FailureCluster, TestAnalysisInput, TestFailure};
 
 use super::records::{finding_records_from_homeboy_findings, NewFindingRecord};
 

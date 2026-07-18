@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use homeboy::core::extension::trace as extension_trace;
-use homeboy::core::extension::trace::TraceCommandOutput;
 use homeboy::core::trace_compare;
 use homeboy::rig;
+use homeboy_extension::trace as extension_trace;
+use homeboy_extension::trace::TraceCommandOutput;
 
 use super::aggregate::{
     aggregate_metric, aggregate_span, TraceAggregateMetricSample, TraceAggregateSpanSample,

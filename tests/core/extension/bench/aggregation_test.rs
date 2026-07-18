@@ -1,5 +1,5 @@
-use crate::extension::bench::test_support::{results_with_scenarios, scenario_with_iterations};
-use crate::observation::timeline::{
+use crate::bench::test_support::{results_with_scenarios, scenario_with_iterations};
+use homeboy_core::observation::timeline::{
     ObservationEvent, ObservationSpanDefinition, ObservationSpanResult, ObservationSpanStatus,
 };
 

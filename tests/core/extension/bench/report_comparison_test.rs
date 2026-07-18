@@ -5,17 +5,15 @@ use super::{
     aggregate_comparison, aggregate_comparison_with_axes, BenchComparisonDiff, BenchPhaseGroups,
     RigBenchEntry,
 };
-use crate::extension::bench::artifact::{
-    BenchArtifact, BenchArtifactViewer, BenchPreviewLifecycleMetadata,
-};
-use crate::extension::bench::diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
-use crate::extension::bench::distribution::BenchRunDistribution;
-use crate::extension::bench::parsing::{
+use crate::bench::artifact::{BenchArtifact, BenchArtifactViewer, BenchPreviewLifecycleMetadata};
+use crate::bench::diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
+use crate::bench::distribution::BenchRunDistribution;
+use crate::bench::parsing::{
     BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy, BenchMetrics, BenchResults,
     BenchRunSnapshot, BenchScenario,
 };
-use crate::extension::bench::run::{BenchRunFailure, BenchRunWorkflowResult};
-use crate::extension::bench::side_by_side::BenchSideBySideMetric;
+use crate::bench::run::{BenchRunFailure, BenchRunWorkflowResult};
+use crate::bench::side_by_side::BenchSideBySideMetric;
 
 mod fixtures {
     use super::*;

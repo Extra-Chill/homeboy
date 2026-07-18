@@ -10,12 +10,12 @@ use crate::commands::utils::args::{
 use crate::commands::GlobalArgs;
 use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
 use homeboy_core::engine::run_dir::RunDir;
-use homeboy_core::extension::component_script::{
+use homeboy_core::test_support::with_isolated_home;
+use homeboy_extension::component_script::{
     run_component_scripts, run_component_scripts_with_env, run_component_scripts_with_run_dir,
     source_path,
 };
-use homeboy_core::extension::ExtensionCapability;
-use homeboy_core::test_support::with_isolated_home;
+use homeboy_extension::ExtensionCapability;
 
 fn component_script_args(root: &Path) -> PositionalComponentArgs {
     PositionalComponentArgs {
@@ -416,7 +416,7 @@ fn wordpress_phpunit_no_discovery_is_neutral_skipped() {
         assert_eq!(output.status, "skipped");
         assert_eq!(output.test_counts.expect("test counts").total, 0);
         let phase = output.phase.expect("phase report");
-        assert_eq!(phase.status, homeboy_core::extension::PhaseStatus::Skipped);
+        assert_eq!(phase.status, homeboy_extension::PhaseStatus::Skipped);
         assert_eq!(
             phase.summary,
             "activation/install passed; PHPUnit discovery found zero tests; no PHPUnit assertions ran"
@@ -479,7 +479,7 @@ fn wordpress_phpunit_no_discovery_can_be_required_as_failure() {
         let failure = output.failure.expect("failure report");
         assert_eq!(
             failure.category,
-            homeboy_core::extension::PhaseFailureCategory::Findings
+            homeboy_extension::PhaseFailureCategory::Findings
         );
     });
 }

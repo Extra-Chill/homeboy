@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use homeboy::core::extension::trace as extension_trace;
+use homeboy_extension::trace as extension_trace;
 
 use super::bundle::{write_trace_experiment_bundle, TraceExperimentBundleRequest};
 use super::output::{

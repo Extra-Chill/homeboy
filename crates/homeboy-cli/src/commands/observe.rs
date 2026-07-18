@@ -12,13 +12,13 @@ use serde::Serialize;
 use crate::command_contract::{CommandJsonFamily, CommandOutputFileMode};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::run_dir::{self, RunDir};
-use homeboy::core::extension::trace::{
-    PassiveTraceCapture, TraceArtifact, TraceProbeConfig, TraceResults,
-};
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::io::{write_output_file_atomically, OutputWriteOptions};
 use homeboy::core::observation::{ActiveObservation, NewRunRecord, RunStatus};
 use homeboy::core::Error;
+use homeboy_extension::trace::{
+    PassiveTraceCapture, TraceArtifact, TraceProbeConfig, TraceResults,
+};
 
 use super::utils::args::PositionalComponentArgs;
 use super::utils::response::actionable_metadata_value_for_run_ref;
@@ -198,7 +198,7 @@ fn error_results(component_id: String, failure: String) -> TraceResults {
     TraceResults {
         component_id,
         scenario_id: "observe".to_string(),
-        status: homeboy::core::extension::trace::TraceStatus::Error,
+        status: homeboy_extension::trace::TraceStatus::Error,
         summary: Some("Passive trace timeline".to_string()),
         failure: Some(failure),
         rig: None,

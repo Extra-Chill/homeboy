@@ -2,17 +2,17 @@ use clap::Args;
 
 use homeboy::core::ci_profile::{self, CiResolvedJob};
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy::core::extension::test as extension_test;
-use homeboy::core::extension::test::{
-    detect_test_drift, report, run_self_check_test_workflow_with_progress, TestCommandOutput,
-    TestRunWorkflowArgs,
-};
-use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{
     finding_records_from_failure_clusters, finding_records_from_test_analysis_input,
     merge_metadata, ActiveObservation, NewRunRecord, RunStatus,
 };
+use homeboy_extension::test as extension_test;
+use homeboy_extension::test::{
+    detect_test_drift, report, run_self_check_test_workflow_with_progress, TestCommandOutput,
+    TestRunWorkflowArgs,
+};
+use homeboy_extension::ExtensionCapability;
 use std::path::{Path, PathBuf};
 
 use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
@@ -525,9 +525,9 @@ mod tests {
     use crate::test_support::with_isolated_home;
     use clap::Parser;
     use homeboy::core::component::Component;
-    use homeboy::core::extension::test::{TestAnalysisInput, TestFailure};
     use homeboy::core::observation::{FindingListFilter, ObservationStore};
     use homeboy::refactor::plan::{build_test_refactor_request, TestSourceOptions};
+    use homeboy_extension::test::{TestAnalysisInput, TestFailure};
     use std::fs;
     use std::path::PathBuf;
 
