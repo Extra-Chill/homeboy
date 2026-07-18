@@ -1,3 +1,5 @@
+pub use homeboy_extension_contract::test_result::TestScopeOutput;
+
 pub mod analyze;
 pub mod baseline;
 pub mod drift;
@@ -17,24 +19,6 @@ use crate::git;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TestScopeOutput {
-    pub mode: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub changed_since: Option<String>,
-    pub selected_count: usize,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub selected_files: Vec<String>,
-    /// Changed files that are production or test source (per the component's
-    /// drift source/test patterns) yet selected zero tests. A non-empty list
-    /// with `selected_count == 0` is a false-green: source changed but the
-    /// changed-scope gate would otherwise pass without running any test.
-    /// Documentation/config-only changes leave this empty so a genuine no-test
-    /// scope can still pass. (#8340)
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub source_changes_without_tests: Vec<String>,
-}
 
 pub use analyze::{FailureCategory, FailureCluster, TestAnalysis, TestAnalysisInput, TestFailure};
 pub use baseline::{

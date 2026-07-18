@@ -11,27 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use homeboy_engine_primitives::baseline::{self as generic, BaselineConfig};
+pub use homeboy_extension_contract::test_result::TestCounts;
 
 const BASELINE_KEY: &str = "test";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TestCounts {
-    pub total: u64,
-    pub passed: u64,
-    pub failed: u64,
-    pub skipped: u64,
-}
-
-impl TestCounts {
-    pub fn new(total: u64, passed: u64, failed: u64, skipped: u64) -> Self {
-        Self {
-            total,
-            passed,
-            failed,
-            skipped,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TestBaselineComparison {
