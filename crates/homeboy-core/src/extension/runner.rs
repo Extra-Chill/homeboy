@@ -342,7 +342,7 @@ impl ExtensionRunner {
             .map(|extension_id| {
                 Ok((
                     extension_id.clone(),
-                    super::registry::extension_path(extension_id),
+                    crate::extension_store::extension_path(extension_id),
                 ))
             })
             .collect()

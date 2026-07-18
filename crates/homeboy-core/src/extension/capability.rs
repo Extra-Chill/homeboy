@@ -4,9 +4,9 @@ use crate::error::{Error, ErrorCode, Result};
 use std::path::{Path, PathBuf};
 
 use super::manifest::ExtensionManifest;
-use super::registry::{extension_path, load_extension};
 use super::runner::ExtensionRunner;
 use super::ResolvedExtensionInvocationContext;
+use crate::extension_store::{extension_path, load_extension};
 use homeboy_extension_contract::ExtensionCapability;
 
 pub(crate) fn stderr_tail(stderr: &str) -> String {

@@ -3,8 +3,8 @@ use serde::Serialize;
 use super::execution::{extension_ready_status, is_extension_compatible};
 use super::lifecycle::read_source_revision;
 use super::manifest::ActionType;
-use super::registry::{broken_extension_links, is_extension_linked, load_all_extensions};
 use super::{evaluate_core_compatibility, CoreCompatibilityReport};
+use crate::extension_store::{broken_extension_links, is_extension_linked, load_all_extensions};
 
 /// Summary of an extension for list views.
 #[derive(Debug, Clone, Serialize)]
