@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.291.2] - 2026-07-18
+
+### Changed
+- Allow adoption after transport failures
+- Add explicit runner lease recovery
+- Preserve authoritative Lab runner sessions
+- Add exact recovery for PID-less daemon jobs
+- Instrument capacity-queued child failures
+- Support force-added ignored promotion candidates
+- Persist typed pre-spawn runner failure evidence
+
+### Fixed
+- gate Lab dispatch on authoritative availability not bare connected flag
+- cancel queued runner reservations
+- persist authoritative candidate paths (#8935)
+- Fix agent task child capacity admission
+
 ## [0.291.1] - 2026-07-18
 
 ### Changed
