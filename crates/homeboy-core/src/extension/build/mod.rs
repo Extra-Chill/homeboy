@@ -952,3 +952,28 @@ mod tests {
         )));
     }
 }
+
+/// Provider that wires the extension component-build runner into core's
+/// `component_build_provider` hook.
+pub struct ExtensionComponentBuildRunner;
+
+impl crate::component_build_provider::ComponentBuildRunner for ExtensionComponentBuildRunner {
+    fn run_component_build(
+        &self,
+        component: &crate::component::Component,
+    ) -> crate::Result<(serde_json::Value, i32)> {
+        let (result, exit_code) = run_component(component)?;
+        let value = serde_json::to_value(&result).map_err(|e| {
+            crate::Error::internal_json(e.to_string(), Some("serialize build result".to_string()))
+        })?;
+        Ok((value, exit_code))
+    }
+}
+
+/// Register the extension component-build runner with core. Call once at
+/// startup.
+pub fn register_component_build_runner() {
+    crate::component_build_provider::register_component_build_runner(Box::new(
+        ExtensionComponentBuildRunner,
+    ));
+}
