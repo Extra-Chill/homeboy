@@ -46,7 +46,7 @@ pub(crate) use capability::{
     extension_guidance_hints, has_linked_extension_for_capability,
     resolve_execution_context_if_available, stderr_tail,
 };
-pub(crate) use compiler_warning_contract::{
+pub use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
 };

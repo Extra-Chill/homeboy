@@ -118,7 +118,10 @@ impl CliRuntime {
         // Register the audit fixability provider so code_audit can report how
         // fixable its findings are without calling up into the refactor engine's
         // fix planner — the seam that removes the last code_audit->refactor edge.
-        crate::core::refactor::audit_fixability_provider::register();
+        crate::refactor::audit_fixability_provider::register();
+        // Register the refactor transform provider so core's extension
+        // test-drift auto-fixer can apply generated transform rules.
+        crate::refactor::transform_provider::register();
         // Register the audit component provider so code_audit can resolve the
         // component under audit (path, extension ids, audit rules, scope excludes)
         // without depending on the component layer — the last cross-layer seam

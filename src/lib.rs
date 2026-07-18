@@ -6,7 +6,8 @@ extern crate self as homeboy;
 // call sites (including the binary entry point and integration tests) are
 // unchanged.
 pub use homeboy_cli::{
-    agents, cli_runtime, cli_surface, command_contract, commands, core, help_topics, runner,
+    agents, cli_runtime, cli_surface, command_contract, commands, core, help_topics, refactor,
+    runner,
 };
 pub use homeboy_core::{is_zero, is_zero_u32, log_status};
 

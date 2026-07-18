@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use homeboy::core::code_audit::CodeAuditResult;
-use homeboy::core::refactor;
+use homeboy::refactor;
 
 use super::{run_across_targets, RefactorOutput, RefactorTargetArgs};
 use crate::commands::CmdResult;

@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use homeboy::core::code_audit::AuditFinding;
 use homeboy::core::component::{self, TargetSpec};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
-use homeboy::core::refactor::{
+use homeboy::refactor::{
     self, auto, AddResult, MoveResult, RenameContext, RenameScope, RenameSpec, RenameTargeting,
 };
 use serde::Serialize;
@@ -478,7 +478,7 @@ fn matches_hot_refactor_source(source: &str) -> bool {
 #[serde(tag = "command")]
 pub enum RefactorOutput {
     #[serde(rename = "refactor.sources")]
-    Sources(homeboy::core::refactor::plan::RefactorSourceRun),
+    Sources(homeboy::refactor::plan::RefactorSourceRun),
 
     #[serde(rename = "refactor.rename")]
     Rename {
@@ -534,13 +534,13 @@ pub enum RefactorOutput {
     #[serde(rename = "refactor.transform")]
     Transform {
         #[serde(flatten)]
-        result: homeboy::core::refactor::TransformResult,
+        result: homeboy::refactor::TransformResult,
     },
 
     #[serde(rename = "refactor.decompose")]
     Decompose {
-        plan: homeboy::core::refactor::DecomposePlan,
-        move_results: Vec<homeboy::core::refactor::MoveResult>,
+        plan: homeboy::refactor::DecomposePlan,
+        move_results: Vec<homeboy::refactor::MoveResult>,
         dry_run: bool,
         applied: bool,
     },
@@ -888,8 +888,8 @@ fn run_refactor_sources_single(
     let only_findings = parse_audit_findings(only)?;
     let exclude_findings = parse_audit_findings(exclude)?;
     let source_path = ctx.source_path.clone();
-    let sources = homeboy::core::refactor::plan::collect_refactor_sources(
-        homeboy::core::refactor::plan::RefactorSourceRequest {
+    let sources = homeboy::refactor::plan::collect_refactor_sources(
+        homeboy::refactor::plan::RefactorSourceRequest {
             component: ctx.component,
             root: ctx.source_path,
             sources: requested_sources,
@@ -900,8 +900,8 @@ fn run_refactor_sources_single(
                 .iter()
                 .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
                 .collect(),
-            lint: homeboy::core::refactor::plan::LintSourceOptions::default(),
-            test: homeboy::core::refactor::plan::TestSourceOptions::default(),
+            lint: homeboy::refactor::plan::LintSourceOptions::default(),
+            test: homeboy::refactor::plan::TestSourceOptions::default(),
             write,
             force,
         },

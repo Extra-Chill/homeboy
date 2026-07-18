@@ -148,7 +148,6 @@ pub mod quality;
 // redaction moved to the internal `homeboy-redaction` crate. Re-exported here so
 // existing `crate::redaction::*` call sites keep working unchanged.
 pub use homeboy_redaction as redaction;
-pub mod refactor;
 pub mod refactor_transform_provider;
 pub mod release;
 pub mod release_set;
