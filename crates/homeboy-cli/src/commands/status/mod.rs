@@ -11,8 +11,8 @@
 
 use homeboy::core::component;
 use homeboy::core::context;
-use homeboy::core::deploy::ReleaseStateStatus;
-use homeboy::core::release::version;
+use homeboy_release::deploy::ReleaseStateStatus;
+use homeboy_release::release::version;
 use homeboy::core::scope::{self, Scope};
 use std::collections::HashMap;
 
@@ -463,29 +463,29 @@ fn deployed_version_dashboard_status(
     remote_ver: &Option<String>,
     origin_tag: Option<&str>,
 ) -> ProjectComponentDashboardStatus {
-    match homeboy::core::deploy::compare_deployed_versions(
+    match homeboy_release::deploy::compare_deployed_versions(
         local_ver.as_deref(),
         remote_ver.as_deref(),
     ) {
-        homeboy::core::deploy::ComponentStatus::NeedsUpdate => {
+        homeboy_release::deploy::ComponentStatus::NeedsUpdate => {
             ProjectComponentDashboardStatus::Outdated
         }
-        homeboy::core::deploy::ComponentStatus::UpToDate
+        homeboy_release::deploy::ComponentStatus::UpToDate
             if local_ver.as_deref().is_some_and(|local| {
                 origin_tag_is_newer_than_local(origin_tag, local)
             }) =>
         {
             ProjectComponentDashboardStatus::PinnedCurrent
         }
-        homeboy::core::deploy::ComponentStatus::Unknown => {
+        homeboy_release::deploy::ComponentStatus::Unknown => {
             ProjectComponentDashboardStatus::Unknown
         }
-        homeboy::core::deploy::ComponentStatus::UpToDate
-        | homeboy::core::deploy::ComponentStatus::BehindRemote => {
+        homeboy_release::deploy::ComponentStatus::UpToDate
+        | homeboy_release::deploy::ComponentStatus::BehindRemote => {
             ProjectComponentDashboardStatus::Current
         }
-        homeboy::core::deploy::ComponentStatus::BehindUpstream
-        | homeboy::core::deploy::ComponentStatus::SourceStale => {
+        homeboy_release::deploy::ComponentStatus::BehindUpstream
+        | homeboy_release::deploy::ComponentStatus::SourceStale => {
             unreachable!("version comparison only returns version statuses")
         }
     }

@@ -1,7 +1,7 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::core::deploy::{
+use homeboy_release::deploy::{
     self, ComponentDeployResult, DeployConfig, DeploySummary, MultiDeploySummary,
     ProjectDeployResult,
 };
@@ -263,7 +263,7 @@ fn validate_apply_boundary(args: &DeployArgs) -> homeboy::core::Result<()> {
     ))
 }
 
-fn load_release_set(path: &str) -> homeboy::core::Result<homeboy::core::release_set::NormalizedReleaseSet> {
+fn load_release_set(path: &str) -> homeboy::core::Result<homeboy_core::release_set::NormalizedReleaseSet> {
     let input = std::fs::read_to_string(path).map_err(|error| {
         homeboy::core::Error::validation_invalid_argument(
             "release_set",
@@ -272,7 +272,7 @@ fn load_release_set(path: &str) -> homeboy::core::Result<homeboy::core::release_
             None,
         )
     })?;
-    homeboy::core::release_set::ReleaseSetManifest::parse_json(&input).map_err(|error| {
+    homeboy_core::release_set::ReleaseSetManifest::parse_json(&input).map_err(|error| {
         homeboy::core::Error::validation_invalid_argument("release_set", error, None, None)
     })
 }
@@ -281,7 +281,7 @@ fn load_release_set(path: &str) -> homeboy::core::Result<homeboy::core::release_
 /// before handing control to deploy orchestration. This is intentionally before
 /// lifecycle creation, builds, transfers, or remote actions.
 fn apply_release_set(
-    release_set: &homeboy::core::release_set::NormalizedReleaseSet,
+    release_set: &homeboy_core::release_set::NormalizedReleaseSet,
     args: &mut DeployArgs,
 ) -> homeboy::core::Result<()> {
     let mut active = Vec::new();
@@ -352,7 +352,7 @@ fn apply_release_set(
                 None,
             ));
         }
-        homeboy::core::deploy::preflight_exact_ref(component, &entry.requested_ref)?;
+        homeboy_release::deploy::preflight_exact_ref(component, &entry.requested_ref)?;
     }
     args.component = Some(active.iter().map(|(entry, _)| entry.id.clone()).collect());
     args.component_ids.clear();
@@ -495,7 +495,7 @@ fn run_multi_output(
     component_ids: &[String],
     config: &DeployConfig,
     args: &DeployArgs,
-    release_set: Option<&homeboy::core::release_set::NormalizedReleaseSet>,
+    release_set: Option<&homeboy_core::release_set::NormalizedReleaseSet>,
 ) -> CmdResult<DeployCommandOutput> {
     let result = deploy::run_multi(project_ids, component_ids, config)?;
     let exit_code = if result.summary.failed > 0 { 1 } else { 0 };

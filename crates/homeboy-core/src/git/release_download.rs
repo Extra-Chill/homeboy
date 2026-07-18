@@ -86,13 +86,13 @@ impl ReleaseArtifactLease {
         })))
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_new(artifact: ReleaseArtifact) -> Result<Self> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_new(artifact: ReleaseArtifact) -> Result<Self> {
         Self::new(artifact)
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_strong_count(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_strong_count(&self) -> usize {
         Arc::strong_count(&self.0)
     }
 }
@@ -180,7 +180,7 @@ pub struct GitHubRepo {
 
 impl GitHubRepo {
     /// Construct a release artifact download URL.
-    pub(crate) fn release_artifact_url(&self, tag: &str, artifact_name: &str) -> String {
+    pub fn release_artifact_url(&self, tag: &str, artifact_name: &str) -> String {
         format!(
             "https://{}/{}/{}/releases/download/{}/{}",
             self.host, self.owner, self.repo, tag, artifact_name

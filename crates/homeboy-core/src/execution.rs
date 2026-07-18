@@ -416,7 +416,6 @@ const fn publish_phase() -> ExecutionPhase {
 mod tests {
     use super::*;
     use crate::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepDependencyKind};
-    use crate::release::{ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus};
 
     #[test]
     fn lifecycle_vocabulary_serializes_in_order() {
@@ -635,52 +634,6 @@ mod tests {
             parsed.preflight_failures[3].check,
             ApplyPreflightCheck::SnapshotDrift
         );
-    }
-
-    #[test]
-    fn release_run_projects_into_execution_run() {
-        let release = ReleaseRun {
-            component_id: "homeboy".to_string(),
-            enabled: true,
-            result: ReleaseRunResult {
-                steps: vec![ReleaseStepResult {
-                    id: "package".to_string(),
-                    step_type: "release.package".to_string(),
-                    status: ReleaseStepStatus::Success,
-                    missing: Vec::new(),
-                    warnings: Vec::new(),
-                    hints: Vec::new(),
-                    data: Some(serde_json::json!([
-                        {
-                            "path": "artifacts/homeboy.tar.gz",
-                            "artifact_type": "archive",
-                            "platform": "darwin"
-                        }
-                    ])),
-                    error: None,
-                }],
-                status: ReleaseStepStatus::Success,
-                warnings: vec!["signed artifact missing".to_string()],
-                summary: None,
-                phase_timings: None,
-            },
-        };
-
-        let execution = ExecutionRun::from(&release);
-
-        assert_eq!(execution.id, "release.homeboy");
-        assert_eq!(execution.mode, ExecutionMode::Execute);
-        assert_eq!(execution.status, ExecutionStatus::Success);
-        assert_eq!(execution.steps[0].status, ExecutionStatus::Success);
-        assert_eq!(execution.steps[0].artifacts, vec!["package.artifact.1"]);
-        assert_eq!(execution.artifacts.len(), 1);
-        assert_eq!(execution.artifacts[0].artifact_type, "archive");
-        assert_eq!(
-            execution.artifacts[0].path.as_deref(),
-            Some("artifacts/homeboy.tar.gz")
-        );
-        assert_eq!(execution.artifacts[0].provenance.source, "release");
-        assert_eq!(execution.warnings, vec!["signed artifact missing"]);
     }
 
     #[test]

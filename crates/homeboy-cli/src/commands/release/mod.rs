@@ -3,12 +3,12 @@ use serde::Serialize;
 use std::{fs, path::Path};
 
 use homeboy::core::component;
-use homeboy::core::deploy::{self, ReleaseStateStatus};
-use homeboy::core::release::{
+use homeboy::core::scope::{self, Scope};
+use homeboy_release::deploy::{self, ReleaseStateStatus};
+use homeboy_release::release::{
     self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult, ReleaseExecutionPlan,
     ReleasePackageResult, ReleasePhase, ReleasePipelineOptions,
 };
-use homeboy::core::scope::{self, Scope};
 
 use super::utils::args::DryRunArgs;
 use super::CmdResult;

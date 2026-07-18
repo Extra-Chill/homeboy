@@ -145,7 +145,7 @@ pub fn run_commands(
 /// (using `{{key}}` syntax), then executes each command on the remote server.
 /// Uses the same resolution order as `run_hooks` (extension hooks first, then
 /// component hooks).
-pub(crate) fn run_hooks_remote(
+pub fn run_hooks_remote(
     ssh_client: &SshClient,
     component: &Component,
     event: &str,

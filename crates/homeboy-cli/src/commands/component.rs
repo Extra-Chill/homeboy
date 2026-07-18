@@ -245,7 +245,7 @@ pub fn run(
             // the actual changelog location on disk so generated homeboy.json
             // files don't ship with a path that doesn't exist. (#1128)
             new_component.changelog_target = changelog_target.or_else(|| {
-                homeboy::core::release::changelog::discover_changelog_relative_path(repo_path)
+                homeboy_release::release::changelog::discover_changelog_relative_path(repo_path)
             });
 
             if !extensions.is_empty() {

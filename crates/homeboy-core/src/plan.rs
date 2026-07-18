@@ -266,7 +266,7 @@ impl PlanStep {
         PlanStepBuilder::new(id, kind, PlanStepStatus::Ready)
     }
 
-    pub(crate) fn ready_labeled(
+    pub fn ready_labeled(
         id: impl Into<String>,
         kind: impl Into<String>,
         label: impl Into<String>,
@@ -280,7 +280,7 @@ impl PlanStep {
             .build()
     }
 
-    pub(crate) fn disabled(id: impl Into<String>, kind: impl Into<String>) -> PlanStepBuilder {
+    pub fn disabled(id: impl Into<String>, kind: impl Into<String>) -> PlanStepBuilder {
         PlanStepBuilder::new(id, kind, PlanStepStatus::Disabled)
     }
 
@@ -448,7 +448,7 @@ impl PlanStepBuilder {
         self
     }
 
-    pub(crate) fn missing(mut self, missing: impl IntoIterator<Item = String>) -> Self {
+    pub fn missing(mut self, missing: impl IntoIterator<Item = String>) -> Self {
         self.step.missing.extend(missing);
         self
     }

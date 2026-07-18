@@ -20,7 +20,7 @@ pub fn apply_component_overrides(
 
 /// Resolve project override layers without allowing target binding fields to
 /// contaminate source/build preparation identity.
-pub(crate) fn resolve_deploy_override_inputs(
+pub fn resolve_deploy_override_inputs(
     component: &crate::component::Component,
     project: &Project,
 ) -> (crate::component::Component, crate::component::Component) {

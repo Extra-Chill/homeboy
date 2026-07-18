@@ -25,7 +25,7 @@ pub use changes::{
     discard_worktree_changes, get_diff, get_dirty_files, get_files_changed_since, get_range_diff,
     get_uncommitted_changes, resolve_merge_base, UncommittedChanges,
 };
-pub(crate) use commits::extract_version_from_tag;
+pub use commits::extract_version_from_tag;
 pub use commits::{
     categorize_commits, find_version_commit, find_version_release_commit, get_commits_in_range,
     get_commits_since_tag, get_commits_since_tag_for_path, get_commits_since_tag_for_paths,
@@ -79,6 +79,7 @@ pub use pr_policy::{
 pub use pr_refresh::{
     pr_refresh, PrRefreshCheck, PrRefreshOptions, PrRefreshOutput, PrRefreshStrategy,
 };
+pub(crate) use primitives::list_tracked_markdown_files;
 pub use primitives::{
     clone_repo, clone_repo_at_ref, commit_staged_with_author, default_branch_name,
     default_remote_branch, get_component_path_prefix, get_git_root, git_probe_path,
@@ -86,7 +87,7 @@ pub use primitives::{
     run_git_output, run_git_output_with_env, run_git_with_env, run_git_with_env_timeout, stage_all,
     update_to_remote_default_branch,
 };
-pub(crate) use primitives::{is_git_repo, is_tracked_path, list_tracked_markdown_files};
+pub use primitives::{is_git_repo, is_tracked_path};
 pub use primitives_query::{
     current_branch, head_sha, head_sha_short, output_optional, output_optional_bytes,
     remote_origin_url, remote_url, repo_root, rev_parse, short_head_revision, status_porcelain,

@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::commands::CmdResult;
-use homeboy::core::release::changelog::{self, ShowOutput};
+use homeboy_release::release::changelog::{self, ShowOutput};
 
 #[derive(Args)]
 pub struct ChangelogArgs {

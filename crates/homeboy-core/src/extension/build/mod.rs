@@ -235,7 +235,7 @@ pub fn run_changed_since(input: &str, changed_since: Option<&str>) -> Result<(Bu
 ///
 /// Thin wrapper around `execute_build_component` that adapts the return type
 /// for the deploy pipeline's error handling convention.
-pub(crate) fn build_component(component: &component::Component) -> (Option<i32>, Option<String>) {
+pub fn build_component(component: &component::Component) -> (Option<i32>, Option<String>) {
     let result = execute_build_component(component, None);
 
     match result {

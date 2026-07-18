@@ -8,9 +8,9 @@
 use std::collections::{HashMap, HashSet};
 
 use homeboy::core::component;
-use homeboy::core::deploy::{self, ReleaseState};
+use homeboy_release::deploy::{self, ReleaseState};
 use homeboy::core::git;
-use homeboy::core::release::version;
+use homeboy_release::release::version;
 
 use super::types::{UnreleasedMerge, UpstreamDrift};
 
@@ -74,7 +74,7 @@ impl StatusGitCache {
             let current_version = version::read_component_version(component)
                 .ok()
                 .map(|info| info.version);
-            let tag_prefix = homeboy::core::release::component_tag_prefix(component)
+            let tag_prefix = homeboy_release::release::component_tag_prefix(component)
                 .ok()
                 .flatten();
             let baseline = git::detect_baseline_with_version_and_tag_prefix_from_fetched_tags(
@@ -155,7 +155,7 @@ fn get_upstream_drift(component: &component::Component) -> Option<UpstreamDrift>
     // After fetching tags, find the latest tag across ALL refs (not just HEAD).
     // `git describe --tags --abbrev=0` only returns tags reachable from HEAD,
     // which misses newer tags when the local checkout is behind.
-    let tag_prefix = homeboy::core::release::component_tag_prefix(component)
+    let tag_prefix = homeboy_release::release::component_tag_prefix(component)
         .ok()
         .flatten();
     let latest_origin_tag = git::get_latest_tag_any_with_prefix(path, tag_prefix.as_deref())
