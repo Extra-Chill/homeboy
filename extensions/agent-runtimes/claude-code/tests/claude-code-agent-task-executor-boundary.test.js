@@ -34,7 +34,7 @@ assert.equal(provider.backend, 'claude-code');
 assert.equal(provider.runtime, 'claude-code');
 assert.equal(provider.status, 'available');
 assert.equal(provider.integration_contract, 'homeboy-claude-code-agent-task/v1');
-assert.equal(provider.lifecycle.max_concurrency_default, 1);
+assert.equal(Object.hasOwn(provider.lifecycle, 'max_concurrency_default'), false);
 assert.equal(provider.lifecycle.cancellation, 'provider_signal');
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'claude-code').env, CLAUDE_CODE_REQUIRED_SECRET_ENV);
 assert.deepEqual(provider.provider_defaults['claude-code'].secret_env, CLAUDE_CODE_SECRET_ENV);

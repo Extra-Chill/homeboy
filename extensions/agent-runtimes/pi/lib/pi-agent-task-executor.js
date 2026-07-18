@@ -45,7 +45,6 @@ function providerContract(options = {}) {
 		lifecycle: {
 			completion: 'synchronous_process',
 			cancellation: 'process_signal',
-			max_concurrency_default: 1,
 		},
 		status: 'experimental',
 		integration_contract: 'homeboy-pi-agent-task/v1',

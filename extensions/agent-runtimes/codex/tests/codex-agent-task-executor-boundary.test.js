@@ -39,7 +39,7 @@ assert.equal(provider.backend, 'codex');
 assert.equal(provider.runtime, 'codex');
 assert.equal(provider.status, 'available');
 assert.equal(provider.integration_contract, 'homeboy-codex-agent-task/v1');
-assert.equal(provider.lifecycle.max_concurrency_default, 1);
+assert.equal(Object.hasOwn(provider.lifecycle, 'max_concurrency_default'), false);
 assert.equal(provider.lifecycle.cancellation, 'provider_signal');
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, CODEX_SECRET_ENV);
 assert.deepEqual(provider.provider_defaults.codex.secret_env, CODEX_SECRET_ENV);

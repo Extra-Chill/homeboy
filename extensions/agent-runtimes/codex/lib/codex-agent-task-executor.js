@@ -71,7 +71,6 @@ function providerContract(options = {}) {
 		lifecycle: {
 			completion: 'synchronous_process',
 			cancellation: 'provider_signal',
-			max_concurrency_default: 1,
 		},
 		artifact_contract: {
 			patch: ['git-diff', 'patch'],
