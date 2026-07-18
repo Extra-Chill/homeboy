@@ -1056,6 +1056,60 @@ fn terminal_payload_budget_bounds_high_event_history_before_child_reservation_pe
 }
 
 #[test]
+fn oversized_terminal_result_remains_observable_when_it_exceeds_the_byte_budget() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("jobs.json");
+    let terminal_job_retention_bytes = 64;
+    let store = JobStore::open_without_reconciliation_with_retention_and_terminal_byte_limit(
+        &path,
+        10,
+        10,
+        terminal_job_retention_bytes,
+    )
+    .expect("durable store opens");
+    let job = store.create("oversized-result");
+    store.start(job.id).expect("job starts");
+
+    let completed = store
+        .complete(job.id, Some(json!({ "output": "x".repeat(10_000) })))
+        .expect("terminal transition remains observable");
+
+    assert_eq!(completed.status, JobStatus::Succeeded);
+    assert_eq!(
+        store
+            .get(job.id)
+            .expect("terminal job remains readable")
+            .status,
+        JobStatus::Succeeded
+    );
+    let events = store
+        .events(job.id)
+        .expect("terminal events remain readable");
+    assert!(events
+        .iter()
+        .any(|event| event.kind == JobEventKind::Result));
+    assert!(events.iter().any(|event| event.kind == JobEventKind::Status
+        && event
+            .data
+            .as_ref()
+            .is_some_and(|data| data["status"] == "succeeded")));
+
+    let evidence = store
+        .inner
+        .lock()
+        .expect("job store mutex")
+        .compaction
+        .clone()
+        .expect("compaction evidence records the oversized terminal job");
+    assert_eq!(evidence.removed_terminal_jobs, 0);
+    assert_eq!(evidence.retained_terminal_jobs, 1);
+    assert!(
+        evidence.retained_terminal_bytes > terminal_job_retention_bytes,
+        "the single retained terminal record may exceed the byte budget"
+    );
+}
+
+#[test]
 fn remote_runner_job_submit_targets_runner_and_project() {
     let store = JobStore::default();
     let job = store
