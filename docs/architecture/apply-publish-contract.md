@@ -15,7 +15,7 @@ to the publish layer, represented by `PublishRequest` and `PublishResult`.
 
 ## Core Types
 
-The core contract lives in `src/core/execution.rs`:
+The core contract lives in `crates/homeboy-core/src/execution.rs`:
 
 - `ExecutionPhase` names the canonical phase vocabulary.
 - `ChangeArtifact` stores proposed changes with provenance.

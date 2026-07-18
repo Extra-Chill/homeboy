@@ -4,7 +4,7 @@ Issue #2242 asks Homeboy core to move compiler-warning collection and compiler-w
 
 ## Required Upstream Contract
 
-Homeboy core needs an extension manifest contract for two separate capabilities before `src/core/code_audit/compiler_warnings.rs` and `src/core/refactor/plan/generate/compiler_warning_fixes.rs` can be made language-agnostic without dropping behavior.
+Homeboy core needs an extension manifest contract for two separate capabilities before `crates/homeboy-code-audit/src/compiler_warnings.rs` and `crates/homeboy-refactor/src/plan/generate/compiler_warning_fixes.rs` can be made language-agnostic without dropping behavior.
 
 1. `scripts.compiler_warnings`
    - Runs from the component root.
