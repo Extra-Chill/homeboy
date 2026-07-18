@@ -4,6 +4,77 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.291.0] - 2026-07-18
+
+### Added
+- extract homeboy-release crate (deploy+release, ~42k LOC); workspace green
+- extract homeboy-review crate; workspace green
+- extract homeboy-stack crate; workspace green
+- extract homeboy-upgrade crate; workspace green
+
+### Changed
+- route deps-provider extension execution through the component-script hook
+- invert component-build execution behind a provider hook
+- relocate extension update-check + is_git_url utils to core
+- relocate build artifact-path resolution to core
+- invert component-script execution behind a provider hook
+- move the lint result cluster to homeboy-extension-contract
+- invert core->deploy/release edges behind ReleaseProvider hook
+- move the top-level test result cluster to homeboy-extension-contract
+- move CiContext to homeboy-extension-contract
+- Preserve explicit runner admission
+- move test drift + run/baseline result types to homeboy-extension-contract
+- add homeboy-release-contract; move release/deploy state types down
+- move test parsing-result types to homeboy-extension-contract
+- move TestCounts + TestScopeOutput to homeboy-extension-contract
+- move test-analysis types to homeboy-extension-contract
+- Recover direct runner sessions at admission
+- Add bounded shared Cargo target retention
+- relocate extension execution-context resolution to core
+- Add pin-aware controller runtime retention
+- Recover transient SSH workspace materialization failures
+- Isolate aggregate cleanup root resolution
+- extract homeboy-rig crate (~15.3k LOC out of core)
+- relocate extension scope + invocation-context glue to core
+- relocate the extension manifest store to core (extension_store)
+- sever stay-in-core rig edges (homeboy-rig extraction prep)
+- move the TraceResults type to homeboy-extension-contract
+- move rig state snapshot types to homeboy-lifecycle-contract
+- extract homeboy-refactor crate (~22.7k LOC out of core)
+- move trace preview metadata types to homeboy-extension-contract
+- sever the 2 extension->refactor prod edges (homeboy-refactor prep)
+- move pure trace parsing types to homeboy-extension-contract
+- move the top-level bench result cluster to homeboy-extension-contract
+- extract homeboy-agents crate (~89k LOC out of core)
+- move bench metric-preset + distribution types, unblocking the top-level result cluster
+- move bench responsiveness types to homeboy-extension-contract
+- move ArtifactRecord to homeboy-lifecycle-contract (joins ArtifactViewerLink)
+- move bench gate types + evaluation to homeboy-extension-contract
+
+### Fixed
+- persist declared release artifacts before packaging
+- bound durable daemon job retention
+- declare windows-sys dep for homeboy-agents crate
+- preserve runner session health budgets
+- Fix authoritative activity lifecycle reconciliation
+- Fix controller pinning in dependent tests
+- expire abandoned local child reservations
+- stabilize Lab controller session identity
+- emit valid task worktree cleanup commands
+- delete branches proven merged by cleanup
+- preserve nested Lab runner context
+- preserve root-anchored snapshot excludes (#8862)
+- retain executed test failure results
+- continue task worktree cleanup after removal failure
+- honor explicit runner during resource preflight
+- recover staged runner metadata writes
+- compare runner doctor build identities
+- render nested review fallback commands
+- reuse runner session during provider preflight
+- make runner and placement exclusive
+- wait for contended Lab reconnect handoff
+- recover transient Lab metadata writes
+
 ## [0.290.0] - 2026-07-17
 
 ### Added
