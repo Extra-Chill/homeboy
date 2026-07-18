@@ -493,6 +493,9 @@ function opencodeFailureOutcome(context) {
 }
 
 function withPolicyDeniedOutcome(context = {}, terminal = {}) {
+	if (terminal.status === 'succeeded') {
+		return terminal;
+	}
 	const denial = detectOpenCodePolicyDenial(context);
 	if (!denial) {
 		return terminal;
@@ -658,7 +661,7 @@ function collectOpenCodeArtifacts(context = {}) {
 		captureErrors.push({ artifact: 'patch', message: patchCapture.error });
 	}
 	const patch = patchCapture.content;
-	const policyDenial = detectOpenCodePolicyDenial(context);
+	const policyDenial = spawnResult.status === 0 ? null : detectOpenCodePolicyDenial(context);
 	const resultStatus = policyDenial ? 'failed' : (spawnResult.status === 0 ? 'succeeded' : 'failed');
 	const resultEnvelope = JSON.stringify({
 		schema: 'homeboy/opencode-agent-result/v1',

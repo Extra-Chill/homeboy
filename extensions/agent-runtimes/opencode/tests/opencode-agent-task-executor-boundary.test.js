@@ -732,6 +732,45 @@ process.exit(0);
 			GIT_COMMITTER_EMAIL: 'homeboy@example.test',
 		},
 	});
+	const recoveredCliPath = path.join(root, 'mock-opencode-policy-denied-then-completed.cjs');
+	fs.writeFileSync(recoveredCliPath, `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({
+  type: 'message',
+  timestamp: '2026-07-03T15:12:00.000Z',
+  parts: [{
+    type: 'tool',
+    tool: 'bash',
+    input: { command: 'cd /tmp && git clone https://example.invalid/private.git' },
+    state: { error: 'The user rejected permission to use this specific tool call.' }
+  }]
+}) + '\\n');
+process.stdout.write(JSON.stringify({ type: 'message', text: 'Completed after the denied tool call.' }) + '\\n');
+process.exit(0);
+`);
+	const recoveredResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-policy-denied-then-completed',
+		workspace_path: deniedWorkspace,
+		artifacts_path: deniedArtifactDir,
+		expected_artifacts: ['patch', 'transcript', 'agent_result'],
+		executor: {
+			...request.executor,
+			config: {
+				...request.executor.config,
+				command_args: [recoveredCliPath],
+			},
+		},
+	}, { env: fixtureEnv });
+	assert.equal(recoveredResult.status, 'succeeded');
+	assert.equal(recoveredResult.failure_classification, undefined);
+	assert.equal(recoveredResult.failure_code, undefined);
+	assert.equal(recoveredResult.metadata.denied_tool_call, undefined);
+	assert.deepEqual(recoveredResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'opencode-runtime-stdout', 'patch', 'transcript']);
+	assert.equal(recoveredResult.diagnostics.some((diagnostic) => diagnostic.class === 'opencode.policy_denied'), false);
+	const recoveredAgentResult = JSON.parse(fs.readFileSync(recoveredResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
+	assert.equal(recoveredAgentResult.status, 'succeeded');
+	assert.equal(recoveredAgentResult.failure_classification, undefined);
+
 	const deniedCliPath = path.join(root, 'mock-opencode-policy-denied.cjs');
 	fs.writeFileSync(deniedCliPath, `#!/usr/bin/env node
 process.stdout.write(JSON.stringify({
@@ -744,7 +783,7 @@ process.stdout.write(JSON.stringify({
     state: { error: 'The user rejected permission to use this specific tool call.' }
   }]
 }) + '\\n');
-process.exit(0);
+process.exit(1);
 `);
 	const deniedResult = await executeOpenCodeAgentTask({
 		...request,
