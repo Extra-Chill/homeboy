@@ -27,6 +27,11 @@ use crate::error::{Error, Result};
 use crate::runner_execution_envelope::PathMaterializationPlan;
 use crate::source_snapshot::SourceSnapshot;
 
+/// A reservation bounds the interval between durable admission and persisting a
+/// child identity. The child is normally spawned immediately after admission;
+/// a longer-lived record means no child was durably confirmed.
+const LOCAL_CHILD_RESERVATION_LEASE_MS: u64 = 60_000;
+
 #[derive(Debug, Clone, Default)]
 pub struct JobStore {
     pub(super) inner: Arc<Mutex<JobStoreInner>>,
@@ -72,6 +77,10 @@ pub(crate) struct LocalRunnerJob {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct LocalChildExecution {
     reservation_id: String,
+    /// Missing only on records written before reservation leases existed. Those
+    /// records remain fail-closed because Homeboy cannot prove their spawn state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reservation_expires_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     process: Option<LocalChildProcessIdentity>,
 }
@@ -1382,7 +1391,12 @@ impl JobStore {
     }
 
     pub(crate) fn reserve_local_child(&self, job_id: Uuid) -> Result<()> {
+        self.reserve_local_child_at(job_id, timestamp_ms())
+    }
+
+    pub(crate) fn reserve_local_child_at(&self, job_id: Uuid, now: u64) -> Result<()> {
         let reservation_id = Uuid::new_v4().to_string();
+        let reservation_expires_at_ms = now.saturating_add(LOCAL_CHILD_RESERVATION_LEASE_MS);
         let mut inner = self.inner.lock().expect("job store mutex poisoned");
         let prior = inner
             .jobs
@@ -1400,6 +1414,7 @@ impl JobStore {
         }
         stored.local_child = Some(LocalChildExecution {
             reservation_id: reservation_id.clone(),
+            reservation_expires_at_ms: Some(reservation_expires_at_ms),
             process: None,
         });
         let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1407,11 +1422,13 @@ impl JobStore {
             sequence,
             job_id,
             kind: JobEventKind::Progress,
-            timestamp_ms: timestamp_ms(),
+            timestamp_ms: now,
             message: Some("local runner child reserved before spawn".to_string()),
-            data: Some(
-                serde_json::json!({ "phase": "child_reserved", "reservation_id": reservation_id }),
-            ),
+            data: Some(serde_json::json!({
+                "phase": "child_reserved",
+                "reservation_id": reservation_id,
+                "reservation_expires_at_ms": reservation_expires_at_ms,
+            })),
         });
         stored.job.event_count = stored.events.len();
         if let Some(persistence) = &self.persistence {
@@ -1424,6 +1441,89 @@ impl JobStore {
             }
         }
         Ok(())
+    }
+
+    /// Terminalize expired pre-spawn reservations. A PID-bound child has
+    /// atomically claimed the reservation and is intentionally left to normal
+    /// child liveness recovery, even when the original admission deadline has
+    /// passed.
+    pub(crate) fn reconcile_expired_local_child_reservations(&self) -> Result<Vec<Uuid>> {
+        self.reconcile_expired_local_child_reservations_at(timestamp_ms())
+    }
+
+    pub(crate) fn reconcile_expired_local_child_reservations_at(
+        &self,
+        now: u64,
+    ) -> Result<Vec<Uuid>> {
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let expired = inner
+            .jobs
+            .values()
+            .filter(|stored| {
+                stored.job.status == JobStatus::Queued
+                    && stored.local_child.as_ref().is_some_and(|child| {
+                        child.process.is_none()
+                            && child
+                                .reservation_expires_at_ms
+                                .is_some_and(|expires_at| expires_at <= now)
+                    })
+            })
+            .map(|stored| stored.job.id)
+            .collect::<Vec<_>>();
+
+        for job_id in &expired {
+            let stored = inner.jobs.get_mut(job_id).expect("expired job exists");
+            let child = stored
+                .local_child
+                .as_ref()
+                .expect("expired reservation exists");
+            let reason = "local child reservation lease expired before spawn";
+            stored.job.status = JobStatus::Failed;
+            stored.job.updated_at_ms = now;
+            stored.job.finished_at_ms = Some(now);
+            stored.job.stale_reason = Some(reason.to_string());
+            let terminal_result = serde_json::json!({
+                "status": JobStatus::Failed,
+                "reason": "local_child_reservation_expired",
+                "retryable": true,
+                "reservation_id": child.reservation_id,
+                "reservation_expires_at_ms": child.reservation_expires_at_ms,
+            });
+            for (kind, message, data) in [
+                (
+                    JobEventKind::Error,
+                    reason.to_string(),
+                    terminal_result.clone(),
+                ),
+                (
+                    JobEventKind::Result,
+                    "retryable terminal reservation failure".to_string(),
+                    terminal_result.clone(),
+                ),
+                (
+                    JobEventKind::Status,
+                    "job marked failed after local child reservation lease expiry".to_string(),
+                    terminal_result,
+                ),
+            ] {
+                let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                stored.events.push(JobEvent {
+                    sequence,
+                    job_id: *job_id,
+                    kind,
+                    timestamp_ms: now,
+                    message: Some(message),
+                    data: Some(data),
+                });
+            }
+            apply_event_retention(&mut stored.events, self.event_retention_limit());
+            stored.job.event_count = stored.events.len();
+        }
+        drop(inner);
+        if !expired.is_empty() {
+            self.persist()?;
+        }
+        Ok(expired)
     }
 
     /// Explicit, per-job legacy recovery. The supplied PID/start ticks must
@@ -1505,6 +1605,7 @@ impl JobStore {
         let now = timestamp_ms();
         stored.local_child = Some(LocalChildExecution {
             reservation_id: format!("operator-recovery-{job_id}"),
+            reservation_expires_at_ms: None,
             process: Some(LocalChildProcessIdentity {
                 pid,
                 process_group_id: None,
@@ -1553,6 +1654,9 @@ impl JobStore {
                 .jobs
                 .get_mut(&job_id)
                 .ok_or_else(|| job_not_found(job_id))?;
+            // Retain the unclaimed reservation so a failed durable write never
+            // leaves queued visibility paired with an uncommitted child PID.
+            let prior = stored.clone();
             validate_transition(stored.job.status, JobStatus::Running)?;
             let local_child = stored.local_child.as_mut().ok_or_else(|| {
                 Error::internal_unexpected("local child spawned without a durable reservation")
@@ -1562,7 +1666,6 @@ impl JobStore {
                 process_group_id,
                 discriminator: discriminator.clone(),
             });
-            let prior = stored.clone();
             let now = timestamp_ms();
             stored.job.status = JobStatus::Running;
             stored.job.started_at_ms = Some(now);

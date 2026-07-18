@@ -43,6 +43,80 @@ fn active_count_reads_durable_jobs_without_reconciling_them() {
 }
 
 #[test]
+fn expired_local_child_reservation_releases_capacity_and_persists_retryable_failure() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("open store");
+    let job = store.create("runner.exec");
+    let reserved_at = 10_000;
+    store
+        .reserve_local_child_at(job.id, reserved_at)
+        .expect("persist reservation");
+
+    assert!(store
+        .reconcile_expired_local_child_reservations_at(reserved_at + 59_999)
+        .expect("reservation remains leased")
+        .is_empty());
+    assert_eq!(
+        JobStore::active_count_at_path(&path).expect("active capacity before expiry"),
+        1
+    );
+
+    assert_eq!(
+        store
+            .reconcile_expired_local_child_reservations_at(reserved_at + 60_000)
+            .expect("expire reservation"),
+        vec![job.id]
+    );
+    assert_eq!(
+        store.get(job.id).expect("terminal job").status,
+        JobStatus::Failed
+    );
+    assert_eq!(
+        JobStore::active_count_at_path(&path).expect("expired capacity released"),
+        0
+    );
+    let events = JobStore::open_without_reconciliation(&path)
+        .expect("reopen durable terminal result")
+        .events(job.id)
+        .expect("events");
+    assert!(events.iter().any(|event| {
+        event.kind == JobEventKind::Result
+            && event.data.as_ref().is_some_and(|data| {
+                data["reason"] == "local_child_reservation_expired" && data["retryable"] == true
+            })
+    }));
+}
+
+#[test]
+fn pid_bound_local_child_is_not_expired_by_its_former_reservation_deadline() {
+    let store = JobStore::default();
+    let job = store.create("runner.exec");
+    store
+        .reserve_local_child_at(job.id, 10_000)
+        .expect("reserve child");
+    store
+        .start_with_reserved_child_identity(
+            job.id,
+            std::process::id(),
+            None,
+            super::store::LocalChildStartDiscriminator::Unsupported {
+                evidence: "test owns a live current-process identity".to_string(),
+            },
+        )
+        .expect("atomically bind live child identity");
+
+    assert!(store
+        .reconcile_expired_local_child_reservations_at(1_000_000)
+        .expect("do not expire spawned child")
+        .is_empty());
+    assert_eq!(
+        store.get(job.id).expect("live job").status,
+        JobStatus::Running
+    );
+}
+
+#[test]
 fn test_create_with_source_snapshot() {
     let store = JobStore::default();
     let snapshot =
