@@ -865,7 +865,33 @@ mod tests {
                     .expect("component build marker"),
                 "built"
             );
+            github_release::validate_declared_build_artifact(&component, &state, false)
+                .expect("durably persisted declared artifact should satisfy GitHub Release");
         });
+    }
+
+    #[test]
+    fn github_release_rejects_declared_artifact_when_source_and_durable_bytes_are_missing() {
+        let component = Component {
+            build_artifact: Some("build/plugin.zip".to_string()),
+            ..Component::default()
+        };
+        let state = ReleaseState {
+            artifacts: vec![ReleaseArtifact {
+                path: "build/plugin.zip".to_string(),
+                durable_path: Some(".homeboy/artifacts/missing-plugin.zip".to_string()),
+                artifact_type: None,
+                platform: None,
+            }],
+            ..ReleaseState::default()
+        };
+
+        let error = github_release::validate_declared_build_artifact(&component, &state, false)
+            .expect_err("declared artifact with no source or durable bytes must fail");
+
+        assert!(error
+            .message
+            .contains("Configured build_artifact 'build/plugin.zip' is absent"));
     }
 
     #[test]

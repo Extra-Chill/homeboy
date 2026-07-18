@@ -25,6 +25,10 @@ use crate::{Error, Result};
 pub trait ComponentBuildRunner: Send + Sync {
     /// Build the component. Returns `(json_result, exit_code)`.
     fn run_component_build(&self, component: &Component) -> Result<(Value, i32)>;
+
+    /// Whether the component has a resolvable build command (used to decide
+    /// if a dependency-build lifecycle step should run at all).
+    fn can_build(&self, component: &Component) -> bool;
 }
 
 fn provider_slot() -> &'static Mutex<Option<Box<dyn ComponentBuildRunner>>> {
@@ -37,6 +41,15 @@ fn provider_slot() -> &'static Mutex<Option<Box<dyn ComponentBuildRunner>>> {
 pub fn register_component_build_runner(provider: Box<dyn ComponentBuildRunner>) {
     let mut slot = provider_slot().lock().expect("component build runner lock");
     *slot = Some(provider);
+}
+
+/// Whether the registered provider can build the component.
+pub fn can_build(component: &Component) -> bool {
+    let slot = provider_slot().lock().expect("component build runner lock");
+    match slot.as_deref() {
+        Some(provider) => provider.can_build(component),
+        None => false,
+    }
 }
 
 /// Build a component through the registered provider. Returns

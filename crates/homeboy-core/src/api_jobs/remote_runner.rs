@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::persistence::{job_not_found, timestamp_ms};
+use super::persistence::{apply_event_retention, job_not_found, timestamp_ms, validate_transition};
 use super::store::{JobStore, StoredJob};
 use super::types::{Job, JobEvent, JobEventKind, JobStatus};
 use crate::engine::command::CommandCaptureMetadata;
@@ -58,6 +59,14 @@ pub struct RunnerJobLifecycleMetadata {
     pub active_child_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_cell_count: Option<u64>,
+}
+
+/// Caller-owned identity required to cancel one daemon-local runner projection.
+/// This is deliberately distinct from the operator-facing job cancellation API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerJobProjectionCancelRequest {
+    pub expected_runner_id: String,
+    pub expected_durable_run_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -727,6 +736,99 @@ impl JobStore {
             }
         }
         self.cancel(job_id, reason)
+    }
+
+    /// Cancel exactly one daemon-local runner job after proving its durable
+    /// controller projection still belongs to the requesting run.
+    pub fn cancel_local_runner_projection(
+        &self,
+        job_id: Uuid,
+        request: &RunnerJobProjectionCancelRequest,
+    ) -> Result<Job> {
+        let expected_runner_id = request.expected_runner_id.trim();
+        let expected_durable_run_id = request.expected_durable_run_id.trim();
+        if expected_runner_id.is_empty() || expected_durable_run_id.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "projection",
+                "strict runner projection cancellation requires non-empty runner and durable run IDs",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get_mut(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        let Some(local_runner) = stored.local_runner.as_ref() else {
+            return Err(Error::validation_invalid_argument(
+                "job_id",
+                "job has no daemon-local runner projection",
+                Some(job_id.to_string()),
+                None,
+            ));
+        };
+        let Some(lifecycle) = local_runner.lifecycle.as_ref() else {
+            return Err(Error::validation_invalid_argument(
+                "job_id",
+                "daemon-local runner projection has no lifecycle metadata",
+                Some(job_id.to_string()),
+                None,
+            ));
+        };
+        let Some(durable_run_id) = lifecycle
+            .durable_run_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return Err(Error::validation_invalid_argument(
+                "job_id",
+                "daemon-local runner projection has no durable run ID",
+                Some(job_id.to_string()),
+                None,
+            ));
+        };
+        if local_runner.runner_id != expected_runner_id {
+            return Err(Error::validation_invalid_argument(
+                "expected_runner_id",
+                "daemon-local runner projection belongs to a different runner",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        if durable_run_id != expected_durable_run_id {
+            return Err(Error::validation_invalid_argument(
+                "expected_durable_run_id",
+                "daemon-local runner projection belongs to a different durable run",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        if stored.job.status.is_terminal() {
+            return Ok(stored.job.clone());
+        }
+        validate_transition(stored.job.status, JobStatus::Cancelled)?;
+        let now = timestamp_ms();
+        stored.job.status = JobStatus::Cancelled;
+        stored.job.updated_at_ms = now;
+        stored.job.finished_at_ms = Some(now);
+        let event = JobEvent {
+            sequence: self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1,
+            job_id,
+            kind: JobEventKind::Status,
+            timestamp_ms: now,
+            message: Some("cancelled via strict runner projection".to_string()),
+            data: Some(serde_json::json!({ "status": JobStatus::Cancelled })),
+        };
+        stored.events.push(event);
+        apply_event_retention(&mut stored.events, self.event_retention_limit());
+        stored.job.event_count = stored.events.len();
+        let job = stored.job.clone();
+        drop(inner);
+        self.persist()?;
+        Ok(job)
     }
 
     pub(crate) fn reconcile_expired_remote_runner_claims(&self, now_ms: u64) -> Result<Vec<Job>> {

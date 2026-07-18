@@ -3,9 +3,11 @@ use std::time::Duration;
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
-use homeboy_core::api_jobs::{Job, JobEvent};
+use homeboy_core::api_jobs::{Job, JobEvent, RunnerJobProjectionCancelRequest};
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
+
+use crate::daemon_http_get::parse_daemon_response_json;
 
 use super::super::broker_http;
 use super::super::evidence::mirror_daemon_job_progress;
@@ -222,6 +224,81 @@ pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobE
             &path,
             json!({}),
             "cancel reverse runner broker job",
+            broker_token.as_deref(),
+        )?
+    } else {
+        return Err(runner_job_cancel_unsupported(
+            &runner.id,
+            "runner session does not expose a cancellable daemon or broker transport",
+        ));
+    };
+    parse_runner_job_cancel_body(body)
+}
+
+/// Cancel a controller-owned daemon job only if its durable projection still
+/// matches the controller run that requested cancellation.
+pub fn runner_job_cancel_projection(
+    runner_id: &str,
+    job_id: &str,
+    durable_run_id: &str,
+) -> Result<(Job, Vec<JobEvent>)> {
+    let runner = load(runner_id)?;
+    let connected = status(runner_id)?;
+    let Some(session) = connected.session.filter(|_| connected.connected) else {
+        return Err(runner_job_cancel_unsupported(
+            &runner.id,
+            "runner is not connected",
+        ));
+    };
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| {
+            Error::internal_unexpected(format!("build runner projection cancel client: {err}"))
+        })?;
+    let path = format!("/jobs/{job_id}/cancel-projection");
+    let request = RunnerJobProjectionCancelRequest {
+        expected_runner_id: runner.id.clone(),
+        expected_durable_run_id: durable_run_id.to_string(),
+    };
+    let payload = serde_json::to_value(request).expect("projection cancel request serializes");
+    let body = if let Some(local_url) = session.local_url.as_deref() {
+        let response = daemon_post_json_text(
+            &client,
+            local_url,
+            &path,
+            &payload,
+            DaemonPostOptions::default(),
+        )?;
+        let envelope: DaemonEnvelope = parse_daemon_response_json(
+            &response.body,
+            response.status_code,
+            &path,
+            "parse daemon projection cancel response",
+        )?;
+        if !envelope.success {
+            return Err(Error::internal_unexpected(format!(
+                "daemon projection cancel failed: {}",
+                envelope.error.unwrap_or(Value::Null)
+            )));
+        }
+        envelope.data.ok_or_else(|| {
+            Error::internal_unexpected("daemon projection cancel response missing data")
+        })?
+    } else if session.mode == RunnerTunnelMode::Reverse {
+        let Some(broker_url) = session.broker_url.as_deref() else {
+            return Err(runner_job_cancel_unsupported(
+                &runner.id,
+                "reverse runner session has no broker URL",
+            ));
+        };
+        let broker_token = homeboy_core::broker_auth::broker_submit_token_for_runner(&runner.id)?;
+        broker_http::post_json(
+            &client,
+            broker_url,
+            &path,
+            payload,
+            "cancel reverse runner broker job projection",
             broker_token.as_deref(),
         )?
     } else {

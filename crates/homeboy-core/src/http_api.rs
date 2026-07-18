@@ -9,7 +9,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::api_jobs::{self, ActiveRunnerJobSummary, JobStore};
+use crate::api_jobs::{self, ActiveRunnerJobSummary, JobStore, RunnerJobProjectionCancelRequest};
 use crate::error::{Error, Result};
 use crate::observation::{
     run_owner_pid, running_status_note, FindingListFilter, ObservationStore, RunListFilter,
@@ -98,6 +98,11 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Post, ["jobs", id, "cancel"]) => Ok(HttpEndpoint::JobCancel {
             id: (*id).to_string(),
         }),
+        (HttpMethod::Post, ["jobs", id, "cancel-projection"]) => {
+            Ok(HttpEndpoint::JobProjectionCancel {
+                id: (*id).to_string(),
+            })
+        }
         (HttpMethod::Post, ["audit"]) => Ok(HttpEndpoint::JobReadyRun {
             kind: JobReadyRunKind::Audit,
         }),
@@ -297,6 +302,25 @@ where
             json!({
                 "command": "api.jobs.cancel",
                 "job": job_store.cancel(job_id, "cancel requested via HTTP API")?,
+                "events": job_store.events(job_id)?,
+            })
+        }
+        HttpEndpoint::JobProjectionCancel { id } => {
+            let job_id = parse_job_id(id)?;
+            let request: RunnerJobProjectionCancelRequest = serde_json::from_value(
+                request.body.unwrap_or_else(|| json!({})),
+            )
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "body",
+                    format!("invalid strict runner projection cancellation request: {error}"),
+                    Some(id.clone()),
+                    None,
+                )
+            })?;
+            json!({
+                "command": "api.jobs.cancel_projection",
+                "job": job_store.cancel_local_runner_projection(job_id, &request)?,
                 "events": job_store.events(job_id)?,
             })
         }

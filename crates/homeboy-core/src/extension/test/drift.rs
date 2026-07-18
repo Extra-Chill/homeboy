@@ -504,6 +504,224 @@ pub fn is_source_relevant_change(opts: &DriftOptions, path: &str) -> bool {
         || is_test_path(path)
 }
 
+/// Documentation, config, and other non-source file suffixes/paths that are
+/// never release-relevant on their own. Used as the conservative fallback when
+/// drift patterns are unconfigured so the gate flags real source changes
+/// instead of silently passing. Kept intentionally small — anything not
+/// obviously docs/config is treated as source (fail closed). (#8927)
+fn is_docs_or_config_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    let file_name = lower.rsplit('/').next().unwrap_or(&lower);
+
+    const DOC_CONFIG_SUFFIXES: &[&str] = &[
+        ".md",
+        ".markdown",
+        ".txt",
+        ".rst",
+        ".adoc",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".svg",
+        ".ico",
+        ".lock",
+        ".toml",
+        ".yml",
+        ".yaml",
+        ".json",
+        ".cfg",
+        ".ini",
+        ".editorconfig",
+        ".gitignore",
+        ".gitattributes",
+        ".license",
+    ];
+
+    const DOC_CONFIG_NAMES: &[&str] = &[
+        "license",
+        "notice",
+        "changelog",
+        "readme",
+        "authors",
+        "contributors",
+        "codeowners",
+    ];
+
+    DOC_CONFIG_SUFFIXES
+        .iter()
+        .any(|suffix| file_name.ends_with(suffix))
+        || DOC_CONFIG_NAMES.iter().any(|name| file_name == *name)
+        || lower.starts_with("docs/")
+        || lower.contains("/docs/")
+        || lower.starts_with(".github/")
+}
+
+impl DriftOptions {
+    /// Whether this options set has any usable source or test glob patterns.
+    ///
+    /// An empty pattern set means drift/source-relevance detection is
+    /// misconfigured (e.g. a component whose language extension declares no
+    /// file extensions). When this is false, the changed-scope gate must NOT
+    /// trust pattern-based source-relevance — it would silently pass every
+    /// change. Callers fall back to a conservative docs/config heuristic and
+    /// warn. (#8927)
+    pub fn has_usable_patterns(&self) -> bool {
+        !self.source_patterns.is_empty() || !self.test_patterns.is_empty()
+    }
+}
+
+/// Conservative source-relevance check for when drift patterns are unconfigured.
+///
+/// Treats any changed file that is not obviously documentation or config as
+/// source-relevant, plus recognized test paths. This fails closed: an
+/// unconfigured component still flags real source changes instead of silently
+/// passing a zero-test scope. (#8927)
+pub fn is_source_relevant_change_unconfigured(path: &str) -> bool {
+    is_test_path(path) || !is_docs_or_config_path(path)
+}
+
+/// Defined symbol names (fn/struct/enum/trait/method/class) added and removed
+/// in a single file's diff.
+struct FileSymbolDelta {
+    added: BTreeSet<String>,
+    removed: BTreeSet<String>,
+}
+
+/// Extract the top-level defined-symbol names added and removed in a file diff.
+///
+/// Unlike [`extract_changes_from_diff`], this ignores string literals and
+/// pairing heuristics — it only cares about which symbol *definitions* entered
+/// or left the file. Used to detect cross-file relocations (a symbol removed
+/// from one changed file and added to another within the same changeset).
+fn defined_symbol_delta(file: &str, diff: &str) -> FileSymbolDelta {
+    static PHP_METHOD_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(
+            r"(?:public|protected|private|static|abstract|final)\s+(?:static\s+)?function\s+(\w+)",
+        )
+        .unwrap()
+    });
+    static PHP_CLASS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?:abstract\s+)?(?:class|trait|interface)\s+(\w+)").unwrap()
+    });
+    static RUST_FN_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)").unwrap()
+    });
+    static RUST_TYPE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait)\s+(\w+)").unwrap()
+    });
+
+    let is_rust = file.ends_with(".rs");
+    let (fn_re, type_re): (&Regex, &Regex) = if is_rust {
+        (&RUST_FN_RE, &RUST_TYPE_RE)
+    } else {
+        (&PHP_METHOD_RE, &PHP_CLASS_RE)
+    };
+
+    let mut added = BTreeSet::new();
+    let mut removed = BTreeSet::new();
+
+    for line in diff.lines() {
+        let (content, target) = if line.starts_with('+') && !line.starts_with("+++") {
+            (&line[1..], &mut added)
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            (&line[1..], &mut removed)
+        } else {
+            continue;
+        };
+
+        if let Some(cap) = fn_re.captures(content) {
+            target.insert(cap[1].to_string());
+        }
+        if let Some(cap) = type_re.captures(content) {
+            target.insert(cap[1].to_string());
+        }
+    }
+
+    FileSymbolDelta { added, removed }
+}
+
+/// Identify changed source files whose diff is a pure symbol relocation.
+///
+/// A relocation refactor moves a symbol (fn/struct/enum/trait) from one file to
+/// another without changing its name or behavior. From a coverage standpoint
+/// this is neutral: the symbol was already tested (or untested) before the move
+/// and remains so after. The changed-scope test gate must not fail closed on
+/// such a move, because there is no new untested surface to cover. (#8927)
+///
+/// Returns the subset of `source_files` that are coverage-neutral relocations —
+/// every symbol they removed reappears (added) in another changed source file,
+/// and every symbol they added arrived (removed) from another changed source
+/// file, with no net-new or net-deleted defined symbols. Files with any
+/// non-relocation symbol change are excluded (they may need test coverage).
+pub fn relocation_only_source_files(
+    opts: &DriftOptions,
+    source_files: &[String],
+) -> BTreeSet<String> {
+    // Only reason about source-relevant files; ignore anything else. When drift
+    // patterns are unconfigured, fall back to the conservative docs/config
+    // heuristic so relocation detection still works (mirrors the gate's own
+    // unconfigured fallback). (#8927)
+    let has_patterns = opts.has_usable_patterns();
+    let files: Vec<&String> = source_files
+        .iter()
+        .filter(|f| {
+            if is_test_path(f) {
+                return false;
+            }
+            if has_patterns {
+                matches_any_pattern(f, &opts.source_patterns)
+            } else {
+                !is_docs_or_config_path(f)
+            }
+        })
+        .collect();
+
+    if files.len() < 2 {
+        // A relocation needs at least a source and a destination file.
+        return BTreeSet::new();
+    }
+
+    // Per-file symbol deltas + changeset-wide added/removed symbol totals.
+    let mut deltas: Vec<(&String, FileSymbolDelta)> = Vec::new();
+    let mut all_added: BTreeSet<String> = BTreeSet::new();
+    let mut all_removed: BTreeSet<String> = BTreeSet::new();
+
+    for file in &files {
+        let Ok(diff) = get_file_diff(&opts.root, &opts.since, file) else {
+            // If we cannot read the diff, do not claim relocation (fail safe).
+            return BTreeSet::new();
+        };
+        let delta = defined_symbol_delta(file, &diff);
+        all_added.extend(delta.added.iter().cloned());
+        all_removed.extend(delta.removed.iter().cloned());
+        deltas.push((*file, delta));
+    }
+
+    let mut relocation_only = BTreeSet::new();
+
+    for (file, delta) in &deltas {
+        // A file is a pure relocation when it has at least one defined-symbol
+        // move and every symbol it removed is added elsewhere and every symbol
+        // it added is removed elsewhere. Symbols moved within the SAME file
+        // (added and removed here) are ignored — they must be matched by the
+        // opposite side in a DIFFERENT file, so we compare against changeset
+        // totals excluding this file's own contribution.
+        if delta.added.is_empty() && delta.removed.is_empty() {
+            continue;
+        }
+
+        let removed_elsewhere_ok = delta.removed.iter().all(|sym| all_added.contains(sym));
+        let added_elsewhere_ok = delta.added.iter().all(|sym| all_removed.contains(sym));
+
+        if removed_elsewhere_ok && added_elsewhere_ok {
+            relocation_only.insert((*file).clone());
+        }
+    }
+
+    relocation_only
+}
+
 /// Collect test files in the repo using extension-declared glob patterns.
 fn collect_test_files(root: &Path, test_patterns: &[String]) -> Vec<PathBuf> {
     use homeboy_engine_primitives::codebase_scan::{self, ExtensionFilter, ScanConfig};
@@ -870,6 +1088,143 @@ mod tests {
             report.drifted_tests[0].test_file,
             "tests/FlowStepConfigTest.php"
         );
+    }
+
+    #[test]
+    fn relocation_only_detects_pure_cross_file_move() {
+        // A symbol moved from one source file to another (unchanged name) is a
+        // coverage-neutral relocation and both files must be recognized. (#8927)
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        run_git(root, &["init", "-q", "-b", "main"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        run_git(root, &["config", "user.name", "Test"]);
+
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/source.rs"),
+            "pub fn is_git_url(source: &str) -> bool { source.starts_with(\"git@\") }\npub fn keep_me() {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/dest.rs"), "pub fn existing() {}\n").unwrap();
+        run_git(root, &["add", "src"]);
+        run_git(root, &["commit", "-q", "-m", "initial"]);
+
+        // Move is_git_url from source.rs to dest.rs, unchanged.
+        std::fs::write(root.join("src/source.rs"), "pub fn keep_me() {}\n").unwrap();
+        std::fs::write(
+            root.join("src/dest.rs"),
+            "pub fn existing() {}\npub fn is_git_url(source: &str) -> bool { source.starts_with(\"git@\") }\n",
+        )
+        .unwrap();
+
+        let opts = DriftOptions {
+            root: root.to_path_buf(),
+            since: "HEAD".to_string(),
+            source_patterns: vec!["src/**/*.rs".to_string()],
+            test_patterns: vec!["tests/**/*.rs".to_string()],
+        };
+
+        let relocated = relocation_only_source_files(
+            &opts,
+            &["src/source.rs".to_string(), "src/dest.rs".to_string()],
+        );
+
+        assert!(
+            relocated.contains("src/source.rs"),
+            "source file of the move must be relocation-only, got {relocated:?}"
+        );
+        assert!(
+            relocated.contains("src/dest.rs"),
+            "destination file of the move must be relocation-only, got {relocated:?}"
+        );
+    }
+
+    #[test]
+    fn relocation_only_excludes_net_new_symbol() {
+        // Moving a symbol AND adding a brand-new one means the destination file
+        // has net-new untested surface — it must NOT be treated as a pure
+        // relocation. (#8927)
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        run_git(root, &["init", "-q", "-b", "main"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        run_git(root, &["config", "user.name", "Test"]);
+
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/source.rs"),
+            "pub fn moved_fn() {}\npub fn stays() {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/dest.rs"), "pub fn existing() {}\n").unwrap();
+        run_git(root, &["add", "src"]);
+        run_git(root, &["commit", "-q", "-m", "initial"]);
+
+        std::fs::write(root.join("src/source.rs"), "pub fn stays() {}\n").unwrap();
+        // dest gains the moved fn AND a genuinely new untested fn.
+        std::fs::write(
+            root.join("src/dest.rs"),
+            "pub fn existing() {}\npub fn moved_fn() {}\npub fn brand_new_untested() {}\n",
+        )
+        .unwrap();
+
+        let opts = DriftOptions {
+            root: root.to_path_buf(),
+            since: "HEAD".to_string(),
+            source_patterns: vec!["src/**/*.rs".to_string()],
+            test_patterns: vec!["tests/**/*.rs".to_string()],
+        };
+
+        let relocated = relocation_only_source_files(
+            &opts,
+            &["src/source.rs".to_string(), "src/dest.rs".to_string()],
+        );
+
+        assert!(
+            relocated.contains("src/source.rs"),
+            "the pure-removal source file is still a relocation, got {relocated:?}"
+        );
+        assert!(
+            !relocated.contains("src/dest.rs"),
+            "destination with a net-new symbol must NOT be relocation-only, got {relocated:?}"
+        );
+    }
+
+    #[test]
+    fn unconfigured_relevance_flags_source_but_not_docs() {
+        // #8927: with no drift patterns, the conservative fallback must treat
+        // real source as relevant (fail closed) and docs/config as irrelevant.
+        assert!(is_source_relevant_change_unconfigured("src/lib.rs"));
+        assert!(is_source_relevant_change_unconfigured(
+            "crates/foo/src/x.rs"
+        ));
+        assert!(is_source_relevant_change_unconfigured(
+            "tests/thing_test.rs"
+        ));
+
+        assert!(!is_source_relevant_change_unconfigured("README.md"));
+        assert!(!is_source_relevant_change_unconfigured("docs/guide.md"));
+        assert!(!is_source_relevant_change_unconfigured("Cargo.toml"));
+        assert!(!is_source_relevant_change_unconfigured("Cargo.lock"));
+        assert!(!is_source_relevant_change_unconfigured(
+            ".github/workflows/ci.yml"
+        ));
+        assert!(!is_source_relevant_change_unconfigured("LICENSE"));
+    }
+
+    #[test]
+    fn has_usable_patterns_reflects_config() {
+        let configured = DriftOptions::rust(Path::new("/tmp"), "HEAD");
+        assert!(configured.has_usable_patterns());
+
+        let empty = DriftOptions {
+            root: PathBuf::from("/tmp"),
+            since: "HEAD".to_string(),
+            source_patterns: Vec::new(),
+            test_patterns: Vec::new(),
+        };
+        assert!(!empty.has_usable_patterns());
     }
 
     #[test]

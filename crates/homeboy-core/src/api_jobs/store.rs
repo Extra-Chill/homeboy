@@ -13,7 +13,7 @@ use super::persistence::{
     apply_event_retention, compact_terminal_jobs, job_not_found, recovered_terminal_from_result,
     stale_after_restart_classification, timestamp_ms, validate_transition, write_durable_store,
     JobStoreCompactionEvidence, DEFAULT_EVENT_RETENTION_LIMIT,
-    DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
+    DEFAULT_TERMINAL_JOB_RETENTION_BYTES, DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
 };
 #[cfg(test)]
 use super::persistence::{read_durable_store, reconcile_stale_jobs};
@@ -46,6 +46,7 @@ pub(super) struct JobStorePersistence {
     pub(super) path: PathBuf,
     pub(super) event_retention_limit: usize,
     pub(super) terminal_job_retention_limit: usize,
+    pub(super) terminal_job_retention_bytes: usize,
 }
 
 #[derive(Debug, Default)]
@@ -171,12 +172,33 @@ impl JobStore {
         event_retention_limit: usize,
         terminal_job_retention_limit: usize,
     ) -> Result<Self> {
+        Self::open_with_retention_and_terminal_byte_limit(
+            path,
+            event_retention_limit,
+            terminal_job_retention_limit,
+            DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_retention_and_terminal_byte_limit(
+        path: impl Into<PathBuf>,
+        event_retention_limit: usize,
+        terminal_job_retention_limit: usize,
+        terminal_job_retention_bytes: usize,
+    ) -> Result<Self> {
         let path = path.into();
         let mut durable = read_durable_store(&path)?;
         let event_retention_limit = event_retention_limit.max(1);
         let terminal_job_retention_limit = terminal_job_retention_limit.max(1);
+        let terminal_job_retention_bytes = terminal_job_retention_bytes.max(1);
         let next_sequence = reconcile_stale_jobs(&mut durable, event_retention_limit);
-        compact_terminal_jobs(&mut durable, terminal_job_retention_limit);
+        compact_terminal_jobs(
+            &mut durable,
+            event_retention_limit,
+            terminal_job_retention_limit,
+            terminal_job_retention_bytes,
+        );
         let store = Self {
             inner: Arc::new(Mutex::new(JobStoreInner {
                 jobs: durable
@@ -191,6 +213,7 @@ impl JobStore {
                 path,
                 event_retention_limit,
                 terminal_job_retention_limit,
+                terminal_job_retention_bytes,
             })),
             daemon_lease_id: None,
         };
@@ -228,6 +251,7 @@ impl JobStore {
             raw,
             DEFAULT_EVENT_RETENTION_LIMIT,
             DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
+            DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
         )
     }
 
@@ -236,6 +260,21 @@ impl JobStore {
         path: impl Into<PathBuf>,
         event_retention_limit: usize,
         terminal_job_retention_limit: usize,
+    ) -> Result<Self> {
+        Self::open_without_reconciliation_with_retention_and_terminal_byte_limit(
+            path,
+            event_retention_limit,
+            terminal_job_retention_limit,
+            DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_without_reconciliation_with_retention_and_terminal_byte_limit(
+        path: impl Into<PathBuf>,
+        event_retention_limit: usize,
+        terminal_job_retention_limit: usize,
+        terminal_job_retention_bytes: usize,
     ) -> Result<Self> {
         let path = path.into();
         let raw = fs::read(&path).unwrap_or_else(|error| {
@@ -256,6 +295,7 @@ impl JobStore {
             &raw,
             event_retention_limit,
             terminal_job_retention_limit,
+            terminal_job_retention_bytes,
         )
     }
 
@@ -264,13 +304,20 @@ impl JobStore {
         raw: &[u8],
         event_retention_limit: usize,
         terminal_job_retention_limit: usize,
+        terminal_job_retention_bytes: usize,
     ) -> Result<Self> {
         let path = path.into();
         let mut durable: DurableJobStore = serde_json::from_slice(raw)
             .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))?;
         let event_retention_limit = event_retention_limit.max(1);
         let terminal_job_retention_limit = terminal_job_retention_limit.max(1);
-        let compacted = compact_terminal_jobs(&mut durable, terminal_job_retention_limit);
+        let terminal_job_retention_bytes = terminal_job_retention_bytes.max(1);
+        compact_terminal_jobs(
+            &mut durable,
+            event_retention_limit,
+            terminal_job_retention_limit,
+            terminal_job_retention_bytes,
+        );
         let next_sequence = durable
             .jobs
             .iter()
@@ -291,12 +338,11 @@ impl JobStore {
                 path,
                 event_retention_limit,
                 terminal_job_retention_limit,
+                terminal_job_retention_bytes,
             })),
             daemon_lease_id: None,
         };
-        if compacted.is_some() {
-            store.persist()?;
-        }
+        store.persist()?;
         Ok(store)
     }
 
@@ -356,6 +402,17 @@ impl JobStore {
             metadata,
             path_materialization_plan,
             None,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_test_local_runner_job(&self, local_runner: Option<LocalRunnerJob>) -> Job {
+        self.create_with_source_snapshot_metadata_path_materialization_and_local_runner(
+            "runner.exec",
+            None,
+            None,
+            None,
+            local_runner,
         )
     }
 
@@ -582,6 +639,118 @@ impl JobStore {
             local_child_liveness,
             recovered_terminal_agent_task_result,
         )
+    }
+
+    /// Terminalize one explicitly confirmed pre-spawn reservation after its
+    /// daemon owner is proven dead. This intentionally refuses every other
+    /// active job so orphan adoption cannot infer ownership or bulk-recover.
+    pub fn recover_expired_pidless_reservation_for_dead_daemon_lease(
+        &self,
+        expected_lease_id: &str,
+        confirmed_job_ids: &[Uuid],
+    ) -> Result<DaemonLeaseJobDiagnostics> {
+        let [job_id] = confirmed_job_ids else {
+            return Err(Error::validation_invalid_argument(
+                "confirm_untracked_child_dead",
+                "exactly one job ID must be confirmed for expired PID-less reservation recovery",
+                Some(expected_lease_id.to_string()),
+                None,
+            ));
+        };
+        let now = timestamp_ms();
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let active_job_ids = inner
+            .jobs
+            .values()
+            .filter(|stored| {
+                matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                    && stored.job.daemon_lease_id.as_deref() == Some(expected_lease_id)
+            })
+            .map(|stored| stored.job.id)
+            .collect::<Vec<_>>();
+        if active_job_ids.as_slice() != [*job_id] {
+            return Err(Error::validation_invalid_argument(
+                "confirm_untracked_child_dead",
+                format!(
+                    "expired PID-less reservation recovery requires the only active job for lease `{expected_lease_id}`; active jobs: {}",
+                    active_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                ),
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        let stored = inner
+            .jobs
+            .get_mut(job_id)
+            .expect("confirmed active job exists");
+        let reservation = stored.local_child.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "confirm_untracked_child_dead",
+                "confirmed job has no local child reservation",
+                Some(job_id.to_string()),
+                None,
+            )
+        })?;
+        if stored.job.status != JobStatus::Queued
+            || reservation.process.is_some()
+            || reservation
+                .reservation_expires_at_ms
+                .is_none_or(|expires_at| expires_at > now)
+        {
+            return Err(Error::validation_invalid_argument(
+                "confirm_untracked_child_dead",
+                "confirmed job is not an expired PID-less pre-spawn reservation",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        let terminal_result = serde_json::json!({
+            "status": JobStatus::Failed,
+            "reason": "operator_confirmed_expired_pidless_reservation_after_dead_daemon_lease",
+            "retryable": true,
+            "expected_lease_id": expected_lease_id,
+            "reservation_id": reservation.reservation_id,
+            "reservation_expires_at_ms": reservation.reservation_expires_at_ms,
+            "operator_confirmation": true,
+        });
+        stored.job.status = JobStatus::Failed;
+        stored.job.updated_at_ms = now;
+        stored.job.finished_at_ms = Some(now);
+        stored.job.stale_reason =
+            Some("local child reservation lease expired before spawn".to_string());
+        for (kind, message) in [
+            (
+                JobEventKind::Error,
+                "expired PID-less reservation recovered after dead daemon lease",
+            ),
+            (
+                JobEventKind::Result,
+                "retryable terminal reservation recovery",
+            ),
+            (
+                JobEventKind::Status,
+                "job marked failed after explicit expired reservation recovery",
+            ),
+        ] {
+            let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+            stored.events.push(JobEvent {
+                sequence,
+                job_id: *job_id,
+                kind,
+                timestamp_ms: now,
+                message: Some(message.to_string()),
+                data: Some(terminal_result.clone()),
+            });
+        }
+        apply_event_retention(&mut stored.events, self.event_retention_limit());
+        stored.job.event_count = stored.events.len();
+        drop(inner);
+        self.persist()?;
+        Ok(DaemonLeaseJobDiagnostics {
+            expected_lease_id: expected_lease_id.to_string(),
+            matching_job_ids: vec![*job_id],
+            ..DaemonLeaseJobDiagnostics::default()
+        })
     }
 
     /// Reconcile only jobs whose linked durable run has already reached a
@@ -1377,6 +1546,84 @@ impl JobStore {
                 store: handle_store,
                 job_id,
             };
+            let _ = job_handle.progress(serde_json::json!({
+                "phase": "local_child_worker_started",
+            }));
+            match run(job_handle) {
+                Ok(output) => {
+                    let _ = worker_store.complete(job_id, serde_json::to_value(output).ok());
+                }
+                Err(error) => {
+                    let error_message = error.to_string();
+                    if worker_store
+                        .get(job_id)
+                        .is_ok_and(|job| job.status == JobStatus::Queued)
+                    {
+                        let _ = worker_store.append_event(
+                            job_id,
+                            JobEventKind::Progress,
+                            Some("local child worker failed before child identity".to_string()),
+                            Some(serde_json::json!({
+                                "phase": "local_child_worker_failed_before_child_identity",
+                                "error": error_message,
+                                "error_code": error.code.as_str(),
+                                "error_details": error.details,
+                            })),
+                        );
+                    }
+                    let _ = worker_store.fail(job_id, error_message);
+                }
+            }
+        });
+        JobRunner { job_id, handle }
+    }
+
+    pub(crate) fn run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner<
+        T,
+        F,
+    >(
+        &self,
+        operation: impl Into<String>,
+        source_snapshot: Option<SourceSnapshot>,
+        metadata: Option<Value>,
+        path_materialization_plan: Option<PathMaterializationPlan>,
+        local_runner: LocalRunnerJob,
+        capacity: usize,
+        run: F,
+    ) -> JobRunner
+    where
+        T: Serialize + Send + 'static,
+        F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
+    {
+        let job = self.create_with_source_snapshot_metadata_path_materialization_and_local_runner(
+            operation,
+            source_snapshot,
+            metadata,
+            path_materialization_plan,
+            Some(local_runner.clone()),
+        );
+        let job_id = job.id;
+        let handle_store = self.clone();
+        let worker_store = self.clone();
+        let handle = thread::spawn(move || {
+            let job_handle = JobHandle {
+                store: handle_store,
+                job_id,
+            };
+            loop {
+                if job_handle.is_cancelled() {
+                    return;
+                }
+                match worker_store.reserve_local_child_with_runner_capacity(
+                    job_id,
+                    &local_runner.runner_id,
+                    capacity,
+                ) {
+                    Ok(true) => break,
+                    Ok(false) => thread::sleep(std::time::Duration::from_millis(10)),
+                    Err(_) => return,
+                }
+            }
             match run(job_handle) {
                 Ok(output) => {
                     let _ = worker_store.complete(job_id, serde_json::to_value(output).ok());
@@ -1472,6 +1719,29 @@ impl JobStore {
     }
 
     pub(crate) fn reserve_local_child_at(&self, job_id: Uuid, now: u64) -> Result<()> {
+        self.reserve_local_child_at_with_runner_capacity(job_id, now, None)
+            .map(|_| ())
+    }
+
+    pub(crate) fn reserve_local_child_with_runner_capacity(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        capacity: usize,
+    ) -> Result<bool> {
+        self.reserve_local_child_at_with_runner_capacity(
+            job_id,
+            timestamp_ms(),
+            Some((runner_id, capacity)),
+        )
+    }
+
+    fn reserve_local_child_at_with_runner_capacity(
+        &self,
+        job_id: Uuid,
+        now: u64,
+        runner_capacity: Option<(&str, usize)>,
+    ) -> Result<bool> {
         let reservation_id = Uuid::new_v4().to_string();
         let reservation_expires_at_ms = now.saturating_add(LOCAL_CHILD_RESERVATION_LEASE_MS);
         let mut inner = self.inner.lock().expect("job store mutex poisoned");
@@ -1480,6 +1750,20 @@ impl JobStore {
             .get(&job_id)
             .cloned()
             .ok_or_else(|| job_not_found(job_id))?;
+        if let Some((runner_id, capacity)) = runner_capacity {
+            let active = inner.jobs.values().filter(|candidate| {
+                candidate.job.id != job_id
+                    && matches!(candidate.job.status, JobStatus::Queued | JobStatus::Running)
+                    && candidate.local_child.is_some()
+                    && candidate
+                        .local_runner
+                        .as_ref()
+                        .is_some_and(|runner| runner.runner_id == runner_id)
+            });
+            if active.count() >= capacity {
+                return Ok(false);
+            }
+        }
         let stored = inner.jobs.get_mut(&job_id).expect("job exists");
         if stored.job.status != JobStatus::Queued {
             return Err(Error::validation_invalid_argument(
@@ -1513,23 +1797,25 @@ impl JobStore {
                 jobs: inner.jobs.values().cloned().collect(),
                 compaction: inner.compaction.clone(),
             };
-            let compacted =
-                compact_terminal_jobs(&mut durable, persistence.terminal_job_retention_limit);
+            compact_terminal_jobs(
+                &mut durable,
+                persistence.event_retention_limit,
+                persistence.terminal_job_retention_limit,
+                persistence.terminal_job_retention_bytes,
+            );
             if let Err(error) = write_durable_store(&persistence.path, &durable) {
                 inner.jobs.insert(job_id, prior);
                 return Err(error);
             }
-            if compacted.is_some() {
-                inner.jobs = durable
-                    .jobs
-                    .iter()
-                    .cloned()
-                    .map(|stored| (stored.job.id, stored))
-                    .collect();
-                inner.compaction = durable.compaction;
-            }
+            inner.jobs = durable
+                .jobs
+                .iter()
+                .cloned()
+                .map(|stored| (stored.job.id, stored))
+                .collect();
+            inner.compaction = durable.compaction;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Terminalize expired pre-spawn reservations. A PID-bound child has
@@ -1786,21 +2072,23 @@ impl JobStore {
                 jobs: inner.jobs.values().cloned().collect(),
                 compaction: inner.compaction.clone(),
             };
-            let compacted =
-                compact_terminal_jobs(&mut durable, persistence.terminal_job_retention_limit);
+            compact_terminal_jobs(
+                &mut durable,
+                persistence.event_retention_limit,
+                persistence.terminal_job_retention_limit,
+                persistence.terminal_job_retention_bytes,
+            );
             if let Err(error) = write_durable_store(&persistence.path, &durable) {
                 *inner.jobs.get_mut(&job_id).expect("job exists") = prior;
                 return Err(error);
             }
-            if compacted.is_some() {
-                inner.jobs = durable
-                    .jobs
-                    .iter()
-                    .cloned()
-                    .map(|stored| (stored.job.id, stored))
-                    .collect();
-                inner.compaction = durable.compaction;
-            }
+            inner.jobs = durable
+                .jobs
+                .iter()
+                .cloned()
+                .map(|stored| (stored.job.id, stored))
+                .collect();
+            inner.compaction = durable.compaction;
         }
         Ok(started)
     }
@@ -1849,7 +2137,7 @@ impl JobStore {
         )
     }
 
-    fn event_retention_limit(&self) -> usize {
+    pub(super) fn event_retention_limit(&self) -> usize {
         self.persistence
             .as_ref()
             .map(|persistence| persistence.event_retention_limit)
@@ -1863,6 +2151,13 @@ impl JobStore {
             .unwrap_or(usize::MAX)
     }
 
+    fn terminal_job_retention_bytes(&self) -> usize {
+        self.persistence
+            .as_ref()
+            .map(|persistence| persistence.terminal_job_retention_bytes)
+            .unwrap_or(usize::MAX)
+    }
+
     pub(super) fn persist(&self) -> Result<()> {
         let Some(persistence) = &self.persistence else {
             return Ok(());
@@ -1873,17 +2168,20 @@ impl JobStore {
             jobs: inner.jobs.values().cloned().collect(),
             compaction: inner.compaction.clone(),
         };
-        let compacted = compact_terminal_jobs(&mut durable, self.terminal_job_retention_limit());
+        compact_terminal_jobs(
+            &mut durable,
+            self.event_retention_limit(),
+            self.terminal_job_retention_limit(),
+            self.terminal_job_retention_bytes(),
+        );
         write_durable_store(&persistence.path, &durable)?;
-        if compacted.is_some() {
-            inner.jobs = durable
-                .jobs
-                .iter()
-                .cloned()
-                .map(|stored| (stored.job.id, stored))
-                .collect();
-            inner.compaction = durable.compaction;
-        }
+        inner.jobs = durable
+            .jobs
+            .iter()
+            .cloned()
+            .map(|stored| (stored.job.id, stored))
+            .collect();
+        inner.compaction = durable.compaction;
         Ok(())
     }
 }

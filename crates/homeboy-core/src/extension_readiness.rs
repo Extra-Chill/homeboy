@@ -4,7 +4,8 @@ use crate::project::Project;
 use crate::server::execute_local_command_in_dir;
 use homeboy_engine_primitives::template;
 
-use super::{load_extension, ExtensionManifest};
+use crate::extension_store::load_extension;
+use homeboy_extension_contract::ExtensionManifest;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExtensionReadyStatus {

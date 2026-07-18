@@ -18,6 +18,9 @@ mod tests;
 
 pub(crate) use run::run_github_release;
 
+#[cfg(test)]
+pub(crate) use run::validate_declared_build_artifact;
+
 // `gh` availability/auth/existence probes are reused by the sibling `tagging`
 // step to gate tag-availability preflight, so they are part of the module's
 // non-test surface.
