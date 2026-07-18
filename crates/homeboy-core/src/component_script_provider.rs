@@ -45,6 +45,16 @@ pub trait ComponentScriptRunner: Send + Sync {
         extra_env: &[(String, String)],
         script_args: &[String],
     ) -> Result<ComponentScriptOutput>;
+
+    /// Run a pre-resolved extension execution context against a component.
+    /// Used by dependency-provider extensions that carry their own context.
+    fn run_with_context(
+        &self,
+        context: &crate::extension_execution::ExtensionExecutionContext,
+        component: &Component,
+        path_override: Option<String>,
+        script_args: &[String],
+    ) -> Result<ComponentScriptOutput>;
 }
 
 fn provider_slot() -> &'static Mutex<Option<Box<dyn ComponentScriptRunner>>> {
@@ -59,6 +69,25 @@ pub fn register_component_script_runner(provider: Box<dyn ComponentScriptRunner>
         .lock()
         .expect("component script runner lock");
     *slot = Some(provider);
+}
+
+/// Run a pre-resolved execution context through the registered provider.
+pub fn run_with_context(
+    context: &crate::extension_execution::ExtensionExecutionContext,
+    component: &Component,
+    path_override: Option<String>,
+    script_args: &[String],
+) -> Result<ComponentScriptOutput> {
+    let slot = provider_slot()
+        .lock()
+        .expect("component script runner lock");
+    match slot.as_deref() {
+        Some(provider) => provider.run_with_context(context, component, path_override, script_args),
+        None => Err(Error::internal_io(
+            "no component-script runner registered; the extension subsystem is not available",
+            None,
+        )),
+    }
 }
 
 /// Run a component's scripts for a capability through the registered provider.
