@@ -87,8 +87,8 @@ pub use homeboy_extension_contract::update_output::{
 };
 pub use homeboy_extension_contract::version::{parse_extension_version, VersionConstraint};
 pub use homeboy_extension_contract::{DeployArchiveInstallPolicy, DeployRequiredHeader};
-pub use lifecycle::source_metadata::resolve_source_url;
 pub use lifecycle::source_metadata::SourceMetadataRepair;
+pub use lifecycle::source_metadata::{resolve_source_url, resolve_source_url_read_only};
 pub use lifecycle::{
     derive_id_from_url, install, install_for_component, install_with_revision,
     read_source_revision, read_source_url, refresh, slugify_id, uninstall, update,

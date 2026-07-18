@@ -404,23 +404,46 @@ fn run_targeted_runner_upgrade(
 fn installed_extension_catalog() -> Vec<ExtensionUpgradeEntry> {
     extension::available_extension_ids()
         .into_iter()
-        .filter_map(|extension_id| {
-            let manifest = extension::load_extension(&extension_id).ok()?;
-            Some(ExtensionUpgradeEntry {
-                extension_id: extension_id.clone(),
-                old_version: manifest.version.clone(),
-                new_version: manifest.version,
-                linked: false,
-                source_path: None,
-                git_root: None,
-                source_url: manifest
-                    .extension_path
-                    .as_deref()
-                    .and_then(|path| extension::read_source_url(Path::new(path))),
-                source_revision: extension::read_source_revision(&extension_id),
-                source_update: Default::default(),
-            })
-        })
+        .map(
+            |extension_id| match extension::load_extension(&extension_id) {
+                Ok(manifest) => {
+                    let source_url = extension::resolve_source_url_read_only(&extension_id);
+                    ExtensionUpgradeEntry {
+                        extension_id: extension_id.clone(),
+                        old_version: manifest.version.clone(),
+                        new_version: manifest.version,
+                        linked: extension::is_extension_linked(&extension_id),
+                        source_path: manifest.extension_path,
+                        git_root: None,
+                        source_url: source_url.as_ref().ok().cloned(),
+                        source_revision: extension::read_source_revision(&extension_id),
+                        source_update: homeboy_core::extension::ExtensionSourceUpdate {
+                            update_note: source_url.err().map(|err| {
+                                format!("unrefreshable extension provenance: {}", err.message)
+                            }),
+                            ..Default::default()
+                        },
+                    }
+                }
+                Err(err) => ExtensionUpgradeEntry {
+                    extension_id,
+                    old_version: String::new(),
+                    new_version: String::new(),
+                    linked: false,
+                    source_path: None,
+                    git_root: None,
+                    source_url: None,
+                    source_revision: None,
+                    source_update: homeboy_core::extension::ExtensionSourceUpdate {
+                        update_note: Some(format!(
+                            "unrefreshable extension manifest: {}",
+                            err.message
+                        )),
+                        ..Default::default()
+                    },
+                },
+            },
+        )
         .collect()
 }
 

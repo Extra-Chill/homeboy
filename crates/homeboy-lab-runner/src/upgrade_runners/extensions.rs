@@ -30,10 +30,10 @@ pub fn sync_runner_extensions(
                 extension_id: extension.extension_id.clone(),
                 source_revision: extension.source_revision.clone().unwrap_or_default(),
                 synced: false,
-                detail: Some(
+                detail: Some(extension.source_update.update_note.clone().unwrap_or_else(|| {
                     "unrefreshable: installed extension lacks reproducible source URL or revision"
-                        .to_string(),
-                ),
+                        .to_string()
+                })),
                 recovery_commands: Vec::new(),
             });
             continue;
