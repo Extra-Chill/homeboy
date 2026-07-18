@@ -294,8 +294,11 @@ fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
         })
         .expect("controller proxy recorded before handoff");
         rewrite_record_for_test("expired-handoff-late-acceptance", |record| {
-            record.metadata["handoff_acceptance"]["deadline_at"] =
-                json!("2000-01-01T00:00:00+00:00");
+            record
+                .lab_handoff
+                .as_mut()
+                .expect("typed handoff")
+                .acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
         })
         .expect("expire acceptance deadline");
 
@@ -314,6 +317,7 @@ fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
         })
         .expect("late acceptance supersedes only the synthetic expiry cancellation");
         assert_eq!(accepted.state, AgentTaskRunState::Running);
+        assert!(accepted.has_accepted_lab_handoff());
         assert_eq!(accepted.metadata["handoff_acceptance"]["state"], "accepted");
         assert_eq!(
             accepted.metadata["runner_job_id"],
@@ -323,6 +327,16 @@ fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
             accepted.metadata["runner_execution_record"]["status"],
             "running"
         );
+        let accepted_with_stale_deadline =
+            rewrite_record_for_test("expired-handoff-late-acceptance", |record| {
+                record
+                    .lab_handoff
+                    .as_mut()
+                    .expect("typed accepted handoff")
+                    .acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
+            })
+            .expect("make the historical acceptance deadline stale");
+        assert!(!accepted_with_stale_deadline.has_expired_pending_lab_handoff(chrono::Utc::now()));
     });
 }
 

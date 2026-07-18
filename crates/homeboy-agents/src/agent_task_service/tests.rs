@@ -799,8 +799,11 @@ fn reconcile_terminalizes_an_unaccepted_controller_handoff_after_its_deadline() 
         )
         .expect("controller handoff persisted before runner acceptance");
         agent_task_lifecycle::rewrite_record_for_test("controller-handoff-unaccepted", |record| {
-            record.metadata["handoff_acceptance"]["deadline_at"] =
-                serde_json::json!("2000-01-01T00:00:00+00:00");
+            record
+                .lab_handoff
+                .as_mut()
+                .expect("typed handoff")
+                .acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
         })
         .expect("expire acceptance deadline");
 
