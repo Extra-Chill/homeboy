@@ -420,7 +420,12 @@ fn local_child_worker_persists_typed_setup_failure_before_child_identity() {
             None,
             None,
             None,
-            move |_job| Err::<serde_json::Value, _>(Error::internal_unexpected("setup failed")),
+            move |_job| {
+                Err::<serde_json::Value, _>(Error::internal_io(
+                    "spawn failed",
+                    Some("execute runner command".to_string()),
+                ))
+            },
         );
     runner.handle.join().expect("worker exits");
 
@@ -439,7 +444,10 @@ fn local_child_worker_persists_typed_setup_failure_before_child_identity() {
         .position(|event| {
             event.data.as_ref().is_some_and(|data| {
                 data["phase"] == "local_child_worker_failed_before_child_identity"
-                    && data["error"] == "setup failed"
+                    && data["error"] == "IO error"
+                    && data["error_code"] == "internal.io_error"
+                    && data["error_details"]["error"] == "spawn failed"
+                    && data["error_details"]["context"] == "execute runner command"
             })
         })
         .expect("typed setup failure event");
@@ -449,7 +457,7 @@ fn local_child_worker_persists_typed_setup_failure_before_child_identity() {
             && event
                 .message
                 .as_deref()
-                .is_some_and(|message| message.contains("setup failed"))
+                .is_some_and(|message| message == "IO error")
     }));
     assert_eq!(
         store.get(runner.job_id).expect("job").status,
