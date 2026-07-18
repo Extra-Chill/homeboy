@@ -172,10 +172,11 @@ fn detached_lab_run_plan_uses_one_identity_for_status_logs_artifacts_and_cancell
         assert!(!logs.events.is_empty());
         assert!(artifacts.artifacts.is_empty());
 
-        let _cancel =
-            super::cancellation::test_cancel_hook::install(Box::new(|runner_id, job_id| {
+        let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
+            |runner_id, job_id, durable_run_id| {
                 assert_eq!(runner_id, "homeboy-lab");
                 assert_eq!(job_id, "job-8341");
+                assert_eq!(durable_run_id, "agent-task-detached-run-plan");
                 Ok((
                     homeboy_core::api_jobs::Job {
                         id: uuid::Uuid::new_v4(),
@@ -201,7 +202,8 @@ fn detached_lab_run_plan_uses_one_identity_for_status_logs_artifacts_and_cancell
                     },
                     Vec::new(),
                 ))
-            }));
+            },
+        ));
         let cancelled = cancel_run(run_id, Some("operator requested cancellation"))
             .expect("canonical cancellation reaches the runner job");
         assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
