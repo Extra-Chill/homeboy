@@ -131,9 +131,25 @@ pub fn adopt_cook_candidate(
 pub fn adopt_cook_candidate_with_dispatcher(
     cook_or_run_id: &str,
     candidate_ref: &str,
+    reconstruct_dispatcher: impl FnOnce(
+        &Value,
+    ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    adopt_cook_candidate_with_dispatcher_and_backend(
+        cook_or_run_id,
+        candidate_ref,
+        reconstruct_dispatcher,
+        &mut RealAgentTaskPrFinalizationBackend,
+    )
+}
+
+fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBackend>(
+    cook_or_run_id: &str,
+    candidate_ref: &str,
     _reconstruct_dispatcher: impl FnOnce(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+    backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let (record, recipe) = resolve_adoption_target(cook_or_run_id)?;
     let cook_id = &recipe.cook_id;
@@ -177,7 +193,7 @@ pub fn adopt_cook_candidate_with_dispatcher(
             let (source, path) = promotion_source(&record.run_id)?;
             (source, path, None)
         };
-    let promotion = promote_with_checkpoint(
+    let mut promotion = promote_with_checkpoint(
         AgentTaskPromotionOptions {
             source,
             source_run_id: Some(record.run_id.clone()),
@@ -204,15 +220,15 @@ pub fn adopt_cook_candidate_with_dispatcher(
             agent_task_lifecycle::record_promotion(&record.run_id, checkpoint).map(|_| ())
         },
     )?;
-    let mut promotion_value = serde_json::to_value(&promotion)
-        .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    promotion_value["provenance"]["adoption"] = serde_json::json!({
+    promotion.provenance["adoption"] = serde_json::json!({
         "source_run_id": record.run_id,
         "candidate_ref": candidate_ref,
         "source_worktree_path": options.source_worktree_path,
         "recorded_task_base": options.task_base_sha,
         "recovery": recovery,
     });
+    let promotion_value = serde_json::to_value(&promotion)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
     agent_task_lifecycle::record_promotion(&record.run_id, promotion_value)?;
     let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
         source_request,
@@ -254,7 +270,8 @@ pub fn adopt_cook_candidate_with_dispatcher(
             0,
         ));
     }
-    let finalization = finalize_or_load_cook_pr(&options, &record.run_id, &promotion)?;
+    let finalization =
+        finalize_or_load_cook_pr_with_backend(&options, &record.run_id, &promotion, backend)?;
     let status = finalization["status"]
         .as_str()
         .unwrap_or("unknown")
@@ -2625,8 +2642,7 @@ mod tests {
             std::fs::write(
                 &provider,
                 format!(
-                    "#!/bin/sh\ncat >/dev/null\ngit -C {source} diff --binary {base} {candidate} | git -C {target} apply --whitespace=nowarn\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
-                    source = source.display(),
+                    "#!/bin/sh\ncat >/dev/null\ngit -C {target} fetch origin {candidate}\ngit -C {target} checkout --detach FETCH_HEAD\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
                     target = target.display(),
                 ),
             )
@@ -2651,7 +2667,9 @@ mod tests {
             options.task_base_sha = Some(base.clone());
             options.provider_command = Some(provider.display().to_string());
             options.gates.verify = vec!["test \"$(cat lib.rs)\" = candidate".to_string()];
-            options.no_finalize = true;
+            options.no_finalize = false;
+            options.head = Some("fix/8058".to_string());
+            options.ai_model = Some("openai/gpt-5.6-terra".to_string());
             let mut recipe =
                 super::super::persist_initial_recipe(&options).expect("persist recipe");
             recipe.runtime_generation = "homeboy 0.291.2+96820fe8cc53".to_string();
@@ -2704,11 +2722,20 @@ mod tests {
                 .message
                 .contains("candidate revision must equal the recorded source worktree HEAD"));
 
-            let result = adopt_cook_candidate(cook_id, &candidate)
-                .expect("historical recipe adoption succeeds");
+            let mut backend = CaptureBackend {
+                hydrate_run_id: Some(run_id.to_string()),
+                ..Default::default()
+            };
+            let result = adopt_cook_candidate_with_dispatcher_and_backend(
+                cook_id,
+                &candidate,
+                |_| Ok(None),
+                &mut backend,
+            )
+            .expect("historical recipe adoption succeeds");
 
             assert_eq!(result.exit_code, 0);
-            assert_eq!(result.value.status, "green_no_finalize");
+            assert_eq!(result.value.status, "review_ready");
             assert_eq!(result.value.attempts.len(), 1);
             assert_eq!(
                 result.value.attempts[0]
@@ -2733,6 +2760,7 @@ mod tests {
                     ["provider_executions_consumed"],
                 0
             );
+            assert!(backend.committed && backend.pushed && backend.created);
         });
     }
 
@@ -2858,10 +2886,14 @@ mod tests {
         committed: bool,
         pushed: bool,
         created: bool,
+        hydrate_run_id: Option<String>,
     }
 
     impl AgentTaskPrFinalizationBackend for CaptureBackend {
         fn hydrate_run(&mut self, _run_id: &str) -> Result<RunLifecycleRecord> {
+            if let Some(run_id) = self.hydrate_run_id.as_deref() {
+                return RealAgentTaskPrFinalizationBackend.hydrate_run(run_id);
+            }
             Ok(RunLifecycleRecord {
                 execution: RunExecutionLifecycle {
                     state: RunExecutionState::Succeeded,
@@ -2881,6 +2913,9 @@ mod tests {
             })
         }
         fn hydrate_gate_proof(&mut self, run_id: &str) -> Result<AgentTaskPrDurableGateProof> {
+            if self.hydrate_run_id.is_some() {
+                return RealAgentTaskPrFinalizationBackend.hydrate_gate_proof(run_id);
+            }
             Ok(AgentTaskPrDurableGateProof {
                 run_id: run_id.to_string(),
                 promotion: promotion(run_id),
