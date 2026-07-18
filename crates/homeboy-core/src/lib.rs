@@ -75,7 +75,7 @@ pub mod cleanup;
 // reference code_audit's provider traits) keep working unchanged.
 pub use homeboy_code_audit as code_audit;
 pub mod command_execution_plan;
-pub mod command_invocation;
+pub use homeboy_command_contract as command_invocation;
 pub mod component;
 pub mod context;
 pub mod controller_pin_reference;
