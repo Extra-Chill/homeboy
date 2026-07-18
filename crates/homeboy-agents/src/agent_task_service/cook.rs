@@ -413,16 +413,24 @@ where
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior.
-    if options.provider_command.is_none() && options.provider_invocation.is_none() {
+    if options.attempt_dispatcher.is_none()
+        && options.provider_command.is_none()
+        && options.provider_invocation.is_none()
+    {
         crate::agent_task_promotion::preflight_configured_workspace_provider(&options.to_worktree)?;
     }
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
+    let existing_recipe = super::recipe_exists(&options.cook_id)?;
     let recipe = super::persist_initial_recipe(&options)?;
     // A recipe can survive an interruption before its first lifecycle record.
     // Resume from the validated durable inputs so ambient transport state cannot
     // turn replay into a conflicting new cook.
-    let options = super::reconstruct_options_with_dispatcher(&recipe, options.attempt_dispatcher)?;
+    let options = if existing_recipe {
+        super::reconstruct_options_with_dispatcher(&recipe, options.attempt_dispatcher)?
+    } else {
+        options
+    };
     let max_attempts = options.max_attempts.max(1);
     let mut attempts = Vec::new();
     let mut run_id = options.initial_run_id.clone();
@@ -2007,7 +2015,7 @@ mod tests {
 
         fn dispatch_attempt(
             &self,
-            plan: AgentTaskPlan,
+            _plan: AgentTaskPlan,
             run_id: &str,
             _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
         ) -> Result<()> {
@@ -2021,7 +2029,6 @@ mod tests {
                     None,
                 ));
             }
-            agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
             agent_task_lifecycle::record_detached_lab_run(
                 agent_task_lifecycle::DetachedLabRunRecord {
                     run_id,
@@ -2283,27 +2290,32 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let barrier = Arc::new(Barrier::new(2));
             let entered = Arc::new(AtomicUsize::new(0));
+            let first = batch_cook_options(
+                "first",
+                Arc::new(BatchAttemptDispatcher {
+                    barrier: Arc::clone(&barrier),
+                    entered: Arc::clone(&entered),
+                    fail: true,
+                }),
+            );
+            let second = batch_cook_options(
+                "second",
+                Arc::new(BatchAttemptDispatcher {
+                    barrier,
+                    entered: Arc::clone(&entered),
+                    fail: false,
+                }),
+            );
+            // The batch owns concurrent dispatch, not concurrent controller
+            // admission; materialize both durable run identities first.
+            agent_task_lifecycle::submit_plan(&first.initial_plan, Some(&first.initial_run_id))
+                .expect("submit first attempt");
+            agent_task_lifecycle::submit_plan(&second.initial_plan, Some(&second.initial_run_id))
+                .expect("submit second attempt");
             let result = run_cook_batch(
                 AgentTaskCookBatchOptions {
                     batch_id: "fixture-batch".to_string(),
-                    cooks: vec![
-                        batch_cook_options(
-                            "first",
-                            Arc::new(BatchAttemptDispatcher {
-                                barrier: Arc::clone(&barrier),
-                                entered: Arc::clone(&entered),
-                                fail: true,
-                            }),
-                        ),
-                        batch_cook_options(
-                            "second",
-                            Arc::new(BatchAttemptDispatcher {
-                                barrier,
-                                entered: Arc::clone(&entered),
-                                fail: false,
-                            }),
-                        ),
-                    ],
+                    cooks: vec![first, second],
                     max_concurrency: 2,
                 },
                 UnusedExecutor,
@@ -2324,7 +2336,7 @@ mod tests {
                     .as_ref()
                     .expect("failed cook report")
                     .status,
-                "provider_failure"
+                "retries_exhausted"
             );
             assert_eq!(result.value.cooks[1].cook_id, "second");
             assert_eq!(result.value.cooks[1].exit_code, 0);
