@@ -137,7 +137,10 @@ impl WorkspaceMaterializationOperation {
                     .join(" ")
             ),
             Self::RecreateTempDir => "rm -rf \"$tmp\" && mkdir -p \"$tmp\"".to_string(),
-            Self::ExtractTarStdinToTemp => "tar -C \"$tmp\" -xf -".to_string(),
+            // v3 snapshot provenance binds the owner execute capability. Tar's
+            // default extraction applies the runner umask, which can erase that
+            // bit before the verifier sees the materialized tree.
+            Self::ExtractTarStdinToTemp => "tar -p -C \"$tmp\" -xf -".to_string(),
             Self::WriteStdinToBundle => {
                 "rm -rf \"$tmp\" \"$bundle\" && cat > \"$bundle\"".to_string()
             }

@@ -1239,6 +1239,92 @@ fn workspace_content_hash_owner_executable_policy_normalizes_non_owner_execute_b
 
 #[test]
 #[cfg(unix)]
+fn snapshot_materialization_preserves_v3_owner_executable_capability_across_runner_umask() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let controller = tempfile::tempdir().expect("macOS controller workspace");
+    let runner = tempfile::tempdir().expect("Linux runner workspace");
+    let controller_tool = controller.path().join("tool");
+    let runner_tool = runner.path().join("tool");
+    fs::write(&controller_tool, "#!/bin/sh\nexit 0\n").expect("controller tool");
+    fs::set_permissions(&controller_tool, fs::Permissions::from_mode(0o755))
+        .expect("controller executable permissions");
+
+    let install = snapshot_install_command(&runner.path().display().to_string())
+        .replacen("tar -p -C", "(umask 0111; tar -p -C", 1)
+        .replacen("-xf - &&", "-xf -) &&", 1);
+    let target = format!("sh -c {}", homeboy_core::engine::shell::quote_arg(&install));
+    super::super::util::run_shell_command(
+        &snapshot_archive_command(controller.path(), &target, &[]),
+        "materialize restrictive-umask snapshot",
+    )
+    .expect("snapshot materialization");
+
+    assert_eq!(
+        fs::metadata(&runner_tool)
+            .expect("runner tool metadata")
+            .permissions()
+            .mode()
+            & 0o100,
+        0o100,
+        "the runner umask must not erase the v3-bound owner execute capability"
+    );
+    assert_eq!(
+        workspace_content_hash_for_policy(
+            controller.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+        )
+        .expect("controller hash"),
+        workspace_content_hash_for_policy(
+            runner.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+        )
+        .expect("runner hash"),
+        "controller and runner must verify the same v3 canonical snapshot"
+    );
+
+    fs::set_permissions(&runner_tool, fs::Permissions::from_mode(0o644))
+        .expect("remove runner executable capability");
+    assert_ne!(
+        workspace_content_hash_for_policy(
+            controller.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+        )
+        .expect("controller hash"),
+        workspace_content_hash_for_policy(
+            runner.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+        )
+        .expect("runner executable-drift hash"),
+        "meaningful owner-executable drift must remain fail-closed"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn workspace_content_hash_rejects_dereferenced_symlink_target_drift() {
+    let controller = tempfile::tempdir().expect("controller workspace");
+    let dependency = tempfile::tempdir().expect("dependency workspace");
+    let target = dependency.path().join("tool");
+    fs::write(&target, "first target\n").expect("first target contents");
+    std::os::unix::fs::symlink(&target, controller.path().join("tool"))
+        .expect("controller symlink");
+
+    let expected = workspace_content_hash(controller.path(), &[]).expect("initial hash");
+    fs::write(&target, "changed target\n").expect("changed target contents");
+    assert_ne!(
+        workspace_content_hash(controller.path(), &[]).expect("changed hash"),
+        expected,
+        "the dereferenced symlink target content remains provenance-bound"
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn workspace_content_hash_versions_legacy_any_execute_separately_from_owner_execute() {
     use std::os::unix::fs::PermissionsExt;
 

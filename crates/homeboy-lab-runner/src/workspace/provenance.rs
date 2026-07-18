@@ -633,9 +633,9 @@ fn content_manifest_difference(
         }
     }
     format!(
-        " entry diagnostics: {} differing logical entries in a bounded {}-entry sample (controller total {}, runner total {}): {};",
+        " entry diagnostics: {} differing logical entries in a bounded {}-entry difference sample (controller total {}, runner total {}): {};",
         differing.len(),
-        expected.entries.len().max(actual.entries.len()),
+        CONTENT_MANIFEST_DIFFERENCE_LIMIT,
         expected.entry_count,
         actual.entry_count,
         if differing.is_empty() { "sample metadata matched; content differs outside bounded metadata".to_string() } else { differing.join(", ") },
@@ -645,14 +645,24 @@ fn content_manifest_difference(
 fn content_manifest_entry_difference(
     expected: &WorkspaceContentManifestEntry,
     actual: &WorkspaceContentManifestEntry,
-) -> &'static str {
+) -> String {
+    let mut differences = Vec::new();
     if expected.kind != actual.kind {
-        "kind changed"
-    } else if expected.owner_executable != actual.owner_executable {
-        "owner-executable capability changed"
-    } else {
-        "metadata changed"
+        differences.push("kind changed");
     }
+    if expected.sha256 != actual.sha256 {
+        differences.push("content digest changed");
+    }
+    if expected.bytes != actual.bytes {
+        differences.push("byte count changed");
+    }
+    if expected.owner_executable != actual.owner_executable {
+        differences.push("owner-executable capability changed");
+    }
+    if differences.is_empty() {
+        differences.push("metadata changed");
+    }
+    differences.join(", ")
 }
 
 fn validate_content_manifest(
@@ -1055,9 +1065,9 @@ mod tests {
         )
         .expect_err("changed materialization must fail");
 
-        assert!(error.contains("entry diagnostics: 0 differing logical entries"));
-        assert!(error.contains("sample metadata matched; content differs outside bounded metadata"));
-        assert!(error.contains("bounded 16-entry sample"));
+        assert!(error.contains("entry diagnostics: 1 differing logical entries"));
+        assert!(error.contains("content digest changed"));
+        assert!(error.contains("bounded 8-entry difference sample"));
         assert!(!error.contains("controller secret"));
         assert!(!error.contains("runner mutation"));
     }
