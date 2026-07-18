@@ -359,6 +359,17 @@ impl JobStore {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn create_test_local_runner_job(&self, local_runner: Option<LocalRunnerJob>) -> Job {
+        self.create_with_source_snapshot_metadata_path_materialization_and_local_runner(
+            "runner.exec",
+            None,
+            None,
+            None,
+            local_runner,
+        )
+    }
+
     fn create_with_source_snapshot_metadata_path_materialization_and_local_runner(
         &self,
         operation: impl Into<String>,
@@ -1849,7 +1860,7 @@ impl JobStore {
         )
     }
 
-    fn event_retention_limit(&self) -> usize {
+    pub(super) fn event_retention_limit(&self) -> usize {
         self.persistence
             .as_ref()
             .map(|persistence| persistence.event_retention_limit)

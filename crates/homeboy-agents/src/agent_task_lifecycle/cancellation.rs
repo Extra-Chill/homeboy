@@ -28,7 +28,13 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     // mutate the durable record, so we can record either a real termination or
     // deterministic operator recovery instructions (acceptance: never force
     // manual process spelunking; always surface pids + safe commands).
-    let cancellation = if record.state == AgentTaskRunState::Running {
+    // A runner-backed proxy can have an accepted daemon job while it is still
+    // queued before the provider starts. Project cancellation to that job too.
+    let cancellation = if record.state == AgentTaskRunState::Running
+        || (record.state == AgentTaskRunState::Queued
+            && record.runner_id().is_some()
+            && record.runner_job_id().is_some())
+    {
         classify_live_cancellation(&record)?
     } else {
         LiveCancellationOutcome::NotRunning
@@ -153,7 +159,7 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
         if let (Some(runner_id), Some(runner_job_id)) =
             (runner_id.as_deref(), runner_job_id.as_deref())
         {
-            if let Ok((job, events)) = cancel_runner_job(runner_id, runner_job_id) {
+            if let Ok((job, events)) = cancel_runner_job(runner_id, runner_job_id, &record.run_id) {
                 return Ok(LiveCancellationOutcome::RunnerJobCancelled { job, events });
             }
         }
@@ -208,17 +214,18 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
 fn cancel_runner_job(
     runner_id: &str,
     runner_job_id: &str,
+    durable_run_id: &str,
 ) -> Result<(
     homeboy_core::api_jobs::Job,
     Vec<homeboy_core::api_jobs::JobEvent>,
 )> {
     #[cfg(test)]
-    if let Some(result) = test_cancel_hook::take(runner_id, runner_job_id) {
+    if let Some(result) = test_cancel_hook::take(runner_id, runner_job_id, durable_run_id) {
         return result;
     }
 
     homeboy_core::observation::runs_service::runner_evidence::with_runner_evidence(|p| {
-        p.runner_job_cancel(runner_id, runner_job_id)
+        p.runner_job_cancel_projection(runner_id, runner_job_id, durable_run_id)
     })
 }
 
@@ -229,6 +236,7 @@ pub(super) mod test_cancel_hook {
 
     type CancelHook = Box<
         dyn FnMut(
+            &str,
             &str,
             &str,
         ) -> Result<(
@@ -257,6 +265,7 @@ pub(super) mod test_cancel_hook {
     pub(super) fn take(
         runner_id: &str,
         runner_job_id: &str,
+        durable_run_id: &str,
     ) -> Option<
         Result<(
             homeboy_core::api_jobs::Job,
@@ -266,7 +275,7 @@ pub(super) mod test_cancel_hook {
         HOOK.with(|cell| {
             cell.borrow_mut()
                 .as_mut()
-                .map(|hook| hook(runner_id, runner_job_id))
+                .map(|hook| hook(runner_id, runner_job_id, durable_run_id))
         })
     }
 }

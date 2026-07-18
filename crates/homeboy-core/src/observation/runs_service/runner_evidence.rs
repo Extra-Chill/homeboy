@@ -81,6 +81,22 @@ pub trait RunnerEvidenceProvider: Send + Sync {
         job_id: &str,
     ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)>;
 
+    /// Strictly cancel a daemon-local projection only when it remains bound to
+    /// this runner and durable controller run.
+    fn runner_job_cancel_projection(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+        _durable_run_id: &str,
+    ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
+        Err(Error::validation_invalid_argument(
+            "runner",
+            "runner evidence provider does not support strict projection cancellation",
+            None,
+            None,
+        ))
+    }
+
     /// Refresh mirrored daemon evidence for a run, returning any mirrored runs.
     fn refresh_mirrored_daemon_evidence(&self, run_id: &str) -> Result<Option<Vec<RunRecord>>>;
 
@@ -137,6 +153,20 @@ impl RunnerEvidenceProvider for NoopRunnerEvidenceProvider {
         &self,
         _runner_id: &str,
         _job_id: &str,
+    ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
+        Err(Error::validation_invalid_argument(
+            "runner",
+            "no runner evidence provider is registered",
+            None,
+            None,
+        ))
+    }
+
+    fn runner_job_cancel_projection(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+        _durable_run_id: &str,
     ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
         Err(Error::validation_invalid_argument(
             "runner",

@@ -172,10 +172,11 @@ fn detached_lab_run_plan_uses_one_identity_for_status_logs_artifacts_and_cancell
         assert!(!logs.events.is_empty());
         assert!(artifacts.artifacts.is_empty());
 
-        let _cancel =
-            super::cancellation::test_cancel_hook::install(Box::new(|runner_id, job_id| {
+        let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
+            |runner_id, job_id, durable_run_id| {
                 assert_eq!(runner_id, "homeboy-lab");
                 assert_eq!(job_id, "job-8341");
+                assert_eq!(durable_run_id, "agent-task-detached-run-plan");
                 Ok((
                     homeboy_core::api_jobs::Job {
                         id: uuid::Uuid::new_v4(),
@@ -201,9 +202,73 @@ fn detached_lab_run_plan_uses_one_identity_for_status_logs_artifacts_and_cancell
                     },
                     Vec::new(),
                 ))
-            }));
+            },
+        ));
         let cancelled = cancel_run(run_id, Some("operator requested cancellation"))
             .expect("canonical cancellation reaches the runner job");
+        assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            cancelled.metadata["live_cancellation"]["cancellation"],
+            "runner_job_cancel"
+        );
+    });
+}
+
+#[test]
+fn cancelling_queued_runner_proxy_projects_to_accepted_daemon_job() {
+    with_isolated_home(|_| {
+        let run_id = "agent-task-queued-runner-proxy";
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id,
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("queued controller proxy");
+        record_runner_job_identity(run_id, "homeboy-lab", "job-pre-provider")
+            .expect("persist accepted daemon job identity");
+
+        let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
+            |runner_id, job_id, durable_run_id| {
+                assert_eq!(runner_id, "homeboy-lab");
+                assert_eq!(job_id, "job-pre-provider");
+                assert_eq!(durable_run_id, "agent-task-queued-runner-proxy");
+                Ok((
+                    homeboy_core::api_jobs::Job {
+                        id: uuid::Uuid::new_v4(),
+                        operation: "runner.exec".to_string(),
+                        status: homeboy_core::api_jobs::JobStatus::Cancelled,
+                        created_at_ms: 1,
+                        updated_at_ms: 2,
+                        started_at_ms: None,
+                        finished_at_ms: Some(2),
+                        event_count: 0,
+                        source_snapshot: None,
+                        path_materialization_plan: None,
+                        stale_reason: None,
+                        daemon_lease_id: None,
+                        target_runner_id: None,
+                        target_project_id: None,
+                        claim_id: None,
+                        claimed_by_runner_id: None,
+                        claimed_at_ms: None,
+                        claim_expires_at_ms: None,
+                        artifacts: Vec::new(),
+                        runner_job_projection: None,
+                    },
+                    Vec::new(),
+                ))
+            },
+        ));
+
+        let cancelled = cancel_run(run_id, Some("controller aggregate unavailable"))
+            .expect("cancellation reaches queued daemon job");
         assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
         assert_eq!(
             cancelled.metadata["live_cancellation"]["cancellation"],
