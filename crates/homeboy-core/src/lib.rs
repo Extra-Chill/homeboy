@@ -95,6 +95,7 @@ pub mod execution;
 pub mod execution_contract;
 pub mod expand;
 pub mod extension;
+pub mod extension_execution;
 pub mod extension_invocation_context;
 pub mod extension_provider_discovery;
 pub mod extension_scope;
