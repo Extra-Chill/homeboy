@@ -382,15 +382,10 @@ fn run_split_placement_cook(
             ]),
         ));
     }
+    // `--runner` implies Lab placement and is mutually exclusive with an
+    // explicit `--placement` at argument parsing, so `--placement local` here
+    // always means a fully local cook with no pinned runner.
     if cli.placement == homeboy::cli_surface::Placement::Local {
-        if cli.runner.is_some() {
-            return Err(Error::validation_invalid_argument(
-                "runner",
-                "--placement local cannot be combined with --runner for agent-task cook; omit --runner for a fully local cook or select Lab placement for its provider attempt",
-                cli.runner.clone(),
-                None,
-            ));
-        }
         return Ok(None);
     }
     let Some(runner_id) = runner_id else {
