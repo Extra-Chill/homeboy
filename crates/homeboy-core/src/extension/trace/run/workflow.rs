@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::extension::{
     resolve_execution_context, stderr_tail, ExtensionCapability, ExtensionExecutionContext,
 };
-use crate::rig::RigStateSnapshot;
+use homeboy_lifecycle_contract::RigStateSnapshot;
 
 use super::super::attach::{append_attach_observations, observe_trace_attachments};
 use super::super::canonicality::{

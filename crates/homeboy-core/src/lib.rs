@@ -159,6 +159,7 @@ pub mod resource_policy_context;
 pub mod resources;
 pub mod review;
 pub mod rig;
+pub mod rig_toolchain_provider;
 pub mod run_lifecycle_record;
 pub mod run_lifecycle_status;
 pub mod run_outcome_envelope;
