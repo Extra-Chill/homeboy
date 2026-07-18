@@ -73,7 +73,7 @@ assert.equal(provider.runtime_id, 'opencode');
 assert.equal(provider.status, 'active');
 assert.equal(provider.integration_contract, 'homeboy-opencode-agent-task/v1');
 assert.deepEqual(provider.invocation, OPENCODE_INVOCATION);
-assert.equal(provider.lifecycle.max_concurrency_default, 1);
+assert.equal(Object.hasOwn(provider.lifecycle, 'max_concurrency_default'), false);
 assert.equal(provider.lifecycle.cancellation, 'provider_signal');
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, OPENCODE_SECRET_ENV);
 assert.deepEqual(provider.provider_defaults.codex.secret_env, OPENCODE_SECRET_ENV);

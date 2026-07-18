@@ -25,7 +25,7 @@ assert.equal(provider.backend, 'pi');
 assert.equal(provider.runtime, 'pi');
 assert.equal(provider.status, 'experimental');
 assert.equal(provider.integration_contract, 'homeboy-pi-agent-task/v1');
-assert.equal(provider.lifecycle.max_concurrency_default, 1);
+assert.equal(Object.hasOwn(provider.lifecycle, 'max_concurrency_default'), false);
 assert.equal(provider.lifecycle.cancellation, 'process_signal');
 assert.deepEqual(provider.secret_env_requirements, []);
 assert.deepEqual(provider.provider_defaults, {});

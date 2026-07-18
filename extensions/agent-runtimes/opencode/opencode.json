@@ -222,8 +222,7 @@
       },
       "lifecycle": {
         "completion": "synchronous_process",
-        "cancellation": "provider_signal",
-        "max_concurrency_default": 1
+        "cancellation": "provider_signal"
       },
       "artifact_contract": {
         "patch": [

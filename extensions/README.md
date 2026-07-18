@@ -1,5 +1,9 @@
 # Homeboy Extensions
 
+Agent runtime providers describe invocation and process lifecycle behavior. They do not own
+execution capacity. Configure the global runner ceiling with Homeboy's
+`runner.settings.concurrency_limit`; per-plan concurrency requests remain bounded by that limit.
+
 Official extension directory for [Homeboy](https://github.com/Extra-Chill/homeboy). Each extension is a project-type primitive — it teaches Homeboy how to discover, audit, lint, test, and release a particular kind of codebase.
 
 This is a **monorepo** — each subdirectory is a standalone extension. Install individual extensions, not the whole repo.
