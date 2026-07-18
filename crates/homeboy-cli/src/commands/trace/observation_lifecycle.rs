@@ -16,7 +16,7 @@ use homeboy::core::observation::{
     finish_run_best_effort, ActiveObservation, NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord,
     ObservationStore, RunStatus,
 };
-use homeboy::core::rig;
+use homeboy::rig;
 
 use super::observations::{self, record_trace_artifacts};
 use super::{

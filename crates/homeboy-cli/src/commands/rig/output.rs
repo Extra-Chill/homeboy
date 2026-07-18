@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::commands::bench::{BenchOutput, RigRunBenchPlan};
 use crate::commands::CommandReport;
-use homeboy::core::rig::{self, RigResourcesSpec, RigSpec};
+use homeboy::rig::{self, RigResourcesSpec, RigSpec};
 
 /// Tagged union of every rig command's output.
 #[derive(Serialize)]

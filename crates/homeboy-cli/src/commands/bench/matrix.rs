@@ -13,8 +13,8 @@ use homeboy::core::extension::bench::{
     BenchRunWorkflowArgs, BenchRunWorkflowResult,
 };
 use homeboy::core::extension::ExtensionCapability;
-use homeboy::core::rig::lease::ActiveRigRunLease;
-use homeboy::core::rig::{self, BenchPrepareReport, BenchSpec, RigSpec, RigStateSnapshot};
+use homeboy::rig::lease::ActiveRigRunLease;
+use homeboy::rig::{self, BenchPrepareReport, BenchSpec, RigSpec, RigStateSnapshot};
 
 use super::observation::{self, BenchObservationStart};
 use super::{BenchRunArgs, CmdResult};
@@ -750,9 +750,7 @@ fn run_component_with_rig_context(
             shared_state: shared_state_override.or_else(|| args.shared_state.clone()),
             extra_workloads,
             env_provider_extensions,
-            rig_package: rig_id
-                .as_deref()
-                .and_then(homeboy::core::rig::package_evidence),
+            rig_package: rig_id.as_deref().and_then(homeboy::rig::package_evidence),
             invocation_requirements,
         },
         &run_dir,

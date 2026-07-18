@@ -37,7 +37,6 @@ use homeboy::core::lifecycle::{
     LIFECYCLE_CONTRACT_VERSION, LIFECYCLE_RESULT_SCHEMA,
 };
 use homeboy::core::observation::{ObservationStore, RunRecord};
-use homeboy::core::rig::RigSpec;
 use homeboy::fuzz::FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND;
 use homeboy::fuzz::{persist_fuzz_execution_request, persist_fuzz_sequence_plan};
 use homeboy::fuzz::{
@@ -45,6 +44,7 @@ use homeboy::fuzz::{
     FuzzFinding, FuzzFindingStatus, FuzzSamplingRequest, FuzzSequencePlan, FuzzTargetInventory,
     IsolationProof,
 };
+use homeboy::rig::RigSpec;
 use homeboy::test_support::with_isolated_home;
 use std::fs;
 use std::path::{Path, PathBuf};

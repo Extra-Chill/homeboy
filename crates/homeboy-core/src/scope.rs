@@ -12,7 +12,7 @@ use std::path::Path;
 use crate::component;
 use crate::error::{Error, Result};
 use crate::git::release_download::detect_remote_url;
-use crate::{fleet, project, rig};
+use crate::{fleet, project};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
@@ -256,22 +256,9 @@ fn resolve_fleet_scope(fleet_id: &str) -> Result<Vec<ScopeComponentRef>> {
 }
 
 fn resolve_rig_scope(rig_id: &str) -> Result<Vec<ScopeComponentRef>> {
-    let spec = rig::load(rig_id)?;
-    let mut refs = Vec::new();
-    for (component_id, component_spec) in spec.components.iter() {
-        let path = rig::expand::expand_vars(&spec, &component_spec.path);
-        let mut component_ref = ScopeComponentRef::new(
-            component_id.clone(),
-            path,
-            component_spec.remote_url.clone(),
-            component_spec.triage_remote_url.clone(),
-            format!("rig:{rig_id}"),
-        );
-        component_ref.usage.insert(rig_id.to_string());
-        refs.push(component_ref);
-    }
-    refs.sort_by(|a, b| a.component_id.cmp(&b.component_id));
-    Ok(refs)
+    // Rig spec loading + path expansion is rig behavior, inverted behind the rig
+    // provider hook so core scope resolution does not depend on the rig subsystem.
+    crate::rig_provider::resolve_rig_scope(rig_id)
 }
 
 fn resolve_fleet_component_records(fleet_id: &str) -> Result<Vec<component::Component>> {
@@ -291,30 +278,9 @@ fn resolve_fleet_component_records(fleet_id: &str) -> Result<Vec<component::Comp
 }
 
 fn resolve_rig_component_records(rig_id: &str) -> Result<Vec<component::Component>> {
-    let spec = rig::load(rig_id)?;
-    let mut components = Vec::new();
-
-    for (component_id, component_spec) in spec.components.iter() {
-        let local_path = rig::expand::expand_vars(&spec, &component_spec.path);
-        let mut component = component::discover_from_portable(Path::new(&local_path))
-            .or_else(|| component::load(component_id).ok())
-            .unwrap_or_default();
-        component.id = component_id.clone();
-        component.local_path = local_path;
-        if component.remote_url.is_none() {
-            component.remote_url = component_spec.remote_url.clone();
-        }
-        if component.triage_remote_url.is_none() {
-            component.triage_remote_url = component_spec.triage_remote_url.clone();
-        }
-        if component.extensions.is_none() {
-            component.extensions = component_spec.extensions.clone();
-        }
-        components.push(component);
-    }
-
-    components.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(components)
+    // Rig spec loading + component discovery is rig behavior, inverted
+    // behind the rig provider hook.
+    crate::rig_provider::resolve_rig_component_records(rig_id)
 }
 
 fn resolve_path_component_record(
@@ -352,8 +318,8 @@ fn resolve_workspace_component_records() -> Result<Vec<component::Component>> {
         }
     }
 
-    for rig in rig::list()? {
-        for component in resolve_scope_component_records(&Scope::Rig(rig.id))? {
+    for rig_id in crate::rig_provider::rig_ids()? {
+        for component in resolve_scope_component_records(&Scope::Rig(rig_id))? {
             components.entry(component.id.clone()).or_insert(component);
         }
     }
@@ -419,9 +385,9 @@ fn resolve_workspace_scope() -> Result<Vec<ScopeComponentRef>> {
         }
     }
 
-    for spec in rig::list()? {
-        for mut component_ref in resolve_rig_scope(&spec.id)? {
-            component_ref.usage.insert(spec.id.clone());
+    for rig_id in crate::rig_provider::rig_ids()? {
+        for mut component_ref in resolve_rig_scope(&rig_id)? {
+            component_ref.usage.insert(rig_id.clone());
             merge_component_ref(&mut refs, component_ref);
         }
     }

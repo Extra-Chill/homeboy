@@ -4,7 +4,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use homeboy::core::extension::trace as extension_trace;
-use homeboy::core::trace_experiment;
+use homeboy::rig::trace_experiment;
 
 use super::output::{
     fmt_delta_avg_ms, fmt_delta_ms, fmt_ms, render_compare_markdown, TraceAggregateInput,

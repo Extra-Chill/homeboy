@@ -2,7 +2,7 @@ use std::{collections::HashMap, fs};
 
 use crate::test_support::with_isolated_home;
 use homeboy::core::component::ScopedExtensionConfig;
-use homeboy::core::rig::{self, ComponentSpec, RigSpec};
+use homeboy::rig::{self, ComponentSpec, RigSpec};
 
 use super::test_fixture::{write_trace_extension, write_trace_rig, TRACE_FIXTURE_EXTENSION_ID};
 use super::workload::trace_workload_scenario_id;

@@ -935,18 +935,18 @@ fn trace_compare_evidence_report_redacts_local_paths_and_reports_assertion_statu
     assert!(!report.contains("/Users/user/private"));
 }
 
-fn rig_state_snapshot() -> homeboy::core::rig::RigStateSnapshot {
+fn rig_state_snapshot() -> homeboy::rig::RigStateSnapshot {
     let mut components = std::collections::BTreeMap::new();
     components.insert(
         "studio".to_string(),
-        homeboy::core::rig::ComponentSnapshot {
+        homeboy::rig::ComponentSnapshot {
             path: "/Users/user/Developer/studio".to_string(),
             declared_path: None,
             sha: Some("abc123".to_string()),
             branch: Some("main".to_string()),
         },
     );
-    homeboy::core::rig::RigStateSnapshot {
+    homeboy::rig::RigStateSnapshot {
         rig_id: "studio-rig".to_string(),
         captured_at: "2026-06-04T00:00:00Z".to_string(),
         components,

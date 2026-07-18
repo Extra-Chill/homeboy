@@ -8,7 +8,7 @@ pub use output::RigCommandOutput;
 use clap::{Args, Subcommand, ValueEnum};
 
 use homeboy::core::engine::shell::quote_arg;
-use homeboy::core::rig;
+use homeboy::rig;
 use homeboy::runner::runners;
 
 use self::output::{
@@ -421,7 +421,7 @@ fn package_lint(manifest_path: &std::path::Path) -> CmdResult<RigCommandOutput> 
     Ok((
         RigCommandOutput::Check(RigCheckOutput {
             command: "rig.package.lint",
-            report: homeboy::core::rig::CheckReport {
+            report: homeboy::rig::CheckReport {
                 rig_id: lint_root.to_string_lossy().to_string(),
                 run_id: None,
                 pipeline: report,
@@ -777,7 +777,7 @@ fn lint(
         return Ok((
             RigCommandOutput::Check(RigCheckOutput {
                 command: "rig.lint",
-                report: homeboy::core::rig::CheckReport {
+                report: homeboy::rig::CheckReport {
                     rig_id: target.to_string(),
                     run_id: None,
                     pipeline: report,

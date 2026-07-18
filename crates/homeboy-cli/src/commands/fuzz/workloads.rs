@@ -5,11 +5,11 @@ use homeboy::core::component::{Component, ScopedExtensionConfig};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::extension::{self, ExtensionCapability};
-use homeboy::core::rig::{self, RigSpec};
 use homeboy::fuzz::{
     merge_fuzz_target_inventory, parse_fuzz_target_inventory_file, FuzzTargetInventory,
     FUZZ_CONTRACT_VERSION, FUZZ_TARGET_INVENTORY_SCHEMA,
 };
+use homeboy::rig::{self, RigSpec};
 
 use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
 use super::report::fuzz_provenance;
