@@ -2454,6 +2454,41 @@ fn explicit_candidate_commit_adoption_promotes_and_records_green_gate_handoff() 
 }
 
 #[test]
+fn explicit_base_equal_candidate_adoption_verifies_successful_no_op() {
+    let (temp, repo, _base, candidate) = adopted_commit_repo();
+    let mut options = adopted_commit_options(
+        &temp,
+        &repo,
+        candidate.clone(),
+        candidate.clone(),
+        VerifyGateOptions {
+            verify: vec!["cargo test --lib".to_string()],
+            ..Default::default()
+        },
+    );
+    options.source = serde_json::json!({
+        "schema": AGENT_TASK_OUTCOME_SCHEMA,
+        "task_id": "adoption-task",
+        "status": "no_op",
+        "artifacts": []
+    })
+    .to_string();
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(repo),
+        ..Default::default()
+    };
+
+    let report =
+        promote_with_provider(options, &mut provider).expect("base-equal candidate adopts");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::VerifiedNoChanges);
+    assert_eq!(report.patch_artifact.id, "adopted-candidate");
+    assert_eq!(report.provenance["candidate_ref"], candidate);
+    assert!(provider.apply_calls.is_empty());
+    assert_eq!(provider.verify_calls.len(), 1);
+}
+
+#[test]
 fn explicit_candidate_rejections_leave_target_unmodified() {
     let (temp, repo, base, candidate) = adopted_commit_repo();
     let cases = [
@@ -2493,6 +2528,39 @@ fn explicit_candidate_rejections_leave_target_unmodified() {
         );
         assert!(provider.apply_calls.is_empty(), "{name} mutated target");
     }
+}
+
+#[test]
+fn explicit_candidate_rejects_failed_outcome_and_non_head_source_ref_before_apply() {
+    let (temp, repo, base, candidate) = adopted_commit_repo();
+    let mut failed = adopted_commit_options(
+        &temp,
+        &repo,
+        base.clone(),
+        candidate.clone(),
+        VerifyGateOptions::default(),
+    );
+    failed.source = serde_json::json!({
+        "schema": AGENT_TASK_OUTCOME_SCHEMA,
+        "task_id": "adoption-task",
+        "status": "failed",
+        "artifacts": []
+    })
+    .to_string();
+    let mut provider = FakePromotionWorkspaceProvider::default();
+    let error = promote_with_provider(failed, &mut provider).expect_err("failed outcome rejected");
+    assert!(error.message.contains("succeeded"), "{}", error.message);
+    assert!(provider.apply_calls.is_empty());
+
+    std::fs::write(repo.join("lib.rs"), "newer candidate\n").expect("write newer candidate");
+    git(&repo, &["commit", "-am", "newer candidate"]);
+    let error = promote_with_provider(
+        adopted_commit_options(&temp, &repo, base, candidate, VerifyGateOptions::default()),
+        &mut provider,
+    )
+    .expect_err("candidate from a different source worktree state rejected");
+    assert!(error.message.contains("recorded source worktree HEAD"));
+    assert!(provider.apply_calls.is_empty());
 }
 
 #[test]

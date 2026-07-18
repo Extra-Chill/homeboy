@@ -302,35 +302,31 @@ pub(super) fn promote_with_provider_and_checkpoint(
         ));
     }
 
+    // Adoption supplies an immutable commit candidate. It intentionally bypasses
+    // provider artifact selection, but still uses the ordinary promotion/gates
+    // implementation and durable checkpoint.
+    if options.candidate_ref.is_some() {
+        let committed_patch = committed_changes_patch(&options)?;
+        if let Some(committed_patch) = committed_patch {
+            return promote_committed_changes(
+                &options,
+                provider,
+                checkpoint,
+                &source_kind,
+                &outcome,
+                None,
+                committed_patch,
+            );
+        }
+        return promote_explicit_no_change_candidate(&options, provider, &source_kind, &outcome);
+    }
+
     if outcome.status == AgentTaskOutcomeStatus::NoOp {
         let committed_patch = committed_changes_patch(&options)?.ok_or_else(|| {
             Error::validation_invalid_argument(
                 "source",
                 "no-op promotion requires an audited committed candidate after the task base",
                 None,
-                None,
-            )
-        })?;
-        return promote_committed_changes(
-            &options,
-            provider,
-            checkpoint,
-            &source_kind,
-            &outcome,
-            None,
-            committed_patch,
-        );
-    }
-
-    // Adoption supplies an immutable commit candidate. It intentionally bypasses
-    // provider artifact selection, but still uses the ordinary promotion/gates
-    // implementation and durable checkpoint.
-    if options.candidate_ref.is_some() {
-        let committed_patch = committed_changes_patch(&options)?.ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "candidate_ref",
-                "candidate revision contains no changes after the recorded task base",
-                options.candidate_ref.clone(),
                 None,
             )
         })?;
@@ -855,6 +851,61 @@ fn promote_committed_changes(
             "commit_range": committed_patch.commit_range,
             "commits": committed_patch.commits,
             "candidate": candidate,
+        }),
+        operator_notification,
+    })
+}
+
+fn promote_explicit_no_change_candidate(
+    options: &AgentTaskPromotionOptions,
+    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    source_kind: &str,
+    outcome: &AgentTaskOutcome,
+) -> Result<AgentTaskPromotionReport> {
+    let worktree_path = options.source_worktree_path.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "source_worktree",
+            "candidate adoption requires the recorded source worktree",
+            None,
+            None,
+        )
+    })?;
+    let target =
+        AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), Some(worktree_path));
+    let gates = run_promotion_gates(options, provider, worktree_path)?;
+    let status = match gates.status {
+        AgentTaskPromotionStatus::Applied => AgentTaskPromotionStatus::VerifiedNoChanges,
+        AgentTaskPromotionStatus::GateFailed => AgentTaskPromotionStatus::NoChangesGateFailed,
+        status => status,
+    };
+    let operator_notification = promotion_notification(status, &target);
+    let candidate =
+        crate::agent_task_promotion::candidate_fingerprint(&worktree_path.display().to_string())?;
+
+    Ok(AgentTaskPromotionReport {
+        schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
+        status,
+        source: promotion_source(source_kind, outcome, options),
+        to_worktree: options.to_worktree.clone(),
+        target,
+        patch_artifact: AgentTaskPromotionArtifactRef {
+            id: "adopted-candidate".to_string(),
+            kind: "commit".to_string(),
+            path: options.candidate_ref.clone().unwrap_or_default(),
+            sha256: None,
+        },
+        changed_files: Vec::new(),
+        command_evidence: Vec::new(),
+        deterministic_gates: gates.deterministic_gates,
+        gate_results: gates.gate_results,
+        verified_base: None,
+        provenance: json!({
+            "source_schema": outcome.schema,
+            "worktree_path": worktree_path,
+            "change_source": "adopted_commit",
+            "candidate_ref": options.candidate_ref,
+            "candidate": candidate,
+            "dependencies_materialized": gates.dependencies_materialized,
         }),
         operator_notification,
     })
