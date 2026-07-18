@@ -126,9 +126,17 @@ pub fn is_runner_hosted_exec() -> bool {
 /// True when this process is already executing on a Lab runner. This is
 /// lifecycle provenance, not controller transport selection.
 pub fn has_lab_execution_provenance() -> bool {
+    lab_execution_runner_id().is_some()
+}
+
+/// The runner that selected this process for execution, when running inside a
+/// Lab handoff. This is durable execution provenance, not controller transport
+/// intent, so nested commands may resolve the current host without reconnecting
+/// to the controller-side runner registry.
+pub fn lab_execution_runner_id() -> Option<String> {
     std::env::var(crate::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV)
         .ok()
-        .is_some_and(|runner_id| !runner_id.trim().is_empty())
+        .filter(|runner_id| !runner_id.trim().is_empty())
 }
 
 /// True when Homeboy is executing inside a GitHub Actions CI job.
