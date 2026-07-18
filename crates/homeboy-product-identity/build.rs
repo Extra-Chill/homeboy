@@ -3,6 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "src/source_upgrade_provenance.rs"]
+mod source_upgrade_provenance;
+
 fn main() {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR missing"));
@@ -36,6 +39,21 @@ fn root_package_version(manifest: &Path) -> String {
 }
 
 fn emit_git_identity(root: &Path) {
+    println!(
+        "cargo:rerun-if-env-changed={}",
+        source_upgrade_provenance::GIT_COMMIT_ENV
+    );
+    println!(
+        "cargo:rerun-if-env-changed={}",
+        source_upgrade_provenance::GIT_DIRTY_ENV
+    );
+    let source_upgrade_commit = env::var(source_upgrade_provenance::GIT_COMMIT_ENV).ok();
+    let source_upgrade_dirty = env::var(source_upgrade_provenance::GIT_DIRTY_ENV).ok();
+    let source_upgrade_provenance = source_upgrade_provenance::parse_source_upgrade_provenance(
+        source_upgrade_commit.as_deref(),
+        source_upgrade_dirty.as_deref(),
+    )
+    .unwrap_or_else(|error| panic!("invalid source-upgrade build provenance: {error}"));
     let git_dir = resolve_git_dir(root).unwrap_or_else(|| root.join(".git"));
     println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
     println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
@@ -48,7 +66,16 @@ fn emit_git_identity(root: &Path) {
         }
     }
 
-    if let Some(commit) = git_output(root, &["rev-parse", "--short=12", "HEAD"]) {
+    if let Some(provenance) = source_upgrade_provenance {
+        println!(
+            "cargo:rustc-env=HOMEBOY_PRODUCT_GIT_COMMIT={}",
+            provenance.git_commit
+        );
+        println!(
+            "cargo:rustc-env=HOMEBOY_PRODUCT_GIT_DIRTY={}",
+            provenance.git_dirty
+        );
+    } else if let Some(commit) = git_output(root, &["rev-parse", "--short=12", "HEAD"]) {
         println!("cargo:rustc-env=HOMEBOY_PRODUCT_GIT_COMMIT={commit}");
     }
     if let Some(status) = git_output(root, &["status", "--porcelain"]) {

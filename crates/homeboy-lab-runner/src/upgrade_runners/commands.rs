@@ -7,6 +7,7 @@ use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
 use homeboy_lab_runner_contract::RunnerRequiredTool;
 use homeboy_upgrade::upgrade::version_is_newer;
 use homeboy_upgrade::upgrade::InstallMethod;
+use homeboy_upgrade::upgrade::SourceBuildProvenance;
 
 pub fn runner_upgrade_command(
     homeboy_path: &str,
@@ -143,13 +144,37 @@ pub fn shell_arg(arg: &str) -> String {
 }
 
 pub fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecOptions {
+    runner_exec_options_with_source_provenance(runner, command, None)
+}
+
+pub fn runner_exec_options_with_source_provenance(
+    runner: &Runner,
+    command: Vec<String>,
+    source_provenance: Option<&SourceBuildProvenance>,
+) -> RunnerExecOptions {
+    let mut env = runner.env.clone();
+    let is_source_upgrade = command
+        .windows(2)
+        .any(|arguments| arguments == ["--method", "source"]);
+    if let (true, Some(provenance)) = (is_source_upgrade, source_provenance) {
+        // This envelope is constructed only after the controller verifies the
+        // selected checkout matches its active build identity.
+        env.insert(
+            homeboy_product_identity::source_upgrade_provenance::GIT_COMMIT_ENV.to_string(),
+            provenance.git_commit.clone(),
+        );
+        env.insert(
+            homeboy_product_identity::source_upgrade_provenance::GIT_DIRTY_ENV.to_string(),
+            provenance.git_dirty.to_string(),
+        );
+    }
     RunnerExecOptions {
         cwd: None,
         project_id: None,
         allow_diagnostic_ssh: true,
         diagnostic_ssh_timeout: None,
         command,
-        env: runner.env.clone(),
+        env,
         secret_env_names: Vec::new(),
         secret_env_plan: None,
         env_materialization: None,

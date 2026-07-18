@@ -32,6 +32,7 @@ use std::path::Path;
 use homeboy_core::error::Result;
 use homeboy_upgrade::upgrade::{
     ExtensionUpgradeEntry, InstallMethod, RunnerUpgradeEntry, RunnerUpgradeProvider,
+    SourceBuildProvenance,
 };
 
 /// The runner layer's `RunnerUpgradeProvider`, delegating to this cluster's
@@ -45,7 +46,7 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
         method_override: Option<InstallMethod>,
         source_path: Option<&Path>,
         explicit_source_path: bool,
-        expected_controller_identity: Option<&str>,
+        expected_source_provenance: Option<&SourceBuildProvenance>,
         runner_targets: &[String],
         extension_updates: &[ExtensionUpgradeEntry],
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
@@ -54,7 +55,7 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
             method_override,
             source_path,
             explicit_source_path,
-            expected_controller_identity,
+            expected_source_provenance,
             runner_targets,
             extension_updates,
         )
@@ -62,6 +63,13 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
 
     fn source_checkout_build_identity(&self, source_path: &Path) -> Option<String> {
         source_checkout_build_identity(source_path)
+    }
+
+    fn source_checkout_build_provenance(
+        &self,
+        source_path: &Path,
+    ) -> Option<SourceBuildProvenance> {
+        source_checkout_build_provenance(source_path)
     }
 }
 

@@ -5,6 +5,7 @@ use crate::RunnerExecOptions;
 use homeboy_core::Result;
 use homeboy_upgrade::upgrade::InstallMethod;
 use homeboy_upgrade::upgrade::RunnerUpgradeEntry;
+use homeboy_upgrade::upgrade::SourceBuildProvenance;
 
 /// Captures the exit code and detail produced by a failed runner upgrade attempt.
 pub struct FailedUpgradeOutcome {
@@ -59,6 +60,7 @@ pub fn recover_and_retry_failed_upgrade(
     original_homeboy_path: &str,
     previous_version: Option<&str>,
     failure: FailedUpgradeOutcome,
+    source_provenance: Option<&SourceBuildProvenance>,
     update_homeboy_path: &mut impl FnMut(&str, &str) -> Result<()>,
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> std::result::Result<(i32, String, Option<FailedUpgradePathRecovery>), RunnerUpgradeEntry> {
@@ -73,7 +75,7 @@ pub fn recover_and_retry_failed_upgrade(
             let realigned_detail = recovery.detail.clone();
             let retry = exec(
                 &runner.id,
-                runner_exec_options(
+                runner_exec_options_with_source_provenance(
                     runner,
                     runner_upgrade_command(
                         &recovery.homeboy_path,
@@ -81,6 +83,7 @@ pub fn recover_and_retry_failed_upgrade(
                         method_override,
                         command_source_path,
                     ),
+                    source_provenance,
                 ),
             );
             match retry {

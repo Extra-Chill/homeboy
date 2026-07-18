@@ -361,13 +361,17 @@ fn run_targeted_runner_upgrade(
     } else {
         None
     };
+    let (source_checkout, source_provenance) = match source_checkout {
+        Some((checkout, provenance)) => (Some(checkout), Some(provenance)),
+        None => (None, None),
+    };
     let (runners_updated, runners_skipped) = super::with_runner_upgrade(|provider| {
         provider.upgrade_configured_runners_with_explicit_source_path(
             force,
             runner_method_override,
             source_checkout.as_deref(),
             source_checkout.is_some(),
-            Some(&previous_build_identity),
+            source_provenance.as_ref(),
             runner_targets,
             &installed_extension_catalog(),
         )
@@ -471,7 +475,7 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
 fn initiating_controller_source_checkout(
     source_path: Option<&Path>,
     expected_identity: &str,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, super::SourceBuildProvenance)> {
     let checkout = if let Some(path) = source_path {
         resolve_source_workspace(Some(path))?
     } else {
@@ -490,28 +494,29 @@ fn initiating_controller_source_checkout(
                 .with_hint("Run from the controller source checkout or pass --source-path <PATH>.")
             })?
     };
-    let identity =
-        super::with_runner_upgrade(|provider| provider.source_checkout_build_identity(&checkout))
+    let provenance =
+        super::with_runner_upgrade(|provider| provider.source_checkout_build_provenance(&checkout))
             .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "source_path",
-                "Runner-only upgrade source checkout has no verifiable build identity",
-                Some(checkout.display().to_string()),
-                None,
-            )
-        })?;
-    if identity != expected_identity {
+                Error::validation_invalid_argument(
+                    "source_path",
+                    "Runner-only upgrade source checkout has no verifiable build identity",
+                    Some(checkout.display().to_string()),
+                    None,
+                )
+            })?;
+    if provenance.display_identity != expected_identity {
         return Err(Error::validation_invalid_argument(
             "source_path",
             format!(
-                "Runner-only upgrade source identity `{identity}` does not match initiating controller `{expected_identity}`"
+                "Runner-only upgrade source identity `{}` does not match initiating controller `{expected_identity}`",
+                provenance.display_identity
             ),
             Some(checkout.display().to_string()),
             None,
         )
         .with_hint("Pass the exact source checkout that built the initiating controller."));
     }
-    Ok(checkout)
+    Ok((checkout, provenance))
 }
 
 fn workspace_from_executable_path(exe_path: &Path) -> Option<PathBuf> {
