@@ -92,6 +92,7 @@ pub fn resume_promoted_patch(
         )
     })?;
     validate_artifact_content(&artifact, &patch)?;
+    validate_resume_candidate(&options, target_path, previous, &outcome, &artifact)?;
     let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
     let command_evidence = vec![verify_patch_is_present(
         target_path,
@@ -183,18 +184,113 @@ fn validate_resume_provenance(
             None,
         ));
     }
+    Ok(())
+}
+
+fn validate_resume_candidate(
+    options: &AgentTaskPromotionOptions,
+    target_path: &Path,
+    previous: &Value,
+    outcome: &AgentTaskOutcome,
+    artifact: &AgentTaskArtifact,
+) -> Result<()> {
+    if previous.pointer("/source/task_id").and_then(Value::as_str) != Some(&outcome.task_id)
+        || previous
+            .pointer("/patch_artifact/id")
+            .and_then(Value::as_str)
+            != Some(&artifact.id)
+        || previous
+            .pointer("/patch_artifact/kind")
+            .and_then(Value::as_str)
+            != Some(&artifact.kind)
+        || previous
+            .pointer("/patch_artifact/sha256")
+            .and_then(Value::as_str)
+            != artifact.sha256.as_deref()
+    {
+        return Err(Error::validation_invalid_argument(
+            "promotion",
+            "promotion resume source task or patch artifact does not match the durable post-apply promotion",
+            None,
+            None,
+        ));
+    }
+    let expected_inputs = json!({
+        "base_ref": options.base_ref,
+        "task_base_sha": options.task_base_sha,
+        "candidate_ref": options.candidate_ref,
+    });
+    if previous
+        .pointer("/provenance/resume_inputs")
+        .is_some_and(|recorded| recorded != &expected_inputs)
+    {
+        return Err(Error::validation_invalid_argument(
+            "promotion",
+            "promotion resume base or candidate input does not match the durable post-apply promotion",
+            None,
+            None,
+        ));
+    }
     let status = std::process::Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(target_path)
         .output()
         .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    if !status.status.success() || !status.stdout.is_empty() {
+    if !status.status.success() {
         return Err(Error::validation_invalid_argument(
             "path",
-            "promotion resume requires a clean Git worktree",
+            "promotion resume target is not an accessible Git worktree",
             Some(target_path.display().to_string()),
             None,
         ));
+    }
+    let expected = previous
+        .pointer("/provenance/candidate")
+        .filter(|candidate| !candidate.is_null())
+        .cloned();
+    if !status.stdout.is_empty() && expected.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "promotion",
+            "promotion resume found a dirty target without an exact post-apply candidate fingerprint; rerun from a clean target",
+            None,
+            None,
+        ));
+    }
+    if let Some(expected) = expected {
+        let expected = serde_json::from_value(expected).map_err(|_| {
+            Error::validation_invalid_argument(
+                "promotion",
+                "promotion resume durable candidate fingerprint is invalid",
+                None,
+                None,
+            )
+        })?;
+        let actual = crate::agent_task_promotion::candidate_fingerprint(
+            target_path.to_string_lossy().as_ref(),
+        )?;
+        if actual != expected {
+            return Err(Error::validation_invalid_argument(
+                "promotion",
+                "promotion resume target differs from the exact checkpointed applied candidate",
+                Some(target_path.display().to_string()),
+                None,
+            ));
+        }
+    }
+    if let Some(recorded_base) = previous.get("verified_base") {
+        let current_base = serde_json::to_value(capture_declared_base(
+            target_path,
+            options.base_ref.as_deref(),
+        )?)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        if &current_base != recorded_base {
+            return Err(Error::validation_invalid_argument(
+                "base_ref",
+                "promotion resume declared base no longer matches the durable post-apply promotion",
+                None,
+                None,
+            ));
+        }
     }
     Ok(())
 }
@@ -507,7 +603,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
             worktree_path,
             &outcome.schema,
             artifact.metadata.clone(),
-        ))?;
+        )?)?;
     }
     let verified_base = if let Some(worktree_path) = applied_worktree_path.as_deref() {
         let verified_base = capture_declared_base(worktree_path, options.base_ref.as_deref())?;
@@ -830,7 +926,7 @@ fn promote_committed_changes(
             artifact
                 .map(|artifact| artifact.metadata.clone())
                 .unwrap_or(Value::Null),
-        ))?;
+        )?)?;
     }
     let verified_base = if let Some(path) = applied_worktree_path.as_deref() {
         let verified_base = capture_declared_base(path, options.base_ref.as_deref())?;
@@ -1170,10 +1266,19 @@ fn post_apply_report(
     worktree_path: &Path,
     source_schema: &str,
     artifact_metadata: Value,
-) -> AgentTaskPromotionReport {
+) -> Result<AgentTaskPromotionReport> {
     let status = AgentTaskPromotionStatus::VerificationPending;
     let operator_notification = promotion_notification(status, &target);
-    AgentTaskPromotionReport {
+    let candidate =
+        crate::agent_task_promotion::candidate_fingerprint(&worktree_path.display().to_string())
+            .ok();
+    // A base observation is recorded when the target can reach its remote. The
+    // post-apply checkpoint must still survive a transient remote failure so it
+    // can protect the already-applied candidate for recovery.
+    let verified_base = capture_declared_base(worktree_path, options.base_ref.as_deref())
+        .ok()
+        .flatten();
+    Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status,
         source: promotion_source(source_kind, outcome, options),
@@ -1184,16 +1289,22 @@ fn post_apply_report(
         command_evidence,
         deterministic_gates: Vec::new(),
         gate_results: Vec::new(),
-        verified_base: None,
+        verified_base,
         provenance: json!({
             "source_schema": source_schema,
             "artifact_metadata": artifact_metadata,
             "worktree_path": worktree_path,
             "dependencies_materialized": false,
             "post_apply": true,
+            "candidate": candidate,
+            "resume_inputs": {
+                "base_ref": options.base_ref,
+                "task_base_sha": options.task_base_sha,
+                "candidate_ref": options.candidate_ref,
+            },
         }),
         operator_notification,
-    }
+    })
 }
 
 fn persisted_changed_files(

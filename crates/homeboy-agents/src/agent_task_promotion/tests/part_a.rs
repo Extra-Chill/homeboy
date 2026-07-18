@@ -381,21 +381,48 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
     let worktree_path = temp.path().join("managed-target");
     std::fs::create_dir(&worktree_path).expect("create target");
     git(&worktree_path, &["init"]);
+    git(
+        &worktree_path,
+        &["config", "user.email", "test@example.com"],
+    );
+    git(&worktree_path, &["config", "user.name", "Test"]);
+    std::fs::create_dir_all(worktree_path.join("src")).expect("source dir");
+    std::fs::write(worktree_path.join("src/lib.rs"), "old\n").expect("base source");
+    git(&worktree_path, &["add", "."]);
+    git(&worktree_path, &["commit", "-m", "base"]);
+    git(&worktree_path, &["branch", "-M", "main"]);
+    let remote = temp.path().join("origin.git");
+    assert!(Command::new("git")
+        .args(["init", "--bare", remote.to_str().expect("remote path")])
+        .status()
+        .expect("create remote")
+        .success());
+    git(
+        &worktree_path,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("remote path"),
+        ],
+    );
+    git(&worktree_path, &["push", "-u", "origin", "main"]);
     let (source_path, source) = write_patch_source(&temp);
     let mut provider = FakePromotionWorkspaceProvider {
         workspace_path: Some(worktree_path.clone()),
         verify_transport_error: true,
+        apply_to_git: true,
         ..Default::default()
     };
     let mut checkpoints = Vec::new();
 
     let error = promote_with_provider_and_checkpoint(
         AgentTaskPromotionOptions {
-            source,
+            source: source.clone(),
             source_run_id: Some("restartable-run".to_string()),
-            source_path: Some(source_path),
+            source_path: Some(source_path.clone()),
             source_worktree_path: None,
-            base_ref: None,
+            base_ref: Some("main".to_string()),
             task_base_sha: None,
             candidate_ref: None,
             to_worktree: "homeboy@restartable".to_string(),
@@ -432,6 +459,63 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
         worktree_path.to_str()
     );
     assert_eq!(checkpoints[0].provenance["post_apply"], true);
+    assert!(checkpoints[0].provenance["candidate"].is_object());
+    assert_eq!(
+        checkpoints[0]
+            .verified_base
+            .as_ref()
+            .map(|base| base.base.as_str()),
+        Some("main")
+    );
+    assert_eq!(
+        Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&worktree_path)
+            .output()
+            .expect("git status")
+            .stdout,
+        b" M src/lib.rs\n"
+    );
+
+    let resume_options = || AgentTaskPromotionOptions {
+        source: source.clone(),
+        source_run_id: Some("restartable-run".to_string()),
+        source_path: Some(source_path.clone()),
+        source_worktree_path: None,
+        base_ref: Some("main".to_string()),
+        task_base_sha: None,
+        candidate_ref: None,
+        to_worktree: "homeboy@restartable".to_string(),
+        task_id: None,
+        artifact_id: None,
+        dry_run: false,
+        gates: VerifyGateOptions {
+            verify: vec!["true".to_string()],
+            private_verify: Vec::new(),
+            private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+        },
+        provider_command: None,
+        provider_invocation: None,
+    };
+    let checkpoint = serde_json::to_value(&checkpoints[0]).expect("checkpoint value");
+    let resumed = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
+        .expect("resume exact applied candidate");
+    assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(provider.apply_calls.len(), 1, "resume must not reapply");
+
+    std::fs::write(worktree_path.join("src/lib.rs"), "tampered\n").expect("tamper candidate");
+    let mismatch = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
+        .expect_err("modified candidate rejected");
+    assert!(mismatch
+        .message
+        .contains("differs from the exact checkpointed"));
+
+    std::fs::write(worktree_path.join("extra.rs"), "extra\n").expect("add extra candidate file");
+    let extra = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
+        .expect_err("extra candidate change rejected");
+    assert!(extra
+        .message
+        .contains("differs from the exact checkpointed"));
 }
 
 #[test]
