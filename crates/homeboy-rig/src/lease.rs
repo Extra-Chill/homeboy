@@ -522,5 +522,5 @@ fn lease_path(rig_id: &str) -> Result<PathBuf> {
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/lease_test.rs"]
+#[path = "../../../tests/core/rig/lease_test.rs"]
 mod lease_test;

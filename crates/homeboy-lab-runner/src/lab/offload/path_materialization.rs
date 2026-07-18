@@ -5,7 +5,7 @@
 //! inputs after individual argument transforms.
 
 use super::*;
-use homeboy_core::rig;
+use homeboy_rig;
 
 pub(crate) struct PathMaterializationPlanner {
     pub(crate) args: Vec<String>,
@@ -92,18 +92,21 @@ pub(crate) fn rig_declared_path_input_extra_workspaces(
     )
 }
 
-fn load_primary_rig_spec(primary_source_path: &Path, rig_id: &str) -> Result<Option<rig::RigSpec>> {
+fn load_primary_rig_spec(
+    primary_source_path: &Path,
+    rig_id: &str,
+) -> Result<Option<homeboy_rig::RigSpec>> {
     if !primary_source_path.join("rig.json").is_file() && !primary_source_path.join("rigs").is_dir()
     {
         return Ok(None);
     }
-    let Some(discovered) = rig::discover_rigs(primary_source_path)?
+    let Some(discovered) = homeboy_rig::discover_rigs(primary_source_path)?
         .into_iter()
         .find(|candidate| candidate.id == rig_id)
     else {
         return Ok(None);
     };
-    Ok(Some(rig::load_local_source(
+    Ok(Some(homeboy_rig::load_local_source(
         &discovered.rig_path.to_string_lossy(),
         Some(discovered.id.as_str()),
     )?))

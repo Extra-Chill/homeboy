@@ -1184,5 +1184,5 @@ pub(crate) fn link_or_copy_file(source: &Path, target: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/install_test.rs"]
+#[path = "../../../tests/core/rig/install_test.rs"]
 mod install_test;

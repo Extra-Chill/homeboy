@@ -1561,13 +1561,13 @@ mod trace_experiment_spec_tests {
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/spec_test.rs"]
+#[path = "../../../tests/core/rig/spec_test.rs"]
 mod spec_test;
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/public_preview_spec_test.rs"]
+#[path = "../../../tests/core/rig/public_preview_spec_test.rs"]
 mod public_preview_spec_test;
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/bench_default_baseline_spec_test.rs"]
+#[path = "../../../tests/core/rig/bench_default_baseline_spec_test.rs"]
 mod bench_default_baseline_spec_test;

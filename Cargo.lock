@@ -1018,6 +1018,7 @@ dependencies = [
  "homeboy-fuzz",
  "homeboy-lab-runner-contract",
  "homeboy-product-identity",
+ "homeboy-rig",
  "libc",
  "regex",
  "reqwest",

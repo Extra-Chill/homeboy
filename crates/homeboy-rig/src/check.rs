@@ -406,5 +406,5 @@ fn resolve_time_source(rig: &RigSpec, src: &TimeSource, side: &str) -> Result<Op
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/check_test.rs"]
+#[path = "../../../tests/core/rig/check_test.rs"]
 mod check_test;

@@ -246,5 +246,5 @@ fn report(
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/app_test.rs"]
+#[path = "../../../tests/core/rig/app_test.rs"]
 mod app_test;

@@ -711,5 +711,5 @@ fn rig_config_matches_source(config_path: &Path, rig_path: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/source_test.rs"]
+#[path = "../../../tests/core/rig/source_test.rs"]
 mod source_test;

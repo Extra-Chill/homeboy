@@ -144,5 +144,5 @@ pub(crate) fn now_rfc3339() -> String {
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/state_test.rs"]
+#[path = "../../../tests/core/rig/state_test.rs"]
 mod state_test;

@@ -568,5 +568,5 @@ mod platform {
 
 #[cfg(test)]
 #[cfg(unix)]
-#[path = "../../../../tests/core/rig/service_test.rs"]
+#[path = "../../../tests/core/rig/service_test.rs"]
 mod service_test;

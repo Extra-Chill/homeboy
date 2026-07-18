@@ -366,5 +366,5 @@ fn expand_workload_path(rig_spec: &RigSpec, package_root: Option<&Path>, path: &
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/workloads_test.rs"]
+#[path = "../../../tests/core/rig/workloads_test.rs"]
 mod workloads_test;

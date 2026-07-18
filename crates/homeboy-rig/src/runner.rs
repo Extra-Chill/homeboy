@@ -1058,9 +1058,9 @@ fn rig_observation_metadata(
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/runner_test.rs"]
+#[path = "../../../tests/core/rig/runner_test.rs"]
 mod runner_test;
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/runner_observation_test.rs"]
+#[path = "../../../tests/core/rig/runner_observation_test.rs"]
 mod runner_observation_test;

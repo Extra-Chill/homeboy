@@ -277,5 +277,5 @@ fn entry_from_output(component_id: &str, output: SyncOutput) -> RigStackSyncEntr
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/core/rig/stack_test.rs"]
+#[path = "../../../tests/core/rig/stack_test.rs"]
 mod stack_test;
