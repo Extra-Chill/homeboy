@@ -3,7 +3,10 @@
 # incremental compilation and lower peak build memory. They are path-only
 # dependencies of the `homeboy` crate. The entire workspace is private; the
 # shipped CLI artifact remains the single `homeboy` binary.
-members = ["crates/*"]
+members = ["crates/*", "crates/contracts/*"]
+# `crates/*` also globs the `crates/contracts` grouping directory, which is not
+# itself a crate; exclude it so only the contract crates under it are members.
+exclude = ["crates/contracts"]
 
 [package]
 name = "homeboy"
@@ -39,7 +42,7 @@ path = "src/bin/bench-audit-self.rs"
 
 [dependencies]
 # Private workspace crates shipped only in the Homeboy binary.
-homeboy-cli-contract = { path = "crates/homeboy-cli-contract" }
+homeboy-cli-contract = { path = "crates/contracts/homeboy-cli-contract" }
 homeboy-error = { path = "crates/homeboy-error" }
 homeboy-finding = { path = "crates/homeboy-finding" }
 homeboy-output = { path = "crates/homeboy-output" }
@@ -50,7 +53,7 @@ homeboy-engine-primitives = { path = "crates/homeboy-engine-primitives" }
 homeboy-cli = { path = "crates/homeboy-cli" }
 homeboy-core = { path = "crates/homeboy-core" }
 homeboy-lab-runner = { path = "crates/homeboy-lab-runner" }
-homeboy-lab-contract = { path = "crates/homeboy-lab-contract" }
+homeboy-lab-contract = { path = "crates/contracts/homeboy-lab-contract" }
 homeboy-redaction = { path = "crates/homeboy-redaction" }
 
 # Core library dependencies

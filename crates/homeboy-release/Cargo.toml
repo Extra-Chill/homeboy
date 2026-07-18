@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
-homeboy-release-contract = { version = "0.1.0", path = "../homeboy-release-contract" }
+homeboy-release-contract = { version = "0.1.0", path = "../contracts/homeboy-release-contract" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

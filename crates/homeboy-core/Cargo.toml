@@ -20,24 +20,24 @@ test-support = []
 slow-tests = []
 
 [dependencies]
-homeboy-cli-contract = { version = "0.1.0", path = "../homeboy-cli-contract" }
+homeboy-cli-contract = { version = "0.1.0", path = "../contracts/homeboy-cli-contract" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 homeboy-finding = { version = "0.1.0", path = "../homeboy-finding" }
 homeboy-output = { version = "0.1.0", path = "../homeboy-output" }
 homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }
 homeboy-process = { version = "0.1.0", path = "../homeboy-process" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
-homeboy-release-contract = { version = "0.1.0", path = "../homeboy-release-contract" }
-homeboy-audit-contract = { version = "0.1.0", path = "../homeboy-audit-contract" }
-homeboy-refactor-contract = { version = "0.1.0", path = "../homeboy-refactor-contract" }
+homeboy-release-contract = { version = "0.1.0", path = "../contracts/homeboy-release-contract" }
+homeboy-audit-contract = { version = "0.1.0", path = "../contracts/homeboy-audit-contract" }
+homeboy-refactor-contract = { version = "0.1.0", path = "../contracts/homeboy-refactor-contract" }
 homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit" }
-homeboy-extension-contract = { version = "0.1.0", path = "../homeboy-extension-contract" }
-homeboy-lifecycle-contract = { version = "0.1.0", path = "../homeboy-lifecycle-contract" }
-homeboy-rig-contract = { version = "0.1.0", path = "../homeboy-rig-contract" }
+homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
+homeboy-lifecycle-contract = { version = "0.1.0", path = "../contracts/homeboy-lifecycle-contract" }
+homeboy-rig-contract = { version = "0.1.0", path = "../contracts/homeboy-rig-contract" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
-homeboy-lab-contract = { version = "0.1.0", path = "../homeboy-lab-contract" }
-homeboy-lab-runner-contract = { version = "0.1.0", path = "../homeboy-lab-runner-contract" }
-homeboy-agents-contract = { version = "0.1.0", path = "../homeboy-agents-contract" }
+homeboy-lab-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-contract" }
+homeboy-lab-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-runner-contract" }
+homeboy-agents-contract = { version = "0.1.0", path = "../contracts/homeboy-agents-contract" }
 homeboy-redaction = { version = "0.1.0", path = "../homeboy-redaction" }
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }

@@ -10,7 +10,7 @@ publish = false
 test-support = []
 
 [dependencies]
-homeboy-audit-contract = { version = "0.1.0", path = "../homeboy-audit-contract" }
+homeboy-audit-contract = { version = "0.1.0", path = "../contracts/homeboy-audit-contract" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 homeboy-finding = { version = "0.1.0", path = "../homeboy-finding" }
