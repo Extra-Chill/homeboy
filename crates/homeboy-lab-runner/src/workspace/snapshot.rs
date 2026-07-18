@@ -19,6 +19,28 @@ use super::util::{
 
 const RUNNER_WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
 const LAB_AT_FILES_DIRECTORY: &str = ".homeboy/lab-at-files";
+
+/// Runner-owned paths that Homeboy materializes *onto* a workspace after
+/// transport. They exist only on the runner side, never in the controller's
+/// source tree, so they must be excluded from every workspace content-identity
+/// computation — otherwise the runner and controller hash different trees and
+/// materialization verification fails spuriously.
+///
+/// This is the single source of truth: the content-hash traversals and the
+/// pre-sync collision check all derive from it, so a new reserved path cannot
+/// leak into one hash algorithm while being excluded from another (the drift
+/// that produced #9003 and left the v1 traversal missing `lab-at-files`).
+const RESERVED_RUNNER_WORKSPACE_PATHS: &[&str] =
+    &[RUNNER_WORKSPACE_METADATA_FILE, LAB_AT_FILES_DIRECTORY];
+
+/// Whether `relative` (a `/`-normalized workspace-relative path) is a
+/// runner-owned materialization artifact that must never contribute to a
+/// workspace content identity.
+fn is_reserved_runner_workspace_path(relative: &str) -> bool {
+    RESERVED_RUNNER_WORKSPACE_PATHS
+        .iter()
+        .any(|reserved| relative == *reserved)
+}
 pub(crate) const WORKSPACE_CONTENT_PERMISSION_PORTABLE: &str = "portable-content-only";
 pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE: &str = "unix-executable";
 pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE: &str = "unix-owner-executable";
@@ -237,8 +259,7 @@ fn collect_content_hash_entries_v2(
         let is_runner_metadata_directory = relative == ".homeboy";
         if relative == ".git"
             || is_excluded(root, &root.join(&relative_path), excludes, &[])
-            || relative == RUNNER_WORKSPACE_METADATA_FILE
-            || relative == LAB_AT_FILES_DIRECTORY
+            || is_reserved_runner_workspace_path(&relative)
         {
             continue;
         }
@@ -438,7 +459,7 @@ fn collect_content_hash_entries_v1(
         let is_runner_metadata_directory = relative == ".homeboy";
         if relative == ".git"
             || is_excluded(root, &root.join(&relative_path), excludes, &[])
-            || relative == RUNNER_WORKSPACE_METADATA_FILE
+            || is_reserved_runner_workspace_path(&relative)
         {
             continue;
         }
@@ -1307,7 +1328,7 @@ pub(crate) fn copy_snapshot_to_directory(
 }
 
 pub(crate) fn ensure_no_runner_workspace_metadata_collision(local_path: &Path) -> Result<()> {
-    for reserved in [RUNNER_WORKSPACE_METADATA_FILE, LAB_AT_FILES_DIRECTORY] {
+    for reserved in RESERVED_RUNNER_WORKSPACE_PATHS.iter().copied() {
         let reserved_path = local_path.join(reserved);
         match fs::symlink_metadata(&reserved_path) {
             Ok(_) => {
