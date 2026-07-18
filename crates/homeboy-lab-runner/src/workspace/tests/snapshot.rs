@@ -143,6 +143,84 @@ fn snapshot_command_failure_bounds_transport_output() {
 }
 
 #[test]
+fn snapshot_signal_death_is_a_retryable_transport_failure() {
+    // #8803: an SSH transport that drops mid-pipe kills `sh` with a signal, so
+    // it exits with no code (surfaced as -1). This must be classified as a
+    // retryable transport failure carrying structured diagnostics, not an
+    // opaque internal error.
+    let error = super::super::util::run_shell_command(
+        "kill -PIPE $$",
+        "materialize SSH workspace snapshot",
+    )
+    .expect_err("signal death must be an actionable transport failure");
+
+    assert_eq!(
+        error.code,
+        homeboy_core::error::ErrorCode::RunnerLabTransportFailure
+    );
+    assert_eq!(
+        error.retryable,
+        Some(true),
+        "transport failures must be retryable"
+    );
+    let details = serde_json::to_string(&error.details).expect("serialize details");
+    assert!(
+        details.contains("\"signal_death\":true"),
+        "must record that the process was killed by a signal: {details}"
+    );
+    assert!(
+        details.contains("transport_close_reason"),
+        "must record a transport close reason: {details}"
+    );
+    // The generic non-transport message must not be used for a transport drop.
+    assert!(
+        !error.message.contains("failed during command execution"),
+        "signal death must not fall through to the generic command error: {}",
+        error.message
+    );
+}
+
+#[test]
+fn snapshot_ssh_connection_exit_is_a_retryable_transport_failure() {
+    // SSH exits 255 on a connection-level error, distinct from a remote
+    // command's own non-zero exit code.
+    let error = super::super::util::run_shell_command(
+        "echo 'ssh: connect to host lab port 22: Connection refused' >&2; exit 255",
+        "materialize SSH workspace snapshot",
+    )
+    .expect_err("ssh connection error must be an actionable transport failure");
+
+    assert_eq!(
+        error.code,
+        homeboy_core::error::ErrorCode::RunnerLabTransportFailure
+    );
+    assert_eq!(error.retryable, Some(true));
+    assert!(
+        error.message.to_lowercase().contains("connection refused"),
+        "must surface the transport close reason: {}",
+        error.message
+    );
+}
+
+#[test]
+fn snapshot_ordinary_command_failure_is_not_classified_as_transport() {
+    // A genuine remote command failure (non-signal, non-255, no transient
+    // stderr) must remain a plain command error so real bugs are not silently
+    // retried as transport flakes.
+    let error = super::super::util::run_shell_command(
+        "echo boom >&2; exit 2",
+        "materialize SSH workspace snapshot",
+    )
+    .expect_err("ordinary failure still errors");
+
+    assert_ne!(
+        error.code,
+        homeboy_core::error::ErrorCode::RunnerLabTransportFailure
+    );
+    assert!(error.message.contains("exit status 2"));
+}
+
+#[test]
 fn snapshot_command_failure_bounds_multibyte_output_at_a_character_boundary() {
     let error = super::super::util::run_shell_command(
         "head -c 4095 /dev/zero | tr '\\0' Z; printf '\\342\\202\\254'; exit 26",

@@ -4,7 +4,7 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use homeboy_core::engine::shell;
-use homeboy_core::error::{Error, Result};
+use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::server::{self, Server, SshClient};
 
 use super::super::Runner;
@@ -121,6 +121,17 @@ pub(crate) fn run_shell_command(command: &str, action: &str) -> Result<()> {
     }
     let stdout = bounded_command_output(&output.stdout);
     let stderr = bounded_command_output(&output.stderr);
+    // The command is typically a local `tar ... | ssh <runner> <extract>`
+    // pipe, so an SSH transport that drops mid-materialization surfaces here
+    // as a signal death (`sh` returns no exit code, reported as -1) or an
+    // SSH connection error (exit 255 / transient connection stderr) rather
+    // than a genuine remote command failure. Classify that as a retryable
+    // transport failure with structured evidence so the caller can resume
+    // from a deterministic phase instead of terminalizing an opaque
+    // `invalid_input` with no diagnosable cause (#8803).
+    if let Some(error) = classify_transport_failure(action, &output.status, &stdout, &stderr) {
+        return Err(error);
+    }
     let evidence = match (stdout.is_empty(), stderr.is_empty()) {
         (true, true) => "the command exited without stdout or stderr".to_string(),
         (false, true) => format!("stdout: {stdout}"),
@@ -131,6 +142,79 @@ pub(crate) fn run_shell_command(command: &str, action: &str) -> Result<()> {
         "{action} failed during command execution (exit status {}): {evidence}",
         output.status.code().unwrap_or(-1),
     )))
+}
+
+/// SSH connection failures worth retrying, matched against the piped command's
+/// stderr. Kept in sync with `homeboy_core::server::is_transient_ssh_error`,
+/// which operates on the runner `CommandOutput` type rather than the local
+/// `sh` process output available here.
+const TRANSIENT_SSH_STDERR_PATTERNS: [&str; 10] = [
+    "connection refused",
+    "connection reset",
+    "connection timed out",
+    "no route to host",
+    "network is unreachable",
+    "temporary failure in name resolution",
+    "could not resolve hostname",
+    "broken pipe",
+    "ssh_exchange_identification",
+    "connection closed by remote host",
+];
+
+/// Return a retryable [`ErrorCode::RunnerLabTransportFailure`] when a piped
+/// materialization command failed because its SSH transport dropped, or `None`
+/// when the failure is an ordinary non-transport command error.
+fn classify_transport_failure(
+    action: &str,
+    status: &std::process::ExitStatus,
+    stdout: &str,
+    stderr: &str,
+) -> Option<Error> {
+    // `code() == None` means the process was killed by a signal (e.g. SIGPIPE
+    // when the remote SSH end closed), reported to callers as exit status -1.
+    let signal_death = status.code().is_none();
+    // SSH itself exits 255 on a connection-level error, distinct from a remote
+    // command's own non-zero exit code.
+    let ssh_connection_exit = status.code() == Some(255);
+    let lower_stderr = stderr.to_lowercase();
+    let matched_transient = TRANSIENT_SSH_STDERR_PATTERNS
+        .iter()
+        .find(|pattern| lower_stderr.contains(**pattern))
+        .copied();
+
+    if !signal_death && !ssh_connection_exit && matched_transient.is_none() {
+        return None;
+    }
+
+    let close_reason = stderr
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| matched_transient.map(str::to_string))
+        .unwrap_or_else(|| {
+            if signal_death {
+                "SSH transport closed the command without an exit code".to_string()
+            } else {
+                "SSH connection error (exit 255) without stderr".to_string()
+            }
+        });
+
+    let exit_code = status.code().unwrap_or(-1);
+    Some(
+        Error::new(
+            ErrorCode::RunnerLabTransportFailure,
+            format!("{action} failed (exit status {exit_code}): {close_reason}"),
+            serde_json::json!({
+                "action": action,
+                "exit_code": exit_code,
+                "signal_death": signal_death,
+                "transport_close_reason": close_reason,
+                "stdout": stdout,
+                "stderr": stderr,
+            }),
+        )
+        .with_retryable(true),
+    )
 }
 
 const COMMAND_FAILURE_OUTPUT_LIMIT: usize = 4 * 1024;
