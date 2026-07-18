@@ -330,8 +330,8 @@ fn hydrate_file_evidence_ref(uri: &str) -> Result<HydratedContent> {
 }
 
 fn hydrate_local_path_evidence_ref(path: &Path) -> Result<HydratedContent> {
-    let metadata = fs::metadata(path)
-        .map_err(|error| homeboy_core::Error::internal_io(error.to_string(), None))?;
+    let metadata =
+        fs::metadata(path).map_err(|error| file_evidence_io_error("metadata", path, error))?;
     if !metadata.is_file() {
         return Err(homeboy_core::Error::validation_invalid_argument(
             "evidence_ref",
@@ -341,8 +341,7 @@ fn hydrate_local_path_evidence_ref(path: &Path) -> Result<HydratedContent> {
         ));
     }
 
-    let bytes = fs::read(path)
-        .map_err(|error| homeboy_core::Error::internal_io(error.to_string(), None))?;
+    let bytes = fs::read(path).map_err(|error| file_evidence_io_error("read", path, error))?;
     let truncated = bytes.len() > EVIDENCE_TEXT_LIMIT;
     let visible = &bytes[..bytes.len().min(EVIDENCE_TEXT_LIMIT)];
     let text = String::from_utf8_lossy(visible);
@@ -358,6 +357,20 @@ fn hydrate_local_path_evidence_ref(path: &Path) -> Result<HydratedContent> {
         omitted_bytes: truncated.then_some(bytes.len().saturating_sub(EVIDENCE_TEXT_LIMIT) as u64),
         content,
     })
+}
+
+fn file_evidence_io_error(
+    operation: &str,
+    path: &Path,
+    error: std::io::Error,
+) -> homeboy_core::Error {
+    homeboy_core::Error::internal_io(
+        error.to_string(),
+        Some(format!(
+            "agent_task.evidence.hydrate.{operation}: {}",
+            path.display()
+        )),
+    )
 }
 
 fn local_evidence_path(uri: &str) -> Option<PathBuf> {
@@ -565,6 +578,8 @@ fn first_diagnostics(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_error::ErrorCode;
+    use std::io::{Error as IoError, ErrorKind};
 
     #[test]
     fn agent_task_evidence_url_requires_supported_run_section_shape() {
@@ -589,6 +604,45 @@ mod tests {
         );
         assert!(parse_agent_task_homeboy_uri("homeboy://agent-task/run/run-1").is_err());
         assert!(parse_agent_task_homeboy_uri("homeboy://agent-task/artifacts/run-1").is_err());
+    }
+
+    #[test]
+    fn missing_file_evidence_retains_metadata_operation_path_and_os_error() {
+        let path = tempfile::tempdir()
+            .expect("temporary directory")
+            .path()
+            .join("missing-evidence.json");
+        let expected_os_error = fs::metadata(&path).expect_err("missing file").to_string();
+
+        let error = match hydrate_local_path_evidence_ref(&path) {
+            Ok(_) => panic!("missing file evidence hydrated"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+        assert_eq!(error.message, "IO error");
+        assert_eq!(error.details["error"], expected_os_error);
+        assert_eq!(
+            error.details["context"],
+            format!("agent_task.evidence.hydrate.metadata: {}", path.display())
+        );
+    }
+
+    #[test]
+    fn file_evidence_read_error_retains_operation_path_and_os_error() {
+        let path = Path::new("evidence.json");
+        let os_error = IoError::new(ErrorKind::PermissionDenied, "read denied");
+        let expected_os_error = os_error.to_string();
+
+        let error = file_evidence_io_error("read", path, os_error);
+
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+        assert_eq!(error.message, "IO error");
+        assert_eq!(error.details["error"], expected_os_error);
+        assert_eq!(
+            error.details["context"],
+            "agent_task.evidence.hydrate.read: evidence.json"
+        );
     }
 }
 
