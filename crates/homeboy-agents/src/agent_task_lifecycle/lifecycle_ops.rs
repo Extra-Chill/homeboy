@@ -1053,6 +1053,45 @@ fn is_expired_unaccepted_lab_handoff(
             .is_some_and(|deadline| deadline.with_timezone(&chrono::Utc) <= now)
 }
 
+/// Whether the controller has durably transferred this run to a specific
+/// runner daemon job. Once this is true, controller transport errors are not
+/// pre-acceptance failures: the stored runner identity is the reconciliation
+/// boundary for the eventual authoritative result.
+pub fn has_accepted_runner_handoff(run_id: &str) -> Result<bool> {
+    let record = store::read_record(&sanitize_run_id(run_id))?;
+    Ok(is_accepted_runner_handoff(&record))
+}
+
+/// Pure durable-handoff predicate for callers that already hold the lifecycle
+/// record and must not re-enter the store.
+pub(crate) fn is_accepted_runner_handoff(record: &AgentTaskRunRecord) -> bool {
+    let Some(runner_id) = record.runner_id() else {
+        return false;
+    };
+    let Some(runner_job_id) = record.runner_job_id() else {
+        return false;
+    };
+    let handoff = record.metadata.get("runner_handoff");
+    record
+        .metadata
+        .get("handoff_acceptance")
+        .and_then(|acceptance| acceptance.get("state"))
+        .and_then(Value::as_str)
+        == Some("accepted")
+        && handoff
+            .and_then(|value| value.get("authority"))
+            .and_then(Value::as_str)
+            == Some("runner_daemon")
+        && handoff
+            .and_then(|value| value.pointer("/identity/runner_id"))
+            .and_then(Value::as_str)
+            == Some(runner_id)
+        && handoff
+            .and_then(|value| value.pointer("/identity/runner_job_id"))
+            .and_then(Value::as_str)
+            == Some(runner_job_id)
+}
+
 fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
     let _lock = LabHandoffLock::lock(run_id)?;
     // Re-read while holding the handoff lock: an accepted job is runner-owned
