@@ -18,6 +18,7 @@ const LEASE_FILE: &str = "lease.json";
 const PIN_DIR: &str = "pins";
 const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
 const SUBPROCESS_LEASE_ENV: &str = "HOMEBOY_RUNTIME_PROMOTION_LEASE";
+const ACQUIRE_DISAPPEARED_LEASE_RETRIES: usize = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimePromotionLeaseRecord {
@@ -72,6 +73,11 @@ pub struct RuntimePromotionTakeover {
     pub archived_path: String,
 }
 
+enum LeaseRecordReadError {
+    Disappeared(std::io::Error),
+    Failure(Error),
+}
+
 impl Drop for RuntimePromotionLease {
     fn drop(&mut self) {
         if self.primary {
@@ -107,8 +113,11 @@ pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimeProm
     let generation = current_generation();
     let subprocess_capability = subprocess_capability_from_env();
 
-    match create_lease_dir(&path) {
-        Ok(()) => {
+    match acquire_lease_dir_with_retry(
+        || create_lease_dir(&path),
+        || read_record_for_acquisition(&path),
+    )? {
+        None => {
             let capability = uuid::Uuid::new_v4().to_string();
             write_record(
                 &path,
@@ -131,8 +140,7 @@ pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimeProm
                 capability,
             })
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let held = read_record(&path)?;
+        Some(held) => {
             let same_transaction = held.target == target && held.generation == generation;
             if held.pid == pid && same_transaction {
                 return Ok(RuntimePromotionLease {
@@ -161,11 +169,45 @@ pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimeProm
             }
             Err(blocked_error(&held, false))
         }
-        Err(error) => Err(Error::internal_io(
-            error.to_string(),
-            Some("acquire runtime promotion lease".to_string()),
-        )),
     }
+}
+
+/// Create the lease directory or return its existing record. A previous owner
+/// can remove its directory after our create attempt observes it, so retry the
+/// create exactly once when the record is gone before it can be read.
+fn acquire_lease_dir_with_retry<Create, Read>(
+    mut create: Create,
+    mut read: Read,
+) -> Result<Option<RuntimePromotionLeaseRecord>>
+where
+    Create: FnMut() -> std::io::Result<()>,
+    Read: FnMut() -> std::result::Result<RuntimePromotionLeaseRecord, LeaseRecordReadError>,
+{
+    for attempt in 0..=ACQUIRE_DISAPPEARED_LEASE_RETRIES {
+        match create() {
+            Ok(()) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => match read() {
+                Ok(record) => return Ok(Some(record)),
+                Err(LeaseRecordReadError::Disappeared(_))
+                    if attempt < ACQUIRE_DISAPPEARED_LEASE_RETRIES =>
+                {
+                    continue;
+                }
+                Err(LeaseRecordReadError::Disappeared(error)) => {
+                    return Err(io("read runtime promotion lease")(error));
+                }
+                Err(LeaseRecordReadError::Failure(error)) => return Err(error),
+            },
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some("acquire runtime promotion lease".to_string()),
+                ));
+            }
+        }
+    }
+
+    unreachable!("the bounded acquisition loop always returns")
 }
 
 impl RuntimePromotionLease {
@@ -278,6 +320,25 @@ fn read_record(path: &Path) -> Result<RuntimePromotionLeaseRecord> {
         fs::read_to_string(path.join(LEASE_FILE)).map_err(io("read runtime promotion lease"))?;
     serde_json::from_str(&content).map_err(|e| {
         Error::validation_invalid_json(e, Some("parse runtime promotion lease".to_string()), None)
+    })
+}
+
+fn read_record_for_acquisition(
+    path: &Path,
+) -> std::result::Result<RuntimePromotionLeaseRecord, LeaseRecordReadError> {
+    let content = fs::read_to_string(path.join(LEASE_FILE)).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            LeaseRecordReadError::Disappeared(error)
+        } else {
+            LeaseRecordReadError::Failure(io("read runtime promotion lease")(error))
+        }
+    })?;
+    serde_json::from_str(&content).map_err(|error| {
+        LeaseRecordReadError::Failure(Error::validation_invalid_json(
+            error,
+            Some("parse runtime promotion lease".to_string()),
+            None,
+        ))
     })
 }
 
@@ -422,6 +483,59 @@ mod tests {
             generation: record.generation.clone(),
             capability: record.capability.clone(),
         }
+    }
+
+    #[test]
+    fn acquire_retries_once_when_the_observed_lease_disappears() {
+        let mut create_calls = 0;
+        let mut read_calls = 0;
+
+        let result = acquire_lease_dir_with_retry(
+            || {
+                create_calls += 1;
+                if create_calls == 1 {
+                    Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                read_calls += 1;
+                Err(LeaseRecordReadError::Disappeared(std::io::Error::from(
+                    std::io::ErrorKind::NotFound,
+                )))
+            },
+        )
+        .expect("the second acquisition succeeds after the former owner removes its lease");
+
+        assert!(result.is_none());
+        assert_eq!(create_calls, 2);
+        assert_eq!(read_calls, 1);
+    }
+
+    #[test]
+    fn acquire_does_not_retry_a_malformed_or_unreadable_lease() {
+        let mut create_calls = 0;
+        let mut read_calls = 0;
+
+        let error = acquire_lease_dir_with_retry(
+            || {
+                create_calls += 1;
+                Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+            },
+            || {
+                read_calls += 1;
+                Err(LeaseRecordReadError::Failure(Error::internal_io(
+                    "invalid lease record".to_string(),
+                    Some("parse runtime promotion lease".to_string()),
+                )))
+            },
+        )
+        .expect_err("a malformed or unreadable lease remains an error");
+
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+        assert_eq!(create_calls, 1);
+        assert_eq!(read_calls, 1);
     }
 
     #[test]
