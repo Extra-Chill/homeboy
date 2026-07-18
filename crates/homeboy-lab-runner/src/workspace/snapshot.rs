@@ -24,9 +24,16 @@ pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE: &str = "unix-exec
 pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE: &str = "unix-owner-executable";
 pub(crate) const WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT: usize = 192;
 
-// Commands are passed through a shell and, for remote runners, SSH. Keep well
-// below platform argv limits after their quoting and environment overhead.
-const INCREMENTAL_PREPARE_COMMAND_MAX_BYTES: usize = 32 * 1024;
+// The SSH path passes this script through `sh -c` after shell-quoting it. A
+// single quote can expand from one byte to five bytes at that layer. 16 KiB
+// therefore remains below Linux's 128 KiB single-argument limit even in that
+// worst case, while leaving room for the SSH invocation and its environment.
+const INCREMENTAL_PREPARE_COMMAND_MAX_BYTES: usize = 16 * 1024;
+
+// Fixed shell syntax, owner capture, UUID, and repeated path references. The
+// preflight deliberately overestimates so it can reject before allocating a
+// command proportional to the manifest.
+const INCREMENTAL_PREPARE_COMMAND_FIXED_OVERHEAD_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct WorkspaceContentManifest {
@@ -790,6 +797,14 @@ pub(crate) fn materialize_snapshot_incremental(
     delta: &SnapshotManifestDelta,
 ) -> Result<SnapshotTransferStats> {
     let temporary = format!("{}.tmp-{}", remote_path, uuid::Uuid::new_v4());
+    if !incremental_prepare_command_fits(remote_path, &temporary, seed_path, delta) {
+        materialize_snapshot(runner, local_path, remote_path, excludes)?;
+        return Ok(SnapshotTransferStats {
+            reused: ByteFileCounts::default(),
+            transferred: delta.transfer.final_size.clone(),
+            final_size: delta.transfer.final_size.clone(),
+        });
+    }
     let prepare = incremental_prepare_command(remote_path, &temporary, seed_path, delta);
     if prepare.len() > INCREMENTAL_PREPARE_COMMAND_MAX_BYTES {
         materialize_snapshot(runner, local_path, remote_path, excludes)?;
@@ -868,6 +883,65 @@ pub(crate) fn materialize_snapshot_incremental(
         cleanup_incremental_temporary(runner, &temporary);
     }
     result.map(|_| delta.transfer.clone())
+}
+
+fn saturating_shell_quote_upper_bound(value: &str) -> usize {
+    // `quote_arg` can render each apostrophe as `'\\''` and add delimiters.
+    const SHELL_META: &[char] = &[
+        ' ', '\t', '\n', '\'', '"', '\\', '$', '`', '!', '*', '?', '[', ']', '(', ')', '{', '}',
+        '<', '>', '|', '&', ';', '#', '~',
+    ];
+    if value.contains(SHELL_META) {
+        value.len().saturating_mul(5).saturating_add(2)
+    } else {
+        value.len()
+    }
+}
+
+pub(super) fn incremental_prepare_command_fits(
+    remote_path: &str,
+    temporary: &str,
+    seed_path: &str,
+    delta: &SnapshotManifestDelta,
+) -> bool {
+    incremental_prepare_command_preflight_bytes(remote_path, temporary, seed_path, delta)
+        <= INCREMENTAL_PREPARE_COMMAND_MAX_BYTES
+}
+
+fn incremental_prepare_command_preflight_bytes(
+    remote_path: &str,
+    temporary: &str,
+    seed_path: &str,
+    delta: &SnapshotManifestDelta,
+) -> usize {
+    let parent = parent_remote_path(remote_path);
+    let mut bytes = INCREMENTAL_PREPARE_COMMAND_FIXED_OVERHEAD_BYTES;
+
+    // Account for every path embedded in the outer command, including the
+    // nested `sh -c` cleanup predicate for retained paths.
+    for path in &delta.retained_paths {
+        bytes = bytes.saturating_add(
+            saturating_shell_quote_upper_bound(path)
+                .saturating_mul(5)
+                .saturating_add(64),
+        );
+    }
+    for path in delta
+        .deleted_paths
+        .iter()
+        .chain(delta.replaced_paths.iter())
+        .chain(delta.changed_file_paths.iter())
+    {
+        bytes = bytes.saturating_add(saturating_shell_quote_upper_bound(path).saturating_add(64));
+    }
+
+    // These values are repeated in the generated setup, clone, cleanup, and
+    // removal clauses. Multiplying their conservative quoted size keeps the
+    // check independent of controller or runner path length.
+    bytes = bytes.saturating_add(saturating_shell_quote_upper_bound(&parent).saturating_mul(4));
+    bytes = bytes.saturating_add(saturating_shell_quote_upper_bound(temporary).saturating_mul(12));
+    bytes = bytes.saturating_add(saturating_shell_quote_upper_bound(seed_path).saturating_mul(2));
+    bytes
 }
 
 fn cleanup_incremental_temporary(runner: &Runner, temporary: &str) {
