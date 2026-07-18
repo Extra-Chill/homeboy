@@ -99,6 +99,13 @@ pub struct AgentTaskCookServiceOptions {
     pub harvest_context: crate::agent_task_scheduler::HarvestExecutionContext,
 }
 
+/// Provenance supplied when Homeboy adopts a candidate prepared outside its
+/// provider lifecycle.
+#[derive(Debug, Clone, Default)]
+pub struct AgentTaskCandidateAdoptionOptions {
+    pub ai_model: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentTaskCookReport {
     pub schema: &'static str,
@@ -122,7 +129,12 @@ pub fn adopt_cook_candidate(
     cook_or_run_id: &str,
     candidate_ref: &str,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    adopt_cook_candidate_with_dispatcher(cook_or_run_id, candidate_ref, |_| Ok(None))
+    adopt_cook_candidate_with_options_and_dispatcher(
+        cook_or_run_id,
+        candidate_ref,
+        AgentTaskCandidateAdoptionOptions::default(),
+        |_| Ok(None),
+    )
 }
 
 /// Compatibility entry point for callers that previously supplied attempt
@@ -135,9 +147,27 @@ pub fn adopt_cook_candidate_with_dispatcher(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    adopt_cook_candidate_with_options_and_dispatcher(
+        cook_or_run_id,
+        candidate_ref,
+        AgentTaskCandidateAdoptionOptions::default(),
+        reconstruct_dispatcher,
+    )
+}
+
+/// Adopt a candidate with provenance supplied by the external preparer.
+pub fn adopt_cook_candidate_with_options_and_dispatcher(
+    cook_or_run_id: &str,
+    candidate_ref: &str,
+    adoption: AgentTaskCandidateAdoptionOptions,
+    reconstruct_dispatcher: impl FnOnce(
+        &Value,
+    ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     adopt_cook_candidate_with_dispatcher_and_backend(
         cook_or_run_id,
         candidate_ref,
+        adoption,
         reconstruct_dispatcher,
         &mut RealAgentTaskPrFinalizationBackend,
     )
@@ -146,6 +176,7 @@ pub fn adopt_cook_candidate_with_dispatcher(
 fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBackend>(
     cook_or_run_id: &str,
     candidate_ref: &str,
+    adoption: AgentTaskCandidateAdoptionOptions,
     _reconstruct_dispatcher: impl FnOnce(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
@@ -153,7 +184,7 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let (record, recipe) = resolve_adoption_target(cook_or_run_id)?;
     let cook_id = &recipe.cook_id;
-    let options = super::reconstruct_adoption_options(&recipe)?;
+    let mut options = super::reconstruct_adoption_options(&recipe)?;
     let run_id = record.run_id.clone();
     let plan = agent_task_lifecycle::load_plan(&run_id)?;
     let source_request = plan.tasks.first().cloned().ok_or_else(|| {
@@ -220,12 +251,25 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
             agent_task_lifecycle::record_promotion(&record.run_id, checkpoint).map(|_| ())
         },
     )?;
+    let (adoption_ai_model, ai_model_source) = match adoption.ai_model {
+        Some(model) => (concrete_adoption_ai_model(&model)?, "candidate_input"),
+        None => (
+            concrete_adoption_ai_model(options.ai_model.as_deref().unwrap_or_default())?,
+            "recipe_finalization",
+        ),
+    };
+    // The adopted candidate did not run through this cook's provider lifecycle.
+    // Bind its declared model to the authenticated promotion instead of inferring
+    // one from the immutable execution plan.
+    options.ai_model = Some(adoption_ai_model.clone());
     promotion.provenance["adoption"] = serde_json::json!({
         "source_run_id": record.run_id,
         "candidate_ref": candidate_ref,
         "source_worktree_path": options.source_worktree_path,
         "recorded_task_base": options.task_base_sha,
         "recovery": recovery,
+        "ai_model": adoption_ai_model,
+        "ai_model_source": ai_model_source,
     });
     let promotion_value = serde_json::to_value(&promotion)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
@@ -285,6 +329,30 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
         None,
         exit_code,
     ))
+}
+
+fn concrete_adoption_ai_model(value: &str) -> Result<String> {
+    let normalized = value.trim();
+    if normalized.is_empty()
+        || value != normalized
+        || value.chars().any(char::is_control)
+        || matches!(
+            normalized.to_ascii_lowercase().as_str(),
+            "not recorded"
+                | "unknown"
+                | "ai-assisted"
+                | "ai assisted"
+                | "legacy caller did not record a model"
+        )
+    {
+        return Err(Error::validation_invalid_argument(
+            "ai_model",
+            "candidate adoption requires a concrete model identifier",
+            None,
+            None,
+        ));
+    }
+    Ok(normalized.to_string())
 }
 
 /// Resolve an existing run first, then recover the exact persisted attempt when
@@ -2729,6 +2797,9 @@ mod tests {
             let result = adopt_cook_candidate_with_dispatcher_and_backend(
                 cook_id,
                 &candidate,
+                AgentTaskCandidateAdoptionOptions {
+                    ai_model: Some("openai/gpt-5.6-sol".to_string()),
+                },
                 |_| Ok(None),
                 &mut backend,
             )
@@ -2760,8 +2831,27 @@ mod tests {
                     ["provider_executions_consumed"],
                 0
             );
+            assert_eq!(
+                promoted.metadata["latest_promotion"]["provenance"]["adoption"]["ai_model"],
+                "openai/gpt-5.6-sol"
+            );
+            assert_eq!(
+                promoted.metadata["latest_promotion"]["provenance"]["adoption"]["ai_model_source"],
+                "candidate_input"
+            );
+            assert!(backend.body.contains("- **Tool(s):** test"));
+            assert!(backend.body.contains("- **Model:** openai/gpt-5.6-sol"));
             assert!(backend.committed && backend.pushed && backend.created);
         });
+    }
+
+    #[test]
+    fn adoption_rejects_missing_or_placeholder_candidate_model() {
+        for model in ["", "not recorded", " unknown "] {
+            let error = concrete_adoption_ai_model(model)
+                .expect_err("adoption model must be a concrete identifier");
+            assert_eq!(error.details["field"], "ai_model");
+        }
     }
 
     #[test]

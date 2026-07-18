@@ -891,6 +891,10 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
     missing_head.promotion.provenance["candidate"]["fingerprint"]["head"] = json!("");
     rejected(recovery_lifecycle.clone(), missing_head);
 
+    let mut missing_model = pre_provider_adoption_gate_proof();
+    missing_model.promotion.provenance["adoption"]["ai_model"] = serde_json::Value::Null;
+    rejected(recovery_lifecycle.clone(), missing_model);
+
     let mut non_green = pre_provider_adoption_gate_proof();
     non_green.promotion.gate_results[0].status = HomeboyGateStatus::Failed;
     rejected(recovery_lifecycle, non_green);
@@ -1460,6 +1464,7 @@ fn pre_provider_adoption_gate_proof() -> AgentTaskPrDurableGateProof {
         "adoption": {
             "source_run_id": "cook-3678",
             "candidate_ref": "7f76933ef002d195ee1cc5bf21069e0f40b1c972",
+            "ai_model": "openai/gpt-5.6-sol",
             "recovery": {
                 "schema": "homeboy/agent-task-candidate-adoption-recovery/v1",
                 "reason": "pre_provider_transport_failure",

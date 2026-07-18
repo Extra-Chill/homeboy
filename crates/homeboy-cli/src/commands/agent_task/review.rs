@@ -332,9 +332,12 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
 }
 
 pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
-    let result = agent_task_service::adopt_cook_candidate_with_dispatcher(
+    let result = agent_task_service::adopt_cook_candidate_with_options_and_dispatcher(
         &args.run_or_cook_id,
         &args.candidate_ref,
+        agent_task_service::AgentTaskCandidateAdoptionOptions {
+            ai_model: args.ai_model.clone(),
+        },
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )?;
     let exit_code = result.exit_code;
@@ -343,6 +346,7 @@ pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
         "schema": "homeboy/agent-task-candidate-adoption/v1",
         "source": args.run_or_cook_id,
         "candidate_ref": args.candidate_ref,
+        "ai_model": args.ai_model,
         "controller_owned": true,
     });
     Ok((value, exit_code))

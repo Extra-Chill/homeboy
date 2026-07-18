@@ -121,6 +121,28 @@ mod tests {
         assert_eq!(args.artifact.as_deref(), Some("/trusted/homeboy"));
         assert!(args.source.is_none());
     }
+
+    #[test]
+    fn adoption_parses_external_candidate_model() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "adopt",
+            "cook-a",
+            "--candidate-ref",
+            "0123456789abcdef0123456789abcdef01234567",
+            "--ai-model",
+            "openai/gpt-5.6-sol",
+        ])
+        .expect("adoption model parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::Adopt(args) = agent_task.command else {
+            panic!("expected adoption command");
+        };
+        assert_eq!(args.ai_model.as_deref(), Some("openai/gpt-5.6-sol"));
+    }
 }
 #[derive(Args, Debug)]
 pub struct ReplayProviderBoundaryArgs {
@@ -188,6 +210,9 @@ pub struct AdoptArgs {
     /// Immutable commit revision in the recorded source worktree.
     #[arg(long, value_name = "SHA")]
     pub candidate_ref: String,
+    /// Concrete model that prepared the externally supplied candidate.
+    #[arg(long, value_name = "MODEL")]
+    pub ai_model: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct FinalizePrArgs {
