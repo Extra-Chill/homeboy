@@ -27,7 +27,7 @@ Runner sync uses this contract:
 - `--no-restart`: Skip automatic restart after upgrade. Useful for scripted environments.
 - `--skip-extensions`: Skip automatic extension updates.
 - `--skip-runners`: Skip automatic configured runner upgrades.
-- `--upgrade-runner`: Upgrade only the named configured runner. Repeat to target multiple runners.
+- `--upgrade-runner`: Upgrade only the named configured runner. Repeat to target multiple runners. Runner-only mode leaves the controller unchanged; source-built controllers pin the initiating source identity, while packaged controllers retain their configured runner upgrade method.
 - `--method`: Override install method detection (`homebrew|cargo|source|binary`).
 
 ## Installation Method Detection

@@ -22,10 +22,20 @@ pub fn sync_runner_extensions(
     let mut skipped = Vec::new();
     let mut failed = Vec::new();
     for extension in extension_updates {
-        let Some(source_url) = extension.source_url.as_deref() else {
-            continue;
-        };
-        let Some(source_revision) = extension.source_revision.as_deref() else {
+        let (Some(source_url), Some(source_revision)) = (
+            extension.source_url.as_deref(),
+            extension.source_revision.as_deref(),
+        ) else {
+            skipped.push(RunnerExtensionSyncEntry {
+                extension_id: extension.extension_id.clone(),
+                source_revision: extension.source_revision.clone().unwrap_or_default(),
+                synced: false,
+                detail: Some(extension.source_update.update_note.clone().unwrap_or_else(|| {
+                    "unrefreshable: installed extension lacks reproducible source URL or revision"
+                        .to_string()
+                })),
+                recovery_commands: Vec::new(),
+            });
             continue;
         };
         if !runner_supports_extension_sync(runner, &extension.extension_id) {
@@ -120,6 +130,44 @@ pub fn defer_extension_failures_for_path_drift(
         ));
         entry
     }));
+}
+
+pub fn defer_runner_extensions_for_binary_drift(
+    extension_updates: &[ExtensionUpgradeEntry],
+    path_drift: &str,
+) -> Vec<RunnerExtensionSyncEntry> {
+    extension_updates
+        .iter()
+        .map(|extension| {
+            let Some(source_revision) = extension.source_revision.as_ref() else {
+                return RunnerExtensionSyncEntry {
+                    extension_id: extension.extension_id.clone(),
+                    source_revision: String::new(),
+                    synced: false,
+                    detail: Some("unrefreshable: installed extension lacks reproducible source URL or revision".to_string()),
+                    recovery_commands: Vec::new(),
+                };
+            };
+            if extension.source_url.is_none() {
+                return RunnerExtensionSyncEntry {
+                    extension_id: extension.extension_id.clone(),
+                    source_revision: source_revision.clone(),
+                    synced: false,
+                    detail: Some("unrefreshable: installed extension lacks reproducible source URL or revision".to_string()),
+                    recovery_commands: Vec::new(),
+                };
+            }
+            RunnerExtensionSyncEntry {
+                extension_id: extension.extension_id.clone(),
+                source_revision: source_revision.clone(),
+                synced: false,
+                detail: Some(format!(
+                    "deferred because runner executable did not converge: {path_drift}"
+                )),
+                recovery_commands: Vec::new(),
+            }
+        })
+        .collect()
 }
 
 fn runner_extension_install_recovery_command(

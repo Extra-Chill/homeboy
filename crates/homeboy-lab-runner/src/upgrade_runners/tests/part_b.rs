@@ -385,6 +385,12 @@ fn source_runner_upgrade_realigns_to_same_version_source_checkout_identity() {
                 7 if options.command[0] == source_binary => {
                     (format!("{expected_identity}\n"), String::new(), 0)
                 }
+                8 if options.command[0] == source_binary => {
+                    (format!("{expected_identity}\n"), String::new(), 0)
+                }
+                9 if options.command[0] == source_binary => {
+                    (format!("{expected_identity}\n"), String::new(), 0)
+                }
                 other => (
                     String::new(),
                     format!("unexpected command {other}: {:?}", options.command),
@@ -416,6 +422,136 @@ fn source_runner_upgrade_realigns_to_same_version_source_checkout_identity() {
     assert_eq!(updated[0].new_version.as_deref(), Some(current_version()));
     assert_eq!(updated[0].path_drift, None);
     assert_eq!(path_updates, vec![("lab".to_string(), source_binary)]);
+}
+
+#[test]
+fn rejects_stale_source_runner_identity_before_extension_sync() {
+    let source_dir = git_source_checkout();
+    let expected_identity = source_checkout_build_identity(source_dir.path()).unwrap();
+    let remote_source = "/home/user/Developer/_lab_workspaces/homeboy-current-main";
+    let source_binary = format!("{remote_source}/target/release/homeboy");
+    let runner = ssh_runner(
+        "lab",
+        Some("/home/user/Developer/homeboy@stale/target/release/homeboy"),
+    );
+    let extension_updates = vec![extension_update("required-extension", "48517ac3")];
+    let mut commands = Vec::new();
+
+    let (updated, skipped) = upgrade_runners_with_executor_and_source_materializer(
+        &[runner],
+        true,
+        Some(InstallMethod::Source),
+        Some(source_dir.path()),
+        &extension_updates,
+        |runner_id, options| {
+            commands.push(options.command.clone());
+            let stdout = match commands.len() {
+                1 => format!("homeboy {}+oldbuild\n", current_version()),
+                2 => "prepared source checkout\n".to_string(),
+                3 => "{\"success\":true}\n".to_string(),
+                4 => format!("homeboy {}\n", current_version()),
+                5 => format!("homeboy {}+stale\n", current_version()),
+                6 if options.command[0] == source_binary => {
+                    format!("homeboy {}\n", current_version())
+                }
+                7 if options.command[0] == source_binary => {
+                    format!("homeboy {}+stale\n", current_version())
+                }
+                8 => format!("homeboy {}\n", current_version()),
+                9 => format!("homeboy {}+stale\n", current_version()),
+                10 => format!("homeboy {}+stale\n", current_version()),
+                11 => format!("homeboy {}\n", current_version()),
+                12 => format!("homeboy {}+stale\n", current_version()),
+                13 => format!("homeboy {}+stale\n", current_version()),
+                other => panic!("unexpected runner command {other}: {:?}", options.command),
+            };
+            Ok((exec_output(runner_id, options.command, &stdout, "", 0), 0))
+        },
+        runner_status,
+        |_runner, _path| Ok(remote_source.to_string()),
+    );
+
+    assert!(updated.is_empty());
+    assert_eq!(skipped.len(), 1);
+    assert!(!skipped[0].success);
+    assert!(skipped[0]
+        .path_drift
+        .as_deref()
+        .unwrap()
+        .contains(&expected_identity));
+    assert_eq!(skipped[0].extensions_synced.len(), 0);
+    assert_eq!(skipped[0].extensions_skipped.len(), 1);
+    assert!(skipped[0].extensions_skipped[0]
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains("did not converge"));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains(&"extension".to_string())));
+}
+
+#[test]
+fn reports_unrefreshable_extensions_when_runner_binary_drift_defers_sync() {
+    let extensions = vec![ExtensionUpgradeEntry {
+        extension_id: "local-extension".to_string(),
+        old_version: "1.0.0".to_string(),
+        new_version: "1.0.0".to_string(),
+        linked: false,
+        source_path: None,
+        git_root: None,
+        source_url: None,
+        source_revision: None,
+        source_update: Default::default(),
+    }];
+
+    let skipped = defer_runner_extensions_for_binary_drift(&extensions, "identity mismatch");
+
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].extension_id, "local-extension");
+    assert!(skipped[0]
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains("unrefreshable"));
+}
+
+#[test]
+fn rejects_packaged_runner_with_same_version_but_different_controller_identity() {
+    let runner = ssh_runner("lab", Some("/opt/homeboy/homeboy"));
+    let extensions = vec![extension_update("required-extension", "48517ac3")];
+    let mut calls = 0;
+
+    let entry = upgrade_runner_with_executor(
+        &runner,
+        true,
+        Some(InstallMethod::Binary),
+        None,
+        &extensions,
+        &mut |runner_id, options| {
+            calls += 1;
+            let stdout = match calls {
+                1 | 3 => format!("homeboy {}\n", current_version()),
+                2 => "{\"success\":true}\n".to_string(),
+                _ => format!("homeboy {}+other-build\n", current_version()),
+            };
+            Ok((exec_output(runner_id, options.command, &stdout, "", 0), 0))
+        },
+        &runner_status,
+        &mut |_| Ok("reconnected".to_string()),
+        &mut |_, _| Ok("unused".to_string()),
+        &mut |_, _| Ok(()),
+        Some("controller-build"),
+    );
+
+    assert!(!entry.success);
+    assert!(entry
+        .path_drift
+        .as_deref()
+        .unwrap()
+        .contains("controller-build"));
+    assert_eq!(entry.extensions_synced.len(), 0);
+    assert_eq!(entry.extensions_skipped.len(), 1);
 }
 
 #[test]
