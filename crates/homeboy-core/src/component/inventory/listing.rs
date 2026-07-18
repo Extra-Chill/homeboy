@@ -17,6 +17,37 @@ use std::path::{Path, PathBuf};
 /// precedence over a standalone file with the same ID, which in turn takes
 /// precedence over CWD discovery.
 pub fn inventory() -> Result<Vec<Component>> {
+    let mut components = registered()?;
+    let mut seen: HashSet<String> = components
+        .iter()
+        .map(|component| component.id.clone())
+        .collect();
+
+    // CWD portable discovery is intentionally a command-local convenience,
+    // not a source of durable component ownership.
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(component) = discover_from_portable(&cwd) {
+            if seen.insert(component.id.clone()) {
+                components.push(component);
+            }
+        } else if let Some(git_root) = crate::component::resolution::detect_git_root(&cwd) {
+            if let Some(component) = discover_from_portable(&git_root) {
+                if seen.insert(component.id.clone()) {
+                    components.push(component);
+                }
+            }
+        }
+    }
+
+    components.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(components)
+}
+
+/// List components with persisted ownership only.
+///
+/// This excludes portable `homeboy.json` discovery from the caller's current
+/// directory, which is suitable for host-level operations such as cleanup.
+pub fn registered() -> Result<Vec<Component>> {
     let projects = project::list().unwrap_or_default();
     let mut components = Vec::new();
     let mut seen = HashSet::new();
@@ -47,17 +78,6 @@ pub fn inventory() -> Result<Vec<Component>> {
     if let Ok(standalone) = load_standalone_components() {
         for component in standalone {
             add_component(component);
-        }
-    }
-
-    // 3. CWD portable discovery (lowest priority)
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Some(component) = discover_from_portable(&cwd) {
-            add_component(component);
-        } else if let Some(git_root) = crate::component::resolution::detect_git_root(&cwd) {
-            if let Some(component) = discover_from_portable(&git_root) {
-                add_component(component);
-            }
         }
     }
 

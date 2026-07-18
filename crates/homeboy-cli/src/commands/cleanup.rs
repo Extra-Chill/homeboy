@@ -529,7 +529,7 @@ struct RepoArtifactRootDiagnostic {
 }
 
 fn repo_artifacts_category(apply: bool) -> homeboy::core::Result<CleanupInventoryCategory> {
-    let configured_roots: Vec<PathBuf> = homeboy::core::component::inventory()
+    let configured_roots: Vec<PathBuf> = homeboy::core::component::registered()
         .unwrap_or_default()
         .into_iter()
         .map(|component| PathBuf::from(component.local_path))
@@ -644,11 +644,14 @@ fn repo_artifact_roots(
     let mut roots = Vec::new();
     let mut seen = HashSet::new();
     for path in configured_roots {
-        if seen.insert(path.clone()) {
+        let root = homeboy::core::git::repo_root(&path)
+            .and_then(|root| std::fs::canonicalize(root).ok())
+            .unwrap_or(path);
+        if seen.insert(root.clone()) {
             roots.push((
                 "configured_component",
                 ArtifactCleanupOptions {
-                    path: Some(path),
+                    path: Some(root),
                     apply,
                     self_artifacts: false,
                     temp_roots: Vec::new(),
@@ -1253,6 +1256,36 @@ mod tests {
         assert_eq!(roots[0].0, "configured_component");
         assert_eq!(roots[0].1.path, Some(PathBuf::from("/configured/root")));
         assert!(roots[0].1.apply);
+    }
+
+    #[test]
+    fn aggregate_repo_artifact_roots_deduplicate_paths_with_one_git_root() {
+        let repository = TempDir::new().expect("repository");
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repository.path())
+            .output()
+            .expect("initialize repository");
+        let subdirectory = repository.path().join("packages/component");
+        std::fs::create_dir_all(&subdirectory).expect("component directory");
+
+        let roots = repo_artifact_roots(
+            vec![subdirectory, repository.path().to_path_buf()],
+            false,
+            false,
+        );
+
+        assert_eq!(roots.len(), 1);
+        assert_eq!(
+            roots[0].1.path.as_deref(),
+            Some(
+                repository
+                    .path()
+                    .canonicalize()
+                    .expect("canonical repository")
+                    .as_path()
+            )
+        );
     }
 
     #[test]
