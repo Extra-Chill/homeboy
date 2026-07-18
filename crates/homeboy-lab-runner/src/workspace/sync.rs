@@ -17,7 +17,10 @@ use super::super::validation_dependencies::{
 use super::super::{
     load, source_materialization, RunnerKind, RunnerLifecycleOwner, RunnerWorkspaceLease,
 };
-use super::git::{git_snapshot, materialize_git, materialize_git_from_controller_bundle};
+use super::git::{
+    git_snapshot, materialize_git, materialize_git_from_controller_bundle,
+    materialize_git_snapshot_from_controller_bundle,
+};
 use super::snapshot::{
     effective_snapshot_excludes, ensure_no_runner_workspace_metadata_collision,
     local_snapshot_stats, materialize_snapshot, materialize_snapshot_git,
@@ -122,7 +125,24 @@ pub fn sync_workspace(
                 &excludes,
                 WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
             )?;
-            let synthetic_checkout = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
+            let git_backed_snapshot = git_output(&local_path, &["rev-parse", "HEAD"]).is_ok();
+            let synthetic_checkout = if git_backed_snapshot {
+                match materialize_git_snapshot_from_controller_bundle(
+                    &runner,
+                    &local_path,
+                    &remote_path,
+                    &excludes,
+                ) {
+                    Ok(provenance) => {
+                        materialization_plan.controller_git_bundle = Some(provenance);
+                        None
+                    }
+                    Err(error) => {
+                        rollback_materialized_workspace(&runner, workspace_root, &remote_path);
+                        return Err(error);
+                    }
+                }
+            } else if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
                 match materialize_snapshot_git(
                     &runner,
                     &local_path,

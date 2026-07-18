@@ -9,6 +9,7 @@ use homeboy_core::error::{Error, Result};
 
 use super::super::{Runner, RunnerKind};
 use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializer};
+use super::snapshot::materialize_snapshot_overlay;
 use super::types::ControllerGitBundleProvenance;
 use super::types::GitSnapshot;
 use super::util::{git_output, run_shell_command, ssh_args, ssh_client_for_runner};
@@ -231,6 +232,36 @@ pub(super) fn materialize_git_from_controller_bundle(
         // The controller tempdir is removed as soon as the transfer finishes.
         cleanup_ttl: "PT0S",
     })
+}
+
+/// Materialize a controller Git workspace as its exact captured commit, then
+/// apply its filtered working-tree contents. The bundle creates runner-local
+/// Git metadata; the overlay deliberately excludes controller `.git` data.
+pub(super) fn materialize_git_snapshot_from_controller_bundle(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    excludes: &[String],
+) -> Result<ControllerGitBundleProvenance> {
+    let head = git_output(local_path, &["rev-parse", "HEAD"])?;
+    let branch = git_output(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .filter(|branch| branch != "HEAD");
+    let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"])
+        .unwrap_or_else(|_| "homeboy-controller-bundle".to_string());
+    let provenance = materialize_git_from_controller_bundle(
+        runner,
+        local_path,
+        remote_path,
+        &head,
+        branch.as_deref(),
+        &remote_url,
+        None,
+        &[],
+        false,
+    )?;
+    materialize_snapshot_overlay(runner, local_path, remote_path, excludes)?;
+    Ok(provenance)
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
