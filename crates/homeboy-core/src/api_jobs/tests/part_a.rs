@@ -187,6 +187,160 @@ fn explicit_dead_lease_pidless_recovery_refuses_ambiguous_unexpired_or_identifie
 }
 
 #[test]
+fn runner_capacity_is_claimed_before_reserving_an_agent_task_child() {
+    let store = JobStore::default();
+    let local_runner = || super::store::LocalRunnerJob {
+        runner_id: "homeboy-lab".to_string(),
+        command: vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+        ],
+        cwd: Some("/runner/worktree".to_string()),
+        lifecycle: Some(RunnerJobLifecycleMetadata {
+            source: Some("runner-daemon".to_string()),
+            kind: Some("agent-task-run-plan".to_string()),
+            durable_run_id: None,
+            active_child_count: None,
+            active_cell_count: None,
+        }),
+    };
+    let first = store.create_test_local_runner_job(Some(local_runner()));
+    let second = store.create_test_local_runner_job(Some(local_runner()));
+
+    assert!(store
+        .reserve_local_child_with_runner_capacity(first.id, "homeboy-lab", 1)
+        .expect("idle runner admits the first child"));
+    assert!(!store
+        .reserve_local_child_with_runner_capacity(second.id, "homeboy-lab", 1)
+        .expect("second child waits behind the reservation owner"));
+    assert!(store.get(second.id).expect("queued second job").status == JobStatus::Queued);
+    assert!(!store
+        .events(second.id)
+        .expect("second job events")
+        .iter()
+        .any(|event| event
+            .data
+            .as_ref()
+            .is_some_and(|data| data["phase"] == "child_reserved")));
+
+    store
+        .start_with_reserved_child_identity(
+            first.id,
+            std::process::id(),
+            None,
+            super::store::LocalChildStartDiscriminator::Unsupported {
+                evidence: "test process owns the first capacity slot".to_string(),
+            },
+        )
+        .expect("first child starts once its reservation is admitted");
+    store
+        .complete(first.id, None)
+        .expect("release first capacity owner");
+    assert!(store
+        .reserve_local_child_with_runner_capacity(second.id, "homeboy-lab", 1)
+        .expect("next queued child claims released capacity"));
+    assert_eq!(
+        store
+            .events(second.id)
+            .expect("second child reservation")
+            .iter()
+            .filter(|event| event
+                .data
+                .as_ref()
+                .is_some_and(|data| data["phase"] == "child_reserved"))
+            .count(),
+        1,
+        "the provider path receives exactly one pre-spawn reservation"
+    );
+}
+
+#[test]
+fn capacity_queued_agent_task_spawns_once_after_claiming_an_idle_slot() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    let store = JobStore::default();
+    let local_runner = || super::store::LocalRunnerJob {
+        runner_id: "homeboy-lab".to_string(),
+        command: vec!["homeboy".to_string(), "agent-task".to_string()],
+        cwd: Some("/runner/worktree".to_string()),
+        lifecycle: None,
+    };
+    let starts = Arc::new(AtomicUsize::new(0));
+    let (first_started_tx, first_started_rx) = mpsc::channel();
+    let (release_first_tx, release_first_rx) = mpsc::channel();
+    let first_starts = Arc::clone(&starts);
+    let first = store.run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
+        "runner.exec",
+        None,
+        None,
+        None,
+        local_runner(),
+        1,
+        move |job| {
+            job.start_with_reserved_child_identity(
+                std::process::id(),
+                None,
+                super::store::LocalChildStartDiscriminator::Unsupported {
+                    evidence: "test provider child".to_string(),
+                },
+            )?;
+            first_starts.fetch_add(1, Ordering::SeqCst);
+            first_started_tx.send(()).expect("report first spawn");
+            release_first_rx.recv().expect("release first provider");
+            Ok(json!({}))
+        },
+    );
+    first_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("idle agent-task child spawns");
+
+    let (second_started_tx, second_started_rx) = mpsc::channel();
+    let second_starts = Arc::clone(&starts);
+    let second = store.run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
+        "runner.exec",
+        None,
+        None,
+        None,
+        local_runner(),
+        1,
+        move |job| {
+            job.start_with_reserved_child_identity(
+                std::process::id(),
+                None,
+                super::store::LocalChildStartDiscriminator::Unsupported {
+                    evidence: "test provider child".to_string(),
+                },
+            )?;
+            second_starts.fetch_add(1, Ordering::SeqCst);
+            second_started_tx.send(()).expect("report second spawn");
+            Ok(json!({}))
+        },
+    );
+    assert!(second_started_rx
+        .recv_timeout(Duration::from_millis(50))
+        .is_err());
+    assert!(!store
+        .events(second.job_id)
+        .expect("queued second events")
+        .iter()
+        .any(|event| event
+            .data
+            .as_ref()
+            .is_some_and(|data| data["phase"] == "child_reserved")));
+
+    release_first_tx.send(()).expect("release first provider");
+    first.handle.join().expect("first worker exits");
+    second_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("second child starts after capacity release");
+    second.handle.join().expect("second worker exits");
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn pid_bound_local_child_is_not_expired_by_its_former_reservation_deadline() {
     let store = JobStore::default();
     let job = store.create("runner.exec");
