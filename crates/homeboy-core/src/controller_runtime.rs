@@ -1190,18 +1190,13 @@ fn test_controller_identity(path: &Path) -> Option<Result<String>> {
         )
     });
     let candidate_digest = executable_digest(path);
-    Some(match (source_digest, candidate_digest) {
+    match (source_digest, candidate_digest) {
         (Ok(source_digest), Ok(candidate_digest)) if source_digest == candidate_digest => {
-            Ok(identity)
+            Some(Ok(identity))
         }
-        (Err(error), _) | (_, Err(error)) => Err(error),
-        _ => Err(Error::validation_invalid_argument(
-            "controller_runtime",
-            "test controller identity contract does not match the pinned executable",
-            Some(path.display().to_string()),
-            None,
-        )),
-    })
+        (Err(error), _) | (_, Err(error)) => Some(Err(error)),
+        _ => None,
+    }
 }
 
 fn activated_executable_identity(path: &Path) -> Result<String> {
