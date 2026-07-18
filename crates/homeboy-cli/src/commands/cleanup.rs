@@ -5,6 +5,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use homeboy::core::cleanup::{
     self, ArtifactCleanupOptions, ArtifactCleanupSort, ResourceCleanupOptions,
 };
+use homeboy::core::controller_runtime::{self, ControllerRuntimeCleanupOptions};
 use homeboy::core::defaults;
 use homeboy::core::engine;
 use homeboy::core::engine::shell::quote_arg;
@@ -61,6 +62,7 @@ pub enum CleanupCategoryArg {
     RemoteLabWorkspaces,
     RuntimeTmp,
     ControllerScratch,
+    ControllerRuntimes,
 }
 
 #[derive(Subcommand)]
@@ -203,6 +205,8 @@ pub struct CleanupRetentionManifest {
     pub schema: &'static str,
     pub terminal_run_days: i64,
     pub runtime_tmp_days: u64,
+    pub controller_runtime_days: u64,
+    pub controller_runtime_max_bytes: u64,
     pub limit: i64,
     pub terminal_run_guard: bool,
 }
@@ -311,6 +315,14 @@ const CONTROLLER_SCRATCH_METADATA: CleanupInventoryCategoryMetadata =
         include_arg: "controller-scratch",
         dry_run_command: "homeboy cleanup --include controller-scratch",
         apply_command: "homeboy cleanup --include controller-scratch --apply",
+    };
+
+const CONTROLLER_RUNTIMES_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "controller_runtimes",
+        include_arg: "controller-runtimes",
+        dry_run_command: "homeboy cleanup --include controller-runtimes",
+        apply_command: "homeboy cleanup --include controller-runtimes --apply",
     };
 
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
@@ -455,6 +467,36 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             output,
         )?);
     }
+    if selected.includes(CleanupCategoryArg::ControllerRuntimes) {
+        let output = controller_runtime::cleanup(ControllerRuntimeCleanupOptions {
+            apply,
+            min_age: std::time::Duration::from_secs(
+                configured.controller_runtime_days.saturating_mul(86_400),
+            ),
+            max_total_bytes: configured.controller_runtime_max_bytes,
+            limit: usize::try_from(limit).unwrap_or(usize::MAX),
+        })?;
+        let estimated_bytes = output
+            .snapshots
+            .iter()
+            .filter(|snapshot| snapshot.eligible)
+            .map(|snapshot| snapshot.size_bytes)
+            .sum();
+        categories.push(category_from_output(
+            CONTROLLER_RUNTIMES_METADATA,
+            apply,
+            output
+                .snapshots
+                .iter()
+                .filter(|snapshot| snapshot.eligible)
+                .count(),
+            output.removed_identities.len(),
+            output.retained.len(),
+            estimated_bytes,
+            output.reclaimed_bytes,
+            output,
+        )?);
+    }
 
     let candidate_count = categories
         .iter()
@@ -490,6 +532,8 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             schema: "homeboy/retention-manifest/v1",
             terminal_run_days,
             runtime_tmp_days: configured.runtime_tmp_days,
+            controller_runtime_days: configured.controller_runtime_days,
+            controller_runtime_max_bytes: configured.controller_runtime_max_bytes,
             limit,
             terminal_run_guard: true,
         },
@@ -1393,6 +1437,13 @@ mod tests {
                 "runtime-tmp",
                 "homeboy self cleanup-runtime-tmp",
                 "homeboy self cleanup-runtime-tmp --apply",
+            ),
+            (
+                CONTROLLER_RUNTIMES_METADATA,
+                "controller_runtimes",
+                "controller-runtimes",
+                "homeboy cleanup --include controller-runtimes",
+                "homeboy cleanup --include controller-runtimes --apply",
             ),
         ];
 

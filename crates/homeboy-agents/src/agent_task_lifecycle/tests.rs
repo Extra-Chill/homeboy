@@ -266,7 +266,7 @@ fn legacy_v1_pin_migration_failures_leave_durable_record_unchanged() {
 
 #[cfg(unix)]
 #[test]
-fn controller_runtime_retention_keeps_mutable_runs_and_reports_terminal_pins_eligible() {
+fn controller_runtime_retention_keeps_mutable_and_retained_terminal_runs() {
     with_isolated_home(|_| {
         // Controller-runtime retention discovers referenced pins through the
         // agent-task pin-reference provider hook; register it so the report can
@@ -305,6 +305,7 @@ fn controller_runtime_retention_keeps_mutable_runs_and_reports_terminal_pins_eli
         }
         rewrite_record_for_test(&terminal.run_id, |record| {
             record.state = AgentTaskRunState::Succeeded;
+            record.lifecycle.artifact_retention.status = ArtifactRetentionStatus::Retained;
         })
         .expect("make terminal");
 
@@ -325,15 +326,15 @@ fn controller_runtime_retention_keeps_mutable_runs_and_reports_terminal_pins_eli
         let report =
             homeboy_core::controller_runtime::retention_report().expect("retention report");
         assert!(report.retained.contains(&active_pin));
-        assert!(report.eligible.contains(&terminal_pin));
+        assert!(report.retained.contains(&terminal_pin));
         let dry_run = prune_controller_runtime_pins(false).expect("plan pin pruning");
         assert!(dry_run.retained.contains(&active_pin));
-        assert!(dry_run.eligible.contains(&terminal_pin));
+        assert!(dry_run.retained.contains(&terminal_pin));
         assert!(dry_run.removed.is_empty());
-        let applied = prune_controller_runtime_pins(true).expect("prune terminal pin");
-        assert!(applied.removed.contains(&terminal_pin));
+        let applied = prune_controller_runtime_pins(true).expect("prune unreferenced pins");
+        assert!(!applied.removed.contains(&terminal_pin));
         assert!(active_pin.exists());
-        assert!(!terminal_pin.exists());
+        assert!(terminal_pin.exists());
     });
 }
 

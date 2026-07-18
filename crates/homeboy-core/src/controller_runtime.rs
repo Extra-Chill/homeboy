@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
 use crate::{build_identity, paths, Error, Result};
@@ -34,13 +34,36 @@ static ADMISSION_LOCK_PROCESS_GUARDS: OnceLock<Mutex<BTreeMap<PathBuf, &'static 
 pub struct ControllerRuntimeRetentionReport {
     pub retained: Vec<PathBuf>,
     pub eligible: Vec<PathBuf>,
+    pub snapshots: Vec<ControllerRuntimeSnapshot>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ControllerRuntimeSnapshot {
+    pub identity: String,
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub age_seconds: u64,
+    pub pins: Vec<PathBuf>,
+    pub retention_reasons: Vec<String>,
+    pub eligible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControllerRuntimeCleanupOptions {
+    pub apply: bool,
+    pub min_age: Duration,
+    pub max_total_bytes: u64,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ControllerRuntimePruneResult {
     pub retained: Vec<PathBuf>,
     pub eligible: Vec<PathBuf>,
     pub removed: Vec<PathBuf>,
+    pub removed_identities: Vec<PathBuf>,
+    pub reclaimed_bytes: u64,
+    pub snapshots: Vec<ControllerRuntimeSnapshot>,
 }
 
 /// Discover pin references through the durable lifecycle store and classify the
@@ -48,13 +71,20 @@ pub struct ControllerRuntimePruneResult {
 /// recoverable partial records retain their pins because lifecycle recovery can
 /// still operate on them. The active admission generation is retained as well.
 pub fn retention_report() -> Result<ControllerRuntimeRetentionReport> {
-    let root = runtime_root()?;
     let referenced = crate::controller_pin_reference::referenced_controller_pins()?;
+    retention_report_with_references_at(&referenced, SystemTime::now())
+}
+
+fn retention_report_with_references_at(
+    referenced: &[PathBuf],
+    now: SystemTime,
+) -> Result<ControllerRuntimeRetentionReport> {
+    let root = runtime_root()?;
     let mut retained = BTreeSet::new();
 
     for path in referenced {
         if content_addressed_pin_path(&root, &path) {
-            retained.insert(path);
+            retained.insert(path.clone());
         }
     }
 
@@ -85,33 +115,209 @@ pub fn retention_report() -> Result<ControllerRuntimeRetentionReport> {
 
     let pins = discover_pin_paths(&root)?;
     let eligible = pins.difference(&retained).cloned().collect();
+    let mut snapshots = Vec::new();
+    for entry in fs::read_dir(&root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("list controller runtime identities".to_string()),
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read controller runtime identity".to_string()),
+            )
+        })?;
+        let path = entry.path();
+        if !path.is_dir()
+            || path
+                .file_name()
+                .is_some_and(|name| name == ADMISSION_LOCK_DIR)
+        {
+            continue;
+        }
+        let identity_pins = pins
+            .iter()
+            .filter(|pin| pin.starts_with(&path))
+            .cloned()
+            .collect::<Vec<_>>();
+        if identity_pins.is_empty() {
+            continue;
+        }
+        let mut reasons = Vec::new();
+        if identity_pins.iter().any(|pin| retained.contains(pin)) {
+            reasons.push("pinned_by_active_or_resumable_run_or_current_generation".to_string());
+        }
+        let modified = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(now);
+        let age_seconds = now.duration_since(modified).unwrap_or_default().as_secs();
+        snapshots.push(ControllerRuntimeSnapshot {
+            identity: path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            size_bytes: path_size(&path),
+            age_seconds,
+            pins: identity_pins,
+            eligible: reasons.is_empty(),
+            retention_reasons: reasons,
+            path,
+        });
+    }
+    snapshots.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(ControllerRuntimeRetentionReport {
         retained: retained.into_iter().collect(),
         eligible,
+        snapshots,
     })
 }
 
 /// Remove only content-addressed pins not referenced by a nonterminal durable
 /// record or the active generation. The caller chooses mutation explicitly.
 pub fn prune_pins(apply: bool) -> Result<ControllerRuntimePruneResult> {
-    let report = retention_report()?;
+    let result = cleanup(ControllerRuntimeCleanupOptions {
+        apply,
+        min_age: Duration::ZERO,
+        max_total_bytes: 0,
+        limit: usize::MAX,
+    })?;
+    Ok(ControllerRuntimePruneResult {
+        retained: result.retained,
+        eligible: result.eligible,
+        removed: result.removed,
+        removed_identities: result.removed_identities,
+        reclaimed_bytes: result.reclaimed_bytes,
+        snapshots: result.snapshots,
+    })
+}
+
+/// Inventory and reclaim immutable runtime identities. The admission lock makes
+/// the final reachability check atomic with activation and materialization.
+pub fn cleanup(options: ControllerRuntimeCleanupOptions) -> Result<ControllerRuntimePruneResult> {
+    let root = runtime_root()?;
+    // Lifecycle inventory may migrate legacy records, which itself needs the
+    // admission lock. Collect reachability before taking the runtime lock.
+    let referenced = crate::controller_pin_reference::referenced_controller_pins()?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    if options.apply {
+        recover_cleanup_tombstones(&root)?;
+    }
+    let mut report = retention_report_with_references_at(&referenced, SystemTime::now())?;
+    let mut total = report
+        .snapshots
+        .iter()
+        .map(|snapshot| snapshot.size_bytes)
+        .sum::<u64>();
+    let mut candidates = report
+        .snapshots
+        .iter_mut()
+        .filter(|snapshot| snapshot.eligible)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .age_seconds
+            .cmp(&left.age_seconds)
+            .then_with(|| right.size_bytes.cmp(&left.size_bytes))
+    });
     let mut removed = Vec::new();
-    if apply {
-        for path in &report.eligible {
-            fs::remove_file(path).map_err(|error| {
+    let mut removed_identities = Vec::new();
+    let mut reclaimed_bytes: u64 = 0;
+    for snapshot in candidates {
+        let expired = snapshot.age_seconds >= options.min_age.as_secs();
+        let pressured = total > options.max_total_bytes;
+        if !(expired || pressured) {
+            snapshot
+                .retention_reasons
+                .push("within_age_and_size_budget".to_string());
+            continue;
+        }
+        if removed.len() >= options.limit {
+            snapshot
+                .retention_reasons
+                .push("cleanup_limit_reached".to_string());
+            continue;
+        }
+        if options.apply {
+            // Rename first: an interrupted cleanup leaves a non-discoverable
+            // tombstone rather than a partially materialized identity.
+            let tombstone = root.join(format!(".cleanup-{}", Uuid::new_v4()));
+            fs::rename(&snapshot.path, &tombstone).map_err(|error| {
                 Error::internal_io(
                     error.to_string(),
-                    Some("prune unreferenced controller runtime pin".to_string()),
+                    Some("stage controller runtime identity cleanup".to_string()),
                 )
             })?;
-            removed.push(path.clone());
+            fs::remove_dir_all(&tombstone).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("remove controller runtime identity".to_string()),
+                )
+            })?;
+            removed.extend(snapshot.pins.clone());
+            removed_identities.push(snapshot.path.clone());
+            reclaimed_bytes = reclaimed_bytes.saturating_add(snapshot.size_bytes);
+            total = total.saturating_sub(snapshot.size_bytes);
         }
     }
+    let removed_set = removed.iter().collect::<BTreeSet<_>>();
+    report.eligible.retain(|path| !removed_set.contains(path));
     Ok(ControllerRuntimePruneResult {
         retained: report.retained,
         eligible: report.eligible,
         removed,
+        removed_identities,
+        reclaimed_bytes,
+        snapshots: report.snapshots,
     })
+}
+
+fn recover_cleanup_tombstones(root: &Path) -> Result<()> {
+    for entry in fs::read_dir(root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("list interrupted controller runtime cleanup".to_string()),
+        )
+    })? {
+        let path = entry
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("read interrupted controller runtime cleanup".to_string()),
+                )
+            })?
+            .path();
+        if path.is_dir()
+            && path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".cleanup-"))
+        {
+            fs::remove_dir_all(path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("complete interrupted controller runtime cleanup".to_string()),
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn path_size(path: &Path) -> u64 {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    fs::read_dir(path)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| path_size(&entry.path()))
+        .sum()
 }
 
 fn content_addressed_pin_path(root: &Path, path: &Path) -> bool {
@@ -149,6 +355,12 @@ fn discover_pin_paths(root: &Path) -> Result<BTreeSet<PathBuf>> {
             )
         })?;
         let path = entry.path();
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".cleanup-"))
+        {
+            continue;
+        }
         let direct_pin = path.join("homeboy");
         if content_addressed_pin_path(root, &direct_pin) && direct_pin.is_file() {
             pins.insert(direct_pin);
@@ -206,6 +418,12 @@ impl Drop for AdmissionLock {
 }
 
 pub fn pin_current() -> Result<Value> {
+    let root = runtime_root()?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    pin_current_unlocked()
+}
+
+fn pin_current_unlocked() -> Result<Value> {
     let identity = build_identity::current();
     let executable = std::env::current_exe().map_err(|error| {
         Error::internal_io(
@@ -250,7 +468,7 @@ pub fn admit_current() -> Result<RuntimeAdmission> {
     let root = runtime_root()?;
     let lock_path = root.join(ADMISSION_LOCK_DIR);
     let lock = acquire_admission_lock(&lock_path)?;
-    let runtime = pin_current()?;
+    let runtime = pin_current_unlocked()?;
     write_active_generation(&root.join(ACTIVE_GENERATION_FILE), &runtime)?;
     validate_pin(&runtime)?;
     Ok(RuntimeAdmission {
@@ -331,6 +549,27 @@ pub fn validate_for_mutation(metadata: &Value, current_identity: &str) -> Result
 /// Upgrade a legacy pin into the immutable content-addressed v2 format.
 /// The caller persists the returned metadata only after this has completed.
 pub fn migrate_legacy_pin(runtime: &Value) -> Result<Value> {
+    let root = runtime_root()?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    migrate_legacy_pin_unlocked(runtime)
+}
+
+/// Publish a migrated pin and persist its durable reference while the admission
+/// lock remains held, so cleanup cannot reclaim the new identity in between.
+pub fn migrate_legacy_pin_and_persist(
+    runtime: &Value,
+    persist: impl FnOnce(&Value) -> Result<()>,
+) -> Result<Value> {
+    let root = runtime_root()?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    let migrated = migrate_legacy_pin_unlocked(runtime)?;
+    if &migrated != runtime {
+        persist(&migrated)?;
+    }
+    Ok(migrated)
+}
+
+fn migrate_legacy_pin_unlocked(runtime: &Value) -> Result<Value> {
     let identity =
         required_runtime_string(runtime, "/originating/build_identity", "build identity")?;
     let current = required_runtime_string(
@@ -387,6 +626,31 @@ pub fn validate(runtime: &Value) -> Result<()> {
 /// artifact or source checkout without changing the durable identity or digest
 /// contract.
 pub fn recover_pin(
+    runtime: &Value,
+    artifact: Option<&Path>,
+    source: Option<&Path>,
+) -> Result<Value> {
+    let root = runtime_root()?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    recover_pin_unlocked(runtime, artifact, source)
+}
+
+/// Publish a recovered pin and persist its durable reference under one
+/// admission lock, closing the publication-to-record race with cleanup.
+pub fn recover_pin_and_persist(
+    runtime: &Value,
+    artifact: Option<&Path>,
+    source: Option<&Path>,
+    persist: impl FnOnce(&Value) -> Result<()>,
+) -> Result<Value> {
+    let root = runtime_root()?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    let recovered = recover_pin_unlocked(runtime, artifact, source)?;
+    persist(&recovered)?;
+    Ok(recovered)
+}
+
+fn recover_pin_unlocked(
     runtime: &Value,
     artifact: Option<&Path>,
     source: Option<&Path>,
@@ -1680,6 +1944,81 @@ mod tests {
                 runtime_a_bytes
             );
             validate_pin(&recovered).expect("recovered runtime A validates");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_preserves_active_generation_and_reclaims_unpinned_identity_under_size_pressure() {
+        crate::test_support::with_isolated_home(|_| {
+            let temporary = tempfile::tempdir().expect("temporary controller directory");
+            let current = temporary.path().join("current");
+            let stale = temporary.path().join("stale");
+            let current_digest = fake_controller(&current, "homeboy test+current", "current");
+            let stale_digest = fake_controller(&stale, "homeboy test+stale", "stale");
+            let current_pin =
+                pinned_path("homeboy test+current", &current_digest).expect("current path");
+            let stale_pin = pinned_path("homeboy test+stale", &stale_digest).expect("stale path");
+            publish_pin(&current, &current_pin, &current_digest).expect("publish current");
+            publish_pin(&stale, &stale_pin, &stale_digest).expect("publish stale");
+            write_active_generation(
+                &runtime_root().expect("root").join(ACTIVE_GENERATION_FILE),
+                &json!({ "originating": { "pinned_executable": current_pin } }),
+            )
+            .expect("activate current");
+
+            let inventory = cleanup(ControllerRuntimeCleanupOptions {
+                apply: false,
+                min_age: Duration::from_secs(u64::MAX),
+                max_total_bytes: 0,
+                limit: 10,
+            })
+            .expect("inventory");
+            assert!(inventory
+                .snapshots
+                .iter()
+                .any(|snapshot| snapshot.pins.contains(&current_pin) && !snapshot.eligible));
+            assert!(inventory
+                .snapshots
+                .iter()
+                .any(|snapshot| snapshot.pins.contains(&stale_pin) && snapshot.eligible));
+            let applied = cleanup(ControllerRuntimeCleanupOptions {
+                apply: true,
+                min_age: Duration::from_secs(u64::MAX),
+                max_total_bytes: 0,
+                limit: 10,
+            })
+            .expect("apply");
+            assert!(applied.removed.contains(&stale_pin));
+            assert!(current_pin.exists());
+            assert!(!stale_pin.exists());
+        });
+    }
+
+    #[test]
+    fn cleanup_dry_run_preserves_tombstones_and_apply_recovers_them() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = runtime_root().expect("runtime root");
+            let tombstone = root.join(".cleanup-interrupted");
+            fs::create_dir_all(&tombstone).expect("create tombstone");
+            fs::write(tombstone.join("homeboy"), b"interrupted").expect("write tombstone");
+
+            cleanup(ControllerRuntimeCleanupOptions {
+                apply: false,
+                min_age: Duration::ZERO,
+                max_total_bytes: 0,
+                limit: 1,
+            })
+            .expect("dry run");
+            assert!(tombstone.exists());
+            cleanup(ControllerRuntimeCleanupOptions {
+                apply: true,
+                min_age: Duration::ZERO,
+                max_total_bytes: 0,
+                limit: 1,
+            })
+            .expect("apply");
+            assert!(!tombstone.exists());
         });
     }
 }
