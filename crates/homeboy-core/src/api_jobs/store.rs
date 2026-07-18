@@ -1849,7 +1849,7 @@ impl JobStore {
         )
     }
 
-    fn event_retention_limit(&self) -> usize {
+    pub(super) fn event_retention_limit(&self) -> usize {
         self.persistence
             .as_ref()
             .map(|persistence| persistence.event_retention_limit)
