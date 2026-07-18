@@ -567,8 +567,10 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
         "schema": "homeboy/agent-task-promotion-report/v1",
         "status": "verification_pending",
         "source_run_id": "run-8307",
+        "source": { "task_id": "task-1" },
         "to_worktree": "repo@fix-8307",
         "target": { "worktree": "repo@fix-8307", "path": target },
+        "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
     });
 
     let report = resume_promoted_patch(options, &target, &previous).expect("resume proof");
