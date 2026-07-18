@@ -342,6 +342,52 @@ fn capacity_queued_agent_task_spawns_once_after_claiming_an_idle_slot() {
 }
 
 #[test]
+fn capacity_queued_agent_task_persists_typed_failure_before_child_identity() {
+    let store = JobStore::default();
+    let runner = store.run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
+        "runner.exec",
+        None,
+        None,
+        None,
+        super::store::LocalRunnerJob {
+            runner_id: "homeboy-lab".to_string(),
+            command: vec!["homeboy".to_string(), "agent-task".to_string()],
+            cwd: Some("/runner/worktree".to_string()),
+            lifecycle: None,
+        },
+        1,
+        move |_job| {
+            Err::<serde_json::Value, _>(Error::internal_io(
+                "spawn failed",
+                Some("execute runner command".to_string()),
+            ))
+        },
+    );
+    runner.handle.join().expect("worker exits");
+
+    let events = store.events(runner.job_id).expect("events");
+    assert!(events.iter().any(|event| {
+        event
+            .data
+            .as_ref()
+            .is_some_and(|data| data["phase"] == "local_child_worker_started")
+    }));
+    assert!(events.iter().any(|event| {
+        event.data.as_ref().is_some_and(|data| {
+            data["phase"] == "local_child_worker_failed_before_child_identity"
+                && data["error"] == "IO error"
+                && data["error_code"] == "internal.io_error"
+                && data["error_details"]["error"] == "spawn failed"
+                && data["error_details"]["context"] == "execute runner command"
+        })
+    }));
+    assert_eq!(
+        store.get(runner.job_id).expect("job").status,
+        JobStatus::Failed
+    );
+}
+
+#[test]
 fn pid_bound_local_child_is_not_expired_by_its_former_reservation_deadline() {
     let store = JobStore::default();
     let job = store.create("runner.exec");
