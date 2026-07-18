@@ -128,6 +128,11 @@ const OPENCODE_WORKSPACE_TOOLS = {
 	],
 };
 
+const OPENCODE_NATIVE_WORKSPACE_PERMISSIONS = {
+	readonly: ['read', 'glob', 'grep'],
+	readwrite: ['edit', 'bash'],
+};
+
 const OPENCODE_WORKSPACE_MATERIALIZATION = {
 	cwd: 'git_checkout',
 	requires_git: true,
@@ -290,12 +295,11 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '') {
 		};
 	}
 	if (workspaceReadPatterns.length > 0) {
-		content.permission = permissionWithWorkspaceReadAllowances(content.permission, workspaceReadPatterns);
+		content.permission = permissionWithWorkspaceToolAllowances(content.permission);
 		content.agent[primaryAgent] = {
 			...objectValue(content.agent[primaryAgent]),
-			permission: permissionWithWorkspaceReadAllowances(
+			permission: permissionWithWorkspaceToolAllowances(
 				objectValue(content.agent[primaryAgent]).permission,
-				workspaceReadPatterns,
 				content.permission
 			),
 		};
@@ -370,29 +374,33 @@ function permissionWithExternalDirectoryAllowances(permission, patterns) {
 	};
 }
 
-function permissionWithWorkspaceReadAllowances(permission, patterns, inheritedPermission = {}) {
+function permissionWithWorkspaceToolAllowances(permission, inheritedPermission = {}) {
 	const rules = typeof permission === 'string'
 		? { '*': permission }
 		: objectValue(permission);
-	const inheritedRead = typeof inheritedPermission.read === 'string'
-		? { '*': inheritedPermission.read }
-		: objectValue(inheritedPermission.read);
-	const read = {
-		...inheritedRead,
-		...(typeof rules.read === 'string' ? { '*': rules.read } : objectValue(rules.read)),
-	};
-	const deniedReadRules = Object.fromEntries(
-		Object.entries(read).filter(([pattern, action]) => pattern !== '*' && action === 'deny')
-	);
+	const permissionTools = Object.values(OPENCODE_NATIVE_WORKSPACE_PERMISSIONS).flat();
+	return permissionTools.reduce((nextRules, tool) => ({
+		...nextRules,
+		[tool]: workspaceToolPermissionRules(rules[tool], inheritedPermission[tool], tool),
+	}), rules);
+}
 
+function workspaceToolPermissionRules(permission, inheritedPermission, tool) {
+	const inheritedRules = typeof inheritedPermission === 'string'
+		? { '*': inheritedPermission }
+		: objectValue(inheritedPermission);
+	const rules = typeof permission === 'string'
+		? { '*': permission }
+		: objectValue(permission);
+	const deniedRules = Object.fromEntries(
+		Object.entries({ ...inheritedRules, ...rules }).filter(([pattern, action]) => pattern !== '*' && action === 'deny')
+	);
 	return {
-		...rules,
-		read: {
-			// Permit source inspection only under the concrete task workspace.
-			'*': 'deny',
-			...Object.fromEntries(patterns.map((pattern) => [pattern, 'allow'])),
-			...deniedReadRules,
-		},
+		// These surfaces correspond to the executor's declared Homeboy workspace
+		// capabilities. OpenCode evaluates their paths from the task cwd.
+		'*': 'allow',
+		...(tool === 'read' ? { '..': 'deny', '../*': 'deny', '..\\*': 'deny' } : {}),
+		...deniedRules,
 	};
 }
 

@@ -51,10 +51,19 @@ function externalDirectoryAction(config, agent, requestedPattern) {
 	return rules.findLast(([pattern]) => opencodeWildcardMatch(requestedPattern, pattern))?.[1] || 'ask';
 }
 
-function readAction(config, agent, requestedPath) {
+function readAction(config, agent, worktree, filepath) {
+	// OpenCode evaluates ReadTool rules after resolving the target against its
+	// workspace, so absolute workspace rules cannot match nested source files.
+	const requestedPath = path.relative(worktree, filepath);
 	const permissions = [config.permission, config.agent?.[agent]?.permission];
 	const rules = permissions.flatMap((permission) => Object.entries(permission?.read || {}));
 	return rules.findLast(([pattern]) => opencodeWildcardMatch(requestedPath, pattern))?.[1] || 'allow';
+}
+
+function nativeToolAction(config, agent, tool, requestedValue) {
+	const permissions = [config.permission, config.agent?.[agent]?.permission];
+	const rules = permissions.flatMap((permission) => Object.entries(permission?.[tool] || {}));
+	return rules.findLast(([pattern]) => opencodeWildcardMatch(requestedValue, pattern))?.[1] || 'allow';
 }
 
 function concretePath(candidate) {
@@ -208,14 +217,16 @@ assert.equal(config.agent.title.disable, true);
 	assert.equal(Object.hasOwn(config, 'agents'), false);
 	assert.deepEqual(config.permission, {
 	  read: {
-	    '*': 'deny',
-	    ${JSON.stringify(path.join(realModelWorkspace, '**'))}: 'allow',
+	    '*': 'allow',
+	    '..': 'deny',
+	    '../*': 'deny',
+	    '..\\\\*': 'deny',
 	    '*.env': 'deny'
 	  },
-	  glob: { '*': 'ask' },
-	  grep: { '*': 'ask', 'secret': 'deny' },
-	  edit: { '*': 'ask' },
-	  bash: { '*': 'ask' },
+	  glob: { '*': 'allow' },
+	  grep: { '*': 'allow', 'secret': 'deny' },
+	  edit: { '*': 'allow' },
+	  bash: { '*': 'allow', 'git push *': 'deny' },
 	  external_directory: {
 	    '/unrelated/**': 'deny',
 	    ${JSON.stringify(path.join(realModelWorkspace, '**'))}: 'allow'
@@ -223,10 +234,16 @@ assert.equal(config.agent.title.disable, true);
 	});
 	assert.deepEqual(config.agent.build.permission, {
 	  read: {
-	    '*': 'deny',
-	    ${JSON.stringify(path.join(realModelWorkspace, '**'))}: 'allow',
+	    '*': 'allow',
+	    '..': 'deny',
+	    '../*': 'deny',
+	    '..\\\\*': 'deny',
 	    '*.env': 'deny'
 	  },
+	  glob: { '*': 'allow' },
+	  grep: { '*': 'allow', 'secret': 'deny' },
+	  edit: { '*': 'allow' },
+	  bash: { '*': 'allow', 'git push *': 'deny' },
 	  external_directory: {
 	    ${JSON.stringify(path.join(realModelWorkspace, '**'))}: 'allow'
 	  }
@@ -251,7 +268,7 @@ assert.equal(config.agent.title.disable, true);
 							glob: { '*': 'ask' },
 							grep: { '*': 'ask', secret: 'deny' },
 							edit: { '*': 'ask' },
-							bash: { '*': 'ask' },
+							bash: { '*': 'ask', 'git push *': 'deny' },
 							external_directory: { '/unrelated/**': 'deny' },
 						},
 						agents: { build: { model: 'invalid-plural-key/must-not-survive' } },
@@ -262,7 +279,7 @@ assert.equal(config.agent.title.disable, true);
 			},
 		},
 	}, { env: fixtureEnv });
-	assert.equal(modelResult.status, 'succeeded');
+	assert.equal(modelResult.status, 'succeeded', JSON.stringify(modelResult.diagnostics));
 
 	const permissionWorkspaces = [
 		{
@@ -324,22 +341,33 @@ assert.equal(config.permission.external_directory[${JSON.stringify(attemptRootPa
 assert.equal(config.permission.external_directory[${JSON.stringify(path.join(ambientTmpdir, '*'))}], undefined);
 assert.equal(config.permission.external_directory['/unrelated/**'], 'deny');
 assert.equal(config.permission.external_directory['*'], 'deny');
-assert.deepEqual(config.permission.grep, { '*': 'ask' });
-assert.deepEqual(config.permission.glob, { '*': 'ask' });
+assert.deepEqual(config.permission.grep, { '*': 'allow', secret: 'deny' });
+assert.deepEqual(config.permission.glob, { '*': 'allow' });
 		assert.deepEqual(config.permission.read, {
-			'*': 'deny',
-			${JSON.stringify(workspacePattern)}: 'allow',
+			'*': 'allow',
+			'..': 'deny',
+			'../*': 'deny',
+			'..\\\\*': 'deny',
 			'*.env': 'deny',
 		});
-		assert.deepEqual(config.permission.edit, { '*': 'ask' });
+		assert.deepEqual(config.permission.edit, { '*': 'allow' });
+		assert.deepEqual(config.permission.bash, { '*': 'allow', 'git push *': 'deny' });
 		assert.deepEqual(config.agent.build.permission, ${JSON.stringify(expectedAttemptRootPattern ? {
-			read: { '*': 'deny', [workspacePattern]: 'allow', '*.env': 'deny' },
+			read: { '*': 'allow', '..': 'deny', '../*': 'deny', '..\\*': 'deny', '*.env': 'deny' },
+			glob: { '*': 'allow' },
+			grep: { '*': 'allow', secret: 'deny' },
+			edit: { '*': 'allow' },
+			bash: { '*': 'allow', 'git push *': 'deny' },
 			external_directory: {
 			[attemptRootPattern]: 'allow',
 			[workspacePattern]: 'allow',
 			},
 		} : {
-			read: { '*': 'deny', [workspacePattern]: 'allow', '*.env': 'deny' },
+			read: { '*': 'allow', '..': 'deny', '../*': 'deny', '..\\*': 'deny', '*.env': 'deny' },
+			glob: { '*': 'allow' },
+			grep: { '*': 'allow', secret: 'deny' },
+			edit: { '*': 'allow' },
+			bash: { '*': 'allow', 'git push *': 'deny' },
 			external_directory: { [workspacePattern]: 'allow' },
 		})});
 fs.writeFileSync(${JSON.stringify(configCapturePath)}, JSON.stringify(config));
@@ -357,7 +385,7 @@ process.exit(0);
 						OPENCODE_CONFIG_CONTENT: JSON.stringify({
 							permission: {
 								external_directory: { '*': 'deny', '/unrelated/**': 'deny' },
-								grep: { '*': 'ask' }, glob: { '*': 'ask' }, read: { '*.env': 'deny' }, edit: { '*': 'ask' },
+								grep: { '*': 'ask', secret: 'deny' }, glob: { '*': 'ask' }, read: { '*.env': 'deny' }, edit: { '*': 'ask' }, bash: { '*': 'ask', 'git push *': 'deny' },
 							},
 						}),
 					},
@@ -375,7 +403,7 @@ process.exit(0);
 		const permissionResult = await executeOpenCodeAgentTask(workspaceRequest, {
 			env: { ...fixtureEnv, TMPDIR: ambientTmpdir },
 		});
-		assert.equal(permissionResult.status, 'succeeded');
+		assert.equal(permissionResult.status, 'succeeded', JSON.stringify(permissionResult.diagnostics));
 		const generatedConfig = JSON.parse(fs.readFileSync(configCapturePath, 'utf8'));
 		const requestedPatterns = permissionWorkspace.allowAttemptRoot
 			? [
@@ -388,11 +416,17 @@ process.exit(0);
 			assert.equal(externalDirectoryAction(generatedConfig, 'build', requestedPattern), 'allow');
 		}
 		assert.equal(
-			readAction(generatedConfig, 'build', path.join(concreteWorkspace, 'src', 'index.js')),
+			readAction(generatedConfig, 'build', concreteWorkspace, path.join(concreteWorkspace, 'src', 'index.js')),
 			'allow'
 		);
+		assert.equal(nativeToolAction(generatedConfig, 'build', 'glob', 'src/**/*.js'), 'allow');
+		assert.equal(nativeToolAction(generatedConfig, 'build', 'grep', 'TODO'), 'allow');
+		assert.equal(nativeToolAction(generatedConfig, 'build', 'grep', 'secret'), 'deny');
+		assert.equal(nativeToolAction(generatedConfig, 'build', 'edit', 'src/index.js'), 'allow');
+		assert.equal(nativeToolAction(generatedConfig, 'build', 'bash', 'git status --short'), 'allow');
+		assert.equal(nativeToolAction(generatedConfig, 'build', 'bash', 'git push origin trunk'), 'deny');
 		assert.equal(
-			readAction(generatedConfig, 'build', path.join(root, 'outside-workspace', 'index.js')),
+			readAction(generatedConfig, 'build', concreteWorkspace, path.join(root, 'outside-workspace', 'index.js')),
 			'deny'
 		);
 		if (permissionWorkspace.attemptRoot && !permissionWorkspace.allowAttemptRoot) {
