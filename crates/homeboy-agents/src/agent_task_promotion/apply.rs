@@ -20,6 +20,12 @@ use super::types::{
     AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionOptions,
 };
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct TrustedUnpushedCandidateDestination {
+    pub(crate) path: PathBuf,
+    pub(crate) head: String,
+}
+
 /// Environment variable carrying the promotion workspace provider command.
 const PROMOTION_PROVIDER_COMMAND_ENV: &str = "HOMEBOY_AGENT_TASK_PROMOTION_COMMAND";
 
@@ -167,6 +173,24 @@ pub fn apply_materialized_workspace_patch(workspace: &Path, request_json: &str) 
         .as_ref()
         .map(|file| file.path().to_string_lossy().into_owned())
         .unwrap_or_else(|| request.patch_path.clone());
+    if request
+        .trusted_unpushed_candidate_destination
+        .as_ref()
+        .is_some_and(|trusted| trusted_candidate_destination_matches(workspace, trusted))
+        && patch_is_already_applied(workspace, &patch_path)?
+    {
+        return serde_json::to_string(&AgentTaskPromotionApplyResponse {
+            schema: AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA.to_string(),
+            workspace_path: workspace.display().to_string(),
+            command_evidence: Vec::new(),
+        })
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize promotion provider response".to_string()),
+            )
+        });
+    }
     let mut command = Command::new("git");
     command
         .arg("-C")
@@ -206,6 +230,52 @@ pub fn apply_materialized_workspace_patch(workspace: &Path, request_json: &str) 
     })
 }
 
+fn trusted_candidate_destination_matches(
+    workspace: &Path,
+    trusted: &TrustedUnpushedCandidateDestination,
+) -> bool {
+    let Ok(workspace) = std::fs::canonicalize(workspace) else {
+        return false;
+    };
+    let Ok(path) = std::fs::canonicalize(&trusted.path) else {
+        return false;
+    };
+    workspace == path
+        && Command::new("git")
+            .args([
+                "-C",
+                workspace.to_str().unwrap_or_default(),
+                "rev-parse",
+                "--verify",
+                "HEAD^{commit}",
+            ])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .is_some_and(|output| String::from_utf8_lossy(&output.stdout).trim() == trusted.head)
+}
+
+fn patch_is_already_applied(workspace: &Path, patch_path: &str) -> Result<bool> {
+    Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args([
+            "apply",
+            "--reverse",
+            "--check",
+            "--whitespace=nowarn",
+            patch_path,
+        ])
+        .status()
+        .map(|status| status.success())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("verify already-applied agent-task promotion patch".to_string()),
+            )
+        })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct AgentTaskPromotionApplyRequest {
     pub(crate) schema: String,
@@ -220,6 +290,8 @@ pub(crate) struct AgentTaskPromotionApplyRequest {
     pub(crate) gate_feedback_baseline: Option<serde_json::Value>,
     #[serde(default)]
     pub(crate) dry_run: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) trusted_unpushed_candidate_destination: Option<TrustedUnpushedCandidateDestination>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -346,10 +418,20 @@ impl ExternalPromotionWorkspaceProvider {
                 None,
             )
         })?;
-        let resolution = worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+        let trusted_unpushed_destination = request
+            .trusted_unpushed_candidate_destination
+            .as_ref()
+            .map(
+                |trusted| homeboy_core::worktree_providers::TrustedUnpushedWorktree {
+                    path: trusted.path.clone(),
+                    head: trusted.head.clone(),
+                },
+            );
+        let resolution = worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
             &request.to_workspace,
             &configured_fallback.config,
             request.gate_feedback_baseline.as_ref(),
+            trusted_unpushed_destination.as_ref(),
         )?;
         let executable = configured_fallback
             .executable

@@ -16,7 +16,8 @@ use homeboy_core::{Error, Result};
 
 use super::apply::{
     AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspaceProvider,
-    ExternalPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
+    ExternalPromotionWorkspaceProvider, TrustedUnpushedCandidateDestination,
+    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
 };
 use super::committed_changes::{committed_changes_patch, CommittedChangesPatch};
 use super::patch::write_normalized_patch;
@@ -575,6 +576,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
             changed_files: changed_files.clone(),
             gate_feedback_baseline,
             dry_run: options.dry_run,
+            trusted_unpushed_candidate_destination: None,
         })?;
         command_evidence.extend(target.command_evidence);
         if !options.dry_run {
@@ -900,6 +902,15 @@ fn promote_committed_changes(
             .and_then(|artifact| artifact.metadata.get("gate_feedback_baseline"))
             .cloned(),
         dry_run: options.dry_run,
+        trusted_unpushed_candidate_destination: options.candidate_ref.as_ref().map(|_| {
+            TrustedUnpushedCandidateDestination {
+                path: options
+                    .source_worktree_path
+                    .clone()
+                    .expect("candidate has source workspace"),
+                head: committed_patch.candidate.clone(),
+            }
+        }),
     })?;
     command_evidence.extend(target.command_evidence);
     let applied_worktree_path = (!options.dry_run).then_some(target.path);

@@ -185,6 +185,7 @@ fn lookup_only_configured_provider_cannot_construct_a_promotion_adapter() {
             changed_files: vec!["src/lib.rs".to_string()],
             gate_feedback_baseline: None,
             dry_run: false,
+            trusted_unpushed_candidate_destination: None,
         })
         .expect_err("lookup-only provider must not authorize promotion");
 

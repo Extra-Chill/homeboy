@@ -673,6 +673,7 @@ fn provider_failure_surfaces_bounded_stdout_and_stderr_evidence() {
         changed_files: vec!["src/lib.rs".to_string()],
         gate_feedback_baseline: None,
         dry_run: false,
+        trusted_unpushed_candidate_destination: None,
     };
 
     let error = run_provider_command(

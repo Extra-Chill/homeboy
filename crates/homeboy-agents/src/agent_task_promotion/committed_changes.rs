@@ -10,6 +10,7 @@ use super::types::AgentTaskPromotionOptions;
 
 pub(crate) struct CommittedChangesPatch {
     pub(crate) base_ref: String,
+    pub(crate) candidate: String,
     pub(crate) patch_path: PathBuf,
     pub(crate) sha256: String,
     pub(crate) commit_range: String,
@@ -103,6 +104,7 @@ pub(crate) fn committed_changes_patch(
     })?;
     Ok(Some(CommittedChangesPatch {
         base_ref,
+        candidate,
         patch_path,
         sha256,
         commit_range,
