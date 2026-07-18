@@ -183,14 +183,24 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
     }
 }
 
+/// The `cook-batch` fanout coordinator is controller-owned in every mode: it
+/// compiles the plan (default), previews it (`--dry-run`), or runs the batch
+/// coordinator locally (`--run-plan`). In none of these modes may the
+/// coordinator command itself be offloaded to Lab as a single job — the
+/// coordinator owns worktree creation, the durable batch record, and child
+/// dispatch. Only the child cooks it generates are Lab-eligible.
+///
+/// Previously this guard only matched `run_plan: true`, so a default (neither
+/// `--dry-run` nor `--run-plan`) coordinator invocation fell through to being
+/// treated as a portable, offloadable hot command. That allowed the whole
+/// coordinator to be dispatched to Lab, where it timed out before creating its
+/// local batch record/worktrees and stranded the run (#8025).
 fn is_controller_owned_fanout_coordination(command: &Commands) -> bool {
     matches!(
         command,
         Commands::AgentTask(agent_task::AgentTaskArgs {
             command: agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                command: agent_task::AgentTaskFanoutCommand::CookBatch(
-                    agent_task::AgentTaskFanoutCookBatchArgs { run_plan: true, .. },
-                ),
+                command: agent_task::AgentTaskFanoutCommand::CookBatch(_),
             }),
         })
     )
@@ -581,6 +591,33 @@ mod tests {
         ]);
 
         assert!(hot_command(&cli.command).is_none());
+    }
+
+    #[test]
+    fn default_cook_batch_coordinator_is_controller_owned_and_not_offloadable() {
+        // #8025: the default cook-batch invocation (neither --dry-run nor
+        // --run-plan) compiles the plan on the controller. It owns worktree
+        // creation and the durable batch record, so the coordinator command
+        // itself must never be treated as a portable, offloadable hot command.
+        // Previously only --run-plan was guarded, so this default variant fell
+        // through and could be dispatched to Lab as a single job, timing out
+        // before creating its local batch record.
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "homeboy",
+            "--verify",
+            "cargo test --lib",
+            "https://github.com/Extra-Chill/homeboy/issues/8025",
+        ]);
+
+        assert!(
+            hot_command(&cli.command).is_none(),
+            "default cook-batch coordinator must be controller-owned, not offloadable"
+        );
     }
 
     #[test]
