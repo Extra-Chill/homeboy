@@ -1,6 +1,5 @@
 use crate::component::{self, Component};
 use crate::extension;
-use crate::extension::build;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -442,7 +441,8 @@ fn extension_install_invocation(
 fn rebuild_component(component: &Component, path: &Path) -> Result<DependencyCommandResult> {
     let mut build_component = component.clone();
     build_component.local_path = path.display().to_string();
-    let (result, exit_code) = build::run_component(&build_component)?;
+    let (result, exit_code) =
+        crate::component_build_provider::run_component_build(&build_component)?;
     let stdout = serde_json::to_string(&result).map_err(|e| {
         Error::internal_json(e.to_string(), Some("serialize deps rebuild".to_string()))
     })?;

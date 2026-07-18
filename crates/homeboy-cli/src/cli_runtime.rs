@@ -112,6 +112,7 @@ impl CliRuntime {
         crate::release::provider_impl::register();
         crate::core::extension::audit_manifest_provider::register();
         crate::core::extension::component_script::register_component_script_runner();
+        crate::core::extension::build::register_component_build_runner();
         // Register the fingerprint-script provider so code_audit can fall back to
         // extension fingerprint scripts (for files the core grammar engine can't
         // handle) without depending on the extension script runner.

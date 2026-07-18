@@ -90,6 +90,7 @@ pub use homeboy_lab_contract::env_materialization_plan;
 // `crate::error::*` call sites keep working unchanged.
 pub use homeboy_error as error;
 pub mod build_artifact_path;
+pub mod component_build_provider;
 pub mod component_script_provider;
 pub mod evidence_manifest;
 pub mod execution;
