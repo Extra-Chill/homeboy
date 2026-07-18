@@ -968,6 +968,68 @@ fn detached_cook_preacceptance_failure_terminalizes_attempt_proxy() {
 }
 
 #[test]
+fn retryable_workspace_metadata_transport_failure_builds_transient_outcome() {
+    let plan = test_plan();
+    let error = Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        "write runner workspace metadata failed during `workspace_metadata_write`",
+        json!({
+            "phase": "workspace_metadata_write",
+            "command": "write Homeboy runner workspace metadata",
+            "timeout_seconds": 30,
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": "Connection to 192.168.86.63 closed by remote host. client_loop: send disconnect: Broken pipe",
+            "transport_close_reason": "Connection to 192.168.86.63 closed by remote host. client_loop: send disconnect: Broken pipe",
+        }),
+    )
+    .with_retryable(true);
+    let outcome = build_pre_execution_failure_outcome(
+        "cook-8803-attempt-1",
+        &plan.tasks[0],
+        "lab_workspace_stage",
+        &error,
+    );
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Transient)
+    );
+    assert_eq!(outcome.diagnostics[0].data["retryable"], true);
+    assert_eq!(
+        outcome.diagnostics[0].data["details"]["phase"],
+        "workspace_metadata_write"
+    );
+    assert_eq!(outcome.outputs["retryable"], true);
+    assert_eq!(
+        outcome.outputs["details"]["transport_close_reason"],
+        error.details["transport_close_reason"]
+    );
+    assert_eq!(outcome.metadata["retryable"], true);
+    assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
+}
+
+#[test]
+fn non_retryable_pre_execution_failure_remains_invalid_input() {
+    let plan = test_plan();
+    let outcome = build_pre_execution_failure_outcome(
+        "cook-invalid-input",
+        &plan.tasks[0],
+        "controller_admission",
+        &Error::validation_invalid_argument("plan", "invalid input", None, None),
+    );
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::InvalidInput)
+    );
+    assert_eq!(outcome.diagnostics[0].data["retryable"], false);
+    assert_eq!(outcome.outputs["retryable"], false);
+    assert_eq!(outcome.metadata["retryable"], false);
+    assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
+}
+
+#[test]
 fn missing_lab_attempt_plan_is_recovered_before_handoff_or_terminalized() {
     with_isolated_home(|_| {
         let run_id = "cook-8096-attempt-1";

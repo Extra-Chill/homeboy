@@ -1,4 +1,8 @@
 use std::collections::HashMap;
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use super::super::{
@@ -69,6 +73,46 @@ fn empty_secret_env_block_carries_only_the_sentinel() {
     ))
     .expect("utf8 block");
     assert_eq!(block, format!("{SECRET_ENV_STDIN_SENTINEL}\n"));
+}
+
+#[test]
+fn bounded_ssh_retry_reestablishes_a_closed_transport_for_workspace_metadata() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSH closure fixture");
+    let port = listener.local_addr().expect("listener address").port();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let accepted_by_server = Arc::clone(&accepted);
+    let server = thread::spawn(move || {
+        for _ in 0..3 {
+            let (_stream, _) = listener.accept().expect("accept SSH connection");
+            accepted_by_server.fetch_add(1, Ordering::SeqCst);
+            // Close before SSH can establish a channel, as a lost tunnel does.
+        }
+    });
+    let client = SshClient {
+        host: "127.0.0.1".to_string(),
+        user: "tester".to_string(),
+        port,
+        identity_file: None,
+        auth: None,
+        is_local: false,
+        env: HashMap::new(),
+    };
+
+    let output = client.execute_with_retry_and_timeout(
+        "write Homeboy runner workspace metadata",
+        Duration::from_secs(1),
+    );
+
+    server.join().expect("SSH closure fixture completes");
+    assert!(!output.success);
+    assert_eq!(accepted.load(Ordering::SeqCst), 3);
+    assert!(super::host::is_transient_ssh_error(&output));
+    assert!(
+        output.stderr.to_lowercase().contains("connection")
+            || output.stderr.to_lowercase().contains("broken pipe"),
+        "unexpected SSH transport evidence: {}",
+        output.stderr
+    );
 }
 
 #[test]
