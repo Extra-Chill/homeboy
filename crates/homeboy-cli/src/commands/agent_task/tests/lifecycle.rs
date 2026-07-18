@@ -1133,7 +1133,7 @@ fn run_next_claims_oldest_queued_run_and_leaves_later_runs_queued() {
             std::env::current_exe().expect("current test executable"),
             "dependent core must not pin the libtest harness"
         );
-        homeboy::core::agent_task_lifecycle::validate_controller_runtime("run-next-a")
+        agent_task_lifecycle::validate_controller_runtime("run-next-a")
             .expect("pinned controller identity validates");
         let observed_status = Arc::new(Mutex::new(None));
 
