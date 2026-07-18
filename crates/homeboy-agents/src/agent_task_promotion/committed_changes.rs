@@ -37,6 +37,17 @@ pub(crate) fn committed_changes_patch(
         ensure_clean_source(worktree_path)?;
     }
     let candidate = resolve_candidate(worktree_path, options.candidate_ref.as_deref())?;
+    if options.candidate_ref.is_some() {
+        let head = git_stdout(worktree_path, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+        if candidate != head.trim() {
+            return Err(Error::validation_invalid_argument(
+                "candidate_ref",
+                "candidate revision must equal the recorded source worktree HEAD",
+                Some(candidate),
+                None,
+            ));
+        }
+    }
     let is_ancestor = Command::new("git")
         .args(["merge-base", "--is-ancestor", &base_ref, &candidate])
         .current_dir(worktree_path)

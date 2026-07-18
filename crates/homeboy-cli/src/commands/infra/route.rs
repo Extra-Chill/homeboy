@@ -582,6 +582,10 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
         runners::prepare_explicit_lab_runner_for_offload(&self.runner_id)
     }
 
+    fn pre_execution_failure_phase(&self) -> &'static str {
+        "transport_dispatcher_prepare"
+    }
+
     fn dispatch_attempt(
         &self,
         plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,

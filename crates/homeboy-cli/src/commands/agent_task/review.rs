@@ -318,8 +318,11 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
 }
 
 pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
-    let result =
-        agent_task_service::adopt_cook_candidate(&args.run_or_cook_id, &args.candidate_ref)?;
+    let result = agent_task_service::adopt_cook_candidate_with_dispatcher(
+        &args.run_or_cook_id,
+        &args.candidate_ref,
+        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+    )?;
     let exit_code = result.exit_code;
     let mut value = serde_json::to_value(result.value).unwrap_or(Value::Null);
     value["adoption"] = serde_json::json!({

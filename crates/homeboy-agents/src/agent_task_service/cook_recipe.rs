@@ -754,6 +754,26 @@ mod tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[derive(Debug)]
+    struct ReconstructedDispatcher;
+
+    impl AgentTaskCookAttemptDispatcher for ReconstructedDispatcher {
+        fn durable_recipe(&self) -> Result<Value> {
+            Ok(serde_json::json!({ "kind": "test" }))
+        }
+
+        fn dispatch_attempt(
+            &self,
+            _plan: AgentTaskPlan,
+            _run_id: &str,
+            _derived_cook_baseline: Option<
+                &crate::agent_task_service::cook::DerivedCookBaselineCapability,
+            >,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
     fn recipe() -> AgentTaskCookRecipe {
         let request = AgentTaskRequest {
             schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
@@ -861,6 +881,51 @@ mod tests {
             .unwrap_err()
             .message
             .contains("sensitive mappings"));
+    }
+
+    #[test]
+    fn external_dispatcher_recipe_requires_and_accepts_durable_reconstruction() {
+        let mut remote_recipe = recipe();
+        remote_recipe.promotion_transport["attempt_dispatch"] = serde_json::json!({
+            "kind": "remote"
+        });
+
+        let error = reconstruct_options(&remote_recipe).expect_err("missing dispatcher blocks");
+        assert_eq!(
+            error.details["field"],
+            "cook_recipe.promotion_transport.attempt_dispatch"
+        );
+        assert_eq!(
+            error.details["problem"],
+            "cook recipe requires `remote` attempt dispatcher reconstruction"
+        );
+
+        let options = reconstruct_options_with_dispatcher(
+            &remote_recipe,
+            Some(Arc::new(ReconstructedDispatcher)),
+        )
+        .expect("durable dispatcher reconstruction permits normal cook gates");
+        assert!(options.attempt_dispatcher.is_some());
+        assert_eq!(options.gates.verify, Vec::<String>::new());
+        assert_eq!(options.to_worktree, "target");
+        assert_eq!(options.base, "main");
+    }
+
+    #[test]
+    fn recipe_reconstruction_reports_missing_finalization_field() {
+        let mut incomplete = recipe();
+        incomplete
+            .finalization
+            .as_object_mut()
+            .expect("finalization object")
+            .remove("to_worktree");
+
+        let error = reconstruct_options(&incomplete).expect_err("missing target blocks adoption");
+        assert_eq!(error.details["field"], "cook_recipe.finalization");
+        assert_eq!(
+            error.details["problem"],
+            "missing finalization field `to_worktree`"
+        );
     }
 
     #[test]

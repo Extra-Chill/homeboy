@@ -642,6 +642,62 @@ fn explicit_candidate_commit_adoption_promotes_and_records_green_gate_handoff() 
 }
 
 #[test]
+fn explicit_candidate_adopts_only_durable_pre_provider_transport_failures() {
+    let (temp, repo, base, candidate) = adopted_commit_repo();
+    let failed_source = |recovery: Value| {
+        serde_json::json!({
+            "schema": AGENT_TASK_OUTCOME_SCHEMA,
+            "task_id": "adoption-task",
+            "status": "failed",
+            "artifacts": [],
+            "metadata": { "candidate_adoption_recovery": recovery }
+        })
+        .to_string()
+    };
+    let eligible = serde_json::json!({
+        "schema": "homeboy/agent-task-candidate-adoption-recovery/v1",
+        "reason": "pre_provider_transport_failure",
+        "provider_executions_consumed": 0
+    });
+    let mut options = adopted_commit_options(
+        &temp,
+        &repo,
+        base.clone(),
+        candidate.clone(),
+        VerifyGateOptions {
+            verify: vec!["cargo test --lib".to_string()],
+            ..Default::default()
+        },
+    );
+    options.source = failed_source(eligible);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(repo.clone()),
+        ..Default::default()
+    };
+    let report = promote_with_provider(options.clone(), &mut provider)
+        .expect("eligible transport failure adopts immutable candidate through gates");
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(provider.apply_calls.len(), 1);
+    assert_eq!(provider.verify_calls.len(), 1);
+
+    for recovery in [
+        Value::Null,
+        serde_json::json!({ "reason": "provider_failure" }),
+    ] {
+        options.source = failed_source(recovery);
+        let error = promote_with_provider(options.clone(), &mut provider)
+            .expect_err("legacy and provider failures fail closed");
+        assert!(
+            error
+                .message
+                .contains("explicit durable pre-provider transport recovery eligibility"),
+            "{}",
+            error.message
+        );
+    }
+}
+
+#[test]
 fn promotion_options_deserialize_legacy_flat_gate_payload() {
     // Payloads authored before the refactor used flat keys; they must still
     // deserialize into the flattened `gates` field unchanged.
