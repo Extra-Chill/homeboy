@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::artifact_address::validated_public_url;
-use crate::gate::{HomeboyGateResult, HomeboyGateStatus};
+use crate::gate::HomeboyGateStatus;
 
 use super::*;
 
@@ -317,68 +317,4 @@ fn validation_status(
         return HomeboyProofValidationStatus::Incomplete;
     }
     HomeboyProofValidationStatus::Failed
-}
-
-pub(super) fn proof_validation_schema() -> String {
-    HOMEBOY_PROOF_VALIDATION_SCHEMA.to_string()
-}
-
-pub(super) fn proof_scope(gates: &[HomeboyGateResult]) -> HomeboyProofScope {
-    if gates.is_empty() {
-        return HomeboyProofScope::Unknown;
-    }
-
-    let ci_equivalent = gates
-        .iter()
-        .filter(|gate| is_ci_equivalent_gate(gate))
-        .count();
-    if ci_equivalent == 0 {
-        HomeboyProofScope::Targeted
-    } else if ci_equivalent == gates.len() {
-        HomeboyProofScope::CiEquivalent
-    } else {
-        HomeboyProofScope::Mixed
-    }
-}
-
-pub fn is_ci_equivalent_gate(gate: &HomeboyGateResult) -> bool {
-    gate.provenance
-        .get("ci_equivalent")
-        .and_then(|value| value.as_bool())
-        .or_else(|| {
-            gate.evidence
-                .get("ci_equivalent")
-                .and_then(|value| value.as_bool())
-        })
-        .unwrap_or(false)
-}
-
-pub fn gate_status_label(status: HomeboyGateStatus) -> &'static str {
-    match status {
-        HomeboyGateStatus::Passed => "passed",
-        HomeboyGateStatus::Failed => "failed",
-        HomeboyGateStatus::Skipped => "skipped",
-        HomeboyGateStatus::Blocked => "blocked",
-    }
-}
-
-pub fn gate_scope_label(gate: &HomeboyGateResult) -> &'static str {
-    if is_ci_equivalent_gate(gate) {
-        "CI-equivalent"
-    } else {
-        "targeted"
-    }
-}
-
-pub fn proof_runner_label(runner: HomeboyProofRunner) -> &'static str {
-    match runner {
-        HomeboyProofRunner::Homeboy => "Homeboy agent-task cook loop",
-        HomeboyProofRunner::Manual => "manual",
-        HomeboyProofRunner::ExternalCi => "external CI",
-        HomeboyProofRunner::Unknown => "unknown",
-    }
-}
-
-pub(super) fn proof_schema() -> String {
-    HOMEBOY_PROOF_SCHEMA.to_string()
 }

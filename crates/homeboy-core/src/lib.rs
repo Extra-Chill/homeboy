@@ -108,7 +108,7 @@ pub mod extension_update_check;
 // `crate::finding::*` call sites keep working unchanged.
 pub use homeboy_finding as finding;
 pub mod fleet;
-pub mod gate;
+pub use homeboy_gate_contract::gate;
 pub mod gate_feedback_baseline;
 pub mod gh_actions_cache;
 pub mod git;
@@ -142,7 +142,7 @@ pub mod performance_hotspots;
 // depend on the slim primitives base rather than all of homeboy-core; this
 // re-export keeps the existing crate::phase_timing path working.
 pub use homeboy_engine_primitives::phase_timing;
-pub mod plan;
+pub use homeboy_gate_contract::plan;
 // process moved to the internal `homeboy-process` crate. Re-exported so existing
 // `crate::process::*` call sites keep working unchanged.
 pub use homeboy_process as process;

@@ -1,0 +1,18 @@
+[package]
+name = "homeboy-gate-contract"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Pure serializable gate / plan / proof contract types for homeboy"
+repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
+
+[lib]
+name = "homeboy_gate_contract"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "string"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
