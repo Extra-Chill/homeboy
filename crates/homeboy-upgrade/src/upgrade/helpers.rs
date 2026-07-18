@@ -412,7 +412,25 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
         .map(
             |extension_id| match extension::load_extension(&extension_id) {
                 Ok(manifest) => {
-                    let source_url = extension::resolve_source_url_read_only(&extension_id);
+                    let (source_url, update_note) =
+                        match extension::resolve_source_url_read_only(&extension_id) {
+                            Ok(source_url) if extension::is_git_url(&source_url) => {
+                                (Some(source_url), None)
+                            }
+                            Ok(source_url) => (
+                                None,
+                                Some(format!(
+                                    "unrefreshable extension provenance: local source `{source_url}` cannot be materialized on a runner"
+                                )),
+                            ),
+                            Err(err) => (
+                                None,
+                                Some(format!(
+                                    "unrefreshable extension provenance: {}",
+                                    err.message
+                                )),
+                            ),
+                        };
                     ExtensionUpgradeEntry {
                         extension_id: extension_id.clone(),
                         old_version: manifest.version.clone(),
@@ -420,12 +438,10 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
                         linked: extension::is_extension_linked(&extension_id),
                         source_path: manifest.extension_path,
                         git_root: None,
-                        source_url: source_url.as_ref().ok().cloned(),
+                        source_url,
                         source_revision: extension::read_source_revision(&extension_id),
                         source_update: homeboy_core::extension::ExtensionSourceUpdate {
-                            update_note: source_url.err().map(|err| {
-                                format!("unrefreshable extension provenance: {}", err.message)
-                            }),
+                            update_note,
                             ..Default::default()
                         },
                     }
@@ -992,9 +1008,14 @@ mod runner_source_upgrade_tests {
                 "https://example.test/sidecar.git\n",
             )
             .unwrap();
+            write_extension(
+                &extensions.join("local"),
+                "local",
+                r#"{"name":"local","version":"1.0.0","source_url":"/Users/chris/Developer/local-extension"}"#,
+            );
 
             let catalog = installed_extension_catalog();
-            assert_eq!(catalog.len(), 3);
+            assert_eq!(catalog.len(), 4);
             assert_eq!(
                 catalog
                     .iter()
@@ -1022,9 +1043,21 @@ mod runner_source_upgrade_tests {
                     .as_deref(),
                 Some("https://example.test/sidecar.git")
             );
+            let local = catalog
+                .iter()
+                .find(|entry| entry.extension_id == "local")
+                .unwrap();
+            assert!(local.source_url.is_none());
+            assert!(local
+                .source_update
+                .update_note
+                .as_deref()
+                .unwrap()
+                .contains("cannot be materialized on a runner"));
             assert!(catalog.iter().all(|entry| entry.source_revision.is_none()));
             assert!(!extensions.join("manifest/.source-url").exists());
             assert!(!extensions.join("alias/.source-url").exists());
+            assert!(!extensions.join("local/.source-url").exists());
             assert_eq!(
                 std::fs::read_to_string(extensions.join("sidecar/.source-url")).unwrap(),
                 "https://example.test/sidecar.git\n"
