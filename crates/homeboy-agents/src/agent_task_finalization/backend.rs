@@ -747,6 +747,16 @@ pub(super) fn validate_real_candidate_fingerprint(
             None,
         ));
     }
+    if normalize_changed_files(&options.changed_files)
+        != normalize_changed_files(&promotion.changed_files)
+    {
+        return Err(Error::validation_invalid_argument(
+            "changed-file",
+            "caller changed files must exactly match the persisted promotion report before finalization",
+            None,
+            None,
+        ));
+    }
     validate_candidate_fingerprint(options, &expected)
 }
 
@@ -773,15 +783,6 @@ pub(super) fn validate_candidate_fingerprint(
         ));
     };
     if actual == *expected {
-        let changed_files = normalize_changed_files(&options.changed_files);
-        if !changed_files.is_empty() && changed_files != actual_fingerprint.changed_files {
-            return Err(Error::validation_invalid_argument(
-                "changed-file",
-                "caller changed files do not match promoted candidate",
-                None,
-                None,
-            ));
-        }
         return Ok(());
     }
     if !actual_fingerprint.changed_files.is_empty()
@@ -791,15 +792,6 @@ pub(super) fn validate_candidate_fingerprint(
         return Err(Error::validation_invalid_argument(
             "path",
             "candidate changed after promotion; durable finalization accepts a recovery commit only when its parent and tree exactly match the recorded promoted candidate. Rerun promotion gates before finalization.",
-            None,
-            None,
-        ));
-    }
-    let changed_files = normalize_changed_files(&options.changed_files);
-    if changed_files != expected_fingerprint.changed_files {
-        return Err(Error::validation_invalid_argument(
-            "changed-file",
-            "recovery commit changed files must exactly match the recorded promoted candidate",
             None,
             None,
         ));

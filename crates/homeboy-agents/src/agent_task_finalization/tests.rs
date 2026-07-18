@@ -85,21 +85,11 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
                 None,
             ));
         }
-        let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } = actual
+        let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint: _ } =
+            actual
         else {
             unreachable!("test candidate is Git")
         };
-        let mut changed_files = options.changed_files.clone();
-        changed_files.sort();
-        changed_files.dedup();
-        if !changed_files.is_empty() && changed_files != fingerprint.changed_files {
-            return Err(Error::validation_invalid_argument(
-                "changed-file",
-                "caller changed files do not match promoted candidate",
-                None,
-                None,
-            ));
-        }
         Ok(())
     }
     fn current_branch(&mut self, _path: &str) -> Result<String> {
@@ -829,11 +819,16 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
         lifecycle: Some(recovery_lifecycle.clone()),
-        gate_proof: Some(pre_provider_adoption_gate_proof()),
+        gate_proof: Some({
+            let mut proof = pre_provider_adoption_gate_proof();
+            proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+            proof
+        }),
         ..Default::default()
     };
     let mut finalization_options = options();
     finalization_options.manual_finalization = false;
+    finalization_options.changed_files = vec!["src/lib.rs".to_string()];
     let report = finalize_pr_with_backend(finalization_options, &mut backend)
         .expect("authenticated recovery publishes");
     assert_eq!(report.status, "review_ready");
@@ -911,6 +906,7 @@ fn durable_finalization_publishes_clean_synced_recovered_candidate() {
     };
     let mut finalization_options = options();
     finalization_options.manual_finalization = false;
+    finalization_options.changed_files = vec!["src/lib.rs".to_string()];
 
     let report = finalize_pr_with_backend(finalization_options, &mut backend)
         .expect("clean synced candidate publishes");
@@ -923,17 +919,20 @@ fn durable_finalization_publishes_clean_synced_recovered_candidate() {
 
 #[test]
 fn durable_finalization_accepts_succeeded_generic_executor_outcome_once() {
+    let mut gate_proof = successful_gate_proof();
+    gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
         lifecycle: Some(generic_executor_lifecycle(
             ProviderRuntimeState::Succeeded,
             "openai/gpt-5.6-terra",
         )),
-        gate_proof: Some(successful_gate_proof()),
+        gate_proof: Some(gate_proof),
         ..Default::default()
     };
     let mut finalization_options = options();
     finalization_options.manual_finalization = false;
+    finalization_options.changed_files = vec!["src/lib.rs".to_string()];
 
     let report = finalize_pr_with_backend(finalization_options, &mut backend)
         .expect("succeeded generic executor outcome finalizes");
@@ -952,17 +951,20 @@ fn durable_finalization_accepts_succeeded_generic_executor_outcome_once() {
     );
 
     for rejected_state in [ProviderRuntimeState::Failed, ProviderRuntimeState::TimedOut] {
+        let mut gate_proof = successful_gate_proof();
+        gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
         let mut rejected_backend = MockBackend {
             changed_files: vec!["src/lib.rs".to_string()],
             lifecycle: Some(generic_executor_lifecycle(
                 rejected_state,
                 "openai/gpt-5.6-terra",
             )),
-            gate_proof: Some(successful_gate_proof()),
+            gate_proof: Some(gate_proof),
             ..Default::default()
         };
         let mut rejected_options = options();
         rejected_options.manual_finalization = false;
+        rejected_options.changed_files = vec!["src/lib.rs".to_string()];
 
         assert!(finalize_pr_with_backend(rejected_options, &mut rejected_backend).is_err());
         assert!(!rejected_backend.committed);
@@ -1095,14 +1097,17 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
         assert!(runtimes.iter().all(|runtime| runtime.task_id != "skipped"));
         assert_eq!(record.artifact_refs[0].kind, "patch");
 
+        let mut gate_proof = successful_gate_proof();
+        gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
         let mut backend = MockBackend {
             changed_files: vec!["src/lib.rs".to_string()],
             lifecycle: Some(record.lifecycle),
-            gate_proof: Some(successful_gate_proof()),
+            gate_proof: Some(gate_proof),
             ..Default::default()
         };
         let mut finalization_options = options();
         finalization_options.manual_finalization = false;
+        finalization_options.changed_files = vec!["src/lib.rs".to_string()];
 
         let report = finalize_pr_with_backend(finalization_options.clone(), &mut backend)
             .expect("mixed durable evidence finalizes");
@@ -1140,6 +1145,11 @@ fn real_git_backend(
 ) -> MockBackend {
     let mut gate_proof = successful_gate_proof();
     gate_proof.promotion.target.path = Some(path.display().to_string());
+    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } = &candidate
+    else {
+        unreachable!("test candidate is Git")
+    };
+    gate_proof.promotion.changed_files = fingerprint.changed_files.clone();
     MockBackend {
         lifecycle: Some(successful_lifecycle("openai/gpt-5.6-terra")),
         gate_proof: Some(gate_proof),
@@ -1270,6 +1280,7 @@ fn production_validator_normalizes_changed_file_order_and_duplicates() {
         let mut promotion = successful_gate_proof().promotion;
         promotion.source.run_id = Some(run_id.to_string());
         promotion.target.path = Some(repo.path().display().to_string());
+        promotion.changed_files = vec!["a".to_string(), "b".to_string()];
         promotion.provenance = json!({ "candidate": candidate });
         crate::agent_task_lifecycle::record_promotion(
             run_id,
@@ -1284,6 +1295,65 @@ fn production_validator_normalizes_changed_file_order_and_duplicates() {
         validate_real_candidate_fingerprint(&options).unwrap();
         options.changed_files = vec!["a".to_string()];
         assert!(validate_real_candidate_fingerprint(&options).is_err());
+    });
+}
+
+#[test]
+fn durable_finalization_uses_promoted_files_for_clean_committed_candidate() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let repo = real_git_repo();
+        std::fs::write(repo.path().join("a"), "a").unwrap();
+        std::fs::write(repo.path().join("b"), "b").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "a", "b"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "promoted candidate"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let candidate =
+            crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap())
+                .unwrap();
+        let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } =
+            &candidate
+        else {
+            unreachable!("test repository is Git")
+        };
+        assert!(fingerprint.changed_files.is_empty());
+
+        let run_id = "clean-committed-candidate";
+        crate::agent_task_lifecycle::submit_plan(
+            &crate::agent_task_scheduler::AgentTaskPlan::new("validator", Vec::new()),
+            Some(run_id),
+        )
+        .unwrap();
+        let mut promotion = successful_gate_proof().promotion;
+        promotion.source.run_id = Some(run_id.to_string());
+        promotion.target.path = Some(repo.path().display().to_string());
+        promotion.changed_files = vec!["a".to_string(), "b".to_string()];
+        promotion.provenance = json!({ "candidate": candidate });
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(promotion).unwrap(),
+        )
+        .unwrap();
+
+        let mut options = real_git_finalization_options(
+            repo.path(),
+            vec!["b".to_string(), "a".to_string(), "a".to_string()],
+        );
+        options.run_id = run_id.to_string();
+        validate_real_candidate_fingerprint(&options).expect("clean committed candidate accepted");
+
+        options.changed_files = vec!["a".to_string()];
+        let error = validate_real_candidate_fingerprint(&options)
+            .expect_err("mismatched durable changed files rejected");
+        assert!(error.message.contains("persisted promotion report"));
     });
 }
 
@@ -1304,6 +1374,7 @@ fn production_validator_accepts_only_the_exact_promoted_recovery_commit() {
         let mut promotion = successful_gate_proof().promotion;
         promotion.source.run_id = Some(run_id.to_string());
         promotion.target.path = Some(repo.path().display().to_string());
+        promotion.changed_files = vec!["candidate".to_string()];
         promotion.provenance = json!({ "candidate": candidate });
         crate::agent_task_lifecycle::record_promotion(
             run_id,
@@ -1331,12 +1402,12 @@ fn production_validator_accepts_only_the_exact_promoted_recovery_commit() {
         missing.changed_files.clear();
         let error =
             validate_real_candidate_fingerprint(&missing).expect_err("missing paths rejected");
-        assert!(error.message.contains("changed files must exactly match"));
+        assert!(error.message.contains("persisted promotion report"));
         let mut synthetic = options.clone();
         synthetic.changed_files = vec!["candidate".to_string(), "synthetic".to_string()];
         let error =
             validate_real_candidate_fingerprint(&synthetic).expect_err("extra paths rejected");
-        assert!(error.message.contains("changed files must exactly match"));
+        assert!(error.message.contains("persisted promotion report"));
 
         std::fs::write(repo.path().join("drift"), "drift").unwrap();
         Command::new("git")

@@ -54,7 +54,15 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         validate_gate_proof_binding(&gate_proof, &options)?;
         let eligibility =
             validate_durable_publication_eligibility(&lifecycle, &gate_proof.promotion)?;
-        durable_changed_files = gate_proof.promotion.changed_files.clone();
+        durable_changed_files = normalize_changed_files(&gate_proof.promotion.changed_files);
+        if normalize_changed_files(&options.changed_files) != durable_changed_files {
+            return Err(Error::validation_invalid_argument(
+                "changed-file",
+                "caller changed files must exactly match the persisted promotion report before finalization",
+                None,
+                None,
+            ));
+        }
         options.normalized_gate_results = gate_proof.promotion.gate_results;
         if options.normalized_gate_results.is_empty() {
             return Err(Error::validation_invalid_argument(
@@ -112,10 +120,10 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             ));
         }
     };
-    if !options.changed_files.is_empty() {
-        changed_files = options.changed_files.clone();
-    } else if changed_files.is_empty() && !options.manual_finalization {
+    if !options.manual_finalization {
         changed_files = durable_changed_files;
+    } else if !options.changed_files.is_empty() {
+        changed_files = options.changed_files.clone();
     }
     changed_files.sort();
     changed_files.dedup();
@@ -227,6 +235,13 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         commit_required,
         push_required,
     ))
+}
+
+fn normalize_changed_files(changed_files: &[String]) -> Vec<String> {
+    let mut normalized = changed_files.to_vec();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 fn validate_gate_proof_binding(
