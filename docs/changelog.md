@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.291.1] - 2026-07-18
+
+### Changed
+- split two more test god-files into tests/ dirs
+- Cancel queued runner proxies with strict identity
+- relocate extension readiness + hook hygiene build (final extraction prep)
+- split 4812-line agent_task_lifecycle test god-file
+
+### Fixed
+- recover expired pidless daemon reservations
+- reap cancelled process groups
+- stop changed-scope test gate failing on pure relocations
+- bound durable daemon job history
+- retain accepted Lab handoffs
+- validate durable declared release artifacts
+- match durable declared release artifacts
+
 ## [0.291.0] - 2026-07-18
 
 ### Added
