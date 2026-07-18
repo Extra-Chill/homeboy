@@ -226,6 +226,74 @@ fn detached_cook_preacceptance_failure_terminalizes_attempt_proxy() {
 }
 
 #[test]
+fn accepted_handoff_survives_a_pre_execution_disruption_without_terminalizing() {
+    // #8824: once a Lab handoff is accepted the runner daemon owns the durable
+    // job. A transient controller-session loss (e.g. a concurrent runner
+    // refresh) must not be recorded as a pre-execution failure that discards
+    // the authoritative in-flight remote work. The run stays non-terminal and
+    // retryable so reconciliation can project the real runner result later.
+    with_isolated_home(|_| {
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        let plan = test_plan();
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "accepted-handoff-disrupted",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+            durable_plan: Some(&plan),
+        })
+        .expect("controller proxy recorded before handoff");
+        let accepted = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "accepted-handoff-disrupted",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-accepted-in-flight",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("runner accepts the handoff");
+        assert!(accepted.has_accepted_lab_handoff());
+        assert_eq!(accepted.state, AgentTaskRunState::Running);
+
+        // A pre-execution failure raised after acceptance (controller lost its
+        // session) must NOT terminalize the accepted handoff.
+        let after = record_pre_execution_failure(
+            "accepted-handoff-disrupted",
+            &plan,
+            "lab_handoff_preacceptance",
+            &Error::validation_invalid_argument(
+                "runner",
+                "runner is not connected to a daemon",
+                None,
+                None,
+            ),
+        )
+        .expect("accepted handoff is preserved, not failed");
+
+        assert_ne!(
+            after.state,
+            AgentTaskRunState::Failed,
+            "an accepted handoff must not be reclassified as a pre-execution failure"
+        );
+        assert!(
+            after.has_accepted_lab_handoff(),
+            "the accepted handoff and its runner job must be preserved"
+        );
+        assert_eq!(after.runner_job_id(), Some("job-accepted-in-flight"));
+        assert_eq!(after.metadata["retryable"], true);
+        assert_eq!(
+            after.metadata["accepted_handoff_pre_execution_disruption"]["phase"],
+            "lab_handoff_preacceptance"
+        );
+        // No terminal pre-execution failure aggregate was written.
+        assert!(after.metadata.get("pre_execution_failure").is_none());
+    });
+}
+
+#[test]
 fn failed_lab_handoff_retry_recovers_the_materialized_user_plan() {
     with_isolated_home(|_| {
         let mut plan = test_plan();
