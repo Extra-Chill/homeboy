@@ -31,10 +31,14 @@ pub(super) fn daemon_get(client: &Client, local_url: &str, path: &str) -> Result
     let envelope: DaemonGetEnvelope =
         parse_daemon_response_json(&body, status_code, path, "parse daemon response")?;
     if !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "daemon request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
+        return Err(Error::new(
+            ErrorCode::InternalUnexpected,
+            format!(
+                "daemon request failed: {}",
+                envelope.error.unwrap_or(Value::Null)
+            ),
+            json!({ "http_status": status_code, "path": path }),
+        ));
     }
     envelope
         .data

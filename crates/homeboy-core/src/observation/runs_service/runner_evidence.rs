@@ -248,7 +248,10 @@ pub fn with_runner_evidence<T>(f: impl FnOnce(&dyn RunnerEvidenceProvider) -> T)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
+    use std::sync::{Arc, OnceLock};
+
+    use crate::observation::{ObservationStore, RunStatus};
+    use crate::test_support::with_isolated_home;
 
     fn provider_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -430,5 +433,159 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
+    }
+
+    struct SelectedRefreshProvider {
+        calls: Arc<Mutex<Vec<String>>>,
+        error: Option<Error>,
+    }
+
+    impl RunnerEvidenceProvider for SelectedRefreshProvider {
+        fn mirror_connected_runner_run(&self, _: &str) -> Result<Option<RunRecord>> {
+            Ok(None)
+        }
+
+        fn statuses(&self) -> Vec<RunnerConnectionInfo> {
+            Vec::new()
+        }
+
+        fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
+            Ok(Value::Null)
+        }
+
+        fn runner_artifact_content(&self, _: &str, _: &str, _: &str) -> Result<Value> {
+            Ok(Value::Null)
+        }
+
+        fn runner_job_cancel(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
+            unreachable!()
+        }
+
+        fn refresh_mirrored_daemon_evidence(&self, run_id: &str) -> Result<Option<Vec<RunRecord>>> {
+            self.calls.lock().expect("calls").push(run_id.to_string());
+            self.error.clone().map_or(Ok(None), Err)
+        }
+
+        fn mirrored_runner_job_identity(&self, run: &RunRecord) -> Option<(String, String)> {
+            run.metadata_json
+                .pointer("/lab/runner/id")
+                .and_then(Value::as_str)
+                .zip(
+                    run.metadata_json
+                        .pointer("/lab/remote_job/id")
+                        .and_then(Value::as_str),
+                )
+                .map(|(runner, job)| (runner.to_string(), job.to_string()))
+        }
+
+        fn download_remote_artifact(
+            &self,
+            _: &str,
+            _: Option<PathBuf>,
+        ) -> Result<RemoteArtifactDownloadInfo> {
+            unreachable!()
+        }
+    }
+
+    fn mirrored_run(id: &str) -> RunRecord {
+        let mut run = run(id);
+        run.metadata_json = serde_json::json!({
+            "lab": { "runner": { "id": "lab" }, "remote_job": { "id": "job-1" } }
+        });
+        run
+    }
+
+    #[test]
+    fn selected_refresh_skips_unrelated_mirrors_and_non_mirrors() {
+        let _lock = provider_lock().lock().expect("provider lock");
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let selected = run("selected");
+            let unrelated = mirrored_run("unrelated");
+            store.import_run(&selected).expect("selected");
+            store.import_run(&unrelated).expect("unrelated");
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            register_runner_evidence_provider(Box::new(SelectedRefreshProvider {
+                calls: calls.clone(),
+                error: Some(Error::internal_unexpected("unrelated refresh must not run")),
+            }));
+
+            assert!(
+                super::super::refresh_selected_mirrored_daemon_evidence(&store, &selected)
+                    .is_none()
+            );
+            assert!(calls.lock().expect("calls").is_empty());
+        });
+        PROVIDER.lock().expect("provider").take();
+    }
+
+    #[test]
+    fn selected_daemon_job_not_found_becomes_stale_diagnostics() {
+        let _lock = provider_lock().lock().expect("provider lock");
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let selected = mirrored_run("selected");
+            store.import_run(&selected).expect("selected");
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            register_runner_evidence_provider(Box::new(SelectedRefreshProvider {
+                calls: calls.clone(),
+                error: Some(Error::new(
+                    crate::error::ErrorCode::InternalUnexpected,
+                    "daemon request failed: job not found",
+                    serde_json::json!({ "http_status": 404, "path": "/jobs/job-1" }),
+                )),
+            }));
+
+            assert!(
+                super::super::refresh_selected_mirrored_daemon_evidence(&store, &selected)
+                    .is_none()
+            );
+            assert_eq!(*calls.lock().expect("calls"), vec!["selected"]);
+            let refreshed = store.get_run("selected").expect("read").expect("run");
+            assert_eq!(refreshed.status, RunStatus::Stale.as_str());
+            assert_eq!(
+                refreshed.metadata_json["runner_terminal_evidence"]["stale_reason"],
+                "daemon_job_not_found"
+            );
+            assert_eq!(
+                refreshed.metadata_json["runner_terminal_evidence"]["diagnostic"]["details"]
+                    ["http_status"],
+                404
+            );
+        });
+        PROVIDER.lock().expect("provider").take();
+    }
+
+    #[test]
+    fn selected_transport_refresh_failure_remains_actionable() {
+        let _lock = provider_lock().lock().expect("provider lock");
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let selected = mirrored_run("selected");
+            store.import_run(&selected).expect("selected");
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            register_runner_evidence_provider(Box::new(SelectedRefreshProvider {
+                calls: calls.clone(),
+                error: Some(Error::internal_unexpected("runner transport unavailable")),
+            }));
+
+            let err = super::super::refresh_selected_mirrored_daemon_evidence(&store, &selected)
+                .expect("actionable refresh error");
+            assert_eq!(err.message, "runner transport unavailable");
+            assert_eq!(*calls.lock().expect("calls"), vec!["selected"]);
+            assert_eq!(
+                store
+                    .get_run("selected")
+                    .expect("read")
+                    .expect("run")
+                    .status,
+                RunStatus::Running.as_str()
+            );
+        });
+        PROVIDER.lock().expect("provider").take();
     }
 }

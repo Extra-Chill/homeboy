@@ -238,6 +238,63 @@ pub fn refresh_mirrored_daemon_evidence_best_effort(run_id: &str) {
     }
 }
 
+/// Refresh one selected mirrored run. A daemon 404 means the persisted mirror
+/// can no longer be observed, so preserve that terminal diagnostic locally
+/// instead of emitting a generic refresh warning.
+pub fn refresh_selected_mirrored_daemon_evidence_best_effort(
+    store: &ObservationStore,
+    run: &RunRecord,
+) {
+    if let Some(err) = refresh_selected_mirrored_daemon_evidence(store, run) {
+        eprintln!(
+            "Warning: could not refresh mirrored Lab runner evidence for `{}`: {}",
+            run.id, err.message
+        );
+    }
+}
+
+pub(crate) fn refresh_selected_mirrored_daemon_evidence(
+    store: &ObservationStore,
+    run: &RunRecord,
+) -> Option<Error> {
+    let Some((runner_id, job_id)) =
+        runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(run))
+    else {
+        return None;
+    };
+
+    match runner_evidence::with_runner_evidence(|p| p.refresh_mirrored_daemon_evidence(&run.id)) {
+        Ok(_) => None,
+        Err(err) if err.details.get("http_status").and_then(Value::as_u64) == Some(404) => {
+            let mut metadata = run.metadata_json.clone();
+            if !metadata.is_object() {
+                metadata = serde_json::json!({ "homeboy_original_metadata": metadata });
+            }
+            if let Some(object) = metadata.as_object_mut() {
+                object.insert(
+                    "runner_terminal_evidence".to_string(),
+                    serde_json::json!({
+                        "runner_id": runner_id,
+                        "job_id": job_id,
+                        "status": "not_found",
+                        "lifecycle_state": "stale",
+                        "stale_reason": "daemon_job_not_found",
+                        "retryable": false,
+                        "diagnostic": {
+                            "code": err.code.as_str(),
+                            "message": err.message,
+                            "details": err.details,
+                        },
+                    }),
+                );
+            }
+            let _ = store.finish_run(&run.id, RunStatus::Stale, Some(metadata));
+            None
+        }
+        Err(err) => Some(err),
+    }
+}
+
 /// Best-effort refresh of all locally-running Lab runner mirror records.
 ///
 /// A controller can exit, disconnect, or time out while the runner daemon keeps
