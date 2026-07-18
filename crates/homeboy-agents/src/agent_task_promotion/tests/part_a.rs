@@ -619,6 +619,7 @@ fn provider_command_response_supplies_workspace_and_evidence() {
         changed_files: vec!["src/lib.rs".to_string()],
         gate_feedback_baseline: None,
         dry_run: false,
+        trusted_unpushed_candidate_destination: None,
     };
     let workspace = run_provider_command(
         &CommandInvocation {

@@ -120,7 +120,7 @@ pub fn resolve_worktree_provider_from_config(
     handle: &str,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderResolution> {
-    resolve_worktree_provider_with_policy_from_config(handle, config, false, None)
+    resolve_worktree_provider_with_policy_from_config(handle, config, false, None, None)
 }
 
 /// Resolve a workspace only from providers explicitly authorized for apply operations.
@@ -129,7 +129,36 @@ pub fn resolve_apply_enabled_worktree_provider_from_config(
     config: &HomeboyConfig,
     gate_feedback_baseline: Option<&serde_json::Value>,
 ) -> Result<WorktreeProviderResolution> {
-    resolve_worktree_provider_with_policy_from_config(handle, config, true, gate_feedback_baseline)
+    resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+        handle,
+        config,
+        gate_feedback_baseline,
+        None,
+    )
+}
+
+/// A clean immutable candidate may be its own destination before Homeboy's
+/// finalizer pushes it. The exception remains bound to this exact checkout and
+/// commit; every other destination safety requirement still applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedUnpushedWorktree {
+    pub path: std::path::PathBuf,
+    pub head: String,
+}
+
+pub fn resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+    handle: &str,
+    config: &HomeboyConfig,
+    gate_feedback_baseline: Option<&serde_json::Value>,
+    trusted_unpushed_destination: Option<&TrustedUnpushedWorktree>,
+) -> Result<WorktreeProviderResolution> {
+    resolve_worktree_provider_with_policy_from_config(
+        handle,
+        config,
+        true,
+        gate_feedback_baseline,
+        trusted_unpushed_destination,
+    )
 }
 
 fn resolve_worktree_provider_with_policy_from_config(
@@ -137,6 +166,7 @@ fn resolve_worktree_provider_with_policy_from_config(
     config: &HomeboyConfig,
     require_apply_enabled: bool,
     gate_feedback_baseline: Option<&serde_json::Value>,
+    trusted_unpushed_destination: Option<&TrustedUnpushedWorktree>,
 ) -> Result<WorktreeProviderResolution> {
     let mut provider_ids = config
         .worktree_providers
@@ -160,7 +190,12 @@ fn resolve_worktree_provider_with_policy_from_config(
             attempted.push(provider_id.clone());
             let worktrees = run_provider_resolve_command(&provider_id, provider, command, handle)?;
             if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
-                validate_provider_handle(&provider_id, &worktree, gate_feedback_baseline)?;
+                validate_provider_handle(
+                    &provider_id,
+                    &worktree,
+                    gate_feedback_baseline,
+                    trusted_unpushed_destination,
+                )?;
                 return Ok(WorktreeProviderResolution {
                     provider_id,
                     worktree,
@@ -174,7 +209,12 @@ fn resolve_worktree_provider_with_policy_from_config(
         attempted.push(provider_id.clone());
         let worktrees = run_provider_list_command(&provider_id, provider, command)?;
         if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
-            validate_provider_handle(&provider_id, &worktree, gate_feedback_baseline)?;
+            validate_provider_handle(
+                &provider_id,
+                &worktree,
+                gate_feedback_baseline,
+                trusted_unpushed_destination,
+            )?;
             return Ok(WorktreeProviderResolution {
                 provider_id,
                 worktree,
@@ -440,6 +480,7 @@ fn validate_provider_handle(
     provider_id: &str,
     worktree: &WorktreeProviderHandle,
     gate_feedback_baseline: Option<&serde_json::Value>,
+    trusted_unpushed_destination: Option<&TrustedUnpushedWorktree>,
 ) -> Result<()> {
     let path = std::path::PathBuf::from(&worktree.path);
     if !path.is_dir() {
@@ -479,7 +520,11 @@ fn validate_provider_handle(
             worktree.safety.dirty && !verified_gate_feedback_baseline,
             "dirty",
         ),
-        (worktree.safety.unpushed, "unpushed"),
+        (
+            worktree.safety.unpushed
+                && !trusted_unpushed_destination_matches(&path, trusted_unpushed_destination),
+            "unpushed",
+        ),
         (worktree.safety.primary, "primary"),
     ]
     .into_iter()
@@ -511,6 +556,29 @@ fn validate_provider_handle(
         ));
     }
     Ok(())
+}
+
+fn trusted_unpushed_destination_matches(
+    path: &std::path::Path,
+    trusted: Option<&TrustedUnpushedWorktree>,
+) -> bool {
+    let Some(trusted) = trusted else {
+        return false;
+    };
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    let Ok(trusted_path) = std::fs::canonicalize(&trusted.path) else {
+        return false;
+    };
+    path == trusted_path
+        && crate::git::run_git(
+            &path,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+            "verify trusted unpushed worktree HEAD",
+        )
+        .ok()
+        .is_some_and(|head| head.trim() == trusted.head)
 }
 
 pub fn cleanup_worktree_providers_from_config(
@@ -1431,6 +1499,76 @@ mod tests {
             .expect_err("unsafe metadata must fail closed");
             assert!(err.message.contains(expected), "{}", err.message);
         }
+    }
+
+    #[test]
+    fn trusted_immutable_destination_is_the_only_unpushed_apply_exception() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(workspace.path())
+                .output()
+                .expect("run git");
+            assert!(output.status.success());
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["config", "user.email", "agent@example.test"]);
+        git(&["config", "user.name", "Agent"]);
+        std::fs::write(workspace.path().join("candidate"), "candidate\n").expect("write candidate");
+        git(&["add", "candidate"]);
+        git(&["commit", "-m", "candidate"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let mut config = config_with_provider(list_provider(
+            fake_list_provider_script(json!({ "worktrees": [{
+                "handle": "fixture@cook-target", "path": workspace.path(), "branch": "cook-target",
+                "safety": { "dirty": false, "unpushed": true, "primary": false }
+            }]})),
+            worktrees_mapping(),
+        ));
+        config
+            .worktree_providers
+            .get_mut("fixture")
+            .expect("fixture provider")
+            .apply_enabled = true;
+
+        let rejected = resolve_apply_enabled_worktree_provider_from_config(
+            "fixture@cook-target",
+            &config,
+            None,
+        )
+        .expect_err("ordinary unpushed destination remains blocked");
+        assert!(rejected.message.contains("unpushed"));
+
+        let resolved =
+            resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+                "fixture@cook-target",
+                &config,
+                None,
+                Some(&TrustedUnpushedWorktree {
+                    path: workspace.path().to_path_buf(),
+                    head: head.clone(),
+                }),
+            )
+            .expect("exact immutable destination is allowed before finalizer push");
+        assert_eq!(
+            resolved.worktree.path,
+            workspace.path().display().to_string()
+        );
+
+        let stale =
+            resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+                "fixture@cook-target",
+                &config,
+                None,
+                Some(&TrustedUnpushedWorktree {
+                    path: workspace.path().to_path_buf(),
+                    head: format!("{head}0"),
+                }),
+            )
+            .expect_err("different candidate commit remains blocked");
+        assert!(stale.message.contains("unpushed"));
     }
 
     #[test]

@@ -5,7 +5,8 @@ use super::super::apply::{
     preflight_configured_workspace_provider_with_config, run_provider_command,
     AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
     AgentTaskPromotionWorkspaceProvider, ExternalPromotionWorkspaceProvider,
-    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+    TrustedUnpushedCandidateDestination, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
+    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 use super::super::promote::{
     normalize_promotion_patch, promote, promote_with_provider,
@@ -184,6 +185,7 @@ fn configured_command_provider_is_resolved_lazily_with_provenance() {
             changed_files: vec!["src/lib.rs".to_string()],
             gate_feedback_baseline: None,
             dry_run: false,
+            trusted_unpushed_candidate_destination: None,
         })
         .expect_err("fixture executable is not an adapter");
 
@@ -206,6 +208,91 @@ fn configured_command_provider_is_resolved_lazily_with_provenance() {
     assert_eq!(
         error.details["worktree_provider"]["path"],
         workspace.path().display().to_string()
+    );
+}
+
+#[test]
+fn configured_provider_accepts_only_the_unpushed_immutable_candidate_destination() {
+    let (_temp, repo, _base, candidate) = adopted_commit_repo();
+    let provider = tempfile::NamedTempFile::new().expect("provider command");
+    std::fs::write(
+        provider.path(),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+            serde_json::json!({
+                "worktrees": [{
+                    "handle": "fixture@candidate",
+                    "path": repo,
+                    "branch": "main",
+                    "safety": { "dirty": false, "unpushed": true, "primary": false }
+                }]
+            })
+        ),
+    )
+    .expect("write provider command");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(provider.path())
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
+    }
+    let mut config = HomeboyConfig::default();
+    config.worktree_providers.insert(
+        "fixture".to_string(),
+        WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            commands: WorktreeProviderCommands {
+                resolve: Some(vec![
+                    provider.path().display().to_string(),
+                    "{handle}".to_string(),
+                ]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(WorktreeProviderListResultMapping {
+                items: "$.worktrees".to_string(),
+                handle: "$.handle".to_string(),
+                path: "$.path".to_string(),
+                branch: "$.branch".to_string(),
+                dirty: "$.safety.dirty".to_string(),
+                unpushed: "$.safety.unpushed".to_string(),
+                primary: "$.safety.primary".to_string(),
+            }),
+        },
+    );
+    let mut provider = ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
+        &promotion_options("fixture@candidate"),
+        &config,
+        Some(PathBuf::from("/fixture/homeboy")),
+        None,
+    );
+    let error = provider
+        .apply_patch(AgentTaskPromotionApplyRequest {
+            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+            to_workspace: "fixture@candidate".to_string(),
+            patch: Some(VALID_PATCH.to_string()),
+            patch_path: "changes.patch".to_string(),
+            changed_files: vec!["lib.rs".to_string()],
+            gate_feedback_baseline: None,
+            dry_run: false,
+            trusted_unpushed_candidate_destination: Some(TrustedUnpushedCandidateDestination {
+                path: repo.clone(),
+                head: candidate,
+            }),
+        })
+        .expect_err("fixture executable is not an adapter");
+    assert!(!error.message.contains("unpushed"), "{}", error.message);
+    assert_eq!(
+        provider
+            .invocation()
+            .expect("resolved provider")
+            .argv
+            .last(),
+        Some(&repo.display().to_string())
     );
 }
 
@@ -782,6 +869,7 @@ fn provider_response_overflow_is_terminated_with_bounded_evidence() {
         changed_files: vec!["src/lib.rs".to_string()],
         gate_feedback_baseline: None,
         dry_run: false,
+        trusted_unpushed_candidate_destination: None,
     };
 
     let error = run_provider_command(
