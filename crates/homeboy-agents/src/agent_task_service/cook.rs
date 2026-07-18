@@ -23,7 +23,7 @@ use crate::agent_task_gate::VerifyGateOptions;
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
     normalize_promotion_patch, promote_with_checkpoint, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    AgentTaskPromotionReport,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -1613,10 +1613,10 @@ fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     promotion: &AgentTaskPromotionReport,
     backend: &mut B,
 ) -> Result<Value> {
-    if promotion.status != AgentTaskPromotionStatus::Applied {
+    if !promotion.is_finalization_ready() {
         return Err(Error::validation_invalid_argument(
             "promotion",
-            "agent-task cook finalization requires an applied promotion with green gates",
+            "agent-task cook finalization requires an applied promotion or green explicitly adopted candidate",
             None,
             None,
         ));
@@ -1783,6 +1783,7 @@ mod tests {
     use crate::agent_task_finalization::{
         AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend, AgentTaskPrRef,
     };
+    use crate::agent_task_promotion::AgentTaskPromotionStatus;
     use homeboy_core::run_lifecycle_record::{
         ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
         RunLifecycleRecord,
@@ -2356,6 +2357,7 @@ mod tests {
         committed: bool,
         pushed: bool,
         created: bool,
+        gate_proof: Option<AgentTaskPromotionReport>,
     }
 
     impl AgentTaskPrFinalizationBackend for CaptureBackend {
@@ -2381,7 +2383,7 @@ mod tests {
         fn hydrate_gate_proof(&mut self, run_id: &str) -> Result<AgentTaskPrDurableGateProof> {
             Ok(AgentTaskPrDurableGateProof {
                 run_id: run_id.to_string(),
-                promotion: promotion(run_id),
+                promotion: self.gate_proof.clone().unwrap_or_else(|| promotion(run_id)),
             })
         }
         fn current_branch(&mut self, _path: &str) -> Result<String> {
@@ -2551,6 +2553,54 @@ mod tests {
                 );
             }
             assert!(backend.committed && backend.pushed && backend.created);
+        });
+    }
+
+    #[test]
+    fn cook_finalization_accepts_green_explicit_no_change_adoption_and_rejects_non_green() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "cook-adopted-candidate";
+            let plan = AgentTaskPlan::new("cook-adopted-candidate", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+            let mut options = batch_cook_options(
+                "cook-adopted-candidate",
+                Arc::new(AcceptedDetachedAttemptDispatcher),
+            );
+            options.no_finalize = false;
+            options.base = "main".to_string();
+            options.head = Some("fix/8058".to_string());
+            options.gates.verify = vec!["cargo test --lib".to_string()];
+
+            let mut adopted = promotion(run_id);
+            adopted.status = AgentTaskPromotionStatus::VerifiedNoChanges;
+            adopted.changed_files.clear();
+            adopted.patch_artifact.id = "adopted-candidate".to_string();
+            adopted.patch_artifact.kind = "commit".to_string();
+            adopted.provenance["change_source"] = Value::String("adopted_commit".to_string());
+            adopted.provenance["candidate_ref"] = Value::String("candidate-sha".to_string());
+            let mut backend = CaptureBackend {
+                gate_proof: Some(adopted.clone()),
+                ..Default::default()
+            };
+
+            finalize_cook_pr_with_backend(&options, run_id, &adopted, &mut backend)
+                .expect("green adopted candidate reaches PR finalization");
+            assert!(backend.created);
+
+            let rejected_run_id = "cook-adopted-candidate-red";
+            agent_task_lifecycle::submit_plan(&plan, Some(rejected_run_id)).unwrap();
+            adopted.status = AgentTaskPromotionStatus::NoChangesGateFailed;
+            adopted.source.run_id = Some(rejected_run_id.to_string());
+            let mut rejected_backend = CaptureBackend::default();
+            let error = finalize_cook_pr_with_backend(
+                &options,
+                rejected_run_id,
+                &adopted,
+                &mut rejected_backend,
+            )
+            .expect_err("non-green no-change promotion is not finalizable");
+            assert!(error.message.contains("green explicitly adopted candidate"));
+            assert!(!rejected_backend.created);
         });
     }
 

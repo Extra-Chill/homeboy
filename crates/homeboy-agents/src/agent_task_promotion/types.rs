@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::agent_task_gate::{AgentTaskGateReport, VerifyGateOptions};
 use homeboy_core::command_invocation::CommandInvocation;
-use homeboy_core::gate::HomeboyGateResult;
+use homeboy_core::gate::{HomeboyGateResult, HomeboyGateStatus};
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 
 pub const AGENT_TASK_PROMOTION_REPORT_SCHEMA: &str = "homeboy/agent-task-promotion-report/v1";
@@ -72,6 +72,29 @@ pub struct AgentTaskPromotionReport {
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub provenance: Value,
     pub operator_notification: AgentTaskPromotionNotification,
+}
+
+impl AgentTaskPromotionReport {
+    /// A finalizable promotion has a materialized patch or an explicitly adopted
+    /// immutable candidate, and durable proof that every declared gate passed.
+    pub fn is_finalization_ready(&self) -> bool {
+        let accepted_status = self.status == AgentTaskPromotionStatus::Applied
+            || (self.status == AgentTaskPromotionStatus::VerifiedNoChanges
+                && self.provenance.get("change_source").and_then(Value::as_str)
+                    == Some("adopted_commit")
+                && self
+                    .provenance
+                    .get("candidate_ref")
+                    .and_then(Value::as_str)
+                    .is_some_and(|candidate_ref| !candidate_ref.trim().is_empty()));
+
+        accepted_status
+            && !self.gate_results.is_empty()
+            && self
+                .gate_results
+                .iter()
+                .all(|gate| gate.status == HomeboyGateStatus::Passed)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -872,6 +872,7 @@ fn promote_explicit_no_change_candidate(
     })?;
     let target =
         AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), Some(worktree_path));
+    let verified_base = capture_declared_base(worktree_path, options.base_ref.as_deref())?;
     let gates = run_promotion_gates(options, provider, worktree_path)?;
     let status = match gates.status {
         AgentTaskPromotionStatus::Applied => AgentTaskPromotionStatus::VerifiedNoChanges,
@@ -898,7 +899,7 @@ fn promote_explicit_no_change_candidate(
         command_evidence: Vec::new(),
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
-        verified_base: None,
+        verified_base,
         provenance: json!({
             "source_schema": outcome.schema,
             "worktree_path": worktree_path,

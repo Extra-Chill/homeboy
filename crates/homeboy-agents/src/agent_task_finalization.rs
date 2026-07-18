@@ -230,11 +230,10 @@ fn validate_gate_proof_binding(
     gate_proof: &AgentTaskPrDurableGateProof,
     options: &AgentTaskPrFinalizationOptions,
 ) -> Result<()> {
-    use crate::agent_task_promotion::AgentTaskPromotionStatus;
-    if gate_proof.promotion.status != AgentTaskPromotionStatus::Applied {
+    if !gate_proof.promotion.is_finalization_ready() {
         return Err(Error::validation_invalid_argument(
             "run_id",
-            "durable gate proof must record an applied promotion",
+            "durable gate proof must record an applied promotion or green explicitly adopted candidate",
             None,
             None,
         ));
