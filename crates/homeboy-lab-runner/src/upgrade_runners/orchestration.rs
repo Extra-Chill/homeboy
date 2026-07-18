@@ -408,14 +408,19 @@ pub fn upgrade_runner_with_executor(
         }
     }
 
-    if path_drift.is_none() {
-        path_drift = source_runner_identity_drift(
+    let mut source_identity_drift = if path_drift.is_none() {
+        source_runner_identity_drift(
             runner,
             &homeboy_path,
             method_override,
             expected_source_identity.as_deref(),
             exec,
-        );
+        )
+    } else {
+        None
+    };
+    if path_drift.is_none() {
+        path_drift = source_identity_drift.clone();
     }
     let (extensions_synced, mut extensions_skipped, mut extensions_failed) =
         if let Some(drift) = path_drift.as_deref() {
@@ -490,6 +495,18 @@ pub fn upgrade_runner_with_executor(
     );
     if path_drift.is_none() {
         path_drift = local_version_drift;
+    }
+    // PATH alignment is semver-only. Re-check the final configured executable
+    // so an equal-version bare binary cannot erase source identity divergence.
+    source_identity_drift = source_runner_identity_drift(
+        runner,
+        &homeboy_path,
+        method_override,
+        expected_source_identity.as_deref(),
+        exec,
+    );
+    if path_drift.is_none() {
+        path_drift = source_identity_drift.clone();
     }
 
     defer_extension_failures_for_path_drift(

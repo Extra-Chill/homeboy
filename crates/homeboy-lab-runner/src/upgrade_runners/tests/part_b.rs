@@ -388,6 +388,9 @@ fn source_runner_upgrade_realigns_to_same_version_source_checkout_identity() {
                 8 if options.command[0] == source_binary => {
                     (format!("{expected_identity}\n"), String::new(), 0)
                 }
+                9 if options.command[0] == source_binary => {
+                    (format!("{expected_identity}\n"), String::new(), 0)
+                }
                 other => (
                     String::new(),
                     format!("unexpected command {other}: {:?}", options.command),
@@ -427,7 +430,10 @@ fn rejects_stale_source_runner_identity_before_extension_sync() {
     let expected_identity = source_checkout_build_identity(source_dir.path()).unwrap();
     let remote_source = "/home/user/Developer/_lab_workspaces/homeboy-current-main";
     let source_binary = format!("{remote_source}/target/release/homeboy");
-    let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
+    let runner = ssh_runner(
+        "lab",
+        Some("/home/user/Developer/homeboy@stale/target/release/homeboy"),
+    );
     let extension_updates = vec![extension_update("required-extension", "48517ac3")];
     let mut commands = Vec::new();
 
@@ -455,6 +461,8 @@ fn rejects_stale_source_runner_identity_before_extension_sync() {
                 9 => format!("homeboy {}+stale\n", current_version()),
                 10 => format!("homeboy {}+stale\n", current_version()),
                 11 => format!("homeboy {}\n", current_version()),
+                12 => format!("homeboy {}+stale\n", current_version()),
+                13 => format!("homeboy {}+stale\n", current_version()),
                 other => panic!("unexpected runner command {other}: {:?}", options.command),
             };
             Ok((exec_output(runner_id, options.command, &stdout, "", 0), 0))
