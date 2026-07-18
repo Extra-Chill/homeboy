@@ -21,6 +21,7 @@ pub mod bench_result;
 pub mod bench_results;
 pub mod capability;
 pub mod test_analysis;
+pub mod test_parsing;
 pub mod test_result;
 pub mod trace_parsing;
 pub use bench_artifact::{BenchArtifact, BenchArtifactViewer, BenchPreviewLifecycleMetadata};
@@ -43,6 +44,7 @@ pub use capability::ExtensionCapability;
 pub use test_analysis::{
     FailureCategory, FailureCluster, TestAnalysis, TestAnalysisInput, TestFailure,
 };
+pub use test_parsing::{CoverageOutput, TestFailureSummaryItem, TestSummaryOutput, UncoveredFile};
 pub use test_result::{TestCounts, TestScopeOutput};
 pub use trace_parsing::{
     TraceArtifact, TraceAssertion, TraceAssertionStatus, TraceCanonicalCheck,
