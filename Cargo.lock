@@ -1125,6 +1125,7 @@ dependencies = [
  "homeboy-lab-runner-contract",
  "homeboy-product-identity",
  "homeboy-rig",
+ "homeboy-source-snapshot-contract",
  "homeboy-upgrade",
  "libc",
  "regex",

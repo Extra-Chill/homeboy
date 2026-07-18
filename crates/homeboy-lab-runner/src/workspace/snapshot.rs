@@ -19,7 +19,6 @@ use super::util::{
 
 const RUNNER_WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
 const LAB_AT_FILES_DIRECTORY: &str = ".homeboy/lab-at-files";
-
 /// Runner-owned paths that Homeboy materializes *onto* a workspace after
 /// transport. They exist only on the runner side, never in the controller's
 /// source tree, so they must be excluded from every workspace content-identity
@@ -41,9 +40,19 @@ fn is_reserved_runner_workspace_path(relative: &str) -> bool {
         .iter()
         .any(|reserved| relative == *reserved)
 }
-pub(crate) const WORKSPACE_CONTENT_PERMISSION_PORTABLE: &str = "portable-content-only";
-pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE: &str = "unix-executable";
-pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE: &str = "unix-owner-executable";
+
+// The workspace-content *identity spec* (permission-policy names, the default
+// policy, the policy -> algorithm-marker mapping, and the content manifest
+// types) lives in the leaf `homeboy-source-snapshot-contract` crate so the
+// controller-declare and runner-verify paths derive it from one place. The
+// filesystem traversal that *applies* the spec stays here. Re-exported so
+// existing `crate::workspace::snapshot::*` / `crate::*` paths keep resolving.
+pub use homeboy_source_snapshot_contract::workspace_content_identity::{
+    workspace_content_hash_algorithm, WorkspaceContentManifest, WorkspaceContentManifestEntry,
+    WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+};
+
 pub(crate) const WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT: usize = 192;
 
 // The SSH path passes this script through `sh -c` after shell-quoting it. A
@@ -56,31 +65,6 @@ const INCREMENTAL_PREPARE_COMMAND_MAX_BYTES: usize = 16 * 1024;
 // preflight deliberately overestimates so it can reject before allocating a
 // command proportional to the manifest.
 const INCREMENTAL_PREPARE_COMMAND_FIXED_OVERHEAD_BYTES: usize = 4 * 1024;
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct WorkspaceContentManifest {
-    pub entry_count: usize,
-    pub entries: Vec<WorkspaceContentManifestEntry>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct WorkspaceContentManifestEntry {
-    pub path: String,
-    pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bytes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_executable: Option<bool>,
-}
-
-#[cfg(unix)]
-pub(crate) const WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY: &str =
-    WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE;
-#[cfg(not(unix))]
-pub(crate) const WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY: &str =
-    WORKSPACE_CONTENT_PERMISSION_PORTABLE;
 
 pub(crate) fn snapshot_identity(
     local_path: &Path,
@@ -110,21 +94,6 @@ pub(crate) fn snapshot_identity(
 /// cannot be interpreted under a different platform capability contract.
 pub(crate) fn workspace_content_hash(path: &Path, excludes: &[String]) -> Result<String> {
     workspace_content_hash_for_policy(path, excludes, WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY)
-}
-
-pub(crate) fn workspace_content_hash_algorithm(policy: &str) -> Option<String> {
-    match policy {
-        WORKSPACE_CONTENT_PERMISSION_PORTABLE => {
-            Some("homeboy-workspace-content-v2+portable-content-only".to_string())
-        }
-        WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE if cfg!(unix) => {
-            Some("homeboy-workspace-content-v2+unix-executable".to_string())
-        }
-        WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE if cfg!(unix) => {
-            Some("homeboy-workspace-content-v3+unix-owner-executable".to_string())
-        }
-        _ => None,
-    }
 }
 
 pub(crate) fn workspace_content_hash_for_policy(
