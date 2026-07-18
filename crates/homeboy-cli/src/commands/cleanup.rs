@@ -502,25 +502,18 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             .filter(|snapshot| snapshot.eligible)
             .map(|snapshot| snapshot.size_bytes)
             .sum();
-        let reclaimed_bytes = output
-            .removed
-            .iter()
-            .filter_map(|path| {
-                output
-                    .snapshots
-                    .iter()
-                    .find(|snapshot| snapshot.pins.contains(path))
-                    .map(|snapshot| snapshot.size_bytes)
-            })
-            .sum();
         categories.push(category_from_output(
             CONTROLLER_RUNTIMES_METADATA,
             apply,
-            output.eligible.len(),
-            output.removed.len(),
+            output
+                .snapshots
+                .iter()
+                .filter(|snapshot| snapshot.eligible)
+                .count(),
+            output.removed_identities.len(),
             output.retained.len(),
             estimated_bytes,
-            reclaimed_bytes,
+            output.reclaimed_bytes,
             output,
         )?);
     }

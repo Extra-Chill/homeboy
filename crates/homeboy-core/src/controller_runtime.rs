@@ -61,6 +61,8 @@ pub struct ControllerRuntimePruneResult {
     pub retained: Vec<PathBuf>,
     pub eligible: Vec<PathBuf>,
     pub removed: Vec<PathBuf>,
+    pub removed_identities: Vec<PathBuf>,
+    pub reclaimed_bytes: u64,
     pub snapshots: Vec<ControllerRuntimeSnapshot>,
 }
 
@@ -182,6 +184,8 @@ pub fn prune_pins(apply: bool) -> Result<ControllerRuntimePruneResult> {
         retained: result.retained,
         eligible: result.eligible,
         removed: result.removed,
+        removed_identities: result.removed_identities,
+        reclaimed_bytes: result.reclaimed_bytes,
         snapshots: result.snapshots,
     })
 }
@@ -191,34 +195,8 @@ pub fn prune_pins(apply: bool) -> Result<ControllerRuntimePruneResult> {
 pub fn cleanup(options: ControllerRuntimeCleanupOptions) -> Result<ControllerRuntimePruneResult> {
     let root = runtime_root()?;
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
-    // A prior process may have stopped after the atomic rename. Tombstones are
-    // never runtime identities and can be completed safely under this lock.
-    for entry in fs::read_dir(&root).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("list interrupted controller runtime cleanup".to_string()),
-        )
-    })? {
-        let path = entry
-            .map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("read interrupted controller runtime cleanup".to_string()),
-                )
-            })?
-            .path();
-        if path.is_dir()
-            && path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(".cleanup-"))
-        {
-            fs::remove_dir_all(path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("complete interrupted controller runtime cleanup".to_string()),
-                )
-            })?;
-        }
+    if options.apply {
+        recover_cleanup_tombstones(&root)?;
     }
     let mut report = retention_report()?;
     let mut total = report
@@ -238,6 +216,8 @@ pub fn cleanup(options: ControllerRuntimeCleanupOptions) -> Result<ControllerRun
             .then_with(|| right.size_bytes.cmp(&left.size_bytes))
     });
     let mut removed = Vec::new();
+    let mut removed_identities = Vec::new();
+    let mut reclaimed_bytes: u64 = 0;
     for snapshot in candidates {
         let expired = snapshot.age_seconds >= options.min_age.as_secs();
         let pressured = total > options.max_total_bytes;
@@ -270,6 +250,8 @@ pub fn cleanup(options: ControllerRuntimeCleanupOptions) -> Result<ControllerRun
                 )
             })?;
             removed.extend(snapshot.pins.clone());
+            removed_identities.push(snapshot.path.clone());
+            reclaimed_bytes = reclaimed_bytes.saturating_add(snapshot.size_bytes);
             total = total.saturating_sub(snapshot.size_bytes);
         }
     }
@@ -279,8 +261,41 @@ pub fn cleanup(options: ControllerRuntimeCleanupOptions) -> Result<ControllerRun
         retained: report.retained,
         eligible: report.eligible,
         removed,
+        removed_identities,
+        reclaimed_bytes,
         snapshots: report.snapshots,
     })
+}
+
+fn recover_cleanup_tombstones(root: &Path) -> Result<()> {
+    for entry in fs::read_dir(root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("list interrupted controller runtime cleanup".to_string()),
+        )
+    })? {
+        let path = entry
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("read interrupted controller runtime cleanup".to_string()),
+                )
+            })?
+            .path();
+        if path.is_dir()
+            && path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".cleanup-"))
+        {
+            fs::remove_dir_all(path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("complete interrupted controller runtime cleanup".to_string()),
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn path_size(path: &Path) -> u64 {
@@ -334,6 +349,12 @@ fn discover_pin_paths(root: &Path) -> Result<BTreeSet<PathBuf>> {
             )
         })?;
         let path = entry.path();
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".cleanup-"))
+        {
+            continue;
+        }
         let direct_pin = path.join("homeboy");
         if content_addressed_pin_path(root, &direct_pin) && direct_pin.is_file() {
             pins.insert(direct_pin);
@@ -391,6 +412,12 @@ impl Drop for AdmissionLock {
 }
 
 pub fn pin_current() -> Result<Value> {
+    let root = runtime_root()?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    pin_current_unlocked()
+}
+
+fn pin_current_unlocked() -> Result<Value> {
     let identity = build_identity::current();
     let executable = std::env::current_exe().map_err(|error| {
         Error::internal_io(
@@ -435,7 +462,7 @@ pub fn admit_current() -> Result<RuntimeAdmission> {
     let root = runtime_root()?;
     let lock_path = root.join(ADMISSION_LOCK_DIR);
     let lock = acquire_admission_lock(&lock_path)?;
-    let runtime = pin_current()?;
+    let runtime = pin_current_unlocked()?;
     write_active_generation(&root.join(ACTIVE_GENERATION_FILE), &runtime)?;
     validate_pin(&runtime)?;
     Ok(RuntimeAdmission {
@@ -516,6 +543,12 @@ pub fn validate_for_mutation(metadata: &Value, current_identity: &str) -> Result
 /// Upgrade a legacy pin into the immutable content-addressed v2 format.
 /// The caller persists the returned metadata only after this has completed.
 pub fn migrate_legacy_pin(runtime: &Value) -> Result<Value> {
+    let root = runtime_root()?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    migrate_legacy_pin_unlocked(runtime)
+}
+
+fn migrate_legacy_pin_unlocked(runtime: &Value) -> Result<Value> {
     let identity =
         required_runtime_string(runtime, "/originating/build_identity", "build identity")?;
     let current = required_runtime_string(
@@ -572,6 +605,16 @@ pub fn validate(runtime: &Value) -> Result<()> {
 /// artifact or source checkout without changing the durable identity or digest
 /// contract.
 pub fn recover_pin(
+    runtime: &Value,
+    artifact: Option<&Path>,
+    source: Option<&Path>,
+) -> Result<Value> {
+    let root = runtime_root()?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    recover_pin_unlocked(runtime, artifact, source)
+}
+
+fn recover_pin_unlocked(
     runtime: &Value,
     artifact: Option<&Path>,
     source: Option<&Path>,
@@ -1913,6 +1956,33 @@ mod tests {
             assert!(applied.removed.contains(&stale_pin));
             assert!(current_pin.exists());
             assert!(!stale_pin.exists());
+        });
+    }
+
+    #[test]
+    fn cleanup_dry_run_preserves_tombstones_and_apply_recovers_them() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = runtime_root().expect("runtime root");
+            let tombstone = root.join(".cleanup-interrupted");
+            fs::create_dir_all(&tombstone).expect("create tombstone");
+            fs::write(tombstone.join("homeboy"), b"interrupted").expect("write tombstone");
+
+            cleanup(ControllerRuntimeCleanupOptions {
+                apply: false,
+                min_age: Duration::ZERO,
+                max_total_bytes: 0,
+                limit: 1,
+            })
+            .expect("dry run");
+            assert!(tombstone.exists());
+            cleanup(ControllerRuntimeCleanupOptions {
+                apply: true,
+                min_age: Duration::ZERO,
+                max_total_bytes: 0,
+                limit: 1,
+            })
+            .expect("apply");
+            assert!(!tombstone.exists());
         });
     }
 }
