@@ -84,10 +84,10 @@ use super::super::lab_env::{
 };
 use super::super::lab_plan::{base_lab_plan, disabled_select_runner_plan, with_step};
 use super::super::lab_selection::{
-    fail_if_no_default_runner_accepts_jobs, preflight_lab_runner_availability,
-    prepare_lab_runner_for_offload, release_gate_local_hot_denied_error,
-    resolve_lab_runner_selection, status_tunnel_mode, LabRunnerPreparation, LabRunnerSelection,
-    LabRunnerSelectionSource,
+    fail_if_no_default_runner_accepts_jobs, lab_runner_availability_error,
+    preflight_lab_runner_availability, prepare_lab_runner_for_offload,
+    release_gate_local_hot_denied_error, resolve_lab_runner_selection, status_tunnel_mode,
+    LabRunnerPreparation, LabRunnerSelection, LabRunnerSelectionSource,
 };
 use super::super::lab_workspaces::{
     agent_task_fanout_extra_workspaces, agent_task_plan_extra_workspaces,
@@ -110,10 +110,11 @@ use super::super::{
     preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
     prepare_lab_runner_capability, remote_runner_homeboy_path, reuse_compatible_snapshot_workspace,
     rig_materialization, status, status_for_admission, sync_workspace, LabRunnerGateDecision,
-    MaterializedWorkspace, Runner, RunnerCapabilityPreflight, RunnerDependencyCacheSaveOutput,
-    RunnerDependencyCacheSaveRequest, RunnerExecOptions, RunnerFileTransfer, RunnerStatusReport,
-    RunnerWorkspaceApplyOutput, RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy,
+    MaterializedWorkspace, Runner, RunnerAvailability, RunnerCapabilityPreflight,
+    RunnerDependencyCacheSaveOutput, RunnerDependencyCacheSaveRequest, RunnerExecOptions,
+    RunnerFileTransfer, RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceOutputPaths,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    WorkspaceCleanupPolicy,
 };
 
 #[cfg(test)]
