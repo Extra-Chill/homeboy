@@ -14,63 +14,13 @@ use crate::extension::{
     PhaseFailureCategory, PhaseReport, PhaseStatus, VerificationPhase,
 };
 use crate::finding::HomeboyFinding;
+pub use homeboy_extension_contract::test_results::TestCommandOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use serde::Serialize;
 use serde_json::Value;
 
 use super::run::{RawTestOutput, TestRunWorkflowResult};
 use super::workflow::{AutoFixDriftOutput, AutoFixDriftWorkflowResult, DriftWorkflowResult};
-
-/// Unified output envelope for all test command modes.
-///
-/// This is the single serialization target for the test command. Each sub-workflow
-/// populates its relevant fields; unused fields are `None` and skipped in serialization.
-#[derive(Serialize)]
-pub struct TestCommandOutput {
-    pub passed: bool,
-    pub status: String,
-    pub component: String,
-    pub exit_code: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase: Option<PhaseReport>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure: Option<PhaseFailure>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub test_counts: Option<TestCounts>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub findings: Option<Vec<HomeboyFinding>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub coverage: Option<CoverageOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baseline_comparison: Option<TestBaselineComparison>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub analysis: Option<TestAnalysis>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub autofix: Option<AppliedRefactor>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hints: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub drift: Option<DriftReport>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auto_fix_drift: Option<AutoFixDriftOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub test_scope: Option<TestScopeOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<TestSummaryOutput>,
-    /// Tail of runner stdout/stderr when tests fail — lets CI wrappers and
-    /// users see the actual PHPUnit/cargo output. (#1143)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_output: Option<RawTestOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ci_context: Option<CiContext>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extension_phase_timings: Vec<crate::extension::ExtensionPhaseTiming>,
-    #[serde(
-        rename = "_homeboy_actionable",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub actionable: Option<Value>,
-}
 
 /// Build output from a main test workflow result.
 pub fn from_main_workflow(result: TestRunWorkflowResult) -> (TestCommandOutput, i32) {

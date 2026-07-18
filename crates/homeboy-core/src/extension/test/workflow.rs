@@ -4,39 +4,12 @@ use crate::extension::test::resolve_drift_options;
 use crate::extension::test::TestScopeOutput;
 use crate::extension::test::{ChangeType, TestAnalysis};
 use crate::extension::test::{TestBaselineComparison, TestCounts};
+pub use homeboy_extension_contract::test_results::{
+    AutoFixDriftWorkflowResult, DriftWorkflowResult, MainTestWorkflowResult,
+};
 pub use homeboy_extension_contract::test_workflow::AutoFixDriftOutput;
 use homeboy_refactor_contract::{AppliedRefactor, TransformSet};
 use serde::Serialize;
-
-#[derive(Debug, Clone, Serialize)]
-pub struct DriftWorkflowResult {
-    pub component: String,
-    pub report: DriftReport,
-    pub exit_code: i32,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AutoFixDriftWorkflowResult {
-    pub component: String,
-    pub output: AutoFixDriftOutput,
-    pub hints: Vec<String>,
-    pub report: Option<DriftReport>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct MainTestWorkflowResult {
-    pub status: String,
-    pub component: String,
-    pub exit_code: i32,
-    pub test_counts: Option<TestCounts>,
-    pub coverage: Option<serde_json::Value>,
-    pub baseline_comparison: Option<TestBaselineComparison>,
-    pub analysis: Option<TestAnalysis>,
-    pub autofix: Option<AppliedRefactor>,
-    pub hints: Option<Vec<String>>,
-    pub test_scope: Option<TestScopeOutput>,
-    pub summary: Option<serde_json::Value>,
-}
 
 pub fn detect_test_drift(
     component_id: &str,
