@@ -5,10 +5,11 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use crate::workspace::snapshot::{
-    copy_snapshot_to_directory, snapshot_archive_command, snapshot_install_command,
-    synthetic_checkout_value, workspace_content_hash, workspace_content_hash_algorithm,
-    workspace_content_hash_for_policy, workspace_content_manifest_for_policy,
-    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    copy_snapshot_to_directory, ensure_no_runner_workspace_metadata_collision,
+    snapshot_archive_command, snapshot_install_command, synthetic_checkout_value,
+    workspace_content_hash, workspace_content_hash_algorithm, workspace_content_hash_for_policy,
+    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
@@ -364,7 +365,7 @@ fn runner_snapshot_rejects_source_runner_workspace_metadata_collision() {
         )
         .expect_err("reserved runner metadata must reject staging");
 
-        assert!(error.message.contains("reserved runner metadata path"));
+        assert!(error.message.contains("reserved runner path"));
         assert!(error.message.contains("remove or rename"));
         assert_eq!(
             fs::read_dir(runner_root.path())
@@ -374,6 +375,19 @@ fn runner_snapshot_rejects_source_runner_workspace_metadata_collision() {
             "collision must fail before creating a materialized workspace"
         );
     });
+}
+
+#[test]
+fn runner_snapshot_rejects_source_lab_at_file_collision() {
+    let source = tempfile::tempdir().expect("source tempdir");
+    fs::create_dir_all(source.path().join(".homeboy/lab-at-files")).expect("Lab input collision");
+
+    let error = ensure_no_runner_workspace_metadata_collision(source.path())
+        .expect_err("reserved Lab input path must reject staging");
+
+    assert!(error.message.contains("reserved runner path"));
+    assert!(error.message.contains(".homeboy/lab-at-files"));
+    assert!(error.message.contains("remove or rename"));
 }
 
 #[test]
@@ -1417,7 +1431,7 @@ fn workspace_content_hash_non_unix_rejects_unix_executable_policy() {
 }
 
 #[test]
-fn snapshot_content_hash_binds_user_owned_homeboy_files_but_ignores_runner_metadata() {
+fn snapshot_content_hash_binds_user_owned_homeboy_files_but_ignores_runner_state() {
     let controller = tempfile::tempdir().expect("controller");
     let source = controller.path().join("homeboy-extensions@fixture");
     let destination = controller.path().join("materialized");
@@ -1443,6 +1457,31 @@ fn snapshot_content_hash_binds_user_owned_homeboy_files_but_ignores_runner_metad
         workspace_content_hash(&destination, &excludes).expect("materialized hash"),
         expected,
         "runner metadata must not change the controller identity"
+    );
+
+    fs::create_dir_all(destination.join(".homeboy/lab-at-files")).expect("Lab input directory");
+    fs::write(
+        destination.join(".homeboy/lab-at-files/plan.json"),
+        "{\"task\":\"fixture\"}\n",
+    )
+    .expect("materialized Lab input");
+    assert_eq!(
+        workspace_content_hash(&destination, &excludes).expect("Lab input-insensitive hash"),
+        expected,
+        "broker-owned Lab @files must not change the controller identity"
+    );
+    let manifest = workspace_content_manifest_for_policy(
+        &destination,
+        &excludes,
+        crate::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+    )
+    .expect("materialized manifest");
+    assert!(
+        manifest
+            .entries
+            .iter()
+            .all(|entry| !entry.path.starts_with(".homeboy/lab-at-files")),
+        "broker-owned Lab @files must not enter the source manifest"
     );
 
     fs::write(
