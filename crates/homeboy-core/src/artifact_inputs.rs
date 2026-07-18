@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use zip::write::FileOptions;
 
 use crate::artifact_metadata::sha256_file;
+use crate::build_artifact_path::resolve_artifact_path_from_root;
 use crate::component::{self, ArtifactInput, Component};
 use crate::error::{Error, Result};
-use crate::extension::build::resolve_artifact_path_from_root;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResolvedArtifactInput {

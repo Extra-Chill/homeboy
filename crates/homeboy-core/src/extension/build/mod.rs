@@ -20,9 +20,9 @@ use homeboy_engine_primitives::shell;
 const DEFAULT_BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const BUILD_TIMEOUT_ENV: &str = "HOMEBOY_BUILD_TIMEOUT_SECS";
 
-mod artifact;
+// artifact-path resolution relocated to crate::build_artifact_path (pure core glue)
 
-pub use artifact::{resolve_artifact_path, resolve_artifact_path_from_root};
+pub use crate::build_artifact_path::{resolve_artifact_path, resolve_artifact_path_from_root};
 
 // === Build Command Resolution ===
 
