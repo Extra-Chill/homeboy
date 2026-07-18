@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.26.6] - 2026-07-18
+
+### Changed
+- canonicalize codebox plugin inputs
+- remove codebox compatibility discovery
+- delegate wordpress runners to codebox cli
+- canonicalize wordpress codebox contracts
+
 ## [3.26.5] - 2026-07-18
 
 ### Fixed
