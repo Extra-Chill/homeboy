@@ -857,7 +857,12 @@ pub(crate) fn run_lab_offload_inner(
         ));
     }
 
-    require_connected_lab_runner(runner_id, &runner_status)?;
+    require_available_lab_runner(
+        runner_id,
+        &runner_status,
+        runner.settings.concurrency_limit,
+        contract.hot_label,
+    )?;
 
     let runner_workspace_root = request
         .job_overrides
@@ -1509,21 +1514,46 @@ pub(crate) fn run_lab_offload_inner(
     })
 }
 
-fn require_connected_lab_runner(runner_id: &str, runner_status: &RunnerStatusReport) -> Result<()> {
-    if runner_status.connected {
+/// Gate Lab dispatch on the same authoritative availability verdict the
+/// selection preflight uses, rather than a bare `connected` boolean.
+///
+/// A raw `connected` check is lossy in two directions and was the shared root
+/// cause of several Lab reliability reports:
+///
+/// - A runner can be `connected: true` while `accepts_jobs: false` because its
+///   daemon is version-stale (`stale_daemon`). The old boolean gate *passed*
+///   such a runner, so dispatch proceeded and then failed opaquely downstream
+///   (#8811), while the exact `runner refresh-homeboy ... --reconnect` recovery
+///   command that status already computed was discarded.
+/// - A disconnected runner was rejected with a generic "requires a connected
+///   daemon" message that omitted the structured reason and recovery evidence.
+///
+/// Routing through `RunnerAvailability` + `lab_runner_availability_error` keeps
+/// this deeper gate consistent with the preflight gate and preserves the
+/// stale-daemon reason and its exact recovery command in the returned error.
+fn require_available_lab_runner(
+    runner_id: &str,
+    runner_status: &RunnerStatusReport,
+    concurrency_limit: Option<usize>,
+    command_label: &str,
+) -> Result<()> {
+    let availability = RunnerAvailability::from_status_parts(
+        runner_id.to_string(),
+        runner_status.connected,
+        runner_status.stale_daemon.is_some(),
+        runner_status.active_jobs.len(),
+        &runner_status.active_job_state,
+        concurrency_limit,
+    );
+    if availability.accepts_jobs {
         return Ok(());
     }
 
-    Err(Error::validation_invalid_argument(
-        "runner",
-        format!(
-            "Lab offload requires a connected {} runner daemon",
-            status_tunnel_mode(runner_status).label()
-        ),
-        Some(runner_id.to_string()),
-        Some(vec![format!(
-            "Connect runner `{runner_id}` before using --runner."
-        )]),
+    Err(lab_runner_availability_error(
+        command_label,
+        Some(&availability),
+        Some(runner_status),
+        vec![availability.clone()],
     ))
 }
 
@@ -1707,16 +1737,70 @@ fn artifact_name_or_kind_is_fuzz_result(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RunnerActiveJobState, RunnerSessionState};
+    use crate::{RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning};
 
     #[test]
     fn inner_uses_authoritative_preflight_status_not_conflicting_cwd_projection() {
         let preflight_status = runner_status(true);
         let conflicting_cwd_projection = runner_status(false);
 
-        require_connected_lab_runner("homeboy-lab", &preflight_status)
+        require_available_lab_runner("homeboy-lab", &preflight_status, None, "cook")
             .expect("inner accepts the connected status selected during preflight");
-        assert!(require_connected_lab_runner("homeboy-lab", &conflicting_cwd_projection).is_err());
+        assert!(require_available_lab_runner(
+            "homeboy-lab",
+            &conflicting_cwd_projection,
+            None,
+            "cook"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn inner_rejects_connected_but_stale_daemon_with_recovery_command() {
+        // #8811: a runner can be `connected: true` while its daemon is
+        // version-stale. The old bare-boolean gate passed such a runner and
+        // dispatch then failed opaquely downstream. The unified availability
+        // gate must reject it up front with the structured `stale_daemon`
+        // reason and the exact `refresh-homeboy` recovery command that status
+        // already computed, instead of the generic "not connected" message.
+        let mut status = runner_status(true);
+        status.stale_daemon = Some(RunnerStaleDaemonWarning {
+            severity: "warning",
+            session_homeboy_version: "0.289.1".to_string(),
+            current_homeboy_version: "0.289.3".to_string(),
+            session_homeboy_build_identity: None,
+            current_homeboy_build_identity: None,
+            active_daemon_control_plane_version: "0.289.1".to_string(),
+            job_command_binary_version: "0.289.3".to_string(),
+            active_daemon_control_plane_build_identity: None,
+            job_command_binary_build_identity: None,
+            refresh_command:
+                "homeboy runner refresh-homeboy homeboy-lab --ref v0.289.3 --reconnect".to_string(),
+            stale_runtime_paths: Vec::new(),
+            changed_runtime_paths: Vec::new(),
+            message: "daemon is stale".to_string(),
+            recovery_commands: Vec::new(),
+        });
+
+        let error = require_available_lab_runner("homeboy-lab", &status, None, "cook")
+            .expect_err("connected-but-stale runner must not pass the Lab dispatch gate");
+
+        // The rejection is the structured availability diagnosis, not the
+        // generic "requires a connected daemon" boolean error.
+        assert!(
+            !error.message.contains("requires a connected"),
+            "stale-daemon rejection must not use the generic connectivity message: {}",
+            error.message
+        );
+        let details = serde_json::to_string(&error.details).expect("serialize error details");
+        assert!(
+            details.contains("stale_daemon"),
+            "error must preserve the stale_daemon reason: {details}"
+        );
+        assert!(
+            details.contains("refresh-homeboy"),
+            "error must surface the exact refresh-homeboy recovery command: {details}"
+        );
     }
 
     #[test]
