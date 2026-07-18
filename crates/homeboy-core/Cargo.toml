@@ -22,6 +22,7 @@ slow-tests = []
 [dependencies]
 homeboy-artifact-ref-contract = { version = "0.1.0", path = "../contracts/homeboy-artifact-ref-contract" }
 homeboy-cli-contract = { version = "0.1.0", path = "../contracts/homeboy-cli-contract" }
+homeboy-execution-contract = { version = "0.1.0", path = "../contracts/homeboy-execution-contract" }
 homeboy-run-lifecycle-contract = { version = "0.1.0", path = "../contracts/homeboy-run-lifecycle-contract" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 homeboy-finding = { version = "0.1.0", path = "../homeboy-finding" }
