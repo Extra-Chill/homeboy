@@ -373,18 +373,19 @@ pub mod secrets {
 /// High-level service entry points combining lifecycle and scheduling.
 pub mod service {
     pub use super::super::agent_task_service::{
-        adopt_cook_candidate, adopt_cook_candidate_with_dispatcher, aggregate_exit_code,
-        ai_model_from_tool, artifacts, cancel, compile_cook_attempt, discover_runs,
-        evidence_ref_task_id, hydrate_evidence_ref, hydrate_evidence_summary, logs,
-        normalize_plan_workspaces, offloaded_status_remediation,
-        persist_provider_boundary_replay_evidence, promotion_source, read_plan,
-        reconcile_terminal_artifact_projection, resume, retry, run_cook, run_cook_batch,
+        adopt_cook_candidate, adopt_cook_candidate_with_dispatcher,
+        adopt_cook_candidate_with_options_and_dispatcher, aggregate_exit_code, ai_model_from_tool,
+        artifacts, cancel, compile_cook_attempt, discover_runs, evidence_ref_task_id,
+        hydrate_evidence_ref, hydrate_evidence_summary, logs, normalize_plan_workspaces,
+        offloaded_status_remediation, persist_provider_boundary_replay_evidence, promotion_source,
+        read_plan, reconcile_terminal_artifact_projection, resume, retry, run_cook, run_cook_batch,
         run_loaded_plan, run_next, run_next_with_cook_dispatcher, run_status, run_submitted,
         run_submitted_with_timeout, source_worktree_path, status, submit_plan_spec,
-        AgentTaskCookAttemptReport, AgentTaskCookBatchCellReport, AgentTaskCookBatchOptions,
-        AgentTaskCookBatchReport, AgentTaskCookReport, AgentTaskCookServiceOptions,
-        AgentTaskDiscoveryCommands, AgentTaskDiscoveryCounts, AgentTaskDiscoveryFilter,
-        AgentTaskDiscoveryReport, AgentTaskDiscoveryRun, AgentTaskHydratedEvidence,
-        AgentTaskRetryServiceResult, AgentTaskRunResult,
+        AgentTaskCandidateAdoptionOptions, AgentTaskCookAttemptReport,
+        AgentTaskCookBatchCellReport, AgentTaskCookBatchOptions, AgentTaskCookBatchReport,
+        AgentTaskCookReport, AgentTaskCookServiceOptions, AgentTaskDiscoveryCommands,
+        AgentTaskDiscoveryCounts, AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport,
+        AgentTaskDiscoveryRun, AgentTaskHydratedEvidence, AgentTaskRetryServiceResult,
+        AgentTaskRunResult,
     };
 }

@@ -529,12 +529,14 @@ fn validate_durable_publication_eligibility(
         .provenance
         .pointer("/candidate/fingerprint/head")
         .and_then(serde_json::Value::as_str);
+    let adoption_model = promotion.provenance["adoption"]["ai_model"].as_str();
     let authenticated_adoption = lifecycle.execution.state == RunExecutionState::Cancelled
         && lifecycle.provider_runtime.is_empty()
         && promotion.provenance["adoption"]["source_run_id"]
             == promotion.source.run_id.clone().unwrap_or_default()
         && candidate_ref.is_some_and(is_git_commit_identity)
         && candidate_ref == candidate_head
+        && adoption_model.is_some_and(is_concrete_model)
         && recovery.is_some_and(|recovery| {
             recovery["schema"] == "homeboy/agent-task-candidate-adoption-recovery/v1"
                 && recovery["reason"] == "pre_provider_transport_failure"
@@ -550,6 +552,20 @@ fn validate_durable_publication_eligibility(
     }
 
     Err(Error::validation_invalid_argument("run_id", "durable run must have succeeded execution and succeeded provider runtime before publication; the only exception is an applied, green, fingerprinted candidate-adoption recovery with durable zero-execution pre-provider transport provenance", None, None))
+}
+
+fn is_concrete_model(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value == value.trim()
+        && !value.chars().any(char::is_control)
+        && !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "not recorded"
+                | "unknown"
+                | "ai-assisted"
+                | "ai assisted"
+                | "legacy caller did not record a model"
+        )
 }
 
 fn is_git_commit_identity(value: &str) -> bool {
