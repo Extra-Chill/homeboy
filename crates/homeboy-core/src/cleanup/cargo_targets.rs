@@ -216,6 +216,20 @@ pub fn cleanup_shared_cargo_targets(
     })
 }
 
+/// Read the complete shared-store lifecycle inventory for a bounded reporting
+/// projection. This never acquires a deletion lock or mutates a store.
+pub fn shared_cargo_target_inventory(
+    root: Option<PathBuf>,
+    now: SystemTime,
+    older_than: Duration,
+    lease_ttl: Duration,
+) -> Result<Vec<CargoTargetStore>> {
+    let root = root.unwrap_or(homeboy_paths::homeboy_data()?.join(STORE_ROOT));
+    let mut stores = inventory(&root, now, older_than, lease_ttl)?;
+    stores.sort_by(order_stores);
+    Ok(stores)
+}
+
 #[derive(PartialEq, Eq)]
 enum RemoveOutcome {
     Removed,
