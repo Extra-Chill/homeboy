@@ -14,6 +14,7 @@ pub fn record_pre_execution_failure(
     let failed = task_count;
     let retryable = error.retryable == Some(true);
     let failure_classification = pre_execution_failure_classification(error);
+    let candidate_adoption_recovery = candidate_adoption_recovery(phase);
     let outcomes = plan
         .tasks
         .iter()
@@ -68,6 +69,7 @@ pub fn record_pre_execution_failure(
             "details": error.details.clone(),
             "hints": error.hints.iter().map(|hint| hint.message.as_str()).collect::<Vec<_>>(),
             "provider_executions_consumed": 0,
+            "candidate_adoption_recovery": candidate_adoption_recovery,
             "controller_identity": homeboy_core::build_identity::current().display,
             "runner_id": runner_id,
             "task_linkage": plan.tasks.iter().map(|task| json!({
@@ -89,6 +91,7 @@ pub(crate) fn build_pre_execution_failure_outcome(
 ) -> AgentTaskOutcome {
     let retryable = error.retryable == Some(true);
     let failure_classification = pre_execution_failure_classification(error);
+    let candidate_adoption_recovery = candidate_adoption_recovery(phase);
     let diagnostic = AgentTaskDiagnostic {
         class: "pre_execution_failure".to_string(),
         message: error.message.clone(),
@@ -134,8 +137,23 @@ pub(crate) fn build_pre_execution_failure_outcome(
             "error_code": error.code.as_str(),
             "retryable": retryable,
             "provider_executions_consumed": 0,
+            "candidate_adoption_recovery": candidate_adoption_recovery,
         }),
     }
+}
+
+fn candidate_adoption_recovery(phase: &str) -> Option<serde_json::Value> {
+    matches!(
+        phase,
+        "lab_handoff_preacceptance" | "transport_dispatcher_prepare"
+    )
+    .then(|| {
+        json!({
+            "schema": "homeboy/agent-task-candidate-adoption-recovery/v1",
+            "reason": "pre_provider_transport_failure",
+            "provider_executions_consumed": 0,
+        })
+    })
 }
 
 fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassification {

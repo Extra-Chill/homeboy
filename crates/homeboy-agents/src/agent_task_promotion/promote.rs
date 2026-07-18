@@ -269,20 +269,29 @@ pub(super) fn promote_with_provider_and_checkpoint(
     let source_for_provenance = source_value.clone();
     let (source_kind, outcome) = select_outcome(source_value, options.task_id.as_deref())?;
 
+    let failed_candidate_adoption = options.candidate_ref.is_some()
+        && outcome.status == AgentTaskOutcomeStatus::Failed
+        && has_pre_provider_transport_recovery_eligibility(&outcome);
     if !matches!(
         outcome.status,
         AgentTaskOutcomeStatus::Succeeded
             | AgentTaskOutcomeStatus::CandidateRecoverable
             | AgentTaskOutcomeStatus::NoOp
-    ) {
-        return Err(Error::validation_invalid_argument(
-            "source",
+    ) && !failed_candidate_adoption
+    {
+        let problem = if options.candidate_ref.is_some()
+            && outcome.status == AgentTaskOutcomeStatus::Failed
+        {
+            "immutable candidate adoption requires explicit durable pre-provider transport recovery eligibility; legacy or provider/test failures remain ineligible. Retry the cook or record a new transport failure through Homeboy."
+                .to_string()
+        } else {
             format!(
                 "promotion requires a succeeded, recoverable-candidate, or no-op outcome; task {} has status {:?}",
                 outcome.task_id, outcome.status
-            ),
-            None,
-            None,
+            )
+        };
+        return Err(Error::validation_invalid_argument(
+            "source", problem, None, None,
         ));
     }
 
@@ -548,6 +557,20 @@ pub(super) fn promote_with_provider_and_checkpoint(
         }),
         operator_notification,
     })
+}
+
+fn has_pre_provider_transport_recovery_eligibility(outcome: &AgentTaskOutcome) -> bool {
+    let eligibility = outcome
+        .metadata
+        .get("candidate_adoption_recovery")
+        .or_else(|| outcome.outputs.get("candidate_adoption_recovery"));
+    eligibility
+        .filter(|value| {
+            value["schema"] == "homeboy/agent-task-candidate-adoption-recovery/v1"
+                && value["reason"] == "pre_provider_transport_failure"
+                && value["provider_executions_consumed"] == 0
+        })
+        .is_some()
 }
 
 fn gate_feedback_baseline_for_artifact(

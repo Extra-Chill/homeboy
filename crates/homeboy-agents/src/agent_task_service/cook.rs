@@ -52,6 +52,12 @@ pub trait AgentTaskCookAttemptDispatcher: Send + Sync + std::fmt::Debug {
         Ok(())
     }
 
+    /// External transports identify dispatch failures before a provider can
+    /// execute so candidate recovery remains distinct from provider failures.
+    fn pre_execution_failure_phase(&self) -> &'static str {
+        "cook_pre_execution"
+    }
+
     /// `derived_cook_baseline` is process-local authority for a gate-fix retry.
     /// Implementations must not serialize it into the provider request.
     fn dispatch_attempt(
@@ -116,6 +122,19 @@ pub fn adopt_cook_candidate(
     cook_or_run_id: &str,
     candidate_ref: &str,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    adopt_cook_candidate_with_dispatcher(cook_or_run_id, candidate_ref, |_| Ok(None))
+}
+
+/// Adopt an immutable candidate using the caller's durable transport
+/// reconstruction boundary. This keeps a persisted cook's placement policy in
+/// force even when its original provider attempt failed before transport setup.
+pub fn adopt_cook_candidate_with_dispatcher(
+    cook_or_run_id: &str,
+    candidate_ref: &str,
+    reconstruct_dispatcher: impl FnOnce(
+        &Value,
+    ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let record = agent_task_lifecycle::status(cook_or_run_id)?;
     let cook_id = record
         .metadata
@@ -123,7 +142,12 @@ pub fn adopt_cook_candidate(
         .and_then(Value::as_str)
         .unwrap_or(cook_or_run_id);
     let recipe = super::load_recipe(cook_id)?;
-    let options = super::reconstruct_options(&recipe)?;
+    let attempt_dispatcher =
+        reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
+    let options = super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)?;
+    if let Some(dispatcher) = &options.attempt_dispatcher {
+        dispatcher.prepare_for_cook()?;
+    }
     let run_id = record.run_id.clone();
     let plan = agent_task_lifecycle::load_plan(&run_id)?;
     let source_request = plan.tasks.first().cloned().ok_or_else(|| {
@@ -465,7 +489,12 @@ where
                 let record = match agent_task_lifecycle::status(&run_id) {
                     Ok(record) => Some(record),
                     Err(_) => {
-                        record_pre_execution_failure(&plan, &run_id, &error)?;
+                        let phase = options
+                            .attempt_dispatcher
+                            .as_ref()
+                            .map(|dispatcher| dispatcher.pre_execution_failure_phase())
+                            .unwrap_or("cook_pre_execution");
+                        record_pre_execution_failure(&plan, &run_id, &error, phase)?;
                         agent_task_lifecycle::status(&run_id).ok()
                     }
                 };
@@ -826,14 +855,14 @@ where
 
 /// Pre-execution failures happen before a provider can receive work. Persist a
 /// normal terminal run so the Cook alias can expose its complete retry history.
-fn record_pre_execution_failure(plan: &AgentTaskPlan, run_id: &str, error: &Error) -> Result<()> {
+fn record_pre_execution_failure(
+    plan: &AgentTaskPlan,
+    run_id: &str,
+    error: &Error,
+    phase: &str,
+) -> Result<()> {
     if agent_task_lifecycle::submit_plan(plan, Some(run_id)).is_ok() {
-        agent_task_lifecycle::record_pre_execution_failure(
-            run_id,
-            plan,
-            "cook_pre_execution",
-            error,
-        )?;
+        agent_task_lifecycle::record_pre_execution_failure(run_id, plan, phase, error)?;
     }
     Ok(())
 }
