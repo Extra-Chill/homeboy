@@ -327,10 +327,12 @@ pub(super) enum RemoteDaemonConnectAction {
 pub(super) fn ensure_remote_daemon(
     client: &SshClient,
     homeboy: &str,
+    runner_id: &str,
     previous_session: Option<&RunnerSession>,
     configured_identity: &str,
     orphan_lease_id: Option<&str>,
     confirmed_no_pid_job_ids: &[uuid::Uuid],
+    live_lease_expectation: Option<(&str, u32)>,
 ) -> std::result::Result<RemoteDaemon, String> {
     let mut status = remote_daemon_status(client, homeboy)?;
     probe_remote_daemon_endpoint(client, &mut status);
@@ -352,10 +354,12 @@ pub(super) fn ensure_remote_daemon(
         );
     }
     let inspected_freshness = remote_daemon_recovery_freshness_from_status("<runner-id>", &status);
-    match remote_daemon_connect_action_with_controller_identity(
+    match remote_daemon_connect_action_for_runner(
         previous_session,
         &status,
         configured_identity,
+        runner_id,
+        live_lease_expectation,
     )? {
         RemoteDaemonConnectAction::Reattach => {
             let mut daemon = status.daemon.ok_or_else(|| {
@@ -400,6 +404,22 @@ pub(super) fn remote_daemon_connect_action_with_controller_identity(
     status: &RemoteDaemonStatus,
     expected_identity: &str,
 ) -> std::result::Result<RemoteDaemonConnectAction, String> {
+    remote_daemon_connect_action_for_runner(
+        previous_session,
+        status,
+        expected_identity,
+        "<runner-id>",
+        None,
+    )
+}
+
+pub(super) fn remote_daemon_connect_action_for_runner(
+    previous_session: Option<&RunnerSession>,
+    status: &RemoteDaemonStatus,
+    expected_identity: &str,
+    runner_id: &str,
+    live_lease_expectation: Option<(&str, u32)>,
+) -> std::result::Result<RemoteDaemonConnectAction, String> {
     let Some(daemon) = status.daemon.as_ref() else {
         if status.active_jobs > 0 {
             return Err(format!(
@@ -435,23 +455,6 @@ pub(super) fn remote_daemon_connect_action_with_controller_identity(
             active_job_recovery_guidance(status.active_jobs)
         ));
     }
-    if let Some(session) = previous_session.filter(|session| {
-        session.mode == RunnerTunnelMode::DirectSsh && session.role == RunnerSessionRole::Controller
-    }) {
-        if let Some(expected_lease) = session.remote_daemon_lease_id.as_deref() {
-            let actual_lease = daemon.lease_id.as_deref().expect("checked above");
-            if expected_lease != actual_lease {
-                return Err(format!(
-                    "live remote daemon lease `{actual_lease}` does not match persisted session lease `{expected_lease}`; refusing to replace the live daemon"
-                ));
-            }
-        } else if session.remote_daemon_pid != daemon.pid
-            || session.remote_daemon_address.as_deref() != Some(daemon.address.as_str())
-        {
-            return Err("persisted direct-SSH runner session has no daemon lease and does not match the live daemon PID/address; refusing replacement".to_string());
-        }
-    }
-
     // A lease-less freshness report ordinarily prevents replacement. The one
     // bounded exception is an idle daemon whose identity differs from the
     // configured executable and whose typed `/jobs` endpoint independently
@@ -468,7 +471,7 @@ pub(super) fn remote_daemon_connect_action_with_controller_identity(
         {
             return Ok(RemoteDaemonConnectAction::ReplaceIdleStale);
         }
-        return Ok(RemoteDaemonConnectAction::Reattach);
+        return reattach_only_if_same_lease(previous_session, daemon, runner_id, status);
     }
 
     let healthy = status.fresh && status.reachable;
@@ -510,15 +513,92 @@ pub(super) fn remote_daemon_connect_action_with_controller_identity(
                 "live remote daemon did not report a lease; refusing to replace it".to_string()
             })?;
             if expected_lease != actual_lease {
-                return Err(format!(
-                    "live remote daemon lease `{actual_lease}` does not match persisted session lease `{expected_lease}`; refusing to replace the live daemon"
+                if live_lease_expectation
+                    == Some((actual_lease, daemon.pid.expect("checked above")))
+                    && daemon.build_identity.as_deref().map(str::trim)
+                        == Some(expected_identity.trim())
+                    && status.endpoint_probe_error.is_none()
+                {
+                    return Ok(RemoteDaemonConnectAction::Reattach);
+                }
+                return Err(lease_reconciliation_failure(
+                    expected_lease,
+                    actual_lease,
+                    daemon,
+                    status,
+                    expected_identity,
+                    runner_id,
                 ));
             }
+        } else if live_lease_expectation
+            != Some((
+                daemon.lease_id.as_deref().expect("checked above"),
+                daemon.pid.expect("checked above"),
+            ))
+            || daemon.build_identity.as_deref().map(str::trim) != Some(expected_identity.trim())
+            || status.endpoint_probe_error.is_some()
+        {
+            return Err(lease_reconciliation_failure(
+                "none or corrupt",
+                daemon.lease_id.as_deref().expect("checked above"),
+                daemon,
+                status,
+                expected_identity,
+                runner_id,
+            ));
         }
         return Ok(RemoteDaemonConnectAction::Reattach);
     }
 
     Ok(RemoteDaemonConnectAction::Start)
+}
+
+fn reattach_only_if_same_lease(
+    previous_session: Option<&RunnerSession>,
+    daemon: &RemoteDaemon,
+    runner_id: &str,
+    status: &RemoteDaemonStatus,
+) -> std::result::Result<RemoteDaemonConnectAction, String> {
+    let persisted_lease = previous_session
+        .filter(|session| {
+            session.mode == RunnerTunnelMode::DirectSsh
+                && session.role == RunnerSessionRole::Controller
+        })
+        .and_then(|session| session.remote_daemon_lease_id.as_deref());
+    if persisted_lease == daemon.lease_id.as_deref() {
+        Ok(RemoteDaemonConnectAction::Reattach)
+    } else {
+        Err(lease_reconciliation_failure(
+            persisted_lease.unwrap_or("none or corrupt"),
+            daemon.lease_id.as_deref().unwrap_or("unavailable"),
+            daemon,
+            status,
+            "not evaluated for stale daemon",
+            runner_id,
+        ))
+    }
+}
+
+fn lease_reconciliation_failure(
+    expected_lease: &str,
+    actual_lease: &str,
+    daemon: &RemoteDaemon,
+    status: &RemoteDaemonStatus,
+    expected_identity: &str,
+    runner_id: &str,
+) -> String {
+    format!(
+        "live remote daemon lease `{actual_lease}` differs from persisted session lease `{expected_lease}`; refusing to adopt or replace it because runner ownership is not proven (fresh={}, reachable={}, live identity `{}`, configured identity `{}`, endpoint probe `{}`). No session state was changed. Run `homeboy runner connect {} --adopt-live-lease {} --expected-live-pid {}` to explicitly adopt this observed lease/PID/build after revalidation. This is operator-confirmed recovery within the trusted remote SSH UID boundary; it never stops or replaces a daemon, and later lease drift fails closed. Run `homeboy runner status {} --json` to inspect it.",
+        status.fresh,
+        status.reachable,
+        daemon.build_identity.as_deref().unwrap_or("unavailable"),
+        expected_identity,
+        status.endpoint_probe_error.as_deref().unwrap_or("verified"),
+        shell::quote_arg(runner_id),
+        shell::quote_arg(actual_lease),
+        daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable"),
+        shell::quote_arg(runner_id),
+    )
 }
 
 fn active_job_recovery_guidance(active_jobs: usize) -> String {

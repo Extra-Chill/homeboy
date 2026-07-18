@@ -101,6 +101,48 @@ pub fn connect_with_orphan_adoption(
     recorded_pid: Option<u32>,
     recorded_endpoint: Option<&str>,
 ) -> Result<(RunnerConnectReport, i32)> {
+    connect_with_orphan_adoption_and_live_lease(
+        runner_id,
+        orphan_lease_id,
+        confirmed_no_pid_job_ids,
+        reconcile_leaseless_orphans,
+        missing_lease_id,
+        recorded_pid,
+        recorded_endpoint,
+        None,
+    )
+}
+
+/// Explicitly adopt a currently healthy remote lease. The operator supplies
+/// both coordinates, which are rechecked after the tunnel health probe and
+/// immediately before atomic session persistence.
+pub fn connect_with_live_lease_adoption(
+    runner_id: &str,
+    lease_id: &str,
+    pid: u32,
+) -> Result<(RunnerConnectReport, i32)> {
+    connect_with_orphan_adoption_and_live_lease(
+        runner_id,
+        None,
+        &[],
+        false,
+        None,
+        None,
+        None,
+        Some((lease_id, pid)),
+    )
+}
+
+fn connect_with_orphan_adoption_and_live_lease(
+    runner_id: &str,
+    orphan_lease_id: Option<&str>,
+    confirmed_no_pid_job_ids: &[uuid::Uuid],
+    reconcile_leaseless_orphans: bool,
+    missing_lease_id: Option<&str>,
+    recorded_pid: Option<u32>,
+    recorded_endpoint: Option<&str>,
+    live_lease_expectation: Option<(&str, u32)>,
+) -> Result<(RunnerConnectReport, i32)> {
     // Reconnect replaces daemon runtime state. It shares the promotion lease
     // with binary selection so a second session cannot reconnect against a
     // different configured executable halfway through the transaction.
@@ -140,7 +182,13 @@ pub fn connect_with_orphan_adoption(
         ));
     };
     let version = identity.version.clone();
-    let previous_session = read_session_or_live_peer(runner_id)?;
+    // A malformed local record is not ownership evidence. It remains fail
+    // closed unless an operator supplies an exact live-lease expectation.
+    let previous_session = match read_session_or_live_peer(runner_id) {
+        Ok(session) => session,
+        Err(error) if error.code == homeboy_core::error::ErrorCode::ConfigInvalidJson => None,
+        Err(error) => return Err(error),
+    };
 
     let mut leaseless_recovery = None;
     let mut state_loss_recovery = None;
@@ -294,10 +342,12 @@ pub fn connect_with_orphan_adoption(
     let daemon = ensure_remote_daemon(
         &client,
         homeboy,
+        runner_id,
         previous_session.as_ref(),
         &identity.display,
         orphan_lease_id,
         confirmed_no_pid_job_ids,
+        live_lease_expectation,
     );
     let Ok(daemon) = daemon else {
         let (mut report, exit_code) = failed_connect_after_recovery(
@@ -336,6 +386,22 @@ pub fn connect_with_orphan_adoption(
     };
 
     let remote_daemon_lease_id = daemon.lease_id.clone();
+    if let Err(error) = verify_live_lease_adoption(
+        &client,
+        homeboy,
+        live_lease_expectation,
+        &daemon,
+        &identity.display,
+    ) {
+        return Ok(session_write_failure_report(
+            runner_id,
+            session_path,
+            error,
+            state_loss_recovery,
+            tunnel_pid,
+            session_store::terminate_pid,
+        ));
+    }
     let connection_warning = daemon
         .inspected_freshness
         .as_ref()
@@ -363,7 +429,12 @@ pub fn connect_with_orphan_adoption(
             .as_ref()
             .and_then(|e| serde_json::to_value(e).ok()),
     };
-    if let Err(error) = write_session(&session) {
+    // The tunnel health check above re-proved the exact remote lease and PID.
+    // Refuse a runtime generation change before atomically publishing it.
+    if let Err(error) = promotion_lease
+        .assert_generation()
+        .and_then(|_| write_session(&session))
+    {
         return Ok(session_write_failure_report(
             runner_id,
             session_path,
@@ -399,6 +470,50 @@ pub fn connect_with_orphan_adoption(
         },
         0,
     ))
+}
+
+fn verify_live_lease_adoption(
+    client: &SshClient,
+    homeboy: &str,
+    expectation: Option<(&str, u32)>,
+    connected_daemon: &RemoteDaemon,
+    expected_identity: &str,
+) -> std::result::Result<(), Error> {
+    let Some((expected_lease, expected_pid)) = expectation else {
+        return Ok(());
+    };
+    let mut status = remote_daemon_status(client, homeboy).map_err(Error::internal_unexpected)?;
+    probe_remote_daemon_endpoint(client, &mut status);
+    let daemon = status.daemon.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "adopt_live_lease",
+            "live lease changed before adoption could be persisted",
+            None,
+            None,
+        )
+    })?;
+    if !status.fresh
+        || !status.reachable
+        || status.endpoint_probe_error.is_some()
+        || daemon.lease_id.as_deref() != Some(expected_lease)
+        || daemon.pid != Some(expected_pid)
+        || daemon.lease_id != connected_daemon.lease_id
+        || daemon.pid != connected_daemon.pid
+        || daemon.build_identity.as_deref().map(str::trim) != Some(expected_identity.trim())
+    {
+        return Err(Error::validation_invalid_argument(
+            "adopt_live_lease",
+            format!(
+                "explicit live lease adoption snapshot no longer matches: expected lease `{expected_lease}` PID {expected_pid} build `{expected_identity}`; current lease `{}` PID `{}` build `{}`; no session state was changed",
+                daemon.lease_id.as_deref().unwrap_or("unavailable"),
+                daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable"),
+                daemon.build_identity.as_deref().unwrap_or("unavailable"),
+            ),
+            None,
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn remote_leaseless_recovery_help_command(homeboy: &str) -> String {

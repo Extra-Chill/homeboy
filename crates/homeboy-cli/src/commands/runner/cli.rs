@@ -221,6 +221,14 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         confirm_pid_dead: bool,
 
+        /// Operator-confirm a live lease/PID/build adoption within the trusted remote SSH UID boundary; never stops or replaces a daemon
+        #[arg(long)]
+        adopt_live_lease: Option<String>,
+
+        /// Current remote daemon PID paired with --adopt-live-lease
+        #[arg(long)]
+        expected_live_pid: Option<u32>,
+
         /// Confirm one exact unresolved job has no live untracked child; repeat for each job
         #[arg(long = "confirm-untracked-child-dead")]
         confirm_untracked_child_dead: Vec<uuid::Uuid>,

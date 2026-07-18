@@ -27,10 +27,11 @@
 pub use crate::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path,
     broker_submit_token_for_runner, broker_token_from_env, connect,
-    connect_with_leaseless_orphan_reconciliation, connect_with_orphan_adoption,
-    connect_with_recovery, reverse_broker_artifact, reverse_broker_artifact_content,
-    reverse_broker_reconcile, runner_artifact_content, BrokerAuthGrant, BrokerAuthStore,
-    BrokerCredential, BrokerScope, MintedCredential, BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
+    connect_with_leaseless_orphan_reconciliation, connect_with_live_lease_adoption,
+    connect_with_orphan_adoption, connect_with_recovery, reverse_broker_artifact,
+    reverse_broker_artifact_content, reverse_broker_reconcile, runner_artifact_content,
+    BrokerAuthGrant, BrokerAuthStore, BrokerCredential, BrokerScope, MintedCredential,
+    BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
 };
 pub use crate::{
     connect_reverse, disconnect, download_remote_artifact,
@@ -100,12 +101,12 @@ pub mod registry {
 /// Connect/disconnect/status helpers for runner sessions.
 pub mod connection {
     pub use crate::{
-        connect, connect_reverse, connect_with_orphan_adoption, connect_with_recovery, disconnect,
-        run_reverse_worker, status, statuses, ReverseRunnerConnectOptions,
-        ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, RunnerAvailability,
-        RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
-        RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
-        RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode,
+        connect, connect_reverse, connect_with_live_lease_adoption, connect_with_orphan_adoption,
+        connect_with_recovery, disconnect, run_reverse_worker, status, statuses,
+        ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput,
+        RunnerAvailability, RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport,
+        RunnerFailureKind, RunnerSession, RunnerSessionRole, RunnerSessionState,
+        RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode,
     };
 }
 

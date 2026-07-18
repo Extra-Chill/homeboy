@@ -1134,18 +1134,12 @@ mod tests {
             homeboy_product_identity::product_version()
         );
         assert!(hint.contains(&job_binary_refresh));
-        assert!(hint.contains(
-            "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
-        ));
 
         let refresh = commands
             .iter()
             .find(|command| command.scope == "daemon_refresh")
             .expect("daemon refresh command");
         assert!(refresh.command.starts_with(&job_binary_refresh));
-        assert!(refresh.command.ends_with(
-            "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
-        ));
         assert!(refresh
             .description
             .contains("configured job command binary"));

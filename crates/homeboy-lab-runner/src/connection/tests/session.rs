@@ -49,14 +49,103 @@ fn missing_daemon_state_with_active_jobs_refuses_ensure_running() {
 }
 
 #[test]
-fn refuses_to_replace_live_daemon_with_a_different_persisted_lease() {
+fn stale_persisted_lease_requires_explicit_live_lease_adoption() {
+    let session = direct_ssh_session("lease-recorded");
+    let mut status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
+    status.daemon.as_mut().expect("daemon").build_identity =
+        Some("homeboy test+configured".to_string());
+
+    let action = remote_daemon_connect_action_with_controller_identity(
+        Some(&session),
+        &status,
+        "homeboy test+configured",
+    )
+    .expect_err("matching build identity does not prove runner ownership");
+
+    assert!(action.contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
+}
+
+#[test]
+fn explicit_live_lease_adoption_requires_the_exact_current_lease_and_pid() {
+    let session = direct_ssh_session("lease-recorded");
+    let mut status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
+    status.daemon.as_mut().expect("daemon").build_identity = Some("irrelevant".to_string());
+
+    assert_eq!(
+        remote_daemon::remote_daemon_connect_action_for_runner(
+            Some(&session),
+            &status,
+            "irrelevant",
+            "runner-a",
+            Some(("lease-live", 4646)),
+        )
+        .expect("exact compare-and-swap expectation adopts the live lease"),
+        RemoteDaemonConnectAction::Reattach,
+    );
+    for expectation in [Some(("lease-other", 4646)), Some(("lease-live", 9999))] {
+        assert!(remote_daemon::remote_daemon_connect_action_for_runner(
+            Some(&session),
+            &status,
+            "irrelevant",
+            "runner-a",
+            expectation,
+        )
+        .expect_err("changed lease or PID must fail closed")
+        .contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
+    }
+}
+
+#[test]
+fn stale_active_mismatched_daemon_never_reattaches_or_adopts() {
+    let session = direct_ssh_session("lease-recorded");
+    let mut status = remote_daemon_status_for_test(false, true, 1, "lease-live", 4646);
+    status.endpoint_probe_error = Some("identity probe failed".to_string());
+
+    let error = remote_daemon::remote_daemon_connect_action_for_runner(
+        Some(&session),
+        &status,
+        "homeboy test+different",
+        "runner-a",
+        Some(("lease-live", 4646)),
+    )
+    .expect_err("stale active daemon must preserve the persisted session");
+
+    assert!(error.contains("persisted session lease `lease-recorded`"));
+    assert!(error.contains("live remote daemon lease `lease-live`"));
+}
+
+#[test]
+fn stale_persisted_lease_refuses_an_unverified_live_daemon_with_recovery_guidance() {
     let session = direct_ssh_session("lease-recorded");
     let status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
 
-    let err = remote_daemon_connect_action(Some(&session), &status).expect_err("lease mismatch");
+    let err = remote_daemon_connect_action_with_controller_identity(
+        Some(&session),
+        &status,
+        "homeboy test+configured",
+    )
+    .expect_err("unverified live daemon must not be adopted");
 
-    assert!(err.contains("does not match persisted session lease"));
-    assert!(err.contains("refusing to replace"));
+    assert!(err.contains("persisted session lease `lease-recorded`"));
+    assert!(err.contains("live remote daemon lease `lease-live`"));
+    assert!(err.contains("runner ownership is not proven"));
+    assert!(err.contains("homeboy runner status"));
+    assert!(err.contains("--json"));
+}
+
+#[test]
+fn healthy_sessionless_daemon_requires_verified_runner_identity() {
+    let mut status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
+    status.daemon.as_mut().expect("daemon").build_identity =
+        Some("homeboy test+configured".to_string());
+
+    assert!(remote_daemon_connect_action_with_controller_identity(
+        None,
+        &status,
+        "homeboy test+configured",
+    )
+    .expect_err("missing or corrupt session requires explicit adoption")
+    .contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
 }
 
 #[test]
@@ -968,21 +1057,19 @@ fn reverse_controller_session_requires_fresh_heartbeat() {
 }
 
 #[test]
-fn sessionless_active_daemon_reattaches_only_with_matching_endpoint_identity() {
+fn sessionless_active_daemon_requires_explicit_adoption_even_with_matching_identity() {
     let mut status = remote_daemon_status_for_test(true, true, 2, "lease-live", 1183765);
     let daemon = status.daemon.as_mut().expect("daemon");
     daemon.version = Some("0.284.0".to_string());
     daemon.build_identity = Some("homeboy 0.284.0+live".to_string());
 
-    assert_eq!(
-        remote_daemon_connect_action_with_controller_identity(
-            None,
-            &status,
-            "homeboy 0.284.0+live"
-        )
-        .expect("matching controller reattaches"),
-        RemoteDaemonConnectAction::Reattach
-    );
+    assert!(remote_daemon_connect_action_with_controller_identity(
+        None,
+        &status,
+        "homeboy 0.284.0+live"
+    )
+    .expect_err("matching build identity does not establish runner ownership")
+    .contains("--adopt-live-lease lease-live --expected-live-pid 1183765"));
 
     let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
     assert_eq!(recovery.daemon_version.as_deref(), Some("0.284.0"));
