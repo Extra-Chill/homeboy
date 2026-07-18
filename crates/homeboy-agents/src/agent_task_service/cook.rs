@@ -135,13 +135,8 @@ pub fn adopt_cook_candidate_with_dispatcher(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    let record = agent_task_lifecycle::status(cook_or_run_id)?;
-    let cook_id = record
-        .metadata
-        .get("cook_id")
-        .and_then(Value::as_str)
-        .unwrap_or(cook_or_run_id);
-    let recipe = super::load_recipe(cook_id)?;
+    let (record, recipe) = resolve_adoption_target(cook_or_run_id)?;
+    let cook_id = &recipe.cook_id;
     let attempt_dispatcher =
         reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
     let options = super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)?;
@@ -257,6 +252,71 @@ pub fn adopt_cook_candidate_with_dispatcher(
         None,
         exit_code,
     ))
+}
+
+/// Resolve an existing run first, then recover the exact persisted attempt when
+/// a controller stopped after writing its recipe and before writing the run.
+fn resolve_adoption_target(
+    cook_or_run_id: &str,
+) -> Result<(
+    agent_task_lifecycle::AgentTaskRunRecord,
+    super::AgentTaskCookRecipe,
+)> {
+    if agent_task_lifecycle::run_record_exists(cook_or_run_id)? {
+        let record = agent_task_lifecycle::status(cook_or_run_id)?;
+        let cook_id = record
+            .metadata
+            .get("cook_id")
+            .and_then(Value::as_str)
+            .unwrap_or(cook_or_run_id)
+            .to_string();
+        return Ok((record, super::load_recipe(&cook_id)?));
+    }
+
+    if !super::recipe_exists(cook_or_run_id)? {
+        return Err(Error::validation_invalid_argument(
+            "run_or_cook_id",
+            "unknown agent-task run or durable cook id",
+            Some(cook_or_run_id.to_string()),
+            None,
+        ));
+    }
+
+    let recipe = super::load_recipe(cook_or_run_id)?;
+    let orphaned_attempts = recipe
+        .attempts
+        .iter()
+        .map(|attempt| {
+            Ok((
+                attempt,
+                agent_task_lifecycle::run_record_exists(&attempt.run_id)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter_map(|(attempt, exists)| (!exists).then_some(attempt))
+        .collect::<Vec<_>>();
+    let [attempt] = orphaned_attempts.as_slice() else {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.attempts",
+            "candidate adoption requires exactly one orphaned durable cook attempt",
+            Some(recipe.cook_id.clone()),
+            None,
+        ));
+    };
+
+    agent_task_lifecycle::submit_plan(&attempt.plan, Some(&attempt.run_id))?;
+    agent_task_lifecycle::record_cook_attempt(&recipe.cook_id, attempt.attempt, &attempt.run_id)?;
+    let recovery = Error::internal_unexpected(
+        "recovered orphaned durable cook recipe before provider dispatch".to_string(),
+    );
+    let record = agent_task_lifecycle::record_pre_execution_failure(
+        &attempt.run_id,
+        &attempt.plan,
+        "transport_dispatcher_prepare",
+        &recovery,
+    )?;
+    Ok((record, recipe))
 }
 
 /// A bounded collection of independently durable cooks. Each cook retains the
@@ -2465,6 +2525,69 @@ mod tests {
             assert!(error
                 .message
                 .contains("durable cook recipe already exists with different execution inputs"));
+        });
+    }
+
+    #[test]
+    fn adoption_by_cook_id_materializes_the_exact_orphaned_recipe_attempt() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-adopt-orphan";
+            let run_id = "cook-adopt-orphan-attempt-1";
+            let mut options =
+                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.initial_run_id = run_id.to_string();
+            super::super::persist_initial_recipe(&options).expect("persist orphaned recipe");
+
+            let (record, recipe) =
+                resolve_adoption_target(cook_id).expect("adoption resolves orphaned cook");
+
+            assert_eq!(recipe.cook_id, cook_id);
+            assert_eq!(record.run_id, run_id);
+            assert_eq!(record.metadata["cook_id"], cook_id);
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["candidate_adoption_recovery"]["reason"],
+                "pre_provider_transport_failure"
+            );
+            assert!(agent_task_lifecycle::run_record_exists(run_id).expect("record exists"));
+        });
+    }
+
+    #[test]
+    fn adoption_by_run_id_keeps_the_existing_lifecycle_record() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-adopt-existing-run";
+            let run_id = "cook-adopt-existing-run-attempt-1";
+            let mut options =
+                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.initial_run_id = run_id.to_string();
+            super::super::persist_initial_recipe(&options).expect("persist recipe");
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+                .expect("persist lifecycle record");
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id)
+                .expect("link cook attempt");
+
+            let (record, recipe) =
+                resolve_adoption_target(run_id).expect("adoption resolves existing run");
+
+            assert_eq!(recipe.cook_id, cook_id);
+            assert_eq!(record.run_id, run_id);
+            assert_eq!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+        });
+    }
+
+    #[test]
+    fn adoption_rejects_unknown_run_or_cook_ids() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let error = resolve_adoption_target("unknown-adoption-target")
+                .expect_err("unknown adoption target fails closed");
+
+            assert_eq!(error.details["field"], "run_or_cook_id");
+            assert!(error
+                .message
+                .contains("unknown agent-task run or durable cook id"));
         });
     }
 
