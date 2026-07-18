@@ -1,0 +1,18 @@
+[package]
+name = "homeboy-execution-contract"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Typed runtime-facing execution surface contract for homeboy (artifact URI / apply / lab-offload)"
+repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
+
+[lib]
+name = "homeboy_execution_contract"
+path = "src/lib.rs"
+
+[dependencies]
+homeboy-artifact-ref-contract = { version = "0.1.0", path = "../homeboy-artifact-ref-contract" }
+homeboy-engine-primitives = { version = "0.1.0", path = "../../homeboy-engine-primitives" }
+base64 = "0.22"

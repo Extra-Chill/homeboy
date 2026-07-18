@@ -915,6 +915,7 @@ dependencies = [
  "homeboy-code-audit",
  "homeboy-engine-primitives",
  "homeboy-error",
+ "homeboy-execution-contract",
  "homeboy-extension",
  "homeboy-extension-contract",
  "homeboy-finding",
@@ -972,6 +973,15 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "homeboy-execution-contract"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "homeboy-artifact-ref-contract",
+ "homeboy-engine-primitives",
 ]
 
 [[package]]
