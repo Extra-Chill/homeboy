@@ -90,7 +90,7 @@ use secrets::*;
 
 // Crate-internal surface consumed by sibling `runner` modules (evidence, worker,
 // lab_env, lab/offload) and re-exported by the parent `runner` module.
-pub(crate) use daemon::result_event_data;
+pub(crate) use daemon::{reserve_daemon_admission, result_event_data, DaemonAdmissionReservation};
 pub use daemon_api::{canonical_daemon_body, daemon_api_get};
 pub(crate) use failure::{
     append_failure_context_error_summary, runner_exec_failure_context_from_output,

@@ -239,6 +239,7 @@ pub(crate) struct LabDispatchExecutionContext<'a> {
     pub(crate) dependency_cache_saves: Vec<RunnerDependencyCacheSaveRequest>,
     pub(crate) remote_output_file: Option<String>,
     pub(crate) host_telemetry: Option<LabHostTelemetryCapture>,
+    pub(crate) admission: Option<DaemonAdmissionReservation>,
     pub(crate) plan: HomeboyPlan,
     pub(crate) messages: Vec<String>,
     pub(crate) overhead: LabOffloadOverhead,
@@ -290,6 +291,8 @@ fn lab_runner_exec_options(
 pub(crate) fn exec_lab_context(
     mut context: LabDispatchExecutionContext<'_>,
 ) -> Result<LabOffloadOutcome> {
+    // Keep the daemon-visible admission active until this function returns.
+    let _admission = context.admission.take();
     let request = context.request;
     let selection = context.selection;
     let contract = context.contract;
@@ -1196,6 +1199,20 @@ pub(crate) fn run_lab_offload_inner(
     }
 
     let capability_preflight: Option<RunnerCapabilityPreflight> = capability_plan.map(Into::into);
+    let admission = direct_daemon_admission_coordinates(
+        runner_id,
+        &selection.mode,
+        runner_status.session.as_ref(),
+    )?
+    .map(|(local_url, expected_daemon_lease_id)| {
+        reserve_daemon_admission(
+            runner_id,
+            local_url,
+            &redact_argv_shell_display(&command_prefix.argv),
+            expected_daemon_lease_id,
+        )
+    })
+    .transpose()?;
     let workspace_sync_timer = overhead.phase(LabOffloadPhase::WorkspaceSync);
     let workspace_stage = match prepare_lab_offload_workspace_stage(
         &request,
@@ -1462,6 +1479,14 @@ pub(crate) fn run_lab_offload_inner(
     lab_metadata["settings_env"] =
         settings_env_diagnostics(&remapped_args, &secret_env_handoff.env_delta);
     lab_metadata["runner_homeboy"] = runner_homeboy.clone();
+    if let Some(admission) = admission.as_ref() {
+        lab_metadata["admission_reservation"] = serde_json::json!({
+            "job_id": admission.job_id(),
+            "daemon_lease_id": admission.daemon_lease_id,
+            "status": "reserved",
+            "release_policy": "best_effort_on_context_exit_after_terminal_or_detached_handoff",
+        });
+    }
     lab_metadata["source_checkout"] = source_checkout.clone();
     lab_metadata["job_scoped_overrides"] = job_scoped_overrides_metadata(&request.job_overrides);
     lab_metadata["rig_sync"] = serde_json::json!({
@@ -1540,6 +1565,7 @@ pub(crate) fn run_lab_offload_inner(
         dependency_cache_saves,
         remote_output_file,
         host_telemetry: Some(host_telemetry),
+        admission,
         plan,
         messages,
         overhead,
@@ -1547,6 +1573,49 @@ pub(crate) fn run_lab_offload_inner(
         print_handoff: true,
         detach_after_handoff: request.detach_after_handoff,
     })
+}
+
+fn direct_daemon_admission_coordinates<'a>(
+    runner_id: &str,
+    mode: &super::super::super::RunnerTunnelMode,
+    session: Option<&'a super::super::super::RunnerSession>,
+) -> Result<Option<(&'a str, &'a str)>> {
+    if *mode == super::super::super::RunnerTunnelMode::Reverse {
+        return Ok(None);
+    }
+    let session = session.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            format!("runner `{runner_id}` has no direct session for Lab admission"),
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
+    if session.mode != super::super::super::RunnerTunnelMode::DirectSsh {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            format!("runner `{runner_id}` direct Lab admission found a non-direct session"),
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    let local_url = session.local_url.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            format!("runner `{runner_id}` has no direct daemon endpoint for Lab admission"),
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
+    let lease_id = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            format!("runner `{runner_id}` has no proven daemon lease for Lab admission"),
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
+    Ok(Some((local_url, lease_id)))
 }
 
 /// Gate Lab dispatch on the same authoritative availability verdict the
@@ -1856,6 +1925,7 @@ mod tests {
             dependency_cache_saves: Vec::new(),
             remote_output_file: None,
             host_telemetry: None,
+            admission: None,
             plan: base_lab_plan(None),
             messages: Vec::new(),
             overhead: LabOffloadOverhead::start(),
@@ -1999,6 +2069,71 @@ mod tests {
             reconcile_lab_mutation_output(output, &["src/lib.rs".to_string()]),
             output
         );
+    }
+
+    #[test]
+    fn direct_lab_admission_requires_and_preserves_daemon_coordinates() {
+        let session = admission_session(
+            RunnerTunnelMode::DirectSsh,
+            Some("http://127.0.0.1:7421"),
+            Some("lease-a"),
+        );
+        assert_eq!(
+            direct_daemon_admission_coordinates(
+                "homeboy-lab",
+                &RunnerTunnelMode::DirectSsh,
+                Some(&session),
+            )
+            .expect("direct admission coordinates"),
+            Some(("http://127.0.0.1:7421", "lease-a")),
+        );
+
+        let missing_endpoint =
+            admission_session(RunnerTunnelMode::DirectSsh, None, Some("lease-a"));
+        let error = direct_daemon_admission_coordinates(
+            "homeboy-lab",
+            &RunnerTunnelMode::DirectSsh,
+            Some(&missing_endpoint),
+        )
+        .expect_err("direct admission requires an endpoint");
+        assert!(error.message.contains("direct daemon endpoint"));
+    }
+
+    #[test]
+    fn reverse_lab_admission_keeps_broker_path_without_direct_reservation() {
+        assert_eq!(
+            direct_daemon_admission_coordinates("homeboy-lab", &RunnerTunnelMode::Reverse, None)
+                .expect("reverse sessions use broker admission"),
+            None,
+        );
+    }
+
+    fn admission_session(
+        mode: RunnerTunnelMode,
+        local_url: Option<&str>,
+        lease_id: Option<&str>,
+    ) -> crate::RunnerSession {
+        crate::RunnerSession {
+            runner_id: "homeboy-lab".to_string(),
+            mode,
+            role: crate::RunnerSessionRole::Controller,
+            server_id: None,
+            controller_id: None,
+            broker_url: None,
+            remote_daemon_address: None,
+            local_port: None,
+            local_url: local_url.map(str::to_string),
+            tunnel_pid: None,
+            remote_daemon_pid: None,
+            remote_daemon_lease_id: lease_id.map(str::to_string),
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: None,
+            connected_at: "2026-01-01T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }
     }
 
     fn runner_status(connected: bool) -> RunnerStatusReport {

@@ -401,11 +401,8 @@ pub fn refresh_homeboy_binary(
     if options.reconnect {
         promotion_lease.assert_generation()?;
         let active_jobs = active_jobs_before_daemon_replacement(&plan.runner_id)?;
-        interrupted_job_ids = protect_active_jobs_before_reconnect(
-            &plan.runner_id,
-            active_jobs.iter().map(|job| job.job_id.as_str()),
-            options.force,
-        )?;
+        interrupted_job_ids =
+            protect_active_jobs_before_reconnect(&plan.runner_id, &active_jobs, options.force)?;
         if let Err(error) =
             disconnect_with_session(&plan.runner_id, refresh_session.as_ref(), options.force)
         {
@@ -1535,14 +1532,14 @@ fn active_job_reconnect_error(runner_id: &str, job_ids: &[String]) -> Error {
     error
 }
 
-fn protect_active_jobs_before_reconnect<'a>(
+fn protect_active_jobs_before_reconnect(
     runner_id: &str,
-    active_job_ids: impl IntoIterator<Item = &'a str>,
+    active_jobs: &[homeboy_core::api_jobs::ActiveRunnerJobSummary],
     force: bool,
 ) -> Result<Vec<String>> {
-    let job_ids = active_job_ids
+    let job_ids = active_jobs
         .into_iter()
-        .map(str::to_string)
+        .map(|job| job.job_id.clone())
         .collect::<Vec<_>>();
     if !job_ids.is_empty() && !force {
         return Err(active_job_reconnect_error(runner_id, &job_ids));

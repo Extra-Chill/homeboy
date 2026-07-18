@@ -60,9 +60,9 @@ use super::super::command_path::{
 };
 use super::super::daemon_health::runner_daemon_health_failure;
 use super::super::execution::{
-    append_failure_context_error_summary, lab_offload_handoff_hints,
+    append_failure_context_error_summary, lab_offload_handoff_hints, reserve_daemon_admission,
     runner_exec_failure_context_from_output, runner_exec_failure_context_remediation_hint,
-    DaemonJobHandoffState,
+    DaemonAdmissionReservation, DaemonJobHandoffState,
 };
 use super::super::lab_apply::{
     apply_lab_offload_patch, apply_lab_promotion_patch, PromotionPatchIntent,
