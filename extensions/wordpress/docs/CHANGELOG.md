@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.26.7] - 2026-07-18
+
+### Changed
+- Restore WP Codebox PHPUnit runner protocol
+
 ## [3.26.6] - 2026-07-18
 
 ### Changed
