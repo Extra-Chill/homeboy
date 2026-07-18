@@ -4,7 +4,7 @@ use crate::output::MergeOutput;
 use crate::paths;
 use std::path::PathBuf;
 
-use super::manifest::ExtensionManifest;
+use homeboy_extension_contract::ExtensionManifest;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BrokenExtensionLink {

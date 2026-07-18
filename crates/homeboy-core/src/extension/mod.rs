@@ -24,7 +24,8 @@ mod manifest;
 mod manifest_config;
 mod manifest_sidecar;
 mod refactor_protocol;
-mod registry;
+// Manifest store relocated to crate::extension_store (core-level; operates on
+// the contract ExtensionManifest type). Re-exported here for path stability.
 mod repair;
 mod runner;
 mod runtime_helper;
@@ -57,6 +58,10 @@ pub use homeboy_extension_contract::core_compat::{
 };
 pub use homeboy_extension_contract::ExtensionCapability;
 
+pub use crate::extension_store::{
+    available_extension_ids, extension_path, find_extension_by_tool, find_extension_for_file_ext,
+    is_extension_linked, load_all_extensions, load_extension, merge, save_manifest,
+};
 pub(crate) use execution::{build_settings_json_from_manifest, execute_action};
 pub use execution::{
     extension_ready_status, is_extension_compatible, run_action, run_extension, run_setup,
@@ -117,10 +122,6 @@ pub use refactor_protocol::{
     run_refactor_script, run_refactor_script_result, AdjustedItem, ParsedItem,
     RefactorScriptFailure, RefactorScriptFailureKind, RelatedTests, ResolvedImports,
     RewrittenImport,
-};
-pub use registry::{
-    available_extension_ids, extension_path, find_extension_by_tool, find_extension_for_file_ext,
-    is_extension_linked, load_all_extensions, load_extension, merge, save_manifest,
 };
 pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
 pub use runner::{ExtensionRunner, RunnerOutput};

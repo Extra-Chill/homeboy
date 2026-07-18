@@ -96,6 +96,7 @@ pub mod execution_contract;
 pub(crate) mod expand;
 pub mod extension;
 pub mod extension_provider_discovery;
+pub mod extension_store;
 // finding moved to the internal `homeboy-finding` crate. Re-exported so existing
 // `crate::finding::*` call sites keep working unchanged.
 pub use homeboy_finding as finding;

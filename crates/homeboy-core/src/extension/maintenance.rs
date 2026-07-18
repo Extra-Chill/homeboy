@@ -2,10 +2,10 @@ use crate::error::{Error, Result};
 
 use super::exec_context;
 use super::lifecycle::update;
-use super::registry::{available_extension_ids, load_extension};
 use super::update_output::{
     SourceMetadataRepairEntry, UpdateAllResult, UpdateEntry, UpdateSkippedEntry,
 };
+use crate::extension_store::{available_extension_ids, load_extension};
 
 /// Update all installed extensions through the same path used by single-extension updates.
 pub fn update_all(force: bool) -> UpdateAllResult {
