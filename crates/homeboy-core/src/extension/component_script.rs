@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::runner::ExtensionRunner;
 use crate::component::Component;
 pub use crate::component_script_provider::ComponentScriptOutput;
 use crate::engine::invocation::{InvocationGuard, InvocationRequirements};
@@ -305,6 +306,23 @@ impl crate::component_script_provider::ComponentScriptRunner for ExtensionCompon
             extra_env,
             script_args,
         )
+    }
+
+    fn run_with_context(
+        &self,
+        context: &crate::extension_execution::ExtensionExecutionContext,
+        component: &crate::component::Component,
+        path_override: Option<String>,
+        script_args: &[String],
+    ) -> crate::Result<ComponentScriptOutput> {
+        let mut runner = ExtensionRunner::for_context(context.clone())
+            .component(component.clone())
+            .passthrough(false)
+            .script_args(script_args);
+        if let Some(path) = path_override {
+            runner = runner.path_override(Some(path.clone())).working_dir(&path);
+        }
+        Ok(runner.run()?.into())
     }
 }
 
