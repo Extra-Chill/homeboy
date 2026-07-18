@@ -126,6 +126,14 @@ pub fn sync_workspace(
                 WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
             )?;
             let git_backed_snapshot = git_output(&local_path, &["rev-parse", "HEAD"]).is_ok();
+            // Snapshot transport of a Git workspace starts from its exact commit
+            // and overlays the filtered working tree. Report the resulting Git
+            // checkout distinctly from a file-only snapshot.
+            let materialization_mode = if git_backed_snapshot {
+                RunnerWorkspaceSyncMode::SnapshotGit
+            } else {
+                options.mode
+            };
             let synthetic_checkout = if git_backed_snapshot {
                 match materialize_git_snapshot_from_controller_bundle(
                     &runner,
@@ -197,7 +205,7 @@ pub fn sync_workspace(
                 &runner.id,
                 &local_path,
                 &remote_path,
-                options.mode,
+                materialization_mode,
                 &snapshot,
                 &excludes,
                 Some(content_manifest),
@@ -228,7 +236,7 @@ pub fn sync_workspace(
             let current_workspace = current_workspace_summary(
                 &local_path,
                 &remote_path,
-                options.mode,
+                materialization_mode,
                 true,
                 synthetic_checkout,
             );
@@ -244,7 +252,7 @@ pub fn sync_workspace(
                     current_workspace,
                     workspace_lease,
                     resource_lifecycle,
-                    sync_mode: options.mode,
+                    sync_mode: materialization_mode,
                     snapshot_identity: snapshot,
                     counts: stats,
                     excludes,

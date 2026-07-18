@@ -133,6 +133,20 @@ fn verify_materialized_snapshot_git_checkout(
             path.display()
         ));
     }
+    match (
+        provenance.synthetic_checkout_commit.as_deref(),
+        provenance.synthetic_checkout_ref.as_deref(),
+        provenance.synthetic_checkout_tree.as_deref(),
+    ) {
+        (None, None, None) => return verify_exact_snapshot_git_checkout(workspace, provenance),
+        (Some(_), Some(_), Some(_)) => {}
+        _ => {
+            return Err(
+                "snapshot-git provenance must provide either a complete synthetic checkout identity or none"
+                    .to_string(),
+            )
+        }
+    }
     let expected_commit = provenance
         .synthetic_checkout_commit
         .as_deref()
@@ -200,6 +214,29 @@ fn verify_materialized_snapshot_git_checkout(
     )? != expected_note
     {
         return Err("snapshot-git note does not match the verified source snapshot".to_string());
+    }
+    Ok(())
+}
+
+/// Git-backed snapshot transport checks out the recorded source revision before
+/// applying the filtered working-tree overlay. Its content hash binds that
+/// overlay, while Git binds the checkout identity.
+fn verify_exact_snapshot_git_checkout(
+    workspace: &Path,
+    provenance: &VerifiedLabWorkspaceProvenance,
+) -> std::result::Result<(), String> {
+    if git(workspace, &["rev-parse", "HEAD"])? != provenance.source_revision {
+        return Err("snapshot-git HEAD does not match the verified source revision".to_string());
+    }
+    let dirty = !git(
+        workspace,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )?
+    .is_empty();
+    if dirty != provenance.source_dirty {
+        return Err(
+            "snapshot-git Git cleanliness does not match the verified source snapshot".to_string(),
+        );
     }
     Ok(())
 }
@@ -997,6 +1034,29 @@ mod tests {
         )
         .expect_err("wrong declared identity must fail closed")
         .contains("workspace identity"));
+    }
+
+    #[test]
+    fn exact_snapshot_git_checkout_preserves_verified_dirty_overlay() {
+        let workspace = git_workspace();
+        std::fs::write(workspace.path().join("file.txt"), "overlay\n").expect("overlay");
+        let mut snapshot = git_snapshot(workspace.path());
+        snapshot.dirty = true;
+        let mut lab = lab(workspace.path(), &snapshot);
+        lab["sync_mode"] = serde_json::json!("snapshot-git");
+        lab["workspace_cleanliness"] = serde_json::json!({
+            "allow_dirty_lab_workspace": true,
+        });
+
+        let provenance = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            lab,
+        )
+        .expect("verified dirty snapshot-git provenance");
+        verify_lab_workspace_git_root(workspace.path(), &provenance)
+            .expect("exact checkout and verified overlay are accepted");
     }
 
     #[test]

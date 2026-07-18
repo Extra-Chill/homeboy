@@ -10,6 +10,8 @@ use homeboy_core::resource_lifecycle_index::ResourceLifecycleRecord;
 pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
     ".git",
     ".git/**",
+    ".homeboy",
+    ".homeboy/**",
     ".homeboy-build",
     ".homeboy-build/**",
     ".homeboy-bin",

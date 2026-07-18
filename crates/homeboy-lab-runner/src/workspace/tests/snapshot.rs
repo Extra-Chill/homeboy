@@ -102,8 +102,119 @@ use crate::workspace::types::{
     RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 use crate::workspace::util::git_output;
+use homeboy_core::source_snapshot::SourceSnapshot;
 
 static PATH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[test]
+fn git_backed_snapshot_reports_checkout_provenance_for_committed_harvest() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source workspace");
+        let runner_root = tempfile::tempdir().expect("runner root");
+        fs::write(source.path().join("file.txt"), "committed source\n").expect("source file");
+        std::process::Command::new("git")
+            .args(["init", "--quiet", "-b", "main"])
+            .current_dir(source.path())
+            .status()
+            .expect("initialize source repository");
+        std::process::Command::new("git")
+            .args(["add", "file.txt"])
+            .current_dir(source.path())
+            .status()
+            .expect("stage source");
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=test@homeboy.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "source",
+            ])
+            .current_dir(source.path())
+            .status()
+            .expect("commit source");
+        let source_revision =
+            git_output(source.path(), &["rev-parse", "HEAD"]).expect("source SHA");
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-snapshot-harvest","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let (synced, _) = sync_workspace(
+            "lab-snapshot-harvest",
+            RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Snapshot,
+                controller_routed_git: false,
+                changed_since_base: None,
+                git_fetch_refs: Vec::new(),
+                snapshot_includes: Vec::new(),
+                allow_dirty_lab_workspace: false,
+                run_isolation_token: None,
+            },
+        )
+        .expect("materialize local-only committed source");
+
+        assert_eq!(synced.sync_mode, RunnerWorkspaceSyncMode::SnapshotGit);
+        assert_eq!(
+            git_output(Path::new(&synced.remote_path), &["rev-parse", "HEAD"])
+                .expect("materialized SHA"),
+            source_revision
+        );
+        let mut snapshot = SourceSnapshot::collect_local(
+            "lab-snapshot-harvest",
+            source.path(),
+            Some(&synced.remote_path),
+            "lab_offload",
+        );
+        snapshot.sync_excludes = synced.excludes.clone();
+        snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
+        let content_hash = super::super::snapshot::workspace_content_hash_v1(
+            source.path(),
+            &snapshot.sync_excludes,
+        )
+        .expect("source content hash");
+        let snapshot_json = serde_json::to_value(&snapshot).expect("snapshot JSON");
+        let lab = serde_json::json!({
+            "runner_id": "lab-snapshot-harvest",
+            "remote_workspace": synced.remote_path.clone(),
+            "sync_mode": synced.sync_mode.label(),
+            "status": "offloaded",
+            "source_snapshot": snapshot_json,
+            "workspace_cleanliness": { "allow_dirty_lab_workspace": false },
+            "workspace_verification": {
+                "schema": "homeboy/lab-workspace-verification/v1",
+                "identity": synced.snapshot_identity.clone(),
+                "content_hash": content_hash,
+                "sync_excludes": snapshot.sync_excludes,
+                "source_snapshot": snapshot.clone(),
+                "primary_workspace": {
+                    "identity": synced.snapshot_identity.clone(),
+                    "remote_path": synced.remote_path.clone(),
+                },
+            },
+        });
+        let provenance = super::super::provenance::verify_lab_workspace(
+            &synced.remote_path,
+            Path::new(&synced.remote_path),
+            snapshot,
+            lab,
+        )
+        .expect("committed-harvest provenance");
+        super::super::provenance::verify_lab_workspace_git_root(
+            Path::new(&synced.remote_path),
+            &provenance,
+        )
+        .expect("committed-harvest Git root");
+    });
+}
 
 #[test]
 fn snapshot_command_failure_keeps_exit_status_and_silent_transport_cause() {
