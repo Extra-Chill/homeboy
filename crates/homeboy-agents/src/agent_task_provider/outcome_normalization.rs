@@ -63,9 +63,37 @@ pub(super) fn normalize_homeboy_local_artifact_sizes(
     }
 
     if outcome.status == AgentTaskOutcomeStatus::Succeeded && has_known_empty_change_set(outcome) {
-        outcome.status = AgentTaskOutcomeStatus::NoOp;
-        outcome.summary = Some("provider produced an empty change artifact".to_string());
+        if has_substantive_non_change_evidence(outcome) {
+            // An empty change artifact next to substantive work evidence
+            // (a transcript, report, log, or other content-bearing artifact)
+            // is not a clean "nothing happened" — it is a patch-capture
+            // failure that would otherwise silently discard real changes,
+            // including committed ones (#7719). Surface it for controller
+            // review/salvage instead of collapsing it to NoOp.
+            outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+            outcome.summary = Some(
+                "provider reported success with an empty change artifact but produced substantive work evidence; the patch may have failed to capture real changes and needs review"
+                    .to_string(),
+            );
+        } else {
+            outcome.status = AgentTaskOutcomeStatus::NoOp;
+            outcome.summary = Some("provider produced an empty change artifact".to_string());
+        }
     }
+}
+
+/// Evidence that the executor did real work even though its change artifact is
+/// empty: any content-bearing artifact that is not itself a change/patch — a
+/// transcript, report, log, or any other artifact with positive size. Used to
+/// distinguish a genuine no-op from a failed patch capture that would
+/// otherwise silently discard committed work (#7719).
+fn has_substantive_non_change_evidence(outcome: &AgentTaskOutcome) -> bool {
+    outcome.artifacts.iter().any(|artifact| {
+        !matches!(
+            artifact.kind.as_str(),
+            "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
+        ) && matches!(artifact.size_bytes, Some(size) if size > 0)
+    })
 }
 
 fn measure_homeboy_local_artifact(
