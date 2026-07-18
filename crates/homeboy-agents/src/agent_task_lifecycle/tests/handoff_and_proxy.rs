@@ -135,6 +135,100 @@ fn active_pinned_run_does_not_block_controller_promotion() {
     });
 }
 
+// Stamp a durable run's controller-runtime metadata with an obsolete build
+// identity, simulating a run created before a controller/runner upgrade.
+fn stamp_stale_controller_runtime(run_id: &str, stale_identity: &str) {
+    rewrite_record_for_test(run_id, |record| {
+        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+            "schema": "homeboy/controller-runtime-pin/v2",
+            "requested": stale_identity,
+            "originating": {
+                "build_identity": stale_identity,
+                "executable": "/legacy/homeboy",
+                "pinned_executable": "/legacy/homeboy",
+                "sha256": "0".repeat(64),
+            },
+            "current": stale_identity,
+            "executed": stale_identity,
+        });
+    })
+    .expect("stamp stale controller runtime");
+}
+
+fn stamped_runtime_identity(run_id: &str) -> String {
+    status(run_id).expect("record loaded").metadata
+        [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
+        ["build_identity"]
+        .as_str()
+        .expect("stamped build identity")
+        .to_string()
+}
+
+#[test]
+fn retry_stamps_replacement_run_with_current_runtime_not_stale_source() {
+    // #8550: a Lab cook created under an older controller runtime left the durable
+    // run pinned to that obsolete build. After controller and runner were upgraded
+    // to the same current build, a clean lifecycle retry produced a fresh run ID
+    // but retained the obsolete runtime provenance, so the runner refused it with
+    // `Invalid argument controller_runtime`. A replacement run must be owned by the
+    // runtime that creates it.
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let current_identity = homeboy_core::build_identity::current().display;
+        let stale_identity = format!("{current_identity}-obsolete-predecessor");
+        assert_ne!(stale_identity, current_identity);
+
+        let source = submit_plan(&plan, Some("cook-8550-source")).expect("source submitted");
+        stamp_stale_controller_runtime(&source.run_id, &stale_identity);
+        assert_eq!(stamped_runtime_identity(&source.run_id), stale_identity);
+
+        // (1) A failed run created by runtime A can be retried with a new run ID
+        //     under runtime B, and the replacement run records runtime B.
+        let replacement = retry(&source.run_id, Some("cook-8550-retry")).expect("retry succeeds");
+        assert_ne!(replacement.run_id, source.run_id);
+        assert_eq!(
+            stamped_runtime_identity(&replacement.run_id),
+            current_identity,
+            "replacement run must be stamped with the current runtime that created it"
+        );
+        assert_eq!(
+            replacement.metadata["retry_of"].as_str(),
+            Some(source.run_id.as_str())
+        );
+
+        // (2) Mutating the original runtime-A run under runtime B remains rejected.
+        let source_record = status(&source.run_id).expect("source record");
+        let mutation = homeboy_core::controller_runtime::validate_for_mutation(
+            &source_record.metadata,
+            &current_identity,
+        );
+        assert!(
+            mutation.is_err(),
+            "mutating the stale source run under the current runtime must stay fail-closed"
+        );
+
+        // (3) A same-runtime retry retains current behavior: the replacement is
+        //     owned by the current runtime and the source is untouched.
+        let same_runtime_source =
+            submit_plan(&plan, Some("cook-8550-fresh")).expect("fresh source submitted");
+        assert_eq!(
+            stamped_runtime_identity(&same_runtime_source.run_id),
+            current_identity
+        );
+        let same_runtime_replacement =
+            retry(&same_runtime_source.run_id, None).expect("same-runtime retry succeeds");
+        assert_eq!(
+            stamped_runtime_identity(&same_runtime_replacement.run_id),
+            current_identity
+        );
+        assert_eq!(
+            stamped_runtime_identity(&same_runtime_source.run_id),
+            current_identity,
+            "retry must not rewrite the source run's runtime provenance"
+        );
+    });
+}
+
 #[test]
 fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
     with_isolated_home(|_| {

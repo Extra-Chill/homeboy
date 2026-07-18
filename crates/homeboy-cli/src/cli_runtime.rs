@@ -503,11 +503,16 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
     cli: &Cli,
     normalized_args: &[String],
 ) -> homeboy::core::Result<Option<i32>> {
+    // Run and Resume mutate the SAME durable record, so they must re-exec under
+    // the runtime that admitted it. Retry is intentionally excluded: it reads the
+    // source record but creates a NEW replacement run, which must be owned by the
+    // runtime that creates it rather than inheriting the source's (possibly stale)
+    // pinned runtime. Delegating Retry here stamped the replacement with the
+    // obsolete runtime after an upgrade (Extra-Chill/homeboy#8550).
     let run_id = match &cli.command {
         Commands::AgentTask(agent_task) => match &agent_task.command {
             crate::commands::agent_task::AgentTaskCommand::Run(args) => Some(&args.run_id),
             crate::commands::agent_task::AgentTaskCommand::Resume(args) => Some(&args.run_id),
-            crate::commands::agent_task::AgentTaskCommand::Retry(args) => Some(&args.run_id),
             _ => None,
         },
         _ => None,
