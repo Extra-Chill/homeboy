@@ -4,6 +4,47 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.292.0] - 2026-07-18
+
+### Added
+- record candidate model during adoption
+
+### Changed
+- extract api-jobs data types into homeboy-api-jobs-contract
+- extract source-snapshot data types into homeboy-source-snapshot-contract
+- fix pre-existing rustfmt drift in agent_tasks.rs
+- extract component model + config into homeboy-component-contract
+- re-extract command-invocation contract clobbered by extension PR
+- Align Lab snapshot Git provenance
+- extract gate/plan/proof data cluster into homeboy-gate-contract
+- extract execution-contract types into homeboy-execution-contract
+- Reserve direct Lab daemon admission
+- Preserve runner pre-spawn diagnostics
+- relocate artifact-ref types into homeboy-artifact-ref-contract off observation
+- extract run-lifecycle record contract into homeboy-run-lifecycle-contract
+- Materialize Git snapshots as exact runner worktrees
+- extract homeboy-extension crate from core (~127 files)
+- sink URI codec primitives into engine-primitives to break execution_contract cycle
+- Resume exact checkpointed promotion candidates
+
+### Fixed
+- centralize reserved runner-workspace paths so content-hash algorithms cannot drift
+- converge successful Lab reconnects
+- retry disappeared runtime promotion leases
+- preserve adoption provenance through finalization
+- preflight incremental snapshot commands
+- register extension providers in deps integration tests
+- bound incremental snapshot preparation
+- preserve oversized terminal daemon jobs
+- publish recovered candidate adoptions
+- adopt exact unpushed candidate destinations
+- give runner exec --run-id a generic run instead of an agent-task lookup
+- exclude broker inputs from snapshot identity
+- align cook placement/runner rejection with clap exclusivity
+- stamp agent-task retry replacement runs with the current controller runtime
+- resolve run record for Lab-offloaded retry instead of shipping unrunnable args
+- preserve v3 snapshot executable capability
+
 ## [0.291.5] - 2026-07-18
 
 ### Fixed
