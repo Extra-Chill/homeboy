@@ -10,8 +10,7 @@ use std::collections::HashSet;
 
 pub(super) fn component_remote_path(component: &Component) -> String {
     if component.remote_path.trim().is_empty() {
-        component
-            .auto_resolve_remote_path()
+        homeboy_core::component::auto_resolve_remote_path(component)
             .unwrap_or_else(|| component.remote_path.clone())
     } else {
         component.remote_path.clone()

@@ -83,7 +83,7 @@ pub struct ResolvedTarget {
 fn resolved_target_from_component(mut component: Component, synthetic: bool) -> ResolvedTarget {
     let source_path = PathBuf::from(shellexpand::tilde(&component.local_path).into_owned());
     let git_root = detect_git_root(&source_path);
-    component.resolve_remote_path();
+    crate::component::resolve_remote_path(&mut component);
 
     ResolvedTarget {
         component_id: component.id.clone(),
@@ -273,13 +273,13 @@ fn prefer_cwd_for_component(component_id: &str) -> Option<Component> {
         registered.local_path = rebase_registered_path_to_checkout(&registered_path, &cwd_git_root)
             .to_string_lossy()
             .to_string();
-        registered.resolve_remote_path();
+        crate::component::resolve_remote_path(&mut registered);
         return Some(registered);
     }
 
     if is_named_component_worktree(component_id, &registered_path, &cwd_git_root) {
         registered.local_path = cwd_git_root.to_string_lossy().to_string();
-        registered.resolve_remote_path();
+        crate::component::resolve_remote_path(&mut registered);
         return Some(registered);
     }
 
@@ -380,7 +380,7 @@ fn resolve_path_override(path: &str) -> Result<Component> {
             Some(Path::new(path)),
         )?;
         discovered.local_path = path.to_string();
-        discovered.resolve_remote_path();
+        crate::component::resolve_remote_path(&mut discovered);
         return Ok(discovered);
     }
 
@@ -390,7 +390,7 @@ fn resolve_path_override(path: &str) -> Result<Component> {
             if let Some(mut discovered) = try_discover_from_portable(&git_root)? {
                 validate_duplicate_portable_component_ids(&discovered.id, &git_root, None)?;
                 discovered.local_path = path.to_string();
-                discovered.resolve_remote_path();
+                crate::component::resolve_remote_path(&mut discovered);
                 return Ok(discovered);
             }
         }
@@ -618,7 +618,7 @@ fn resolve_effective_inner(
                     Some(Path::new(path)),
                 )?;
                 discovered.local_path = path.to_string();
-                discovered.resolve_remote_path();
+                crate::component::resolve_remote_path(&mut discovered);
                 Ok(discovered)
             } else {
                 // Fallback: create a synthetic component when --path is
@@ -651,7 +651,7 @@ fn resolve_effective_inner(
                         Some(id_path),
                     )?;
                     discovered.local_path = local_path;
-                    discovered.resolve_remote_path();
+                    crate::component::resolve_remote_path(&mut discovered);
                     return Ok(discovered);
                 }
 

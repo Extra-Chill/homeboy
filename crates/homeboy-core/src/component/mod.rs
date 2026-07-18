@@ -5,13 +5,20 @@ pub mod audit_provider;
 // module tree. Re-exported as `component::audit` so existing
 // `crate::component::audit::*` paths keep resolving.
 pub use homeboy_audit_contract as audit;
-pub mod config;
+// The pure component model + config data types were extracted to the
+// homeboy-component-contract leaf crate. Re-exported as `component::config` and
+// `component::model` so existing `crate::component::{config,model}::*` paths
+// keep resolving. The extension-driven, fs-touching remote-path resolution that
+// used to live on `Component` stays in core as free functions in
+// `remote_path`.
+pub use homeboy_component_contract::config;
+pub use homeboy_component_contract::model;
 pub mod drift;
 pub mod inventory;
-pub mod model;
 pub mod mutations;
 pub mod portable;
 pub mod relationships;
+pub mod remote_path;
 pub mod resolution;
 pub mod scope;
 pub mod versioning;
@@ -46,6 +53,7 @@ pub use portable::{
     try_discover_from_portable, write_portable_config,
 };
 pub use relationships::{associated_projects, projects_using, rename_component, shared_components};
+pub use remote_path::{auto_resolve_remote_path, resolve_remote_path};
 pub use resolution::{
     local_path_is_relative, normalize_component_local_path, normalize_component_local_path_against,
     resolve, resolve_artifact, resolve_effective, resolve_target, resolve_target_from_component,

@@ -1,0 +1,20 @@
+[package]
+name = "homeboy-component-contract"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Pure serializable component model + config contract types for homeboy"
+repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
+
+[lib]
+name = "homeboy_component_contract"
+path = "src/lib.rs"
+
+[dependencies]
+homeboy-error = { version = "0.1.0", path = "../../homeboy-error" }
+homeboy-audit-contract = { version = "0.1.0", path = "../homeboy-audit-contract" }
+homeboy-extension-contract = { version = "0.1.0", path = "../homeboy-extension-contract" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

@@ -246,7 +246,7 @@ pub(super) fn rig_component_for_bench(spec: &RigSpec, component_id: &str) -> Opt
     let mut component = rig::resolve_component(spec, component_id).ok()?;
     component.remote_url = rig_component.remote_url.clone().or(component.remote_url);
     component.extensions = Some(extensions);
-    component.resolve_remote_path();
+    homeboy::core::component::resolve_remote_path(&mut component);
     Some(component)
 }
 

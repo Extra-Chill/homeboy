@@ -1,7 +1,7 @@
 use serde::{ser::SerializeMap, Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 
-use crate::error::{Error, Result as HomeboyResult};
+use homeboy_error::{Error, Result as HomeboyResult};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 
@@ -157,7 +157,7 @@ impl ComponentOverrideConfig {
     ///
     /// `None` and empty collection fields mean "no override" so existing
     /// on-disk config keeps the same sparse-layer behavior.
-    pub fn apply_to_component(&self, component: &mut crate::component::Component) {
+    pub fn apply_to_component(&self, component: &mut crate::model::Component) {
         if let Some(remote_path) = &self.remote_path {
             component.remote_path = remote_path.clone();
         }

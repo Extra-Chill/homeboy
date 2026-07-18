@@ -220,7 +220,7 @@ pub(super) fn rig_component_for_fuzz(spec: &RigSpec, component_id: &str) -> Opti
     let mut component = rig::resolve_component(spec, component_id).ok()?;
     component.remote_url = rig_component.remote_url.clone().or(component.remote_url);
     component.extensions = Some(extensions);
-    component.resolve_remote_path();
+    homeboy::core::component::resolve_remote_path(&mut component);
     Some(component)
 }
 
@@ -245,7 +245,7 @@ fn rig_component_for_fuzz_with_path(
         extensions: Some(extensions),
         ..Component::default()
     };
-    component.resolve_remote_path();
+    homeboy::core::component::resolve_remote_path(&mut component);
     Some(component)
 }
 
