@@ -166,6 +166,8 @@ pub struct RetentionConfig {
     pub shared_store_days: u64,
     #[serde(default = "default_shared_store_max_bytes")]
     pub shared_store_max_bytes: u64,
+    #[serde(default = "default_shared_store_lease_seconds")]
+    pub shared_store_lease_seconds: u64,
 }
 
 impl Default for RetentionConfig {
@@ -176,6 +178,7 @@ impl Default for RetentionConfig {
             limit: default_retention_limit(),
             shared_store_days: default_shared_store_retention_days(),
             shared_store_max_bytes: default_shared_store_max_bytes(),
+            shared_store_lease_seconds: default_shared_store_lease_seconds(),
         }
     }
 }
@@ -198,6 +201,10 @@ fn default_shared_store_retention_days() -> u64 {
 
 fn default_shared_store_max_bytes() -> u64 {
     20 * 1024 * 1024 * 1024
+}
+
+fn default_shared_store_lease_seconds() -> u64 {
+    6 * 60 * 60
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -487,6 +494,18 @@ mod tests {
             config.triage.priority_labels,
             Some(vec!["security".to_string(), "urgent".to_string()])
         );
+    }
+
+    #[test]
+    fn retention_shared_store_fields_deserialize_with_documented_defaults() {
+        let config: HomeboyConfig = serde_json::from_str(r#"{"retention":{}}"#).unwrap();
+
+        assert_eq!(config.retention.shared_store_days, 30);
+        assert_eq!(
+            config.retention.shared_store_max_bytes,
+            20 * 1024 * 1024 * 1024
+        );
+        assert_eq!(config.retention.shared_store_lease_seconds, 6 * 60 * 60);
     }
 
     #[test]

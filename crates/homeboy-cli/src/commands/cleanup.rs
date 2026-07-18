@@ -47,6 +47,10 @@ pub struct CleanupArgs {
     #[arg(long, value_name = "N")]
     pub limit: Option<i64>,
 
+    /// Continue a bounded shared-store cleanup inventory from this cursor.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<CleanupCommand>,
 }
@@ -207,6 +211,7 @@ pub struct CleanupRetentionManifest {
     pub runtime_tmp_days: u64,
     pub shared_store_days: u64,
     pub shared_store_max_bytes: u64,
+    pub shared_store_lease_seconds: u64,
     pub limit: i64,
     pub terminal_run_guard: bool,
 }
@@ -495,7 +500,9 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             older_than: Duration::from_secs(configured.shared_store_days.saturating_mul(86_400)),
             max_bytes: configured.shared_store_max_bytes,
             limit: usize::try_from(limit).unwrap_or(usize::MAX),
+            cursor: args.cursor.clone(),
             now: std::time::SystemTime::now(),
+            lease_ttl: Duration::from_secs(configured.shared_store_lease_seconds),
         })?;
         categories.push(category_from_output(
             SHARED_CARGO_TARGETS_METADATA,
@@ -545,6 +552,7 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             runtime_tmp_days: configured.runtime_tmp_days,
             shared_store_days: configured.shared_store_days,
             shared_store_max_bytes: configured.shared_store_max_bytes,
+            shared_store_lease_seconds: configured.shared_store_lease_seconds,
             limit,
             terminal_run_guard: true,
         },

@@ -450,8 +450,11 @@ pub fn recover_pin(
             &revision,
         ],
     )?;
+    let target =
+        crate::cleanup::acquire_shared_cargo_target(&format!("controller-runtime:{revision}"))?;
     let build = Command::new("cargo")
         .args(["build", "--release", "--bin", "homeboy"])
+        .env("CARGO_TARGET_DIR", target.target_dir())
         .current_dir(&checkout)
         .status()
         .map_err(|error| {
@@ -479,7 +482,7 @@ pub fn recover_pin(
             None,
         ));
     }
-    let built = checkout.join("target/release/homeboy");
+    let built = target.target_dir().join("release/homeboy");
     let actual = executable_digest(&built)?;
     if actual != expected {
         let _ = run_command(

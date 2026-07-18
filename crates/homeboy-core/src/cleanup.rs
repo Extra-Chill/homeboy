@@ -16,7 +16,8 @@ use crate::{git, Error, Result};
 
 mod cargo_targets;
 pub use cargo_targets::{
-    cleanup_shared_cargo_targets, CargoTargetCleanupOptions, CargoTargetCleanupOutput,
+    acquire_shared_cargo_target, cleanup_shared_cargo_targets, CargoTargetCleanupOptions,
+    CargoTargetCleanupOutput, SharedCargoTargetLease,
 };
 mod self_artifacts;
 

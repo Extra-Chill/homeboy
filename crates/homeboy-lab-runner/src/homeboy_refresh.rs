@@ -1275,9 +1275,14 @@ fn build_local_homeboy_binary(source_path: Option<&Path>) -> Result<PathBuf> {
             None,
         ));
     }
+    let target = homeboy_core::cleanup::acquire_shared_cargo_target(&format!(
+        "runner-refresh:{}",
+        source_path.display()
+    ))?;
     let status = Command::new("cargo")
         .args(["build", "--release", "--bin", "homeboy", "--manifest-path"])
         .arg(&manifest)
+        .env("CARGO_TARGET_DIR", target.target_dir())
         .status()
         .map_err(|err| {
             Error::internal_json(err.to_string(), Some("build local homeboy".to_string()))
@@ -1290,7 +1295,7 @@ fn build_local_homeboy_binary(source_path: Option<&Path>) -> Result<PathBuf> {
             None,
         ));
     }
-    Ok(source_path.join("target/release/homeboy"))
+    Ok(target.target_dir().join("release/homeboy"))
 }
 
 fn dev_binary_path(workspace_root: &str, sha256: &str) -> String {
