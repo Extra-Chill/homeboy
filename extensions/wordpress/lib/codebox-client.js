@@ -11,17 +11,9 @@ const path = require('node:path');
 /**
  * Internal dependencies
  */
-const legacyCore = require('./wp-codebox-core-loader');
 const resolver = require('./wp-codebox-resolver');
 
 const DEFAULT_PUBLIC_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
-const ARTIFACT_COMPATIBILITY_OPTIONS = {
-	packageCandidates: [
-		'@automattic/wp-codebox-core/artifacts',
-		'wp-codebox-workspace/artifacts',
-	],
-	packageDistEntries: ['artifacts.js'],
-};
 
 function createCodeboxClient(options = {}) {
 	return new CodeboxClient(options);
@@ -36,44 +28,13 @@ class CodeboxClient {
 		return resolver.resolveWpCodeboxIdentity({ ...this.options, ...options });
 	}
 
-	identityDiagnostics(identity = this.identity()) {
-		return resolver.wpCodeboxIdentityMismatchDiagnostics(identity);
-	}
-
-	command(bin = resolver.DEFAULT_WP_CODEBOX_BIN) {
-		return resolver.wpCodeboxCommand(bin);
-	}
-
 	publicCliBin(options = {}) {
-		const merged = { ...this.options, ...options };
-		if (merged.wpCliBin || merged.wp_cli_bin || merged.wpCli || merged.wpCommand) {
-			return merged.wpCliBin || merged.wp_cli_bin || merged.wpCli || merged.wpCommand;
-		}
-		const env = { ...process.env, ...(merged.env || {}) };
-		if (env.wpCliBin || env.wp_cli_bin || env.wpCli || env.wpCommand || env.HOMEBOY_WP_CLI_BIN || env.WP_CLI_BIN) {
-			return env.wpCliBin || env.wp_cli_bin || env.wpCli || env.wpCommand || env.HOMEBOY_WP_CLI_BIN || env.WP_CLI_BIN;
-		}
-		const identity = this.identity(merged);
-		return identity.selectionSource === 'default' ? resolver.DEFAULT_WP_CLI_BIN : identity.bin;
+		return this.identity({ ...this.options, ...options }).bin;
 	}
 
 	publicCliInvocation(options = {}) {
 		const merged = { ...this.options, ...options };
-		const identity = this.identity(merged);
-		const bin = this.publicCliBin(merged);
-		if (bin === identity.bin) {
-			return identity.invocation;
-		}
-		const invocation = this.command(bin);
-		const executable = path.basename(String(bin || '')).toLowerCase();
-		const usesWpCliNamespace = Boolean(merged.wpCli || merged.wpCommand)
-			|| executable === 'wp'
-			|| executable === 'wp-cli'
-			|| executable === 'wp-cli.phar';
-		return {
-			command: invocation.command,
-			args: usesWpCliNamespace ? [...invocation.args, 'codebox'] : invocation.args,
-		};
+		return this.identity(merged).invocation;
 	}
 
 	runPublicCliCommand(args, options = {}) {
@@ -107,36 +68,11 @@ class CodeboxClient {
 		}
 	}
 
-	runArtifactApplyPreflight({ artifactId, artifactsPath, bundlePath, approvedFiles, cwd, env, wpCommand, wpCli } = {}) {
-		if (bundlePath) {
-			const args = publicArtifactApplyPreflightArgs({ bundlePath, approvedFiles });
-			const result = this.runPublicCliCommand(args, { cwd, env, wpCli, wpCommand });
-			if (result.status !== 0) {
-				const detail = [result.stderr, result.stdout].filter(Boolean).join('\n').trim();
-				throw new Error(`${this.publicCliBin({ env, wpCli, wpCommand })} ${args.join(' ')} failed${detail ? `: ${detail}` : ''}`);
-			}
-			return parseJsonCliOutput(result.stdout, args.join(' '));
-		}
-
-		return this.runLegacyArtifactApplyPreflight({ artifactId, artifactsPath, approvedFiles, cwd, env, wpCommand, wpCli });
-	}
-
-	runLegacyArtifactApplyPreflight({ artifactId, artifactsPath, approvedFiles, cwd, env, wpCommand, wpCli } = {}) {
-		const command = wpCommand || wpCli || process.env.HOMEBOY_WP_CLI || resolver.DEFAULT_WP_CLI_BIN;
-		const args = [
-			'codebox',
-			'artifacts',
-			'preflight-apply',
-			artifactId,
-			`--artifacts-path=${artifactsPath}`,
-			`--approved-files=${JSON.stringify(approvedFiles)}`,
-			'--format=json',
-		];
-		const result = spawnSync(command, args, { cwd, encoding: 'utf8', env: env || process.env });
-		if (result.status !== 0) {
-			const detail = [result.stderr, result.stdout].filter(Boolean).join('\n').trim();
-			throw new Error(`${command} ${args.join(' ')} failed${detail ? `: ${detail}` : ''}`);
-		}
+	runArtifactApplyPreflight({ bundlePath, approvedFiles, cwd, env } = {}) {
+		if (!bundlePath) throw new Error('WP Codebox artifact apply preflight requires bundlePath.');
+		const args = publicArtifactApplyPreflightArgs({ bundlePath, approvedFiles });
+		const result = this.runPublicCliCommand(args, { cwd, env });
+		if (result.status !== 0) throw new Error(`${this.publicCliBin({ env })} ${args.join(' ')} failed: ${[result.stderr, result.stdout].filter(Boolean).join('\n').trim()}`);
 		return parseJsonCliOutput(result.stdout, args.join(' '));
 	}
 
@@ -160,21 +96,6 @@ class CodeboxClient {
 		return parseJsonCliOutput(result.stdout, args.join(' '));
 	}
 
-	async loadCompatibilityExport(name, options = {}) {
-		return legacyCore.loadWpCodeboxCoreExport(name, { ...this.options, ...options });
-	}
-
-	async loadCompatibilityFunction(name, options = {}) {
-		const result = await this.loadCompatibilityExport(name, options);
-		return result ? result.value : null;
-	}
-
-	async loadArtifactCompatibilityFunction(name, options = {}) {
-		return this.loadCompatibilityFunction(name, {
-			...ARTIFACT_COMPATIBILITY_OPTIONS,
-			...options,
-		});
-	}
 }
 
 function publicJsonArgs(command, inputFile, options = {}) {
@@ -223,7 +144,6 @@ function normalizeCliResult(result = {}) {
 
 module.exports = {
 	CodeboxClient,
-	ARTIFACT_COMPATIBILITY_OPTIONS,
 	createCodeboxClient,
 	normalizeCliResult,
 	parseJsonCliOutput,

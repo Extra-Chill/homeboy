@@ -33,9 +33,6 @@ const {
 	wordpressFuzzMutationLifecycleDiagnosticsForCase,
 } = require('./wordpress-fuzz-mutation-lifecycle');
 const {
-	wpCodeboxIdentityMismatchDiagnostics,
-} = require('./wp-codebox-resolver');
-const {
 	createCodeboxClient,
 } = require('./codebox-client');
 const {
@@ -45,16 +42,6 @@ const {
 	buildWordPressFuzzCommandManifest,
 	requiredWpCodeboxContractsForFuzzPlan,
 } = require('./wordpress-fuzz-command-manifest');
-
-let loadCanonicalRuntimeContractSourceSync;
-
-try {
-	({
-		loadCanonicalRuntimeContractSourceSync,
-	} = require('../../agent-runtimes/wp-codebox/lib/wp-codebox-runtime-contract-source'));
-} catch {
-	loadCanonicalRuntimeContractSourceSync = null;
-}
 
 const WP_CODEBOX_FUZZ_SUITE_SCHEMA = 'wp-codebox/fuzz-suite/v1';
 const WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA = 'wp-codebox/fuzz-suite-result/v1';
@@ -67,6 +54,14 @@ const WORDPRESS_FUZZ_OBSERVATION_SCHEMA = 'homeboy/wordpress-fuzz-observation/v1
 const DEFAULT_FUZZ_SUITE_ABILITY = 'wp-codebox/run-fuzz-suite';
 const DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY = 'wp-codebox/run-wordpress-workload';
 const DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA = 'wp-codebox/wordpress-workload-run/v1';
+const DEFAULT_RUNTIME_CONTRACT_MANIFEST = Object.freeze({
+	schema: 'wp-codebox/runtime-contract-manifest/v1', version: 1,
+	abilities: { wordpressRuntime: { runFuzzSuite: DEFAULT_FUZZ_SUITE_ABILITY, runWorkload: DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY } },
+	commands: { wordpressRuntime: { runFuzzSuite: 'run-fuzz-suite', runWorkload: 'run-wordpress-workload' } },
+	schemas: { wordpressRuntime: { fuzzSuite: WP_CODEBOX_FUZZ_SUITE_SCHEMA, fuzzSuiteResult: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA, workloadRun: DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA } },
+	capabilities: { wordpressRuntime: { commands: ['run-fuzz-suite', 'run-wordpress-workload'], runner_modes: { 'runtime-backed': true } } },
+	readiness: { wordpressRuntime: { schema: WP_CODEBOX_FUZZ_RUNNER_READINESS_SCHEMA, status: 'ready', mode: 'runtime-backed', command_available: true } },
+});
 const WP_CODEBOX_PUBLIC_CLI_COMMANDS = WP_CODEBOX_FUZZ_PUBLIC_COMMANDS;
 const ARTIFACT_POSTPROCESS_COMMAND = 'homeboy.artifact-postprocess';
 const ARTIFACT_POSTPROCESS_CONTRACT = 'homeboy/artifact-postprocess/v1';
@@ -262,11 +257,7 @@ const REQUIRED_WP_CODEBOX_FUZZ_CONTRACT_PATHS = [
 
 function wpCodeboxRuntimeContractManifest(options = {}) {
 	const manifest = options.runtimeContractManifest || options.runtime_contract_manifest || options.manifest || options.contractManifest || options.contract_manifest;
-	if (objectOrUndefined(manifest)) {
-		return manifest;
-	}
-	const source = wpCodeboxCanonicalRuntimeContractSource(options);
-	return source?.manifest || null;
+	return objectOrUndefined(manifest) || DEFAULT_RUNTIME_CONTRACT_MANIFEST;
 }
 
 function wpCodeboxWordPressRuntimeContracts(options = {}) {
@@ -279,95 +270,6 @@ function wpCodeboxWordPressRuntimeContracts(options = {}) {
 	};
 }
 
-function wpCodeboxCanonicalRuntimeContractSource(options = {}) {
-	const resolvedOptions = wpCodeboxRuntimeContractSourceOptions(options);
-	if (typeof options.loadRuntimeContractSource === 'function') {
-		return options.loadRuntimeContractSource(resolvedOptions);
-	}
-	if (typeof options.loadCanonicalRuntimeContractSourceSync === 'function') {
-		return options.loadCanonicalRuntimeContractSourceSync({ ...resolvedOptions, required: false })
-			|| loadWpCodeboxRuntimeContractSourceDirect(resolvedOptions);
-	}
-	if (!loadCanonicalRuntimeContractSourceSync) {
-		return loadWpCodeboxRuntimeContractSourceDirect(resolvedOptions);
-	}
-	try {
-		return loadCanonicalRuntimeContractSourceSync({ ...resolvedOptions, required: false })
-			|| loadWpCodeboxRuntimeContractSourceDirect(resolvedOptions);
-	} catch {
-		return loadWpCodeboxRuntimeContractSourceDirect(resolvedOptions);
-	}
-}
-
-function loadWpCodeboxRuntimeContractSourceDirect(options = {}) {
-	const specifier = options.wpCodeboxCoreModule || options.coreModule;
-	if (!specifier) {
-		return null;
-	}
-	try {
-		const core = require(isPathSpecifier(specifier) ? path.resolve(specifier) : specifier);
-		let manifest = null;
-		if (typeof core?.runtimeContractManifest === 'function') {
-			manifest = core.runtimeContractManifest();
-		} else if (typeof core?.default?.runtimeContractManifest === 'function') {
-			manifest = core.default.runtimeContractManifest();
-		}
-		return objectOrUndefined(manifest) ? {
-			source: specifier,
-			manifest,
-			normalizers: core.RUNTIME_CONTRACT_NORMALIZERS || core.default?.RUNTIME_CONTRACT_NORMALIZERS || {},
-			canonical: true,
-		} : null;
-	} catch {
-		return null;
-	}
-}
-
-function isPathSpecifier(value) {
-	return typeof value === 'string' && (value.startsWith('.') || path.isAbsolute(value) || value.startsWith('~') || value.includes('\\'));
-}
-
-function wpCodeboxRuntimeContractSourceOptions(options = {}) {
-	if (options.wpCodeboxCoreModule || options.coreModule) {
-		return options;
-	}
-	const managedCoreModule = wpCodeboxManagedRuntimeCoreModule(options);
-	if (managedCoreModule) {
-		return { ...options, wpCodeboxCoreModule: managedCoreModule };
-	}
-	const identity = createCodeboxClient(options).identity();
-	return { ...options, wpCodeboxCoreModule: identity.coreModulePath };
-}
-
-function wpCodeboxManagedRuntimeCoreModule(options = {}) {
-	const env = { ...process.env, ...(options.env || {}) };
-	return firstExistingFile([
-		options.wpCodeboxSourceRoot && path.resolve(options.wpCodeboxSourceRoot, 'packages/runtime-core/dist/contracts.js'),
-		options.wp_codebox_source_root && path.resolve(options.wp_codebox_source_root, 'packages/runtime-core/dist/contracts.js'),
-		options.sourceRoot && path.resolve(options.sourceRoot, 'packages/runtime-core/dist/contracts.js'),
-		options.source_root && path.resolve(options.source_root, 'packages/runtime-core/dist/contracts.js'),
-		env.HOMEBOY_WP_CODEBOX_SOURCE_ROOT && path.resolve(env.HOMEBOY_WP_CODEBOX_SOURCE_ROOT, 'packages/runtime-core/dist/contracts.js'),
-		env.WP_CODEBOX_SOURCE_ROOT && path.resolve(env.WP_CODEBOX_SOURCE_ROOT, 'packages/runtime-core/dist/contracts.js'),
-		options.wpCodeboxInstallDir && path.resolve(options.wpCodeboxInstallDir, 'source/packages/runtime-core/dist/contracts.js'),
-		options.wpCodeboxInstallRoot && path.resolve(options.wpCodeboxInstallRoot, 'source/packages/runtime-core/dist/contracts.js'),
-		options.installRoot && path.resolve(options.installRoot, 'source/packages/runtime-core/dist/contracts.js'),
-		env.HOMEBOY_WP_CODEBOX_INSTALL_DIR && path.resolve(env.HOMEBOY_WP_CODEBOX_INSTALL_DIR, 'source/packages/runtime-core/dist/contracts.js'),
-		env.HOMEBOY_WP_CODEBOX_INSTALL_ROOT && path.resolve(env.HOMEBOY_WP_CODEBOX_INSTALL_ROOT, 'source/packages/runtime-core/dist/contracts.js'),
-	]);
-}
-
-function firstExistingFile(values) {
-	for (const value of values.filter(Boolean)) {
-		try {
-			if (fs.statSync(value).isFile()) {
-				return value;
-			}
-		} catch {
-			// Missing managed runtime candidates do not contribute to precedence.
-		}
-	}
-	return undefined;
-}
 
 function missingWpCodeboxFuzzRuntimeContractPaths(manifest) {
 	if (!objectOrUndefined(manifest)) {
@@ -1537,8 +1439,6 @@ function wpCodeboxPublicFuzzCapabilitiesFromRuntimeContract(options = {}) {
 
 function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 	const request = options.request || options.taskRequest || options.task_request || null;
-	const wpCodeboxIdentity = createCodeboxClient(options).identity();
-	const identityDiagnostics = wpCodeboxIdentityMismatchDiagnostics(wpCodeboxIdentity);
 	const capabilities = detectWpCodeboxPublicFuzzCapabilities(options);
 	const manifest = wpCodeboxRuntimeContractManifest(options);
 	const wordpressRuntimeAbilities = objectOrUndefined(manifest?.abilities?.wordpressRuntime) || {};
@@ -1568,13 +1468,6 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 			message: 'WP Codebox fuzz readiness reports this runtime as unsupported for the requested fuzz contract.',
 			unsupported_capabilities: normalizeArray(capabilities.readiness.unsupportedRequiredCapabilities || capabilities.readiness.unsupported_required_capabilities),
 			readiness: capabilities.readiness,
-		});
-	}
-	for (const diagnostic of identityDiagnostics) {
-		missingContracts.push({
-			type: 'identity_mismatch',
-			message: diagnostic.message,
-			diagnostic,
 		});
 	}
 	if (destructiveReadiness.required && !destructiveReadiness.ok) {
@@ -1638,7 +1531,6 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 		status: missingContracts.length === 0 ? 'passed' : 'failed',
 		request_id: request?.task_id,
 		capabilities,
-		wp_codebox_identity: wpCodeboxIdentity,
 		required: {
 			commands: requiredCommands,
 			abilities: requiredAbilities,

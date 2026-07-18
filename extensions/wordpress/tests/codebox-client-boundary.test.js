@@ -15,7 +15,6 @@ const wordpressRoot = path.resolve(__dirname, '..');
 const libRoot = path.join(wordpressRoot, 'lib');
 const allowedInternalFiles = new Set([
 	'codebox-client.js',
-	'wp-codebox-core-loader.js',
 	'wp-codebox-resolver.js',
 ]);
 const legacyInternalPatterns = [
@@ -24,7 +23,7 @@ const legacyInternalPatterns = [
 	/packages\/runtime-(?:core|playground)\/dist/,
 	/packages\/cli\/dist/,
 	/node_modules\/@automattic\/wp-codebox-core/,
-	/loadWpCodeboxCore(?:Export|Function)?/,
+	/runLegacyArtifactApplyPreflight/,
 ];
 
 function walkJavaScriptFiles(directory) {
@@ -62,7 +61,7 @@ try {
 	].join('\n'));
 	fs.chmodSync(bin, 0o755);
 
-	const client = createCodeboxClient({ wpCodeboxBin: bin, env: {} });
+	const client = createCodeboxClient({ wp_codebox_bin: bin, env: {} });
 	assert.equal(client.identity().bin, bin);
 	assert.deepEqual(client.publicCliInvocation(), { command: process.execPath, args: [bin] });
 	assert.deepEqual(publicJsonArgs('run-fuzz-suite', '/tmp/input.json', { runnerMode: 'runtime-backed' }), ['run-fuzz-suite', '--runner-mode=runtime-backed', '--input-file', '/tmp/input.json', '--json']);
@@ -76,13 +75,13 @@ try {
 	assert.deepEqual(JSON.parse(fs.readFileSync(capture, 'utf8')).argv, ['run-fuzz-suite', '--help']);
 
 	const delegatedResult = createCodeboxClient({
-		wpCliBin: 'wp',
+		wp_codebox_bin: bin,
 		runPublicCli: ({ command, args }) => ({ status: 0, stdout: JSON.stringify({ command, args }) }),
 	}).runPublicCliCommand(['run-wordpress-workload', '--help']);
-	assert.equal(JSON.parse(delegatedResult.stdout).command, 'wp');
+	assert.equal(JSON.parse(delegatedResult.stdout).command, bin);
 
 	const preflightResult = createCodeboxClient({
-		wpCodeboxBin: bin,
+		wp_codebox_bin: bin,
 		runPublicCli: ({ command, args }) => ({
 			status: 0,
 			stdout: JSON.stringify({ ready: true, command, args }),
@@ -95,7 +94,7 @@ try {
 	assert.deepEqual(preflightResult.args, ['artifacts', 'apply-preflight', '--bundle', '/tmp/bundle', '--json', '--approved-file', 'wp-content/plugins/example/readme.txt']);
 
 	const discoveryResult = createCodeboxClient({
-		wpCodeboxBin: bin,
+		wp_codebox_bin: bin,
 		runPublicCli: ({ args }) => ({ status: 0, stdout: JSON.stringify({ artifacts: [], args }) }),
 	}).runArtifactsDiscoverPartial({
 		artifactsRoot: '/tmp/artifacts',

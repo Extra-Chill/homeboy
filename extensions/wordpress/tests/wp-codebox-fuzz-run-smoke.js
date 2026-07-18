@@ -76,7 +76,8 @@ assert.equal(wpCodeboxFuzzSuiteAbility({ runtimeContractManifest: manifest }), D
 assert.equal(wpCodeboxFuzzSuiteSchema({ runtimeContractManifest: manifest }), WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 assert.equal(wpCodeboxWordPressWorkloadRunAbility({ runtimeContractManifest: manifest }), DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY);
 assert.equal(wpCodeboxWordPressWorkloadRunSchema({ runtimeContractManifest: manifest }), DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA);
-assert.equal(wpCodeboxRuntimeContractManifest({ loadRuntimeContractSource: () => ({ manifest }) }), manifest);
+assert.equal(wpCodeboxRuntimeContractManifest({ runtimeContractManifest: manifest }), manifest);
+assert.equal(wpCodeboxRuntimeContractManifest().commands.wordpressRuntime.runFuzzSuite, 'run-fuzz-suite');
 
 const artifactPostprocessWorkloadInput = wpCodeboxWordPressWorkloadRunInput({
   id: 'artifact-postprocess-workload-run',
