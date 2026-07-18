@@ -169,7 +169,7 @@ pub struct ChangelogSnapshot {
     pub items: Option<Vec<String>>,
 }
 
-pub type ComponentReleaseState = crate::deploy::ReleaseState;
+pub type ComponentReleaseState = homeboy_release_contract::ReleaseState;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ComponentWithState {
@@ -410,7 +410,7 @@ fn collect_focused_components(
 
 fn compute_status(
     components: &[ComponentWithState],
-    release_buckets: &crate::deploy::ReleaseStateBuckets,
+    release_buckets: &homeboy_release_contract::ReleaseStateBuckets,
 ) -> ContextReportStatus {
     let mut config_gaps = 0;
     let mut gap_details = Vec::new();

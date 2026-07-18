@@ -1,0 +1,15 @@
+[package]
+name = "homeboy-release-contract"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Shared release/deploy state data types (component release state, deploy status enums, release-state buckets). Sits below homeboy-core so both core (fleet/project/context status) and homeboy-release reference them without a cycle."
+publish = false
+
+[lib]
+name = "homeboy_release_contract"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

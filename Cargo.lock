@@ -909,6 +909,7 @@ dependencies = [
  "homeboy-product-identity",
  "homeboy-redaction",
  "homeboy-refactor-contract",
+ "homeboy-release-contract",
  "homeboy-rig-contract",
  "keyring",
  "libc",
@@ -1113,6 +1114,14 @@ dependencies = [
 
 [[package]]
 name = "homeboy-refactor-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "homeboy-release-contract"
 version = "0.1.0"
 dependencies = [
  "serde",
