@@ -294,10 +294,11 @@ fn classify_liveness(
     last_update_age_minutes: Option<i64>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> AgentTaskLiveness {
+    if record.lab_handoff_validation_error().is_some() {
+        return AgentTaskLiveness::Unreconciled;
+    }
     if record.state != agent_task_lifecycle::AgentTaskRunState::Running {
-        if record.state == agent_task_lifecycle::AgentTaskRunState::Queued
-            && handoff_acceptance_expired(record, now)
-        {
+        if record.has_expired_pending_lab_handoff(now) {
             return AgentTaskLiveness::Unreconciled;
         }
         // Queued runs are genuinely pending work unless their controller-owned
@@ -313,7 +314,7 @@ fn classify_liveness(
         last_update_age_minutes.is_some_and(|age| age >= STALE_UPDATE_THRESHOLD_MINUTES);
 
     let has_owner_signal =
-        record.metadata.get("runner_pid").is_some() || record.metadata.get("runner_id").is_some();
+        record.metadata.get("runner_pid").is_some() || record.runner_id().is_some();
 
     match (stale_by_age, has_owner_signal) {
         (true, _) => AgentTaskLiveness::Suspect,
@@ -324,30 +325,12 @@ fn classify_liveness(
     }
 }
 
-fn handoff_acceptance_expired(
-    record: &AgentTaskRunRecord,
-    now: chrono::DateTime<chrono::Utc>,
-) -> bool {
-    record
-        .metadata
-        .get("handoff_acceptance")
-        .filter(|acceptance| acceptance.get("state").and_then(Value::as_str) == Some("pending"))
-        .and_then(|acceptance| acceptance.get("deadline_at").and_then(Value::as_str))
-        .and_then(|deadline| chrono::DateTime::parse_from_rfc3339(deadline).ok())
-        .is_some_and(|deadline| deadline.with_timezone(&chrono::Utc) <= now)
-}
-
 /// Label where a run executes so an operator can trace the runner process.
 fn run_source(record: &AgentTaskRunRecord) -> String {
-    if let Some(runner_id) =
-        metadata_string(&record.metadata, "runner_id").filter(|id| !id.trim().is_empty())
-    {
+    if let Some(runner_id) = record.runner_id() {
         return format!("runner:{runner_id}");
     }
-    if record.metadata.get("remote_run_id").is_some()
-        || record.metadata.get("runner_job_id").is_some()
-        || record.metadata.get("job_id").is_some()
-    {
+    if record.metadata.get("remote_run_id").is_some() || record.runner_job_id().is_some() {
         return "remote".to_string();
     }
     "local".to_string()
@@ -395,8 +378,8 @@ fn discovery_run(
     // record ownership. Controller handoff projections retain their durable
     // record locally across runner reconnects, so their commands must remain
     // controller-scoped until a runner-local record is independently discovered.
-    let runner_id = metadata_string(&record.metadata, "runner_id")
-        .filter(|runner_id| !runner_id.trim().is_empty());
+    let runner_id = record.runner_id().map(str::to_string);
+    let runner_job_id = record.runner_job_id().map(str::to_string);
     let command_prefix = if metadata_string(&record.metadata, "lifecycle_store_owner").as_deref()
         == Some("controller")
     {
@@ -417,9 +400,8 @@ fn discovery_run(
         counts: discovery_counts(&record.tasks),
         submitted_at: record.submitted_at,
         updated_at: record.updated_at,
-        runner_id: metadata_string(&record.metadata, "runner_id"),
-        runner_job_id: metadata_string(&record.metadata, "runner_job_id")
-            .or_else(|| metadata_string(&record.metadata, "job_id")),
+        runner_id,
+        runner_job_id,
         remote_run_id: metadata_string(&record.metadata, "remote_run_id"),
         stale: metadata_bool(&record.metadata, "stale_running"),
         stale_reason: metadata_string(&record.metadata, "stale_running_reason"),

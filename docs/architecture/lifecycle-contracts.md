@@ -81,3 +81,12 @@ it under `results.lifecycle` in the `homeboy/fuzz-campaign/v1` campaign object.
 Snapshot refs are metadata pointers, not implicit filesystem paths. Use
 `artifact_id` or the nested `artifact` contract when snapshot bytes are persisted
 as Homeboy artifacts; use `locator` only for runner-owned opaque references.
+
+## Agent-Task Lab Handoffs
+
+Controller-owned agent-task records persist a typed Lab handoff with pending,
+accepted, or expired state, runner identity, deadline, and the accepted daemon
+job identity. Existing v1 metadata is hydrated only when its redundant identity
+fields agree; malformed legacy metadata fails closed. The compatibility slice
+preserves v1 metadata while new records write the typed projection. Idempotent
+daemon submission remains a follow-up.

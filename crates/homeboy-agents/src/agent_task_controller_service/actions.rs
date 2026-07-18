@@ -309,7 +309,14 @@ pub(super) fn accepted_lab_runner_handoff_identity(execution: &Value) -> Result<
     }
 
     let persisted = lifecycle::status(run_id)?;
-    if persisted.runner_id() != Some(runner_id) || persisted.runner_job_id() != Some(runner_job_id)
+    if !persisted.has_accepted_lab_handoff()
+        || persisted
+            .lab_handoff
+            .as_ref()
+            .is_none_or(|persisted_identity| {
+                persisted_identity.runner_id != runner_id
+                    || persisted_identity.runner_job_id.as_deref() != Some(runner_job_id)
+            })
     {
         return Err(Error::validation_invalid_argument(
             "controller runner handoff identity",

@@ -23,7 +23,9 @@ pub(crate) fn diagnose_run(
         quarantined,
         remediation: remediation.to_string(),
     })?;
-    let reason = if record.schema != schemas::RUN
+    let reason = if record.lab_handoff_validation_error().is_some() {
+        Some(AgentTaskRecordHealthReason::MalformedMetadata)
+    } else if record.schema != schemas::RUN
         || record.lifecycle.schema != RUN_LIFECYCLE_RECORD_SCHEMA
     {
         Some(AgentTaskRecordHealthReason::LegacySchema)
@@ -84,11 +86,16 @@ pub fn reconcile_record_health(dry_run: bool) -> Result<AgentTaskRecordReconcili
             continue;
         }
         report.considered += 1;
-        let reconstructable = matches!(
-            item.reason,
-            AgentTaskRecordHealthReason::MissingMetadata
-                | AgentTaskRecordHealthReason::MalformedMetadata
-        ) && store::read_controller_plan(&run.id).is_ok();
+        let reconstructable = !run
+            .metadata_json
+            .pointer("/agent_task_run/lab_handoff")
+            .is_some()
+            && matches!(
+                item.reason,
+                AgentTaskRecordHealthReason::MissingMetadata
+                    | AgentTaskRecordHealthReason::MalformedMetadata
+            )
+            && store::read_controller_plan(&run.id).is_ok();
         let action = if reconstructable || item.reason == AgentTaskRecordHealthReason::LegacySchema
         {
             "migrate"
@@ -169,6 +176,7 @@ fn reconstruct_record(run: &RunRecord) -> Result<AgentTaskRunRecord> {
         provider_handles: Vec::new(),
         latest_executor_evidence: None,
         lifecycle,
+        lab_handoff: None,
         metadata: json!({
             "lifecycle_reconstruction": {
                 "source": "observation_status_and_durable_plan",
