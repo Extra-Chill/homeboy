@@ -11,6 +11,12 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CAPTURE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OBSERVED_LINE_BYTES: usize = 64 * 1024;
+#[cfg(unix)]
+const PROCESS_TREE_TERM_GRACE: Duration = Duration::from_secs(2);
+#[cfg(unix)]
+const PROCESS_TREE_KILL_GRACE: Duration = Duration::from_secs(2);
+#[cfg(unix)]
+const PROCESS_TREE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 pub type StdoutLineObserver = Arc<dyn Fn(&str) + Send + Sync + 'static>;
 
@@ -182,8 +188,7 @@ pub fn wait_with_bounded_output_until_cancelled_with_stdout_observer(
             break status;
         }
         if is_cancelled() {
-            terminate_process_tree(child.id())?;
-            break child.wait()?;
+            break terminate_process_tree_and_reap(child)?;
         }
         thread::sleep(Duration::from_millis(100));
     };
@@ -220,30 +225,51 @@ pub fn isolate_process_tree(command: &mut Command) {
     }
 }
 
-fn terminate_process_tree(root_pid: u32) -> io::Result<()> {
+fn signal_process_group(root_pid: u32, signal: libc::c_int) -> io::Result<()> {
     #[cfg(unix)]
     unsafe {
         let pgid = -(root_pid as libc::pid_t);
-        if libc::kill(pgid, libc::SIGTERM) != 0 {
+        if libc::kill(pgid, signal) != 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {
                 return Err(error);
             }
-        }
-        thread::sleep(Duration::from_millis(500));
-        if libc::kill(pgid, 0) == 0 {
-            let _ = libc::kill(pgid, libc::SIGKILL);
         }
         Ok(())
     }
 
     #[cfg(not(unix))]
     {
-        let _ = root_pid;
+        let _ = (root_pid, signal);
         Err(io::Error::other(
             "process tree cancellation is not implemented on this platform",
         ))
     }
+}
+
+#[cfg(unix)]
+fn process_group_is_running(root_pid: u32) -> bool {
+    unsafe { libc::kill(-(root_pid as libc::pid_t), 0) == 0 }
+}
+
+#[cfg(unix)]
+fn wait_for_process_group_exit(
+    child: &mut Child,
+    root_pid: u32,
+    grace: Duration,
+    status: &mut Option<ExitStatus>,
+) -> io::Result<bool> {
+    let deadline = std::time::Instant::now() + grace;
+    while process_group_is_running(root_pid) {
+        if status.is_none() {
+            *status = child.try_wait()?;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(PROCESS_TREE_POLL_INTERVAL);
+    }
+    Ok(true)
 }
 
 /// Terminate an isolated child process tree and reap its direct child process.
@@ -251,11 +277,24 @@ fn terminate_process_tree(root_pid: u32) -> io::Result<()> {
 /// termination and reaping of the spawned process.
 pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStatus> {
     #[cfg(unix)]
-    if let Err(error) = terminate_process_tree(child.id()) {
-        // Reap the direct child even if its process-group cleanup failed.
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
+    {
+        let root_pid = child.id();
+        signal_process_group(root_pid, libc::SIGTERM)?;
+        let mut status = child.try_wait()?;
+        if !wait_for_process_group_exit(child, root_pid, PROCESS_TREE_TERM_GRACE, &mut status)? {
+            signal_process_group(root_pid, libc::SIGKILL)?;
+            if !wait_for_process_group_exit(child, root_pid, PROCESS_TREE_KILL_GRACE, &mut status)?
+            {
+                if status.is_none() {
+                    let _ = child.wait()?;
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("process group {root_pid} remained alive after SIGKILL"),
+                ));
+            }
+        }
+        return status.map(Ok).unwrap_or_else(|| child.wait());
     }
 
     #[cfg(not(unix))]
@@ -265,9 +304,8 @@ pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStat
                 return Err(error);
             }
         }
+        child.wait()
     }
-
-    child.wait()
 }
 
 #[derive(Debug)]
@@ -441,5 +479,40 @@ mod tests {
         assert_eq!(captured.metadata.bytes_seen, 2);
         assert_eq!(captured.metadata.bytes_retained, 2);
         assert!(!captured.metadata.truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_reaps_the_entire_isolated_process_group() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pid_file = temp.path().join("descendant.pid");
+        let script = format!(
+            "trap '' TERM; sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; wait",
+            shell_quote_path(&pid_file)
+        );
+        let mut command = Command::new("sh");
+        command.args(["-c", &script]);
+        isolate_process_tree(&mut command);
+        let mut child = command.spawn().expect("spawn process tree");
+
+        let status =
+            wait_with_bounded_output_until_cancelled(&mut child, 1024, || pid_file.exists())
+                .expect("cancel and reap process tree");
+        assert!(!status.status.success());
+
+        let descendant_pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("numeric descendant pid");
+        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+    }
+
+    #[cfg(unix)]
+    fn shell_quote_path(path: &std::path::Path) -> String {
+        format!(
+            "'{}'",
+            path.display().to_string().replace('\'', "'\\\"'\\\"'")
+        )
     }
 }

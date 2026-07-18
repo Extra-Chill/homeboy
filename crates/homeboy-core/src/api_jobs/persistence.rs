@@ -424,6 +424,7 @@ pub(super) fn validate_transition(current: JobStatus, next: JobStatus) -> Result
     let allowed = matches!(
         (current, next),
         (JobStatus::Queued, JobStatus::Running)
+            | (JobStatus::Queued, JobStatus::Failed)
             | (JobStatus::Queued, JobStatus::Cancelled)
             | (JobStatus::Running, JobStatus::Succeeded)
             | (JobStatus::Running, JobStatus::Failed)

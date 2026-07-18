@@ -611,7 +611,7 @@ fn exact_lease_adoption_refuses_owner_lock_and_preserves_store() {
             .expect("owner lock")
             .expect("owner acquired");
 
-        let error = super::adopt_orphaned_lease("lease-dead", true, "127.0.0.1:0")
+        let error = super::adopt_orphaned_lease("lease-dead", true, &[], "127.0.0.1:0")
             .expect_err("owner lock blocks adoption");
         assert!(error.message.contains("owner lock is held"));
         assert_eq!(std::fs::read(&jobs_path).expect("store bytes"), before);
