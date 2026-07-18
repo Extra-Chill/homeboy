@@ -16,6 +16,22 @@ pub(crate) fn remote_lab_artifact_dir(checkout_root: &str) -> String {
     RunnerWorkspaceOutputPaths::artifact_dir_for_workspace(checkout_root)
 }
 
+/// Job-scoped rig registry rooted in the run-owned artifact sibling.
+pub(crate) fn remote_lab_rig_registry_root(checkout_root: &str) -> String {
+    format!("{}/rig-registry", remote_lab_artifact_dir(checkout_root))
+}
+
+pub(crate) fn lab_rig_registry_env(
+    registry_root: Option<&str>,
+) -> std::collections::HashMap<String, String> {
+    registry_root.map_or_else(std::collections::HashMap::new, |root| {
+        std::collections::HashMap::from([(
+            homeboy_core::paths::RIG_REGISTRY_ROOT_ENV.to_string(),
+            root.to_string(),
+        )])
+    })
+}
+
 /// Remote path for the Lab structured-output JSON file.
 ///
 /// `checkout_root` is the runner-side synced checkout (or the resident
@@ -209,6 +225,8 @@ pub(crate) struct LabDispatchExecutionContext<'a> {
     pub(crate) agent_task_run_id: Option<String>,
     pub(crate) lab_runner_workload: Option<LabRunnerWorkload>,
     pub(crate) lab_metadata: serde_json::Value,
+    /// Admitted during standard workspace staging and authoritative at dispatch.
+    pub(crate) rig_registry_root: Option<String>,
     pub(crate) env_resolution_layers: Vec<LabEnvResolutionLayer>,
     pub(crate) secret_env_handoff: super::super::secrets::LabSecretEnvHandoffPlan,
     pub(crate) source_snapshot: Option<SourceSnapshot>,
@@ -242,6 +260,7 @@ fn lab_runner_exec_options(
         homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV.to_string(),
         context.runner_id.to_string(),
     );
+    env.extend(lab_rig_registry_env(context.rig_registry_root.as_deref()));
     RunnerExecOptions {
         cwd: Some(context.remote_cwd.clone()),
         project_id: None,
@@ -299,6 +318,16 @@ pub(crate) fn exec_lab_context(
             env: request.job_overrides.env.clone(),
             secret_names: request.job_overrides.secret_env_names.clone(),
         }))
+        .chain(
+            context
+                .rig_registry_root
+                .as_deref()
+                .map(|root| LabEnvResolutionLayer {
+                    source: "admitted_rig_registry",
+                    env: lab_rig_registry_env(Some(root)),
+                    secret_names: Vec::new(),
+                }),
+        )
         .collect(),
     );
     let mut env = build_lab_offload_env_with_passthroughs(&context.lab_metadata);
@@ -1228,6 +1257,7 @@ pub(crate) fn run_lab_offload_inner(
         dependency_cache_saves,
         runtime_overlay_env,
         runtime_overlay_metadata,
+        rig_registry_root,
     } = workspace_stage;
     plan = next_plan;
     if agent_task_run_id != pre_acceptance_run_id {
@@ -1260,14 +1290,16 @@ pub(crate) fn run_lab_offload_inner(
     let materialized_workspace = MaterializedWorkspace::new(
         runner_id.to_string(),
         remote_cwd.clone(),
-        remote_output_file
-            .as_deref()
-            .map(|_| remote_lab_artifact_dir(&remote_cwd)),
+        (remote_output_file.is_some() || rig_registry_root.is_some())
+            .then(|| remote_lab_artifact_dir(&remote_cwd)),
         cleanup_policy,
     );
 
-    if let Some(output_file) = remote_output_file.as_deref() {
-        ensure_remote_lab_artifact_dir(runner_id, output_file)?;
+    if let Some(artifact_path) = remote_output_file
+        .as_deref()
+        .or(rig_registry_root.as_deref())
+    {
+        ensure_remote_lab_artifact_dir(runner_id, artifact_path)?;
     }
 
     let dependency_hydration = hydrate_for_lab_workspace_exec(
@@ -1374,6 +1406,7 @@ pub(crate) fn run_lab_offload_inner(
         &remapped_args,
     );
     let mut env_delta = std::collections::HashMap::new();
+    env_delta.extend(lab_rig_registry_env(rig_registry_root.as_deref()));
     let rig_component_path_env =
         forward_rig_component_path_env(&mut env_delta, &workspace_mapping)?;
     let declared_dependency_paths_env =
@@ -1435,6 +1468,7 @@ pub(crate) fn run_lab_offload_inner(
         "step": "lab.sync_rigs",
         "synced_count": synced_rigs.len(),
         "source_snapshot_remote_path": remote_cwd,
+        "registry_root": rig_registry_root,
         "rigs": synced_rigs,
         "selected_before_remote_settings_resolution": true,
     });
@@ -1474,6 +1508,7 @@ pub(crate) fn run_lab_offload_inner(
         agent_task_run_id,
         lab_runner_workload: Some(lab_runner_workload),
         lab_metadata,
+        rig_registry_root,
         env_resolution_layers: vec![
             LabEnvResolutionLayer {
                 source: "env_delta",
@@ -1737,7 +1772,105 @@ fn artifact_name_or_kind_is_fuzz_result(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning};
+    use crate::{
+        RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning, RunnerTunnelMode,
+    };
+
+    #[test]
+    fn final_dispatch_reasserts_the_admitted_rig_registry_root() {
+        let root = "/runner/app-homeboy-artifacts/rig-registry".to_string();
+        let args = Vec::new();
+        let request = LabOffloadRequest {
+            command: None,
+            normalized_args: &args,
+            explicit_runner: None,
+            placement: homeboy_cli_contract::Placement::Auto,
+            allow_local_fallback: true,
+            allow_dirty_lab_workspace: false,
+            skip_deps_hydration: false,
+            capture_patch: false,
+            mutation_flag: None,
+            detach_after_handoff: false,
+            output_file_requested: false,
+            read_only_polling: false,
+            local_output_file: None,
+            durable_agent_task_plan: None,
+            source_path: None,
+            verified_cook_baseline: None,
+            require_controller_git_bundle: false,
+            reuse_compatible_snapshot: false,
+            job_overrides: LabJobOverrides {
+                env: std::collections::HashMap::from([(
+                    homeboy_core::paths::RIG_REGISTRY_ROOT_ENV.to_string(),
+                    "/caller/conflict".to_string(),
+                )]),
+                ..Default::default()
+            },
+        };
+        let selection = LabRunnerSelection {
+            runner_id: "homeboy-lab".to_string(),
+            source: LabRunnerSelectionSource::Explicit,
+            mode: RunnerTunnelMode::Reverse,
+        };
+        let contract = LabOffloadCommand {
+            command: homeboy_core::lab_contract::LabCommandContract::portable(
+                "test",
+                None,
+                true,
+                &[],
+            ),
+            required_extensions: Vec::new(),
+            required_capabilities: Vec::new(),
+            workload: None,
+        };
+        let secret_env_handoff = build_lab_secret_env_handoff_plan(&[], &args, Default::default())
+            .expect("empty secret handoff");
+        let runner_status = runner_status(true);
+        let context = LabDispatchExecutionContext {
+            request: &request,
+            selection: &selection,
+            contract: &contract,
+            runner: None,
+            runner_id: "homeboy-lab",
+            runner_status: &runner_status,
+            source_path: std::path::PathBuf::from("/controller/app"),
+            remote_cwd: "/runner/app".to_string(),
+            command: vec!["homeboy".to_string(), "bench".to_string()],
+            remote_command: Vec::new(),
+            remapped_args: Vec::new(),
+            accepted_extension_settings: Vec::new(),
+            secret_preflight_args: Vec::new(),
+            agent_task_run_id: None,
+            lab_runner_workload: None,
+            lab_metadata: serde_json::json!({}),
+            rig_registry_root: Some(root.clone()),
+            env_resolution_layers: Vec::new(),
+            secret_env_handoff,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            capability_preflight: None,
+            provider_preflight: None,
+            path_remaps: Vec::new(),
+            workspace_mapping_metadata: serde_json::json!({}),
+            materialized_workspace: None,
+            dependency_cache_saves: Vec::new(),
+            remote_output_file: None,
+            host_telemetry: None,
+            plan: base_lab_plan(None),
+            messages: Vec::new(),
+            overhead: LabOffloadOverhead::start(),
+            mirror_evidence: false,
+            print_handoff: false,
+            detach_after_handoff: false,
+        };
+        let options =
+            lab_runner_exec_options(&context, request.job_overrides.env.clone(), Vec::new());
+
+        assert_eq!(
+            options.env.get(homeboy_core::paths::RIG_REGISTRY_ROOT_ENV),
+            Some(&root)
+        );
+    }
 
     #[test]
     fn inner_uses_authoritative_preflight_status_not_conflicting_cwd_projection() {

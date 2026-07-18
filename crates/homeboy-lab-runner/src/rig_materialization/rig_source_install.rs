@@ -5,6 +5,7 @@
 //! metadata, and validating installed source paths. Kept in a sibling module so
 //! the root stays under the structural item-count threshold (#5241).
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use homeboy_core::{Error, Result};
@@ -56,28 +57,63 @@ fn exec_runner_rig_sources_command(
     runner_id: &str,
     command_path: &str,
     remote_cwd: &str,
+    registry_root: &str,
     args: &[&str],
 ) -> Result<(RunnerExecOutput, i32)> {
+    exec(
+        runner_id,
+        RunnerExecOptions::command(runner_rig_sources_command(command_path, args))
+            .with_cwd(remote_cwd)
+            .with_env(rig_registry_env(registry_root)),
+    )
+}
+
+pub(super) fn runner_rig_sources_command(command_path: &str, args: &[&str]) -> Vec<String> {
     let mut command = vec![
         command_path.to_string(),
         "rig".to_string(),
         "sources".to_string(),
     ];
     command.extend(args.iter().map(|arg| arg.to_string()));
-    exec(
-        runner_id,
-        RunnerExecOptions::command(command).with_cwd(remote_cwd),
-    )
+    command
+}
+
+pub(super) fn runner_rig_install_command(
+    command_path: &str,
+    source: &str,
+    rig_id: &str,
+) -> Vec<String> {
+    vec![
+        command_path.to_string(),
+        "rig".to_string(),
+        "install".to_string(),
+        source.to_string(),
+        "--id".to_string(),
+        rig_id.to_string(),
+    ]
+}
+
+pub(super) fn rig_registry_env(registry_root: &str) -> HashMap<String, String> {
+    HashMap::from([(
+        homeboy_core::paths::RIG_REGISTRY_ROOT_ENV.to_string(),
+        registry_root.to_string(),
+    )])
 }
 
 pub(super) fn remove_runner_installed_rig_source(
     runner_id: &str,
     command_path: &str,
     remote_cwd: &str,
+    registry_root: &str,
     rig_id: &str,
 ) -> Result<Option<String>> {
-    let (list_output, list_exit_code) =
-        exec_runner_rig_sources_command(runner_id, command_path, remote_cwd, &["list"])?;
+    let (list_output, list_exit_code) = exec_runner_rig_sources_command(
+        runner_id,
+        command_path,
+        remote_cwd,
+        registry_root,
+        &["list"],
+    )?;
     if list_exit_code != 0 {
         return Err(Error::validation_invalid_argument(
             "rig",
@@ -97,6 +133,7 @@ pub(super) fn remove_runner_installed_rig_source(
         runner_id,
         command_path,
         remote_cwd,
+        registry_root,
         &["remove", selector.as_str()],
     )?;
     if remove_exit_code != 0 {
@@ -206,6 +243,34 @@ mod tests {
             vec![RunnerRequiredTool::homeboy()]
         );
         assert!(!preflight.is_empty());
+    }
+
+    #[test]
+    fn runner_rig_commands_and_env_share_the_admitted_registry_root() {
+        let root = "/runner/app-homeboy-artifacts/rig-registry";
+        assert_eq!(
+            runner_rig_sources_command("homeboy", &["list"]),
+            vec!["homeboy", "rig", "sources", "list"]
+        );
+        assert_eq!(
+            runner_rig_sources_command("homeboy", &["remove", "old-source"]),
+            vec!["homeboy", "rig", "sources", "remove", "old-source"]
+        );
+        assert_eq!(
+            runner_rig_install_command("homeboy", "/runner/source", "fixture"),
+            vec![
+                "homeboy",
+                "rig",
+                "install",
+                "/runner/source",
+                "--id",
+                "fixture"
+            ]
+        );
+        assert_eq!(
+            rig_registry_env(root).get(homeboy_core::paths::RIG_REGISTRY_ROOT_ENV),
+            Some(&root.to_string())
+        );
     }
 
     #[test]

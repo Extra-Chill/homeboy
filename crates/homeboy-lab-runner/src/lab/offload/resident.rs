@@ -174,6 +174,7 @@ pub(crate) fn run_runner_resident_lab_offload(
         agent_task_run_id,
         lab_runner_workload: Some(lab_runner_workload),
         lab_metadata,
+        rig_registry_root: None,
         env_resolution_layers: vec![LabEnvResolutionLayer {
             source: SECRET_ENV_PLAN_ENV_DELTA_SOURCE,
             env: secret_env_handoff.env_delta.clone(),
