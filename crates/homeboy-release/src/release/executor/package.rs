@@ -50,7 +50,16 @@ pub(crate) fn run_package(
         ));
     }
 
-    build_declared_component_artifact(component, declared_build_artifact)?;
+    let declared_artifact_built =
+        build_declared_component_artifact(component, declared_build_artifact)?;
+    if declared_artifact_built {
+        collect_declared_build_artifact(
+            state,
+            declared_build_artifact,
+            component_id,
+            component_local_path,
+        )?;
+    }
 
     let extra_config = package_build_config(skip_build_validation);
     let mut responses = Vec::new();
@@ -76,12 +85,14 @@ pub(crate) fn run_package(
         }));
     }
 
-    collect_declared_build_artifact(
-        state,
-        declared_build_artifact,
-        component_id,
-        component_local_path,
-    )?;
+    if !declared_artifact_built {
+        collect_declared_build_artifact(
+            state,
+            declared_build_artifact,
+            component_id,
+            component_local_path,
+        )?;
+    }
 
     let data = if responses.len() == 1 {
         let response = responses.pop().expect("single package response");
@@ -107,11 +118,11 @@ pub(crate) fn run_package(
 fn build_declared_component_artifact(
     component: &Component,
     declared_build_artifact: Option<&str>,
-) -> Result<()> {
+) -> Result<bool> {
     if declared_build_artifact.is_none_or(|path| path.trim().is_empty())
         || !component.has_script(ExtensionCapability::Build)
     {
-        return Ok(());
+        return Ok(false);
     }
 
     let (exit_code, build_error) = homeboy_core::build::build_component(component);
@@ -127,7 +138,7 @@ fn build_declared_component_artifact(
         ));
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Add a component-owned deploy artifact even when its packaging provider also
