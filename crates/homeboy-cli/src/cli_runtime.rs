@@ -1633,6 +1633,32 @@ mod tests {
     }
 
     #[test]
+    fn scoped_cook_runner_is_preserved_for_pinned_reexecution() {
+        let matches = Cli::command_with_scoped_lab_args()
+            .try_get_matches_from([
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--to-worktree",
+                "homeboy@fix-explicit-runner",
+                "--prompt",
+                "fix the issue",
+                "--verify",
+                "true",
+                "--runner",
+                "selected-lab",
+            ])
+            .expect("scoped cook accepts an explicit runner");
+        let (cli, _) = Cli::from_registered_arg_matches(&matches).expect("typed cli");
+
+        assert_eq!(cli.runner.as_deref(), Some("selected-lab"));
+        assert_eq!(
+            resource_policy_runner_hint(&cli, Some("default-lab")),
+            Some("selected-lab")
+        );
+    }
+
+    #[test]
     fn managed_runner_context_clears_before_production_run_command() {
         let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let previous = [
