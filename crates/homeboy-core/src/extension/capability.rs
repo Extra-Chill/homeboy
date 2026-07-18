@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use super::manifest::ExtensionManifest;
 use super::runner::ExtensionRunner;
-use super::ResolvedExtensionInvocationContext;
+use crate::extension_invocation_context::ResolvedExtensionInvocationContext;
 use crate::extension_store::{extension_path, load_extension};
 use homeboy_extension_contract::ExtensionCapability;
 

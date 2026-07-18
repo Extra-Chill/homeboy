@@ -26,7 +26,7 @@ use super::manifest::{ExtensionManifest, RuntimeConfig};
 use super::read_source_revision;
 use super::runner_contract::RunnerStepFilter;
 use super::runtime_helper;
-use super::ResolvedExtensionInvocationContext;
+use crate::extension_invocation_context::ResolvedExtensionInvocationContext;
 
 pub(crate) use action::execute_action;
 pub use readiness::{extension_ready_status, is_extension_compatible, ExtensionReadyStatus};
