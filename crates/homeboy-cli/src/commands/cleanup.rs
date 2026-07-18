@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 use homeboy::core::cleanup::{
@@ -329,28 +329,8 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     }
     let mut categories = Vec::new();
 
-    if selected.skips_repo_artifacts_without_checkout(current_dir_is_git_checkout()) {
-        categories.push(repo_artifacts_checkout_skipped_category(apply));
-    } else if selected.includes(CleanupCategoryArg::RepoArtifacts) {
-        let output = cleanup::cleanup_artifacts(ArtifactCleanupOptions {
-            path: None,
-            apply,
-            self_artifacts: false,
-            temp_roots: Vec::new(),
-            sort: ArtifactCleanupSort::Discovery,
-            limit: None,
-            merged_only: false,
-        })?;
-        categories.push(category_from_output(
-            REPO_ARTIFACTS_METADATA,
-            apply,
-            output.candidate_count,
-            output.applied_count,
-            output.skipped_count,
-            output.estimated_bytes,
-            output.reclaimed_bytes,
-            output,
-        )?);
+    if selected.includes(CleanupCategoryArg::RepoArtifacts) {
+        categories.push(repo_artifacts_category(apply)?);
     }
 
     if selected.includes(CleanupCategoryArg::TaskWorktrees) {
@@ -535,39 +515,165 @@ impl CleanupCategorySelection {
         (self.include.is_empty() || self.include.contains(&category))
             && !self.exclude.contains(&category)
     }
+}
 
-    fn skips_repo_artifacts_without_checkout(&self, in_git_checkout: bool) -> bool {
-        !in_git_checkout
-            && self.include.is_empty()
-            && !self.exclude.contains(&CleanupCategoryArg::RepoArtifacts)
+#[derive(Debug, Serialize)]
+struct RepoArtifactRootDiagnostic {
+    scope: &'static str,
+    path: Option<String>,
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<cleanup::ArtifactCleanupOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn repo_artifacts_category(apply: bool) -> homeboy::core::Result<CleanupInventoryCategory> {
+    let configured_roots: Vec<PathBuf> = homeboy::core::component::inventory()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|component| PathBuf::from(component.local_path))
+        .collect();
+    let include_source_checkout = configured_roots.is_empty();
+    let mut output = cleanup_repo_artifact_roots(repo_artifact_roots(
+        configured_roots,
+        include_source_checkout,
+        apply,
+    ));
+    if !include_source_checkout
+        && output
+            .diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.success)
+    {
+        let source_output =
+            cleanup_repo_artifact_roots(repo_artifact_roots(Vec::new(), true, apply));
+        output.candidate_count += source_output.candidate_count;
+        output.applied_count += source_output.applied_count;
+        output.skipped_count += source_output.skipped_count;
+        output.estimated_bytes += source_output.estimated_bytes;
+        output.reclaimed_bytes += source_output.reclaimed_bytes;
+        output.diagnostics.extend(source_output.diagnostics);
     }
-}
-
-fn current_dir_is_git_checkout() -> bool {
-    Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(Path::new("."))
-        .output()
-        .is_ok_and(|output| output.status.success() && output.stdout.trim_ascii() == b"true")
-}
-
-fn repo_artifacts_checkout_skipped_category(apply: bool) -> CleanupInventoryCategory {
-    CleanupInventoryCategory {
+    let failure_count = output
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| !diagnostic.success)
+        .count();
+    Ok(CleanupInventoryCategory {
         category: REPO_ARTIFACTS_METADATA.category,
         canonical_cleanup_command: REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply),
-        specialist_command: "homeboy cleanup artifacts --path <PATH>".to_string(),
+        specialist_command: REPO_ARTIFACTS_METADATA
+            .specialist_command(apply)
+            .to_string(),
         included: true,
-        skipped: true,
-        skip_reason: Some(
-            "current directory is not inside a git checkout; run from a checkout or use `homeboy cleanup artifacts --path <PATH>`".to_string(),
-        ),
+        skipped: output.candidate_count == 0
+            && output
+                .diagnostics
+                .iter()
+                .all(|diagnostic| !diagnostic.success),
+        skip_reason: (failure_count > 0)
+            .then(|| format!("{failure_count} owned cleanup root(s) could not be inspected")),
+        candidate_count: output.candidate_count,
+        applied_count: output.applied_count,
+        skipped_count: output.skipped_count + failure_count,
+        estimated_bytes: output.estimated_bytes,
+        reclaimed_bytes: output.reclaimed_bytes,
+        output: serde_json::to_value(output.diagnostics).map_err(|error| {
+            homeboy::core::Error::internal_json(
+                error.to_string(),
+                Some("repo_artifacts".to_string()),
+            )
+        })?,
+    })
+}
+
+struct RepoArtifactRootsCleanup {
+    diagnostics: Vec<RepoArtifactRootDiagnostic>,
+    candidate_count: usize,
+    applied_count: usize,
+    skipped_count: usize,
+    estimated_bytes: u64,
+    reclaimed_bytes: u64,
+}
+
+fn cleanup_repo_artifact_roots(
+    roots: Vec<(&'static str, ArtifactCleanupOptions)>,
+) -> RepoArtifactRootsCleanup {
+    let mut output = RepoArtifactRootsCleanup {
+        diagnostics: Vec::new(),
         candidate_count: 0,
         applied_count: 0,
-        skipped_count: 1,
+        skipped_count: 0,
         estimated_bytes: 0,
         reclaimed_bytes: 0,
-        output: serde_json::json!({ "path_remediation": "homeboy cleanup artifacts --path <PATH>" }),
+    };
+    for (scope, options) in roots {
+        match cleanup::cleanup_artifacts(options) {
+            Ok(root_output) => {
+                output.candidate_count += root_output.candidate_count;
+                output.applied_count += root_output.applied_count;
+                output.skipped_count += root_output.skipped_count;
+                output.estimated_bytes += root_output.estimated_bytes;
+                output.reclaimed_bytes += root_output.reclaimed_bytes;
+                output.diagnostics.push(RepoArtifactRootDiagnostic {
+                    scope,
+                    path: Some(root_output.root.clone()),
+                    success: true,
+                    output: Some(root_output),
+                    error: None,
+                });
+            }
+            Err(error) => output.diagnostics.push(RepoArtifactRootDiagnostic {
+                scope,
+                path: None,
+                success: false,
+                output: None,
+                error: Some(error.message),
+            }),
+        }
     }
+    output
+}
+
+fn repo_artifact_roots(
+    configured_roots: Vec<PathBuf>,
+    include_source_checkout: bool,
+    apply: bool,
+) -> Vec<(&'static str, ArtifactCleanupOptions)> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+    for path in configured_roots {
+        if seen.insert(path.clone()) {
+            roots.push((
+                "configured_component",
+                ArtifactCleanupOptions {
+                    path: Some(path),
+                    apply,
+                    self_artifacts: false,
+                    temp_roots: Vec::new(),
+                    sort: ArtifactCleanupSort::Discovery,
+                    limit: None,
+                    merged_only: false,
+                },
+            ));
+        }
+    }
+    if include_source_checkout {
+        roots.push((
+            "homeboy_source_checkout",
+            ArtifactCleanupOptions {
+                path: None,
+                apply,
+                self_artifacts: true,
+                temp_roots: Vec::new(),
+                sort: ArtifactCleanupSort::Discovery,
+                limit: None,
+                merged_only: false,
+            },
+        ));
+    }
+    roots
 }
 
 fn category_from_output<T: Serialize>(
@@ -1032,6 +1138,8 @@ mod tests {
     use clap::Parser;
     use homeboy::runner::runners::{RunnerActiveJobState, RunnerSessionState, RunnerStatusReport};
     use serde_json::json;
+    use std::process::Command;
+    use tempfile::TempDir;
 
     use crate::cli_surface::{Cli, Commands};
 
@@ -1117,58 +1225,62 @@ mod tests {
     }
 
     #[test]
-    fn repo_artifacts_checkout_precondition_is_default_only() {
-        let cases = [
-            ("default", vec![], vec![], true, true),
-            (
-                "explicit include remains strict",
-                vec![CleanupCategoryArg::RepoArtifacts],
-                vec![],
-                true,
-                false,
-            ),
-            (
-                "exclude remains excluded",
-                vec![],
-                vec![CleanupCategoryArg::RepoArtifacts],
-                false,
-                false,
-            ),
+    fn aggregate_repo_artifact_roots_do_not_depend_on_the_caller_directory() {
+        let configured = vec![
+            PathBuf::from("/configured/one"),
+            PathBuf::from("/configured/two"),
         ];
+        let roots = repo_artifact_roots(configured.clone(), true, false);
 
-        for (name, include, exclude, included, skipped) in cases {
-            let selection = CleanupCategorySelection::new(include, exclude);
-            assert_eq!(
-                selection.includes(CleanupCategoryArg::RepoArtifacts),
-                included,
-                "{name}: selection"
-            );
-            assert_eq!(
-                selection.skips_repo_artifacts_without_checkout(false),
-                skipped,
-                "{name}: checkout precondition"
-            );
-        }
+        assert_eq!(roots.len(), 3);
+        assert_eq!(roots[0].0, "configured_component");
+        assert_eq!(roots[0].1.path.as_ref(), Some(&configured[0]));
+        assert_eq!(roots[1].0, "configured_component");
+        assert_eq!(roots[1].1.path.as_ref(), Some(&configured[1]));
+        assert_eq!(roots[2].0, "homeboy_source_checkout");
+        assert!(roots[2].1.self_artifacts);
+        assert!(roots
+            .iter()
+            .all(|(_, options)| options.path.is_some() || options.self_artifacts));
     }
 
     #[test]
-    fn repo_artifacts_checkout_skip_is_structured_with_path_remediation() {
-        let category = repo_artifacts_checkout_skipped_category(false);
+    fn aggregate_repo_artifact_roots_deduplicate_configured_paths_and_preserve_apply() {
+        let root = PathBuf::from("/configured/root");
+        let roots = repo_artifact_roots(vec![root.clone(), root], false, true);
 
-        assert_eq!(category.category, "repo_artifacts");
-        assert!(category.included);
-        assert!(category.skipped);
-        assert_eq!(category.skipped_count, 1);
-        assert_eq!(
-            category.skip_reason.as_deref(),
-            Some(
-                "current directory is not inside a git checkout; run from a checkout or use `homeboy cleanup artifacts --path <PATH>`"
-            )
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].0, "configured_component");
+        assert_eq!(roots[0].1.path, Some(PathBuf::from("/configured/root")));
+        assert!(roots[0].1.apply);
+    }
+
+    #[test]
+    fn invalid_owned_root_does_not_abort_other_repo_artifact_roots() {
+        let repository = TempDir::new().expect("repository");
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repository.path())
+            .output()
+            .expect("initialize repository");
+        std::fs::create_dir_all(repository.path().join("target/debug")).expect("target directory");
+        std::fs::write(repository.path().join("target/debug/app"), "artifact")
+            .expect("target artifact");
+
+        let roots = repo_artifact_roots(
+            vec![
+                PathBuf::from("/does/not/exist"),
+                repository.path().to_path_buf(),
+            ],
+            false,
+            false,
         );
-        assert_eq!(
-            category.output["path_remediation"],
-            "homeboy cleanup artifacts --path <PATH>"
-        );
+        let output = cleanup_repo_artifact_roots(roots);
+
+        assert_eq!(output.diagnostics.len(), 2);
+        assert!(!output.diagnostics[0].success);
+        assert!(output.diagnostics[1].success);
+        assert_eq!(output.candidate_count, 1);
     }
 
     #[test]
