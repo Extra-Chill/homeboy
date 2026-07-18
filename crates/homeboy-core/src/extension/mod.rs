@@ -38,15 +38,15 @@ pub mod trace;
 pub mod update_check;
 mod validation;
 
-pub use capability::{
-    build_scenario_runner, extract_component_extension_settings, path_list_env_value,
-    resolve_execution_context, resolve_extension_for_capability, ExtensionExecutionContext,
-    ScenarioRunnerOptions,
-};
-pub(crate) use capability::{
+pub(crate) use crate::extension_execution::{
     extension_guidance_hints, has_linked_extension_for_capability,
     resolve_execution_context_if_available, stderr_tail,
 };
+pub use crate::extension_execution::{
+    extract_component_extension_settings, path_list_env_value, resolve_execution_context,
+    resolve_extension_for_capability, ExtensionExecutionContext,
+};
+pub use capability::{build_scenario_runner, ScenarioRunnerOptions};
 pub use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
