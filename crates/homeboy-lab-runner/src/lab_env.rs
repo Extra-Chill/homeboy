@@ -12,6 +12,7 @@ use homeboy_core::observation::{
 const SETTINGS_DIAGNOSTICS_SCHEMA: &str = "homeboy/lab-offload-settings-env/v1";
 pub(super) const DECLARED_DEPENDENCY_PATHS_ENV: &str = "HOMEBOY_DECLARED_DEPENDENCY_PATHS";
 const DECLARED_DEPENDENCY_PATHS_SCHEMA: &str = "homeboy/lab-offload-declared-dependency-paths/v1";
+const LAB_OFFLOAD_METADATA_ENV_MAX_BYTES: usize = 128 * 1024;
 
 pub(super) fn forward_env_if_present(env: &mut HashMap<String, String>, name: &str) {
     if let Ok(value) = std::env::var(name) {
@@ -474,6 +475,42 @@ mod tests {
         assert_eq!(
             diagnostics["forwarded_environment"][0]["value_preview"],
             "<redacted>"
+        );
+    }
+
+    #[test]
+    fn oversized_workspace_manifest_is_excluded_from_lab_environment() {
+        let metadata = serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "remote_workspace": "/runner/workspace",
+            "workspace_verification": {
+                "content_hash": "sha256:authoritative",
+                "identity": "snapshot:authoritative",
+                "content_manifest": {
+                    "entry_count": 1,
+                    "entries": [{ "path": "node_modules/fixture", "payload": "x".repeat(LAB_OFFLOAD_METADATA_ENV_MAX_BYTES) }]
+                }
+            }
+        });
+
+        let env = build_lab_offload_env(&metadata);
+        let serialized = env
+            .get(LAB_OFFLOAD_METADATA_ENV)
+            .expect("Lab metadata environment");
+        let transported: serde_json::Value =
+            serde_json::from_str(serialized).expect("transported metadata JSON");
+
+        assert!(serialized.len() < LAB_OFFLOAD_METADATA_ENV_MAX_BYTES);
+        assert!(transported["workspace_verification"]
+            .get("content_manifest")
+            .is_none());
+        assert_eq!(
+            transported["workspace_verification"]["content_hash"],
+            "sha256:authoritative"
+        );
+        assert_eq!(
+            transported["workspace_verification"]["identity"],
+            "snapshot:authoritative"
         );
     }
 
