@@ -31,7 +31,7 @@ if (process.argv[2] !== 'recipe-run' || recipeIndex < 0) {
   process.exit(2);
 }
 const recipe = JSON.parse(fs.readFileSync(process.argv[recipeIndex + 1], 'utf8'));
-const extraPlugins = recipe.inputs.extraPlugins || recipe.inputs.extra_plugins || [];
+const extraPlugins = recipe.inputs.extra_plugins || [];
 const plugin = extraPlugins.find((entry) => entry.slug === 'prepare-steps-fixture');
 if (!plugin || !plugin.sourceSubpath || !fs.existsSync(plugin.source + '/' + plugin.sourceSubpath + '/includes/react-admin/feature-config.php')) {
   process.stderr.write('generated feature config missing before wp-codebox launch\\n');

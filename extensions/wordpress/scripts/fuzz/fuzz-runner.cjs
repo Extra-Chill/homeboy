@@ -19,7 +19,6 @@ const {
 	writeHomeboyFuzzArtifactFiles,
 	writeHomeboyFuzzResultsFile,
 } = require('../../lib/wordpress-fuzz-runner');
-const { loadWpCodeboxCoreFunction } = require('../../lib/wp-codebox-core-loader');
 const {
 	publicFuzzCliRunnerModeForRequest,
 	wpCodeboxFuzzSuiteAbility,
@@ -134,17 +133,7 @@ async function runWpCodeboxAgentTask(request) {
 	return { json: normalizeWpCodeboxAgentTaskOutput(result, request) };
 }
 
-async function discoverRuntimeContractManifest(env = process.env) {
-	try {
-		const runtimeContractManifest = await loadWpCodeboxCoreFunction('runtimeContractManifest', {
-			wpCodeboxCoreModule: env.HOMEBOY_WP_CODEBOX_CORE_MODULE,
-		});
-		if (typeof runtimeContractManifest === 'function') {
-			return runtimeContractManifest();
-		}
-	} catch {
-		// Older WP Codebox installs do not publish the core package yet.
-	}
+async function discoverRuntimeContractManifest() {
 	return wpCodeboxRuntimeContractManifest();
 }
 
@@ -180,23 +169,10 @@ function requiresCodeboxTaskAdapter(request) {
 		return false;
 	}
 	const config = request.executor?.config || {};
-	const runtimeRequirements = config.runtime_requirements || config.runtimeRequirements || {};
+	const runtimeRequirements = config.runtime_requirements || {};
 	return [
-		config.component_contracts,
-		config.componentContracts,
-		config.runtime_overlays,
-		config.runtimeOverlays,
-		config.runtime_mounts,
-		config.runtimeMounts,
 		runtimeRequirements.extra_plugins,
-		runtimeRequirements.extraPlugins,
-		runtimeRequirements.component_contracts,
-		runtimeRequirements.componentContracts,
 		runtimeRequirements.runtime_mounts,
-		runtimeRequirements.runtimeMounts,
-		runtimeRequirements.mounts,
-		runtimeRequirements.plugins,
-		runtimeRequirements.components,
 	].some((value) => Array.isArray(value) && value.length > 0);
 }
 

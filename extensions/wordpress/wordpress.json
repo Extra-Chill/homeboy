@@ -1210,13 +1210,6 @@
       "description": "Backend-neutral WordPress runtime blueprint merged into the selected runtime adapter recipe. Empty object means stock WordPress. Runtime adapters normalize this canonical setting to backend-specific fields."
     },
     {
-      "id": "wp_codebox_blueprint",
-      "label": "WP Codebox blueprint",
-      "type": "object",
-      "default": {},
-      "description": "Legacy compatibility alias for wordpress_runtime_blueprint. Prefer wordpress_runtime_blueprint for new configuration."
-    },
-    {
       "id": "wp_codebox_extra_plugins",
       "label": "WP Codebox extra plugins",
       "type": "array",
@@ -1243,27 +1236,6 @@
       "type": "array",
       "default": [],
       "description": "Backend-neutral recipe steps to run after the measured WordPress runtime bench step in the same disposable runtime. Use for generic post-bench browser probes, browser actions, or reviewer-facing evidence capture after workloads mutate WordPress state."
-    },
-    {
-      "id": "wp_codebox_workloads",
-      "label": "Bench workloads",
-      "type": "array",
-      "default": [],
-      "description": "Legacy compatibility alias for wordpress_runtime_workloads. Prefer wordpress_runtime_workloads for new configuration."
-    },
-    {
-      "id": "wp_codebox_recipe_prepare_steps",
-      "label": "WP Codebox recipe prepare steps",
-      "type": "array",
-      "default": [],
-      "description": "Legacy compatibility alias for wordpress_runtime_prepare_steps. Prefer wordpress_runtime_prepare_steps for new configuration."
-    },
-    {
-      "id": "wp_codebox_recipe_post_steps",
-      "label": "WP Codebox recipe post steps",
-      "type": "array",
-      "default": [],
-      "description": "Legacy compatibility alias for wordpress_runtime_post_steps. Prefer wordpress_runtime_post_steps for new configuration."
     },
     {
       "id": "wp_codebox_bootstrap_files",

@@ -67,22 +67,6 @@ select a backend; currently supported value: `wp-codebox`.
 Reusable WordPress/WooCommerce workload helpers live under `scripts/bench/lib/`.
 Workloads can require them from the WP Codebox-mounted extension path.
 
-### WP Codebox Browser Coverage Primitive
-
-`lib/wp-codebox-browser-coverage.js` provides the shared declaration shape for
-WP Codebox browser request-coverage workloads. The helper normalizes
-`homeboy/wordpress-wp-codebox-browser-coverage/v1` declarations with:
-
-- `component_id` for the Homeboy component under coverage.
-- `required_file` and `activation_file` for plugin/theme presence and activation.
-- `scenarios[]` with stable scenario ids and optional browser step files.
-- `profile` and `profile_metadata` for WP version, viewport, timeouts, inputs,
-  assumptions, and ownership metadata.
-- `trace_command` for the caller-owned trace entry point.
-
-This is a contract helper only. WP Codebox still owns recipe execution and
-browser artifact semantics; product rigs own their scenario files and setup code.
-
 ### REST Route Discovery
 
 `lib/wordpress-rest-route-discovery.js` provides generic WordPress REST route
@@ -385,14 +369,14 @@ runtime, component mount, command execution, and artifacts, and emits the same
 
 Each file under `tests/bench/*.php` returns a callable. The callable may return
 numeric metrics directly or `{metrics, metadata, artifacts}`. Components may also
-declare configured workloads via the legacy `wp_codebox_workloads` setting; the
-WordPress runner maps those declarations into a temporary WP Codebox recipe
-alongside `validation_dependencies`, legacy `wp_codebox_file_mounts`,
+declare configured workloads via the canonical `wordpress_runtime_workloads`
+setting; the WordPress runner maps those declarations into a temporary WP
+Codebox recipe alongside `validation_dependencies`, `wp_codebox_file_mounts`,
 `wp_config_defines`, `bench_env`, shared-state mounts, and browser handoff
 descriptors.
 
-The generated recipe is the single runtime entry point for benchmarks: legacy
-`wp_codebox_blueprint` becomes `runtime.blueprint`, dependencies become recipe
+The generated recipe is the single runtime entry point for benchmarks:
+`wordpress_runtime_blueprint` becomes `runtime.blueprint`, dependencies become recipe
 plugin inputs, and scenario manifests compile into configured workloads.
 Fixture profiles can seed the sandbox through WP Codebox `inputs.siteSeeds`
 without product-specific recipe steps:
@@ -783,11 +767,11 @@ Configure per-component in the component's homeboy/component config under
 | `user` | string | `""` | WP-CLI user (email/login/ID); appended as `--user` when set |
 | `wp_config_defines` | object | `{}` | `CONSTANT_NAME => value` map appended to the runtime `wp-tests-config.php`; PHP type preserved via `var_export` |
 | `bench_env` | object | `{}` | `NAME => value` env vars forwarded into the runtime (workloads/fixtures read via `getenv()`) |
-| `wp_codebox_core_module` | string | `""` | Legacy compatibility setting for the host-side ESM module path or package specifier that exports WP Codebox recipe builders for bench recipe generation |
-| `wp_codebox_blueprint` | object | `{}` | Legacy WP Codebox bench setting for the runtime blueprint merged into the generated recipe |
-| `wp_codebox_extra_plugins` | array | `[]` | Legacy WP Codebox bench setting for additional plugin entries that are not Homeboy validation dependencies |
-| `wp_codebox_workloads` | array | `[]` | Legacy WP Codebox bench setting for declared workloads passed to `wordpress.bench` through the generated recipe after deps and component load |
-| `wp_codebox_file_mounts` | array | `[]` | Legacy WP Codebox bench setting for files from the component or validation dependencies mounted into explicit WordPress runtime paths |
+| `wp_codebox_core_module` | string | `""` | Host-side ESM module path or package specifier that exports WP Codebox recipe builders for bench recipe generation |
+| `wordpress_runtime_blueprint` | object | `{}` | Runtime blueprint merged into the generated recipe |
+| `wp_codebox_extra_plugins` | array | `[]` | Additional plugin entries that are not Homeboy validation dependencies |
+| `wordpress_runtime_workloads` | array | `[]` | Workloads passed to `wordpress.bench` through the generated recipe after deps and component load |
+| `wp_codebox_file_mounts` | array | `[]` | Files from the component or validation dependencies mounted into explicit WordPress runtime paths |
 | `fixture_profile` | object | `{}` | Product-agnostic fixture profile mapped to WP Codebox `inputs.siteSeeds` for sandbox setup before fuzz/coverage workloads run |
 | `bench_browser_target` | object | `{}` | Browser bench target descriptor (see Bench runner above) |
 

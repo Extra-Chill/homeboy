@@ -59,7 +59,7 @@ jq -n '{
     seed: 123,
     prompt: "Reproduce the failure.",
     openai_api_key: "should-not-leak",
-    wp_codebox_blueprint: {
+    wordpress_runtime_blueprint: {
         steps: [
             { step: "login", username: "admin", password: "should-not-leak" }
         ]

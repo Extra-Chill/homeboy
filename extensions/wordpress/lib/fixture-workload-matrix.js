@@ -104,7 +104,7 @@ function buildWpCodeboxFixtureWorkloadMatrixRecipe(input = {}) {
 		},
 		inputs: compactObject({
 			mounts,
-			extra_plugins: normalizeArray(input.extraPlugins || input.extra_plugins),
+			extra_plugins: normalizeArray(input.extra_plugins),
 		}),
 		workflow: { steps: [...setupSteps, ...workloadSteps] },
 		artifacts: { directory: artifactsDirectory },
