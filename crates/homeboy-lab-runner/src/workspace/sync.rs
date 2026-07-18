@@ -126,14 +126,6 @@ pub fn sync_workspace(
                 WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
             )?;
             let git_backed_snapshot = git_output(&local_path, &["rev-parse", "HEAD"]).is_ok();
-            // Snapshot transport of a Git workspace starts from its exact commit
-            // and overlays the filtered working tree. Report the resulting Git
-            // checkout distinctly from a file-only snapshot.
-            let materialization_mode = if git_backed_snapshot {
-                RunnerWorkspaceSyncMode::SnapshotGit
-            } else {
-                options.mode
-            };
             let synthetic_checkout = if git_backed_snapshot {
                 match materialize_git_snapshot_from_controller_bundle(
                     &runner,
@@ -201,11 +193,18 @@ pub fn sync_workspace(
                 });
                 None
             };
+            if git_backed_snapshot {
+                // Preserve snapshot transport semantics while recording that its
+                // successful result is an exact Git checkout plus overlay.
+                materialization_plan.actual_materialization_mode =
+                    Some(RunnerWorkspaceSyncMode::SnapshotGit.label().to_string());
+            }
             let metadata = workspace_metadata(
                 &runner.id,
                 &local_path,
                 &remote_path,
-                materialization_mode,
+                options.mode,
+                materialization_plan.actual_materialization_mode.as_deref(),
                 &snapshot,
                 &excludes,
                 Some(content_manifest),
@@ -236,7 +235,7 @@ pub fn sync_workspace(
             let current_workspace = current_workspace_summary(
                 &local_path,
                 &remote_path,
-                materialization_mode,
+                options.mode,
                 true,
                 synthetic_checkout,
             );
@@ -252,7 +251,7 @@ pub fn sync_workspace(
                     current_workspace,
                     workspace_lease,
                     resource_lifecycle,
-                    sync_mode: materialization_mode,
+                    sync_mode: options.mode,
                     snapshot_identity: snapshot,
                     counts: stats,
                     excludes,
@@ -347,6 +346,7 @@ pub fn sync_workspace(
                 &local_path,
                 &remote_path,
                 RunnerWorkspaceSyncMode::Git,
+                None,
                 &git.head,
                 &excludes,
                 None,
@@ -484,7 +484,7 @@ pub fn reuse_compatible_snapshot_workspace(
     let mut snapshot_options = options.clone();
     snapshot_options.mode = RunnerWorkspaceSyncMode::Snapshot;
     snapshot_options.controller_routed_git = false;
-    let materialization_plan = workspace_materialization_plan(
+    let mut materialization_plan = workspace_materialization_plan(
         workspace_root,
         &local_path,
         &snapshot.remote_path,
@@ -493,6 +493,7 @@ pub fn reuse_compatible_snapshot_workspace(
         &includes,
         workspace_cleanliness,
     );
+    materialization_plan.actual_materialization_mode = snapshot.actual_materialization_mode;
     let current_workspace = RunnerWorkspaceCurrentSummary {
         local_path: local_path_string.clone(),
         remote_path: snapshot.remote_path.clone(),
@@ -1031,6 +1032,7 @@ fn workspace_snapshot_entry(
         local_path: metadata.local_path,
         remote_path: metadata.remote_path,
         sync_mode: metadata.sync_mode,
+        actual_materialization_mode: metadata.actual_materialization_mode,
         snapshot_identity: metadata.snapshot_identity,
         snapshot_excludes: metadata.snapshot_excludes,
         content_manifest: metadata.content_manifest,
@@ -1076,6 +1078,7 @@ fn workspace_metadata(
     local_path: &Path,
     remote_path: &str,
     sync_mode: RunnerWorkspaceSyncMode,
+    actual_materialization_mode: Option<&str>,
     snapshot_identity: &str,
     snapshot_excludes: &[String],
     content_manifest: Option<super::snapshot::WorkspaceContentManifest>,
@@ -1092,6 +1095,7 @@ fn workspace_metadata(
         local_path: local_path.display().to_string(),
         remote_path: remote_path.to_string(),
         sync_mode: sync_mode.label().to_string(),
+        actual_materialization_mode: actual_materialization_mode.map(str::to_string),
         snapshot_identity: snapshot_identity.to_string(),
         snapshot_excludes: snapshot_excludes.to_vec(),
         content_manifest,

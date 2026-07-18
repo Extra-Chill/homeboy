@@ -10,8 +10,6 @@ use homeboy_core::resource_lifecycle_index::ResourceLifecycleRecord;
 pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
     ".git",
     ".git/**",
-    ".homeboy",
-    ".homeboy/**",
     ".homeboy-build",
     ".homeboy-build/**",
     ".homeboy-bin",
@@ -74,6 +72,8 @@ pub struct RunnerWorkspaceMaterializationContract {
     pub output_paths: RunnerWorkspaceOutputPaths,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub controller_git_bundle: Option<ControllerGitBundleProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_materialization_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_transfer: Option<SnapshotTransferStats>,
 }
@@ -196,6 +196,7 @@ impl RunnerWorkspaceMaterializationContract {
             },
             output_paths: RunnerWorkspaceOutputPaths::for_remote_path(&workspace_root, remote_path),
             controller_git_bundle: None,
+            actual_materialization_mode: None,
             snapshot_transfer: None,
         }
     }
@@ -376,6 +377,8 @@ pub struct RunnerWorkspaceSnapshotEntry {
     pub local_path: String,
     pub remote_path: String,
     pub sync_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_materialization_mode: Option<String>,
     pub snapshot_identity: String,
     #[serde(default)]
     pub snapshot_excludes: Vec<String>,
@@ -406,6 +409,8 @@ pub(super) struct RunnerWorkspaceMetadata {
     pub local_path: String,
     pub remote_path: String,
     pub sync_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_materialization_mode: Option<String>,
     pub snapshot_identity: String,
     #[serde(default)]
     pub snapshot_excludes: Vec<String>,

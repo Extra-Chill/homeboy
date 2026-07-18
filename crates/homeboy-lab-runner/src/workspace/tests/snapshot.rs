@@ -162,7 +162,14 @@ fn git_backed_snapshot_reports_checkout_provenance_for_committed_harvest() {
         )
         .expect("materialize local-only committed source");
 
-        assert_eq!(synced.sync_mode, RunnerWorkspaceSyncMode::SnapshotGit);
+        assert_eq!(synced.sync_mode, RunnerWorkspaceSyncMode::Snapshot);
+        assert_eq!(
+            synced
+                .materialization_plan
+                .actual_materialization_mode
+                .as_deref(),
+            Some(RunnerWorkspaceSyncMode::SnapshotGit.label())
+        );
         assert_eq!(
             git_output(Path::new(&synced.remote_path), &["rev-parse", "HEAD"])
                 .expect("materialized SHA"),
@@ -176,22 +183,23 @@ fn git_backed_snapshot_reports_checkout_provenance_for_committed_harvest() {
         );
         snapshot.sync_excludes = synced.excludes.clone();
         snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
-        let content_hash = super::super::snapshot::workspace_content_hash_v1(
-            source.path(),
-            &snapshot.sync_excludes,
-        )
-        .expect("source content hash");
+        let content_hash = workspace_content_hash(source.path(), &snapshot.sync_excludes)
+            .expect("source content hash");
         let snapshot_json = serde_json::to_value(&snapshot).expect("snapshot JSON");
         let lab = serde_json::json!({
             "runner_id": "lab-snapshot-harvest",
             "remote_workspace": synced.remote_path.clone(),
-            "sync_mode": synced.sync_mode.label(),
+            "sync_mode": synced.materialization_plan.actual_materialization_mode,
             "status": "offloaded",
             "source_snapshot": snapshot_json,
             "workspace_cleanliness": { "allow_dirty_lab_workspace": false },
             "workspace_verification": {
-                "schema": "homeboy/lab-workspace-verification/v1",
+                "schema": "homeboy/lab-workspace-verification/v2",
                 "identity": synced.snapshot_identity.clone(),
+                "content_hash_algorithm": workspace_content_hash_algorithm(
+                    super::super::snapshot::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+                ).expect("content hash algorithm"),
+                "permission_policy": super::super::snapshot::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
                 "content_hash": content_hash,
                 "sync_excludes": snapshot.sync_excludes,
                 "source_snapshot": snapshot.clone(),
