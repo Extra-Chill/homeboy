@@ -1,10 +1,10 @@
 use serde_json::Value;
 
-use crate::ci_profile::CiRunOutput;
-use crate::code_audit::{homeboy_finding_from_audit, AuditCommandOutput};
-use crate::extension::lint::LintCommandOutput;
-use crate::extension::test::TestCommandOutput;
-use crate::finding::HomeboyFinding;
+use homeboy_code_audit::{homeboy_finding_from_audit, AuditCommandOutput};
+use homeboy_core::ci_profile::CiRunOutput;
+use homeboy_core::extension::lint::LintCommandOutput;
+use homeboy_core::extension::test::TestCommandOutput;
+use homeboy_finding::HomeboyFinding;
 
 pub trait ReviewArtifactFindings {
     fn review_artifact_findings(&self) -> Vec<HomeboyFinding> {
@@ -67,9 +67,9 @@ impl ReviewArtifactFindings for Value {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_audit::baseline::BaselineComparison;
-    use crate::code_audit::report::AuditSummaryOutput;
-    use crate::code_audit::{AuditFinding, AuditSummary, CodeAuditResult, Finding, Severity};
+    use homeboy_code_audit::baseline::BaselineComparison;
+    use homeboy_code_audit::report::AuditSummaryOutput;
+    use homeboy_code_audit::{AuditFinding, AuditSummary, CodeAuditResult, Finding, Severity};
 
     #[test]
     fn audit_full_maps_result_findings_to_review_artifact_findings() {

@@ -825,6 +825,7 @@ dependencies = [
  "homeboy-redaction",
  "homeboy-refactor",
  "homeboy-refactor-contract",
+ "homeboy-review",
  "homeboy-rig",
  "homeboy-stack",
  "homeboy-triage",
@@ -1114,6 +1115,19 @@ dependencies = [
 name = "homeboy-refactor-contract"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "homeboy-review"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "homeboy-code-audit",
+ "homeboy-core",
+ "homeboy-error",
+ "homeboy-finding",
  "serde",
  "serde_json",
 ]

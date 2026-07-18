@@ -17,13 +17,13 @@
 
 use std::fmt::Write as _;
 
-use crate::ci_profile::CiRunOutput;
-use crate::code_audit::AuditCommandOutput;
-use crate::extension::lint::LintCommandOutput;
-use crate::extension::test::TestCommandOutput;
-use crate::extension::ExtensionPhaseTiming;
-use crate::finding::HomeboyFinding;
-use crate::top_n::top_n_by;
+use homeboy_code_audit::AuditCommandOutput;
+use homeboy_core::ci_profile::CiRunOutput;
+use homeboy_core::extension::lint::LintCommandOutput;
+use homeboy_core::extension::test::TestCommandOutput;
+use homeboy_core::extension::ExtensionPhaseTiming;
+use homeboy_core::top_n::top_n_by;
+use homeboy_finding::HomeboyFinding;
 
 use super::{ReviewCommandOutput, ReviewStage};
 
@@ -376,14 +376,16 @@ fn render_ci_body(out: &mut String, output: &CiRunOutput) {
 mod tests {
     use super::*;
 
-    use crate::ci_profile::{CiContext, CiJobRunOutput, CiRunOutput, CiRunSelection};
-    use crate::code_audit::{AuditCommandOutput, AuditFinding, CodeAuditResult, Finding, Severity};
-    use crate::extension::lint::LintCommandOutput;
-    use crate::extension::test::{TestCommandOutput, TestCounts};
-    use crate::extension::CiJobMapping;
-    use crate::extension::{PhaseReport, PhaseStatus, VerificationPhase};
-    use crate::finding::HomeboyFinding;
-    use crate::quality::{build_quality_plan, QualityPlanOptions};
+    use homeboy_code_audit::{
+        AuditCommandOutput, AuditFinding, CodeAuditResult, Finding, Severity,
+    };
+    use homeboy_core::ci_profile::{CiContext, CiJobRunOutput, CiRunOutput, CiRunSelection};
+    use homeboy_core::extension::lint::LintCommandOutput;
+    use homeboy_core::extension::test::{TestCommandOutput, TestCounts};
+    use homeboy_core::extension::CiJobMapping;
+    use homeboy_core::extension::{PhaseReport, PhaseStatus, VerificationPhase};
+    use homeboy_core::quality::{build_quality_plan, QualityPlanOptions};
+    use homeboy_finding::HomeboyFinding;
 
     // ── Builders for fixture envelopes ──────────────────────────────────
 
@@ -517,7 +519,7 @@ mod tests {
         let result = CodeAuditResult {
             component_id: "my-comp".to_string(),
             source_path: "/tmp/my-comp".to_string(),
-            summary: crate::code_audit::AuditSummary {
+            summary: homeboy_code_audit::AuditSummary {
                 files_scanned: 0,
                 conventions_detected: 0,
                 outliers_found: 0,

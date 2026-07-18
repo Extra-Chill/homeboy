@@ -4,14 +4,14 @@ use chrono::Utc;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::ci_profile::CiRunOutput;
-use crate::code_audit::AuditCommandOutput;
-use crate::execution::{self, PlanExecutionRun};
-use crate::extension::lint::LintCommandOutput;
-use crate::extension::test::TestCommandOutput;
-use crate::finding::HomeboyFinding;
-use crate::plan::{HomeboyPlan, PlanStep};
-use crate::ObservationOutputMetadata;
+use homeboy_code_audit::AuditCommandOutput;
+use homeboy_core::ci_profile::CiRunOutput;
+use homeboy_core::execution::{self, PlanExecutionRun};
+use homeboy_core::extension::lint::LintCommandOutput;
+use homeboy_core::extension::test::TestCommandOutput;
+use homeboy_core::plan::{HomeboyPlan, PlanStep};
+use homeboy_core::ObservationOutputMetadata;
+use homeboy_finding::HomeboyFinding;
 
 mod artifact_findings;
 pub mod render;
@@ -238,9 +238,9 @@ fn artifact_commands(stages: &ReviewStages) -> Vec<ReviewArtifactCommand> {
 pub fn execute_review_plan_steps<R, Dispatch>(
     steps: &[PlanStep],
     dispatch: Dispatch,
-) -> crate::Result<PlanExecutionRun<R>>
+) -> homeboy_core::Result<PlanExecutionRun<R>>
 where
-    Dispatch: FnMut(&PlanStep) -> crate::Result<Option<R>>,
+    Dispatch: FnMut(&PlanStep) -> homeboy_core::Result<Option<R>>,
 {
     execution::execute_plan_steps(steps, dispatch, |_| false)
 }
@@ -330,7 +330,7 @@ pub fn artifact_status(commands: &[ReviewArtifactCommand]) -> &'static str {
 }
 
 pub fn git_ref(path: &str, git_ref: &str) -> Option<String> {
-    crate::git::rev_parse(std::path::Path::new(path), git_ref)
+    homeboy_core::git::rev_parse(std::path::Path::new(path), git_ref)
 }
 
 fn generated_at_now() -> String {
@@ -439,7 +439,7 @@ mod tests {
             PlanStep::builder(
                 "review.test",
                 "review.test",
-                crate::plan::PlanStepStatus::Skipped,
+                homeboy_core::plan::PlanStepStatus::Skipped,
             )
             .build(),
         ];

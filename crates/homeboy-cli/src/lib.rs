@@ -12,6 +12,7 @@ extern crate self as homeboy;
 pub use homeboy_agents as agents;
 pub use homeboy_core as core;
 pub use homeboy_refactor as refactor;
+pub use homeboy_review as review;
 pub use homeboy_rig as rig;
 pub use homeboy_stack as stack;
 
