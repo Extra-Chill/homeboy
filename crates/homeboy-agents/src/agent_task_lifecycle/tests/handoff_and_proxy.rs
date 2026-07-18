@@ -781,6 +781,37 @@ fn cook_index_keeps_repeated_attempts_unique_with_stable_latest_alias() {
 }
 
 #[test]
+fn run_record_exists_resolves_a_cook_id_to_its_latest_run() {
+    // #8390: the Lab retry handoff guarded on the exact-match `run_record_exists`,
+    // so a resolvable id (e.g. a cook id) reported absent even though `retry`
+    // would succeed, and the handoff silently fell through to ship an unrunnable
+    // `agent-task retry <id>` to the runner. `run_record_exists_resolved` must
+    // report present for a cook id that resolves to a real run.
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let aggregate = succeeded_aggregate(&plan);
+        let run_id = cook_attempt_run_id("cook-issue-8390", 1);
+        record_completed_run(&plan, &aggregate, Some(&run_id)).expect("run recorded");
+        record_cook_attempt("cook-issue-8390", 1, &run_id).expect("cook indexed");
+
+        // Exact match sees only the concrete run id, not the cook alias.
+        assert!(run_record_exists(&run_id).expect("exact run exists"));
+        assert!(!run_record_exists("cook-issue-8390").expect("cook id not an exact record"));
+
+        // Resolution-aware existence follows the same path `retry` uses.
+        assert!(run_record_exists_resolved(&run_id).expect("resolved run exists"));
+        assert!(
+            run_record_exists_resolved("cook-issue-8390").expect("cook id resolves"),
+            "a cook id must resolve to its latest run for the Lab retry handoff"
+        );
+        assert!(
+            !run_record_exists_resolved("cook-does-not-exist").expect("missing id"),
+            "a genuinely missing id must still report absent"
+        );
+    });
+}
+
+#[test]
 fn remote_dispatch_failure_preserves_structured_outcome_details() {
     with_isolated_home(|_| {
         let plan = test_plan();

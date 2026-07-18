@@ -1919,6 +1919,16 @@ pub fn run_record_exists(run_id: &str) -> Result<bool> {
     store::record_exists(&sanitize_run_id(run_id))
 }
 
+/// Whether a durable run record exists for `run_id` after the same resolution
+/// `retry` applies (a cook id resolves to its latest run). The plain
+/// `run_record_exists` is an exact-match check, so a resolvable id (e.g. a cook
+/// id) reports absent even though `retry` would succeed — which previously made
+/// the Lab retry handoff silently fall through and ship an unrunnable
+/// `agent-task retry <id>` to a runner with no such record (#8390).
+pub fn run_record_exists_resolved(run_id: &str) -> Result<bool> {
+    store::record_exists(&resolve_run_id(run_id)?)
+}
+
 #[derive(Debug, Clone)]
 pub struct DetachedLabRunRecord<'a> {
     pub run_id: &'a str,
