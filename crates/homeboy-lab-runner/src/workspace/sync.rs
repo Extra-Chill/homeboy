@@ -1,11 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use base64::Engine;
 
 use homeboy_core::engine::temp;
-use homeboy_core::error::{Error, Result};
+use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::resource_lifecycle_index::{
     resource_lifecycle_path_ttl_expired_at, ResourceCleanupPolicy, ResourceEvidenceRetention,
     ResourceLifecycle, ResourceLifecycleRecord, ResourceLifecycleResourceStatus,
@@ -45,6 +45,8 @@ const WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
 const MIN_RUNNER_WORKSPACE_FREE_BYTES: u64 = 1024 * 1024 * 1024;
 const MIN_RUNNER_WORKSPACE_FREE_RATIO: f64 = 0.01;
 const METADATA_SSH_RECOVERY_ATTEMPTS: usize = 2;
+const WORKSPACE_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
+const WORKSPACE_METADATA_OUTPUT_LIMIT: usize = 4 * 1024;
 
 pub fn sync_workspace(
     runner_id: &str,
@@ -1212,7 +1214,8 @@ fn write_workspace_metadata(
             // transport reset. A fresh client avoids reusing a broken channel.
             let output = retry_idempotent_ssh_operation(|| {
                 let (_server, client) = ssh_client_for_runner(runner)?;
-                let prepare = client.execute(&prepare_command);
+                let prepare =
+                    client.execute_with_timeout(&prepare_command, WORKSPACE_METADATA_TIMEOUT);
                 if !prepare.success {
                     return Ok(prepare);
                 }
@@ -1223,15 +1226,12 @@ fn write_workspace_metadata(
                 if !upload.success {
                     return Ok(upload);
                 }
-                Ok(client.execute(&publish_command))
+                Ok(client.execute_with_timeout(&publish_command, WORKSPACE_METADATA_TIMEOUT))
             })?;
             if output.success {
                 Ok(())
             } else {
-                Err(Error::internal_unexpected(format!(
-                    "write runner workspace metadata failed: {}",
-                    output.stderr.trim()
-                )))
+                Err(workspace_metadata_ssh_error(&output))
             }
         }
     }
@@ -1254,6 +1254,90 @@ fn retry_idempotent_ssh_operation(
         }
     }
     unreachable!("bounded SSH recovery always returns from its final attempt")
+}
+
+fn workspace_metadata_ssh_error(output: &CommandOutput) -> Error {
+    let stdout = bounded_workspace_metadata_output(&output.stdout);
+    let stderr = bounded_workspace_metadata_output(&output.stderr);
+    let transport_closed = homeboy_core::server::is_transient_ssh_error(output);
+    let close_reason = transport_closed.then(|| {
+        stderr
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("SSH transport closed without stderr")
+            .to_string()
+    });
+    Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        format!(
+            "write runner workspace metadata failed during `workspace_metadata_write` (exit status {}): {}",
+            output.exit_code,
+            close_reason.as_deref().unwrap_or_else(|| {
+                stderr
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("the command exited without stdout or stderr")
+            })
+        ),
+        serde_json::json!({
+            "phase": "workspace_metadata_write",
+            "command": "write Homeboy runner workspace metadata",
+            "timeout_seconds": WORKSPACE_METADATA_TIMEOUT.as_secs(),
+            "exit_code": output.exit_code,
+            "timed_out": output.timed_out,
+            "stdout": stdout,
+            "stderr": stderr,
+            "transport_close_reason": close_reason,
+        }),
+    )
+    .with_retryable(transport_closed || output.timed_out)
+}
+
+fn bounded_workspace_metadata_output(value: &str) -> String {
+    if value.len() <= WORKSPACE_METADATA_OUTPUT_LIMIT {
+        return value.trim().to_string();
+    }
+    let mut end = WORKSPACE_METADATA_OUTPUT_LIMIT;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}... [truncated]", value[..end].trim())
+}
+
+#[cfg(test)]
+mod metadata_write_tests {
+    use super::*;
+
+    #[test]
+    fn closed_ssh_metadata_write_is_diagnosable_and_retryable() {
+        let error = workspace_metadata_ssh_error(&CommandOutput {
+            stdout: "partial output".to_string(),
+            stderr: "Connection to 192.168.86.63 closed by remote host. client_loop: send disconnect: Broken pipe".to_string(),
+            success: false,
+            exit_code: -1,
+            timed_out: false,
+            child_resource: None,
+        });
+
+        assert_eq!(error.code, ErrorCode::RunnerLabTransportFailure);
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(error.details["phase"], "workspace_metadata_write");
+        assert_eq!(
+            error.details["command"],
+            "write Homeboy runner workspace metadata"
+        );
+        assert_eq!(error.details["timeout_seconds"], 30);
+        assert_eq!(error.details["exit_code"], -1);
+        assert_eq!(error.details["stdout"], "partial output");
+        assert!(error.details["stderr"]
+            .as_str()
+            .unwrap()
+            .contains("Broken pipe"));
+        assert!(error.details["transport_close_reason"]
+            .as_str()
+            .unwrap()
+            .contains("Connection to 192.168.86.63 closed"));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -12,52 +12,12 @@ pub fn record_pre_execution_failure(
     let mut record = store::read_record(&run_id)?;
     let task_count = plan.tasks.len();
     let failed = task_count;
-    let diagnostic = AgentTaskDiagnostic {
-        class: "pre_execution_failure".to_string(),
-        message: error.message.clone(),
-        data: json!({
-            "phase": phase,
-            "error_code": error.code.as_str(),
-            "details": error.details.clone(),
-            "hints": error.hints.iter().map(|hint| hint.message.as_str()).collect::<Vec<_>>(),
-        }),
-    };
+    let retryable = error.retryable == Some(true);
+    let failure_classification = pre_execution_failure_classification(error);
     let outcomes = plan
         .tasks
         .iter()
-        .map(|task| AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-            task_id: task.task_id.clone(),
-            status: AgentTaskOutcomeStatus::Failed,
-            summary: Some(format!(
-                "agent-task pre-execution {phase} failed: {}",
-                error.message
-            )),
-            failure_classification: Some(AgentTaskFailureClassification::InvalidInput),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: vec![AgentTaskEvidenceRef {
-                kind: "agent-task-pre-execution-failure".to_string(),
-                uri: format!("homeboy://agent-task/run/{run_id}/status"),
-                label: Some("Agent-task pre-execution failure".to_string()),
-            }],
-            diagnostics: vec![diagnostic.clone()],
-            outputs: json!({
-                "schema": "homeboy/agent-task-pre-execution-failure/v1",
-                "phase": phase,
-                "error_code": error.code.as_str(),
-                "message": error.message,
-                "details": error.details.clone(),
-                "hints": error.hints.iter().map(|hint| hint.message.as_str()).collect::<Vec<_>>(),
-            }),
-            workflow: None,
-            follow_up: None,
-            metadata: json!({
-                "kind": "pre_execution_failure",
-                "phase": phase,
-                "error_code": error.code.as_str(),
-            }),
-        })
+        .map(|task| build_pre_execution_failure_outcome(&run_id, task, phase, error))
         .collect();
     let aggregate = AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
@@ -93,11 +53,16 @@ pub fn record_pre_execution_failure(
     let mut failed_record = record_aggregate(&mut record, plan, &aggregate)?;
     let runner_id = failed_record.runner_id().map(str::to_string);
     let metadata = failed_record.ensure_metadata_object();
+    if retryable {
+        metadata.insert("retryable".to_string(), json!(true));
+    }
     metadata.insert(
         "pre_execution_failure".to_string(),
         json!({
             "phase": phase,
             "error_code": error.code.as_str(),
+            "failure_classification": failure_classification,
+            "retryable": retryable,
             "failure_code": error.details.get("field").cloned().unwrap_or_else(|| json!(error.code.as_str())),
             "message": error.message,
             "details": error.details.clone(),
@@ -114,6 +79,71 @@ pub fn record_pre_execution_failure(
     );
     store::write_record(&failed_record)?;
     Ok(failed_record)
+}
+
+pub(crate) fn build_pre_execution_failure_outcome(
+    run_id: &str,
+    task: &AgentTaskRequest,
+    phase: &str,
+    error: &Error,
+) -> AgentTaskOutcome {
+    let retryable = error.retryable == Some(true);
+    let failure_classification = pre_execution_failure_classification(error);
+    let diagnostic = AgentTaskDiagnostic {
+        class: "pre_execution_failure".to_string(),
+        message: error.message.clone(),
+        data: json!({
+            "phase": phase,
+            "error_code": error.code.as_str(),
+            "retryable": retryable,
+            "details": error.details.clone(),
+            "hints": error.hints.iter().map(|hint| hint.message.as_str()).collect::<Vec<_>>(),
+        }),
+    };
+    AgentTaskOutcome {
+        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        task_id: task.task_id.clone(),
+        status: AgentTaskOutcomeStatus::Failed,
+        summary: Some(format!(
+            "agent-task pre-execution {phase} failed: {}",
+            error.message
+        )),
+        failure_classification: Some(failure_classification),
+        artifacts: Vec::new(),
+        typed_artifacts: Vec::new(),
+        evidence_refs: vec![AgentTaskEvidenceRef {
+            kind: "agent-task-pre-execution-failure".to_string(),
+            uri: format!("homeboy://agent-task/run/{run_id}/status"),
+            label: Some("Agent-task pre-execution failure".to_string()),
+        }],
+        diagnostics: vec![diagnostic],
+        outputs: json!({
+            "schema": "homeboy/agent-task-pre-execution-failure/v1",
+            "phase": phase,
+            "error_code": error.code.as_str(),
+            "retryable": retryable,
+            "message": error.message,
+            "details": error.details.clone(),
+            "hints": error.hints.iter().map(|hint| hint.message.as_str()).collect::<Vec<_>>(),
+        }),
+        workflow: None,
+        follow_up: None,
+        metadata: json!({
+            "kind": "pre_execution_failure",
+            "phase": phase,
+            "error_code": error.code.as_str(),
+            "retryable": retryable,
+            "provider_executions_consumed": 0,
+        }),
+    }
+}
+
+fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassification {
+    if error.retryable == Some(true) {
+        AgentTaskFailureClassification::Transient
+    } else {
+        AgentTaskFailureClassification::InvalidInput
+    }
 }
 
 /// Shared `(run_id, runner_id)` identity borrowed by the Lab offload dispatch
