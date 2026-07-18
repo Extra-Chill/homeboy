@@ -807,12 +807,12 @@ mod tests {
     }
 
     #[test]
-    fn run_package_collects_declared_component_artifact_alongside_provider_artifacts() {
+    fn run_package_persists_declared_component_artifact_before_provider_can_delete_it() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let component_dir = tempfile::tempdir().expect("component tempdir");
             let package = release_package_extension(
                 "nodejs",
-                "mkdir -p target; printf npm > target/plugin-1.2.3.tgz; \
+                "rm -f packages/plugin/dist/plugin.zip; mkdir -p target; printf npm > target/plugin-1.2.3.tgz; \
                  printf '[{\"path\":\"target/plugin-1.2.3.tgz\",\"type\":\"npm\"}]'",
             );
             homeboy_core::extension::save_manifest(&package).expect("save package extension");
@@ -846,12 +846,20 @@ mod tests {
             .expect("package step should collect declared artifact");
 
             assert_eq!(state.artifacts.len(), 2);
-            assert_eq!(state.artifacts[0].path, "target/plugin-1.2.3.tgz");
-            assert_eq!(state.artifacts[1].path, "packages/plugin/dist/plugin.zip");
-            assert!(state.artifacts[1]
+            assert_eq!(state.artifacts[0].path, "packages/plugin/dist/plugin.zip");
+            assert_eq!(state.artifacts[1].path, "target/plugin-1.2.3.tgz");
+            assert!(!component_dir
+                .path()
+                .join("packages/plugin/dist/plugin.zip")
+                .exists());
+            let durable_path = state.artifacts[0]
                 .durable_path
                 .as_deref()
-                .is_some_and(|path| std::path::Path::new(path).is_file()));
+                .expect("declared durable artifact path");
+            assert_eq!(
+                std::fs::read_to_string(durable_path).expect("declared durable artifact bytes"),
+                "plugin"
+            );
             assert_eq!(
                 std::fs::read_to_string(component_dir.path().join(".homeboy-build-count"))
                     .expect("component build marker"),
