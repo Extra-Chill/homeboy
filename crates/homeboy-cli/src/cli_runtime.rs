@@ -338,6 +338,7 @@ impl CliRuntime {
         };
         commands::set_skip_deps_hydration(cli.skip_deps_hydration);
         normalize_runs_runner_options(&mut cli, &normalized);
+        normalize_cook_runner_option(&mut cli, &normalized);
 
         if matches!(&cli.command, Commands::Runs(args) if args.is_bundle_export()) {
             output_file = None;
@@ -948,6 +949,39 @@ fn normalize_runs_runner_options(cli: &mut Cli, normalized_args: &[String]) {
             cli.runner = args.absorb_global_runner_for_command_option(cli.runner.take());
         }
     }
+}
+
+/// Cook is re-executed by a pinned controller binary. Retain an explicit runner
+/// from that exact argv even when a command-scoped Clap argument did not hydrate
+/// the root global field used by admission and placement routing.
+fn normalize_cook_runner_option(cli: &mut Cli, normalized_args: &[String]) {
+    if cli.runner.is_some()
+        || !matches!(
+            &cli.command,
+            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
+            })
+        )
+    {
+        return;
+    }
+    cli.runner = explicit_runner_from_args(normalized_args);
+}
+
+fn explicit_runner_from_args(args: &[String]) -> Option<String> {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            return None;
+        }
+        if arg == "--runner" {
+            return args.next().cloned();
+        }
+        if let Some(runner_id) = arg.strip_prefix("--runner=") {
+            return Some(runner_id.to_string());
+        }
+    }
+    None
 }
 
 fn is_runs_list_runner_option(args: &[String]) -> bool {
@@ -1655,6 +1689,43 @@ mod tests {
         assert_eq!(
             resource_policy_runner_hint(&cli, Some("default-lab")),
             Some("selected-lab")
+        );
+    }
+
+    #[test]
+    fn pinned_cook_argv_restores_explicit_runner_before_admission() {
+        let mut cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--to-worktree",
+            "homeboy@fix-explicit-runner",
+            "--prompt",
+            "fix the issue",
+            "--verify",
+            "true",
+        ]);
+        let pinned_argv = vec![
+            "/tmp/homeboy/controller-runtimes/homeboy_0_290_0/homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--to-worktree".to_string(),
+            "homeboy@fix-explicit-runner".to_string(),
+            "--prompt".to_string(),
+            "fix the issue".to_string(),
+            "--verify".to_string(),
+            "true".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+        ];
+
+        normalize_cook_runner_option(&mut cli, &pinned_argv);
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert_eq!(
+            resource_policy_runner_hint(&cli, None),
+            Some("homeboy-lab"),
+            "hot-machine admission must receive the runner selected in pinned argv"
         );
     }
 
