@@ -402,8 +402,13 @@ fn run_targeted_runner_upgrade(
 /// lacking a reproducible URL or revision are forwarded as unrefreshable so the
 /// runner can report that condition explicitly.
 fn installed_extension_catalog() -> Vec<ExtensionUpgradeEntry> {
-    extension::available_extension_ids()
-        .into_iter()
+    installed_extension_catalog_for(&extension::available_extension_ids())
+}
+
+fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpgradeEntry> {
+    extension_ids
+        .iter()
+        .cloned()
         .map(
             |extension_id| match extension::load_extension(&extension_id) {
                 Ok(manifest) => {
@@ -956,6 +961,117 @@ mod runner_source_upgrade_tests {
         ] {
             assert_eq!(latest_version_endpoint(method), GITHUB_RELEASES_API);
         }
+    }
+
+    fn write_extension(dir: &Path, id: &str, manifest: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(format!("{id}.json")), manifest).unwrap();
+    }
+
+    #[test]
+    fn installed_extension_catalog_reads_provenance_without_mutating_metadata() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extensions = home.path().join(".config/homeboy/extensions");
+            write_extension(
+                &extensions.join("manifest"),
+                "manifest",
+                r#"{"name":"manifest","version":"1.0.0","source_url":" https://example.test/manifest.git "}"#,
+            );
+            write_extension(
+                &extensions.join("alias"),
+                "alias",
+                r#"{"name":"alias","version":"1.0.0","sourceUrl":"https://example.test/alias.git"}"#,
+            );
+            write_extension(
+                &extensions.join("sidecar"),
+                "sidecar",
+                r#"{"name":"sidecar","version":"1.0.0"}"#,
+            );
+            std::fs::write(
+                extensions.join("sidecar/.source-url"),
+                "https://example.test/sidecar.git\n",
+            )
+            .unwrap();
+
+            let catalog = installed_extension_catalog();
+            assert_eq!(catalog.len(), 3);
+            assert_eq!(
+                catalog
+                    .iter()
+                    .find(|entry| entry.extension_id == "manifest")
+                    .unwrap()
+                    .source_url
+                    .as_deref(),
+                Some("https://example.test/manifest.git")
+            );
+            assert_eq!(
+                catalog
+                    .iter()
+                    .find(|entry| entry.extension_id == "alias")
+                    .unwrap()
+                    .source_url
+                    .as_deref(),
+                Some("https://example.test/alias.git")
+            );
+            assert_eq!(
+                catalog
+                    .iter()
+                    .find(|entry| entry.extension_id == "sidecar")
+                    .unwrap()
+                    .source_url
+                    .as_deref(),
+                Some("https://example.test/sidecar.git")
+            );
+            assert!(catalog.iter().all(|entry| entry.source_revision.is_none()));
+            assert!(!extensions.join("manifest/.source-url").exists());
+            assert!(!extensions.join("alias/.source-url").exists());
+            assert_eq!(
+                std::fs::read_to_string(extensions.join("sidecar/.source-url")).unwrap(),
+                "https://example.test/sidecar.git\n"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_extension_catalog_keeps_linked_and_broken_extensions_unrefreshable() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extensions = home.path().join(".config/homeboy/extensions");
+            let linked = home.path().join("linked");
+            write_extension(&linked, "linked", r#"{"name":"linked","version":"1.0.0"}"#);
+            git(&linked, &["init"]);
+            git(
+                &linked,
+                &["remote", "add", "origin", "https://example.test/linked.git"],
+            );
+            std::fs::create_dir_all(&extensions).unwrap();
+            std::os::unix::fs::symlink(&linked, extensions.join("linked")).unwrap();
+            std::os::unix::fs::symlink(home.path().join("missing"), extensions.join("broken"))
+                .unwrap();
+
+            let catalog =
+                installed_extension_catalog_for(&["linked".to_string(), "broken".to_string()]);
+            let linked = catalog
+                .iter()
+                .find(|entry| entry.extension_id == "linked")
+                .unwrap();
+            assert_eq!(
+                linked.source_url.as_deref(),
+                Some("https://example.test/linked.git")
+            );
+            assert!(linked.source_revision.is_none());
+            let broken = catalog
+                .iter()
+                .find(|entry| entry.extension_id == "broken")
+                .unwrap();
+            assert!(broken.source_url.is_none());
+            assert!(broken
+                .source_update
+                .update_note
+                .as_deref()
+                .unwrap()
+                .contains("unrefreshable extension manifest"));
+        });
     }
 
     #[test]
