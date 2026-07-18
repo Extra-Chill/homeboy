@@ -9,8 +9,8 @@ use crate::error::{Error, Result};
 use crate::observation::timeline::{
     ObservationEvent, ObservationSpanDefinition, ObservationSpanResult, ObservationSpanStatus,
 };
-use crate::rig::RigStateSnapshot;
 use crate::structured_sidecar;
+use homeboy_lifecycle_contract::RigStateSnapshot;
 
 use super::preview::TracePreviewMetadata;
 pub use homeboy_extension_contract::trace_parsing::{

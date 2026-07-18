@@ -12,7 +12,7 @@ use crate::ci_profile::CiContext;
 use crate::execution_contract::reportable_artifact_evidence_path;
 use crate::finding::HomeboyFinding;
 use crate::gate::HomeboyGateResult;
-use crate::rig::RigStateSnapshot;
+use homeboy_lifecycle_contract::RigStateSnapshot;
 
 pub use super::side_by_side::{
     BenchSideBySideArtifact, BenchSideBySideMetric, BenchSideBySidePreviewLink,

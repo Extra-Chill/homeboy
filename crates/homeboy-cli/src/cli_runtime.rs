@@ -118,6 +118,9 @@ impl CliRuntime {
         // Register the audit fixability provider so code_audit can report how
         // fixable its findings are without calling up into the refactor engine's
         // fix planner — the seam that removes the last code_audit->refactor edge.
+        // Register the rig toolchain provider so core's extension exec-env
+        // builder can prepend the rig toolchain PATH.
+        crate::core::rig::toolchain::register();
         crate::refactor::audit_fixability_provider::register();
         // Register the refactor transform provider so core's extension
         // test-drift auto-fixer can apply generated transform rules.

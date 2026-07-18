@@ -181,3 +181,20 @@ mod tests {
         assert!(!parts.contains(&missing));
     }
 }
+
+/// Rig-toolchain implementation of core's command-step PATH hook.
+struct RigToolchainProviderImpl;
+
+impl crate::rig_toolchain_provider::RigToolchainProvider for RigToolchainProviderImpl {
+    fn command_step_path(&self) -> Option<std::ffi::OsString> {
+        command_step_path()
+    }
+}
+
+/// Register the rig toolchain provider so core's extension exec-env builder can
+/// prepend the rig toolchain PATH without depending on the rig subsystem.
+pub fn register() {
+    crate::rig_toolchain_provider::register_rig_toolchain_provider(Box::new(
+        RigToolchainProviderImpl,
+    ));
+}

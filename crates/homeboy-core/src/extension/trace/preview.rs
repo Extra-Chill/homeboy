@@ -7,10 +7,12 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use crate::rig::{TraceNativePublicPreviewSpec, TracePublicPreviewMode, TracePublicPreviewSpec};
 pub use homeboy_extension_contract::trace_preview::{
     TracePreviewAssetCheck, TracePreviewAssetFanoutReport, TracePreviewAssetFanoutRequest,
     TracePreviewLogPaths, TracePreviewMetadata,
+};
+use homeboy_rig_contract::{
+    TraceNativePublicPreviewSpec, TracePublicPreviewMode, TracePublicPreviewSpec,
 };
 
 const DEFAULT_STARTUP_TIMEOUT_SECONDS: u64 = 20;
@@ -854,7 +856,7 @@ fn asset_fanout_report(
 }
 
 fn empty_asset_fanout_report(
-    fanout: &crate::rig::TracePreviewAssetFanoutSpec,
+    fanout: &homeboy_rig_contract::TracePreviewAssetFanoutSpec,
 ) -> TracePreviewAssetFanoutReport {
     TracePreviewAssetFanoutReport {
         schema: "homeboy/preview-asset-fanout/v1".to_string(),
@@ -925,7 +927,7 @@ fn stop_child(child: &mut Option<Child>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{first_https_origin, TracePublicPreviewSession};
-    use crate::rig::{
+    use homeboy_rig_contract::{
         TraceNativePublicPreviewSpec, TracePreviewAssetFanoutSpec, TracePublicPreviewMode,
         TracePublicPreviewSpec,
     };

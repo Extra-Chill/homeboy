@@ -2,7 +2,7 @@ use crate::component::{self, Component};
 use crate::engine::{template, validation};
 use crate::error::{Error, Result};
 use crate::project::Project;
-use crate::rig::toolchain;
+
 use crate::server::{
     execute_local_command_in_dir, execute_local_command_in_dir_with_timeout,
     execute_local_command_interactive, execute_local_command_passthrough,
@@ -800,7 +800,7 @@ fn build_exec_env(
         env.extend(helper_pairs);
     }
 
-    if let Some(path) = toolchain::command_step_path() {
+    if let Some(path) = crate::rig_toolchain_provider::command_step_path() {
         env.push(("PATH".to_string(), path.to_string_lossy().to_string()));
     }
 
