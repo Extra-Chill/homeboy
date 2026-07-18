@@ -721,7 +721,7 @@ fn workspace_list_reports_recent_lab_workspaces_with_exec_commands() {
 }
 
 #[test]
-fn git_backed_snapshot_sync_preserves_exact_commit_and_dirty_overlay() {
+fn git_backed_snapshot_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overlay() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let source = super::dirty_git_repo();
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -733,7 +733,7 @@ fn git_backed_snapshot_sync_preserves_exact_commit_and_dirty_overlay() {
                 "remote",
                 "set-url",
                 "origin",
-                "https://github.com/example/app.git",
+                "file:///does-not-exist/unpublished-fixture.git",
             ],
         );
 
@@ -781,7 +781,7 @@ fn git_backed_snapshot_sync_preserves_exact_commit_and_dirty_overlay() {
         assert_eq!(git_output(remote, &["rev-parse", "HEAD"]).unwrap(), head);
         assert_eq!(
             git_output(remote, &["config", "--get", "remote.origin.url"]).unwrap(),
-            "https://github.com/example/app.git"
+            "file:///does-not-exist/unpublished-fixture.git"
         );
         let status = git_output(remote, &["status", "--porcelain=v1"]).unwrap();
         assert!(status.contains("file.txt"));
@@ -814,6 +814,101 @@ fn git_backed_snapshot_sync_preserves_exact_commit_and_dirty_overlay() {
             "Git cleanup must restore the captured baseline"
         );
         assert!(!remote.join("untracked.txt").exists());
+    });
+}
+
+#[test]
+fn git_backed_snapshot_uses_runner_exact_sha_without_controller_bundle_hydration() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let origin = tempfile::tempdir().expect("origin tempdir");
+        let author = tempfile::tempdir().expect("author tempdir");
+        let source = tempfile::tempdir().expect("source tempdir");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        git(origin.path(), &["init", "--bare"]);
+        git(origin.path(), &["config", "uploadpack.allowFilter", "true"]);
+        git(author.path(), &["init", "-b", "main"]);
+        git(author.path(), &["config", "user.email", "test@example.com"]);
+        git(author.path(), &["config", "user.name", "Test User"]);
+        fs::write(author.path().join("removed.txt"), "base-only\n").expect("base file");
+        git(author.path(), &["add", "."]);
+        git(author.path(), &["commit", "-m", "base"]);
+        let base_blob =
+            git_output(author.path(), &["rev-parse", "HEAD:removed.txt"]).expect("base blob");
+        fs::remove_file(author.path().join("removed.txt")).expect("remove base file");
+        fs::write(author.path().join("file.txt"), "head\n").expect("head file");
+        git(author.path(), &["add", "."]);
+        git(author.path(), &["commit", "-m", "head"]);
+        let head = git_output(author.path(), &["rev-parse", "HEAD"]).expect("head");
+        git(
+            author.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("file://{}", origin.path().display()),
+            ],
+        );
+        git(author.path(), &["push", "origin", "main"]);
+        git(
+            source.path(),
+            &[
+                "clone",
+                "--filter=blob:none",
+                &format!("file://{}", origin.path().display()),
+                ".",
+            ],
+        );
+        assert!(
+            git_output(
+                source.path(),
+                &["rev-list", "--objects", "--missing=print", "HEAD"]
+            )
+            .expect("inspect partial clone")
+            .contains(&format!("?{base_blob}")),
+            "fixture must retain a missing historical promisor blob"
+        );
+        fs::write(source.path().join("file.txt"), "dirty\n").expect("tracked overlay");
+        fs::write(source.path().join("untracked.txt"), "untracked\n").expect("untracked overlay");
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-partial-snapshot","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let (output, exit_code) = sync_workspace(
+            "lab-local-partial-snapshot",
+            RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Snapshot,
+                ..Default::default()
+            },
+        )
+        .expect("runner resolves published exact SHA");
+
+        let remote = Path::new(&output.remote_path);
+        assert_eq!(exit_code, 0);
+        assert!(output.materialization_plan.controller_git_bundle.is_none());
+        assert_eq!(git_output(remote, &["rev-parse", "HEAD"]).unwrap(), head);
+        assert_eq!(
+            fs::read_to_string(remote.join("file.txt")).unwrap(),
+            "dirty\n"
+        );
+        assert_eq!(
+            fs::read_to_string(remote.join("untracked.txt")).unwrap(),
+            "untracked\n"
+        );
+        assert!(
+            git_output(
+                source.path(),
+                &["rev-list", "--objects", "--missing=print", "HEAD"]
+            )
+            .expect("inspect controller after runner checkout")
+            .contains(&format!("?{base_blob}")),
+            "runner-side materialization must not hydrate controller promisor objects"
+        );
     });
 }
 

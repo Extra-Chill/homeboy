@@ -134,7 +134,7 @@ pub fn sync_workspace(
                     &excludes,
                 ) {
                     Ok(provenance) => {
-                        materialization_plan.controller_git_bundle = Some(provenance);
+                        materialization_plan.controller_git_bundle = provenance;
                         None
                     }
                     Err(error) => {
