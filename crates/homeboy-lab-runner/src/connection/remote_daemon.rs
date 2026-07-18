@@ -213,6 +213,11 @@ impl RemoteDaemonWorkEvidence {
     fn is_authoritatively_idle(self) -> bool {
         self == Self::AuthoritativelyIdle
     }
+
+    #[cfg(test)]
+    pub(in crate::connection) fn idle() -> Self {
+        Self::AuthoritativelyIdle
+    }
 }
 
 pub(super) fn remote_daemon_recovery_freshness_from_status(
@@ -234,6 +239,19 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
                     | DaemonStaleReasonCode::VersionMismatch
             )
         );
+    // A remote daemon that self-reports fresh and authoritatively idle (zero
+    // active jobs proven via its typed `/jobs` view) is not a recovery hazard:
+    // the controller simply lost its session to a healthy daemon. Reconnecting
+    // is the safe, deterministic recovery. Without this case such a daemon fell
+    // into the generic "lease evidence unavailable; active jobs are protected"
+    // branch below, which produced no adoption command and left Lab placement
+    // waiting for controller generation admission (#8694). "Protected active
+    // jobs" is also nonsensical when there are provably zero.
+    let recoverable_fresh_idle = !proven_dead
+        && !leaseless_reconciliation_available
+        && status.fresh
+        && status.active_jobs == 0
+        && status.work_evidence.is_authoritatively_idle();
     let mut ownership_evidence = if proven_dead {
         Some(format!(
             "remote daemon status over SSH proved PID {} is dead for lease `{}`",
@@ -242,6 +260,8 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
         ))
     } else if leaseless_reconciliation_available {
         Some("active durable jobs require explicit reconciliation; it will verify the owner lock, process list, and configured listener before terminalizing them".to_string())
+    } else if recoverable_fresh_idle {
+        Some("remote daemon is fresh with zero authoritatively idle jobs; the controller session can be safely reconnected".to_string())
     } else {
         Some("remote daemon lease evidence is unavailable; active jobs are protected from implicit replacement".to_string())
     };
@@ -268,6 +288,11 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
             "homeboy runner connect {} --reconcile-leaseless-orphans --confirm-no-daemon-owner",
             shell::quote_arg(runner_id),
         ))
+    } else if recoverable_fresh_idle {
+        Some(format!(
+            "homeboy runner connect {}",
+            shell::quote_arg(runner_id),
+        ))
     } else {
         None
     };
@@ -279,6 +304,8 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
         pid,
         recovery_evidence: Some(if proven_dead {
             DaemonRecoveryEvidence::ProvenDead
+        } else if recoverable_fresh_idle {
+            DaemonRecoveryEvidence::Recoverable
         } else {
             DaemonRecoveryEvidence::Unavailable
         }),

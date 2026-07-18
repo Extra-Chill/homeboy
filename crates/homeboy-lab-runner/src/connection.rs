@@ -1142,13 +1142,19 @@ pub(super) fn active_jobs_before_daemon_replacement(
     Ok(report.active_jobs)
 }
 
-/// A daemon freshness report is the daemon's own job count. Only a restartable
-/// daemon which reports zero jobs can replace an unavailable typed `/jobs` view.
+/// A daemon freshness report is the daemon's own job count. A daemon can
+/// authoritatively prove zero active jobs either by being restartable (a stale
+/// daemon safe to stop/start) or by being freshly `Recoverable` — a healthy
+/// remote daemon with zero authoritatively idle jobs whose controller session
+/// was merely lost and can be reconnected (#8694). Both cases can safely
+/// replace an unavailable typed `/jobs` view.
 pub(crate) fn authoritative_zero_active_jobs(report: &RunnerStatusReport) -> bool {
-    report
-        .daemon_freshness
-        .as_ref()
-        .is_some_and(|freshness| freshness.restartable && freshness.active_jobs == 0)
+    report.daemon_freshness.as_ref().is_some_and(|freshness| {
+        freshness.active_jobs == 0
+            && (freshness.restartable
+                || freshness.recovery_evidence
+                    == Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable))
+    })
 }
 
 fn runner_daemon_freshness(

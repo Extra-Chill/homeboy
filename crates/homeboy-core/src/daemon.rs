@@ -176,6 +176,11 @@ pub enum DaemonStaleReasonCode {
 #[serde(rename_all = "snake_case")]
 pub enum DaemonRecoveryEvidence {
     ProvenDead,
+    /// The remote daemon is fresh and authoritatively idle (zero active jobs);
+    /// the controller merely lost its session and can safely reconnect. This is
+    /// a benign recovery, distinct from `Unavailable`, which withholds an action
+    /// because ownership/liveness could not be established.
+    Recoverable,
     Unavailable,
 }
 
