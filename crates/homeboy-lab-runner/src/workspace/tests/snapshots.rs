@@ -1,12 +1,14 @@
 use std::fs;
 
 use super::git;
+use crate::workspace::snapshot::{incremental_prepare_command_fits, snapshot_manifest_delta};
 use crate::workspace::sync::{
     reuse_compatible_snapshot_workspace, sync_workspace, workspace_snapshots,
 };
 use crate::workspace::types::{
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
+use crate::workspace::{WorkspaceContentManifest, WorkspaceContentManifestEntry};
 
 #[test]
 fn workspace_snapshots_render_metadata_for_synced_workspace() {
@@ -325,7 +327,48 @@ fn incremental_snapshot_falls_back_to_full_transport_for_large_compatible_seed()
             .expect("retained file"),
             "seed-2253\n"
         );
+        for index in 0..2_254 {
+            let expected = if index == 0 {
+                "updated\n".to_string()
+            } else {
+                format!("seed-{index}\n")
+            };
+            assert_eq!(
+                fs::read_to_string(
+                    std::path::Path::new(&second.remote_path)
+                        .join(format!("files/retained-{index:04}.txt"))
+                )
+                .expect("exact fallback content"),
+                expected
+            );
+        }
     });
+}
+
+#[test]
+fn incremental_prepare_preflight_rejects_quote_heavy_manifest_before_command_construction() {
+    let entry = |index| WorkspaceContentManifestEntry {
+        path: format!("files/{}-{index:04}.txt", "'".repeat(64)),
+        kind: "file".to_string(),
+        sha256: Some(format!("sha256:{}", "0".repeat(64))),
+        bytes: Some(1),
+        owner_executable: None,
+    };
+    let manifest = WorkspaceContentManifest {
+        entry_count: 256,
+        entries: (0..256).map(entry).collect(),
+    };
+    let delta = snapshot_manifest_delta(&manifest, &manifest).expect("valid manifest delta");
+
+    assert!(
+        !incremental_prepare_command_fits(
+            "/runner/workspace/with a deliberately long remote path",
+            "/runner/workspace/with a deliberately long remote path.tmp-12345678",
+            "/runner/seed/with a deliberately long path",
+            &delta,
+        ),
+        "quote-heavy paths must select full transport before building the nested shell command"
+    );
 }
 
 #[test]
