@@ -266,6 +266,41 @@ fn remote_status_without_reason_is_evidence_unavailable_and_non_adoptable() {
 }
 
 #[test]
+fn fresh_idle_remote_daemon_is_recoverable_by_reconnect() {
+    // #8694: a remote daemon that self-reports fresh with zero authoritatively
+    // idle jobs, while the controller session is lost, must be recoverable via
+    // a plain reconnect — not reported as a non-restartable dead end with the
+    // nonsensical "active jobs are protected" message.
+    let mut status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4545);
+    status.work_evidence = crate::connection::remote_daemon::RemoteDaemonWorkEvidence::idle();
+
+    let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
+
+    assert_eq!(recovery.active_jobs, 0);
+    assert!(recovery.fresh);
+    assert_eq!(
+        recovery.recovery_evidence,
+        Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable)
+    );
+    assert_eq!(
+        recovery.adoption_command.as_deref(),
+        Some("homeboy runner connect homeboy-lab")
+    );
+    let ownership = recovery
+        .ownership_evidence
+        .as_deref()
+        .expect("recovery guidance");
+    assert!(
+        ownership.contains("safely reconnected"),
+        "ownership evidence must describe the reconnect recovery: {ownership}"
+    );
+    assert!(
+        !ownership.contains("active jobs are protected"),
+        "must not claim protected jobs when there are provably zero: {ownership}"
+    );
+}
+
+#[test]
 fn remote_missing_or_corrupt_lease_with_active_jobs_exposes_bounded_reconciliation() {
     for reason in [
         DaemonStaleReasonCode::LeaseMissing,
