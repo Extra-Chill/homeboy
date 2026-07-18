@@ -136,6 +136,16 @@ pub fn cleanup_shared_cargo_targets(
     let mut has_more = false;
 
     for store in stores.iter().skip(start) {
+        if let Some(reason) = store
+            .reasons
+            .iter()
+            .find(|reason| reason.starts_with("skipped:"))
+        {
+            *retained_by_reason
+                .entry(reason.trim_start_matches("skipped:").to_string())
+                .or_default() += 1;
+            continue;
+        }
         if store.reasons.iter().any(|reason| reason == "active_lease") {
             *retained_by_reason
                 .entry("active lease".to_string())
@@ -180,9 +190,13 @@ pub fn cleanup_shared_cargo_targets(
     let next_cursor = has_more
         .then(|| candidates.last().map(|store| store.path.clone()))
         .flatten();
-    let next_command = next_cursor
-        .as_ref()
-        .map(|cursor| format!("homeboy cleanup --include shared-cargo-targets --cursor {cursor}"));
+    let next_command = next_cursor.as_ref().map(|cursor| {
+        let apply = if options.apply { " --apply" } else { "" };
+        format!(
+            "homeboy cleanup --include shared-cargo-targets{apply} --cursor {}",
+            shell_quote(cursor)
+        )
+    });
     let skipped_count = retained_by_reason.values().sum();
     Ok(CargoTargetCleanupOutput {
         command: "cleanup.shared_cargo_targets",
@@ -255,10 +269,19 @@ fn inventory(
         let path = entry
             .map_err(|error| io_error(error, "read shared Cargo target entry"))?
             .path();
-        if !path.is_dir() {
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| io_error(error, "stat shared Cargo target entry"))?;
+        if metadata.file_type().is_symlink() {
+            stores.push(skipped_store(&path, "direct-child symlink"));
             continue;
         }
-        let last_used_unix_ms = last_used(&path)?;
+        if !metadata.is_dir() {
+            continue;
+        }
+        let Some(last_used_unix_ms) = last_used(&path) else {
+            stores.push(skipped_store(&path, "missing Homeboy lifecycle metadata"));
+            continue;
+        };
         let mut reasons = Vec::new();
         if now
             .duration_since(UNIX_EPOCH + Duration::from_millis(last_used_unix_ms))
@@ -345,18 +368,10 @@ fn write_last_used(path: &Path, now: SystemTime) -> Result<()> {
     .map_err(|error| io_error(error, "write shared Cargo target last-used"))
 }
 
-fn last_used(path: &Path) -> Result<u64> {
+fn last_used(path: &Path) -> Option<u64> {
     fs::read_to_string(path.join(LAST_USED_FILE))
         .ok()
         .and_then(|value| value.trim().parse().ok())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "shared_cargo_target",
-                "shared Cargo target is missing Homeboy lifecycle metadata",
-                Some(path.display().to_string()),
-                None,
-            )
-        })
 }
 
 fn read_owner(path: &Path) -> Option<String> {
@@ -364,6 +379,15 @@ fn read_owner(path: &Path) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+fn skipped_store(path: &Path, reason: &str) -> CargoTargetStore {
+    CargoTargetStore {
+        path: path.to_string_lossy().to_string(),
+        owner: None,
+        size_bytes: 0,
+        last_used_unix_ms: 0,
+        reasons: vec![format!("skipped:{reason}")],
+    }
 }
 fn order_stores(left: &CargoTargetStore, right: &CargoTargetStore) -> std::cmp::Ordering {
     left.last_used_unix_ms
@@ -394,6 +418,9 @@ fn path_size(path: &Path) -> Result<u64> {
 }
 fn io_error(error: std::io::Error, operation: &str) -> Error {
     Error::internal_io(error.to_string(), Some(operation.to_string()))
+}
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -501,5 +528,38 @@ mod tests {
         assert!(output.continuation_required);
         assert!(output.next_cursor.is_some());
         assert!(output.next_command.as_deref().unwrap().contains("--cursor"));
+    }
+
+    #[test]
+    fn legacy_and_symlink_entries_are_reported_without_inspection_or_removal() {
+        let root = TempDir::new().unwrap();
+        fs::create_dir(root.path().join("legacy")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("legacy", root.path().join("linked")).unwrap();
+        let output =
+            cleanup_shared_cargo_targets(options(root.path(), true, SystemTime::now())).unwrap();
+        assert_eq!(output.applied_count, 0);
+        assert_eq!(
+            output.retained_by_reason["missing Homeboy lifecycle metadata"],
+            1
+        );
+        #[cfg(unix)]
+        assert_eq!(output.retained_by_reason["direct-child symlink"], 1);
+    }
+
+    #[test]
+    fn apply_continuation_quotes_unsafe_cursor() {
+        let root = TempDir::new().unwrap();
+        let now = SystemTime::now();
+        for owner in ["one space", "two'quote"] {
+            store(root.path(), owner, 2, Duration::from_secs(61), now);
+        }
+        let mut options = options(root.path(), true, now);
+        options.limit = 1;
+        options.max_bytes = 100;
+        let output = cleanup_shared_cargo_targets(options).unwrap();
+        let command = output.next_command.unwrap();
+        assert!(command.contains("--apply"));
+        assert!(command.contains("--cursor '"));
     }
 }

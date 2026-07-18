@@ -800,8 +800,8 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
     let mut binary = None;
     if sync_homeboy_binary {
         let source_path = options.homeboy_source.as_deref().map(expand_path);
-        let local_binary = match options.homeboy_binary.as_deref() {
-            Some(path) => expand_path(path),
+        let (local_binary, _target_lease) = match options.homeboy_binary.as_deref() {
+            Some(path) => (expand_path(path), None),
             None => build_local_homeboy_binary(source_path.as_deref())?,
         };
         let runner = load(&options.runner_id)?;
@@ -1259,7 +1259,12 @@ fn refresh_reconnect_failure(
     failure
 }
 
-fn build_local_homeboy_binary(source_path: Option<&Path>) -> Result<PathBuf> {
+fn build_local_homeboy_binary(
+    source_path: Option<&Path>,
+) -> Result<(
+    PathBuf,
+    Option<homeboy_core::cleanup::SharedCargoTargetLease>,
+)> {
     let source_path = match source_path {
         Some(path) => path.to_path_buf(),
         None => {
@@ -1295,7 +1300,7 @@ fn build_local_homeboy_binary(source_path: Option<&Path>) -> Result<PathBuf> {
             None,
         ));
     }
-    Ok(target.target_dir().join("release/homeboy"))
+    Ok((target.target_dir().join("release/homeboy"), Some(target)))
 }
 
 fn dev_binary_path(workspace_root: &str, sha256: &str) -> String {
