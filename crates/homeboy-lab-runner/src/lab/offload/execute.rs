@@ -24,9 +24,11 @@ pub(crate) fn record_synced_remapped_workspace_entry(
 }
 
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
-    if request.placement == homeboy_cli_contract::Placement::Auto
-        && homeboy_core::resource_policy_context::is_managed_runner_placement_context()
-    {
+    if should_skip_managed_runner_placement(
+        request.placement,
+        request.explicit_runner,
+        homeboy_core::resource_policy_context::is_managed_runner_placement_context(),
+    ) {
         return Ok(LabOffloadOutcome::RunLocal {
             plan: disabled_select_runner_plan(
                 base_lab_plan(request.command.as_ref()),
@@ -349,6 +351,37 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         overhead,
         runner_status,
     )
+}
+
+fn should_skip_managed_runner_placement(
+    placement: homeboy_cli_contract::Placement,
+    explicit_runner: Option<&str>,
+    managed_runner_placement: bool,
+) -> bool {
+    placement == homeboy_cli_contract::Placement::Auto
+        && explicit_runner.is_none()
+        && managed_runner_placement
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_runner_is_not_suppressed_by_resolved_automatic_placement() {
+        // A controller re-entering from a managed runner must still honor a new
+        // explicit selection so selection can report that runner's own status.
+        assert!(should_skip_managed_runner_placement(
+            homeboy_cli_contract::Placement::Auto,
+            None,
+            true,
+        ));
+        assert!(!should_skip_managed_runner_placement(
+            homeboy_cli_contract::Placement::Auto,
+            Some("homeboy-lab"),
+            true,
+        ));
+    }
 }
 
 pub(crate) fn unsupported_runner_hints(
