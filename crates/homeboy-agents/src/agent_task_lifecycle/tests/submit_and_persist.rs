@@ -459,6 +459,18 @@ fn disconnected_proxy_projects_terminal_child_aggregate_once_reachable() {
         })
         .expect("running proxy");
         let mut record = status("agent-task-disconnected-child").expect("status");
+        assert!(is_accepted_runner_handoff(&record));
+        assert_eq!(
+            record.metadata["runner_job_id"],
+            "00000000-0000-0000-0000-000000000123"
+        );
+        assert!(record.metadata.get("pre_execution_failure").is_none());
+        let mut running_snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        running_snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+        running_snapshot.events.clear();
+        reconcile_runner_job_snapshot(&mut record, &running_snapshot)
+            .expect("remote process heartbeat is retained");
+        assert_eq!(record.metadata["phase"], "executing");
         let heartbeat = record
             .lifecycle
             .heartbeat
@@ -497,6 +509,7 @@ fn disconnected_proxy_projects_terminal_child_aggregate_once_reachable() {
             "repeated terminal reconciliation is idempotent"
         );
         assert_eq!(record.state, AgentTaskRunState::Succeeded);
+        assert!(is_accepted_runner_handoff(&record));
         assert_eq!(record.artifact_refs[0].uri, "/runner/artifacts/patch.diff");
         assert_eq!(record.metadata["runner_job_status"], "succeeded");
         assert_eq!(record.metadata["runner_liveness"], "reachable");
