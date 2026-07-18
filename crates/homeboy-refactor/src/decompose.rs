@@ -64,8 +64,9 @@ pub fn build_plan(file: &str, root: &Path, strategy: &str) -> Result<DecomposePl
         ));
     }
 
-    let content = std::fs::read_to_string(&source_path)
-        .map_err(|e| homeboy_core::Error::internal_io(e.to_string(), Some(format!("read {}", file))))?;
+    let content = std::fs::read_to_string(&source_path).map_err(|e| {
+        homeboy_core::Error::internal_io(e.to_string(), Some(format!("read {}", file)))
+    })?;
 
     let mut warnings = Vec::new();
     let items = parse_items(file, &content).unwrap_or_else(|| {
@@ -293,7 +294,10 @@ pub fn apply_plan_skeletons(plan: &DecomposePlan, root: &Path) -> Result<Vec<Str
         );
 
         std::fs::write(&path, header).map_err(|e| {
-            homeboy_core::Error::internal_io(e.to_string(), Some(format!("write {}", path.display())))
+            homeboy_core::Error::internal_io(
+                e.to_string(),
+                Some(format!("write {}", path.display())),
+            )
         })?;
         created.push(group.suggested_target);
     }

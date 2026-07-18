@@ -1,9 +1,9 @@
+use crate::auto::FixResultsSummary;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::engine::undo::UndoSnapshot;
 use homeboy_core::extension::test::compute_changed_test_files;
 use homeboy_core::git;
-use crate::auto::FixResultsSummary;
 use homeboy_core::Error;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -438,7 +438,9 @@ fn clean_homeboy_owned_ci_artifacts(root: &Path) -> homeboy_core::Result<bool> {
 /// working when the preceding quality-gate pass left Homeboy-generated
 /// artifacts in the checkout. A mixed tree (artifacts plus real source edits)
 /// still trips the guard — only an all-artifact dirty set is treated as clean.
-fn dirty_changes_are_only_homeboy_artifacts(changes: &homeboy_core::git::UncommittedChanges) -> bool {
+fn dirty_changes_are_only_homeboy_artifacts(
+    changes: &homeboy_core::git::UncommittedChanges,
+) -> bool {
     changes
         .staged
         .iter()
@@ -982,13 +984,14 @@ mod tests {
 
     #[test]
     fn lint_fix_validation_rejects_remaining_findings() {
-        let findings = vec![
-            homeboy_core::finding::HomeboyFinding::builder("lint", "Tabs must be used")
-                .rule("WordPress.WhiteSpace.DisallowSpaceIndent")
-                .file("inc/Demo.php")
-                .fixable(true)
-                .build(),
-        ];
+        let findings =
+            vec![
+                homeboy_core::finding::HomeboyFinding::builder("lint", "Tabs must be used")
+                    .rule("WordPress.WhiteSpace.DisallowSpaceIndent")
+                    .file("inc/Demo.php")
+                    .fixable(true)
+                    .build(),
+            ];
 
         let err = reject_remaining_lint_fix_findings(&findings)
             .expect_err("remaining lint findings should fail fix mode");

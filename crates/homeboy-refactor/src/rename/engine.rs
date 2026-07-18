@@ -462,8 +462,8 @@ fn target_files(files: Vec<PathBuf>, root: &Path, targeting: &RenameTargeting) -
 /// renames are routed through `apply_edit_ops()` so they share the same
 /// execution path as the fixer pipeline and other manual commands.
 pub fn apply_renames(result: &mut RenameResult, root: &Path) -> Result<()> {
-    use homeboy_core::engine::edit_op_apply::apply_edit_ops;
     use crate::edit_op_tagged::rename_file_moves_to_edit_ops;
+    use homeboy_core::engine::edit_op_apply::apply_edit_ops;
 
     // Apply content edits first (whole-file replacement — rename operates at
     // full-content granularity, not line-level, so these bypass EditOp).

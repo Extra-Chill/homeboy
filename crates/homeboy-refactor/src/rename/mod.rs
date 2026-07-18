@@ -35,8 +35,8 @@ pub use types::{
 // Internal items pulled into scope for the test module (`tests.rs` uses
 // `super::*`). These are not part of the public API.
 #[cfg(test)]
-use homeboy_core::engine::codebase_scan::{find_boundary_matches, find_literal_matches};
-#[cfg(test)]
 use casing::{capitalize, pluralize, split_words};
+#[cfg(test)]
+use homeboy_core::engine::codebase_scan::{find_boundary_matches, find_literal_matches};
 #[cfg(test)]
 use safety::{detect_collisions, detect_duplicate_identifiers, extract_field_identifier};

@@ -213,8 +213,9 @@ pub fn move_items_with_options(
         ));
     }
 
-    let content = std::fs::read_to_string(&from_path)
-        .map_err(|e| homeboy_core::Error::internal_io(e.to_string(), Some(format!("read {}", from))))?;
+    let content = std::fs::read_to_string(&from_path).map_err(|e| {
+        homeboy_core::Error::internal_io(e.to_string(), Some(format!("read {}", from)))
+    })?;
 
     // Try to find a refactor-capable extension for this file type
     let ext = find_refactor_extension(from);
@@ -605,13 +606,17 @@ pub fn move_items_with_options(
         // Create parent directory if needed
         if let Some(parent) = to_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                homeboy_core::Error::internal_io(e.to_string(), Some(format!("create dir for {}", to)))
+                homeboy_core::Error::internal_io(
+                    e.to_string(),
+                    Some(format!("create dir for {}", to)),
+                )
             })?;
         }
 
         // Write destination
-        std::fs::write(&to_path, &final_dest)
-            .map_err(|e| homeboy_core::Error::internal_io(e.to_string(), Some(format!("write {}", to))))?;
+        std::fs::write(&to_path, &final_dest).map_err(|e| {
+            homeboy_core::Error::internal_io(e.to_string(), Some(format!("write {}", to)))
+        })?;
 
         // Write modified source
         std::fs::write(&from_path, &modified_source).map_err(|e| {

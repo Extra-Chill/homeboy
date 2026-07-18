@@ -12,8 +12,8 @@ use std::path::Path;
 
 use regex::Regex;
 
-use homeboy_code_audit::{AuditFinding, CodeAuditResult};
 use crate::auto::{Fix, Insertion, InsertionKind, RefactorPrimitive, SkippedFile};
+use homeboy_code_audit::{AuditFinding, CodeAuditResult};
 
 use super::insertion_with_primitive;
 

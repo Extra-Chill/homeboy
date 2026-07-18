@@ -15,9 +15,9 @@
 //! Callers apply tagged ops by passing the inner `&t.op` to
 //! `homeboy_core::engine::edit_op_apply::apply_edit_ops`.
 
-use homeboy_core::engine::edit_op::{EditOp, InsertAnchor};
 use crate::auto::{Insertion, InsertionKind, RefactorPrimitive};
 use homeboy_audit_contract::AuditFinding;
+use homeboy_core::engine::edit_op::{EditOp, InsertAnchor};
 
 /// An `EditOp` with metadata about its origin.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -1,6 +1,6 @@
+use crate::auto::{Fix, InsertionKind, SkippedFile};
 use homeboy_code_audit::naming::{detect_naming_suffix, suffix_matches};
 use homeboy_code_audit::{AuditFinding, CodeAuditResult};
-use crate::auto::{Fix, InsertionKind, SkippedFile};
 use homeboy_engine_primitives::language::Language;
 
 use regex::Regex;

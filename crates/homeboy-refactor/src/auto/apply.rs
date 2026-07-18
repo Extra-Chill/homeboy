@@ -1,11 +1,9 @@
 use crate::plan::verify::rewrite_callers_after_dedup;
 
+use crate::auto::verify::{applied_files_from_chunks, capture_pre_apply_snapshot, run_verify_gate};
+use crate::auto::{ApplyChunkResult, ChunkStatus, Fix, NewFile};
 use homeboy_core::engine::undo::InMemoryRollback;
 use homeboy_core::extension::AutofixVerifyConfig;
-use crate::auto::verify::{
-    applied_files_from_chunks, capture_pre_apply_snapshot, run_verify_gate,
-};
-use crate::auto::{ApplyChunkResult, ChunkStatus, Fix, NewFile};
 use std::path::Path;
 
 // ============================================================================
@@ -24,8 +22,8 @@ pub fn apply_fixes_via_edit_ops(
     new_files: &mut [NewFile],
     root: &Path,
 ) -> Vec<ApplyChunkResult> {
-    use homeboy_core::engine::edit_op_apply::apply_edit_ops;
     use crate::edit_op_tagged::{fix_to_edit_ops, new_file_to_edit_op, TaggedEditOp};
+    use homeboy_core::engine::edit_op_apply::apply_edit_ops;
 
     // Merge same-file insertions (same as old path)
     merge_same_file_insertions(fixes);

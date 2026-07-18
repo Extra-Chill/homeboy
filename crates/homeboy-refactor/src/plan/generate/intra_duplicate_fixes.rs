@@ -16,9 +16,9 @@
 
 use std::path::Path;
 
+use crate::auto::{Fix, SkippedFile};
 use homeboy_code_audit::{AuditFinding, CodeAuditResult};
 use homeboy_core::engine::local_files;
-use crate::auto::{Fix, SkippedFile};
 
 use super::{manual_blocked, range_removal};
 

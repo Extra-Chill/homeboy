@@ -6,12 +6,12 @@
 use std::path::Path;
 
 use super::{tagged_line_replacement, tagged_range_removal};
+use crate::auto::{Fix, RefactorPrimitive, SkippedFile};
 use homeboy_code_audit::{AuditFinding, CodeAuditResult};
 use homeboy_core::extension::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract, ExtensionManifest,
 };
-use crate::auto::{Fix, RefactorPrimitive, SkippedFile};
 
 /// A machine-applicable fix suggestion from the compiler.
 #[derive(Debug, Clone, serde::Deserialize)]

@@ -1,5 +1,5 @@
-use homeboy_code_audit::{AuditFinding, CodeAuditResult, DuplicateGroup};
 use crate::auto::{Fix, InsertionKind, NewFile, SkippedFile};
+use homeboy_code_audit::{AuditFinding, CodeAuditResult, DuplicateGroup};
 use homeboy_engine_primitives::language::Language;
 
 use regex::Regex;
@@ -383,7 +383,8 @@ pub(crate) fn generate_duplicate_function_fixes(
             "project_root": root.to_string_lossy(),
         });
 
-        let Some(result_val) = homeboy_core::extension::run_refactor_script(&manifest, &extract_cmd)
+        let Some(result_val) =
+            homeboy_core::extension::run_refactor_script(&manifest, &extract_cmd)
         else {
             generate_simple_duplicate_fixes(group, root, module_surfaces, fixes, skipped);
             continue;

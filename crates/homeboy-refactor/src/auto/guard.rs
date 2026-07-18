@@ -14,8 +14,8 @@
 use serde::Serialize;
 use std::process::Command;
 
-use homeboy_core::git::BOT_NAME;
 use crate::auto::transaction::AUTOFIX_COMMIT_PREFIX;
+use homeboy_core::git::BOT_NAME;
 
 /// Label that permanently disables autofix on a PR.
 const AUTOFIX_DISABLED_LABEL: &str = "autofix-disabled";

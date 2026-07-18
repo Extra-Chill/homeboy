@@ -1,5 +1,5 @@
-use homeboy_code_audit::{AuditFinding, CodeAuditResult};
 use crate::auto::{Fix, RefactorPrimitive};
+use homeboy_code_audit::{AuditFinding, CodeAuditResult};
 use std::path::Path;
 
 use super::{tagged_doc_line_removal, tagged_doc_reference_update};

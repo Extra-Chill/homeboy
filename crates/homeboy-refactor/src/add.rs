@@ -8,9 +8,9 @@
 
 use std::path::Path;
 
-use homeboy_code_audit::CodeAuditResult;
 use crate::auto::{self, ChunkStatus, Fix, FixResult, Insertion, InsertionKind, NewFile};
 use crate::plan;
+use homeboy_code_audit::CodeAuditResult;
 use homeboy_core::Result;
 
 /// Result of an explicit import addition (not from audit).

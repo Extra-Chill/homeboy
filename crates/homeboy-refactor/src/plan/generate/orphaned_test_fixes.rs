@@ -1,7 +1,7 @@
+use crate::auto::{Fix, InsertionKind, RefactorPrimitive, SkippedFile};
 use homeboy_code_audit::fingerprint;
 use homeboy_code_audit::{AuditFinding, CodeAuditResult};
 use homeboy_core::engine::text::levenshtein;
-use crate::auto::{Fix, InsertionKind, RefactorPrimitive, SkippedFile};
 use std::path::Path;
 
 use super::{insertion_with_primitive, manual_only};
@@ -784,9 +784,9 @@ mod tests {
 
     // ── Integration tests: source-file-deleted promotion ──────────────
 
+    use crate::auto::{Fix, SkippedFile};
     use homeboy_code_audit::test_helpers::empty_result;
     use homeboy_code_audit::{Finding, Severity};
-    use crate::auto::{Fix, SkippedFile};
 
     fn fixture_content() -> &'static str {
         r#"#[cfg(test)]

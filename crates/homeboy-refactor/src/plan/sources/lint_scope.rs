@@ -292,7 +292,9 @@ fn looks_like_signature_line(line: &str) -> bool {
     })
 }
 
-pub(super) fn lint_finding_scope_files(findings: &[homeboy_core::finding::HomeboyFinding]) -> Vec<String> {
+pub(super) fn lint_finding_scope_files(
+    findings: &[homeboy_core::finding::HomeboyFinding],
+) -> Vec<String> {
     let mut files = BTreeSet::new();
     for finding in findings {
         let Some(file) = finding.location.file.as_deref() else {

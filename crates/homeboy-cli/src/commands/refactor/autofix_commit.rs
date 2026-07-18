@@ -10,7 +10,7 @@ const AUTOFIX_PREFIX: &str = "chore(ci): homeboy autofix";
 /// Stage all changes and create a commit after refactor --write.
 pub(super) fn commit_refactor_sources(
     path: &str,
-    sources: &homeboy::core::refactor::plan::RefactorSourceRun,
+    sources: &homeboy::refactor::plan::RefactorSourceRun,
     git_identity: Option<&str>,
 ) -> homeboy::core::Result<()> {
     stage_all(Path::new(path))?;
@@ -45,9 +45,7 @@ pub(super) fn commit_refactor_sources(
 /// Dead code removed: 4 fixes (2 files)
 /// ...
 /// ```
-fn build_autofix_commit_message(
-    sources: &homeboy::core::refactor::plan::RefactorSourceRun,
-) -> String {
+fn build_autofix_commit_message(sources: &homeboy::refactor::plan::RefactorSourceRun) -> String {
     let source_labels: Vec<&str> = sources.sources.iter().map(|s| s.as_str()).collect();
     let source_desc = source_labels.join(", ");
 

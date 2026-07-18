@@ -12,7 +12,7 @@ use homeboy::core::git;
 /// refactor source-run, so core does not depend on the refactor engine's
 /// `RefactorSourceRun` type.
 fn lint_fix_input(
-    run: &homeboy::core::refactor::plan::RefactorSourceRun,
+    run: &homeboy::refactor::plan::RefactorSourceRun,
 ) -> homeboy_refactor_contract::LintFixInput {
     homeboy_refactor_contract::LintFixInput {
         applied: run.applied,
@@ -27,10 +27,8 @@ use homeboy::core::observation::{
     finding_records_from_lint, merge_metadata, ActiveObservation, NewFindingRecord, NewRunRecord,
     RunStatus,
 };
-use homeboy::core::refactor::plan::{
-    collect_refactor_sources, lint_refactor_request, LintSourceOptions,
-};
 use homeboy::core::validation_progress::validation_progress_metadata;
+use homeboy::refactor::plan::{collect_refactor_sources, lint_refactor_request, LintSourceOptions};
 
 use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
@@ -521,7 +519,7 @@ mod tests {
     use homeboy::core::engine::run_dir::RunDir;
     use homeboy::core::extension::lint as extension_lint;
     use homeboy::core::extension::lint::report;
-    use homeboy::core::refactor::plan::{
+    use homeboy::refactor::plan::{
         lint_refactor_request, LintSourceOptions, RefactorSourceRun, SourceTotals,
     };
 

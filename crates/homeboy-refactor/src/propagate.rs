@@ -213,8 +213,8 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
 
     // Step 5: Apply edits if write mode — route through shared EditOp engine
     let applied = if config.write && !all_edits.is_empty() {
-        use homeboy_core::engine::edit_op_apply::apply_edit_ops;
         use crate::edit_op_tagged::propagate_result_to_edit_ops;
+        use homeboy_core::engine::edit_op_apply::apply_edit_ops;
 
         // Build a temporary PropagateResult to convert edits
         let tmp_result = PropagateResult {

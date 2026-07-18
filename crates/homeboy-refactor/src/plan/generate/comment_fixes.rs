@@ -20,8 +20,8 @@ use std::path::Path;
 
 use regex::Regex;
 
-use homeboy_code_audit::{AuditFinding, CodeAuditResult};
 use crate::auto::{Fix, SkippedFile};
+use homeboy_code_audit::{AuditFinding, CodeAuditResult};
 
 use super::{doc_line_removal, manual_blocked, range_removal};
 
@@ -555,9 +555,9 @@ fn leading_indent(line: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auto::InsertionKind;
     use homeboy_code_audit::test_helpers::empty_result;
     use homeboy_code_audit::{Finding, Severity};
-    use crate::auto::InsertionKind;
 
     // ── classify_and_bound tests ──────────────────────────────────────
 

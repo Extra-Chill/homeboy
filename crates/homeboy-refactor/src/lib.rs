@@ -18,11 +18,16 @@ pub mod primitive_builders;
 pub mod propagate;
 mod rename;
 pub mod transform;
+pub mod transform_provider;
 
 /// Resolve the refactor root directory from an explicit path or component id.
-pub fn resolve_root(component_id: Option<&str>, path: Option<&str>) -> homeboy_core::Result<PathBuf> {
-    let target =
-        homeboy_core::component::resolve_target(homeboy_core::component::TargetSpec::new(component_id, path))?;
+pub fn resolve_root(
+    component_id: Option<&str>,
+    path: Option<&str>,
+) -> homeboy_core::Result<PathBuf> {
+    let target = homeboy_core::component::resolve_target(
+        homeboy_core::component::TargetSpec::new(component_id, path),
+    )?;
     if !target.source_path.is_dir() {
         return Err(homeboy_core::Error::validation_invalid_argument(
             "path",

@@ -9,7 +9,6 @@ pub mod transaction;
 pub mod verify;
 
 #[cfg(test)]
-#[path = "../../../../../tests/utils/autofix_test.rs"]
 mod autofix_test;
 
 pub use apply::{apply_fixes_via_edit_ops, apply_fixes_via_edit_ops_with_verify};

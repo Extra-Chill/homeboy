@@ -11,10 +11,10 @@ mod orphaned_test_fixes;
 mod parameter_fixes;
 mod signatures;
 
-use homeboy_code_audit::{fingerprint::FileFingerprint, AuditFinding, CodeAuditResult};
 use crate::auto::{DecomposeFixPlan, Fix, FixPolicy, FixResult, SkippedFile};
 use crate::decompose;
 use crate::plan::file_intent::{FileIntent, FileIntentMap};
+use homeboy_code_audit::{fingerprint::FileFingerprint, AuditFinding, CodeAuditResult};
 use std::path::Path;
 
 use convention_fixes::apply_convention_fixes;

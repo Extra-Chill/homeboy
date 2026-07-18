@@ -10,14 +10,14 @@ use super::lint_scope::{
 };
 use super::planning::{PlannedStage, SourceStageSummary};
 use super::{audit_source::filtered_audit_source_result, LintSourceOptions, TestSourceOptions};
+use crate::auto as fixer;
+use crate::auto::{self, FixApplied};
+use crate::plan::verify::AuditConvergenceScoring;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::engine::undo::UndoSnapshot;
 use homeboy_core::extension;
 use homeboy_core::git;
-use crate::auto as fixer;
-use crate::auto::{self, FixApplied};
-use crate::plan::verify::AuditConvergenceScoring;
 use homeboy_core::Error;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -42,7 +42,10 @@ pub(super) struct AuditStageRequest<'a> {
 /// Uses the same `format_after_write` as the post-write step. Formatter
 /// failures are fatal in write mode so the command never returns an
 /// applied-success payload for a partially formatted worktree.
-pub(super) fn format_changed_files(root: &Path, changed_files: &[String]) -> homeboy_core::Result<()> {
+pub(super) fn format_changed_files(
+    root: &Path,
+    changed_files: &[String],
+) -> homeboy_core::Result<()> {
     if changed_files.is_empty() {
         return Ok(());
     }
@@ -129,7 +132,9 @@ pub(super) fn reject_remaining_lint_fix_findings(
     ))
 }
 
-pub(super) fn plan_audit_stage(request: AuditStageRequest<'_>) -> homeboy_core::Result<PlannedStage> {
+pub(super) fn plan_audit_stage(
+    request: AuditStageRequest<'_>,
+) -> homeboy_core::Result<PlannedStage> {
     let component_id = &request.component.id;
     let root = request.root;
     let result = if let Some(cached) = try_load_cached_audit() {
@@ -179,8 +184,7 @@ pub(super) fn plan_audit_stage(request: AuditStageRequest<'_>) -> homeboy_core::
     )? {
         return Ok(stage);
     }
-    let mut fix_result =
-        crate::plan::generate::generate_audit_fixes(&result, root, &policy);
+    let mut fix_result = crate::plan::generate::generate_audit_fixes(&result, root, &policy);
     let (fix_result, policy_summary, changed_files, stage_warnings): (
         fixer::FixResult,
         fixer::PolicySummary,
@@ -357,7 +361,8 @@ pub(super) fn run_lint_stage(
         // No cached findings — run the diagnostic pass.
         build_lint_runner(diagnostic_glob.as_deref())?.run()?;
 
-        homeboy_core::extension::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default()
+        homeboy_core::extension::lint::baseline::parse_findings_file(&findings_file)
+            .unwrap_or_default()
     };
 
     let lint_source_result = serde_json::json!({

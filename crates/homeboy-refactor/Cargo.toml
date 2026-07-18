@@ -27,4 +27,5 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "blo
 tempfile = "3.14"
 
 [dev-dependencies]
+homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit", features = ["test-support"] }
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
