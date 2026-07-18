@@ -52,11 +52,9 @@ pub(super) fn connect_remote_daemon(
     };
     let (local_port, tunnel_pid, local_url) =
         open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
-    match daemon_health_report(&local_url) {
-        Ok(report) if health_identity_matches(&report, &daemon) => {
-            Ok((local_port, tunnel_pid, local_url, daemon))
-        }
-        Ok(report) => Err(failed_after_tunnel(
+    match probe_daemon_health_until_ready(&local_url, &daemon) {
+        Ok(()) => Ok((local_port, tunnel_pid, local_url, daemon)),
+        Err(DaemonHealthProbeFailure::IdentityMismatch(report)) => Err(failed_after_tunnel(
             tunnel_pid,
             format!(
                 "remote daemon health identity changed or is unavailable (expected lease {:?}, PID {:?}; got lease {:?}, PID {:?}); refusing to write session{}",
@@ -64,7 +62,49 @@ pub(super) fn connect_remote_daemon(
                 active_job_recovery_guidance(&daemon),
             ),
         )),
-        Err(message) => Err(failed_after_tunnel(tunnel_pid, message)),
+        Err(DaemonHealthProbeFailure::Unreachable(message)) => {
+            Err(failed_after_tunnel(tunnel_pid, message))
+        }
+    }
+}
+
+#[derive(Debug)]
+enum DaemonHealthProbeFailure {
+    /// The daemon answered but reported a different lease/PID than the one we
+    /// just started. This is authoritative and must fail immediately.
+    IdentityMismatch(Box<DaemonHealthReport>),
+    /// The daemon endpoint could not be reached within the settle budget.
+    Unreachable(String),
+}
+
+/// A freshly started daemon can have its TCP listener accepting connections
+/// (so the tunnel is reachable) a beat before its HTTP handler answers
+/// `/health`. A single-shot probe then fails with `error sending request` and
+/// the caller rolls the whole refresh back, even though `runner connect`
+/// succeeds moments later (#8459). Retry the transport-level failure within a
+/// bounded settle window so the reconnect converges without operator recovery.
+///
+/// An identity mismatch is authoritative — the daemon is up but is the wrong
+/// one — so it is never retried.
+fn probe_daemon_health_until_ready(
+    local_url: &str,
+    daemon: &RemoteDaemon,
+) -> std::result::Result<(), DaemonHealthProbeFailure> {
+    const SETTLE_BUDGET: Duration = Duration::from_secs(10);
+    const RETRY_INTERVAL: Duration = Duration::from_millis(250);
+
+    let deadline = std::time::Instant::now() + SETTLE_BUDGET;
+    let mut last_error;
+    loop {
+        match daemon_health_report(local_url) {
+            Ok(report) if health_identity_matches(&report, daemon) => return Ok(()),
+            Ok(report) => return Err(DaemonHealthProbeFailure::IdentityMismatch(Box::new(report))),
+            Err(message) => last_error = message,
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(DaemonHealthProbeFailure::Unreachable(last_error));
+        }
+        std::thread::sleep(RETRY_INTERVAL);
     }
 }
 
@@ -620,5 +660,103 @@ mod tests {
     fn health_pid_is_read_from_the_daemon_health_body() {
         let body = serde_json::json!({ "pid": 7331 });
         assert_eq!(daemon_pid_from_body(&body), Some(7331));
+    }
+
+    /// #8459: a freshly started daemon can accept the TCP connection before its
+    /// HTTP handler answers `/health`, so the first probe fails with a
+    /// transport error. The probe must retry within its settle budget and
+    /// converge instead of failing the reconnect (which triggered a full
+    /// refresh rollback and manual orphan-lease recovery).
+    #[test]
+    fn health_probe_retries_through_a_transient_startup_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let body = serde_json::json!({
+            "freshness": report("lease-live", 7331).freshness,
+            "pid": 7331,
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            // First connection: accept then drop without responding, forcing an
+            // `error sending request` transport failure on the controller side.
+            let (first, _) = listener.accept().expect("first health request");
+            drop(first);
+            // Second connection: answer correctly so the retry converges.
+            let (mut stream, _) = listener.accept().expect("second health request");
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).expect("read request");
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    )
+                    .as_bytes(),
+                )
+                .expect("health response");
+        });
+
+        let daemon = RemoteDaemon {
+            address: address.to_string(),
+            pid: Some(7331),
+            lease_id: Some("lease-live".to_string()),
+            version: None,
+            build_identity: None,
+            inspected_freshness: None,
+        };
+        let result = probe_daemon_health_until_ready(&format!("http://{address}"), &daemon);
+        assert!(
+            result.is_ok(),
+            "probe must retry through the transient startup failure: {result:?}"
+        );
+        server.join().expect("server");
+    }
+
+    /// An identity mismatch is authoritative — the daemon is up but is the
+    /// wrong one — so the probe must fail immediately without burning the
+    /// settle budget on retries.
+    #[test]
+    fn health_probe_does_not_retry_an_identity_mismatch() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let body = serde_json::json!({
+            "freshness": report("lease-other", 7331).freshness,
+            "pid": 7331,
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("health request");
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).expect("read request");
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    )
+                    .as_bytes(),
+                )
+                .expect("health response");
+        });
+
+        let daemon = RemoteDaemon {
+            address: address.to_string(),
+            pid: Some(7331),
+            lease_id: Some("lease-live".to_string()),
+            version: None,
+            build_identity: None,
+            inspected_freshness: None,
+        };
+        let started = std::time::Instant::now();
+        let result = probe_daemon_health_until_ready(&format!("http://{address}"), &daemon);
+        assert!(
+            matches!(result, Err(DaemonHealthProbeFailure::IdentityMismatch(_))),
+            "identity mismatch must fail immediately: {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "identity mismatch must not burn the retry budget"
+        );
+        server.join().expect("server");
     }
 }
