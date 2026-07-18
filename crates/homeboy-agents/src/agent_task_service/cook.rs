@@ -156,7 +156,24 @@ pub fn adopt_cook_candidate_with_dispatcher(
             None,
         ));
     }
-    let (source, source_path) = promotion_source(&record.run_id)?;
+    let (source, source_path) =
+        if let Ok((source, path)) = agent_task_lifecycle::aggregate_source(&record.run_id) {
+            (source, Some(path))
+        } else if let Some(outcome) =
+            agent_task_lifecycle::candidate_adoption_recovery_outcome(&record, &source_request)
+        {
+            (
+                serde_json::to_string(&outcome).map_err(|error| {
+                    Error::internal_json(
+                        error.to_string(),
+                        Some("serialize candidate adoption recovery outcome".to_string()),
+                    )
+                })?,
+                None,
+            )
+        } else {
+            promotion_source(&record.run_id)?
+        };
     let promotion = promote_with_checkpoint(
         AgentTaskPromotionOptions {
             source,
@@ -2642,6 +2659,41 @@ mod tests {
             std::fs::write(&recipe_path, serde_json::to_vec(&recipe).unwrap())
                 .expect("persist historical runtime");
 
+            let command = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+            ];
+            agent_task_lifecycle::record_lab_offload_planned(
+                agent_task_lifecycle::LabOffloadProxyPlan {
+                    run_id,
+                    runner_id: "fixture-lab",
+                    remote_workspace: "/runner/workspace",
+                    remote_command: &command,
+                    durable_plan: Some(&options.initial_plan),
+                },
+            )
+            .expect("persist preacceptance handoff");
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id)
+                .expect("link recipe attempt");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record
+                    .lab_handoff
+                    .as_mut()
+                    .expect("typed handoff")
+                    .acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
+            })
+            .expect("expire handoff deadline");
+            let expired =
+                agent_task_lifecycle::status(run_id).expect("expire preacceptance handoff");
+            assert_eq!(
+                expired.state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            assert!(expired.aggregate_path.is_none());
+            assert!(expired.artifact_refs.is_empty());
+            assert_eq!(expired.metadata["provider_executions_consumed"], 0);
+
             let invalid = adopt_cook_candidate(cook_id, &base)
                 .expect_err("candidate validation remains active");
             assert!(invalid
@@ -2667,6 +2719,34 @@ mod tests {
                 std::fs::read_to_string(target.join("lib.rs")).unwrap(),
                 "candidate\n"
             );
+            let promoted = agent_task_lifecycle::status(run_id).expect("adopted lifecycle record");
+            assert_eq!(
+                promoted.metadata["latest_promotion"]["provenance"]["adoption"]["candidate_ref"],
+                candidate
+            );
+        });
+    }
+
+    #[test]
+    fn adoption_rejects_aggregate_free_cancelled_runs_without_pre_provider_evidence() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-adopt-cancelled-without-evidence";
+            let run_id = "cook-adopt-cancelled-without-evidence-attempt-1";
+            let mut options =
+                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.initial_run_id = run_id.to_string();
+            super::super::persist_initial_recipe(&options).expect("persist recipe");
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+                .expect("persist lifecycle record");
+            agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id)
+                .expect("link recipe attempt");
+            let cancelled = agent_task_lifecycle::cancel_run(run_id, Some("fixture cancellation"))
+                .expect("cancel attempt");
+            assert!(cancelled.aggregate_path.is_none());
+
+            let error = adopt_cook_candidate(cook_id, "candidate")
+                .expect_err("cancelled run without recovery evidence is rejected");
+            assert_eq!(error.code, homeboy_core::ErrorCode::ValidationInvalidJson);
         });
     }
 
