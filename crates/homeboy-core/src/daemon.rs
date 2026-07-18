@@ -1159,9 +1159,13 @@ where
     let state = write_state(local_addr)?;
     let job_store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)
         .map(|store| store.with_daemon_lease(state.lease_id.clone()))?;
+    // A restart cannot resume the thread that owned a pre-spawn reservation.
+    // Expire only reservations that never recorded a child identity.
+    job_store.reconcile_expired_local_child_reservations()?;
     let _ = daemon_runtime_snapshot();
     let loopback_bind = local_addr.ip().is_loopback();
 
+    spawn_local_child_reservation_reconciler(job_store.clone());
     spawn_completion_notifier();
 
     for stream in listener.incoming() {
@@ -1186,6 +1190,18 @@ where
 /// seconds. Defaults to [`COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS`].
 const COMPLETION_NOTIFY_INTERVAL_ENV: &str = "HOMEBOY_DAEMON_NOTIFY_INTERVAL_SECS";
 const COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS: u64 = 5;
+const LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS: u64 = 5;
+
+/// Reclaim capacity even when no controller polls the daemon after a failed
+/// handoff. The store owns the fail-closed child-identity check.
+fn spawn_local_child_reservation_reconciler(job_store: JobStore) {
+    std::thread::spawn(move || loop {
+        let _ = job_store.reconcile_expired_local_child_reservations();
+        std::thread::sleep(std::time::Duration::from_secs(
+            LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS,
+        ));
+    });
+}
 
 /// Spawn the background thread that watches in-flight runs and fires a local
 /// notification when one completes, so a detached/offloaded run never becomes a
@@ -1311,6 +1327,9 @@ fn route_with_job_store_and_body_and_runner_and_auth<R>(
 where
     R: AnalysisJobRunner,
 {
+    if let Err(error) = job_store.reconcile_expired_local_child_reservations() {
+        return error_response(500, error);
+    }
     match (method, path) {
         ("GET", "/health") => HttpResponse {
             status_code: 200,
@@ -1808,6 +1827,14 @@ fn enqueue_exec_job(
         "kind": lifecycle.as_ref().and_then(|lifecycle| lifecycle.kind.clone()).unwrap_or_else(|| "runner.exec".to_string()),
         "lifecycle": lifecycle.clone(),
     });
+    // Capture any potentially slow baseline before reserving child capacity.
+    // Once the reservation is durable, the worker performs only the bounded
+    // process-spawn handoff before persisting child ownership.
+    let baseline = if request.capture_patch {
+        Some(capture_baseline(&plan.cwd, source_snapshot.as_ref())?)
+    } else {
+        None
+    };
     let runner = job_store
         .run_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
             operation,
@@ -1826,11 +1853,6 @@ fn enqueue_exec_job(
                     "HOMEBOY_RUNNER_CHILD_RESERVATION".to_string(),
                     job.local_child_reservation_id()?,
                 );
-                let baseline = if request.capture_patch {
-                    Some(capture_baseline(&plan.cwd, source_snapshot.as_ref())?)
-                } else {
-                    None
-                };
                 let progress_job = job.clone();
                 let progress_sink = Arc::new(move |data| progress_job.progress(data).map(|_| ()));
                 let started_job = job.clone();
