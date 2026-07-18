@@ -591,12 +591,13 @@ pub(super) fn is_excluded(
         return false;
     }
     excludes.iter().any(|pattern| {
+        let root_anchored = pattern.starts_with("./");
+        let pattern = pattern.trim_start_matches("./");
         let directory_pattern = pattern.trim_end_matches('/');
         pattern == rel
-            || pattern == name
             || directory_pattern == rel
             || glob_match(pattern, rel)
-            || glob_match(pattern, name)
+            || (!root_anchored && (pattern == name || glob_match(pattern, name)))
     })
 }
 
@@ -1182,11 +1183,33 @@ pub(super) fn snapshot_archive_command(
     // paths that traverse a symlinked dependency resolve to missing files on the
     // runner. Dereferencing materializes the real dependency contents into the
     // snapshot so offloaded plans find them at the remapped path (#3913).
-    format!(
-        "COPYFILE_DISABLE=1 tar --no-xattrs -h -C {src} {exclude} -cf - . | {target_command}",
+    let root_anchored = excludes
+        .iter()
+        .filter(|pattern| pattern.starts_with("./"))
+        .collect::<Vec<_>>();
+    let excludes = excludes
+        .iter()
+        .filter(|pattern| !pattern.starts_with("./"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let archive = format!(
+        "COPYFILE_DISABLE=1 tar --no-xattrs -h -C {src} {exclude} -cf -",
         src = shell::quote_arg(&local_path.display().to_string()),
-        exclude = tar_exclude_args(excludes),
-        target_command = target_command,
+        exclude = tar_exclude_args(&excludes),
+    );
+
+    if root_anchored.is_empty() {
+        return format!("{archive} . | {target_command}");
+    }
+
+    let root_filter = root_anchored
+        .iter()
+        .map(|pattern| format!("! -path {}", shell::quote_arg(pattern)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "(cd {src} && find . -mindepth 1 -maxdepth 1 {root_filter} -print0) | {archive} --null -T - | {target_command}",
+        src = shell::quote_arg(&local_path.display().to_string()),
     )
 }
 

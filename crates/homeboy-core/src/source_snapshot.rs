@@ -281,7 +281,12 @@ pub(crate) fn gitignore_sync_excludes(path: &Path) -> Vec<String> {
 }
 
 fn append_gitignore_exclude(excludes: &mut Vec<String>, raw: &str) {
-    let pattern = raw.trim_start_matches("./").trim_start_matches('/');
+    let pattern = raw.trim_start_matches("./");
+    let pattern = if let Some(pattern) = pattern.strip_prefix('/') {
+        format!("./{pattern}")
+    } else {
+        pattern.to_string()
+    };
     if pattern.is_empty() {
         return;
     }
@@ -289,7 +294,7 @@ fn append_gitignore_exclude(excludes: &mut Vec<String>, raw: &str) {
         let base = pattern.trim_end_matches('/');
         append_unique(excludes, [base.to_string(), format!("{base}/**")]);
     } else {
-        append_unique(excludes, [pattern.to_string()]);
+        append_unique(excludes, [pattern]);
     }
 }
 
@@ -401,6 +406,17 @@ mod tests {
         assert!(snapshot
             .sync_excludes
             .contains(&".sampleplugin/".to_string()));
+    }
+
+    #[test]
+    fn gitignore_root_anchored_directory_excludes_remain_root_anchored() {
+        let tempdir = tempfile::tempdir().expect("creates source fixture");
+        fs::write(tempdir.path().join(".gitignore"), "/dist\ndist\n").expect("writes gitignore");
+
+        assert_eq!(
+            gitignore_sync_excludes(tempdir.path()),
+            vec!["./dist".to_string(), "dist".to_string()]
+        );
     }
 
     #[test]
