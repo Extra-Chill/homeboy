@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.291.5] - 2026-07-18
+
+### Fixed
+- recover expired handoff candidate adoption
+
 ## [0.291.4] - 2026-07-18
 
 ### Changed
