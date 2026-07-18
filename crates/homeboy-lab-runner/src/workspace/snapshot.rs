@@ -18,6 +18,7 @@ use super::util::{
 };
 
 const RUNNER_WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
+const LAB_AT_FILES_DIRECTORY: &str = ".homeboy/lab-at-files";
 pub(crate) const WORKSPACE_CONTENT_PERMISSION_PORTABLE: &str = "portable-content-only";
 pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE: &str = "unix-executable";
 pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE: &str = "unix-owner-executable";
@@ -226,6 +227,7 @@ fn collect_content_hash_entries_v2(
         if relative == ".git"
             || is_excluded(root, &root.join(&relative_path), excludes, &[])
             || relative == RUNNER_WORKSPACE_METADATA_FILE
+            || relative == LAB_AT_FILES_DIRECTORY
         {
             continue;
         }
@@ -1197,22 +1199,31 @@ pub(crate) fn copy_snapshot_to_directory(
 }
 
 pub(crate) fn ensure_no_runner_workspace_metadata_collision(local_path: &Path) -> Result<()> {
-    let metadata_path = local_path.join(RUNNER_WORKSPACE_METADATA_FILE);
-    match fs::symlink_metadata(&metadata_path) {
-        Ok(_) => Err(Error::validation_invalid_argument(
-            "workspace",
-            "source workspace contains the reserved runner metadata path `.homeboy/runner-workspace.json`; remove or rename it before syncing",
-            Some(metadata_path.display().to_string()),
-            Some(vec![
-                "Remove or rename the source file before syncing; Homeboy writes this path only after runner materialization.".to_string(),
-            ]),
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(Error::internal_io(
-            error.to_string(),
-            Some("inspect reserved runner metadata path".to_string()),
-        )),
+    for reserved in [RUNNER_WORKSPACE_METADATA_FILE, LAB_AT_FILES_DIRECTORY] {
+        let reserved_path = local_path.join(reserved);
+        match fs::symlink_metadata(&reserved_path) {
+            Ok(_) => {
+                return Err(Error::validation_invalid_argument(
+                    "workspace",
+                    format!(
+                        "source workspace contains the reserved runner path `{reserved}`; remove or rename it before syncing"
+                    ),
+                    Some(reserved_path.display().to_string()),
+                    Some(vec![
+                        "Remove or rename the source path before syncing; Homeboy owns this path on materialized runner workspaces.".to_string(),
+                    ]),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some("inspect reserved runner workspace path".to_string()),
+                ));
+            }
+        }
     }
+    Ok(())
 }
 
 fn materialize_snapshot_piped(
