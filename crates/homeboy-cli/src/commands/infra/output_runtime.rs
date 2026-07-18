@@ -425,6 +425,32 @@ mod tests {
     }
 
     #[test]
+    fn generic_output_file_keeps_failed_test_result_available() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test.json");
+        let run = CommandRun::from_stdout_result(
+            Ok(json!({
+                "passed": false,
+                "status": "failed",
+                "test_counts": { "total": 36, "passed": 21, "failed": 15, "skipped": 0 }
+            })),
+            1,
+        );
+
+        write_output_file(
+            &run,
+            CommandOutputFileMode::GenericEnvelope,
+            Some(path.to_str().expect("utf8 path")),
+        );
+
+        let written = std::fs::read_to_string(path).expect("failed result written");
+        let json: Value = serde_json::from_str(&written).expect("valid json");
+        assert_eq!(json["success"], false);
+        assert_eq!(json["exit_code"], 1);
+        assert_eq!(json["data"]["test_counts"]["failed"], 15);
+    }
+
+    #[test]
     fn review_output_file_writes_stable_artifact_without_envelope() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("review.json");
