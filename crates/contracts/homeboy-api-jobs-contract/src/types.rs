@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::remote_runner::JobArtifactMetadata;
-use super::remote_runner::RunnerJobLifecycleMetadata;
-use crate::runner_execution_envelope::PathMaterializationPlan;
-use crate::source_snapshot::SourceSnapshot;
+use crate::metadata::JobArtifactMetadata;
+use crate::metadata::RunnerJobLifecycleMetadata;
+use homeboy_lab_contract::path_materialization::PathMaterializationPlan;
+use homeboy_source_snapshot_contract::SourceSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -20,7 +20,7 @@ pub enum JobStatus {
 }
 
 impl JobStatus {
-    pub(super) fn is_terminal(self) -> bool {
+    pub fn is_terminal(self) -> bool {
         matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
     }
 

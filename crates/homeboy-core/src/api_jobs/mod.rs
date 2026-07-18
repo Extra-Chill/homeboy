@@ -4,7 +4,11 @@ mod remote_runner;
 mod runner_job_preparation;
 mod store;
 mod summary;
-mod types;
+// The pure job-model data types (Job/JobStatus/JobEvent + companions) were
+// extracted to the homeboy-api-jobs-contract leaf crate. Re-exported as
+// `api_jobs::types` so existing `crate::api_jobs::types::*` paths keep
+// resolving. The job store / persistence / remote-runner behavior stays here.
+use homeboy_api_jobs_contract::types;
 
 pub use remote_runner::{
     JobArtifactMetadata, RemoteRunnerJobClaim, RemoteRunnerJobRequest, RemoteRunnerJobResult,
