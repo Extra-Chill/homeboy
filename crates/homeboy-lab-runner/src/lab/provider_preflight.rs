@@ -8,7 +8,7 @@ use homeboy_agents::agent_tasks::provider::{
     default_backend_for_component, AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
 };
 use homeboy_core::engine::shell;
-use homeboy_core::redaction::redact_argv_display;
+use homeboy_core::redaction::redact_argv_shell_display;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use homeboy_core::{Error, ErrorCode, Result};
 
@@ -532,7 +532,7 @@ fn agent_task_provider_selection_preflight_error(
         ),
         provider_preflight_homeboy_identity_hint(runner_id, runner_homeboy),
         refresh_hint(runner_id, runner_homeboy, refresh_result),
-        format!("Preflight command: `{}`.", redact_argv_display(command)),
+        format!("Preflight command: `{}`.", redact_argv_shell_display(command)),
     ];
     hints.retain(|hint| !hint.is_empty());
 

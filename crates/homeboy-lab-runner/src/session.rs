@@ -5,7 +5,7 @@ use homeboy_core::daemon::{
 };
 
 use homeboy_core::engine::shell;
-use homeboy_core::redaction::redact_argv_display;
+use homeboy_core::redaction::redact_argv_shell_display;
 
 use homeboy_core::api_jobs::{ActiveRunnerJobSummary, Job, JobArtifactMetadata, JobStatus};
 
@@ -277,7 +277,7 @@ impl RunnerJob {
             job_id: job.id.to_string(),
             operation: job.operation.clone(),
             status: job.status,
-            command: redact_argv_display(command),
+            command: redact_argv_shell_display(command),
             cwd,
             source: source.to_string(),
             lifecycle_owner: if source == "broker" {
@@ -307,6 +307,56 @@ impl RunnerJob {
                 .map(crate::session::runner_artifact_ref_from_metadata)
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_runner_job_projection_uses_redacted_shell_display() {
+        let job = Job {
+            id: uuid::Uuid::nil(),
+            operation: "runner.exec".to_string(),
+            status: JobStatus::Running,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            started_at_ms: Some(1),
+            finished_at_ms: None,
+            event_count: 0,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            stale_reason: None,
+            daemon_lease_id: None,
+            target_runner_id: None,
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+            runner_job_projection: None,
+        };
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run".to_string(),
+            "#8949".to_string(),
+            "path with spaces".to_string(),
+            "O'Brien".to_string(),
+            "$HOME/work".to_string(),
+            "--provider-auth-token".to_string(),
+            "secret-value".to_string(),
+        ];
+
+        let projection = RunnerJob::from_job("homeboy-lab", "daemon", &command, None, &job);
+
+        assert_eq!(
+            projection.command,
+            "homeboy agent-task run '#8949' 'path with spaces' 'O'\\''Brien' '$HOME/work' --provider-auth-token '[REDACTED]'"
+        );
+        assert!(!projection.command.contains("secret-value"));
     }
 }
 

@@ -97,7 +97,7 @@ pub(crate) fn run_runner_resident_lab_offload(
 
     eprintln!(
         "Lab offload: running `{}` on runner `{}` in `{}`.",
-        redact_argv_display(&command),
+        redact_argv_shell_display(&command),
         runner_id,
         runner_workspace_root
     );
