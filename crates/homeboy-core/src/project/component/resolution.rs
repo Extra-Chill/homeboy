@@ -95,7 +95,7 @@ pub fn resolve_project_component_with_standalone_snapshot(
     // Auto-resolve remote_path if still empty after all config layers.
     // Repo homeboy.json intentionally omits remote_path (it's deploy config),
     // so auto-detect it from source files when possible (#812).
-    resolved.resolve_remote_path();
+    crate::component::resolve_remote_path(&mut resolved);
 
     Ok(resolved)
 }

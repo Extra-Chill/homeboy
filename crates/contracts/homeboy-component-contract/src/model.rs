@@ -1,12 +1,12 @@
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
-use super::audit::AuditConfig;
-use super::config::{
+use crate::config::{
     is_default_github_config, ArtifactInput, CleanupArtifactDeclaration, ComponentDeployConfig,
     ComponentReleaseConfig, ComponentScriptsConfig, DependencyStackEdge, GitDeployConfig,
     GithubConfig, ScopeConfig, ScopedExtensionConfig, VersionTarget,
 };
+use homeboy_audit_contract::AuditConfig;
 
 /// Lifecycle state of a component.
 ///
@@ -396,77 +396,6 @@ impl Component {
         }
     }
 
-    /// Auto-resolve `remote_path` from linked extension deploy rules when not explicitly set.
-    ///
-    /// Extensions can declare generic file-content checks and target-path templates.
-    /// Core does not know framework-specific deploy paths; it only evaluates the
-    /// extension-provided contract.
-    ///
-    /// Extension templates can use the **local directory name** (basename of
-    /// `local_path`) separately from the component ID. This keeps deploy paths
-    /// correct when a component ID differs from the on-disk package directory.
-    ///
-    /// Returns `Some(path)` if auto-resolved, `None` if not applicable or not detectable.
-    pub fn auto_resolve_remote_path(&self) -> Option<String> {
-        // File components cannot auto-resolve — they must have explicit remote_path.
-        if std::path::Path::new(&self.local_path).is_file() {
-            return None;
-        }
-
-        let local = std::path::Path::new(&self.local_path);
-
-        // Use the directory basename as the remote directory name.
-        let dir_name = local.file_name()?.to_str()?;
-
-        let mut matches = HashSet::new();
-        for extension_id in self.extensions.as_ref()?.keys() {
-            let Ok(extension) = crate::extension_store::load_extension(extension_id) else {
-                continue;
-            };
-
-            for rule in extension.remote_path_inference_rules() {
-                if self.remote_path_inference_rule_matches(rule, local, dir_name) {
-                    matches.insert(render_remote_path_template(
-                        &rule.remote_path,
-                        &self.id,
-                        dir_name,
-                    ));
-                }
-            }
-        }
-
-        if matches.len() == 1 {
-            matches.into_iter().next()
-        } else {
-            None
-        }
-    }
-
-    fn remote_path_inference_rule_matches(
-        &self,
-        rule: &homeboy_extension_contract::RemotePathInferenceRule,
-        local: &std::path::Path,
-        dir_name: &str,
-    ) -> bool {
-        let relative_file =
-            render_remote_path_template(&rule.when_file_contains.file, &self.id, dir_name);
-        let relative_path = std::path::Path::new(&relative_file);
-        if relative_path.is_absolute()
-            || relative_path
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
-        {
-            return false;
-        }
-
-        let file = local.join(relative_path);
-        let Ok(content) = std::fs::read_to_string(file) else {
-            return false;
-        };
-
-        content.contains(&rule.when_file_contains.text)
-    }
-
     /// Whether this component is independently deployable per its lifecycle.
     ///
     /// `Bundled` and `Retired` components are not independently deployable —
@@ -554,7 +483,7 @@ impl Component {
         !self.script_commands(capability).is_empty()
     }
 
-    pub fn validate_supported_build_config(&self) -> crate::Result<()> {
+    pub fn validate_supported_build_config(&self) -> homeboy_error::Result<()> {
         let Some(command) = self
             .build_command
             .as_deref()
@@ -564,7 +493,7 @@ impl Component {
             return Ok(());
         };
 
-        Err(crate::Error::validation_invalid_argument(
+        Err(homeboy_error::Error::validation_invalid_argument(
             "build_command",
             format!(
                 "Component '{}' uses unsupported legacy build_command. Use scripts.build instead.",
@@ -577,21 +506,12 @@ impl Component {
             ]),
         ))
     }
-
-    /// Ensure `remote_path` is populated. If empty, attempt auto-resolution.
-    ///
-    /// This should be called after all config layers (repo portable, project overrides)
-    /// have been applied. It fills in `remote_path` only if still empty.
-    pub fn resolve_remote_path(&mut self) {
-        if self.remote_path.trim().is_empty() {
-            if let Some(resolved) = self.auto_resolve_remote_path() {
-                self.remote_path = resolved;
-            }
-        }
-    }
 }
 
-fn render_remote_path_template(template: &str, component_id: &str, dir_name: &str) -> String {
+/// Render an extension remote-path template against a component id + on-disk
+/// directory name. Pure string substitution; the extension-driven auto-resolve
+/// behavior that consumes it lives in `homeboy-core`.
+pub fn render_remote_path_template(template: &str, component_id: &str, dir_name: &str) -> String {
     template
         .replace("{{component_id}}", component_id)
         .replace("{{id}}", component_id)

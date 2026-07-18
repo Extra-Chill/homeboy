@@ -95,7 +95,7 @@ fn component_from_spec(
         extensions: spec.extensions.clone(),
         ..Component::default()
     };
-    component.resolve_remote_path();
+    component::resolve_remote_path(&mut component);
     component
 }
 
@@ -116,7 +116,7 @@ fn apply_rig_component_overrides(
     if let Some(extensions) = spec.extensions.clone() {
         component.extensions = Some(extensions);
     }
-    component.resolve_remote_path();
+    component::resolve_remote_path(component);
 }
 
 fn path_from_path_setting(spec: &ComponentSpec) -> Option<String> {

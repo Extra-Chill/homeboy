@@ -904,6 +904,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-component-contract"
+version = "0.1.0"
+dependencies = [
+ "homeboy-audit-contract",
+ "homeboy-error",
+ "homeboy-extension-contract",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "homeboy-core"
 version = "0.1.0"
 dependencies = [
@@ -922,6 +933,7 @@ dependencies = [
  "homeboy-cli-contract",
  "homeboy-code-audit",
  "homeboy-command-contract",
+ "homeboy-component-contract",
  "homeboy-engine-primitives",
  "homeboy-error",
  "homeboy-execution-contract",

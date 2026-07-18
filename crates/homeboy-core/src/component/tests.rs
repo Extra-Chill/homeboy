@@ -437,7 +437,7 @@ fn auto_resolve_remote_path_uses_extension_rule() {
         };
 
         assert_eq!(
-            component.auto_resolve_remote_path(),
+            crate::component::auto_resolve_remote_path(&component),
             Some("remote/my-component".to_string()),
         );
     });
@@ -474,7 +474,7 @@ fn auto_resolve_remote_path_uses_dirname_not_component_id() {
         };
 
         assert_eq!(
-            component.auto_resolve_remote_path(),
+            crate::component::auto_resolve_remote_path(&component),
             Some("remote/source-dir".to_string()),
         );
     });
@@ -492,7 +492,7 @@ fn auto_resolve_remote_path_returns_none_without_matching_extension_rule() {
         ..Component::default()
     };
 
-    assert_eq!(component.auto_resolve_remote_path(), None);
+    assert_eq!(crate::component::auto_resolve_remote_path(&component), None);
 }
 
 #[test]
@@ -528,7 +528,7 @@ fn auto_resolve_remote_path_returns_none_on_conflicting_extension_rules() {
             ..Component::default()
         };
 
-        assert_eq!(component.auto_resolve_remote_path(), None);
+        assert_eq!(crate::component::auto_resolve_remote_path(&component), None);
     });
 }
 
@@ -563,7 +563,7 @@ fn resolve_remote_path_fills_empty() {
             ..Component::default()
         };
 
-        component.resolve_remote_path();
+        crate::component::resolve_remote_path(&mut component);
         assert_eq!(component.remote_path, "remote/my-component");
     });
 }
@@ -581,7 +581,7 @@ fn resolve_remote_path_preserves_explicit_value() {
         ..Component::default()
     };
 
-    component.resolve_remote_path();
+    crate::component::resolve_remote_path(&mut component);
     assert_eq!(component.remote_path, "custom/deploy/path");
 }
 
