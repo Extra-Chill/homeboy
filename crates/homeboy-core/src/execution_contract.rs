@@ -2,6 +2,16 @@ use crate::artifact_ref::{
     ArtifactReference, METADATA_ONLY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME,
 };
 
+// The URI codec primitives live in `homeboy-engine-primitives` (the slim shared
+// base) alongside the artifact-ref schemes, so `core::artifact_ref` and this
+// module can both use them without a mutual `execution_contract <-> artifact_ref`
+// cycle. Re-exported here to preserve existing
+// `execution_contract::{encode_uri_component, decode_uri_component, ...}` call
+// sites, including cross-crate consumers.
+pub use homeboy_engine_primitives::artifact_ref_scheme::{
+    decode_uri_component, decode_uri_component_strict, encode_uri_component,
+};
+
 /// Typed runtime-facing execution surface shared by runner, Lab, daemon, and
 /// extension code paths.
 ///
@@ -84,61 +94,6 @@ pub const EXECUTION_CONTRACT: ExecutionContract = ExecutionContract {
         digest_algorithm_sha256: "sha256",
     },
 };
-
-pub fn encode_uri_component(value: &str) -> String {
-    let mut encoded = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(byte as char);
-            }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    encoded
-}
-
-pub fn decode_uri_component(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
-                if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    decoded.push(byte);
-                    index += 3;
-                    continue;
-                }
-            }
-        }
-        decoded.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&decoded).to_string()
-}
-
-/// Strict counterpart for externally supplied selectors. Unlike the legacy
-/// display decoder, malformed percent escapes and invalid UTF-8 are rejected.
-pub fn decode_uri_component_strict(value: &str) -> Option<String> {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] != b'%' {
-            decoded.push(bytes[index]);
-            index += 1;
-            continue;
-        }
-        if index + 2 >= bytes.len() {
-            return None;
-        }
-        let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
-        decoded.push(u8::from_str_radix(hex, 16).ok()?);
-        index += 3;
-    }
-    String::from_utf8(decoded).ok()
-}
 
 /// Whether an artifact path is a remote-runner artifact reference, per the
 /// execution contract's artifact rules. Lives here (not in the runner module)
