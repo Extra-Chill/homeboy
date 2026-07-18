@@ -17,7 +17,7 @@ process.stdout.write(`${JSON.stringify({
   task_id: taskId,
   status: 'no_op',
   summary: 'Local shell runtime accepted the generic agent task request.',
-  evidence_refs: [{ kind: 'preview', url: `https://example.test/${encodeURIComponent(taskId)}/preview` }],
+  evidence_refs: [{ kind: 'preview', uri: `https://example.test/${encodeURIComponent(taskId)}/preview` }],
   metadata: {
     runtime_id: 'local-shell',
     backend: request.executor?.backend || '',
