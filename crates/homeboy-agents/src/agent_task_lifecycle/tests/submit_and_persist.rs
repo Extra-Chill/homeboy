@@ -232,10 +232,11 @@ fn cancelling_queued_runner_proxy_projects_to_accepted_daemon_job() {
         record_runner_job_identity(run_id, "homeboy-lab", "job-pre-provider")
             .expect("persist accepted daemon job identity");
 
-        let _cancel =
-            super::cancellation::test_cancel_hook::install(Box::new(|runner_id, job_id| {
+        let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
+            |runner_id, job_id, durable_run_id| {
                 assert_eq!(runner_id, "homeboy-lab");
                 assert_eq!(job_id, "job-pre-provider");
+                assert_eq!(durable_run_id, "agent-task-queued-runner-proxy");
                 Ok((
                     homeboy_core::api_jobs::Job {
                         id: uuid::Uuid::new_v4(),
@@ -261,7 +262,8 @@ fn cancelling_queued_runner_proxy_projects_to_accepted_daemon_job() {
                     },
                     Vec::new(),
                 ))
-            }));
+            },
+        ));
 
         let cancelled = cancel_run(run_id, Some("controller aggregate unavailable"))
             .expect("cancellation reaches queued daemon job");

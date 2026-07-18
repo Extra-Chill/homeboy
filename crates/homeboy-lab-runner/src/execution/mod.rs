@@ -113,7 +113,7 @@ pub use artifact_promotion::{
 };
 pub use daemon_api::daemon_api_post;
 pub use failure::runner_exec_failure_error;
-pub use handoff::runner_job_cancel;
+pub use handoff::{runner_job_cancel, runner_job_cancel_projection};
 
 #[derive(Debug, Clone)]
 pub struct RunnerExecOptions {
