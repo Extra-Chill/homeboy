@@ -50,7 +50,7 @@ use homeboy_agents::agent_tasks::provider::provider_runner_source_contracts;
 use homeboy_core::engine::shell;
 use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
-use homeboy_core::redaction::{redact_argv, redact_argv_display, RedactionPolicy};
+use homeboy_core::redaction::{redact_argv, redact_argv_shell_display, RedactionPolicy};
 use homeboy_core::runner_execution_envelope::PathMaterializationPlan;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use homeboy_core::{Error, ErrorCode, Result};

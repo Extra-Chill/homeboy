@@ -524,7 +524,7 @@ fn persist_runner_execution_transition(
     let store = ObservationStore::open_initialized()?;
     let run = store.start_run(
         NewRunRecord::builder("runner_execution")
-            .command(homeboy_core::redaction::redact_argv_display(command))
+            .command(homeboy_core::redaction::redact_argv_shell_display(command))
             .optional_cwd_path(Some(std::path::Path::new(cwd)))
             .metadata(serde_json::json!({
                 "runner_execution_record": record,

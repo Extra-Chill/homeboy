@@ -1092,6 +1092,7 @@ dependencies = [
 name = "homeboy-redaction"
 version = "0.1.0"
 dependencies = [
+ "homeboy-engine-primitives",
  "regex",
  "serde_json",
 ]

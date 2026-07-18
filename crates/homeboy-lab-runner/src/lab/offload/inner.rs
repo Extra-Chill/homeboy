@@ -1051,7 +1051,7 @@ pub(crate) fn run_lab_offload_inner(
         "Lab offload preflight: source checkout `{}` at {}; active Homeboy command `{}` from runner `{}`.",
         source_path.display(),
         source_checkout_ref_display(&source_checkout),
-        redact_argv_display(&command_prefix.argv),
+        redact_argv_shell_display(&command_prefix.argv),
         runner_id,
     );
     let capability_contract =
@@ -1300,7 +1300,7 @@ pub(crate) fn run_lab_offload_inner(
 
     eprintln!(
         "Lab offload: running `{}` on runner `{}` in `{}`.",
-        redact_argv_display(&command),
+        redact_argv_shell_display(&command),
         runner_id,
         remote_cwd
     );
@@ -1310,10 +1310,10 @@ pub(crate) fn run_lab_offload_inner(
             .map(|path| path.display().to_string())
             .unwrap_or_else(|error| format!("<unavailable: {error}>")),
         build_identity::current().display,
-        redact_argv_display(request.normalized_args),
-        redact_argv_display(&remapped_args),
+        redact_argv_shell_display(request.normalized_args),
+        redact_argv_shell_display(&remapped_args),
         serde_json::to_string(&runner_required_extensions).unwrap_or_else(|_| "[]".to_string()),
-        redact_argv_display(&remote_command),
+        redact_argv_shell_display(&remote_command),
     );
     if let Some(run_id) = &agent_task_run_id {
         emit_durable_run_id_before_execution(
