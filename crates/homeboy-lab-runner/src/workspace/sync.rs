@@ -169,6 +169,7 @@ pub fn sync_workspace(
                         &local_path,
                         &remote_path,
                         &seed.remote_path,
+                        &excludes,
                         &delta,
                     ) {
                         Ok(transfer) => transfer,

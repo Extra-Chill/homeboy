@@ -24,6 +24,10 @@ pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE: &str = "unix-exec
 pub(crate) const WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE: &str = "unix-owner-executable";
 pub(crate) const WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT: usize = 192;
 
+// Commands are passed through a shell and, for remote runners, SSH. Keep well
+// below platform argv limits after their quoting and environment overhead.
+const INCREMENTAL_PREPARE_COMMAND_MAX_BYTES: usize = 32 * 1024;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct WorkspaceContentManifest {
     pub entry_count: usize,
@@ -782,10 +786,19 @@ pub(crate) fn materialize_snapshot_incremental(
     local_path: &Path,
     remote_path: &str,
     seed_path: &str,
+    excludes: &[String],
     delta: &SnapshotManifestDelta,
 ) -> Result<SnapshotTransferStats> {
     let temporary = format!("{}.tmp-{}", remote_path, uuid::Uuid::new_v4());
     let prepare = incremental_prepare_command(remote_path, &temporary, seed_path, delta);
+    if prepare.len() > INCREMENTAL_PREPARE_COMMAND_MAX_BYTES {
+        materialize_snapshot(runner, local_path, remote_path, excludes)?;
+        return Ok(SnapshotTransferStats {
+            reused: ByteFileCounts::default(),
+            transferred: delta.transfer.final_size.clone(),
+            final_size: delta.transfer.final_size.clone(),
+        });
+    }
     let finalize = incremental_finalize_command(remote_path, &temporary);
     let result = match runner.kind {
         RunnerKind::Local => {
