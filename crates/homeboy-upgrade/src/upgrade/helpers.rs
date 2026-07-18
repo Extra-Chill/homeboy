@@ -144,7 +144,7 @@ pub fn run_upgrade_with_method(
     source_path: Option<&Path>,
 ) -> Result<UpgradeResult> {
     if !runner_targets.is_empty() {
-        return run_targeted_runner_upgrade(force, runner_targets, source_path);
+        return run_targeted_runner_upgrade(force, method_override, runner_targets, source_path);
     }
 
     let promotion_lease = homeboy_core::runtime_promotion::acquire(
@@ -329,24 +329,42 @@ pub fn run_upgrade_with_method(
     })
 }
 
-/// Upgrade only explicitly selected runners from the exact source revision that
-/// built this controller. This must stay ahead of controller install-method
-/// detection and promotion: a runner-only recovery must not replace its caller.
+/// Upgrade only explicitly selected runners without promoting the controller.
+/// Source controllers pin their checkout identity; packaged controllers retain
+/// the runner's existing install-method contract.
 fn run_targeted_runner_upgrade(
     force: bool,
+    method_override: Option<InstallMethod>,
     runner_targets: &[String],
     source_path: Option<&Path>,
 ) -> Result<UpgradeResult> {
     let previous_version = current_version().to_string();
     let previous_build_identity = build_identity::current().display;
-    let source_checkout =
-        initiating_controller_source_checkout(source_path, &previous_build_identity)?;
+    let install_method = method_override.unwrap_or_else(detect_install_method);
+    if install_method == InstallMethod::Unknown {
+        return Err(Error::validation_invalid_argument(
+            "install_method",
+            "Could not detect installation method",
+            None,
+            None,
+        )
+        .with_hint("Pass --method to select the runner upgrade policy."));
+    }
+    let runner_method_override = runner_method_override_for_method(method_override, install_method);
+    let source_checkout = if runner_method_override == Some(InstallMethod::Source) {
+        Some(initiating_controller_source_checkout(
+            source_path,
+            &previous_build_identity,
+        )?)
+    } else {
+        None
+    };
     let (runners_updated, runners_skipped) = super::with_runner_upgrade(|provider| {
         provider.upgrade_configured_runners_with_explicit_source_path(
             force,
-            Some(InstallMethod::Source),
-            Some(&source_checkout),
-            true,
+            runner_method_override,
+            source_checkout.as_deref(),
+            source_checkout.is_some(),
             runner_targets,
             &[],
         )
@@ -354,15 +372,18 @@ fn run_targeted_runner_upgrade(
 
     Ok(UpgradeResult {
         command: "upgrade".to_string(),
-        install_method: InstallMethod::Source,
+        install_method,
         previous_version: previous_version.clone(),
         new_version: Some(previous_version),
         previous_build_identity: Some(previous_build_identity.clone()),
         new_build_identity: Some(previous_build_identity),
         source_revision: None,
         upgraded: false,
-        message: "Selected runners refreshed from the initiating controller source identity"
-            .to_string(),
+        message: if source_checkout.is_some() {
+            "Selected runners refreshed from the initiating controller source identity".to_string()
+        } else {
+            "Selected runners refreshed without promoting the initiating controller".to_string()
+        },
         restart_required: false,
         extensions_updated: Vec::new(),
         extensions_skipped: Vec::new(),
@@ -899,6 +920,17 @@ mod runner_source_upgrade_tests {
             runner_method_override_for_method(Some(InstallMethod::Binary), InstallMethod::Source),
             Some(InstallMethod::Binary)
         );
+        for method in [
+            InstallMethod::Homebrew,
+            InstallMethod::Secondary,
+            InstallMethod::Binary,
+        ] {
+            assert_eq!(runner_method_override_for_method(None, method), None);
+            assert_eq!(
+                runner_method_override_for_method(Some(method), method),
+                Some(method)
+            );
+        }
     }
 
     #[test]
