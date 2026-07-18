@@ -10,6 +10,7 @@ use super::store::{LinkedDurableRunResolution, RecoveredTerminalJob};
 use super::*;
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
+use crate::Error;
 use uuid::Uuid;
 
 #[test]
@@ -113,6 +114,94 @@ fn pid_bound_local_child_is_not_expired_by_its_former_reservation_deadline() {
     assert_eq!(
         store.get(job.id).expect("live job").status,
         JobStatus::Running
+    );
+}
+
+#[test]
+fn local_child_worker_records_start_before_persisting_child_identity() {
+    let store = JobStore::default();
+    let runner = store
+        .run_local_child_background_with_source_snapshot_metadata_and_path_materialization_plan(
+            "runner.exec",
+            None,
+            None,
+            None,
+            move |job| {
+                job.start_with_reserved_child_identity(
+                    std::process::id(),
+                    None,
+                    super::store::LocalChildStartDiscriminator::Unsupported {
+                        evidence: "test child identity".to_string(),
+                    },
+                )?;
+                Ok(serde_json::json!({}))
+            },
+        );
+    runner.handle.join().expect("worker exits");
+
+    let events = store.events(runner.job_id).expect("events");
+    let phases = events
+        .iter()
+        .filter_map(|event| event.data.as_ref()?.get("phase")?.as_str())
+        .collect::<Vec<_>>();
+    let reserved = phases
+        .iter()
+        .position(|phase| *phase == "child_reserved")
+        .expect("reservation event");
+    let worker_started = phases
+        .iter()
+        .position(|phase| *phase == "local_child_worker_started")
+        .expect("worker start event");
+    let spawned = phases
+        .iter()
+        .position(|phase| *phase == "spawned")
+        .expect("spawn event");
+    assert!(reserved < worker_started && worker_started < spawned);
+}
+
+#[test]
+fn local_child_worker_persists_typed_setup_failure_before_child_identity() {
+    let store = JobStore::default();
+    let runner = store
+        .run_local_child_background_with_source_snapshot_metadata_and_path_materialization_plan(
+            "runner.exec",
+            None,
+            None,
+            None,
+            move |_job| Err::<serde_json::Value, _>(Error::internal_unexpected("setup failed")),
+        );
+    runner.handle.join().expect("worker exits");
+
+    let events = store.events(runner.job_id).expect("events");
+    let worker_started = events
+        .iter()
+        .position(|event| {
+            event
+                .data
+                .as_ref()
+                .is_some_and(|data| data["phase"] == "local_child_worker_started")
+        })
+        .expect("worker start event");
+    let setup_failure = events
+        .iter()
+        .position(|event| {
+            event.data.as_ref().is_some_and(|data| {
+                data["phase"] == "local_child_worker_failed_before_child_identity"
+                    && data["error"] == "setup failed"
+            })
+        })
+        .expect("typed setup failure event");
+    assert!(worker_started < setup_failure);
+    assert!(events.iter().any(|event| {
+        event.kind == JobEventKind::Error
+            && event
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("setup failed"))
+    }));
+    assert_eq!(
+        store.get(runner.job_id).expect("job").status,
+        JobStatus::Failed
     );
 }
 

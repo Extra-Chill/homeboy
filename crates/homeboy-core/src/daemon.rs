@@ -1849,10 +1849,19 @@ fn enqueue_exec_job(
             }),
             move |job| {
                 let mut plan = plan;
-                plan.env.insert(
-                    "HOMEBOY_RUNNER_CHILD_RESERVATION".to_string(),
-                    job.local_child_reservation_id()?,
-                );
+                job.progress(json!({ "phase": "local_child_reservation_lookup_started" }))?;
+                let reservation_id = match job.local_child_reservation_id() {
+                    Ok(reservation_id) => reservation_id,
+                    Err(error) => {
+                        let _ = job.progress(json!({
+                            "phase": "local_child_reservation_lookup_failed",
+                            "error": error.to_string(),
+                        }));
+                        return Err(error);
+                    }
+                };
+                plan.env
+                    .insert("HOMEBOY_RUNNER_CHILD_RESERVATION".to_string(), reservation_id);
                 let progress_job = job.clone();
                 let progress_sink = Arc::new(move |data| progress_job.progress(data).map(|_| ()));
                 let started_job = job.clone();
@@ -1868,6 +1877,8 @@ fn enqueue_exec_job(
                     Ok(())
                 });
                 let cancel_job = job.clone();
+                job.progress(json!({ "phase": "local_child_driver_execution_started" }))?;
+                job.progress(json!({ "phase": "local_child_command_spawn_attempted" }))?;
                 let process_output = runner_exec_driver::execute_exec(
                     &plan,
                     Box::new(move || cancel_job.is_cancelled()),
