@@ -119,3 +119,56 @@ pub struct ReleaseStateBuckets {
     pub has_uncommitted: Vec<String>,
     pub unknown: Vec<String>,
 }
+
+/// Information about a version target after reading a component's version files.
+#[derive(Debug, Clone, Serialize)]
+pub struct VersionTargetInfo {
+    pub file: String,
+    pub pattern: String,
+    pub full_path: String,
+    pub match_count: usize,
+    /// Warning message when target exists but didn't match or had issues
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// A component's resolved version plus the targets it was read from.
+#[derive(Debug, Clone, Serialize)]
+pub struct ComponentVersionSnapshot {
+    pub component_id: String,
+    pub version: String,
+    pub targets: Vec<VersionTargetInfo>,
+}
+
+/// Compact per-component deploy status, surfaced to core's fleet/project status
+/// mechanics by the release provider (so they don't depend on the full deploy
+/// result type). Mirrors the fields those mechanics actually read.
+#[derive(Debug, Clone)]
+pub struct ComponentDeployStatus {
+    pub id: String,
+    pub component_status: Option<ComponentStatus>,
+    pub local_version: Option<String>,
+    pub remote_version: Option<String>,
+}
+
+/// A component's most recent finalized release, as read from its changelog.
+#[derive(Debug, Clone)]
+pub struct FinalizedReleaseSnapshot {
+    pub tag: String,
+    pub date: Option<String>,
+    pub summary: Option<String>,
+}
+
+/// A component's unreleased changelog section (path + label + entries).
+#[derive(Debug, Clone)]
+pub struct ChangelogSnapshotData {
+    pub path: String,
+    pub label: String,
+    pub items: Vec<String>,
+}
+
+/// Baseline-alignment validation warning for a component's version target.
+#[derive(Debug, Clone)]
+pub struct BaselineAlignmentWarning {
+    pub message: String,
+}

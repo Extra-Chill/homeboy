@@ -1,4 +1,4 @@
-use crate::deploy::{self, DeployConfig};
+use crate::release_provider;
 use crate::server::health::{self, ServerHealth};
 
 #[derive(Debug, Clone)]
@@ -39,17 +39,16 @@ pub fn collect_status(project_id: &str, health_only: bool) -> ProjectStatusSnaps
 }
 
 fn collect_component_versions(project_id: &str) -> Option<Vec<ProjectComponentStatus>> {
-    let config = DeployConfig::check_all_no_pull_head();
-
-    deploy::run(project_id, &config).ok().map(|result| {
-        result
-            .results
-            .iter()
-            .map(|r| ProjectComponentStatus {
-                component_id: r.id.clone(),
-                version: r.remote_version.clone(),
-                version_source: Some("live".to_string()),
-            })
-            .collect()
-    })
+    release_provider::deploy_component_statuses(project_id)
+        .ok()
+        .map(|statuses| {
+            statuses
+                .iter()
+                .map(|s| ProjectComponentStatus {
+                    component_id: s.id.clone(),
+                    version: s.remote_version.clone(),
+                    version_source: Some("live".to_string()),
+                })
+                .collect()
+        })
 }

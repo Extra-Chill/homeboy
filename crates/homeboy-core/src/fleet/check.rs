@@ -1,6 +1,6 @@
-use crate::deploy::{self, DeployConfig};
 use crate::project;
-use crate::release::version;
+use crate::release_provider;
+use homeboy_release_contract::ComponentStatus;
 use serde::Serialize;
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -42,35 +42,29 @@ pub fn collect_check(
     };
 
     for project_id in &fl.project_ids {
-        let config = DeployConfig::check_all_no_pull_head();
-
-        match deploy::run(project_id, &config) {
-            Ok(result) => {
+        match release_provider::deploy_component_statuses(project_id) {
+            Ok(results) => {
                 summary.projects_checked += 1;
 
                 let proj = project::load(project_id).ok();
                 let mut component_checks = Vec::new();
 
-                for comp_result in &result.results {
+                for comp_result in &results {
                     let status_str = match &comp_result.component_status {
-                        Some(deploy::ComponentStatus::UpToDate) => "up_to_date",
-                        Some(deploy::ComponentStatus::NeedsUpdate) => "needs_update",
-                        Some(deploy::ComponentStatus::BehindRemote) => "behind_remote",
-                        Some(deploy::ComponentStatus::BehindUpstream) => "behind_upstream",
-                        Some(deploy::ComponentStatus::SourceStale) => "source_stale",
-                        Some(deploy::ComponentStatus::Unknown) | None => "unknown",
+                        Some(ComponentStatus::UpToDate) => "up_to_date",
+                        Some(ComponentStatus::NeedsUpdate) => "needs_update",
+                        Some(ComponentStatus::BehindRemote) => "behind_remote",
+                        Some(ComponentStatus::BehindUpstream) => "behind_upstream",
+                        Some(ComponentStatus::SourceStale) => "source_stale",
+                        Some(ComponentStatus::Unknown) | None => "unknown",
                     };
 
                     match &comp_result.component_status {
-                        Some(deploy::ComponentStatus::UpToDate) => {
-                            summary.components_up_to_date += 1
-                        }
+                        Some(ComponentStatus::UpToDate) => summary.components_up_to_date += 1,
                         Some(status) if status.requires_deploy() => {
                             summary.components_needs_update += 1
                         }
-                        Some(deploy::ComponentStatus::Unknown) | None => {
-                            summary.components_unknown += 1
-                        }
+                        Some(ComponentStatus::Unknown) | None => summary.components_unknown += 1,
                         Some(_) => {}
                     }
 
@@ -78,7 +72,7 @@ pub fn collect_check(
                         && !comp_result
                             .component_status
                             .as_ref()
-                            .is_some_and(deploy::ComponentStatus::requires_deploy)
+                            .is_some_and(ComponentStatus::requires_deploy)
                     {
                         continue;
                     }
@@ -151,7 +145,7 @@ fn cached_project_component_checks(
         .map(|component_id| {
             let local_version = project::resolve_project_component(proj, &component_id)
                 .ok()
-                .and_then(|comp| version::get_component_version(&comp));
+                .and_then(|comp| release_provider::get_component_version(&comp));
 
             summary.components_unknown += 1;
 

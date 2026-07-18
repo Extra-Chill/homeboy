@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 
-use crate::deploy::{self, DeployConfig};
 use crate::project;
-use crate::release::version;
+use crate::release_provider;
 use crate::server::health::{self, ServerHealth};
-use homeboy_release_contract::ReleaseStateStatus;
+use homeboy_release_contract::{ComponentStatus, ReleaseStateStatus};
 use serde::Serialize;
 
 // ============================================================================
@@ -241,7 +240,7 @@ fn collect_cached_status(
         let mut component_statuses = Vec::new();
         for component_id in project::project_component_ids(&proj) {
             let local_version = match project::resolve_project_component(&proj, &component_id) {
-                Ok(comp) => version::get_component_version(&comp),
+                Ok(comp) => release_provider::get_component_version(&comp),
                 Err(_) => None,
             };
 
@@ -278,12 +277,10 @@ fn collect_project_component_statuses(
     proj: &project::Project,
     component_summary: &mut FleetComponentSummary,
 ) -> Vec<FleetComponentStatus> {
-    let config = DeployConfig::check_all_no_pull_head();
-
-    match deploy::run(project_id, &config) {
-        Ok(result) => {
+    match release_provider::deploy_component_statuses(project_id) {
+        Ok(results) => {
             let mut statuses = Vec::new();
-            for comp_result in &result.results {
+            for comp_result in &results {
                 // Get release state for this component
                 let (drift, unreleased) =
                     resolve_component_drift(proj, &comp_result.id, &comp_result.component_status);
@@ -316,7 +313,7 @@ fn collect_project_component_statuses(
             let mut statuses = Vec::new();
             for component_id in project::project_component_ids(proj) {
                 let local_version = match project::resolve_project_component(proj, &component_id) {
-                    Ok(comp) => version::get_component_version(&comp),
+                    Ok(comp) => release_provider::get_component_version(&comp),
                     Err(_) => None,
                 };
 
@@ -341,13 +338,13 @@ fn collect_project_component_statuses(
 fn resolve_component_drift(
     proj: &project::Project,
     component_id: &str,
-    deploy_status: &Option<deploy::ComponentStatus>,
+    deploy_status: &Option<ComponentStatus>,
 ) -> (FleetComponentDrift, u32) {
     // Check release state (unreleased commits)
     let release_info = project::resolve_project_component(proj, component_id)
         .ok()
         .and_then(|comp| {
-            let state = deploy::calculate_release_state(&comp)?;
+            let state = release_provider::calculate_release_state(&comp)?;
             Some((state.status(), state.commits_since_version))
         });
 
@@ -370,12 +367,12 @@ fn resolve_component_drift(
 
     // Fall back to deploy status for drift detection
     let drift = match deploy_status {
-        Some(deploy::ComponentStatus::UpToDate) => FleetComponentDrift::Current,
-        Some(deploy::ComponentStatus::NeedsUpdate) => FleetComponentDrift::NeedsUpdate,
-        Some(deploy::ComponentStatus::BehindRemote) => FleetComponentDrift::BehindRemote,
-        Some(deploy::ComponentStatus::BehindUpstream) => FleetComponentDrift::BehindUpstream,
-        Some(deploy::ComponentStatus::SourceStale) => FleetComponentDrift::BehindUpstream,
-        Some(deploy::ComponentStatus::Unknown) | None => FleetComponentDrift::Unknown,
+        Some(ComponentStatus::UpToDate) => FleetComponentDrift::Current,
+        Some(ComponentStatus::NeedsUpdate) => FleetComponentDrift::NeedsUpdate,
+        Some(ComponentStatus::BehindRemote) => FleetComponentDrift::BehindRemote,
+        Some(ComponentStatus::BehindUpstream) => FleetComponentDrift::BehindUpstream,
+        Some(ComponentStatus::SourceStale) => FleetComponentDrift::BehindUpstream,
+        Some(ComponentStatus::Unknown) | None => FleetComponentDrift::Unknown,
     };
 
     let unreleased = release_info.map(|(_, u)| u).unwrap_or(0);

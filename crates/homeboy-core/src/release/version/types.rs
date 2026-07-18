@@ -3,29 +3,16 @@
 use crate::is_zero;
 use serde::Serialize;
 
-/// Information about a version target after reading
-#[derive(Debug, Clone, Serialize)]
-pub struct VersionTargetInfo {
-    pub file: String,
-    pub pattern: String,
-    pub full_path: String,
-    pub match_count: usize,
-    /// Warning message when target exists but didn't match or had issues
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub warning: Option<String>,
-}
+// VersionTargetInfo and ComponentVersionSnapshot moved DOWN to
+// homeboy-release-contract so core's context status mechanics can hold them in
+// public struct fields without a cycle. Re-exported here so release code paths
+// are unchanged.
+pub use homeboy_release_contract::{ComponentVersionSnapshot, VersionTargetInfo};
 
 /// Result of reading a component's version
 #[derive(Debug, Clone, Serialize)]
 
 pub struct ComponentVersionInfo {
-    pub version: String,
-    pub targets: Vec<VersionTargetInfo>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ComponentVersionSnapshot {
-    pub component_id: String,
     pub version: String,
     pub targets: Vec<VersionTargetInfo>,
 }

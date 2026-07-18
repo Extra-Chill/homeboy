@@ -4,15 +4,15 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::component::{self, Component};
-use crate::deploy;
 use crate::extension::{
     extension_ready_status, is_extension_compatible, is_extension_linked, load_all_extensions,
 };
 use crate::project::{self, Project};
-use crate::release::{changelog, version};
+use crate::release_provider::{self, ReleaseStateEntry};
 use crate::server::{self, Server};
 use crate::{git, Result};
 use crate::{is_zero, is_zero_u32};
+use homeboy_release_contract::VersionTargetInfo;
 
 use super::{build_component_info, ComponentGap, ContextOutput};
 
@@ -133,7 +133,7 @@ pub struct ExtensionEntry {
 pub struct VersionSnapshot {
     pub component_id: String,
     pub version: String,
-    pub targets: Vec<version::VersionTargetInfo>,
+    pub targets: Vec<VersionTargetInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -235,7 +235,7 @@ fn build_report_at(
     let components_with_state: Vec<ComponentWithState> = filtered_components
         .into_iter()
         .map(|component| {
-            let release_state = deploy::calculate_release_state(&component);
+            let release_state = release_provider::calculate_release_state(&component);
             let gaps = if let Some(ref cwd_path) = cwd {
                 if component::resolution::component_is_contained_in_path(&component, cwd_path) {
                     build_component_info(&component).gaps
@@ -253,11 +253,14 @@ fn build_report_at(
         })
         .collect();
 
-    let release_buckets = deploy::bucket_release_states(
-        components_with_state
-            .iter()
-            .map(|comp| (comp.component.id.as_str(), comp.release_state.as_ref())),
-    );
+    let bucket_entries: Vec<ReleaseStateEntry<'_>> = components_with_state
+        .iter()
+        .map(|comp| ReleaseStateEntry {
+            component_id: comp.component.id.as_str(),
+            release_state: comp.release_state.as_ref(),
+        })
+        .collect();
+    let release_buckets = release_provider::bucket_release_states(&bucket_entries);
     let status = compute_status(&components_with_state, &release_buckets);
     let summary = compute_summary(&components_with_state);
 
@@ -450,7 +453,7 @@ fn compute_summary(components: &[ComponentWithState]) -> ContextReportSummary {
             }
         }
 
-        let status = deploy::classify_release_state(comp.release_state.as_ref())
+        let status = release_provider::classify_release_state(comp.release_state.as_ref())
             .as_str()
             .to_string();
         *by_status.entry(status).or_insert(0) += 1;
@@ -491,7 +494,7 @@ fn build_component_summaries(
     components
         .iter()
         .map(|comp| {
-            let status = deploy::classify_release_state(comp.release_state.as_ref())
+            let status = release_provider::classify_release_state(comp.release_state.as_ref())
                 .as_str()
                 .to_string();
             let (commits, code, docs) = comp
@@ -670,7 +673,7 @@ fn build_actionable_next_steps(
 fn resolve_version_snapshot(components: &[ComponentWithState]) -> Option<VersionSnapshot> {
     let wrapper = components.first()?;
     let component = &wrapper.component;
-    let snapshot = version::read_component_snapshot(component).ok()?;
+    let snapshot = release_provider::read_component_version_snapshot(component)?;
     Some(VersionSnapshot {
         component_id: snapshot.component_id,
         version: snapshot.version,
@@ -704,10 +707,11 @@ fn resolve_changelog_snapshots(
     };
     let component = &wrapper.component;
 
-    let (last_release, changelog_snapshot) = match changelog::read_component_snapshots(component) {
-        Ok((last_release, changelog_snapshot)) => (last_release, changelog_snapshot),
-        Err(_) => return (None, None),
-    };
+    let (last_release, changelog_snapshot) =
+        match release_provider::read_changelog_snapshots(component) {
+            Some((last_release, changelog_snapshot)) => (last_release, changelog_snapshot),
+            None => return (None, None),
+        };
 
     (
         last_release.map(|snapshot| ReleaseSnapshot {
@@ -740,7 +744,7 @@ fn resolve_agent_context_files(git_root: Option<&String>) -> Vec<String> {
 fn validate_version_targets(components: &[ComponentWithState]) -> Vec<String> {
     components
         .iter()
-        .flat_map(|wrapper| version::build_init_warnings(&wrapper.component))
+        .flat_map(|wrapper| release_provider::build_version_init_warnings(&wrapper.component))
         .collect()
 }
 
@@ -748,15 +752,16 @@ fn validate_version_baseline_alignment(
     version: &Option<VersionSnapshot>,
     git: &Option<GitSnapshot>,
 ) -> Option<String> {
-    let version_snapshot = version
-        .as_ref()
-        .map(|snapshot| version::ComponentVersionSnapshot {
-            component_id: snapshot.component_id.clone(),
-            version: snapshot.version.clone(),
-            targets: snapshot.targets.clone(),
-        });
+    let version_snapshot =
+        version.as_ref().map(
+            |snapshot| homeboy_release_contract::ComponentVersionSnapshot {
+                component_id: snapshot.component_id.clone(),
+                version: snapshot.version.clone(),
+                targets: snapshot.targets.clone(),
+            },
+        );
 
-    version::validate_baseline_alignment(
+    release_provider::validate_baseline_alignment(
         version_snapshot.as_ref(),
         git.as_ref()
             .and_then(|snapshot| snapshot.baseline_ref.as_deref()),
