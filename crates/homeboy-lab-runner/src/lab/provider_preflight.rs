@@ -14,8 +14,9 @@ use homeboy_core::{Error, ErrorCode, Result};
 
 use super::super::command_path::preflight_remote_argv_path_translation;
 use super::super::connection::disconnect_with_session;
+use super::super::execution::exec_with_status_snapshot;
 use super::super::{
-    connect, exec, status, RunnerActiveJobState, RunnerCapabilityPreflight, RunnerExecOptions,
+    connect, status, RunnerActiveJobState, RunnerCapabilityPreflight, RunnerExecOptions,
     RunnerSession, RunnerStatusReport, RunnerTunnelMode,
 };
 use super::offload::runner_homeboy_daemon_display;
@@ -81,6 +82,7 @@ pub(super) fn preflight_agent_task_provider_on_runner(
         source_snapshot.clone(),
         required_extensions.clone(),
         capability_preflight.clone(),
+        runner_status.clone(),
     )?;
 
     let local_providers = ExtensionProviderAgentTaskExecutor::discover()
@@ -139,12 +141,13 @@ pub(super) fn preflight_agent_task_provider_on_runner(
             runner_id,
             runner_status.session.as_ref(),
         );
-        let reprobe_replacement = matches!(
-            refresh.as_ref(),
-            Ok(ProviderSessionRefresh::Refreshed | ProviderSessionRefresh::Superseded)
-        );
+        let replacement_status = refresh
+            .as_ref()
+            .ok()
+            .map(ProviderSessionRefresh::status)
+            .cloned();
         refresh_result = Some(refresh.map(|_| ()));
-        if reprobe_replacement {
+        if let Some(replacement_status) = replacement_status {
             let probe = probe_agent_task_providers_on_runner(
                 runner_id,
                 remote_cwd,
@@ -153,6 +156,7 @@ pub(super) fn preflight_agent_task_provider_on_runner(
                 source_snapshot,
                 required_extensions,
                 capability_preflight,
+                replacement_status,
             )?;
             if probe.exit_code == 0 {
                 if let Ok(providers) = parse_agent_task_providers_output(&probe.stdout) {
@@ -252,8 +256,9 @@ fn probe_agent_task_providers_on_runner(
     source_snapshot: SourceSnapshot,
     required_extensions: Vec<String>,
     capability_preflight: Option<RunnerCapabilityPreflight>,
+    status_snapshot: RunnerStatusReport,
 ) -> Result<AgentTaskProviderProbeOutput> {
-    let (output, exit_code) = exec(
+    let (output, exit_code) = exec_with_status_snapshot(
         runner_id,
         RunnerExecOptions::command(command.to_vec())
             .with_cwd(remote_cwd)
@@ -261,6 +266,7 @@ fn probe_agent_task_providers_on_runner(
             .with_source_snapshot(source_snapshot)
             .with_required_extensions(required_extensions)
             .with_optional_capability_preflight(capability_preflight),
+        Some(status_snapshot),
     )?;
 
     Ok(AgentTaskProviderProbeOutput {
@@ -279,10 +285,18 @@ fn runner_provider_refresh_is_safe(status: &RunnerStatusReport) -> bool {
             .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum ProviderSessionRefresh {
-    Refreshed,
-    Superseded,
+    Refreshed(RunnerStatusReport),
+    Superseded(RunnerStatusReport),
+}
+
+impl ProviderSessionRefresh {
+    fn status(&self) -> &RunnerStatusReport {
+        match self {
+            Self::Refreshed(status) | Self::Superseded(status) => status,
+        }
+    }
 }
 
 fn refresh_runner_provider_session_if_still_safe(
@@ -300,7 +314,7 @@ fn refresh_runner_provider_session_if_still_safe(
     if provider_session_was_superseded(expected_session, current_status.session.as_ref()) {
         // Another controller completed the only safe refresh for this observed
         // session. Re-probe the replacement instead of stopping it again.
-        return Ok(ProviderSessionRefresh::Superseded);
+        return Ok(ProviderSessionRefresh::Superseded(current_status));
     }
     if !runner_provider_refresh_is_safe(&current_status) {
         return Err(
@@ -311,7 +325,8 @@ fn refresh_runner_provider_session_if_still_safe(
     disconnect_with_session(runner_id, Some(expected_session), false).map_err(|err| err.message)?;
     let (report, exit_code) = connect(runner_id).map_err(|err| err.message)?;
     if exit_code == 0 && report.connected {
-        Ok(ProviderSessionRefresh::Refreshed)
+        let replacement_status = status(runner_id).map_err(|err| err.message)?;
+        Ok(ProviderSessionRefresh::Refreshed(replacement_status))
     } else {
         Err(report.failure_message.unwrap_or_else(|| {
             format!("runner reconnect exited with {exit_code} without establishing a session")
@@ -654,6 +669,27 @@ mod tests {
         }
     }
 
+    fn connected_status(session: RunnerSession) -> RunnerStatusReport {
+        RunnerStatusReport {
+            runner_id: session.runner_id.clone(),
+            connected: true,
+            state: crate::RunnerSessionState::Connected,
+            session: Some(session),
+            stale_daemon: None,
+            daemon_freshness: None,
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "/tmp/homeboy-lab.json".to_string(),
+        }
+    }
+
     #[test]
     fn concurrent_provider_refresh_reprobes_the_replacement_session() {
         let observed_by_both_cooks = direct_session(100, "lease-before-refresh");
@@ -667,6 +703,25 @@ mod tests {
             &observed_by_both_cooks,
             Some(&observed_by_both_cooks),
         ));
+    }
+
+    #[test]
+    fn provider_reprobe_uses_the_fresh_replacement_status_snapshot() {
+        let replacement = connected_status(direct_session(200, "lease-after-refresh"));
+
+        for refresh in [
+            ProviderSessionRefresh::Refreshed(replacement.clone()),
+            ProviderSessionRefresh::Superseded(replacement.clone()),
+        ] {
+            assert_eq!(
+                refresh
+                    .status()
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.remote_daemon_lease_id.as_deref()),
+                Some("lease-after-refresh")
+            );
+        }
     }
 
     #[test]
