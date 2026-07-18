@@ -37,15 +37,16 @@ fn root_package_version(manifest: &Path) -> String {
 
 fn emit_git_identity(root: &Path) {
     let git_dir = resolve_git_dir(root).unwrap_or_else(|| root.join(".git"));
+    let common_dir = git_common_dir(root, &git_dir).unwrap_or_else(|| git_dir.clone());
     println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
     println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
     println!(
         "cargo:rerun-if-changed={}",
-        git_dir.join("refs/notes/homeboy-snapshot").display()
+        common_dir.join("refs/notes/homeboy-snapshot").display()
     );
     println!(
         "cargo:rerun-if-changed={}",
-        git_dir.join("packed-refs").display()
+        common_dir.join("packed-refs").display()
     );
     if let Ok(head) = fs::read_to_string(git_dir.join("HEAD")) {
         if let Some(reference) = head.trim().strip_prefix("ref: ") {
@@ -91,15 +92,16 @@ fn synthetic_snapshot_provenance(root: &Path) -> Option<SyntheticSnapshotProvena
         != 1
         || git_output(root, &["show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD"])?
             != "Homeboy Snapshot <homeboy-snapshot@localhost>|Homeboy Snapshot <homeboy-snapshot@localhost>"
+        || git_output(root, &["show", "-s", "--format=%at|%ct", "HEAD"])? != "0|0"
     {
         return None;
     }
-    let subject = git_output_raw(root, &["show", "-s", "--format=%s", "HEAD"])?;
-    let subject = subject.strip_suffix('\n')?;
-    if subject.ends_with('\n') {
+    let message = git_output_raw(root, &["show", "-s", "--format=%B", "HEAD"])?;
+    let message = message.strip_suffix('\n')?;
+    if message.ends_with('\n') {
         return None;
     }
-    let snapshot = subject.strip_prefix("Homeboy snapshot ")?;
+    let snapshot = message.strip_prefix("Homeboy snapshot ")?;
     if !is_snapshot_identity(snapshot) {
         return None;
     }
@@ -126,6 +128,16 @@ fn synthetic_snapshot_provenance(root: &Path) -> Option<SyntheticSnapshotProvena
     Some(SyntheticSnapshotProvenance {
         commit: source_head[..12].to_string(),
         dirty,
+    })
+}
+
+fn git_common_dir(root: &Path, _git_dir: &Path) -> Option<PathBuf> {
+    let common_dir = git_output(root, &["rev-parse", "--git-common-dir"])?;
+    let common_dir = PathBuf::from(common_dir);
+    Some(if common_dir.is_absolute() {
+        common_dir
+    } else {
+        root.join(common_dir).canonicalize().ok()?
     })
 }
 
