@@ -143,6 +143,10 @@ pub fn run_upgrade_with_method(
     runner_targets: &[String],
     source_path: Option<&Path>,
 ) -> Result<UpgradeResult> {
+    if !runner_targets.is_empty() {
+        return run_targeted_runner_upgrade(force, runner_targets, source_path);
+    }
+
     let promotion_lease = homeboy_core::runtime_promotion::acquire(
         "controller upgrade",
         source_path
@@ -323,6 +327,110 @@ pub fn run_upgrade_with_method(
         services_restarted,
         services_pending_restart,
     })
+}
+
+/// Upgrade only explicitly selected runners from the exact source revision that
+/// built this controller. This must stay ahead of controller install-method
+/// detection and promotion: a runner-only recovery must not replace its caller.
+fn run_targeted_runner_upgrade(
+    force: bool,
+    runner_targets: &[String],
+    source_path: Option<&Path>,
+) -> Result<UpgradeResult> {
+    let previous_version = current_version().to_string();
+    let previous_build_identity = build_identity::current().display;
+    let source_checkout =
+        initiating_controller_source_checkout(source_path, &previous_build_identity)?;
+    let (runners_updated, runners_skipped) = super::with_runner_upgrade(|provider| {
+        provider.upgrade_configured_runners_with_explicit_source_path(
+            force,
+            Some(InstallMethod::Source),
+            Some(&source_checkout),
+            true,
+            runner_targets,
+            &[],
+        )
+    })?;
+
+    Ok(UpgradeResult {
+        command: "upgrade".to_string(),
+        install_method: InstallMethod::Source,
+        previous_version: previous_version.clone(),
+        new_version: Some(previous_version),
+        previous_build_identity: Some(previous_build_identity.clone()),
+        new_build_identity: Some(previous_build_identity),
+        source_revision: None,
+        upgraded: false,
+        message: "Selected runners refreshed from the initiating controller source identity"
+            .to_string(),
+        restart_required: false,
+        extensions_updated: Vec::new(),
+        extensions_skipped: Vec::new(),
+        runners_updated,
+        runners_skipped,
+        extensions_unrefreshed: Vec::new(),
+        services_restarted: Vec::new(),
+        services_pending_restart: Vec::new(),
+    })
+}
+
+fn initiating_controller_source_checkout(
+    source_path: Option<&Path>,
+    expected_identity: &str,
+) -> Result<PathBuf> {
+    let checkout = if let Some(path) = source_path {
+        resolve_source_workspace(Some(path))?
+    } else {
+        let executable_checkout = std::env::current_exe()
+            .ok()
+            .and_then(|path| workspace_from_executable_path(&path));
+        executable_checkout
+            .or_else(|| resolve_source_workspace(None).ok())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "upgrade-runner",
+                    "Runner-only upgrade requires the source checkout that built the initiating controller",
+                    None,
+                    None,
+                )
+                .with_hint("Run from the controller source checkout or pass --source-path <PATH>.")
+            })?
+    };
+    let identity =
+        super::with_runner_upgrade(|provider| provider.source_checkout_build_identity(&checkout))
+            .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "source_path",
+                "Runner-only upgrade source checkout has no verifiable build identity",
+                Some(checkout.display().to_string()),
+                None,
+            )
+        })?;
+    if identity != expected_identity {
+        return Err(Error::validation_invalid_argument(
+            "source_path",
+            format!(
+                "Runner-only upgrade source identity `{identity}` does not match initiating controller `{expected_identity}`"
+            ),
+            Some(checkout.display().to_string()),
+            None,
+        )
+        .with_hint("Pass the exact source checkout that built the initiating controller."));
+    }
+    Ok(checkout)
+}
+
+fn workspace_from_executable_path(exe_path: &Path) -> Option<PathBuf> {
+    let parent = exe_path.parent()?;
+    let build_dir = parent.file_name()?.to_string_lossy();
+    if build_dir != "release" && build_dir != "debug" {
+        return None;
+    }
+    let target_dir = parent.parent()?;
+    if target_dir.file_name()?.to_string_lossy() != "target" {
+        return None;
+    }
+    target_dir.parent().map(Path::to_path_buf)
 }
 
 // Upgrade output must remain visible when a controller captures stdout/stderr.

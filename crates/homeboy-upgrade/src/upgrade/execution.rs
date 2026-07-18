@@ -789,12 +789,10 @@ fn workspace_from_exe_path(exe_path: &Path) -> Option<PathBuf> {
     if build_dir != "release" && build_dir != "debug" {
         return None;
     }
-
     let target_dir = parent.parent()?;
     if target_dir.file_name()?.to_string_lossy() != "target" {
         return None;
     }
-
     target_dir.parent().map(Path::to_path_buf)
 }
 

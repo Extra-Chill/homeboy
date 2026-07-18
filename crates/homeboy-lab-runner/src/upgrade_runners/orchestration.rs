@@ -408,8 +408,25 @@ pub fn upgrade_runner_with_executor(
         }
     }
 
+    if path_drift.is_none() {
+        path_drift = source_runner_identity_drift(
+            runner,
+            &homeboy_path,
+            method_override,
+            expected_source_identity.as_deref(),
+            exec,
+        );
+    }
     let (extensions_synced, mut extensions_skipped, mut extensions_failed) =
-        sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
+        if let Some(drift) = path_drift.as_deref() {
+            (
+                Vec::new(),
+                defer_runner_extensions_for_binary_drift(extension_updates, drift),
+                Vec::new(),
+            )
+        } else {
+            sync_runner_extensions(runner, &homeboy_path, extension_updates, exec)
+        };
     if path_drift.is_some() && is_auto_realignable_homeboy_path(&homeboy_path) {
         let refreshed_bare_homeboy_version =
             runner_bare_homeboy_version(runner, &homeboy_path, exec);

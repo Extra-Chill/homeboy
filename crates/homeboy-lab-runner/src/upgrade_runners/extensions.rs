@@ -122,6 +122,28 @@ pub fn defer_extension_failures_for_path_drift(
     }));
 }
 
+pub fn defer_runner_extensions_for_binary_drift(
+    extension_updates: &[ExtensionUpgradeEntry],
+    path_drift: &str,
+) -> Vec<RunnerExtensionSyncEntry> {
+    extension_updates
+        .iter()
+        .filter_map(|extension| {
+            let source_revision = extension.source_revision.as_ref()?;
+            extension.source_url.as_ref()?;
+            Some(RunnerExtensionSyncEntry {
+                extension_id: extension.extension_id.clone(),
+                source_revision: source_revision.clone(),
+                synced: false,
+                detail: Some(format!(
+                    "deferred because runner executable did not converge: {path_drift}"
+                )),
+                recovery_commands: Vec::new(),
+            })
+        })
+        .collect()
+}
+
 fn runner_extension_install_recovery_command(
     homeboy_path: &str,
     source_url: &str,
