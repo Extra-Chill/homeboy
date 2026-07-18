@@ -390,6 +390,7 @@ pub(crate) fn prepare_daemon_local_process(
         &mut env,
         runner.settings.homeboy_path.as_deref(),
     );
+    crate::lab_env::compact_lab_offload_env_for_subprocess(&mut env);
     let source_snapshot = request.source_snapshot.unwrap_or_else(|| {
         SourceSnapshot::collect_local(
             &runner.id,

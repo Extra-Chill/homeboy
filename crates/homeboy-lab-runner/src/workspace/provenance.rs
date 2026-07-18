@@ -499,6 +499,12 @@ pub(crate) fn verify_lab_workspace(
         };
     let content_manifest = verification
         .and_then(|verification| verification.get("content_manifest"))
+        .filter(|manifest| {
+            manifest
+                .get("entries_omitted_from_env")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+        })
         .map(|value| serde_json::from_value(value.clone()))
         .transpose()
         .map_err(|error| format!("has invalid workspace content manifest: {error}"))?;
@@ -1058,6 +1064,40 @@ mod tests {
         assert!(error.contains("bounded 16-entry sample"));
         assert!(!error.contains("controller secret"));
         assert!(!error.contains("runner mutation"));
+    }
+
+    #[test]
+    fn subprocess_manifest_omission_preserves_content_hash_verification() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        let snapshot = snapshot(workspace.path());
+        let content_hash =
+            super::super::workspace_content_hash(workspace.path(), &snapshot.sync_excludes)
+                .expect("content hash");
+        let mut metadata = lab(workspace.path(), &snapshot);
+        metadata["workspace_verification"]["schema"] =
+            serde_json::json!("homeboy/lab-workspace-verification/v2");
+        metadata["workspace_verification"]["permission_policy"] =
+            serde_json::json!(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY);
+        metadata["workspace_verification"]["content_hash_algorithm"] = serde_json::json!(
+            workspace_content_hash_algorithm(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY)
+                .expect("content hash algorithm")
+        );
+        metadata["workspace_verification"]["content_hash"] = serde_json::json!(content_hash);
+        metadata["workspace_verification"]["content_manifest"] = serde_json::json!({
+            "entry_count": 1,
+            "entries_omitted_from_env": true,
+        });
+
+        let provenance = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            metadata,
+        )
+        .expect("compact subprocess metadata remains verifiable");
+
+        assert!(provenance.content_manifest.is_none());
     }
 
     #[test]

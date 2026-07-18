@@ -305,6 +305,67 @@ fn daemon_worker_marks_nested_cook_as_runner_hosted() {
 }
 
 #[test]
+fn daemon_worker_compacts_lab_manifest_only_for_child_environment() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let entries = (0..12_000)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("fixtures/{index:05}/{}.txt", "x".repeat(200)),
+                    "kind": "file",
+                })
+            })
+            .collect::<Vec<_>>();
+        let metadata = serde_json::json!({
+            "workspace_verification": {
+                "content_manifest": {
+                    "entry_count": entries.len(),
+                    "entries": entries,
+                },
+            },
+        });
+        let serialized = serde_json::to_string(&metadata).expect("metadata JSON");
+        assert!(serialized.len() > 1_000_000);
+
+        let plan = prepare_daemon_local_process(RunnerProcessRequest {
+            runner_id: "homeboy-lab".to_string(),
+            runner: Some(local_runner(workspace.display().to_string())),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec!["homeboy".to_string(), "fuzz".to_string()],
+            env: HashMap::from([(
+                homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV.to_string(),
+                serialized,
+            )]),
+            secret_env_names: Vec::new(),
+            secret_env_plan: None,
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: true,
+        })
+        .expect("prepare daemon worker process");
+
+        let compact = plan
+            .env
+            .get(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV)
+            .expect("Lab metadata");
+        let parsed: serde_json::Value = serde_json::from_str(compact).expect("compact metadata");
+        assert!(compact.len() < 2_000);
+        assert_eq!(
+            parsed["workspace_verification"]["content_manifest"]["entries_omitted_from_env"],
+            true
+        );
+        assert!(parsed["workspace_verification"]["content_manifest"]
+            .get("entries")
+            .is_none());
+    });
+}
+
+#[test]
 fn runner_prep_drops_undeclared_sensitive_env() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");

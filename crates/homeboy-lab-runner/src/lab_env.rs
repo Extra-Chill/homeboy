@@ -30,14 +30,25 @@ pub(super) fn forward_release_ci_env(env: &mut HashMap<String, String>) {
 pub(crate) fn build_lab_offload_env(lab_metadata: &serde_json::Value) -> HashMap<String, String> {
     HashMap::from([(
         LAB_OFFLOAD_METADATA_ENV.to_string(),
-        serde_json::to_string(&subprocess_compatibility_lab_metadata(lab_metadata))
-            .unwrap_or_default(),
+        serde_json::to_string(lab_metadata).unwrap_or_default(),
     )])
 }
 
-/// Keep complete metadata in the control plane while bounding the compatibility
-/// copy inherited by subprocesses. The manifest inventory remains available to
-/// workspace verification before this projection is created.
+/// Bound the compatibility copy inherited by the runner child after the daemon
+/// has consumed the complete transport metadata.
+pub(crate) fn compact_lab_offload_env_for_subprocess(env: &mut HashMap<String, String>) {
+    let Some(raw) = env.get(LAB_OFFLOAD_METADATA_ENV) else {
+        return;
+    };
+    let Ok(metadata) = serde_json::from_str(raw) else {
+        return;
+    };
+    let compact = subprocess_compatibility_lab_metadata(&metadata);
+    if let Ok(serialized) = serde_json::to_string(&compact) {
+        env.insert(LAB_OFFLOAD_METADATA_ENV.to_string(), serialized);
+    }
+}
+
 fn subprocess_compatibility_lab_metadata(lab_metadata: &serde_json::Value) -> serde_json::Value {
     let mut compatibility = lab_metadata.clone();
     let Some(manifest) = compatibility
@@ -462,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn lab_offload_env_compacts_workspace_manifest_entries() {
+    fn subprocess_lab_offload_env_compacts_workspace_manifest_entries() {
         let entries = (0..12_000)
             .map(|index| serde_json::json!({"path": format!("fixtures/{index:05}/{}.txt", "x".repeat(200)), "kind": "file"}))
             .collect::<Vec<_>>();
@@ -481,7 +492,12 @@ mod tests {
             },
         });
         let full = serde_json::to_string(&metadata).expect("full metadata serializes");
-        let env = build_lab_offload_env(&metadata);
+        let mut env = build_lab_offload_env(&metadata);
+        assert_eq!(
+            env.get(LAB_OFFLOAD_METADATA_ENV).map(String::as_str),
+            Some(full.as_str())
+        );
+        compact_lab_offload_env_for_subprocess(&mut env);
         let compact = env
             .get(LAB_OFFLOAD_METADATA_ENV)
             .expect("subprocess metadata is present");
