@@ -5,6 +5,8 @@ use crate::extension::self_check::SelfCheckCaptureMetadata;
 use crate::extension::ExtensionPhaseTiming;
 use crate::finding::{FindingProducerSummary, HomeboyFinding};
 use homeboy_engine_primitives::baseline::BaselineFlags;
+pub use homeboy_extension_contract::FormattingFindings;
+pub use homeboy_extension_contract::LintSummaryOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -72,28 +74,6 @@ pub struct LintRunWorkflowResult {
     pub self_check_capture: Option<SelfCheckCaptureMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
-}
-
-/// Compact lint summary for automation consumers.
-#[derive(Debug, Clone, Serialize)]
-pub struct LintSummaryOutput {
-    pub total_findings: usize,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub categories: BTreeMap<String, usize>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub top_findings: Vec<HomeboyFinding>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub producer_summaries: Vec<FindingProducerSummary>,
-    pub exit_code: i32,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct FormattingFindings {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    pub suggested_command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

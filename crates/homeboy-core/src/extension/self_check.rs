@@ -5,6 +5,7 @@ use crate::extension::ExtensionCapability;
 use crate::observation::ActiveObservation;
 use crate::stream_capture::StreamCaptureMetadata;
 use crate::validation_progress::{write_command_artifact, ValidationProgressRecorder};
+pub use homeboy_extension_contract::SelfCheckCaptureMetadata;
 use serde::Serialize;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -20,12 +21,6 @@ pub struct SelfCheckOutput {
     pub stdout: String,
     pub stderr: String,
     pub capture: SelfCheckCaptureMetadata,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct SelfCheckCaptureMetadata {
-    pub stdout: StreamCaptureMetadata,
-    pub stderr: StreamCaptureMetadata,
 }
 
 #[cfg(test)]
