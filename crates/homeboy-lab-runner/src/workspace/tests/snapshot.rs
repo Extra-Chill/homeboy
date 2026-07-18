@@ -792,6 +792,43 @@ fn snapshot_archive_command_dereferences_symlinked_dependencies() {
 }
 
 #[test]
+fn root_anchored_dist_exclusion_matches_tar_and_preserves_nested_dist() {
+    let controller = tempfile::tempdir().expect("controller");
+    let source = controller.path().join("source");
+    let destination = controller.path().join("materialized");
+    let excludes = vec!["./dist".to_string()];
+    fs::create_dir_all(source.join("dist")).expect("root dist directory");
+    fs::create_dir_all(source.join("packages/example/dist")).expect("nested dist directory");
+    fs::write(source.join("dist/output.a"), "root output").expect("root dist output");
+    fs::write(source.join("packages/example/dist/input.a"), "nested input")
+        .expect("nested dist input");
+
+    let command = snapshot_archive_command(&source, "tar -xf -", &excludes);
+    assert!(
+        command.contains("find . -mindepth 1 -maxdepth 1 ! -path ./dist -print0"),
+        "root-anchored tar input must omit the matching root path: {command}"
+    );
+
+    let expected = workspace_content_hash(&source, &excludes).expect("source hash");
+    copy_snapshot_to_directory(&source, &destination, &excludes).expect("materialize snapshot");
+
+    assert!(
+        !destination.join("dist").exists(),
+        "root dist directory must be excluded"
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("packages/example/dist/input.a"))
+            .expect("nested dist input survives"),
+        "nested input"
+    );
+    assert_eq!(
+        workspace_content_hash(&destination, &excludes).expect("materialized hash"),
+        expected,
+        "content hashing must use the same root-anchored exclusion semantics as tar"
+    );
+}
+
+#[test]
 fn snapshot_content_hash_matches_materialized_workspace_after_runner_metadata_injection() {
     // This mirrors a Lab snapshot of a repository such as homeboy-extensions:
     // the runner creates its metadata directory after extracting a source that
