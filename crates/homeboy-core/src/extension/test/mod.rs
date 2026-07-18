@@ -574,7 +574,41 @@ pub fn compute_changed_test_scope_for_files(
     let selected_files =
         compute_changed_test_files_with_drift_options(component, changed_files, &opts)?;
     let source_changes_without_tests = if selected_files.is_empty() {
-        source_relevant_changed_files(&opts, changed_files)
+        // A relocation refactor (symbol moved between files, unchanged name and
+        // behavior) is coverage-neutral: it introduces no new untested surface,
+        // so it must not force the changed-scope gate to fail closed. Exclude
+        // files whose entire source change is a pure cross-file relocation
+        // before flagging the rest as false-green. (#8927)
+        let relocation_only = drift::relocation_only_source_files(&opts, changed_files);
+
+        // Guard against silently-disabled source relevance. If the component's
+        // drift config resolves no source/test glob patterns (e.g. a language
+        // extension that declares no file extensions), pattern-based relevance
+        // would pass every change as a false green. Warn loudly and fall back
+        // to a conservative docs/config heuristic so real source changes still
+        // fail closed. (#8927)
+        let relevant: Vec<String> = if opts.has_usable_patterns() {
+            source_relevant_changed_files(&opts, changed_files)
+        } else {
+            crate::log_status!(
+                "drift",
+                "component '{}' resolved no source/test drift patterns; \
+                 falling back to conservative source-relevance for the \
+                 changed-scope test gate. Configure a language extension with \
+                 file_extensions to restore precise scoping.",
+                component.id
+            );
+            changed_files
+                .iter()
+                .filter(|file| drift::is_source_relevant_change_unconfigured(file))
+                .cloned()
+                .collect()
+        };
+
+        relevant
+            .into_iter()
+            .filter(|file| !relocation_only.contains(file))
+            .collect()
     } else {
         Vec::new()
     };
@@ -1120,6 +1154,65 @@ mod tests {
         assert!(
             output.source_changes_without_tests.is_empty(),
             "docs-only change must not be flagged as a source change, got {:?}",
+            output.source_changes_without_tests
+        );
+    }
+
+    fn commit_changes(root: &Path, files: &[(&str, &str)]) {
+        for (rel, contents) in files {
+            if let Some(parent) = Path::new(rel).parent() {
+                fs::create_dir_all(root.join(parent)).expect("mkdir");
+            }
+            fs::write(root.join(rel), contents).expect("write change");
+        }
+        for args in [vec!["add", "."], vec!["commit", "-m", "change"]] {
+            Command::new("git")
+                .args(&args)
+                .current_dir(root)
+                .output()
+                .expect("git change command");
+        }
+    }
+
+    #[test]
+    fn pure_relocation_does_not_flag_false_green() {
+        // #8927: relocating a symbol between source files (unchanged name and
+        // behavior) is coverage-neutral and must NOT be flagged as a source
+        // change without tests, so the changed-scope gate does not fail closed
+        // on refactor/extraction commits.
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        let component = init_scope_repo(root);
+        // Baseline: two source files, the util lives in util.rs.
+        commit_changes(
+            root,
+            &[
+                (
+                    "src/util.rs",
+                    "pub fn is_git_url(s: &str) -> bool { s.starts_with(\"git@\") }\n",
+                ),
+                ("src/other.rs", "pub fn other_thing() {}\n"),
+            ],
+        );
+        // Relocate is_git_url from util.rs into other.rs, unchanged.
+        commit_changes(
+            root,
+            &[
+                ("src/util.rs", "// util moved out\n"),
+                (
+                    "src/other.rs",
+                    "pub fn other_thing() {}\npub fn is_git_url(s: &str) -> bool { s.starts_with(\"git@\") }\n",
+                ),
+            ],
+        );
+
+        let output = compute_changed_test_scope(&component, "HEAD~1")
+            .expect("scope computation should succeed");
+
+        assert_eq!(output.selected_count, 0, "no test should be selected");
+        assert!(
+            output.source_changes_without_tests.is_empty(),
+            "pure relocation must not be flagged as a source change, got {:?}",
             output.source_changes_without_tests
         );
     }
