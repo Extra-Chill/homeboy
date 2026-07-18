@@ -245,7 +245,7 @@ pub fn non_interactive_preflight_error(
     local_override: bool,
     interactive: bool,
     local_hot_rerun_command: Option<String>,
-    default_runner: Option<&str>,
+    selected_lab_runner: Option<&str>,
 ) -> Option<crate::core::Error> {
     // GitHub Actions runners are ephemeral, single-purpose, and always
     // non-interactive: the warm-machine refusal would fail otherwise-good PR
@@ -254,7 +254,7 @@ pub fn non_interactive_preflight_error(
     if local_override || interactive || is_runner_hosted_exec() || is_ci_execution() {
         return None;
     }
-    if default_runner.is_some() && warning.message.contains("--runner") {
+    if selected_lab_runner.is_some() && warning.message.contains("--runner") {
         return None;
     }
 
@@ -264,7 +264,7 @@ pub fn non_interactive_preflight_error(
             "Refusing to start `{}` on a {} machine from a non-interactive shell. {} Use a safe Lab/offload path once this command supports it, or rerun later when `homeboy self doctor` reports ok.",
             warning.command,
             severity_str(warning.recommendation),
-            primary_action(warning, default_runner),
+            primary_action(warning, selected_lab_runner),
         ),
         None,
         None,
@@ -668,6 +668,23 @@ mod tests {
     }
 
     #[test]
+    fn non_interactive_hot_warning_allows_explicit_lab_runner_without_default() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
+        let warning = evaluate_with_runner_hint(
+            lab_supported_hot("agent-task cook/run-plan/retry --run"),
+            &resources(ResourceRecommendation::Hot),
+            Some("homeboy-lab"),
+        )
+        .expect("hot machines warn");
+
+        assert!(
+            non_interactive_preflight_error(&warning, false, false, None, Some("homeboy-lab"))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn non_interactive_local_only_refusal_includes_local_hot_rerun_command() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
@@ -715,6 +732,27 @@ mod tests {
         assert_eq!(
             rerun.as_deref(),
             Some("homeboy --runner homeboy-lab audit --changed-since origin/main")
+        );
+    }
+
+    #[test]
+    fn portable_rerun_preserves_explicit_runner_without_placement() {
+        let rerun = rerun_command(
+            lab_supported_hot("review test"),
+            &[
+                "homeboy".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+                "homeboy".to_string(),
+            ],
+            Some("homeboy-lab"),
+        );
+
+        assert_eq!(
+            rerun.as_deref(),
+            Some("homeboy --runner homeboy-lab review test homeboy")
         );
     }
 
