@@ -76,22 +76,20 @@ pub(super) fn ownership_path(runner_id: &str) -> Result<PathBuf> {
 }
 
 pub(super) fn controller_id() -> String {
-    if let Ok(value) = std::env::var("HOMEBOY_CONTROLLER_ID") {
-        if !value.trim().is_empty() {
-            return value;
-        }
-    }
-    let executable = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.canonicalize().ok().or(Some(path)))
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "homeboy".to_string());
-    let directory = std::env::current_dir()
-        .ok()
-        .and_then(|path| path.canonicalize().ok().or(Some(path)))
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "unknown-directory".to_string());
-    format!("{executable}@{directory}")
+    controller_id_from_scope(
+        std::env::var("HOMEBOY_CONTROLLER_ID").ok().as_deref(),
+        hostname_fallback(),
+    )
+}
+
+fn controller_id_from_scope(explicit_scope: Option<&str>, hostname: String) -> String {
+    explicit_scope
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(str::to_string)
+        // A controller may promote its binary or change cwd while a daemon
+        // tunnel remains authenticated. Keep that tunnel in one host scope.
+        .unwrap_or(hostname)
 }
 
 pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
@@ -403,6 +401,68 @@ mod tests {
         assert_eq!(
             read_session_at(&stale_path).expect("read stale session after resolution"),
             Some(stale)
+        );
+    }
+
+    #[test]
+    fn promoted_controller_scope_resolves_status_and_cancel_to_the_same_live_session() {
+        let root = TempDir::new().expect("session directory");
+        let status_alias = session("cargo-homeboy@worktree-a", "lease-live");
+        let stale_mutation_alias = session("cargo-homeboy@worktree-b", "lease-stale");
+        let status_path = root.path().join("cargo-homeboy@worktree-a.json");
+        let mutation_path = root.path().join("cargo-homeboy@worktree-b.json");
+        write_session_at(&status_path, &status_alias).expect("write status session");
+        write_session_at(&mutation_path, &stale_mutation_alias)
+            .expect("write stale mutation session");
+
+        let status = resolve_session_or_live_peer_in(
+            &root.path().to_path_buf(),
+            "cargo-homeboy@worktree-a",
+            read_session_at(&status_path).expect("read status session"),
+            |candidate| candidate.remote_daemon_lease_id.as_deref() == Some("lease-live"),
+        )
+        .expect("resolve status session")
+        .expect("authoritative status session");
+        let cancellation = resolve_session_or_live_peer_in(
+            &root.path().to_path_buf(),
+            "cargo-homeboy@worktree-b",
+            read_session_at(&mutation_path).expect("read mutation session"),
+            |candidate| candidate.remote_daemon_lease_id.as_deref() == Some("lease-live"),
+        )
+        .expect("resolve mutation session")
+        .expect("authoritative mutation session");
+
+        assert_eq!(
+            status.remote_daemon_lease_id,
+            Some("lease-live".to_string())
+        );
+        assert_eq!(
+            cancellation.remote_daemon_lease_id,
+            status.remote_daemon_lease_id
+        );
+        assert_eq!(
+            cancellation.remote_daemon_address,
+            status.remote_daemon_address
+        );
+        assert_eq!(
+            read_session_at(&mutation_path).expect("read stale mutation session"),
+            Some(stale_mutation_alias)
+        );
+    }
+
+    #[test]
+    fn controller_scope_ignores_runtime_path_and_cwd_churn() {
+        assert_eq!(
+            controller_id_from_scope(None, "controller-host".to_string()),
+            "controller-host"
+        );
+        assert_eq!(
+            controller_id_from_scope(Some("  controller-a  "), "controller-host".to_string()),
+            "controller-a"
+        );
+        assert_eq!(
+            controller_id_from_scope(Some("   "), "controller-host".to_string()),
+            "controller-host"
         );
     }
 
