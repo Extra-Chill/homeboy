@@ -8,6 +8,46 @@ use homeboy_core::runner_execution_envelope::{
     PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
 use serde_json::json;
+use std::collections::HashMap;
+
+#[test]
+fn bounded_child_environment_omits_oversized_inheritance_and_preserves_job_values() {
+    let inherited = (0..8)
+        .map(|index| {
+            (
+                format!("HOMEBOY_TEST_OVERSIZED_INHERITED_{index}").into(),
+                "x".repeat(64 * 1024).into(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let plan = PreparedRunnerProcess {
+        runner: local_runner("/".to_string()),
+        cwd: "/".to_string(),
+        command: vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf '%s:%s' \"$HOMEBOY_TEST_REQUIRED_JOB_VALUE\" \"${HOMEBOY_TEST_OVERSIZED_INHERITED_0-unset}\"".to_string(),
+        ],
+        env: HashMap::from([(
+            "HOMEBOY_TEST_REQUIRED_JOB_VALUE".to_string(),
+            "preserved".to_string(),
+        )]),
+        secret_env_names: Vec::new(),
+        source_snapshot: Default::default(),
+        require_paths: Vec::new(),
+    };
+
+    let mut command = std::process::Command::new(&plan.command[0]);
+    command.args(&plan.command[1..]).current_dir(&plan.cwd);
+    apply_runner_process_env_with_inherited(&mut command, &plan, inherited);
+    let output = command
+        .output()
+        .expect("child starts with a bounded environment");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "preserved:unset");
+}
 
 #[test]
 fn daemon_submission_recovers_a_lost_tunnel_before_resending_to_the_same_lease() {

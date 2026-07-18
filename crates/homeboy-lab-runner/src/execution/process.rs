@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -445,10 +446,20 @@ pub(super) fn apply_runner_process_env(
     command: &mut std::process::Command,
     plan: &PreparedRunnerProcess,
 ) {
+    apply_runner_process_env_with_inherited(command, plan, std::env::vars_os());
+}
+
+pub(super) fn apply_runner_process_env_with_inherited(
+    command: &mut std::process::Command,
+    plan: &PreparedRunnerProcess,
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+) {
+    let inherited = inherited.into_iter().collect::<HashMap<_, _>>();
+    report_pruned_inherited_environment(&inherited);
     command.env_clear();
     for key in inherited_runner_process_env_keys() {
         if !plan.env.contains_key(*key) {
-            if let Some(value) = std::env::var_os(key) {
+            if let Some(value) = inherited.get(&OsString::from(key)) {
                 command.env(key, value);
             }
         }
@@ -457,6 +468,23 @@ pub(super) fn apply_runner_process_env(
         homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
         serde_json::to_string(&plan.source_snapshot).unwrap_or_default(),
     );
+}
+
+/// Child processes receive only explicit job values plus the minimal host
+/// baseline below. This avoids carrying a daemon's unrelated inherited payload
+/// into `execve`, where it can exceed the platform argument/environment limit.
+fn report_pruned_inherited_environment(inherited: &HashMap<OsString, OsString>) {
+    const DIAGNOSTIC_THRESHOLD_BYTES: usize = 128 * 1024;
+
+    let inherited = inherited
+        .iter()
+        .map(|(name, value)| name.to_string_lossy().len() + value.to_string_lossy().len() + 2)
+        .sum::<usize>();
+    if inherited >= DIAGNOSTIC_THRESHOLD_BYTES {
+        eprintln!(
+            "runner child spawn environment bounded: omitted {inherited} bytes of inherited environment; only explicit job variables and the minimal host baseline are forwarded"
+        );
+    }
 }
 
 fn validate_runner_inherited_secret_env(

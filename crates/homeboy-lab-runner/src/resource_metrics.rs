@@ -76,9 +76,9 @@ pub(crate) fn measured_command_output(
 ) -> Result<MeasuredOutput> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let started = Instant::now();
-    let child = command.spawn().map_err(|err| {
-        Error::internal_io(err.to_string(), Some("execute runner command".to_string()))
-    })?;
+    let child = command
+        .spawn()
+        .map_err(|err| runner_command_spawn_error(command, err))?;
     let pid = child.id();
     let collector = ResourceMetricsCollector::start(pid, started, None, None, concurrency_limit);
     let bounded_output =
@@ -110,9 +110,9 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     isolate_process_tree(command);
     let started = Instant::now();
-    let mut child = command.spawn().map_err(|err| {
-        Error::internal_io(err.to_string(), Some("execute runner command".to_string()))
-    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|err| runner_command_spawn_error(command, err))?;
     let pid = child.id();
     if let Some(child_started) = child_started {
         if let Err(error) = child_started(pid) {
@@ -189,6 +189,38 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         capture,
         metrics,
     })
+}
+
+fn runner_command_spawn_error(command: &Command, error: std::io::Error) -> Error {
+    if error.raw_os_error() == Some(libc::E2BIG) {
+        let argument_bytes = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().len() + 1)
+            .sum::<usize>();
+        let environment = command
+            .get_envs()
+            .filter_map(|(name, value)| {
+                value
+                    .as_ref()
+                    .map(|value| name.to_string_lossy().len() + value.to_string_lossy().len() + 2)
+            })
+            .sum::<usize>();
+        let environment_count = command
+            .get_envs()
+            .filter(|(_, value)| value.is_some())
+            .count();
+        return Error::internal_io(
+            format!(
+                "{error}; child command has {argument_bytes} argument bytes and {environment_count} explicit environment entries ({environment} bytes). Remove or file-materialize oversized job environment values before retrying."
+            ),
+            Some("execute runner command".to_string()),
+        );
+    }
+
+    Error::internal_io(
+        error.to_string(),
+        Some("execute runner command".to_string()),
+    )
 }
 
 /// Terminate and reap an unrecorded child through the same bounded, verified
@@ -716,6 +748,21 @@ mod tests {
         assert_eq!(payload["process"]["root_pid"], 1234);
         assert_eq!(payload["process"]["resources"]["process_count"], 3);
         assert_eq!(payload["process"]["resources"]["child_process_count"], 2);
+    }
+
+    #[test]
+    fn oversized_spawn_error_reports_bounded_command_measurements() {
+        let mut command = Command::new("runner-command");
+        command.arg("argument").env("JOB_VALUE", "value");
+
+        let error =
+            runner_command_spawn_error(&command, std::io::Error::from_raw_os_error(libc::E2BIG));
+        let details = error.details.to_string();
+
+        assert!(details.contains("argument bytes"));
+        assert!(details.contains("explicit environment entries"));
+        assert!(details.contains("file-materialize"));
+        assert!(!details.contains("\"value\""));
     }
 
     #[cfg(unix)]
