@@ -10,6 +10,7 @@
 
 pub mod artifact_contract;
 pub mod lifecycle;
+pub mod rig_snapshot;
 pub mod timeline;
 
 pub use artifact_contract::{
@@ -20,6 +21,7 @@ pub use lifecycle::{
     LifecycleContract, LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult,
     LifecyclePhaseStatus, LifecycleResultMetadata, LifecycleSnapshotRef,
 };
+pub use rig_snapshot::{ComponentSnapshot, RigStateSnapshot};
 pub use timeline::{
     event_matches_key, merge_span_definitions, parse_phase_milestone, parse_span_definition,
     phase_span_definitions, reporting_timeline, summarize_spans, ObservationEvent,
