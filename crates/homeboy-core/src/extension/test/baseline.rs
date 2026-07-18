@@ -12,19 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use homeboy_engine_primitives::baseline::{self as generic, BaselineConfig};
 pub use homeboy_extension_contract::test_result::TestCounts;
+pub use homeboy_extension_contract::test_workflow::TestBaselineComparison;
 
 const BASELINE_KEY: &str = "test";
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TestBaselineComparison {
-    pub baseline: TestCounts,
-    pub current: TestCounts,
-    pub passed_delta: i64,
-    pub failed_delta: i64,
-    pub regression: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub reasons: Vec<String>,
-}
 
 pub type TestBaseline = generic::Baseline<TestCounts>;
 

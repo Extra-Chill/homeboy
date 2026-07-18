@@ -17,6 +17,7 @@ use crate::validation_progress::{write_command_artifact, ValidationProgressRecor
 use homeboy_engine_primitives::baseline::BaselineFlags;
 use homeboy_engine_primitives::local_files;
 use homeboy_engine_primitives::output_parse::ParseSpec;
+pub use homeboy_extension_contract::test_workflow::RawTestOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use serde::Serialize;
 use std::path::Path;
@@ -63,47 +64,6 @@ pub struct TestRunWorkflowResult {
     pub raw_output: Option<RawTestOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
-}
-
-/// Captured tail of a test runner's stdout/stderr.
-///
-/// Surfaced on failure so the actual tool output
-/// is visible in the structured JSON response. The tail is bounded by
-/// `RAW_OUTPUT_TAIL_LINES` to keep JSON payloads small while still showing
-/// the last error / stack frame, which is almost always the relevant part
-/// for bootstrap failures. (#1143)
-#[derive(Debug, Clone, Serialize)]
-pub struct RawTestOutput {
-    /// Last N lines of stdout. Empty string if the runner emitted no stdout.
-    pub stdout_tail: String,
-    /// Last N lines of stderr. Empty string if the runner emitted no stderr.
-    pub stderr_tail: String,
-    /// Whether either tail was truncated from the original output.
-    pub truncated: bool,
-    /// Whether stdout capture itself was bounded before the line tail was built.
-    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
-    pub stdout_truncated: bool,
-    /// Whether stderr capture itself was bounded before the line tail was built.
-    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
-    pub stderr_truncated: bool,
-    /// Total stdout bytes observed before bounded capture retained its tail.
-    #[serde(skip_serializing_if = "crate::is_zero", default)]
-    pub stdout_seen_bytes: usize,
-    /// Stdout bytes retained in this structured raw-output excerpt.
-    #[serde(skip_serializing_if = "crate::is_zero", default)]
-    pub stdout_retained_bytes: usize,
-    /// Total stderr bytes observed before bounded capture retained its tail.
-    #[serde(skip_serializing_if = "crate::is_zero", default)]
-    pub stderr_seen_bytes: usize,
-    /// Stderr bytes retained in this structured raw-output excerpt.
-    #[serde(skip_serializing_if = "crate::is_zero", default)]
-    pub stderr_retained_bytes: usize,
-    /// Maximum stdout bytes retained by the self-check capture buffer.
-    #[serde(skip_serializing_if = "crate::is_zero", default)]
-    pub stdout_limit_bytes: usize,
-    /// Maximum stderr bytes retained by the self-check capture buffer.
-    #[serde(skip_serializing_if = "crate::is_zero", default)]
-    pub stderr_limit_bytes: usize,
 }
 
 const RAW_OUTPUT_TAIL_LINES: usize = 80;
