@@ -3,8 +3,8 @@ use crate::error::{Error, Result};
 use crate::project::Project;
 use std::collections::HashMap;
 
-use super::load_extension;
-use super::manifest::ExtensionManifest;
+use crate::extension_store::load_extension;
+use homeboy_extension_contract::ExtensionManifest;
 
 /// Settings resolution for extensions with project/component context.
 pub struct ExtensionScope;
