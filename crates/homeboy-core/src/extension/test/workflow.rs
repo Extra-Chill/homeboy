@@ -4,19 +4,9 @@ use crate::extension::test::resolve_drift_options;
 use crate::extension::test::TestScopeOutput;
 use crate::extension::test::{ChangeType, TestAnalysis};
 use crate::extension::test::{TestBaselineComparison, TestCounts};
+pub use homeboy_extension_contract::test_workflow::AutoFixDriftOutput;
 use homeboy_refactor_contract::{AppliedRefactor, TransformSet};
 use serde::Serialize;
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AutoFixDriftOutput {
-    pub since: String,
-    pub auto_fixable_changes: usize,
-    pub generated_rules: usize,
-    pub replacements: usize,
-    pub files_modified: usize,
-    pub written: bool,
-    pub rerun_recommended: bool,
-}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DriftWorkflowResult {

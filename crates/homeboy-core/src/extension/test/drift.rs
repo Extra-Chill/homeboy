@@ -17,83 +17,13 @@ use crate::error::{Error, Result};
 use crate::extension::TestDriftConfig;
 use crate::git;
 use homeboy_engine_primitives::test_path::is_test_path;
+pub use homeboy_extension_contract::test_workflow::{
+    ChangeType, DriftReport, DriftedTest, ProductionChange,
+};
 
 // ============================================================================
 // Models
 // ============================================================================
-
-/// A production change that may cause test drift.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProductionChange {
-    /// Type of change detected.
-    pub change_type: ChangeType,
-    /// Production file where the change occurred.
-    pub file: String,
-    /// The old symbol/value (removed/changed from).
-    pub old_symbol: String,
-    /// The new symbol/value (added/changed to), if applicable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub new_symbol: Option<String>,
-    /// Line number in the diff (approximate).
-    #[serde(default)]
-    pub line: usize,
-}
-
-/// Type of production change detected from git diff.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ChangeType {
-    /// Method/function was renamed.
-    MethodRename,
-    /// Method/function was removed entirely.
-    MethodRemoved,
-    /// Class/trait was renamed.
-    ClassRename,
-    /// Class/trait was removed entirely.
-    ClassRemoved,
-    /// Error code string changed.
-    ErrorCodeChange,
-    /// Return type annotation changed.
-    ReturnTypeChange,
-    /// Method signature changed (different parameters).
-    SignatureChange,
-    /// File was moved/renamed.
-    FileMove,
-    /// String constant changed.
-    StringChange,
-}
-
-/// A test file that references a changed symbol.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DriftedTest {
-    /// Test file path.
-    pub test_file: String,
-    /// Line number where the old symbol is referenced.
-    pub line: usize,
-    /// The line content.
-    pub content: String,
-    /// Reference to the production change that caused the drift.
-    pub change_index: usize,
-}
-
-/// Full drift report.
-#[derive(Debug, Clone, Serialize)]
-pub struct DriftReport {
-    /// Component name.
-    pub component: String,
-    /// Git ref used as baseline (tag, commit, branch).
-    pub since: String,
-    /// Production changes detected.
-    pub production_changes: Vec<ProductionChange>,
-    /// Tests that reference changed symbols.
-    pub drifted_tests: Vec<DriftedTest>,
-    /// Total unique test files affected.
-    pub total_drifted_files: usize,
-    /// Total drift references found.
-    pub total_drift_references: usize,
-    /// Changes that could be auto-fixed with refactor transform.
-    pub auto_fixable: usize,
-}
 
 // ============================================================================
 // Git diff parsing
