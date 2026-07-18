@@ -4,9 +4,9 @@ use crate::materialize_runner_extension_with_exec;
 use crate::Runner;
 use crate::RunnerExecOptions;
 use crate::{RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource};
-use homeboy_core::upgrade::ExtensionUpgradeEntry;
-use homeboy_core::upgrade::RunnerExtensionSyncEntry;
 use homeboy_core::Result;
+use homeboy_upgrade::upgrade::ExtensionUpgradeEntry;
+use homeboy_upgrade::upgrade::RunnerExtensionSyncEntry;
 
 pub fn sync_runner_extensions(
     runner: &Runner,

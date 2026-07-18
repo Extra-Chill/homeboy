@@ -1,5 +1,5 @@
 use clap::Args;
-use homeboy::core::upgrade;
+use homeboy_upgrade::upgrade;
 use serde_json::Value;
 use std::path::PathBuf;
 

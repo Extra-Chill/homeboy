@@ -9,7 +9,7 @@
 
 use std::process::Command;
 
-use crate::defaults::ResidentServiceConfig;
+use homeboy_core::defaults::ResidentServiceConfig;
 
 use super::types::ServiceRestartEntry;
 

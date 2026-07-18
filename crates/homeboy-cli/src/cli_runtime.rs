@@ -17,7 +17,7 @@ use crate::core::extension::{
     list_summaries, load_all_extensions, CliConfig,
     ExtensionManifest as InstalledExtensionManifest, ExtensionSummary,
 };
-use crate::core::upgrade;
+use homeboy_upgrade::upgrade;
 
 const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
 
@@ -908,7 +908,7 @@ fn run_startup_update_checks(command: &Commands) {
         command,
         Commands::Upgrade(_) | Commands::Daemon(_) | Commands::SelfCmd(_)
     ) {
-        crate::core::upgrade::update_check::run_startup_check();
+        homeboy_upgrade::upgrade::update_check::run_startup_check();
         crate::core::extension::update_check::run_startup_check();
     }
 }

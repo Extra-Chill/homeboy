@@ -828,6 +828,7 @@ dependencies = [
  "homeboy-rig",
  "homeboy-triage",
  "homeboy-tunnel",
+ "homeboy-upgrade",
  "libc",
  "regex",
  "reqwest",
@@ -1019,6 +1020,7 @@ dependencies = [
  "homeboy-lab-runner-contract",
  "homeboy-product-identity",
  "homeboy-rig",
+ "homeboy-upgrade",
  "libc",
  "regex",
  "reqwest",
@@ -1168,6 +1170,25 @@ dependencies = [
  "serde_json",
  "sha2",
  "uuid",
+]
+
+[[package]]
+name = "homeboy-upgrade"
+version = "0.1.0"
+dependencies = [
+ "homeboy-core",
+ "homeboy-error",
+ "homeboy-product-identity",
+ "libc",
+ "regex",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml 1.1.2+spec-1.1.0",
+ "which",
+ "zip",
 ]
 
 [[package]]

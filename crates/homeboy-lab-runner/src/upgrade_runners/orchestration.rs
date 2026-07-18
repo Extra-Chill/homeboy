@@ -3,12 +3,12 @@ use crate as runner;
 use crate::Runner;
 use crate::RunnerExecOptions;
 use crate::RunnerStatusReport;
-use homeboy_core::upgrade::version_is_newer;
-use homeboy_core::upgrade::ExtensionUpgradeEntry;
-use homeboy_core::upgrade::InstallMethod;
-use homeboy_core::upgrade::RunnerUpgradeEntry;
 use homeboy_core::Result;
 use homeboy_lab_runner_contract::RunnerKind;
+use homeboy_upgrade::upgrade::version_is_newer;
+use homeboy_upgrade::upgrade::ExtensionUpgradeEntry;
+use homeboy_upgrade::upgrade::InstallMethod;
+use homeboy_upgrade::upgrade::RunnerUpgradeEntry;
 use std::path::Path;
 
 pub fn upgrade_configured_runners(

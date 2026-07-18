@@ -27,7 +27,7 @@ use crate::process::{
 use crate::runner_execution_envelope::PathMaterializationPlan;
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
-use crate::upgrade::VERSION;
+const VERSION: &str = homeboy_product_identity::product_version();
 
 mod artifact_download;
 mod broker_config;

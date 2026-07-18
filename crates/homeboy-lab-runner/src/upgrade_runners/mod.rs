@@ -6,7 +6,7 @@
 //! versions, building remediation commands, and rendering upgrade reports.
 //!
 //! The submodules are a mechanical split of the former single-file module; all
-//! items are re-exported here so existing `homeboy_core::upgrade::runners::*`
+//! items are re-exported here so existing `homeboy_upgrade::upgrade::runners::*`
 //! paths continue to resolve unchanged.
 
 mod commands;
@@ -30,7 +30,7 @@ pub(super) use version::*;
 use std::path::Path;
 
 use homeboy_core::error::Result;
-use homeboy_core::upgrade::{
+use homeboy_upgrade::upgrade::{
     ExtensionUpgradeEntry, InstallMethod, RunnerUpgradeEntry, RunnerUpgradeProvider,
 };
 
@@ -66,7 +66,7 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
 /// Register this cluster's runner-upgrade provider with core. Called once at
 /// startup.
 pub fn register() {
-    homeboy_core::upgrade::register_runner_upgrade_provider(Box::new(RunnerUpgrade));
+    homeboy_upgrade::upgrade::register_runner_upgrade_provider(Box::new(RunnerUpgrade));
 }
 
 #[cfg(test)]

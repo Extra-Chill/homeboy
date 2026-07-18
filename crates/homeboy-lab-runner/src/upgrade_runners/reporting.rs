@@ -2,10 +2,10 @@ use super::*;
 use crate as runner;
 use crate::Runner;
 use crate::RunnerStatusReport;
-use homeboy_core::upgrade::RunnerDaemonDriftEntry;
-use homeboy_core::upgrade::RunnerExtensionSyncEntry;
-use homeboy_core::upgrade::RunnerUpgradeEntry;
 use homeboy_core::Result;
+use homeboy_upgrade::upgrade::RunnerDaemonDriftEntry;
+use homeboy_upgrade::upgrade::RunnerExtensionSyncEntry;
+use homeboy_upgrade::upgrade::RunnerUpgradeEntry;
 
 pub fn runner_version_report_detail(
     detail: String,

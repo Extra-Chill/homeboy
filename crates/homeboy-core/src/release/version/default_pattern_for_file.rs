@@ -192,7 +192,7 @@ pub fn read_version(component_id: Option<&str>) -> Result<ComponentVersionInfo> 
     // If no component_id, return homeboy binary's own version
     let id = match component_id {
         None => {
-            let version = crate::upgrade::current_version().to_string();
+            let version = homeboy_product_identity::product_version().to_string();
             return Ok(ComponentVersionInfo {
                 version,
                 targets: vec![],

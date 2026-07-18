@@ -11,8 +11,8 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::error::Result;
 use crate::upgrade::{ExtensionUpgradeEntry, InstallMethod, RunnerUpgradeEntry};
+use homeboy_core::error::Result;
 
 /// The runner-upgrade contract the core upgrade flow depends on. Implemented by
 /// the runner layer and registered at startup.

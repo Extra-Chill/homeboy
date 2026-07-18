@@ -1,5 +1,5 @@
-use crate::build_identity::{self, BuildIdentity};
 use crate::upgrade::{self, InstallMethod};
+use homeboy_core::build_identity::{self, BuildIdentity};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -147,7 +147,10 @@ fn detect_install_method_from_path(path: Option<&Path>) -> InstallMethod {
     {
         return InstallMethod::Homebrew;
     }
-    let secondary_bin = format!("/.{}/bin/", crate::defaults::secondary_install_method_key());
+    let secondary_bin = format!(
+        "/.{}/bin/",
+        homeboy_core::defaults::secondary_install_method_key()
+    );
     if raw.contains(&secondary_bin) {
         return InstallMethod::Secondary;
     }
@@ -558,7 +561,7 @@ mod tests {
         let status = collect_status_with(
             Some(PathBuf::from(format!(
                 "/Users/test/.{}/bin/homeboy",
-                crate::defaults::secondary_install_method_key()
+                homeboy_core::defaults::secondary_install_method_key()
             ))),
             || Err("offline".to_string()),
             |_cmd, _args| Err("not installed".to_string()),
