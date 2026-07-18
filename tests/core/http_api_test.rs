@@ -345,6 +345,151 @@ fn test_handle_with_jobs() {
     assert_eq!(store.get(job.id).expect("job").status, JobStatus::Cancelled);
 }
 
+fn queued_local_runner_job(store: &JobStore, durable_run_id: Option<&str>) -> crate::api_jobs::Job {
+    store.create_test_local_runner_job(Some(crate::api_jobs::LocalRunnerJob {
+        runner_id: "homeboy-lab".to_string(),
+        command: vec!["homeboy".to_string(), "agent-task".to_string()],
+        cwd: Some("/runner/worktree".to_string()),
+        lifecycle: Some(crate::api_jobs::RunnerJobLifecycleMetadata {
+            source: Some("runner-daemon".to_string()),
+            kind: Some("agent-task".to_string()),
+            durable_run_id: durable_run_id.map(str::to_string),
+            active_child_count: None,
+            active_cell_count: None,
+        }),
+    }))
+}
+
+fn strict_projection_cancel(
+    store: &JobStore,
+    job_id: uuid::Uuid,
+    runner_id: &str,
+    durable_run_id: &str,
+) -> crate::Result<crate::http_api::HttpApiResponse> {
+    http_api::handle_with_jobs(
+        HttpApiRequest {
+            method: HttpMethod::Post,
+            path: format!("/jobs/{job_id}/cancel-projection"),
+            body: Some(serde_json::json!({
+                "expected_runner_id": runner_id,
+                "expected_durable_run_id": durable_run_id,
+            })),
+        },
+        store,
+    )
+}
+
+#[test]
+fn strict_projection_cancel_requires_exact_durable_local_runner_binding() {
+    let store = JobStore::default();
+    let job = queued_local_runner_job(&store, Some("durable-run"));
+    assert_eq!(store.active_runner_jobs().len(), 1);
+    let initial_event_count = store.events(job.id).expect("events").len();
+
+    let response = strict_projection_cancel(&store, job.id, "homeboy-lab", "durable-run")
+        .expect("matching projection cancels");
+    assert_eq!(response.endpoint, "jobs.cancel_projection");
+    assert_eq!(response.body["job"]["status"], "cancelled");
+    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Cancelled);
+    assert_eq!(store.active_runner_jobs().len(), 0);
+    let events = store.events(job.id).expect("events");
+    assert_eq!(events.len(), initial_event_count + 1);
+    assert_eq!(
+        events.last().expect("cancellation event").kind,
+        JobEventKind::Status
+    );
+    assert_eq!(
+        events
+            .last()
+            .expect("cancellation event")
+            .data
+            .as_ref()
+            .expect("status data")["status"],
+        "cancelled"
+    );
+
+    let repeat = strict_projection_cancel(&store, job.id, "homeboy-lab", "durable-run")
+        .expect("terminal strict cancellation is idempotent");
+    assert_eq!(repeat.body["job"]["status"], "cancelled");
+    assert_eq!(
+        store.events(job.id).expect("events").len(),
+        initial_event_count + 1
+    );
+}
+
+#[test]
+fn strict_projection_cancel_refuses_wrong_runner_without_mutation() {
+    let store = JobStore::default();
+    let job = queued_local_runner_job(&store, Some("durable-run"));
+    let initial_event_count = store.events(job.id).expect("events").len();
+
+    let error = strict_projection_cancel(&store, job.id, "other-runner", "durable-run")
+        .expect_err("wrong runner is refused");
+    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
+    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Queued);
+    assert_eq!(store.active_runner_jobs().len(), 1);
+    assert_eq!(
+        store.events(job.id).expect("events").len(),
+        initial_event_count
+    );
+}
+
+#[test]
+fn strict_projection_cancel_refuses_wrong_durable_run_without_mutation() {
+    let store = JobStore::default();
+    let job = queued_local_runner_job(&store, Some("durable-run"));
+    let initial_event_count = store.events(job.id).expect("events").len();
+
+    let error = strict_projection_cancel(&store, job.id, "homeboy-lab", "other-run")
+        .expect_err("wrong durable run is refused");
+    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
+    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Queued);
+    assert_eq!(store.active_runner_jobs().len(), 1);
+    assert_eq!(
+        store.events(job.id).expect("events").len(),
+        initial_event_count
+    );
+}
+
+#[test]
+fn strict_projection_cancel_refuses_local_only_and_legacy_jobs_without_mutation() {
+    let store = JobStore::default();
+    let local_only = store.create("audit");
+    let legacy = queued_local_runner_job(&store, None);
+    let initial_active_count = store.active_runner_jobs().len();
+
+    for job in [local_only, legacy] {
+        let initial_event_count = store.events(job.id).expect("events").len();
+        let error = strict_projection_cancel(&store, job.id, "homeboy-lab", "durable-run")
+            .expect_err("unbound job is refused");
+        assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Queued);
+        assert_eq!(
+            store.events(job.id).expect("events").len(),
+            initial_event_count
+        );
+    }
+    assert_eq!(store.active_runner_jobs().len(), initial_active_count);
+}
+
+#[test]
+fn generic_job_cancel_remains_unscoped_for_operator_compatibility() {
+    let store = JobStore::default();
+    let job = store.create("audit");
+
+    let response = http_api::handle_with_jobs(
+        HttpApiRequest {
+            method: HttpMethod::Post,
+            path: format!("/jobs/{}/cancel", job.id),
+            body: None,
+        },
+        &store,
+    )
+    .expect("generic operator cancellation remains supported");
+    assert_eq!(response.endpoint, "jobs.cancel");
+    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Cancelled);
+}
+
 #[test]
 fn runs_list_includes_active_runner_jobs() {
     with_isolated_home(|_home| {
