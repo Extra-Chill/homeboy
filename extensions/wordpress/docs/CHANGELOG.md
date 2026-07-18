@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.26.4] - 2026-07-18
+
+### Fixed
+- Fix Homeboy runtime helper path
+
 ## [3.26.3] - 2026-07-18
 
 ### Fixed
