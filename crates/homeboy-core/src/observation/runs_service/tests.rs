@@ -607,3 +607,76 @@ fn require_run_rejects_ambiguous_requested_run_id_alias() {
         assert!(joined.contains("rig=studio-b"));
     });
 }
+
+fn lab_labeled_run(id: &str, kind: &str, label: &str, job_id: &str) -> RunRecord {
+    RunRecord {
+        id: id.to_string(),
+        kind: kind.to_string(),
+        component_id: Some("homeboy".to_string()),
+        started_at: "2026-07-18T00:00:00Z".to_string(),
+        finished_at: None,
+        status: "running".to_string(),
+        command: Some(format!("homeboy {kind} --run-id {label}")),
+        cwd: Some("/tmp/homeboy-fixture".to_string()),
+        homeboy_version: None,
+        git_sha: None,
+        rig_id: Some("studio".to_string()),
+        metadata_json: serde_json::json!({
+            "requested_run_id": label,
+            "lab": {
+                "runner": { "id": "homeboy-lab" },
+                "remote_job": { "id": job_id }
+            }
+        }),
+    }
+}
+
+#[test]
+fn require_run_resolves_lab_label_to_caller_across_mirrors() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let caller = lab_labeled_run("caller", "fuzz", "shared-label", "job-1");
+        store.upsert_imported_run(&caller).expect("caller");
+        for id in ["mirror-a", "mirror-b", "mirror-c"] {
+            store
+                .upsert_imported_run(&lab_labeled_run(id, "runner-exec", "shared-label", "job-1"))
+                .expect("mirror");
+        }
+
+        let resolved = require_run(&store, "shared-label").expect("canonical caller");
+        assert_eq!(resolved.id, caller.id);
+    });
+}
+
+#[test]
+fn require_run_keeps_unrelated_lab_label_collision_ambiguous() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let caller = lab_labeled_run("caller", "fuzz", "shared-label", "job-1");
+        let collision = lab_labeled_run("collision", "fuzz", "shared-label", "job-2");
+        store.upsert_imported_run(&caller).expect("caller");
+        for id in ["mirror-a", "mirror-b", "mirror-c"] {
+            store
+                .upsert_imported_run(&lab_labeled_run(id, "runner-exec", "shared-label", "job-1"))
+                .expect("mirror");
+        }
+        store.upsert_imported_run(&collision).expect("collision");
+
+        let err = require_run(&store, "shared-label").expect_err("ambiguous label");
+        assert!(err.message.contains("2 persisted runs match"));
+        let joined = err.details["tried"]
+            .as_array()
+            .expect("disambiguation entries")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains(&caller.id));
+        assert!(joined.contains(&collision.id));
+        assert!(!joined.contains("mirror-a"));
+        assert!(!joined.contains("mirror-b"));
+        assert!(!joined.contains("mirror-c"));
+    });
+}

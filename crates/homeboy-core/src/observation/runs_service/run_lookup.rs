@@ -40,11 +40,60 @@ fn resolve_run_label(store: &ObservationStore, label: &str) -> Result<Option<Run
 }
 
 fn resolve_run_label_matches(label: &str, matches: Vec<RunRecord>) -> Result<Option<RunRecord>> {
+    let matches = canonicalize_lab_run_label_matches(matches);
     match matches.len() {
         0 => Ok(None),
         1 => Ok(matches.into_iter().next()),
         _ => Err(ambiguous_run_label_error(label, &matches)),
     }
+}
+
+/// Collapse a caller and its Lab mirrors only when their durable job lineage
+/// identifies one execution and exactly one caller record remains.
+fn canonicalize_lab_run_label_matches(matches: Vec<RunRecord>) -> Vec<RunRecord> {
+    let mut canonical = Vec::new();
+    for (index, run) in matches.iter().enumerate() {
+        let Some(lineage) = lab_run_lineage(run) else {
+            canonical.push(run.clone());
+            continue;
+        };
+        if matches[..index]
+            .iter()
+            .any(|candidate| lab_run_lineage(candidate).as_ref() == Some(&lineage))
+        {
+            continue;
+        }
+        let related = matches
+            .iter()
+            .filter(|candidate| lab_run_lineage(candidate).as_ref() == Some(&lineage))
+            .collect::<Vec<_>>();
+        let callers = related
+            .iter()
+            .filter(|candidate| candidate.kind != "runner-exec")
+            .collect::<Vec<_>>();
+        if callers.len() == 1 {
+            canonical.push((*callers[0]).clone());
+        } else {
+            canonical.extend(related.into_iter().cloned());
+        }
+    }
+    canonical
+}
+
+fn lab_run_lineage(run: &RunRecord) -> Option<(String, String)> {
+    runner_evidence::with_runner_evidence(|provider| provider.mirrored_runner_job_identity(run))
+        .or_else(|| {
+            let lab = run.metadata_json.get("lab")?;
+            let runner_id = lab
+                .pointer("/runner/id")
+                .or_else(|| lab.get("runner_id"))
+                .and_then(Value::as_str)?;
+            let job_id = lab
+                .pointer("/remote_job/id")
+                .or_else(|| lab.get("remote_job_id"))
+                .and_then(Value::as_str)?;
+            Some((runner_id.to_string(), job_id.to_string()))
+        })
 }
 
 fn ambiguous_run_label_error(label: &str, matches: &[RunRecord]) -> Error {
