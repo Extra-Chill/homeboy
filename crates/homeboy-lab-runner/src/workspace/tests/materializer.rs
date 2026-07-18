@@ -110,6 +110,32 @@ fn workspace_materializer_builds_direct_git_checkout_command() {
 }
 
 #[test]
+fn workspace_materializer_fetches_only_the_exact_sha_for_a_fresh_checkout() {
+    let command = WorkspaceMaterializer::new("/srv/homeboy/_lab_workspaces/homeboy-abc")
+        .op(WorkspaceMaterializationOperation::SyncGitCheckout {
+            remote_url: "https://github.com/Extra-Chill/homeboy.git".to_string(),
+            head: "abc123".to_string(),
+            branch: None,
+            changed_since_base: None,
+            fetch_refs: Vec::new(),
+            allow_dirty: false,
+        })
+        .command();
+
+    assert!(command.contains("git init \"$dest\""));
+    assert!(command.contains("remote add origin https://github.com/Extra-Chill/homeboy.git"));
+    assert!(command.contains("fetch --filter=blob:none origin abc123"));
+    assert!(command.contains("checkout --detach abc123"));
+    assert!(!command.contains("git clone"));
+    assert_eq!(
+        command
+            .matches("'+refs/heads/*:refs/remotes/origin/*'")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn workspace_materializer_builds_dependency_cache_restore_command() {
     let command = dependency_cache_restore_command(
         "/srv/homeboy/_lab_workspaces/homeboy-abc",

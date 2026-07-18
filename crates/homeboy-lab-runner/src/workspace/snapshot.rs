@@ -991,6 +991,55 @@ pub(crate) fn materialize_snapshot_git(
     initialize_synthetic_git_checkout(runner, local_path, remote_path, snapshot, source_dirty)
 }
 
+/// Apply a filtered controller snapshot over an existing runner checkout while
+/// preserving its runner-created Git directory. The overlay is staged before
+/// replacing worktree content so an interrupted transfer cannot leave a
+/// partially extracted archive behind.
+pub(crate) fn materialize_snapshot_overlay(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    excludes: &[String],
+) -> Result<()> {
+    let target = format!(
+        "sh -c {}",
+        shell::quote_arg(&snapshot_overlay_install_command(remote_path))
+    );
+    match runner.kind {
+        RunnerKind::Local => materialize_snapshot_piped(
+            local_path,
+            &target,
+            excludes,
+            "apply local Git workspace snapshot overlay",
+        ),
+        RunnerKind::Ssh => {
+            let (_server, client) = ssh_client_for_runner(runner)?;
+            if client.is_local {
+                materialize_snapshot_piped(
+                    local_path,
+                    &target,
+                    excludes,
+                    "apply local Git workspace snapshot overlay",
+                )
+            } else {
+                let remote = format!("{}@{}", client.user, client.host);
+                let command = snapshot_overlay_install_command(remote_path);
+                materialize_snapshot_piped(
+                    local_path,
+                    &format!(
+                        "ssh {} {} {}",
+                        ssh_args(&client),
+                        shell::quote_arg(&remote),
+                        shell::quote_arg(&command),
+                    ),
+                    excludes,
+                    "apply SSH Git workspace snapshot overlay",
+                )
+            }
+        }
+    }
+}
+
 /// Identity of the synthetic git checkout materialized for a `snapshot-git`
 /// sync. Surfaced as run evidence so write-capable agent-task dispatches can
 /// trace the dirty controller-side worktree back to the synthetic commit that
@@ -1262,4 +1311,11 @@ pub(super) fn snapshot_install_command(remote_path: &str) -> String {
         .op(WorkspaceMaterializationOperation::AtomicReplaceTemp)
         .restore_owner()
         .command()
+}
+
+fn snapshot_overlay_install_command(remote_path: &str) -> String {
+    let remote_path = shell::quote_arg(remote_path);
+    format!(
+        "dest={remote_path}; tmp=\"${{dest}}.overlay.$$\"; rm -rf \"$tmp\" && mkdir -p \"$tmp\" && trap 'rm -rf \"$tmp\"' EXIT && tar -C \"$tmp\" -xf - && find \"$dest\" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {{}} + && cp -a \"$tmp\"/. \"$dest\"/"
+    )
 }
