@@ -247,15 +247,24 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             daemon::supervise(&addr, &startup_token)?;
             Ok((DaemonOutput::Serve(DaemonStartResult { pid: std::process::id(), address: addr, state_path: String::new(), lease_id: String::new() }), 0))
         }
-        DaemonCommand::Stop { lease_id, force } => Ok((
-            DaemonOutput::Stop(match (force, lease_id) {
+        DaemonCommand::Stop { lease_id, force } => {
+            let lease_bound = lease_id.is_some();
+            let result = match (force, lease_id) {
                 (true, Some(lease_id)) => daemon::force_stop_for_lease(&lease_id)?,
                 (true, None) => unreachable!("clap requires --lease-id with --force"),
                 (false, Some(lease_id)) => daemon::stop_for_lease(&lease_id)?,
                 (false, None) => daemon::stop()?,
-            }),
-            0,
-        )),
+            };
+            if lease_bound && !result.stopped && !result.already_absent {
+                return Err(Error::validation_invalid_argument(
+                    "daemon_stop",
+                    "lease-bound daemon stop did not stop the exact owner or prove it already absent",
+                    None,
+                    None,
+                ));
+            }
+            Ok((DaemonOutput::Stop(result), 0))
+        }
         DaemonCommand::Status => Ok((DaemonOutput::Status(daemon::read_status()?), 0)),
         DaemonCommand::BrokerConfig {
             listen_addr,

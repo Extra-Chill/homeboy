@@ -578,6 +578,38 @@ fn reconnect_error_after_disconnect_restores_the_pre_refresh_binary() {
 }
 
 #[test]
+fn reconnect_failure_after_stop_restores_and_reconnects_before_returning() {
+    let operations = std::cell::RefCell::new(Vec::new());
+
+    let error = rollback_refresh_connect_error_with::<(), _, _>(
+        Error::internal_io("selected daemon reconnect failed".to_string(), None),
+        || {
+            operations
+                .borrow_mut()
+                .push("restore old binary".to_string());
+            Ok(())
+        },
+        || {
+            operations
+                .borrow_mut()
+                .push("persist old-or-new authoritative lease".to_string());
+            Ok(())
+        },
+    )
+    .expect_err("the original reconnect failure remains visible after convergence");
+
+    assert_eq!(error.details["error"], "selected daemon reconnect failed");
+    assert_eq!(
+        operations.into_inner(),
+        [
+            "restore old binary",
+            "persist old-or-new authoritative lease"
+        ],
+        "a failed reconnect after the old session is removed must compensate before returning"
+    );
+}
+
+#[test]
 fn nonzero_reconnect_report_rollback_restores_the_pre_refresh_binary() {
     test_support::with_isolated_home(|_| {
         crate::create(
