@@ -1183,19 +1183,47 @@ fn write_workspace_metadata(
         }
         RunnerKind::Ssh => {
             let parent = parent_remote_path(&metadata_path);
-            let command = format!(
-                "remote_path={remote_path}; if [ -d \"$remote_path/.git\" ]; then mkdir -p \"$remote_path/.git/info\" && touch \"$remote_path/.git/info/exclude\" && grep -qxF '.homeboy/' \"$remote_path/.git/info/exclude\" || printf '\\n.homeboy/\\n' >> \"$remote_path/.git/info/exclude\"; fi; mkdir -p {parent} && cat > {path} <<'HOMEBOY_WORKSPACE_METADATA'\n{json}\nHOMEBOY_WORKSPACE_METADATA",
+            let staged_metadata_path = temp::unique_name(&metadata_path, ".tmp");
+            let metadata_file = tempfile::NamedTempFile::new().map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some("create workspace metadata staging file".to_string()),
+                )
+            })?;
+            fs::write(metadata_file.path(), json).map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some("write workspace metadata staging file".to_string()),
+                )
+            })?;
+            let prepare_command = format!(
+                "remote_path={remote_path}; if [ -d \"$remote_path/.git\" ]; then mkdir -p \"$remote_path/.git/info\" && touch \"$remote_path/.git/info/exclude\" && grep -qxF '.homeboy/' \"$remote_path/.git/info/exclude\" || printf '\\n.homeboy/\\n' >> \"$remote_path/.git/info/exclude\"; fi; mkdir -p {parent}",
                 remote_path = shell::quote_arg(&metadata.remote_path),
                 parent = shell::quote_arg(&parent),
-                path = shell::quote_arg(&metadata_path),
-                json = json,
             );
-            // A completed checkout has one idempotent post-materialization write.
-            // Recreate the client for each bounded recovery attempt so a stale
-            // SSH transport cannot force the outer cook to rematerialize it.
+            let publish_command = format!(
+                "mv -f {staged_path} {path}",
+                staged_path = shell::quote_arg(&staged_metadata_path),
+                path = shell::quote_arg(&metadata_path),
+            );
+
+            // Metadata is staged outside the live path, so the complete
+            // prepare-upload-publish transaction is safe to retry after a
+            // transport reset. A fresh client avoids reusing a broken channel.
             let output = retry_idempotent_ssh_operation(|| {
                 let (_server, client) = ssh_client_for_runner(runner)?;
-                Ok(client.execute(&command))
+                let prepare = client.execute(&prepare_command);
+                if !prepare.success {
+                    return Ok(prepare);
+                }
+                let upload = client.upload_file(
+                    &metadata_file.path().display().to_string(),
+                    &staged_metadata_path,
+                );
+                if !upload.success {
+                    return Ok(upload);
+                }
+                Ok(client.execute(&publish_command))
             })?;
             if output.success {
                 Ok(())
@@ -1826,24 +1854,31 @@ mod tests {
     }
 
     #[test]
-    fn metadata_ssh_recovery_retries_a_transient_loss_with_a_fresh_operation() {
+    fn metadata_ssh_recovery_restarts_the_staged_write_after_a_transport_reset() {
         let mut attempts = 0;
+        let mut steps = Vec::new();
         let output = retry_idempotent_ssh_operation(|| {
             attempts += 1;
-            Ok(if attempts == 1 {
-                command_output(
+            steps.push(format!("prepare-{attempts}"));
+            steps.push(format!("stage-{attempts}"));
+            if attempts == 1 {
+                return Ok(command_output(
                     false,
                     255,
                     "Connection to runner.example.test closed by remote host.\nclient_loop: send disconnect: Broken pipe",
-                )
-            } else {
-                command_output(true, 0, "")
-            })
+                ));
+            }
+            steps.push(format!("publish-{attempts}"));
+            Ok(command_output(true, 0, ""))
         })
         .expect("retry operation");
 
         assert!(output.success);
         assert_eq!(attempts, 2);
+        assert_eq!(
+            steps,
+            ["prepare-1", "stage-1", "prepare-2", "stage-2", "publish-2"]
+        );
     }
 
     #[test]
