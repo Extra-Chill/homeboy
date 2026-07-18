@@ -551,12 +551,12 @@ fn run_main_test_workflow_inner(
 
     // When tests failed with no parseable counts, surface a dedicated hint so
     // the user understands `raw_output` is the only signal about what went
-    // wrong (typically a bootstrap error). (#1143)
+    // wrong. A missing sidecar does not prove that no tests executed.
     let mut hints_vec = hints.unwrap_or_default();
     if status == "failed" && test_counts.is_none() && raw_output.is_some() {
         hints_vec.insert(
             0,
-            "No tests ran — the runner failed before producing results. \
+            "The test runner failed before producing structured results. \
              See raw_output.stderr_tail / raw_output.stdout_tail for the underlying error \
              (bootstrap failure, missing deps, DB connection, etc.)."
                 .to_string(),

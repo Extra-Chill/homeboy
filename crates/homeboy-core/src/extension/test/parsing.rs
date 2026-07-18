@@ -307,16 +307,41 @@ pub fn parse_test_results_text_with_spec(text: &str, spec: &ParseSpec) -> Option
 
     let parsed = spec.parse(text);
     let total = parsed.get("total").copied().unwrap_or(0.0).max(0.0) as u64;
-    if total == 0 {
-        return None;
-    }
     let passed = parsed.get("passed").copied().unwrap_or(0.0).max(0.0) as u64;
     let failed = parsed.get("failed").copied().unwrap_or(0.0).max(0.0) as u64;
     let errors = parsed.get("errors").copied().unwrap_or(0.0).max(0.0) as u64;
     let skipped = parsed.get("skipped").copied().unwrap_or(0.0).max(0.0) as u64;
     // `TestCounts` has no separate errors field; fold runner errors into
     // `failed` so status/baseline decisions do not treat errors as passing.
-    Some(TestCounts::new(total, passed, failed + errors, skipped))
+    if total > 0 {
+        return Some(TestCounts::new(total, passed, failed + errors, skipped));
+    }
+
+    parse_key_value_test_summary(text)
+}
+
+/// Parse terminal summaries emitted by runners that report aggregate counts as
+/// `passed=<n> failed=<n>` rather than a framework-specific result line.
+fn parse_key_value_test_summary(text: &str) -> Option<TestCounts> {
+    let summary =
+        regex::Regex::new(r"(?m)^\S.*?\bpassed=(\d+)\s+failed=(\d+)(?:\s+skipped=(\d+))?\s*$")
+            .expect("key-value test summary regex is valid");
+    let captures = summary.captures_iter(text).last()?;
+    let passed = captures.get(1)?.as_str().parse().ok()?;
+    let failed = captures.get(2)?.as_str().parse().ok()?;
+    let skipped = captures
+        .get(3)
+        .map(|capture| capture.as_str().parse())
+        .transpose()
+        .ok()?
+        .unwrap_or(0);
+
+    Some(TestCounts::new(
+        passed + failed + skipped,
+        passed,
+        failed,
+        skipped,
+    ))
 }
 
 fn parse_test_results_text_with_adapter(text: &str, adapter: &str) -> Option<TestCounts> {
@@ -554,6 +579,21 @@ mod tests {
         assert_eq!(counts.passed, 4);
         assert_eq!(counts.failed, 3);
         assert_eq!(counts.skipped, 13);
+    }
+
+    #[test]
+    fn default_parse_spec_reads_terminal_key_value_summary() {
+        let counts = parse_test_results_text(
+            "HOST_SMOKE_SUMMARY:passed=21 failed=15\n\
+             Real-WordPress smoke tests failed (15 of 36):\n\
+               - tests/wiki/upsert-delegation-smoke.php (exit 1)",
+        )
+        .expect("key-value terminal summary should parse");
+
+        assert_eq!(counts.total, 36);
+        assert_eq!(counts.passed, 21);
+        assert_eq!(counts.failed, 15);
+        assert_eq!(counts.skipped, 0);
     }
 
     #[test]
