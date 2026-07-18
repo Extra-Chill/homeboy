@@ -195,6 +195,7 @@ pub(crate) fn run_runner_resident_lab_offload(
         dependency_cache_saves: Vec::new(),
         remote_output_file,
         host_telemetry: None,
+        admission: None,
         plan,
         messages,
         overhead,

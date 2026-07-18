@@ -6,13 +6,10 @@ use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::test_support;
 
 #[test]
-fn routine_reconnect_refuses_to_interrupt_a_detached_lab_cook() {
-    let error = protect_active_jobs_before_reconnect(
-        "homeboy-lab",
-        ["0b77251a-b6a7-42a6-91a3-e49ff5f57c16"],
-        false,
-    )
-    .expect_err("routine reconnect must preserve the active cook");
+fn routine_reconnect_refuses_to_interrupt_an_admitted_lab_offload() {
+    let admission = active_admission("0b77251a-b6a7-42a6-91a3-e49ff5f57c16");
+    let error = protect_active_jobs_before_reconnect("homeboy-lab", &[admission], false)
+        .expect_err("routine reconnect must preserve the active cook");
 
     assert_eq!(
         error.details["active_job_ids"],
@@ -27,17 +24,40 @@ fn routine_reconnect_refuses_to_interrupt_a_detached_lab_cook() {
 
 #[test]
 fn forced_reconnect_reports_the_jobs_it_will_interrupt() {
-    let interrupted = protect_active_jobs_before_reconnect(
-        "homeboy-lab",
-        ["0b77251a-b6a7-42a6-91a3-e49ff5f57c16"],
-        true,
-    )
-    .expect("explicit force permits interruption");
+    let admission = active_admission("0b77251a-b6a7-42a6-91a3-e49ff5f57c16");
+    let interrupted = protect_active_jobs_before_reconnect("homeboy-lab", &[admission], true)
+        .expect("explicit force permits interruption");
 
     assert_eq!(
         interrupted,
         vec!["0b77251a-b6a7-42a6-91a3-e49ff5f57c16".to_string()]
     );
+}
+
+fn active_admission(job_id: &str) -> homeboy_core::api_jobs::ActiveRunnerJobSummary {
+    homeboy_core::api_jobs::ActiveRunnerJobSummary {
+        runner_id: "homeboy-lab".to_string(),
+        job_id: job_id.to_string(),
+        operation: "runner.admission".to_string(),
+        source: "runner-daemon".to_string(),
+        kind: "runner.admission".to_string(),
+        status: homeboy_core::api_jobs::JobStatus::Queued,
+        command: "homeboy generic-workload".to_string(),
+        cwd: None,
+        started_at_ms: 1,
+        updated_at_ms: 1,
+        elapsed_ms: 0,
+        heartbeat_age_ms: 0,
+        claim: Default::default(),
+        claim_expires_in_ms: None,
+        lifecycle: None,
+        durable_run_id: None,
+        stale_reason: None,
+        lifecycle_state: Some("active".to_string()),
+        retryable: Some(false),
+        active_child_count: None,
+        active_cell_count: None,
+    }
 }
 
 #[test]

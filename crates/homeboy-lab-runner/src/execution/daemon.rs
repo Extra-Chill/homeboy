@@ -354,6 +354,112 @@ pub(super) fn exec_via_daemon(
     ))
 }
 
+/// Keeps an admitted Lab offload visible in daemon active-job accounting until
+/// its staged execution reaches a terminal or detached handoff outcome.
+pub(crate) struct DaemonAdmissionReservation {
+    local_url: String,
+    job_id: String,
+    pub(crate) daemon_lease_id: String,
+}
+
+impl DaemonAdmissionReservation {
+    pub(crate) fn job_id(&self) -> &str {
+        &self.job_id
+    }
+}
+
+impl Drop for DaemonAdmissionReservation {
+    fn drop(&mut self) {
+        let Ok(client) = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+        else {
+            return;
+        };
+        let _ = daemon_post_json_text(
+            &client,
+            &self.local_url,
+            &format!("/admissions/{}/release", self.job_id),
+            &json!({}),
+            DaemonPostOptions::default(),
+        );
+    }
+}
+
+pub(crate) fn reserve_daemon_admission(
+    runner_id: &str,
+    local_url: &str,
+    command: &str,
+    expected_daemon_lease_id: &str,
+) -> Result<DaemonAdmissionReservation> {
+    let client = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| {
+            Error::internal_unexpected(format!("build daemon admission client: {err}"))
+        })?;
+    let response = daemon_post_json_text(
+        &client,
+        local_url,
+        "/admissions",
+        &json!({
+            "runner_id": runner_id,
+            "command": command,
+            "expected_daemon_lease_id": expected_daemon_lease_id,
+        }),
+        DaemonPostOptions::default(),
+    )?;
+    let envelope: DaemonEnvelope = serde_json::from_str(&response.body).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse daemon admission response".to_string()),
+        )
+    })?;
+    if response.status_code >= 400 || !envelope.success {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            format!(
+                "runner `{runner_id}` refused Lab admission reservation: {}",
+                envelope.error.unwrap_or(Value::Null)
+            ),
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    let data = envelope
+        .data
+        .ok_or_else(|| Error::internal_unexpected("daemon admission response missing data"))?;
+    let body = canonical_daemon_body(&data, "daemon admission response")?;
+    let daemon_lease_id = body
+        .get("daemon_lease_id")
+        .and_then(Value::as_str)
+        .filter(|lease| !lease.is_empty())
+        .ok_or_else(|| Error::internal_unexpected("daemon admission response missing lease ID"))?;
+    if daemon_lease_id != expected_daemon_lease_id {
+        return Err(Error::validation_invalid_argument(
+            "expected_daemon_lease_id",
+            format!(
+                "runner `{runner_id}` admitted against daemon lease `{daemon_lease_id}`, expected `{expected_daemon_lease_id}`"
+            ),
+            Some(expected_daemon_lease_id.to_string()),
+            None,
+        ));
+    }
+    let job: Job = serde_json::from_value(body["job"].clone()).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse daemon admission job".to_string()),
+        )
+    })?;
+    Ok(DaemonAdmissionReservation {
+        local_url: local_url.to_string(),
+        job_id: job.id.to_string(),
+        daemon_lease_id: daemon_lease_id.to_string(),
+    })
+}
+
 /// Recover only a connection that failed before the daemon could answer. A
 /// timeout or response failure may already represent an accepted non-idempotent
 /// `/exec`, so it is deliberately not retried here.

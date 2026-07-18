@@ -1411,6 +1411,16 @@ where
             Ok(body) => daemon_endpoint_response("jobs.exec", body),
             Err(err) => error_response(400, err),
         },
+        ("POST", "/admissions") => match reserve_admission(body, job_store) {
+            Ok(body) => daemon_endpoint_response("admissions.reserve", body),
+            Err(err) => error_response(400, err),
+        },
+        ("POST", path) if path.starts_with("/admissions/") && path.ends_with("/release") => {
+            match release_admission(path, job_store) {
+                Ok(body) => daemon_endpoint_response("admissions.release", body),
+                Err(err) => error_response(400, err),
+            }
+        }
         ("POST", "/jobs/reconcile-terminal") => {
             match job_store.reconcile_terminal_linked_daemon_jobs() {
                 Ok(reconciled) => daemon_endpoint_response(
@@ -1449,11 +1459,13 @@ where
             Ok(body) => daemon_endpoint_response("files.download", body),
             Err(err) => remote_runner::auth_or_bad_request(err),
         },
-        ("GET", "/exec") | ("GET", "/jobs/reconcile-terminal") => HttpResponse {
-            status_code: 405,
-            body: json!({ "error": "method_not_allowed" }),
-            artifact: None,
-        },
+        ("GET", "/exec") | ("GET", "/admissions") | ("GET", "/jobs/reconcile-terminal") => {
+            HttpResponse {
+                status_code: 405,
+                body: json!({ "error": "method_not_allowed" }),
+                artifact: None,
+            }
+        }
         ("GET", "/lifecycle/stop") => method_not_allowed(),
         ("GET", "/files/mkdir") | ("GET", "/files/upload") | ("GET", "/files/download") => {
             method_not_allowed()
@@ -1476,6 +1488,112 @@ where
         }
         _ => route_read_only_api(method, path, body, job_store, analysis_runner),
     }
+}
+
+fn reserve_admission(
+    body: Option<serde_json::Value>,
+    job_store: &JobStore,
+) -> Result<serde_json::Value> {
+    let body = body.unwrap_or_else(|| json!({}));
+    let runner_id = body
+        .get("runner_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner_id",
+                "admission reservation requires a runner ID",
+                None,
+                None,
+            )
+        })?;
+    let command = body
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("runner admission");
+    let expected_daemon_lease_id = body
+        .get("expected_daemon_lease_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "expected_daemon_lease_id",
+                "admission reservation requires the exact expected daemon lease ID",
+                None,
+                None,
+            )
+        })?;
+    let daemon_lease = heartbeat_lease()?;
+    validate_admission_lease(expected_daemon_lease_id, &daemon_lease.lease_id)?;
+    let job = job_store.create_with_source_snapshot_metadata_and_path_materialization_plan(
+        "runner.admission",
+        None,
+        Some(json!({
+            "runner_job_projection": {
+                "runner_id": runner_id,
+                "command": command,
+                "cwd": serde_json::Value::Null,
+                "source": "runner-daemon",
+                "kind": "runner.admission",
+                "lifecycle": serde_json::Value::Null,
+            },
+            "admission": {
+                "runner_id": runner_id,
+                "state": "reserved",
+                "daemon_lease_id": daemon_lease.lease_id.clone(),
+            },
+        })),
+        None,
+    );
+    Ok(json!({ "job": job, "daemon_lease_id": daemon_lease.lease_id }))
+}
+
+fn validate_admission_lease(expected_lease_id: &str, actual_lease_id: &str) -> Result<()> {
+    if expected_lease_id == actual_lease_id {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "expected_daemon_lease_id",
+        format!(
+            "admission reservation expected daemon lease `{expected_lease_id}` but the authoritative live lease is `{actual_lease_id}`"
+        ),
+        Some(expected_lease_id.to_string()),
+        None,
+    ))
+}
+
+fn release_admission(path: &str, job_store: &JobStore) -> Result<serde_json::Value> {
+    let job_id = path
+        .trim_start_matches("/admissions/")
+        .trim_end_matches("/release")
+        .trim_end_matches('/');
+    let job_id = uuid::Uuid::parse_str(job_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "job_id",
+            format!("invalid admission job ID: {error}"),
+            Some(job_id.to_string()),
+            None,
+        )
+    })?;
+    let job = job_store.get(job_id)?;
+    if job.operation != "runner.admission" {
+        return Err(Error::validation_invalid_argument(
+            "job_id",
+            "job is not an admission reservation",
+            Some(job_id.to_string()),
+            None,
+        ));
+    }
+    let job = if matches!(
+        job.status,
+        JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
+    ) {
+        job
+    } else {
+        job_store.cancel(job_id, "admission reservation released")?
+    };
+    Ok(json!({ "job": job }))
 }
 
 fn lifecycle_stop_request(body: Option<serde_json::Value>) -> Result<LifecycleStopRequest> {
@@ -2091,6 +2209,78 @@ mod tests {
     use std::sync::Arc;
 
     struct EnqueueTestDriver;
+
+    #[test]
+    fn admission_reservation_blocks_daemon_replacement_until_released() {
+        with_isolated_home(|_| {
+            let lease_id = "lease-admission";
+            write_test_lease(lease_id);
+            let store = JobStore::default();
+            let reserved = reserve_admission(
+                Some(json!({
+                    "runner_id": "lab",
+                    "command": "homeboy generic-workload",
+                    "expected_daemon_lease_id": lease_id,
+                })),
+                &store,
+            )
+            .expect("reserve admission");
+            let job_id = reserved["job"]["id"].as_str().expect("reservation job ID");
+
+            let active_jobs = store.active_runner_jobs();
+            assert_eq!(
+                daemon_freshness_report(&store)
+                    .expect("freshness")
+                    .active_jobs,
+                1
+            );
+            assert_eq!(active_jobs.len(), 1);
+            assert_eq!(active_jobs[0].job_id, job_id);
+            assert_eq!(active_jobs[0].operation, "runner.admission");
+            assert_eq!(active_jobs[0].kind, "runner.admission");
+
+            let released = release_admission(&format!("/admissions/{job_id}/release"), &store)
+                .expect("release admission");
+            assert_eq!(released["job"]["status"], "cancelled");
+            assert_eq!(
+                daemon_freshness_report(&store)
+                    .expect("freshness")
+                    .active_jobs,
+                0
+            );
+            assert!(store.active_runner_jobs().is_empty());
+        });
+    }
+
+    #[test]
+    fn admission_reservation_rejects_a_changed_daemon_lease_before_job_creation() {
+        let error = validate_admission_lease("lease-a", "lease-b")
+            .expect_err("a reservation must not cross daemon leases");
+        assert_eq!(
+            error.code,
+            crate::error::ErrorCode::ValidationInvalidArgument
+        );
+        assert!(error.message.contains("lease-a"));
+        assert!(error.message.contains("lease-b"));
+    }
+
+    fn write_test_lease(lease_id: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let state = DaemonState {
+            schema: DAEMON_LEASE_SCHEMA.to_string(),
+            lease_id: lease_id.to_string(),
+            startup_token: String::new(),
+            address: "127.0.0.1:0".to_string(),
+            pid: std::process::id(),
+            state_path: state_path().expect("state path").display().to_string(),
+            started_at: now.clone(),
+            last_seen_at: now,
+            build_identity: build_identity::current(),
+            binary_sha256: current_binary_sha256().expect("binary hash"),
+            runtime_paths: capture_daemon_runtime_snapshot(),
+        };
+        write_lease(&state_path().expect("state path"), &state).expect("write lease");
+    }
 
     impl RunnerExecDriver for EnqueueTestDriver {
         fn prepare(&self, request: RunnerExecPrepareRequest) -> Result<PreparedDaemonExec> {
