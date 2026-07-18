@@ -8,8 +8,8 @@ use crate::workspace::snapshot::{
     copy_snapshot_to_directory, ensure_no_runner_workspace_metadata_collision,
     snapshot_archive_command, snapshot_install_command, synthetic_checkout_value,
     workspace_content_hash, workspace_content_hash_algorithm, workspace_content_hash_for_policy,
-    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
-    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    workspace_content_hash_v1, workspace_content_manifest_for_policy,
+    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
@@ -1194,6 +1194,50 @@ fn snapshot_content_hash_matches_materialized_workspace_after_runner_metadata_in
         workspace_content_hash(&destination, &excludes).expect("materialized hash"),
         expected,
         "the controller hash must describe the bytes and structure that the runner verifies"
+    );
+}
+
+#[test]
+fn every_content_hash_algorithm_ignores_all_reserved_runner_workspace_paths() {
+    // Both the v1 and v2 content-hash traversals must exclude every
+    // runner-owned materialization artifact from `RESERVED_RUNNER_WORKSPACE_PATHS`
+    // identically. Regression guard for the drift where the v2 traversal was
+    // taught to skip `.homeboy/lab-at-files` (#9003) but the v1 traversal was
+    // not, so a v1 workspace carrying that runner path would hash differently on
+    // the runner than on the controller.
+    let controller = tempfile::tempdir().expect("controller");
+    let source = controller.path().join("source");
+    fs::create_dir_all(source.join("packages")).expect("source package directory");
+    fs::write(source.join("packages/app.rs"), "fn main() {}\n").expect("source file");
+    let excludes: Vec<String> = Vec::new();
+
+    let expected_v1 = workspace_content_hash_v1(&source, &excludes).expect("v1 source hash");
+    let expected_v2 = workspace_content_hash(&source, &excludes).expect("v2 source hash");
+
+    // Inject every reserved runner-owned path, exactly as the runner would after
+    // transport, then re-hash. The identity must be unchanged for both
+    // algorithms.
+    fs::create_dir_all(source.join(".homeboy/lab-at-files")).expect("lab-at-files directory");
+    fs::write(
+        source.join(".homeboy/lab-at-files/at-input.txt"),
+        "runner-owned transport artifact\n",
+    )
+    .expect("lab-at-files entry");
+    fs::write(
+        source.join(".homeboy/runner-workspace.json"),
+        r#"{"schema":"homeboy/runner-workspace/v1"}"#,
+    )
+    .expect("runner metadata");
+
+    assert_eq!(
+        workspace_content_hash_v1(&source, &excludes).expect("v1 injected hash"),
+        expected_v1,
+        "v1 content hash must ignore every reserved runner-owned workspace path"
+    );
+    assert_eq!(
+        workspace_content_hash(&source, &excludes).expect("v2 injected hash"),
+        expected_v2,
+        "v2 content hash must ignore every reserved runner-owned workspace path"
     );
 }
 
