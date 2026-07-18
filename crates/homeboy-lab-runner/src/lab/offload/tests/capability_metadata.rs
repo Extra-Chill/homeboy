@@ -290,6 +290,17 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
     let verified = verify_lab_workspace_from_env(&remote_path.display().to_string(), remote.path())
         .expect("verifier accepts hydrated Lab process metadata");
     assert_eq!(verified.workspace_identity, "snapshot:verified");
+    let mut compact_metadata = metadata.clone();
+    compact_metadata["workspace_verification"]
+        .as_object_mut()
+        .expect("workspace verification object")
+        .remove("content_manifest");
+    std::env::set_var(
+        LAB_OFFLOAD_METADATA_ENV,
+        serde_json::to_string(&compact_metadata).expect("compact Lab metadata process env"),
+    );
+    verify_lab_workspace_from_env(&remote_path.display().to_string(), remote.path())
+        .expect("content hash verifies when optional manifest diagnostics are excluded");
     assert_eq!(
         metadata["workspace_verification"]["identity"],
         "snapshot:verified"

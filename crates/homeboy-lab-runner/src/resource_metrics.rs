@@ -17,6 +17,7 @@ use homeboy_core::redaction::RedactionPolicy;
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(1000);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const ENVIRONMENT_DIAGNOSTIC_LIMIT: usize = 8;
 #[cfg(any(target_os = "linux", test))]
 const FALLBACK_RSS_LIMIT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 #[cfg(any(target_os = "linux", test))]
@@ -213,13 +214,33 @@ fn runner_command_spawn_error(command: &Command, error: &std::io::Error) -> Erro
         .chain(std::iter::once(executable))
         .max()
         .unwrap_or_default();
-    let (environment_count, environment_bytes) =
-        command
-            .get_envs()
-            .fold((0usize, 0usize), |(count, bytes), (key, value)| {
-                let value_bytes = value.map(os_str_bytes).unwrap_or_default();
-                (count + 1, bytes + os_str_bytes(key) + 1 + value_bytes)
-            });
+    let mut environment_variables = command
+        .get_envs()
+        .map(|(key, value)| {
+            let key_bytes = os_str_bytes(key);
+            let value_bytes = value.map(os_str_bytes).unwrap_or_default();
+            let entry_bytes = key_bytes + 1 + value_bytes;
+            json!({
+                "name": key.to_string_lossy(),
+                "key_bytes": key_bytes,
+                "value_bytes": value_bytes,
+                "entry_bytes": entry_bytes,
+            })
+        })
+        .collect::<Vec<_>>();
+    environment_variables.sort_by(|left, right| {
+        right["entry_bytes"]
+            .as_u64()
+            .cmp(&left["entry_bytes"].as_u64())
+            .then_with(|| left["name"].as_str().cmp(&right["name"].as_str()))
+    });
+    let environment_count = environment_variables.len();
+    let environment_bytes = environment_variables
+        .iter()
+        .filter_map(|entry| entry["entry_bytes"].as_u64())
+        .sum::<u64>();
+    let largest_environment_variable = environment_variables.first().cloned();
+    environment_variables.truncate(ENVIRONMENT_DIAGNOSTIC_LIMIT);
     let raw_os_error = error.raw_os_error();
 
     Error::new(
@@ -244,6 +265,8 @@ fn runner_command_spawn_error(command: &Command, error: &std::io::Error) -> Erro
             "max_argument_bytes": max_argument_bytes,
             "environment_count": environment_count,
             "environment_bytes": environment_bytes,
+            "largest_environment_variable": largest_environment_variable,
+            "environment_variables": environment_variables,
         }),
     )
 }
@@ -805,6 +828,16 @@ mod tests {
         assert_eq!(error.details["max_argument_bytes"], 64);
         assert_eq!(error.details["environment_count"], 2);
         assert_eq!(error.details["environment_bytes"], 24);
+        assert_eq!(
+            error.details["largest_environment_variable"]["name"],
+            "PUBLIC"
+        );
+        assert_eq!(
+            error.details["largest_environment_variable"]["value_bytes"],
+            5
+        );
+        assert_eq!(error.details["environment_variables"][1]["name"], "TOKEN");
+        assert!(!error.details.to_string().contains("secret"));
         assert_eq!(error.details["executable"], "runner?token=[REDACTED]");
         assert_eq!(error.details["cwd"], "/work?token=[REDACTED]");
         assert_ne!(error.details["io_error_kind"], serde_json::Value::Null);
