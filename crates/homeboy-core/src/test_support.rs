@@ -453,26 +453,6 @@ impl Drop for HomeGuard {
     }
 }
 
-#[cfg(unix)]
-fn test_controller_fixture(directory: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = directory.join("homeboy-controller-fixture");
-    let identity = serde_json::to_string(&crate::build_identity::current().display)
-        .expect("serialize controller fixture identity");
-    fs::write(
-        &path,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{{\"data\":{{\"display\":{identity}}}}}'\n  exit 0\nfi\nexit 1\n"
-        ),
-    )
-    .expect("write controller fixture");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
-        .expect("make controller fixture executable");
-    path
-}
-
-#[cfg(not(unix))]
 fn test_controller_fixture(directory: &Path) -> PathBuf {
     let path = directory.join("homeboy-controller-fixture");
     fs::copy(

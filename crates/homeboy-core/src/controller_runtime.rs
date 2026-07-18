@@ -1137,7 +1137,7 @@ fn verify_self_status_identity(path: &Path, expected: &str) -> Result<()> {
 }
 
 fn executable_identity(path: &Path) -> Result<String> {
-    #[cfg(all(not(unix), any(test, feature = "test-support")))]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(identity) = test_controller_identity(path) {
         return identity;
     }
@@ -1174,10 +1174,10 @@ fn executable_identity(path: &Path) -> Result<String> {
     Ok(actual.expect("identity was checked above"))
 }
 
-/// Non-Unix test hosts cannot execute the Unix shell identity fixture. The
-/// test-support contract is limited to byte-identical copies of its explicit
-/// source executable, so arbitrary fake controller binaries still fail closed.
-#[cfg(all(not(unix), any(test, feature = "test-support")))]
+/// Test-support uses a copied libtest executable as its fixture. The contract
+/// is limited to byte-identical copies of its explicit source executable, so
+/// arbitrary fake controller binaries still execute and fail closed.
+#[cfg(any(test, feature = "test-support"))]
 fn test_controller_identity(path: &Path) -> Option<Result<String>> {
     let source = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV)?;
     let identity = std::env::var(TEST_CONTROLLER_RUNTIME_IDENTITY_ENV).ok()?;
