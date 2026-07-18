@@ -1132,8 +1132,8 @@ fn run_component_deps_script(
     component: &Component,
     path: &Path,
     args: &[String],
-) -> Result<crate::extension::component_script::ComponentScriptOutput> {
-    let output = crate::extension::component_script::run_component_scripts_with_env(
+) -> Result<crate::component_script_provider::ComponentScriptOutput> {
+    let output = crate::component_script_provider::run_component_scripts_with_env(
         component,
         ExtensionCapability::Deps,
         path,
