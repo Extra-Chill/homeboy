@@ -46,6 +46,34 @@ fn git_repo() -> tempfile::TempDir {
     temp
 }
 
+fn merged_task_branch_with_stale_upstream(source: &Path, worktree: &Path) {
+    run_git(
+        source,
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
+    fs::write(worktree.join("task.txt"), "task\n").unwrap();
+    run_git(worktree, &["add", "."]);
+    run_git(worktree, &["commit", "-q", "-m", "task"]);
+    run_git(source, &["branch", "stale-upstream"]);
+    run_git(
+        source,
+        &["remote", "add", "origin", &source.to_string_lossy()],
+    );
+    run_git(source, &["fetch", "-q", "origin", "stale-upstream"]);
+    run_git(
+        source,
+        &["branch", "--set-upstream-to=origin/stale-upstream", "task"],
+    );
+    run_git(source, &["merge", "--no-ff", "-m", "merge task", "task"]);
+    run_git(source, &["worktree", "remove", &worktree.to_string_lossy()]);
+    assert!(!std::process::Command::new("git")
+        .args(["branch", "-d", "task"])
+        .current_dir(source)
+        .status()
+        .unwrap()
+        .success());
+}
+
 fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
     let dir = home.join(".config/homeboy/components");
     fs::create_dir_all(&dir).expect("components dir");
@@ -164,10 +192,7 @@ fn cleanup_deletes_merged_task_branch_when_requested() {
     let dir = tempfile::tempdir().unwrap();
     let source = git_repo();
     let worktree = sibling_worktree_path(source.path(), "merged-branch-cleanup");
-    run_git(
-        source.path(),
-        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
-    );
+    merged_task_branch_with_stale_upstream(source.path(), &worktree);
     let store = dir.path().join("store");
     let record = fixture_record(source.path(), &worktree);
     write_record(&store, &record).unwrap();
@@ -211,6 +236,39 @@ fn cleanup_deletes_merged_task_branch_when_requested() {
     assert_eq!(retry.counts.candidates, 0);
     assert_eq!(retry.counts.removed, 0);
     assert_eq!(retry.counts.branches_deleted, 0);
+}
+
+#[test]
+fn remove_deletes_merged_branch_with_stale_upstream_when_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let worktree = sibling_worktree_path(source.path(), "exact-merged-branch-cleanup");
+    merged_task_branch_with_stale_upstream(source.path(), &worktree);
+    let store = dir.path().join("store");
+    let record = fixture_record(source.path(), &worktree);
+    write_record(&store, &record).unwrap();
+
+    let output = remove_with_store(
+        WorktreeRemoveOptions {
+            id: record.id.clone(),
+            force: false,
+            cleanup_branch: true,
+            allow_unmerged_branch: false,
+        },
+        &store,
+    )
+    .unwrap();
+
+    assert_eq!(output.branch_cleanup.status, BranchCleanupStatus::Deleted);
+    assert!(output.branch_cleanup.deleted);
+    assert!(std::process::Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/task"])
+        .current_dir(source.path())
+        .status()
+        .unwrap()
+        .code()
+        .is_some_and(|code| code != 0));
+    assert!(!worktree.exists());
 }
 
 #[test]

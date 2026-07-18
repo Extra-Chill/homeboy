@@ -390,7 +390,9 @@ fn apply_branch_cleanup(
         return Ok(report);
     }
     let source = resolved_source_checkout(record)?;
-    let delete_flag = if report.safe_delete { "-d" } else { "-D" };
+    // Homeboy has already verified this branch is contained in its configured cleanup base.
+    // Use that proof instead of Git's separate upstream-based `-d` heuristic.
+    let delete_flag = "-D";
     git::run_git(
         &source,
         &["branch", delete_flag, &record.branch],
