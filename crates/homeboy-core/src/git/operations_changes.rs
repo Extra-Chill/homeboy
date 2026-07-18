@@ -4,7 +4,6 @@ use crate::config::read_json_spec_to_string;
 use crate::error::{Error, Result};
 use crate::output::{BulkResult, BulkResultBuilder};
 use crate::project;
-use crate::release::changelog;
 
 use super::changes::*;
 use super::commits::*;
@@ -252,19 +251,15 @@ fn resolve_changelog_info(
     component: &crate::component::Component,
     _commits: &[CommitInfo],
 ) -> Option<ChangelogInfo> {
-    let changelog_path = changelog::resolve_changelog_path(component).ok()?;
-    let content = std::fs::read_to_string(&changelog_path).ok()?;
-    let settings = changelog::resolve_effective_settings(Some(component));
-    let unreleased_entries =
-        changelog::count_unreleased_entries(&content, &settings.next_section_aliases);
+    let info = crate::release_provider::changelog_info(component)?;
 
     // No hint: homeboy auto-generates changelog entries from commits at
     // release time, so an empty `## Unreleased` section no longer implies
     // the user needs to do anything. The count itself is still useful
     // context for `homeboy release changes` output.
     Some(ChangelogInfo {
-        unreleased_entries,
-        path: Some(changelog_path.to_string_lossy().to_string()),
+        unreleased_entries: info.unreleased_entries,
+        path: Some(info.path),
         hint: None,
     })
 }
@@ -305,11 +300,10 @@ pub fn changes_at(
             // Use component version for alignment checking
             let current_version = component
                 .as_ref()
-                .and_then(crate::release::version::get_component_version);
+                .and_then(crate::release_provider::get_component_version);
             let tag_prefix = component
                 .as_ref()
-                .and_then(|component| crate::release::component_tag_prefix(component).ok())
-                .flatten();
+                .and_then(crate::release_provider::component_tag_prefix);
             detect_baseline_with_version_and_tag_prefix(
                 &path,
                 current_version.as_deref(),

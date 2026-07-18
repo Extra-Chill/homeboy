@@ -7,7 +7,7 @@
 
 use crate::component::Component;
 use crate::engine::command;
-use crate::release;
+use crate::release_provider;
 
 /// Information about the HEAD-vs-tag gap for a component.
 #[derive(Debug, Clone)]
@@ -24,7 +24,7 @@ pub struct TagGap {
 /// Returns None if HEAD is at or behind the tag, or if no tags exist.
 pub fn detect_tag_gap(component: &Component) -> Option<TagGap> {
     let path = &component.local_path;
-    let tag = release::latest_component_tag(component).ok().flatten()?;
+    let tag = release_provider::latest_component_tag(component)?;
 
     let ahead_str = command::run_in_optional(
         path,

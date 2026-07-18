@@ -88,19 +88,11 @@ pub fn resolve_changelog_path(component: &Component) -> Result<PathBuf> {
     Ok(configured_path)
 }
 
-#[derive(Debug, Clone)]
-pub struct ChangelogSnapshotData {
-    pub path: String,
-    pub label: String,
-    pub items: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct FinalizedReleaseSnapshot {
-    pub tag: String,
-    pub date: Option<String>,
-    pub summary: Option<String>,
-}
+// ChangelogSnapshotData and FinalizedReleaseSnapshot moved DOWN to
+// homeboy-release-contract so core's context status mechanic can receive them
+// through the release provider hook. Re-exported here so release code paths are
+// unchanged.
+pub use homeboy_release_contract::{ChangelogSnapshotData, FinalizedReleaseSnapshot};
 
 pub fn read_component_snapshots(
     component: &Component,
