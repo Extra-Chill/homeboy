@@ -330,8 +330,28 @@ pub fn reconstruct_options_with_dispatcher(
     recipe: &AgentTaskCookRecipe,
     attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
 ) -> Result<AgentTaskCookServiceOptions> {
+    reconstruct_recipe_options(recipe, attempt_dispatcher, true, true)
+}
+
+/// Reconstruct the policy used to adopt an already-prepared candidate. Adoption
+/// never replays provider work, so it may use a validated historical recipe
+/// after a controller runtime upgrade.
+pub fn reconstruct_adoption_options(
+    recipe: &AgentTaskCookRecipe,
+) -> Result<AgentTaskCookServiceOptions> {
+    reconstruct_recipe_options(recipe, None, false, false)
+}
+
+fn reconstruct_recipe_options(
+    recipe: &AgentTaskCookRecipe,
+    attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
+    require_current_runtime: bool,
+    require_attempt_dispatcher: bool,
+) -> Result<AgentTaskCookServiceOptions> {
     validate_recipe(recipe)?;
-    if recipe.runtime_generation != homeboy_core::build_identity::current().display {
+    if require_current_runtime
+        && recipe.runtime_generation != homeboy_core::build_identity::current().display
+    {
         return Err(Error::validation_invalid_argument(
             "cook_recipe.runtime_generation",
             format!(
@@ -397,7 +417,7 @@ pub fn reconstruct_options_with_dispatcher(
                 None,
             )
         })?;
-    if dispatch_kind == "local" && attempt_dispatcher.is_some() {
+    if require_attempt_dispatcher && dispatch_kind == "local" && attempt_dispatcher.is_some() {
         return Err(Error::validation_invalid_argument(
             "cook_recipe.promotion_transport.attempt_dispatch",
             "local cook recipe cannot be reconstructed with an external dispatcher",
@@ -405,7 +425,7 @@ pub fn reconstruct_options_with_dispatcher(
             None,
         ));
     }
-    if dispatch_kind != "local" && attempt_dispatcher.is_none() {
+    if require_attempt_dispatcher && dispatch_kind != "local" && attempt_dispatcher.is_none() {
         return Err(Error::validation_invalid_argument(
             "cook_recipe.promotion_transport.attempt_dispatch",
             format!("cook recipe requires `{dispatch_kind}` attempt dispatcher reconstruction"),
@@ -929,6 +949,22 @@ mod tests {
             error.details["problem"],
             "missing finalization field `to_worktree`"
         );
+    }
+
+    #[test]
+    fn provider_replay_keeps_runtime_pin_while_adoption_accepts_historical_policy() {
+        let mut historical = recipe();
+        historical.runtime_generation = "homeboy 0.291.2+96820fe8cc53".to_string();
+
+        let replay = reconstruct_options(&historical).expect_err("replay requires pinned runtime");
+        assert_eq!(replay.details["field"], "cook_recipe.runtime_generation");
+
+        let adoption =
+            reconstruct_adoption_options(&historical).expect("adoption reads historical policy");
+        assert_eq!(adoption.cook_id, historical.cook_id);
+        assert!(adoption.gates.verify.is_empty());
+        assert!(adoption.no_finalize);
+        assert!(adoption.attempt_dispatcher.is_none());
     }
 
     #[test]
