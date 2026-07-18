@@ -14,15 +14,6 @@ use std::sync::Mutex;
 use crate::upgrade::{ExtensionUpgradeEntry, InstallMethod, RunnerUpgradeEntry};
 use homeboy_core::error::Result;
 
-/// Controller-verified source provenance injected only into a selected runner
-/// source build. The runner snapshot itself may have a synthetic Git commit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceBuildProvenance {
-    pub display_identity: String,
-    pub git_commit: String,
-    pub git_dirty: bool,
-}
-
 /// The runner-upgrade contract the core upgrade flow depends on. Implemented by
 /// the runner layer and registered at startup.
 pub trait RunnerUpgradeProvider: Send + Sync {
@@ -35,7 +26,7 @@ pub trait RunnerUpgradeProvider: Send + Sync {
         method_override: Option<InstallMethod>,
         source_path: Option<&Path>,
         explicit_source_path: bool,
-        expected_source_provenance: Option<&SourceBuildProvenance>,
+        expected_controller_identity: Option<&str>,
         runner_targets: &[String],
         extension_updates: &[ExtensionUpgradeEntry],
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)>;
@@ -43,9 +34,6 @@ pub trait RunnerUpgradeProvider: Send + Sync {
     /// A short build-identity string for a source checkout (commit + dirty
     /// marker), or `None` if it can't be identified.
     fn source_checkout_build_identity(&self, source_path: &Path) -> Option<String>;
-
-    fn source_checkout_build_provenance(&self, source_path: &Path)
-        -> Option<SourceBuildProvenance>;
 }
 
 /// Default provider used when no runner layer is registered: no runners to
@@ -59,7 +47,7 @@ impl RunnerUpgradeProvider for NoopRunnerUpgradeProvider {
         _method_override: Option<InstallMethod>,
         _source_path: Option<&Path>,
         _explicit_source_path: bool,
-        _expected_source_provenance: Option<&SourceBuildProvenance>,
+        _expected_controller_identity: Option<&str>,
         _runner_targets: &[String],
         _extension_updates: &[ExtensionUpgradeEntry],
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
@@ -67,13 +55,6 @@ impl RunnerUpgradeProvider for NoopRunnerUpgradeProvider {
     }
 
     fn source_checkout_build_identity(&self, _source_path: &Path) -> Option<String> {
-        None
-    }
-
-    fn source_checkout_build_provenance(
-        &self,
-        _source_path: &Path,
-    ) -> Option<SourceBuildProvenance> {
         None
     }
 }

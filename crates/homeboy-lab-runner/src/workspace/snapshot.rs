@@ -985,7 +985,10 @@ pub(crate) fn materialize_snapshot_git(
     snapshot: &str,
 ) -> Result<SyntheticCheckoutIdentity> {
     materialize_snapshot(runner, local_path, remote_path, excludes)?;
-    initialize_synthetic_git_checkout(runner, local_path, remote_path, snapshot)
+    let source_dirty = !git_output(local_path, &["status", "--porcelain=v1"])?
+        .trim()
+        .is_empty();
+    initialize_synthetic_git_checkout(runner, local_path, remote_path, snapshot, source_dirty)
 }
 
 /// Identity of the synthetic git checkout materialized for a `snapshot-git`
@@ -1005,6 +1008,7 @@ fn initialize_synthetic_git_checkout(
     local_path: &Path,
     remote_path: &str,
     snapshot: &str,
+    source_dirty: bool,
 ) -> Result<SyntheticCheckoutIdentity> {
     let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"]).ok();
     let source_head = git_output(local_path, &["rev-parse", "HEAD"]).ok();
@@ -1013,6 +1017,7 @@ fn initialize_synthetic_git_checkout(
         snapshot,
         remote_url.as_deref(),
         source_head.as_deref(),
+        source_dirty,
     );
 
     match runner.kind {
@@ -1102,6 +1107,7 @@ fn synthetic_git_checkout_command(
     snapshot: &str,
     remote_url: Option<&str>,
     source_head: Option<&str>,
+    source_dirty: bool,
 ) -> String {
     let remote_path = shell::quote_arg(remote_path);
     let snapshot = shell::quote_arg(snapshot);
@@ -1119,7 +1125,7 @@ fn synthetic_git_checkout_command(
     format!(
         "git -C {remote_path} init && git -C {remote_path} config user.email homeboy-snapshot@localhost && git -C {remote_path} config user.name 'Homeboy Snapshot' && git -C {remote_path} add -A && env GIT_AUTHOR_NAME='Homeboy Snapshot' GIT_AUTHOR_EMAIL=homeboy-snapshot@localhost GIT_COMMITTER_NAME='Homeboy Snapshot' GIT_COMMITTER_EMAIL=homeboy-snapshot@localhost GIT_AUTHOR_DATE='1970-01-01T00:00:00Z' GIT_COMMITTER_DATE='1970-01-01T00:00:00Z' git -C {remote_path} commit --allow-empty -m {message} --no-gpg-sign && git -C {remote_path} notes --ref=homeboy-snapshot add -m {note} HEAD{set_remote}",
         message = shell::quote_arg(&format!("Homeboy snapshot {snapshot}")),
-        note = shell::quote_arg(&format!("snapshot_identity={snapshot}\nsource_head={source_head}")),
+        note = shell::quote_arg(&format!("snapshot_identity={snapshot}\nsource_head={source_head}\nsource_dirty={source_dirty}")),
     )
 }
 

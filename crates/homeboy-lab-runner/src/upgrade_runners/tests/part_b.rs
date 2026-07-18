@@ -343,8 +343,7 @@ fn realigns_stale_lab_workspace_homeboy_path_after_upgrade_failure() {
 #[test]
 fn source_runner_upgrade_realigns_to_same_version_source_checkout_identity() {
     let source_dir = git_source_checkout();
-    let provenance = source_checkout_build_provenance(source_dir.path()).unwrap();
-    let expected_identity = provenance.display_identity.clone();
+    let expected_identity = source_checkout_build_identity(source_dir.path()).unwrap();
     assert_ne!(expected_identity, build_identity::current().display);
 
     let stale_path = "/home/user/Developer/_lab_workspaces/homeboy-old/target/debug/homeboy";
@@ -423,65 +422,6 @@ fn source_runner_upgrade_realigns_to_same_version_source_checkout_identity() {
     assert_eq!(updated[0].new_version.as_deref(), Some(current_version()));
     assert_eq!(updated[0].path_drift, None);
     assert_eq!(path_updates, vec![("lab".to_string(), source_binary)]);
-}
-
-#[test]
-fn selected_source_upgrade_injects_controller_provenance_not_snapshot_commit() {
-    let runner = ssh_runner("lab", Some("homeboy"));
-    let provenance = SourceBuildProvenance {
-        display_identity: "homeboy 0.291.3+32b58289c8a2".to_string(),
-        git_commit: "32b58289c8a2".to_string(),
-        git_dirty: false,
-    };
-
-    let options = runner_exec_options_with_source_provenance(
-        &runner,
-        runner_upgrade_command(
-            "homeboy",
-            true,
-            Some(InstallMethod::Source),
-            Some("/snapshot"),
-        ),
-        Some(&provenance),
-    );
-
-    assert_eq!(
-        options
-            .env
-            .get(homeboy_product_identity::source_upgrade_provenance::GIT_COMMIT_ENV),
-        Some(&"32b58289c8a2".to_string())
-    );
-    assert_eq!(
-        options
-            .env
-            .get(homeboy_product_identity::source_upgrade_provenance::GIT_DIRTY_ENV),
-        Some(&"false".to_string())
-    );
-    assert_ne!(
-        options
-            .env
-            .get(homeboy_product_identity::source_upgrade_provenance::GIT_COMMIT_ENV),
-        Some(&"a30dc8a37b8d".to_string())
-    );
-
-    let normal = runner_exec_options(
-        &runner,
-        vec!["homeboy".to_string(), "--version".to_string()],
-    );
-    assert!(!normal
-        .env
-        .contains_key(homeboy_product_identity::source_upgrade_provenance::GIT_COMMIT_ENV));
-}
-
-#[test]
-fn source_checkout_provenance_preserves_dirty_suffix() {
-    let source = git_source_checkout();
-    std::fs::write(source.path().join("README.md"), "dirty\n").unwrap();
-
-    let provenance = source_checkout_build_provenance(source.path()).unwrap();
-
-    assert!(provenance.git_dirty);
-    assert!(provenance.display_identity.ends_with("-dirty"));
 }
 
 #[test]
@@ -580,11 +520,6 @@ fn reports_unrefreshable_extensions_when_runner_binary_drift_defers_sync() {
 fn rejects_packaged_runner_with_same_version_but_different_controller_identity() {
     let runner = ssh_runner("lab", Some("/opt/homeboy/homeboy"));
     let extensions = vec![extension_update("required-extension", "48517ac3")];
-    let expected = SourceBuildProvenance {
-        display_identity: "controller-build".to_string(),
-        git_commit: "32b58289c8a2".to_string(),
-        git_dirty: false,
-    };
     let mut calls = 0;
 
     let entry = upgrade_runner_with_executor(
@@ -606,7 +541,7 @@ fn rejects_packaged_runner_with_same_version_but_different_controller_identity()
         &mut |_| Ok("reconnected".to_string()),
         &mut |_, _| Ok("unused".to_string()),
         &mut |_, _| Ok(()),
-        Some(&expected),
+        Some("controller-build"),
     );
 
     assert!(!entry.success);

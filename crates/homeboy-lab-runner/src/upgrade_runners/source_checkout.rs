@@ -10,15 +10,10 @@ use homeboy_lab_runner_contract::RunnerWorkspaceSyncMode;
 use homeboy_lab_runner_contract::RunnerWorkspaceSyncOptions;
 use homeboy_upgrade::upgrade::current_version;
 use homeboy_upgrade::upgrade::InstallMethod;
-use homeboy_upgrade::upgrade::SourceBuildProvenance;
 use std::path::Path;
 use std::process::Command;
 
 pub fn source_checkout_build_identity(source_path: &Path) -> Option<String> {
-    Some(source_checkout_build_provenance(source_path)?.display_identity)
-}
-
-pub fn source_checkout_build_provenance(source_path: &Path) -> Option<SourceBuildProvenance> {
     // `rev-parse` must produce a commit hash; an empty result means we can't
     // identify the checkout, so treat it as failure.
     let commit = git_output(source_path, &["rev-parse", "--short=12", "HEAD"])?;
@@ -34,17 +29,12 @@ pub fn source_checkout_build_provenance(source_path: &Path) -> Option<SourceBuil
         "-dirty"
     };
 
-    let git_dirty = !dirty_suffix.is_empty();
-    Some(SourceBuildProvenance {
-        display_identity: format!(
-            "homeboy {}+{}{}",
-            current_version(),
-            commit.trim(),
-            dirty_suffix
-        ),
-        git_commit: commit.trim().to_string(),
-        git_dirty,
-    })
+    Some(format!(
+        "homeboy {}+{}{}",
+        current_version(),
+        commit.trim(),
+        dirty_suffix
+    ))
 }
 
 pub fn git_output(source_path: &Path, args: &[&str]) -> Option<String> {

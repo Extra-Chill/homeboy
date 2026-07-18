@@ -15,9 +15,7 @@ pub use helpers::{
 };
 pub use planning::resolve_binary_on_path;
 pub(crate) use runner_upgrade_provider::with_runner_upgrade;
-pub use runner_upgrade_provider::{
-    register_runner_upgrade_provider, RunnerUpgradeProvider, SourceBuildProvenance,
-};
+pub use runner_upgrade_provider::{register_runner_upgrade_provider, RunnerUpgradeProvider};
 pub use types::{
     ExtensionUpgradeEntry, InstallMethod, RunnerDaemonDriftEntry, RunnerExtensionSyncEntry,
     RunnerUpgradeEntry, ServiceRestartEntry, UpgradeResult, VersionCheck,

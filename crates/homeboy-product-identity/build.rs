@@ -3,9 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[path = "src/source_upgrade_provenance.rs"]
-mod source_upgrade_provenance;
-
 fn main() {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR missing"));
@@ -39,21 +36,6 @@ fn root_package_version(manifest: &Path) -> String {
 }
 
 fn emit_git_identity(root: &Path) {
-    println!(
-        "cargo:rerun-if-env-changed={}",
-        source_upgrade_provenance::GIT_COMMIT_ENV
-    );
-    println!(
-        "cargo:rerun-if-env-changed={}",
-        source_upgrade_provenance::GIT_DIRTY_ENV
-    );
-    let source_upgrade_commit = env::var(source_upgrade_provenance::GIT_COMMIT_ENV).ok();
-    let source_upgrade_dirty = env::var(source_upgrade_provenance::GIT_DIRTY_ENV).ok();
-    let source_upgrade_provenance = source_upgrade_provenance::parse_source_upgrade_provenance(
-        source_upgrade_commit.as_deref(),
-        source_upgrade_dirty.as_deref(),
-    )
-    .unwrap_or_else(|error| panic!("invalid source-upgrade build provenance: {error}"));
     let git_dir = resolve_git_dir(root).unwrap_or_else(|| root.join(".git"));
     println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
     println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
@@ -66,14 +48,14 @@ fn emit_git_identity(root: &Path) {
         }
     }
 
-    if let Some(provenance) = source_upgrade_provenance {
+    if let Some(provenance) = synthetic_snapshot_provenance(root) {
         println!(
             "cargo:rustc-env=HOMEBOY_PRODUCT_GIT_COMMIT={}",
-            provenance.git_commit
+            provenance.commit
         );
         println!(
             "cargo:rustc-env=HOMEBOY_PRODUCT_GIT_DIRTY={}",
-            provenance.git_dirty
+            provenance.dirty
         );
     } else if let Some(commit) = git_output(root, &["rev-parse", "--short=12", "HEAD"]) {
         println!("cargo:rustc-env=HOMEBOY_PRODUCT_GIT_COMMIT={commit}");
@@ -84,6 +66,52 @@ fn emit_git_identity(root: &Path) {
             if status.is_empty() { "false" } else { "true" }
         );
     }
+}
+
+struct SyntheticSnapshotProvenance {
+    commit: String,
+    dirty: bool,
+}
+
+fn synthetic_snapshot_provenance(root: &Path) -> Option<SyntheticSnapshotProvenance> {
+    let head = git_output(root, &["rev-parse", "HEAD"])?;
+    if git_output(root, &["rev-list", "--parents", "-n", "1", "HEAD"])?
+        .split_whitespace()
+        .count()
+        != 1
+        || git_output(root, &["show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD"])?
+            != "Homeboy Snapshot <homeboy-snapshot@localhost>|Homeboy Snapshot <homeboy-snapshot@localhost>"
+    {
+        return None;
+    }
+    let message = git_output(root, &["log", "-1", "--format=%B"])?;
+    let snapshot = message.strip_prefix("Homeboy snapshot ")?;
+    if snapshot.is_empty() || snapshot.contains('\n') {
+        return None;
+    }
+    let note = git_output(root, &["notes", "--ref=homeboy-snapshot", "show", &head])?;
+    let mut fields = note.lines().map(|line| line.split_once('='));
+    let snapshot_identity = fields.next()??;
+    let source_head = fields.next()??;
+    let source_dirty = fields.next()??;
+    if fields.next().is_some()
+        || snapshot_identity != ("snapshot_identity", snapshot)
+        || source_head.0 != "source_head"
+        || source_head.1.len() != 40
+        || !source_head.1.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || source_dirty.0 != "source_dirty"
+    {
+        return None;
+    }
+    let dirty = match source_dirty.1 {
+        "true" => true,
+        "false" => false,
+        _ => return None,
+    };
+    Some(SyntheticSnapshotProvenance {
+        commit: source_head.1[..12].to_string(),
+        dirty,
+    })
 }
 
 fn resolve_git_dir(root: &Path) -> Option<PathBuf> {

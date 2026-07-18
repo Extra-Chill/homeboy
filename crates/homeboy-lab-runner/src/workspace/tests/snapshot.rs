@@ -794,6 +794,14 @@ fn snapshot_git_sync_materializes_dirty_source_as_synthetic_git_checkout() {
             "",
             "Homeboy-owned runner metadata must not dirty synthetic checkouts before patch capture"
         );
+        assert_eq!(
+            git_output(remote, &["notes", "--ref=homeboy-snapshot", "show", "HEAD"],).unwrap(),
+            format!(
+                "snapshot_identity={}\nsource_head={}\nsource_dirty=true",
+                output.snapshot_identity,
+                output.current_workspace.source_commit.as_deref().unwrap()
+            )
+        );
         assert!(fs::read_to_string(remote.join(".git/info/exclude"))
             .unwrap()
             .lines()

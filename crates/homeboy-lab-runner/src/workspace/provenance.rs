@@ -19,6 +19,7 @@ const CONTENT_MANIFEST_DIFFERENCE_LIMIT: usize = 8;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedLabWorkspaceProvenance {
     pub source_revision: String,
+    pub source_dirty: bool,
     pub materialization_mode: String,
     pub runner_id: String,
     pub workspace_identity: String,
@@ -190,8 +191,8 @@ fn verify_materialized_snapshot_git_checkout(
         return Err("snapshot-git commit author/committer does not match Homeboy identity".to_string());
     }
     let expected_note = format!(
-        "snapshot_identity={identity}\nsource_head={}",
-        provenance.source_revision
+        "snapshot_identity={identity}\nsource_head={}\nsource_dirty={}",
+        provenance.source_revision, provenance.source_dirty
     );
     if git(
         workspace,
@@ -510,6 +511,7 @@ pub(crate) fn verify_lab_workspace(
     }
     let provenance = VerifiedLabWorkspaceProvenance {
         source_revision: source_revision.to_string(),
+        source_dirty: snapshot.dirty,
         materialization_mode: materialization_mode.to_string(),
         runner_id: snapshot.runner_id,
         workspace_identity: workspace_identity.to_string(),
