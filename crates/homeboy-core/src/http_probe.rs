@@ -12,7 +12,7 @@ pub struct HttpProbeError {
 /// probe helpers and other one-off probe call sites (artifact-link reachability,
 /// registry publish verification) so the `Client::builder().timeout().build()`
 /// boilerplate lives in one place (#5364).
-pub(crate) fn blocking_client(timeout: Duration) -> reqwest::Result<reqwest::blocking::Client> {
+pub fn blocking_client(timeout: Duration) -> reqwest::Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .timeout(timeout)
         .build()

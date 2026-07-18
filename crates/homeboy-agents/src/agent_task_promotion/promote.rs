@@ -121,7 +121,7 @@ pub fn resume_promoted_patch(
             path: patch_path.display().to_string(),
             sha256: artifact.sha256,
         },
-        changed_files: normalized_patch.changed_files,
+        changed_files: persisted_changed_files(normalized_patch.changed_files, candidate.as_ref()),
         command_evidence,
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
@@ -534,7 +534,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
             path: patch_path.display().to_string(),
             sha256: artifact.sha256,
         },
-        changed_files,
+        changed_files: persisted_changed_files(changed_files, candidate.as_ref()),
         command_evidence,
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
@@ -840,7 +840,7 @@ fn promote_committed_changes(
             path: committed_patch.patch_path.display().to_string(),
             sha256: Some(committed_patch.sha256),
         },
-        changed_files: normalized_patch.changed_files,
+        changed_files: persisted_changed_files(normalized_patch.changed_files, candidate.as_ref()),
         command_evidence,
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
@@ -1170,6 +1170,20 @@ fn post_apply_report(
             "post_apply": true,
         }),
         operator_notification,
+    }
+}
+
+fn persisted_changed_files(
+    patch_changed_files: Vec<String>,
+    candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
+) -> Vec<String> {
+    match candidate {
+        Some(crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint })
+            if !fingerprint.changed_files.is_empty() =>
+        {
+            fingerprint.changed_files.clone()
+        }
+        _ => patch_changed_files,
     }
 }
 

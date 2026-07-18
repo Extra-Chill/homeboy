@@ -17,7 +17,7 @@ mod json_pointer;
 pub use json_io::{
     from_str, is_json_array, is_json_input, parse_bulk_ids, read_json_file_with,
     read_json_spec_to_string, read_json_value_spec_with_bare_path, read_optional_json_file_with,
-    to_string_pretty, try_read_json_file,
+    to_string_pretty, try_read_json_file, BulkIdsInput,
 };
 pub use json_io::{serialize_with_id, to_json_string};
 pub use json_ops::collect_array_fields;

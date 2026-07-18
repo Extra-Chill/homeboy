@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::runner::ExtensionRunner;
 use crate::component::Component;
+pub use crate::component_script_provider::ComponentScriptOutput;
 use crate::engine::invocation::{InvocationGuard, InvocationRequirements};
 use crate::engine::resource::ExtensionChildResourceSummary;
 use crate::engine::run_dir::RunDir;
@@ -10,17 +12,6 @@ use crate::extension::{
     env_provider, exec_context, load_extension, ExtensionCapability, ExtensionPhaseTiming,
     RunnerOutput,
 };
-
-#[derive(Debug, Clone)]
-pub struct ComponentScriptOutput {
-    pub exit_code: i32,
-    pub success: bool,
-    pub stdout: String,
-    pub stderr: String,
-    pub timed_out: bool,
-    pub child_resource: Option<ExtensionChildResourceSummary>,
-    pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
-}
 
 impl From<RunnerOutput> for ComponentScriptOutput {
     fn from(output: RunnerOutput) -> Self {
@@ -292,3 +283,53 @@ pub fn source_path(component: &Component, path_override: Option<&str>) -> PathBu
 // component scripts end-to-end through commands::test), so they live in the
 // homeboy-cli crate's test scope rather than here — core cannot depend on the CLI
 // command layer. See crates/homeboy-cli tests for component-script coverage.
+
+/// Provider that wires the extension component-script runner into core's
+/// `component_script_provider` hook.
+pub struct ExtensionComponentScriptRunner;
+
+impl crate::component_script_provider::ComponentScriptRunner for ExtensionComponentScriptRunner {
+    fn run_component_scripts_with_env(
+        &self,
+        component: &crate::component::Component,
+        capability: homeboy_extension_contract::ExtensionCapability,
+        source_path: &std::path::Path,
+        passthrough: bool,
+        extra_env: &[(String, String)],
+        script_args: &[String],
+    ) -> crate::Result<ComponentScriptOutput> {
+        run_component_scripts_with_env(
+            component,
+            capability,
+            source_path,
+            passthrough,
+            extra_env,
+            script_args,
+        )
+    }
+
+    fn run_with_context(
+        &self,
+        context: &crate::extension_execution::ExtensionExecutionContext,
+        component: &crate::component::Component,
+        path_override: Option<String>,
+        script_args: &[String],
+    ) -> crate::Result<ComponentScriptOutput> {
+        let mut runner = ExtensionRunner::for_context(context.clone())
+            .component(component.clone())
+            .passthrough(false)
+            .script_args(script_args);
+        if let Some(path) = path_override {
+            runner = runner.path_override(Some(path.clone())).working_dir(&path);
+        }
+        Ok(runner.run()?.into())
+    }
+}
+
+/// Register the extension component-script runner with core. Call once at
+/// startup.
+pub fn register_component_script_runner() {
+    crate::component_script_provider::register_component_script_runner(Box::new(
+        ExtensionComponentScriptRunner,
+    ));
+}

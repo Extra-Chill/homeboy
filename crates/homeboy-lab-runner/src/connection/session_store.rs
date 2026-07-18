@@ -403,6 +403,8 @@ fn live_peer_session_in(
 mod tests {
     use super::*;
     use crate::{RunnerSessionRole, RunnerTunnelMode};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use tempfile::TempDir;
 
     fn session(controller_id: &str, lease_id: &str) -> RunnerSession {
@@ -427,6 +429,117 @@ mod tests {
             last_seen_at: None,
             leaseless_recovery_evidence: None,
         }
+    }
+
+    fn serve_health(
+        lease_id: &str,
+        pid: u32,
+        delay: Duration,
+    ) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let freshness = DaemonFreshnessReport {
+            fresh: true,
+            stale_reason_code: None,
+            restartable: false,
+            lease_id: Some(lease_id.to_string()),
+            pid: Some(pid),
+            recovery_evidence: None,
+            ownership_evidence: None,
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: Some("test".to_string()),
+            daemon_build_identity: Some("homeboy test".to_string()),
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        };
+        let body = serde_json::json!({ "freshness": freshness, "pid": pid }).to_string();
+        let server = std::thread::spawn(move || {
+            // wait_for_tcp opens and immediately closes the first connection.
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("health connection");
+                let mut request = [0; 1024];
+                let read = stream.read(&mut request).expect("read request");
+                if read == 0 {
+                    continue;
+                }
+                assert!(std::str::from_utf8(&request[..read])
+                    .expect("request text")
+                    .starts_with("GET /health HTTP/1.1"));
+                std::thread::sleep(delay);
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(), body
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("health response");
+                return;
+            }
+            panic!("health request was not received");
+        });
+        (port, server)
+    }
+
+    fn session_for_health_endpoint(port: u16, lease_id: &str, pid: u32) -> RunnerSession {
+        let mut session = session("controller", lease_id);
+        session.local_port = Some(port);
+        session.local_url = Some(format!("http://127.0.0.1:{port}"));
+        session.remote_daemon_pid = Some(pid);
+        session
+    }
+
+    #[test]
+    fn session_health_accepts_a_healthy_endpoint_after_one_hundred_milliseconds() {
+        let (port, server) = serve_health("lease-live", 42, Duration::from_millis(125));
+        let session = session_for_health_endpoint(port, "lease-live", 42);
+
+        assert!(session_is_live_with_timeout(
+            &session,
+            Duration::from_millis(200)
+        ));
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn session_health_rejects_a_mismatched_lease() {
+        let (port, server) = serve_health("lease-other", 42, Duration::ZERO);
+        let session = session_for_health_endpoint(port, "lease-live", 42);
+
+        assert!(!session_is_live_with_timeout(
+            &session,
+            Duration::from_millis(200)
+        ));
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn session_health_rejects_a_mismatched_pid() {
+        let (port, server) = serve_health("lease-live", 43, Duration::ZERO);
+        let session = session_for_health_endpoint(port, "lease-live", 42);
+
+        assert!(!session_is_live_with_timeout(
+            &session,
+            Duration::from_millis(200)
+        ));
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn session_health_rejects_a_closed_tunnel() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        drop(listener);
+        let session = session_for_health_endpoint(port, "lease-live", 42);
+
+        assert!(!session_is_live_with_timeout(
+            &session,
+            Duration::from_millis(100)
+        ));
     }
 
     #[test]
@@ -639,6 +752,52 @@ mod tests {
         assert_eq!(
             read_session_at(&root.path().join("prior-worktree.json")).expect("read second alias"),
             Some(second_alias)
+        );
+    }
+
+    #[test]
+    fn promoted_controller_scope_resolves_status_and_cancel_to_the_same_live_session() {
+        let root = TempDir::new().expect("session directory");
+        let status_alias = session("cargo-homeboy@worktree-a", "lease-live");
+        let stale_mutation_alias = session("cargo-homeboy@worktree-b", "lease-stale");
+        let status_path = root.path().join("cargo-homeboy@worktree-a.json");
+        let mutation_path = root.path().join("cargo-homeboy@worktree-b.json");
+        write_session_at(&status_path, &status_alias).expect("write status session");
+        write_session_at(&mutation_path, &stale_mutation_alias)
+            .expect("write stale mutation session");
+
+        let status = resolve_session_or_live_peer_in(
+            &root.path().to_path_buf(),
+            "cargo-homeboy@worktree-a",
+            read_session_at(&status_path).expect("read status session"),
+            |candidate| candidate.remote_daemon_lease_id.as_deref() == Some("lease-live"),
+        )
+        .expect("resolve status session")
+        .expect("authoritative status session");
+        let cancellation = resolve_session_or_live_peer_in(
+            &root.path().to_path_buf(),
+            "cargo-homeboy@worktree-b",
+            read_session_at(&mutation_path).expect("read mutation session"),
+            |candidate| candidate.remote_daemon_lease_id.as_deref() == Some("lease-live"),
+        )
+        .expect("resolve mutation session")
+        .expect("authoritative mutation session");
+
+        assert_eq!(
+            status.remote_daemon_lease_id,
+            Some("lease-live".to_string())
+        );
+        assert_eq!(
+            cancellation.remote_daemon_lease_id,
+            status.remote_daemon_lease_id
+        );
+        assert_eq!(
+            cancellation.remote_daemon_address,
+            status.remote_daemon_address
+        );
+        assert_eq!(
+            read_session_at(&mutation_path).expect("read stale mutation session"),
+            Some(stale_mutation_alias)
         );
     }
 

@@ -417,7 +417,7 @@ pub(crate) fn list_tracked_markdown_files(path: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-pub(crate) fn is_git_repo(path: &str) -> bool {
+pub fn is_git_repo(path: &str) -> bool {
     command::succeeded_in(path, "git", &["rev-parse", "--git-dir"])
 }
 
@@ -427,7 +427,7 @@ pub(crate) fn is_git_repo(path: &str) -> bool {
 /// Returns `false` when the path is gitignored, untracked, or the directory is
 /// not a git repository. Uses `git ls-files --error-unmatch`, which only
 /// succeeds for paths recorded in the index.
-pub(crate) fn is_tracked_path(repo_dir: &Path, relative: &str) -> bool {
+pub fn is_tracked_path(repo_dir: &Path, relative: &str) -> bool {
     command::succeeded_in(
         &repo_dir.to_string_lossy(),
         "git",

@@ -128,8 +128,8 @@ pub use execution::{
     daemon_api_get, daemon_api_post, exec, promote_runner_exec_artifact_dirs,
     promote_runner_exec_artifacts, promote_runner_exec_summaries, promoted_output,
     runner_exec_failure_error, runner_exec_structured_summary, runner_job_cancel,
-    RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions, RunnerExecOutput,
-    RunnerExecPromotedOutput, RunnerExecStructuredSummary,
+    runner_job_cancel_projection, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
+    RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
 };
 pub(crate) use execution::{
     exec_with_status_snapshot, execute_runner_process_until_cancelled_with_progress,

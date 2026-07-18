@@ -7,7 +7,7 @@ This document defines the core primitives introduced for:
 
 ## Runner contract (core)
 
-`src/core/extension/runner_contract.rs`
+`crates/homeboy-extension-contract/src/runner_contract.rs`
 
 - `RunnerStepFilter { step, skip }`
 - `should_run(step_name)` for deterministic include/skip semantics
@@ -40,8 +40,8 @@ Expressions support `+` and `-` over numeric literals and parsed field names.
 
 ## Initial wiring
 
-- `src/core/extension/test/parsing.rs` now uses `output_parse` for text fallback parsing in
+- `crates/homeboy-core/src/extension/test/parsing.rs` now uses `output_parse` for text fallback parsing in
   `parse_test_results_text()`.
-- `src/commands/test.rs` falls back from sidecar JSON to parsed stdout via this primitive.
+- `crates/homeboy-cli/src/commands/test.rs` falls back from sidecar JSON to parsed stdout via this primitive.
 
 This keeps extension contracts minimal while centralizing normalization/policy in core.

@@ -618,7 +618,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
         // Stage the controller-owned identity before Lab preflight. A rejected
         // handoff can then terminalize this record with a retryable diagnosis.
         agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
-        let outcome = lab_routing::dispatch_lab_offload(
+        let outcome = match lab_routing::dispatch_lab_offload(
             LabRoutingRequest {
                 command: lab_offload_command(&provider_cli.command)?,
                 normalized_args: &provider_args,
@@ -650,23 +650,34 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
             },
             Some(&self.runner_id),
             Box::new(NoopLabDispatchObserver),
-        )
-        .map_err(|error| {
-            let recovery =
-                format!("Resolve the Lab handoff, then retry controller-owned attempt `{run_id}`.");
-            match agent_task_lifecycle::record_pre_execution_failure(
-                run_id,
-                &plan,
-                "lab_handoff_preacceptance",
-                &error,
-            ) {
-                Ok(_) => error.with_hint(recovery),
-                Err(record_error) => error.with_hint(format!(
-                    "{recovery} Homeboy also could not persist the handoff failure: {}",
-                    record_error.message
-                )),
+        ) {
+            Ok(outcome) => outcome,
+            Err(_error) if agent_task_lifecycle::has_accepted_runner_handoff(run_id)? => {
+                // The daemon owns an accepted job. A controller session can
+                // disappear during a refresh, but its durable runner/job IDs
+                // remain sufficient for later authoritative reconciliation.
+                return Ok(());
             }
-        })?;
+            Err(error) => {
+                let recovery = format!(
+                    "Resolve the Lab handoff, then retry controller-owned attempt `{run_id}`."
+                );
+                return Err(
+                    match agent_task_lifecycle::record_pre_execution_failure(
+                        run_id,
+                        &plan,
+                        "lab_handoff_preacceptance",
+                        &error,
+                    ) {
+                        Ok(_) => error.with_hint(recovery),
+                        Err(record_error) => error.with_hint(format!(
+                            "{recovery} Homeboy also could not persist the handoff failure: {}",
+                            record_error.message
+                        )),
+                    },
+                );
+            }
+        };
         match outcome {
             LabRouteOutcome::Offloaded(remote) if remote.exit_code == 0 => Ok(()),
             LabRouteOutcome::Offloaded(remote) => Err(Error::validation_invalid_argument(

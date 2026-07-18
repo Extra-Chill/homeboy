@@ -946,6 +946,7 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
 pub fn adopt_orphaned_lease(
     lease_id: &str,
     confirm_pid_dead: bool,
+    confirmed_no_pid_job_ids: &[uuid::Uuid],
     addr: &str,
 ) -> Result<DaemonOrphanAdoptionResult> {
     if !confirm_pid_dead {
@@ -966,7 +967,14 @@ pub fn adopt_orphaned_lease(
         || {
             let store =
                 super::JobStore::open_without_reconciliation(crate::paths::daemon_jobs_file()?)?;
-            store.reconcile_dead_daemon_lease_jobs(lease_id)
+            if confirmed_no_pid_job_ids.is_empty() {
+                store.reconcile_dead_daemon_lease_jobs(lease_id)
+            } else {
+                store.recover_expired_pidless_reservation_for_dead_daemon_lease(
+                    lease_id,
+                    confirmed_no_pid_job_ids,
+                )
+            }
         },
         || start_or_return_live_unlocked(addr),
     )

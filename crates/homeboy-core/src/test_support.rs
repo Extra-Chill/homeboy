@@ -133,6 +133,8 @@ pub struct HomeGuard {
     prior_invocation_runtime: Option<String>,
     prior_no_update_check: Option<String>,
     prior_daemon_binary_sha: Option<String>,
+    prior_controller_runtime_executable: Option<String>,
+    prior_controller_runtime_identity: Option<String>,
     context: HermeticTestContext,
     _guard: MutexGuard<'static, ()>,
 }
@@ -205,6 +207,10 @@ impl HomeGuard {
         let prior_no_update_check = std::env::var("HOMEBOY_NO_UPDATE_CHECK").ok();
         let prior_daemon_binary_sha =
             std::env::var(crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV).ok();
+        let prior_controller_runtime_executable =
+            std::env::var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV).ok();
+        let prior_controller_runtime_identity =
+            std::env::var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV).ok();
         // The isolated HOME hosts `~/.config/homeboy/extensions/**/*.sh`
         // capability scripts that tests execute. On `noexec`-`/tmp` hosts a
         // plain `TempDir::new()` lands the whole HOME on a `noexec` mount,
@@ -234,6 +240,14 @@ impl HomeGuard {
             crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
             TEST_DAEMON_BINARY_SHA,
         );
+        std::env::set_var(
+            crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
+            test_controller_fixture(context.runtime_dir()),
+        );
+        std::env::set_var(
+            crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
+            crate::build_identity::current().display,
+        );
         Self {
             prior,
             prior_xdg_data_home,
@@ -242,6 +256,8 @@ impl HomeGuard {
             prior_invocation_runtime,
             prior_no_update_check,
             prior_daemon_binary_sha,
+            prior_controller_runtime_executable,
+            prior_controller_runtime_identity,
             context,
             _guard: guard,
         }
@@ -415,8 +431,44 @@ impl Drop for HomeGuard {
             Some(value) => std::env::set_var(crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV, value),
             None => std::env::remove_var(crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV),
         }
+        match &self.prior_controller_runtime_executable {
+            Some(value) => std::env::set_var(
+                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
+                value,
+            ),
+            None => std::env::remove_var(
+                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
+            ),
+        }
+        match &self.prior_controller_runtime_identity {
+            Some(value) => std::env::set_var(
+                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
+                value,
+            ),
+            None => std::env::remove_var(
+                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
+            ),
+        }
         reset_cached_test_state();
     }
+}
+
+fn test_controller_fixture(directory: &Path) -> PathBuf {
+    let path = directory.join("homeboy-controller-fixture");
+    fs::copy(
+        std::env::current_exe().expect("current test executable"),
+        &path,
+    )
+    .expect("copy controller fixture");
+    path
+}
+
+/// Source executable selected by the hermetic controller-runtime test contract.
+pub fn controller_runtime_test_executable() -> PathBuf {
+    PathBuf::from(
+        std::env::var_os(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV)
+            .expect("controller runtime test executable"),
+    )
 }
 
 pub fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {

@@ -56,7 +56,7 @@ All behavior is configurable via JSON:
 
 ### Configuration Management
 
-**Location:** `src/core/config.rs`
+**Location:** `crates/homeboy-core/src/component/config.rs`
 
 Centralized configuration system that:
 - Loads JSON configs from config directory
@@ -76,10 +76,10 @@ Config entities:
 
 ### Storage Layer
 
-**Location:** `src/core/engine/local_files.rs`
+**Location:** `crates/homeboy-engine-primitives/src/local_files.rs`
 
 File-based storage adapter used by configuration and other local persistence
-callers. `src/core/config.rs` owns config entity semantics and delegates actual
+callers. `crates/homeboy-core/src/component/config.rs` owns config entity semantics and delegates actual
 file operations through the `local_files` adapter:
 - Reads/writes JSON files in config directory
 - Handles atomic operations for safety
@@ -96,7 +96,7 @@ Variable substitution in templates:
 
 ### Execution System
 
-**Location:** `src/core/engine/executor.rs` and `src/core/engine/`
+**Location:** `crates/homeboy-core/src/engine/executor.rs` and `crates/homeboy-core/src/engine/`
 
 Executes local, remote, and extension commands with:
 - Environment variable injection
@@ -131,7 +131,7 @@ SSH client wrapper that:
 
 ### HTTP Client
 
-**Location:** `src/core/server/http.rs`
+**Location:** `crates/homeboy-core/src/server/http.rs`
 
 HTTP client for API operations:
 - Template-based URL construction
@@ -154,7 +154,7 @@ Secrets stored:
 
 ### Git Operations
 
-**Location:** `src/core/git/`
+**Location:** `crates/homeboy-core/src/git/`
 
 Git wrapper for:
 - Status checking
@@ -164,7 +164,7 @@ Git wrapper for:
 
 ### Version Management
 
-**Location:** `src/core/extension/version.rs`
+**Location:** `crates/homeboy-extension-contract/src/version.rs`
 
 Semantic versioning:
 - Pattern-based version detection in files
@@ -173,7 +173,7 @@ Semantic versioning:
 
 ### Changelog Management
 
-**Location:** `src/core/release/changelog/`
+**Location:** `crates/homeboy-release/src/release/changelog/`
 
 Changelog operations:
 - Add entries
@@ -183,7 +183,7 @@ Changelog operations:
 
 ### Extension System
 
-**Location:** `src/core/extension/mod.rs`
+**Location:** `crates/homeboy-core/src/extension/mod.rs`
 
 Extension management:
 - Install from git or local path
@@ -195,7 +195,7 @@ Extension management:
 
 ### Release Pipeline
 
-**Location:** `src/core/release/` (executor.rs, pipeline.rs, types.rs)
+**Location:** `crates/homeboy-release/src/release/` (executor.rs, pipeline.rs, types.rs)
 
 Local orchestration system:
 - Define steps as configuration
@@ -209,7 +209,7 @@ Step types:
 
 ### Code Audit
 
-**Location:** `src/core/code_audit/`
+**Location:** `crates/homeboy-code-audit/src/`
 
 Convention detection and drift analysis:
 - Fingerprints source files (methods, registrations, types) via extensions
@@ -229,7 +229,7 @@ Audit pipeline phases:
 
 ### Docs Audit
 
-**Location:** `src/core/code_audit/docs_audit/`
+**Location:** `crates/homeboy-code-audit/src/docs_audit/`
 
 Documentation verification:
 - Extracts claims (file paths, directory paths) from markdown docs
@@ -240,7 +240,7 @@ Documentation verification:
 
 ### Fleet Management
 
-**Location:** `src/core/fleet/`
+**Location:** `crates/homeboy-core/src/fleet/`
 
 Fleet management for grouped environments:
 - Named groups of projects
@@ -253,7 +253,7 @@ Config entities:
 
 ### CLI Layer
 
-**Location:** `src/commands/` and `src/main.rs`
+**Location:** `crates/homeboy-cli/src/commands/` and `src/main.rs`
 
 Command-line interface built with `clap`:
 - Command definitions and parsing

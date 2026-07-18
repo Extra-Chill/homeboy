@@ -10,6 +10,7 @@ use super::store::{LinkedDurableRunResolution, RecoveredTerminalJob};
 use super::*;
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
+use crate::Error;
 use uuid::Uuid;
 
 #[test]
@@ -39,6 +40,428 @@ fn active_count_reads_durable_jobs_without_reconciling_them() {
         store.get(job.id).expect("job remains present").status,
         JobStatus::Running,
         "status inspection must not reconcile an in-flight daemon job"
+    );
+}
+
+#[test]
+fn expired_local_child_reservation_releases_capacity_and_persists_retryable_failure() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("open store");
+    let job = store.create("runner.exec");
+    let reserved_at = 10_000;
+    store
+        .reserve_local_child_at(job.id, reserved_at)
+        .expect("persist reservation");
+
+    assert!(store
+        .reconcile_expired_local_child_reservations_at(reserved_at + 59_999)
+        .expect("reservation remains leased")
+        .is_empty());
+    assert_eq!(
+        JobStore::active_count_at_path(&path).expect("active capacity before expiry"),
+        1
+    );
+
+    assert_eq!(
+        store
+            .reconcile_expired_local_child_reservations_at(reserved_at + 60_000)
+            .expect("expire reservation"),
+        vec![job.id]
+    );
+    assert_eq!(
+        store.get(job.id).expect("terminal job").status,
+        JobStatus::Failed
+    );
+    assert_eq!(
+        JobStore::active_count_at_path(&path).expect("expired capacity released"),
+        0
+    );
+    let events = JobStore::open_without_reconciliation(&path)
+        .expect("reopen durable terminal result")
+        .events(job.id)
+        .expect("events");
+    assert!(events.iter().any(|event| {
+        event.kind == JobEventKind::Result
+            && event.data.as_ref().is_some_and(|data| {
+                data["reason"] == "local_child_reservation_expired" && data["retryable"] == true
+            })
+    }));
+}
+
+#[test]
+fn explicit_dead_lease_recovery_terminalizes_only_one_expired_pidless_reservation() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path)
+        .expect("store")
+        .with_daemon_lease("lease-dead".to_string());
+    let job = store.create("runner.exec");
+    store
+        .reserve_local_child_at(job.id, 0)
+        .expect("persist expired reservation");
+
+    let recovered = store
+        .recover_expired_pidless_reservation_for_dead_daemon_lease("lease-dead", &[job.id])
+        .expect("exact expired reservation recovers");
+
+    assert_eq!(recovered.matching_job_ids, vec![job.id]);
+    assert_eq!(
+        store.get(job.id).expect("terminal job").status,
+        JobStatus::Failed
+    );
+    let events = JobStore::open_without_reconciliation(&path)
+        .expect("reopen durable store")
+        .events(job.id)
+        .expect("durable evidence");
+    assert!(events.iter().any(|event| {
+        event.kind == JobEventKind::Result
+            && event.data.as_ref().is_some_and(|data| {
+                data["reason"]
+                    == "operator_confirmed_expired_pidless_reservation_after_dead_daemon_lease"
+                    && data["retryable"] == true
+                    && data["expected_lease_id"] == "lease-dead"
+            })
+    }));
+}
+
+#[test]
+fn explicit_dead_lease_pidless_recovery_refuses_ambiguous_unexpired_or_identified_jobs() {
+    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+    let selected = store.create("runner.exec");
+    store
+        .reserve_local_child_at(selected.id, 0)
+        .expect("reserve selected");
+    let additional = store.create("runner.exec");
+    store
+        .reserve_local_child_at(additional.id, 0)
+        .expect("reserve additional");
+    let before = store.events(selected.id).expect("events").len();
+
+    let ambiguity = store
+        .recover_expired_pidless_reservation_for_dead_daemon_lease("lease-dead", &[selected.id])
+        .expect_err("additional active reservation is ambiguous");
+    assert!(ambiguity.message.contains("only active job"));
+    assert_eq!(store.events(selected.id).expect("events").len(), before);
+
+    let single = JobStore::default().with_daemon_lease("lease-dead".to_string());
+    let unexpired = single.create("runner.exec");
+    single
+        .reserve_local_child(unexpired.id)
+        .expect("reserve job");
+    let error = single
+        .recover_expired_pidless_reservation_for_dead_daemon_lease("lease-dead", &[unexpired.id])
+        .expect_err("unexpired reservation fails closed");
+    assert!(error.message.contains("not an expired PID-less"));
+    assert_eq!(
+        single.get(unexpired.id).expect("job").status,
+        JobStatus::Queued
+    );
+    let wrong_lease = single
+        .recover_expired_pidless_reservation_for_dead_daemon_lease("wrong-lease", &[unexpired.id])
+        .expect_err("wrong lease fails closed");
+    assert!(wrong_lease.message.contains("only active job"));
+    let wrong_job = single
+        .recover_expired_pidless_reservation_for_dead_daemon_lease("lease-dead", &[Uuid::new_v4()])
+        .expect_err("wrong job fails closed");
+    assert!(wrong_job.message.contains("only active job"));
+
+    let identified = JobStore::default().with_daemon_lease("lease-dead".to_string());
+    let job = identified.create("runner.exec");
+    identified
+        .reserve_local_child_at(job.id, 0)
+        .expect("reserve job");
+    identified
+        .start_with_reserved_child_identity(
+            job.id,
+            u32::MAX,
+            None,
+            super::store::LocalChildStartDiscriminator::Unsupported {
+                evidence: "test identity".to_string(),
+            },
+        )
+        .expect("persist identity");
+    let error = identified
+        .recover_expired_pidless_reservation_for_dead_daemon_lease("lease-dead", &[job.id])
+        .expect_err("persisted child identity fails closed");
+    assert!(error.message.contains("not an expired PID-less"));
+}
+
+#[test]
+fn runner_capacity_is_claimed_before_reserving_an_agent_task_child() {
+    let store = JobStore::default();
+    let local_runner = || super::store::LocalRunnerJob {
+        runner_id: "homeboy-lab".to_string(),
+        command: vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+        ],
+        cwd: Some("/runner/worktree".to_string()),
+        lifecycle: Some(RunnerJobLifecycleMetadata {
+            source: Some("runner-daemon".to_string()),
+            kind: Some("agent-task-run-plan".to_string()),
+            durable_run_id: None,
+            active_child_count: None,
+            active_cell_count: None,
+        }),
+    };
+    let first = store.create_test_local_runner_job(Some(local_runner()));
+    let second = store.create_test_local_runner_job(Some(local_runner()));
+
+    assert!(store
+        .reserve_local_child_with_runner_capacity(first.id, "homeboy-lab", 1)
+        .expect("idle runner admits the first child"));
+    assert!(!store
+        .reserve_local_child_with_runner_capacity(second.id, "homeboy-lab", 1)
+        .expect("second child waits behind the reservation owner"));
+    assert!(store.get(second.id).expect("queued second job").status == JobStatus::Queued);
+    assert!(!store
+        .events(second.id)
+        .expect("second job events")
+        .iter()
+        .any(|event| event
+            .data
+            .as_ref()
+            .is_some_and(|data| data["phase"] == "child_reserved")));
+
+    store
+        .start_with_reserved_child_identity(
+            first.id,
+            std::process::id(),
+            None,
+            super::store::LocalChildStartDiscriminator::Unsupported {
+                evidence: "test process owns the first capacity slot".to_string(),
+            },
+        )
+        .expect("first child starts once its reservation is admitted");
+    store
+        .complete(first.id, None)
+        .expect("release first capacity owner");
+    assert!(store
+        .reserve_local_child_with_runner_capacity(second.id, "homeboy-lab", 1)
+        .expect("next queued child claims released capacity"));
+    assert_eq!(
+        store
+            .events(second.id)
+            .expect("second child reservation")
+            .iter()
+            .filter(|event| event
+                .data
+                .as_ref()
+                .is_some_and(|data| data["phase"] == "child_reserved"))
+            .count(),
+        1,
+        "the provider path receives exactly one pre-spawn reservation"
+    );
+}
+
+#[test]
+fn capacity_queued_agent_task_spawns_once_after_claiming_an_idle_slot() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    let store = JobStore::default();
+    let local_runner = || super::store::LocalRunnerJob {
+        runner_id: "homeboy-lab".to_string(),
+        command: vec!["homeboy".to_string(), "agent-task".to_string()],
+        cwd: Some("/runner/worktree".to_string()),
+        lifecycle: None,
+    };
+    let starts = Arc::new(AtomicUsize::new(0));
+    let (first_started_tx, first_started_rx) = mpsc::channel();
+    let (release_first_tx, release_first_rx) = mpsc::channel();
+    let first_starts = Arc::clone(&starts);
+    let first = store.run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
+        "runner.exec",
+        None,
+        None,
+        None,
+        local_runner(),
+        1,
+        move |job| {
+            job.start_with_reserved_child_identity(
+                std::process::id(),
+                None,
+                super::store::LocalChildStartDiscriminator::Unsupported {
+                    evidence: "test provider child".to_string(),
+                },
+            )?;
+            first_starts.fetch_add(1, Ordering::SeqCst);
+            first_started_tx.send(()).expect("report first spawn");
+            release_first_rx.recv().expect("release first provider");
+            Ok(json!({}))
+        },
+    );
+    first_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("idle agent-task child spawns");
+
+    let (second_started_tx, second_started_rx) = mpsc::channel();
+    let second_starts = Arc::clone(&starts);
+    let second = store.run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
+        "runner.exec",
+        None,
+        None,
+        None,
+        local_runner(),
+        1,
+        move |job| {
+            job.start_with_reserved_child_identity(
+                std::process::id(),
+                None,
+                super::store::LocalChildStartDiscriminator::Unsupported {
+                    evidence: "test provider child".to_string(),
+                },
+            )?;
+            second_starts.fetch_add(1, Ordering::SeqCst);
+            second_started_tx.send(()).expect("report second spawn");
+            Ok(json!({}))
+        },
+    );
+    assert!(second_started_rx
+        .recv_timeout(Duration::from_millis(50))
+        .is_err());
+    assert!(!store
+        .events(second.job_id)
+        .expect("queued second events")
+        .iter()
+        .any(|event| event
+            .data
+            .as_ref()
+            .is_some_and(|data| data["phase"] == "child_reserved")));
+
+    release_first_tx.send(()).expect("release first provider");
+    first.handle.join().expect("first worker exits");
+    second_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("second child starts after capacity release");
+    second.handle.join().expect("second worker exits");
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn pid_bound_local_child_is_not_expired_by_its_former_reservation_deadline() {
+    let store = JobStore::default();
+    let job = store.create("runner.exec");
+    store
+        .reserve_local_child_at(job.id, 10_000)
+        .expect("reserve child");
+    store
+        .start_with_reserved_child_identity(
+            job.id,
+            std::process::id(),
+            None,
+            super::store::LocalChildStartDiscriminator::Unsupported {
+                evidence: "test owns a live current-process identity".to_string(),
+            },
+        )
+        .expect("atomically bind live child identity");
+
+    assert!(store
+        .reconcile_expired_local_child_reservations_at(1_000_000)
+        .expect("do not expire spawned child")
+        .is_empty());
+    assert_eq!(
+        store.get(job.id).expect("live job").status,
+        JobStatus::Running
+    );
+}
+
+#[test]
+fn local_child_worker_records_start_before_persisting_child_identity() {
+    let store = JobStore::default();
+    let runner = store
+        .run_local_child_background_with_source_snapshot_metadata_and_path_materialization_plan(
+            "runner.exec",
+            None,
+            None,
+            None,
+            move |job| {
+                job.start_with_reserved_child_identity(
+                    std::process::id(),
+                    None,
+                    super::store::LocalChildStartDiscriminator::Unsupported {
+                        evidence: "test child identity".to_string(),
+                    },
+                )?;
+                Ok(serde_json::json!({}))
+            },
+        );
+    runner.handle.join().expect("worker exits");
+
+    let events = store.events(runner.job_id).expect("events");
+    let phases = events
+        .iter()
+        .filter_map(|event| event.data.as_ref()?.get("phase")?.as_str())
+        .collect::<Vec<_>>();
+    let reserved = phases
+        .iter()
+        .position(|phase| *phase == "child_reserved")
+        .expect("reservation event");
+    let worker_started = phases
+        .iter()
+        .position(|phase| *phase == "local_child_worker_started")
+        .expect("worker start event");
+    let spawned = phases
+        .iter()
+        .position(|phase| *phase == "spawned")
+        .expect("spawn event");
+    assert!(reserved < worker_started && worker_started < spawned);
+}
+
+#[test]
+fn local_child_worker_persists_typed_setup_failure_before_child_identity() {
+    let store = JobStore::default();
+    let runner = store
+        .run_local_child_background_with_source_snapshot_metadata_and_path_materialization_plan(
+            "runner.exec",
+            None,
+            None,
+            None,
+            move |_job| {
+                Err::<serde_json::Value, _>(Error::internal_io(
+                    "spawn failed",
+                    Some("execute runner command".to_string()),
+                ))
+            },
+        );
+    runner.handle.join().expect("worker exits");
+
+    let events = store.events(runner.job_id).expect("events");
+    let worker_started = events
+        .iter()
+        .position(|event| {
+            event
+                .data
+                .as_ref()
+                .is_some_and(|data| data["phase"] == "local_child_worker_started")
+        })
+        .expect("worker start event");
+    let setup_failure = events
+        .iter()
+        .position(|event| {
+            event.data.as_ref().is_some_and(|data| {
+                data["phase"] == "local_child_worker_failed_before_child_identity"
+                    && data["error"] == "IO error"
+                    && data["error_code"] == "internal.io_error"
+                    && data["error_details"]["error"] == "spawn failed"
+                    && data["error_details"]["context"] == "execute runner command"
+            })
+        })
+        .expect("typed setup failure event");
+    assert!(worker_started < setup_failure);
+    assert!(events.iter().any(|event| {
+        event.kind == JobEventKind::Error
+            && event
+                .message
+                .as_deref()
+                .is_some_and(|message| message == "IO error")
+    }));
+    assert_eq!(
+        store.get(runner.job_id).expect("job").status,
+        JobStatus::Failed
     );
 }
 

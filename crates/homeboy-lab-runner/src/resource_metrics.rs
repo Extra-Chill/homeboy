@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use homeboy_core::engine::command::{
-    isolate_process_tree, supports_process_tree_isolation, wait_with_bounded_output,
-    wait_with_bounded_output_until_cancelled_with_stdout_observer, CommandCaptureMetadata,
-    StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
+    isolate_process_tree, supports_process_tree_isolation, terminate_process_tree_and_reap,
+    wait_with_bounded_output, wait_with_bounded_output_until_cancelled_with_stdout_observer,
+    CommandCaptureMetadata, StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
 };
 use homeboy_core::error::{Error, Result};
 
@@ -191,20 +191,14 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     })
 }
 
-/// Terminate an unrecorded child with every available ownership boundary before
-/// reaping it. The root fallback keeps cleanup safe where group/tree control is
-/// unavailable, while the caller preserves the original persistence failure.
+/// Terminate and reap an unrecorded child through the same bounded, verified
+/// process-tree lifecycle used by cancellation.
 fn terminate_unpersisted_child_and_reap(child: &mut std::process::Child) -> Result<()> {
-    let pid = child.id();
-    let group = homeboy_core::process::terminate_isolated_process_group(pid);
-    let tree = homeboy_core::process::terminate_process_tree_best_effort(pid);
-    if group.is_err() || tree.is_err() {
-        let _ = child.kill();
-    }
-    child.wait().map_err(|error| {
-        Error::internal_io(error.to_string(), Some("reap runner child".to_string()))
-    })?;
-    tree.or(group)
+    terminate_process_tree_and_reap(child)
+        .map(|_| ())
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some("reap runner child".to_string()))
+        })
 }
 
 struct ResourceMetricsCollector {
@@ -818,12 +812,14 @@ mod tests {
     #[test]
     fn failed_initial_child_identity_persistence_terminates_and_reaps_the_process_tree() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let marker = temp.path().join("should-not-exist");
+        let descendant_pid_file = temp.path().join("descendant.pid");
+        let callback_pid_file = descendant_pid_file.clone();
         let spawned_pid = Arc::new(Mutex::new(None));
         let progress_sink = {
             let spawned_pid = Arc::clone(&spawned_pid);
             Arc::new(move |data: Value| {
                 *spawned_pid.lock().expect("pid lock") = data["process"]["root_pid"].as_u64();
+                wait_for_path(&callback_pid_file);
                 Err(Error::internal_io(
                     "durable progress unavailable",
                     Some("test progress persistence".to_string()),
@@ -831,7 +827,13 @@ mod tests {
             })
         };
         let mut command = Command::new("sh");
-        command.args(["-c", &format!("sleep 1; touch {}", marker.display())]);
+        command.args([
+            "-c",
+            &format!(
+                "sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; wait",
+                shell_quote_path(&descendant_pid_file)
+            ),
+        ]);
 
         let error = measured_command_output_until_cancelled_with_progress(
             &mut command,
@@ -850,11 +852,29 @@ mod tests {
             .expect("pid lock")
             .expect("initial callback received PID") as u32;
         assert!(!homeboy_core::process::pid_is_running(pid));
-        std::thread::sleep(Duration::from_millis(1200));
-        assert!(
-            !marker.exists(),
-            "child process tree must not continue running"
-        );
+        let descendant_pid = std::fs::read_to_string(&descendant_pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("numeric descendant pid");
+        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+    }
+
+    #[cfg(unix)]
+    fn shell_quote_path(path: &std::path::Path) -> String {
+        format!(
+            "'{}'",
+            path.display().to_string().replace('\'', "'\\\"'\\\"'")
+        )
+    }
+
+    #[cfg(unix)]
+    fn wait_for_path(path: &std::path::Path) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !path.exists() {
+            assert!(Instant::now() < deadline, "timed out waiting for {path:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[cfg(unix)]

@@ -1159,9 +1159,13 @@ where
     let state = write_state(local_addr)?;
     let job_store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)
         .map(|store| store.with_daemon_lease(state.lease_id.clone()))?;
+    // A restart cannot resume the thread that owned a pre-spawn reservation.
+    // Expire only reservations that never recorded a child identity.
+    job_store.reconcile_expired_local_child_reservations()?;
     let _ = daemon_runtime_snapshot();
     let loopback_bind = local_addr.ip().is_loopback();
 
+    spawn_local_child_reservation_reconciler(job_store.clone());
     spawn_completion_notifier();
 
     for stream in listener.incoming() {
@@ -1186,6 +1190,18 @@ where
 /// seconds. Defaults to [`COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS`].
 const COMPLETION_NOTIFY_INTERVAL_ENV: &str = "HOMEBOY_DAEMON_NOTIFY_INTERVAL_SECS";
 const COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS: u64 = 5;
+const LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS: u64 = 5;
+
+/// Reclaim capacity even when no controller polls the daemon after a failed
+/// handoff. The store owns the fail-closed child-identity check.
+fn spawn_local_child_reservation_reconciler(job_store: JobStore) {
+    std::thread::spawn(move || loop {
+        let _ = job_store.reconcile_expired_local_child_reservations();
+        std::thread::sleep(std::time::Duration::from_secs(
+            LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS,
+        ));
+    });
+}
 
 /// Spawn the background thread that watches in-flight runs and fires a local
 /// notification when one completes, so a detached/offloaded run never becomes a
@@ -1311,6 +1327,9 @@ fn route_with_job_store_and_body_and_runner_and_auth<R>(
 where
     R: AnalysisJobRunner,
 {
+    if let Err(error) = job_store.reconcile_expired_local_child_reservations() {
+        return error_response(500, error);
+    }
     match (method, path) {
         ("GET", "/health") => HttpResponse {
             status_code: 200,
@@ -1808,29 +1827,53 @@ fn enqueue_exec_job(
         "kind": lifecycle.as_ref().and_then(|lifecycle| lifecycle.kind.clone()).unwrap_or_else(|| "runner.exec".to_string()),
         "lifecycle": lifecycle.clone(),
     });
+    // Capture any potentially slow baseline before reserving child capacity.
+    // Once the reservation is durable, the worker performs only the bounded
+    // process-spawn handoff before persisting child ownership.
+    let baseline = if request.capture_patch {
+        Some(capture_baseline(&plan.cwd, source_snapshot.as_ref())?)
+    } else {
+        None
+    };
+    let local_runner = LocalRunnerJob {
+        runner_id: plan.runner_id.clone(),
+        command: plan.command.clone(),
+        cwd: Some(plan.cwd.clone()),
+        lifecycle: lifecycle.clone(),
+    };
+    // Direct-daemon offload deliberately projects its transport lifecycle as
+    // `runner.exec`; the typed workload is the canonical agent-task identity.
+    let is_agent_task = request
+        .lab_runner_workload
+        .as_ref()
+        .and_then(|workload| workload.agent_task.as_ref())
+        .is_some();
+    let capacity = is_agent_task
+        .then_some(plan.concurrency_limit.unwrap_or(usize::MAX).max(1))
+        .unwrap_or(usize::MAX);
     let runner = job_store
-        .run_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
+        .run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
             operation,
             source_snapshot.clone(),
             Some(run_ref_metadata),
             path_materialization_plan.clone(),
-            Some(LocalRunnerJob {
-                runner_id: plan.runner_id.clone(),
-                command: plan.command.clone(),
-                cwd: Some(plan.cwd.clone()),
-                lifecycle: lifecycle.clone(),
-            }),
+            local_runner,
+            capacity,
             move |job| {
                 let mut plan = plan;
-                plan.env.insert(
-                    "HOMEBOY_RUNNER_CHILD_RESERVATION".to_string(),
-                    job.local_child_reservation_id()?,
-                );
-                let baseline = if request.capture_patch {
-                    Some(capture_baseline(&plan.cwd, source_snapshot.as_ref())?)
-                } else {
-                    None
+                job.progress(json!({ "phase": "local_child_reservation_lookup_started" }))?;
+                let reservation_id = match job.local_child_reservation_id() {
+                    Ok(reservation_id) => reservation_id,
+                    Err(error) => {
+                        let _ = job.progress(json!({
+                            "phase": "local_child_reservation_lookup_failed",
+                            "error": error.to_string(),
+                        }));
+                        return Err(error);
+                    }
                 };
+                plan.env
+                    .insert("HOMEBOY_RUNNER_CHILD_RESERVATION".to_string(), reservation_id);
                 let progress_job = job.clone();
                 let progress_sink = Arc::new(move |data| progress_job.progress(data).map(|_| ()));
                 let started_job = job.clone();
@@ -1846,6 +1889,8 @@ fn enqueue_exec_job(
                     Ok(())
                 });
                 let cancel_job = job.clone();
+                job.progress(json!({ "phase": "local_child_driver_execution_started" }))?;
+                job.progress(json!({ "phase": "local_child_command_spawn_attempted" }))?;
                 let process_output = runner_exec_driver::execute_exec(
                     &plan,
                     Box::new(move || cancel_job.is_cancelled()),
@@ -1995,7 +2040,67 @@ fn daemon_job_store() -> &'static JobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::runner_exec_driver::{
+        self, DaemonExecOutput, PreparedDaemonExec, RunnerExecDriver, RunnerExecPrepareRequest,
+    };
     use crate::test_support::with_isolated_home;
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
+    #[cfg(unix)]
+    use std::process::Command;
+    use std::sync::Arc;
+
+    struct EnqueueTestDriver;
+
+    impl RunnerExecDriver for EnqueueTestDriver {
+        fn prepare(&self, request: RunnerExecPrepareRequest) -> Result<PreparedDaemonExec> {
+            let cwd = request.cwd.unwrap_or_else(|| "/tmp".to_string());
+            Ok(PreparedDaemonExec::new(
+                request.runner_id.clone(),
+                cwd.clone(),
+                request.command,
+                request.env,
+                request.secret_env_names,
+                SourceSnapshot::existing_remote(&request.runner_id, &cwd, None),
+                request.require_paths,
+                Some(1),
+                Arc::new(()),
+            ))
+        }
+
+        fn execute(
+            &self,
+            _prepared: &PreparedDaemonExec,
+            _is_cancelled: runner_exec_driver::ExecCancellationProbe,
+            _progress_sink: Option<runner_exec_driver::ExecProgressSink>,
+            _require_child_identity_acknowledgement: bool,
+            child_started: Option<runner_exec_driver::ExecChildStarted>,
+        ) -> Result<DaemonExecOutput> {
+            #[cfg(unix)]
+            {
+                let mut command = Command::new("sh");
+                command.args(["-c", "sleep 0.1"]);
+                unsafe {
+                    command.pre_exec(|| {
+                        if libc::setpgid(0, 0) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+                let mut child = command.spawn().map_err(|error| {
+                    Error::internal_io(error.to_string(), Some("spawn test child".to_string()))
+                })?;
+                child_started.expect("daemon supplies child acknowledgement")(child.id())?;
+                child.wait().map_err(|error| {
+                    Error::internal_io(error.to_string(), Some("reap test child".to_string()))
+                })?;
+            }
+            #[cfg(not(unix))]
+            child_started.expect("daemon supplies child acknowledgement")(std::process::id())?;
+            Ok(DaemonExecOutput::default())
+        }
+    }
 
     #[test]
     fn owner_lock_blocks_a_second_owner_without_lease_or_listener_evidence() {
@@ -2032,6 +2137,60 @@ mod tests {
 
         assert_eq!(metadata["durable_run_id"], "agent-task-run-123");
         assert_eq!(metadata["agent_task_run_id"], "agent-task-run-123");
+    }
+
+    #[test]
+    fn direct_daemon_agent_task_request_uses_workload_identity_for_capacity_admission() {
+        runner_exec_driver::register_runner_exec_driver(Arc::new(EnqueueTestDriver));
+        let store = JobStore::default();
+        let response = enqueue_exec_job(
+            Some(json!({
+                "runner_id": "homeboy-lab",
+                "cwd": "/tmp",
+                "command": ["homeboy", "agent-task", "run-plan", "--plan", "{}", "--record-run-id", "run-8926"],
+                "runner_workload": {
+                    "schema": "homeboy/runner-workload/v1",
+                    "workload_id": "plan-8926.runner_workload",
+                    "kind": { "command_label": "agent-task run-plan", "command_family": "agent_task" },
+                    "agent_task": {
+                        "run_id": "run-8926",
+                        "dispatch_kind": "run_plan",
+                        "lifecycle_mirror_policy": "run_plan_aggregate"
+                    },
+                    "workspace_mappings": { "source_path_mode": "existing_remote", "workspace_mode_policy": "existing", "mapping_ref": null },
+                    "required_capabilities": [],
+                    "required_secrets": { "categories": [], "secret_env_plan": {} },
+                    "required_extensions": [],
+                    "mutation_policy": { "capture_patch": false, "mutation_flag": null, "allow_dirty_lab_workspace": false },
+                    "assignment": { "runner_id": "homeboy-lab", "runner_mode": "direct_ssh", "source": "explicit" },
+                    "state": { "status": "offloaded", "remote_workspace": "/tmp", "fallback_reason": null },
+                    "result_refs": { "plan_id": "plan-8926", "proof_id": null, "workspace_mapping_ref": null }
+                },
+                "lifecycle": {
+                    "source": "runner-daemon",
+                    "kind": "runner.exec",
+                    "durable_run_id": "run-8926"
+                }
+            })),
+            &store,
+        )
+        .expect("direct daemon accepts the canonical agent-task workload");
+        let job_id = response["job"]["id"]
+            .as_str()
+            .expect("accepted job id")
+            .parse()
+            .expect("valid job id");
+        wait_for_daemon_job_status(&store, job_id, JobStatus::Succeeded);
+        assert!(store
+            .events(job_id)
+            .expect("job events")
+            .iter()
+            .any(|event| {
+                event
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data["phase"] == "child_reserved")
+            }));
     }
 
     // NOTE: daemon `/exec` projection is exercised end-to-end in the

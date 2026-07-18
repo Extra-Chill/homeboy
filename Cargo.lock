@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.290.0"
+version = "0.291.1"
 dependencies = [
  "base64",
  "chrono",
@@ -776,6 +776,7 @@ dependencies = [
  "shellexpand",
  "tempfile",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -825,6 +826,7 @@ dependencies = [
  "homeboy-redaction",
  "homeboy-refactor",
  "homeboy-refactor-contract",
+ "homeboy-release",
  "homeboy-review",
  "homeboy-rig",
  "homeboy-stack",
@@ -909,6 +911,7 @@ dependencies = [
  "homeboy-product-identity",
  "homeboy-redaction",
  "homeboy-refactor-contract",
+ "homeboy-release",
  "homeboy-release-contract",
  "homeboy-rig-contract",
  "keyring",
@@ -1119,6 +1122,28 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "homeboy-release"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "glob",
+ "glob-match",
+ "homeboy-core",
+ "homeboy-error",
+ "homeboy-product-identity",
+ "homeboy-release-contract",
+ "regex",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml 1.1.2+spec-1.1.0",
+ "uuid",
+ "zip",
 ]
 
 [[package]]

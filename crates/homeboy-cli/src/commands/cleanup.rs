@@ -989,7 +989,7 @@ fn cleanup_actionable(
         }
         actionable.next_actions.push(CommandNextAction::new(
             format!("{} cleanup", category.category.replace('_', " ")),
-            if apply {
+            if apply || category.category == TASK_WORKTREES_METADATA.category {
                 category.specialist_command.clone()
             } else {
                 apply_command(&category.specialist_command)
@@ -1510,6 +1510,39 @@ mod tests {
                 metadata.canonical_cleanup_command(true),
                 format!("homeboy cleanup --include {include_arg} --apply")
             );
+        }
+    }
+
+    #[test]
+    fn task_worktree_cleanup_next_actions_preserve_mode_specific_commands() {
+        let cases = [
+            (
+                false,
+                "homeboy worktree cleanup --dry-run --cleanup-branches",
+            ),
+            (true, "homeboy worktree cleanup --cleanup-branches"),
+        ];
+
+        for (apply, command) in cases {
+            let category = CleanupInventoryCategory {
+                category: TASK_WORKTREES_METADATA.category,
+                canonical_cleanup_command: TASK_WORKTREES_METADATA.canonical_cleanup_command(apply),
+                specialist_command: TASK_WORKTREES_METADATA
+                    .specialist_command(apply)
+                    .to_string(),
+                included: true,
+                skipped: false,
+                skip_reason: None,
+                candidate_count: 1,
+                applied_count: 0,
+                skipped_count: 0,
+                estimated_bytes: 0,
+                reclaimed_bytes: 0,
+                output: Value::Null,
+            };
+
+            let actionable = cleanup_actionable(&[category], apply);
+            assert_eq!(actionable.next_actions[0].command, command);
         }
     }
 

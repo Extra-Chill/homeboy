@@ -1,7 +1,8 @@
 use crate::component::Component;
 use crate::deps::{DependencyCommandResult, DependencyPackage, DependencyUpdateResult};
-use crate::extension::{self, ExtensionCapability, ExtensionExecutionContext};
+use crate::extension_execution::ExtensionExecutionContext;
 use crate::{paths, Error, Result};
+use homeboy_extension_contract::ExtensionCapability;
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
@@ -227,9 +228,10 @@ pub(crate) fn resolve_dependency_providers_optional(
         .map(|extensions| !extensions.is_empty())
         .unwrap_or(false)
     {
-        if let Some(context) =
-            extension::resolve_execution_context_if_available(component, ExtensionCapability::Deps)?
-        {
+        if let Some(context) = crate::extension_execution::resolve_execution_context_if_available(
+            component,
+            ExtensionCapability::Deps,
+        )? {
             providers.push(DependencyProvider::Extension(Box::new(
                 ExtensionDependencyProvider { context },
             )));
@@ -1117,14 +1119,13 @@ impl ExtensionDependencyProvider {
         component: &Component,
         path: &Path,
         args: &[String],
-    ) -> Result<crate::extension::RunnerOutput> {
-        crate::extension::ExtensionRunner::for_context(self.context.clone())
-            .component(component.clone())
-            .path_override(Some(path.display().to_string()))
-            .working_dir(&path.display().to_string())
-            .passthrough(false)
-            .script_args(args)
-            .run()
+    ) -> Result<crate::component_script_provider::ComponentScriptOutput> {
+        crate::component_script_provider::run_with_context(
+            &self.context,
+            component,
+            Some(path.display().to_string()),
+            args,
+        )
     }
 }
 
@@ -1132,8 +1133,8 @@ fn run_component_deps_script(
     component: &Component,
     path: &Path,
     args: &[String],
-) -> Result<crate::extension::component_script::ComponentScriptOutput> {
-    let output = crate::extension::component_script::run_component_scripts_with_env(
+) -> Result<crate::component_script_provider::ComponentScriptOutput> {
+    let output = crate::component_script_provider::run_component_scripts_with_env(
         component,
         ExtensionCapability::Deps,
         path,
@@ -1321,8 +1322,8 @@ fn first_non_empty_line(output: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::component::Component;
-    use crate::extension::ExtensionCapability;
     use crate::paths;
+    use homeboy_extension_contract::ExtensionCapability;
     use std::fs;
     use tempfile::tempdir;
 
@@ -1362,7 +1363,7 @@ esac
             None,
         );
         let provider = ExtensionDependencyProvider {
-            context: crate::extension::ExtensionExecutionContext {
+            context: crate::extension_execution::ExtensionExecutionContext {
                 component: component.clone(),
                 capability: ExtensionCapability::Deps,
                 extension_id: "fixture-deps".to_string(),

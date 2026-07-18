@@ -16,7 +16,7 @@ use std::path::Path;
 use std::time::Duration;
 
 mod action;
-mod readiness;
+// readiness relocated to crate::extension_readiness (core glue)
 mod settings;
 
 use super::env_provider;
@@ -28,8 +28,10 @@ use super::runner_contract::RunnerStepFilter;
 use super::runtime_helper;
 use crate::extension_invocation_context::ResolvedExtensionInvocationContext;
 
-pub(crate) use action::execute_action;
-pub use readiness::{extension_ready_status, is_extension_compatible, ExtensionReadyStatus};
+pub use crate::extension_readiness::{
+    extension_ready_status, is_extension_compatible, ExtensionReadyStatus,
+};
+pub use action::execute_action;
 use settings::serialize_settings;
 pub(crate) use settings::{build_settings_json_from_manifest, load_extension_manifest_from_dir};
 

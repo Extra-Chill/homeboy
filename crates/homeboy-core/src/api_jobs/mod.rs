@@ -8,7 +8,7 @@ mod types;
 
 pub use remote_runner::{
     JobArtifactMetadata, RemoteRunnerJobClaim, RemoteRunnerJobRequest, RemoteRunnerJobResult,
-    RunnerJobLifecycleMetadata,
+    RunnerJobLifecycleMetadata, RunnerJobProjectionCancelRequest,
 };
 pub(crate) use runner_job_preparation::with_runner_job_preparation;
 pub use runner_job_preparation::{

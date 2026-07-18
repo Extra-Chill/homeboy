@@ -82,7 +82,6 @@ pub mod controller_pin_reference;
 pub mod controller_runtime;
 pub mod daemon;
 pub mod db;
-pub mod deploy;
 pub mod deps;
 pub mod deterministic_loop;
 pub mod engine;
@@ -90,6 +89,9 @@ pub use homeboy_lab_contract::env_materialization_plan;
 // error moved to the internal `homeboy-error` crate. Re-exported here so existing
 // `crate::error::*` call sites keep working unchanged.
 pub use homeboy_error as error;
+pub mod build_artifact_path;
+pub mod component_build_provider;
+pub mod component_script_provider;
 pub mod evidence_manifest;
 pub mod execution;
 pub mod execution_contract;
@@ -98,8 +100,10 @@ pub mod extension;
 pub mod extension_execution;
 pub mod extension_invocation_context;
 pub mod extension_provider_discovery;
+pub mod extension_readiness;
 pub mod extension_scope;
 pub mod extension_store;
+pub mod extension_update_check;
 // finding moved to the internal `homeboy-finding` crate. Re-exported so existing
 // `crate::finding::*` call sites keep working unchanged.
 pub use homeboy_finding as finding;
@@ -153,7 +157,6 @@ pub mod quality;
 // existing `crate::redaction::*` call sites keep working unchanged.
 pub use homeboy_redaction as redaction;
 pub mod refactor_transform_provider;
-pub mod release;
 pub mod release_provider;
 pub mod release_set;
 pub mod report_compare;

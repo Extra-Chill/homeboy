@@ -6,7 +6,6 @@ use serde_json::Value;
 
 use crate::api_jobs::{self, ActiveRunnerJobSummary, Job, JobEvent};
 use crate::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
-use crate::run_lifecycle_record::RunExecutionState;
 use crate::run_lifecycle_status::RunLifecycleStatus;
 use crate::{paths, Error, Result};
 
@@ -76,6 +75,15 @@ pub struct ActivitySourceProjection {
     pub finished_at: Option<String>,
 }
 
+/// A non-authoritative source state retained for operators investigating a
+/// reconciled activity item. The top-level item state remains authoritative.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityStateConflict {
+    pub source_store: String,
+    pub id: String,
+    pub state: ActivityState,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityItem {
     pub id: String,
@@ -101,6 +109,8 @@ pub struct ActivityItem {
     pub evidence: Vec<ActivityEvidenceRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_projections: Vec<ActivitySourceProjection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state_conflicts: Vec<ActivityStateConflict>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<ActivityNextAction>,
 }
@@ -252,6 +262,9 @@ impl ActivityCollector {
 
     fn items(self, scope: ActivityScope, limit: usize) -> Vec<ActivityItem> {
         let mut items = self.items.into_values().collect::<Vec<_>>();
+        for item in &mut items {
+            finalize_item(item);
+        }
         items.sort_by(|left, right| item_sort_key(right).cmp(&item_sort_key(left)));
         if scope == ActivityScope::ActiveRecent {
             items.retain(|item| is_active(item.state) || item.finished_at.is_some());
@@ -308,13 +321,54 @@ fn merge_item(existing: &mut ActivityItem, incoming: &ActivityItem) {
 }
 
 fn source_precedence(item: &ActivityItem) -> u8 {
-    match item.source_store.as_str() {
+    source_store_precedence(&item.source_store)
+}
+
+fn source_store_precedence(source_store: &str) -> u8 {
+    match source_store {
         "agent-task.lifecycle" => 4,
         "runner.session" => 3,
         "daemon.jobs-json" => 2,
         "observation.sqlite" => 1,
         _ => 0,
     }
+}
+
+fn finalize_item(item: &mut ActivityItem) {
+    item.artifacts.sort_by(|left, right| {
+        left.uri
+            .cmp(&right.uri)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    item.evidence.sort_by(|left, right| {
+        left.uri
+            .cmp(&right.uri)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    item.next_actions.sort_by(|left, right| {
+        left.command
+            .cmp(&right.command)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    item.source_projections.sort_by(|left, right| {
+        source_store_precedence(&right.source_store)
+            .cmp(&source_store_precedence(&left.source_store))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| left.source_store.cmp(&right.source_store))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    item.state_conflicts = item
+        .source_projections
+        .iter()
+        .filter(|projection| projection.state != item.state)
+        .map(|projection| ActivityStateConflict {
+            source_store: projection.source_store.clone(),
+            id: projection.id.clone(),
+            state: projection.state,
+        })
+        .collect();
 }
 
 fn merge_refs(existing: &mut ActivityItem, incoming: &ActivityItem) {
@@ -492,6 +546,7 @@ mod observation {
             artifacts,
             evidence: Vec::new(),
             source_projections: Vec::new(),
+            state_conflicts: Vec::new(),
             next_actions: actions_for_observation_run(&run.id, state_from_run_status(&run.status)),
         })
     }
@@ -581,6 +636,7 @@ mod daemon_jobs {
                 .collect(),
             evidence: Vec::new(),
             source_projections: Vec::new(),
+            state_conflicts: Vec::new(),
             next_actions: actions_for_job(None, &job_id, state),
         })
     }
@@ -675,6 +731,7 @@ mod runner_sessions {
             artifacts: Vec::new(),
             evidence: Vec::new(),
             source_projections: Vec::new(),
+            state_conflicts: Vec::new(),
             next_actions: actions_for_runner_job(&job.runner_id, &job.job_id, state),
         }
     }
@@ -703,6 +760,7 @@ mod tests {
     use super::*;
     use crate::api_jobs::JobStatus;
     use crate::observation::NewRunRecord;
+    use crate::run_lifecycle_record::RunExecutionState;
     use crate::test_support::with_isolated_home;
 
     fn item(id: &str, state: ActivityState) -> ActivityItem {
@@ -725,6 +783,7 @@ mod tests {
             artifacts: Vec::new(),
             evidence: Vec::new(),
             source_projections: Vec::new(),
+            state_conflicts: Vec::new(),
             next_actions: vec![action("show", format!("homeboy runs show {id}"))],
         }
     }
@@ -785,6 +844,66 @@ mod tests {
                 ("observation.sqlite", ActivityState::Running),
             ]
         );
+        assert_eq!(
+            items[0]
+                .state_conflicts
+                .iter()
+                .map(|conflict| (
+                    conflict.source_store.as_str(),
+                    conflict.id.as_str(),
+                    conflict.state
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("runner.session", "runner-job-1", ActivityState::Running),
+                ("observation.sqlite", "agent-task-1", ActivityState::Running),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_projection_order_and_conflicts_are_stable_across_collection_order() {
+        let mut lifecycle = item("agent-task-1", ActivityState::Queued);
+        lifecycle.source_store = "agent-task.lifecycle".to_string();
+        lifecycle.refs.run_id = None;
+        lifecycle.refs.agent_task_run_id = Some("agent-task-1".to_string());
+
+        let mut observation = item("agent-task-1", ActivityState::Running);
+        observation.source_store = "observation.sqlite".to_string();
+
+        let mut runner = item("runner-job-1", ActivityState::Running);
+        runner.source_store = "runner.session".to_string();
+        runner.refs.run_id = Some("agent-task-1".to_string());
+
+        let collect = |items: Vec<ActivityItem>| {
+            let mut collector = ActivityCollector::default();
+            for item in items {
+                collector.insert(item);
+            }
+            collector
+                .items(ActivityScope::All, 10)
+                .into_iter()
+                .next()
+                .expect("canonical activity item")
+        };
+        let item = collect(vec![lifecycle.clone(), observation.clone(), runner.clone()]);
+        let reverse = collect(vec![runner, observation, lifecycle]);
+
+        assert_eq!(item, reverse);
+        assert_eq!(item.source_store, "agent-task.lifecycle");
+        assert_eq!(item.state, ActivityState::Queued);
+        assert_eq!(
+            item.source_projections
+                .iter()
+                .map(|projection| projection.source_store.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "agent-task.lifecycle",
+                "runner.session",
+                "observation.sqlite"
+            ]
+        );
+        assert_eq!(item.state_conflicts.len(), 2);
     }
 
     #[test]

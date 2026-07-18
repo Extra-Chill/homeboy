@@ -20,9 +20,9 @@ use homeboy_engine_primitives::shell;
 const DEFAULT_BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const BUILD_TIMEOUT_ENV: &str = "HOMEBOY_BUILD_TIMEOUT_SECS";
 
-mod artifact;
+// artifact-path resolution relocated to crate::build_artifact_path (pure core glue)
 
-pub use artifact::{resolve_artifact_path, resolve_artifact_path_from_root};
+pub use crate::build_artifact_path::{resolve_artifact_path, resolve_artifact_path_from_root};
 
 // === Build Command Resolution ===
 
@@ -235,7 +235,7 @@ pub fn run_changed_since(input: &str, changed_since: Option<&str>) -> Result<(Bu
 ///
 /// Thin wrapper around `execute_build_component` that adapts the return type
 /// for the deploy pipeline's error handling convention.
-pub(crate) fn build_component(component: &component::Component) -> (Option<i32>, Option<String>) {
+pub fn build_component(component: &component::Component) -> (Option<i32>, Option<String>) {
     let result = execute_build_component(component, None);
 
     match result {
@@ -951,4 +951,33 @@ mod tests {
             "full".to_string()
         )));
     }
+}
+
+/// Provider that wires the extension component-build runner into core's
+/// `component_build_provider` hook.
+pub struct ExtensionComponentBuildRunner;
+
+impl crate::component_build_provider::ComponentBuildRunner for ExtensionComponentBuildRunner {
+    fn run_component_build(
+        &self,
+        component: &crate::component::Component,
+    ) -> crate::Result<(serde_json::Value, i32)> {
+        let (result, exit_code) = run_component(component)?;
+        let value = serde_json::to_value(&result).map_err(|e| {
+            crate::Error::internal_json(e.to_string(), Some("serialize build result".to_string()))
+        })?;
+        Ok((value, exit_code))
+    }
+
+    fn can_build(&self, component: &crate::component::Component) -> bool {
+        resolve_build_command(component).is_ok()
+    }
+}
+
+/// Register the extension component-build runner with core. Call once at
+/// startup.
+pub fn register_component_build_runner() {
+    crate::component_build_provider::register_component_build_runner(Box::new(
+        ExtensionComponentBuildRunner,
+    ));
 }

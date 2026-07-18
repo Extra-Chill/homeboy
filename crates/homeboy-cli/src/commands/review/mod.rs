@@ -21,7 +21,7 @@ use homeboy::core::extension::test::TestCommandOutput;
 use homeboy::core::git;
 use homeboy::core::plan::PlanStep;
 use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
-use homeboy::core::release::changelog;
+use homeboy_release::release::changelog;
 use homeboy_review::review::{
     self, ReviewArtifactFindings, ReviewCommandOutput, ReviewOutputInput, ReviewService,
     ReviewStage, ReviewStages,
