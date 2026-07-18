@@ -6,6 +6,10 @@ fn homeboy() -> Command {
 
 #[test]
 fn cook_rejects_invalid_controller_transport_before_worktree_resolution() {
+    // `--runner` implies Lab placement, so combining it with an explicit
+    // `--placement` is contradictory and rejected at argument parsing (see
+    // `runner_and_placement_are_mutually_exclusive`). That rejection happens
+    // before any worktree provider resolution.
     let output = homeboy()
         .args([
             "--placement",
@@ -26,8 +30,10 @@ fn cook_rejects_invalid_controller_transport_before_worktree_resolution() {
 
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--placement local cannot be combined with --runner"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("'--placement <PLACEMENT>' cannot be used with '--runner <RUNNER_ID>'"));
     assert!(!stdout.contains("worktree provider"));
+    assert!(!stderr.contains("worktree provider"));
 }
 
 #[test]

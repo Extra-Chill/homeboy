@@ -1060,33 +1060,6 @@ fn explicit_local_cook_does_not_enter_lab_attempt_dispatch() {
 }
 
 #[test]
-fn explicit_local_cook_runner_is_rejected_before_worktree_resolution() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--placement",
-        "local",
-        "--runner",
-        "homeboy-lab",
-        "agent-task",
-        "cook",
-        "--to-worktree",
-        "missing@worktree",
-        "--verify",
-        "true",
-        "--prompt",
-        "stay local",
-    ]);
-
-    let error = run_split_placement_cook(&cli, &[], None, Some("homeboy-lab"))
-        .expect_err("mixed local placement and runner must fail before plan materialization");
-
-    assert_eq!(error.details["field"], "runner");
-    assert!(error
-        .message
-        .contains("--placement local cannot be combined with --runner"));
-}
-
-#[test]
 fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
