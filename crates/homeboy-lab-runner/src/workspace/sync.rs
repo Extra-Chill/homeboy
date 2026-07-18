@@ -981,12 +981,7 @@ fn workspace_snapshots_ssh(
 ) -> Result<Vec<RunnerWorkspaceSnapshotEntry>> {
     let (_server, mut client) = ssh_client_for_runner(runner)?;
     client.env.extend(runner.env.clone());
-    let command = format!(
-        "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then find \"$root\" -mindepth 1 -maxdepth 1 -type d -exec sh -c 'meta_rel=$1; shift; for dir do meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; printf \"%s\\t\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\n\"; done' sh {meta_arg} {{}} +; fi",
-        root = shell::quote_arg(root),
-        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
-        meta_arg = shell::quote_arg(WORKSPACE_METADATA_FILE),
-    );
+    let command = workspace_snapshot_scan_command(root);
     let output = client.execute(&command);
     if !output.success {
         return Err(Error::internal_unexpected(format!(
@@ -1010,6 +1005,17 @@ fn workspace_snapshots_ssh(
         }
     }
     Ok(snapshots)
+}
+
+pub(super) fn workspace_snapshot_scan_command(root: &str) -> String {
+    // Promotion replaces a temporary child atomically. `find` reports a
+    // disappeared child as an error even though the snapshot root remains
+    // valid, so read each candidate defensively and verify the root afterwards.
+    format!(
+        "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then for dir in \"$root\"/*; do [ -d \"$dir\" ] || continue; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; encoded=$(base64 < \"$meta\" 2>/dev/null) || continue; printf \"%s\\t%s\\n\" \"$dir\" \"$encoded\"; done; [ -d \"$root\" ] || {{ printf '%s\\n' \"runner workspace snapshot root disappeared during scan: $root\" >&2; exit 1; }}; fi",
+        root = shell::quote_arg(root),
+        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+    )
 }
 
 fn workspace_snapshot_entry(
