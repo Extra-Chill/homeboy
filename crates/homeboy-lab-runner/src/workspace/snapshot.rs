@@ -653,6 +653,7 @@ pub(crate) fn materialize_snapshot(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SnapshotManifestDelta {
+    retained_paths: Vec<String>,
     pub(crate) changed_paths: Vec<String>,
     pub(crate) deleted_paths: Vec<String>,
     pub(crate) replaced_paths: Vec<String>,
@@ -721,6 +722,7 @@ pub(crate) fn snapshot_manifest_delta(
     );
     let final_size = count_files(controller_entries.values().collect());
     Ok(SnapshotManifestDelta {
+        retained_paths: controller_entries.keys().cloned().collect(),
         changed_paths,
         deleted_paths,
         replaced_paths,
@@ -904,12 +906,31 @@ fn incremental_prepare_command(
         })
         .collect::<Vec<_>>()
         .join(" && ");
+    let retain = delta
+        .retained_paths
+        .iter()
+        .map(|path| format!("[ \"$relative\" = {} ]", shell::quote_arg(path)))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    let retain = if retain.is_empty() {
+        "false".to_string()
+    } else {
+        retain
+    };
+    let cleanup = format!(
+        "find {temporary} -mindepth 1 -depth -exec sh -c {script} sh {temporary} {{}} +",
+        temporary = shell::quote_arg(temporary),
+        script = shell::quote_arg(&format!(
+            "root=$1; shift; for path do relative=${{path#\"$root\"/}}; if ! ({retain}); then rm -rf -- \"$path\"; fi; done"
+        )),
+    );
     format!(
-        "{owner_capture} ; mkdir -p {parent} && rm -rf {temporary} && mkdir -p {temporary} && {seed} {removals}",
+        "{owner_capture} ; mkdir -p {parent} && rm -rf {temporary} && mkdir -p {temporary} && {seed} && {cleanup} {removals}",
         owner_capture = owner_capture_shell(&parent),
         parent = shell::quote_arg(&parent),
         temporary = shell::quote_arg(&temporary),
         seed = seed_snapshot_command(seed_path, temporary),
+        cleanup = cleanup,
         removals = if removals.is_empty() { String::new() } else { format!(" && {removals}") },
     )
 }
@@ -987,9 +1008,9 @@ pub(crate) fn materialize_snapshot_git(
     snapshot: &str,
 ) -> Result<SyntheticCheckoutIdentity> {
     materialize_snapshot(runner, local_path, remote_path, excludes)?;
-    let source_dirty = !git_output(local_path, &["status", "--porcelain=v1"])?
-        .trim()
-        .is_empty();
+    let source_dirty = git_output(local_path, &["status", "--porcelain=v1"])
+        .map(|status| !status.trim().is_empty())
+        .unwrap_or(false);
     initialize_synthetic_git_checkout(runner, local_path, remote_path, snapshot, source_dirty)
 }
 

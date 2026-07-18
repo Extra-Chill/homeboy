@@ -172,6 +172,11 @@ fn prepare_lab_offload_workspace_stage_inner(
     }
     .0;
     sync_mode = synced.sync_mode;
+    let lab_materialization_mode = synced
+        .materialization_plan
+        .actual_materialization_mode
+        .as_deref()
+        .unwrap_or_else(|| sync_mode.label());
     let remote_cwd = synced.remote_path.clone();
     let mut workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
     // The primary workspace sync materializes each declared dependency checkout
@@ -211,7 +216,7 @@ fn prepare_lab_offload_workspace_stage_inner(
                     .string("local_path", &synced.local_path)
                     .string("remote_path", &remote_cwd)
                     .json("materialization_plan", &synced.materialization_plan)
-                    .string("mode", sync_mode.label())
+                    .string("mode", lab_materialization_mode)
                     .json(
                         "allow_dirty_lab_workspace",
                         request.allow_dirty_lab_workspace,
