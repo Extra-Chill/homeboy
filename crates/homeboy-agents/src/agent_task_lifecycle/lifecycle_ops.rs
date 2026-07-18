@@ -1045,6 +1045,37 @@ pub(crate) fn is_accepted_runner_handoff(record: &AgentTaskRunRecord) -> bool {
     record.has_accepted_lab_handoff()
 }
 
+/// Reconstruct the only aggregate-free failure that can safely admit an
+/// externally prepared immutable candidate: an expired handoff before the
+/// runner recorded a job or consumed a provider execution.
+pub fn candidate_adoption_recovery_outcome(
+    record: &AgentTaskRunRecord,
+    task: &AgentTaskRequest,
+) -> Option<AgentTaskOutcome> {
+    let handoff = record.lab_handoff.as_ref()?;
+    let eligible = record.state == AgentTaskRunState::Cancelled
+        && record.aggregate_path.is_none()
+        && record.totals.is_none()
+        && record.artifact_refs.is_empty()
+        && record.provider_handles.is_empty()
+        && record.latest_executor_evidence.is_none()
+        && record.lab_handoff_validation_error().is_none()
+        && handoff.state == AgentTaskLabHandoffState::Expired
+        && handoff.runner_job_id.is_none()
+        && record.metadata["phase"] == "handoff_rejected"
+        && record.metadata["provider_executions_consumed"] == 0
+        && record.metadata["handoff_acceptance"]["state"] == "expired"
+        && record.metadata["handoff_acceptance"]["reason"] == EXPIRED_LAB_HANDOFF_REASON;
+    eligible.then(|| {
+        build_pre_execution_failure_outcome(
+            &record.run_id,
+            task,
+            "lab_handoff_preacceptance",
+            &Error::internal_unexpected(EXPIRED_LAB_HANDOFF_REASON.to_string()),
+        )
+    })
+}
+
 fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
     let _lock = LabHandoffLock::lock(run_id)?;
     // Re-read while holding the handoff lock: an accepted job is runner-owned
@@ -1071,6 +1102,7 @@ fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
         }),
     );
     metadata.insert("phase".to_string(), json!("handoff_rejected"));
+    metadata.insert("provider_executions_consumed".to_string(), json!(0));
     metadata.insert(
         "phase_activity".to_string(),
         json!("runner handoff acceptance deadline expired before runner acceptance"),
