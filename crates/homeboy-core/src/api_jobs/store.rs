@@ -1558,6 +1558,64 @@ impl JobStore {
         JobRunner { job_id, handle }
     }
 
+    pub(crate) fn run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner<
+        T,
+        F,
+    >(
+        &self,
+        operation: impl Into<String>,
+        source_snapshot: Option<SourceSnapshot>,
+        metadata: Option<Value>,
+        path_materialization_plan: Option<PathMaterializationPlan>,
+        local_runner: LocalRunnerJob,
+        capacity: usize,
+        run: F,
+    ) -> JobRunner
+    where
+        T: Serialize + Send + 'static,
+        F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
+    {
+        let job = self.create_with_source_snapshot_metadata_path_materialization_and_local_runner(
+            operation,
+            source_snapshot,
+            metadata,
+            path_materialization_plan,
+            Some(local_runner.clone()),
+        );
+        let job_id = job.id;
+        let handle_store = self.clone();
+        let worker_store = self.clone();
+        let handle = thread::spawn(move || {
+            let job_handle = JobHandle {
+                store: handle_store,
+                job_id,
+            };
+            loop {
+                if job_handle.is_cancelled() {
+                    return;
+                }
+                match worker_store.reserve_local_child_with_runner_capacity(
+                    job_id,
+                    &local_runner.runner_id,
+                    capacity,
+                ) {
+                    Ok(true) => break,
+                    Ok(false) => thread::sleep(std::time::Duration::from_millis(10)),
+                    Err(_) => return,
+                }
+            }
+            match run(job_handle) {
+                Ok(output) => {
+                    let _ = worker_store.complete(job_id, serde_json::to_value(output).ok());
+                }
+                Err(error) => {
+                    let _ = worker_store.fail(job_id, error.to_string());
+                }
+            }
+        });
+        JobRunner { job_id, handle }
+    }
+
     fn run_background_with_start_policy<T, F>(
         &self,
         operation: impl Into<String>,
@@ -1641,6 +1699,29 @@ impl JobStore {
     }
 
     pub(crate) fn reserve_local_child_at(&self, job_id: Uuid, now: u64) -> Result<()> {
+        self.reserve_local_child_at_with_runner_capacity(job_id, now, None)
+            .map(|_| ())
+    }
+
+    pub(crate) fn reserve_local_child_with_runner_capacity(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        capacity: usize,
+    ) -> Result<bool> {
+        self.reserve_local_child_at_with_runner_capacity(
+            job_id,
+            timestamp_ms(),
+            Some((runner_id, capacity)),
+        )
+    }
+
+    fn reserve_local_child_at_with_runner_capacity(
+        &self,
+        job_id: Uuid,
+        now: u64,
+        runner_capacity: Option<(&str, usize)>,
+    ) -> Result<bool> {
         let reservation_id = Uuid::new_v4().to_string();
         let reservation_expires_at_ms = now.saturating_add(LOCAL_CHILD_RESERVATION_LEASE_MS);
         let mut inner = self.inner.lock().expect("job store mutex poisoned");
@@ -1649,6 +1730,20 @@ impl JobStore {
             .get(&job_id)
             .cloned()
             .ok_or_else(|| job_not_found(job_id))?;
+        if let Some((runner_id, capacity)) = runner_capacity {
+            let active = inner.jobs.values().filter(|candidate| {
+                candidate.job.id != job_id
+                    && matches!(candidate.job.status, JobStatus::Queued | JobStatus::Running)
+                    && candidate.local_child.is_some()
+                    && candidate
+                        .local_runner
+                        .as_ref()
+                        .is_some_and(|runner| runner.runner_id == runner_id)
+            });
+            if active.count() >= capacity {
+                return Ok(false);
+            }
+        }
         let stored = inner.jobs.get_mut(&job_id).expect("job exists");
         if stored.job.status != JobStatus::Queued {
             return Err(Error::validation_invalid_argument(
@@ -1700,7 +1795,7 @@ impl JobStore {
                 .collect();
             inner.compaction = durable.compaction;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Terminalize expired pre-spawn reservations. A PID-bound child has

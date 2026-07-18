@@ -56,6 +56,9 @@ pub struct PreparedDaemonExec {
     pub secret_env_names: Vec<String>,
     pub source_snapshot: SourceSnapshot,
     pub require_paths: Vec<String>,
+    /// The runner's declared process capacity. The daemon uses this to admit a
+    /// local child before creating its bounded pre-spawn reservation.
+    pub concurrency_limit: Option<usize>,
     /// Opaque driver-owned plan handle carried back into `execute`. The daemon
     /// never inspects it; it exists so the driver can reconstruct the full
     /// runner process without re-preparing.
@@ -73,6 +76,7 @@ impl PreparedDaemonExec {
         secret_env_names: Vec<String>,
         source_snapshot: SourceSnapshot,
         require_paths: Vec<String>,
+        concurrency_limit: Option<usize>,
         plan_token: Arc<dyn std::any::Any + Send + Sync>,
     ) -> Self {
         Self {
@@ -83,6 +87,7 @@ impl PreparedDaemonExec {
             secret_env_names,
             source_snapshot,
             require_paths,
+            concurrency_limit,
             plan_token,
         }
     }

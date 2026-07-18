@@ -74,6 +74,7 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             plan.secret_env_names.clone(),
             plan.source_snapshot.clone(),
             plan.require_paths.clone(),
+            plan.runner.settings.concurrency_limit,
             Arc::new(plan),
         ))
     }
