@@ -272,6 +272,63 @@ fn incremental_snapshots_materialize_unchanged_content_without_transfer() {
 }
 
 #[test]
+fn incremental_snapshot_falls_back_to_full_transport_for_large_compatible_seed() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_local_runner("lab-local-large-incremental", runner_root.path());
+        let source = tempfile::tempdir().expect("source");
+        fs::create_dir_all(source.path().join("files")).expect("source directory");
+        for index in 0..2_254 {
+            fs::write(
+                source.path().join(format!("files/retained-{index:04}.txt")),
+                format!("seed-{index}\n"),
+            )
+            .expect("seed file");
+        }
+        sync_workspace(
+            "lab-local-large-incremental",
+            sync_options(
+                source.path().display().to_string(),
+                Some("first".to_string()),
+            ),
+        )
+        .expect("large seed snapshot");
+
+        fs::write(source.path().join("files/retained-0000.txt"), "updated\n").expect("small delta");
+        let (second, _) = sync_workspace(
+            "lab-local-large-incremental",
+            sync_options(
+                source.path().display().to_string(),
+                Some("second".to_string()),
+            ),
+        )
+        .expect("large compatible snapshot");
+
+        let transfer = second
+            .materialization_plan
+            .snapshot_transfer
+            .expect("transfer accounting");
+        assert_eq!(transfer.reused.files, 0);
+        assert_eq!(transfer.transferred.files, 2_254);
+        assert_eq!(transfer.final_size.files, 2_254);
+        assert_eq!(
+            fs::read_to_string(
+                std::path::Path::new(&second.remote_path).join("files/retained-0000.txt")
+            )
+            .expect("updated file"),
+            "updated\n"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                std::path::Path::new(&second.remote_path).join("files/retained-2253.txt")
+            )
+            .expect("retained file"),
+            "seed-2253\n"
+        );
+    });
+}
+
+#[test]
 fn incremental_snapshot_refuses_seed_when_effective_excludes_change() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
