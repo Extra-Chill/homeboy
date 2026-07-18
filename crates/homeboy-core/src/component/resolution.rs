@@ -501,7 +501,7 @@ fn path_strictly_contains(parent: &Path, child: &Path) -> bool {
 }
 
 /// Find the git root directory for a given path.
-pub(crate) fn detect_git_root(dir: &Path) -> Option<PathBuf> {
+pub fn detect_git_root(dir: &Path) -> Option<PathBuf> {
     let output = run_git_output(dir, &["rev-parse", "--show-toplevel"], "git root").ok()?;
     if !output.status.success() {
         return None;

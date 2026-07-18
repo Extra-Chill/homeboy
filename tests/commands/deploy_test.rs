@@ -273,7 +273,7 @@ fn multi_project_zero_components_remains_validation_failure() {
     assert!(components.is_empty());
     assert!(config.component_ids.is_empty());
 
-    let err = homeboy::core::deploy::run_multi(
+    let err = homeboy_release::deploy::run_multi(
         &["project-a".to_string(), "project-b".to_string()],
         &components,
         &config,

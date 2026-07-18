@@ -64,7 +64,7 @@ pub(crate) fn apply_to_component_artifact(
     Ok(resolved)
 }
 
-pub(crate) fn resolve_metadata(component: &Component) -> Result<Vec<ResolvedArtifactInput>> {
+pub fn resolve_metadata(component: &Component) -> Result<Vec<ResolvedArtifactInput>> {
     component
         .artifact_inputs
         .iter()

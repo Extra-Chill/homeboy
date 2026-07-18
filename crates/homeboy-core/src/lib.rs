@@ -82,7 +82,6 @@ pub mod controller_pin_reference;
 pub mod controller_runtime;
 pub mod daemon;
 pub mod db;
-pub mod deploy;
 pub mod deps;
 pub mod deterministic_loop;
 pub mod engine;
@@ -154,7 +153,6 @@ pub mod quality;
 // existing `crate::redaction::*` call sites keep working unchanged.
 pub use homeboy_redaction as redaction;
 pub mod refactor_transform_provider;
-pub mod release;
 pub mod release_provider;
 pub mod release_set;
 pub mod report_compare;

@@ -288,7 +288,7 @@ fn parse_commit_records(raw: &str) -> Vec<CommitInfo> {
 
 /// Extract version number from a git tag.
 /// Handles formats: v1.0.0, 1.0.0, component-v1.0.0
-pub(crate) fn extract_version_from_tag(tag: &str) -> Option<String> {
+pub fn extract_version_from_tag(tag: &str) -> Option<String> {
     let version_pattern = Regex::new(r"v?(\d+\.\d+(?:\.\d+)?)").ok()?;
     version_pattern
         .captures(tag)

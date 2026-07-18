@@ -64,7 +64,8 @@ pub use crate::extension_store::{
     available_extension_ids, extension_path, find_extension_by_tool, find_extension_for_file_ext,
     is_extension_linked, load_all_extensions, load_extension, merge, save_manifest,
 };
-pub(crate) use execution::{build_settings_json_from_manifest, execute_action};
+pub(crate) use execution::build_settings_json_from_manifest;
+pub use execution::execute_action;
 pub use execution::{
     extension_ready_status, is_extension_compatible, run_action, run_extension, run_setup,
     ExtensionExecutionMode, ExtensionReadyStatus, ExtensionRunResult, ExtensionSetupResult,

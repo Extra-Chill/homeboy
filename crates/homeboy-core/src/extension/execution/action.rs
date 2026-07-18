@@ -9,7 +9,7 @@ use super::{build_action_env, execute_extension_command, load_extension, Extensi
 use crate::extension::manifest::{ActionConfig, ActionType, HttpMethod};
 use crate::extension::ExtensionScope;
 
-pub(crate) fn execute_action(
+pub fn execute_action(
     extension_id: &str,
     action_id: &str,
     project_id: Option<&str>,

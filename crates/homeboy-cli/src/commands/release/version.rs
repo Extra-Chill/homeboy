@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::core::component;
-use homeboy::core::release::version::{read_component_version, read_version, VersionTargetInfo};
+use homeboy_release::release::version::{read_component_version, read_version, VersionTargetInfo};
 
 use crate::commands::CmdResult;
 

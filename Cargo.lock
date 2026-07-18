@@ -825,6 +825,7 @@ dependencies = [
  "homeboy-redaction",
  "homeboy-refactor",
  "homeboy-refactor-contract",
+ "homeboy-release",
  "homeboy-review",
  "homeboy-rig",
  "homeboy-stack",
@@ -909,6 +910,7 @@ dependencies = [
  "homeboy-product-identity",
  "homeboy-redaction",
  "homeboy-refactor-contract",
+ "homeboy-release",
  "homeboy-release-contract",
  "homeboy-rig-contract",
  "keyring",
@@ -1119,6 +1121,28 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "homeboy-release"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "glob",
+ "glob-match",
+ "homeboy-core",
+ "homeboy-error",
+ "homeboy-product-identity",
+ "homeboy-release-contract",
+ "regex",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml 1.1.2+spec-1.1.0",
+ "uuid",
+ "zip",
 ]
 
 [[package]]

@@ -40,7 +40,7 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         title: "Release set manifest",
         owner: "homeboy-core",
         summary: "Caller-supplied, product-agnostic required or optional component membership and immutable source references.",
-        rust_type: "homeboy::core::release_set::ReleaseSetManifest",
+        rust_type: "homeboy_core::release_set::ReleaseSetManifest",
     },
     ContractRegistryEntry {
         schema_id: crate::core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA,

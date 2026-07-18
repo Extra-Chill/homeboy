@@ -128,7 +128,7 @@ pub fn is_json_array(input: &str) -> bool {
 
 /// Simple bulk input with just component IDs.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct BulkIdsInput {
+pub struct BulkIdsInput {
     pub component_ids: Vec<String>,
 }
 

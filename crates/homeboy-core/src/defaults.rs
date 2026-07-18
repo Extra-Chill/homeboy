@@ -17,7 +17,7 @@ pub use policy::{
 #[cfg(any(test, feature = "test-support"))]
 pub use io::reset_config_cache_for_test;
 
-pub(crate) use builtins::deploy_generated_build_dir;
+pub use builtins::deploy_generated_build_dir;
 pub(crate) use builtins::extension_provided_direct_test_file_suffixes;
 pub(crate) use builtins::extension_provided_test_drift_config;
 
