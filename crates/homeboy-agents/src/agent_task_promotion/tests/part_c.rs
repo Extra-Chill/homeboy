@@ -531,6 +531,59 @@ fn promote_applies_patch_with_fake_workspace_provider() {
 }
 
 #[test]
+fn promote_persists_force_added_ignored_git_candidate_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let worktree_path = temp.path().join("controlled-worktree");
+    std::fs::create_dir(&worktree_path).expect("worktree");
+    git(&worktree_path, &["init"]);
+    git(
+        &worktree_path,
+        &["config", "user.email", "test@example.com"],
+    );
+    git(&worktree_path, &["config", "user.name", "Test"]);
+    std::fs::create_dir_all(worktree_path.join("src")).expect("src");
+    std::fs::write(worktree_path.join("src/lib.rs"), "old\n").expect("base source");
+    git(&worktree_path, &["add", "."]);
+    git(&worktree_path, &["commit", "-m", "base"]);
+    let (source_path, source) = write_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(worktree_path),
+        force_add_ignored_file: true,
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("run-8935".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "repo@controlled-worktree".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("promotion accepts the force-added ignored candidate file");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(
+        report.changed_files,
+        vec![
+            "ignored/nested/force-added.rs".to_string(),
+            "src/lib.rs".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn promote_materializes_worktree_dependencies_before_verify_gate() {
     // #3771: a freshly created worktree has no installed dependencies, so a
     // verify gate that touches autoloaded deps fatals on missing deps

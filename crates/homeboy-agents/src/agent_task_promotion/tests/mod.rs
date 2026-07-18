@@ -55,6 +55,7 @@ pub(super) struct FakePromotionWorkspaceProvider {
     )>,
     verify_exit_code: i32,
     verify_transport_error: bool,
+    force_add_ignored_file: bool,
 }
 
 impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
@@ -73,6 +74,17 @@ impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
                 None,
             )
         })?;
+        if self.force_add_ignored_file {
+            git(&path, &["apply", &request.patch_path]);
+            std::fs::write(path.join(".git/info/exclude"), "ignored/\n")
+                .expect("ignore nested candidate file");
+            let ignored = path.join("ignored/nested/force-added.rs");
+            std::fs::create_dir_all(ignored.parent().expect("ignored parent"))
+                .expect("create ignored nested directory");
+            std::fs::write(&ignored, "pub const FORCED: bool = true;\n")
+                .expect("write ignored nested candidate file");
+            git(&path, &["add", "-f", "ignored/nested/force-added.rs"]);
+        }
         Ok(AgentTaskPromotionWorkspace {
             path,
             command_evidence: vec![command_report(vec![
