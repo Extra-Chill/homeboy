@@ -24,11 +24,9 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
         ));
     }
 
-    // Classify how live cancellation can be performed for this run BEFORE we
-    // mutate the durable record, so we can record either a real termination or
-    // deterministic operator recovery instructions (acceptance: never force
-    // manual process spelunking; always surface pids + safe commands).
-    let cancellation = if record.state == AgentTaskRunState::Running {
+    // Cancel a runner job before terminalizing its controller record, including
+    // the pre-provider queued state where it may still hold daemon capacity.
+    let cancellation = if record.state == AgentTaskRunState::Running || record.is_runner_backed() {
         classify_live_cancellation(&record)?
     } else {
         LiveCancellationOutcome::NotRunning
