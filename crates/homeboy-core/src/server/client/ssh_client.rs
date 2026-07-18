@@ -389,40 +389,6 @@ impl SshClient {
         self.execute_ssh_with_timeout(&effective, None, timeout)
     }
 
-    /// Execute a bounded SSH operation, retrying only failures that indicate the
-    /// transport closed before the remote command could complete. Each retry
-    /// starts a new SSH invocation, allowing a dead control-master connection to
-    /// be re-established without retrying remote command failures.
-    pub fn execute_with_retry_and_timeout(
-        &self,
-        command: &str,
-        timeout: Duration,
-    ) -> CommandOutput {
-        let effective = self.prepend_env(command);
-        if self.is_local {
-            return execute_local_command_in_dir_with_timeout(&effective, None, None, timeout);
-        }
-
-        let backoff_secs = [0, 2, 5];
-        for attempt in 0..3 {
-            let result = self.execute_ssh_with_timeout(&effective, None, timeout);
-            if result.success || attempt == 2 || !is_transient_ssh_error(&result) {
-                return result;
-            }
-
-            let delay = backoff_secs[attempt + 1];
-            log_status!(
-                "ssh",
-                "Bounded connection failed (attempt {}/3), re-establishing SSH session in {}s...",
-                attempt + 1,
-                delay
-            );
-            thread::sleep(Duration::from_secs(delay));
-        }
-
-        unreachable!("the final SSH retry always returns")
-    }
-
     /// Execute `command` with secret env vars delivered over stdin instead of
     /// interpolated into the SSH command argv.
     ///

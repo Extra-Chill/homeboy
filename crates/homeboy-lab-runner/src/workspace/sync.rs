@@ -1259,7 +1259,7 @@ fn retry_idempotent_ssh_operation(
 fn workspace_metadata_ssh_error(output: &CommandOutput) -> Error {
     let stdout = bounded_workspace_metadata_output(&output.stdout);
     let stderr = bounded_workspace_metadata_output(&output.stderr);
-    let transport_closed = homeboy_core::server::is_transient_ssh_error(&output);
+    let transport_closed = homeboy_core::server::is_transient_ssh_error(output);
     let close_reason = transport_closed.then(|| {
         stderr
             .lines()
