@@ -545,8 +545,10 @@ fn validate_durable_publication_eligibility(
         .pointer("/candidate/fingerprint/head")
         .and_then(serde_json::Value::as_str);
     let adoption_model = promotion.provenance["adoption"]["ai_model"].as_str();
-    let authenticated_adoption = lifecycle.execution.state == RunExecutionState::Cancelled
-        && lifecycle.provider_runtime.is_empty()
+    let authenticated_adoption = matches!(
+        lifecycle.execution.state,
+        RunExecutionState::Cancelled | RunExecutionState::Failed
+    ) && lifecycle.provider_runtime.is_empty()
         && promotion.provenance["adoption"]["source_run_id"]
             == promotion.source.run_id.clone().unwrap_or_default()
         && candidate_ref.is_some_and(is_git_commit_identity)
