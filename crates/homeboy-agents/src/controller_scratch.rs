@@ -239,6 +239,70 @@ pub struct ControllerScratchCleanupOptions {
     pub limit: usize,
 }
 
+/// Read-only lifecycle inventory used by retained-storage reporting. Unlike
+/// cleanup, this neither reconciles leases nor writes the scratch index.
+#[derive(Debug, Serialize)]
+pub struct ControllerScratchRetainedResource {
+    pub path: String,
+    pub run_id: String,
+    pub task_id: String,
+    pub owner_pid: u32,
+    pub lifecycle_state: String,
+    pub reason: String,
+    pub liveness: String,
+    pub age_seconds: Option<u64>,
+    pub size_bytes: u64,
+}
+
+pub fn retained_storage_inventory() -> Result<Vec<ControllerScratchRetainedResource>> {
+    let index_path = index_path()?;
+    with_index_lock(&index_path, || {
+        let index = read_index_unlocked()?;
+        let now = chrono::Utc::now();
+        let mut resources = Vec::new();
+        for resource in index.resources {
+            let path = PathBuf::from(&resource.path);
+            if !path.exists() {
+                continue;
+            }
+            let (reason, liveness) = if !resource.reconstructable {
+                (
+                    "resource is not explicitly reconstructable",
+                    "unknown/unmanaged",
+                )
+            } else if homeboy_core::process::pid_is_running(resource.owner_pid) {
+                ("owner process is still running", "active")
+            } else if resource.finalized_at.is_none() {
+                ("resource has not been finalized by its owning run", "stale")
+            } else {
+                (
+                    "retention policy has not been advanced by cleanup",
+                    "terminal",
+                )
+            };
+            let age_seconds = chrono::DateTime::parse_from_rfc3339(&resource.created_at)
+                .ok()
+                .map(|created| {
+                    now.signed_duration_since(created.with_timezone(&chrono::Utc))
+                        .num_seconds()
+                        .max(0) as u64
+                });
+            resources.push(ControllerScratchRetainedResource {
+                path: resource.path,
+                run_id: resource.run_id,
+                task_id: resource.task_id,
+                owner_pid: resource.owner_pid,
+                lifecycle_state: resource.lifecycle_state,
+                reason: reason.to_string(),
+                liveness: liveness.to_string(),
+                age_seconds,
+                size_bytes: path_size(&path)?,
+            });
+        }
+        Ok(resources)
+    })
+}
+
 /// Registers provider-created controller scratch returned in an outcome's
 /// `metadata.controller_scratch` object or array. Providers own materializing
 /// the path; Homeboy owns its durable lifecycle and cleanup policy.

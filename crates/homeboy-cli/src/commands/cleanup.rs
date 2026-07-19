@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -78,6 +78,20 @@ pub enum CleanupCommand {
 
     /// Aggregate cleanup across configured external worktree providers
     Worktrees(CleanupWorktreesArgs),
+
+    /// Explain retained Homeboy storage without deleting or reconciling resources.
+    RetainedStorage(CleanupRetainedStorageArgs),
+}
+
+#[derive(Args)]
+pub struct CleanupRetainedStorageArgs {
+    /// Maximum largest-byte examples to return. The report always aggregates all inspected sources.
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+
+    /// Continue largest-byte examples after this deterministic reference token.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Args)]
@@ -185,7 +199,265 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Value> {
             })
         })
         .map(|output| (output, 0)),
+        Some(CleanupCommand::RetainedStorage(args)) => retained_storage_report(args)
+            .and_then(|output| {
+                serde_json::to_value(output).map_err(|err| {
+                    homeboy::core::Error::internal_json(
+                        err.to_string(),
+                        Some("serialize retained storage report".to_string()),
+                    )
+                })
+            })
+            .map(|output| (output, 0)),
         None => cleanup_inventory(args).map(|output| (output, 0)),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct RetainedStorageRecord {
+    category: String,
+    reason: String,
+    owner: String,
+    run_id: Option<String>,
+    liveness: String,
+    age: String,
+    age_seconds: Option<u64>,
+    size_bytes: u64,
+    reference: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct RetainedStorageAggregate {
+    key: String,
+    count: usize,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct RetainedStorageReport {
+    command: &'static str,
+    mode: &'static str,
+    inspected_count: usize,
+    retained_count: usize,
+    retained_bytes: u64,
+    by_category: Vec<RetainedStorageAggregate>,
+    by_reason: Vec<RetainedStorageAggregate>,
+    by_owner: Vec<RetainedStorageAggregate>,
+    by_liveness: Vec<RetainedStorageAggregate>,
+    by_age: Vec<RetainedStorageAggregate>,
+    largest_examples: Vec<RetainedStorageRecord>,
+    continuation: Option<String>,
+    safe_next_commands: Vec<String>,
+    sqlite: RetainedStorageSqlite,
+}
+
+#[derive(Debug, Serialize)]
+struct RetainedStorageSqlite {
+    path: String,
+    exists: bool,
+    size_bytes: u64,
+    status_command: &'static str,
+    compaction: &'static str,
+}
+
+fn retained_storage_report(
+    args: CleanupRetainedStorageArgs,
+) -> homeboy::core::Result<RetainedStorageReport> {
+    if args.limit == 0 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "limit",
+            "--limit must be positive",
+            None,
+            None,
+        ));
+    }
+
+    let mut records = Vec::new();
+    let runtime = controller_runtime::retention_report()?;
+    for snapshot in runtime.snapshots {
+        if snapshot.eligible {
+            continue;
+        }
+        records.push(RetainedStorageRecord {
+            category: "controller_runtimes".to_string(),
+            reason: snapshot.retention_reasons.join(", "),
+            owner: snapshot.identity,
+            run_id: None,
+            liveness: "lifecycle_pinned".to_string(),
+            age: age_bucket(snapshot.age_seconds),
+            age_seconds: Some(snapshot.age_seconds),
+            size_bytes: snapshot.size_bytes,
+            reference: snapshot.path.display().to_string(),
+        });
+    }
+
+    let retention = defaults::load_config().retention;
+    let cargo = cleanup::shared_cargo_target_inventory(
+        None,
+        std::time::SystemTime::now(),
+        Duration::from_secs(retention.shared_store_days.saturating_mul(86_400)),
+        Duration::from_secs(retention.shared_store_lease_seconds),
+    )?;
+    for store in cargo {
+        let reason = if store
+            .reasons
+            .iter()
+            .any(|reason| reason.starts_with("skipped:"))
+        {
+            store.reasons.join(", ")
+        } else if store.reasons.iter().any(|reason| reason == "active_lease") {
+            "active lease".to_string()
+        } else if !store.reasons.iter().any(|reason| reason == "age_expired") {
+            "within age and size budget".to_string()
+        } else {
+            continue;
+        };
+        let liveness = if reason == "active lease" {
+            "active"
+        } else {
+            "unknown"
+        };
+        records.push(RetainedStorageRecord {
+            category: "shared_cargo_targets".to_string(),
+            reason,
+            owner: store
+                .owner
+                .unwrap_or_else(|| "unknown/unmanaged".to_string()),
+            run_id: None,
+            liveness: liveness.to_string(),
+            age: "unknown".to_string(),
+            age_seconds: None,
+            size_bytes: store.size_bytes,
+            reference: store.path,
+        });
+    }
+
+    for resource in homeboy::agents::controller_scratch::retained_storage_inventory()? {
+        records.push(RetainedStorageRecord {
+            category: "controller_scratch".to_string(),
+            reason: resource.reason,
+            owner: format!("pid {}", resource.owner_pid),
+            run_id: Some(resource.run_id),
+            liveness: resource.liveness,
+            age: resource
+                .age_seconds
+                .map(age_bucket)
+                .unwrap_or_else(|| "unknown".to_string()),
+            age_seconds: resource.age_seconds,
+            size_bytes: resource.size_bytes,
+            reference: format!("{} (task {})", resource.path, resource.task_id),
+        });
+    }
+
+    let database_path = homeboy::core::observation::store::database_path()?;
+    let metadata = std::fs::metadata(&database_path).ok();
+    let sqlite = RetainedStorageSqlite {
+        path: database_path.display().to_string(),
+        exists: metadata.is_some(),
+        size_bytes: metadata.as_ref().map_or(0, std::fs::Metadata::len),
+        status_command: "homeboy db status",
+        compaction: "SQLite compaction is explicitly delegated; inspect status before selecting an operator-managed VACUUM workflow.",
+    };
+    if sqlite.exists {
+        records.push(RetainedStorageRecord {
+            category: "sqlite_observation_store".to_string(),
+            reason: "durable lifecycle database; compaction delegated".to_string(),
+            owner: "homeboy".to_string(),
+            run_id: None,
+            liveness: "managed".to_string(),
+            age: "unknown".to_string(),
+            age_seconds: None,
+            size_bytes: sqlite.size_bytes,
+            reference: sqlite.path.clone(),
+        });
+    }
+
+    Ok(build_retained_storage_report(
+        records,
+        args.limit,
+        args.cursor.as_deref(),
+        sqlite,
+    ))
+}
+
+fn build_retained_storage_report(
+    mut records: Vec<RetainedStorageRecord>,
+    limit: usize,
+    cursor: Option<&str>,
+    sqlite: RetainedStorageSqlite,
+) -> RetainedStorageReport {
+    records.sort_by(|left, right| {
+        right
+            .size_bytes
+            .cmp(&left.size_bytes)
+            .then_with(|| left.reference.cmp(&right.reference))
+    });
+    let inspected_count = records.len();
+    let retained_bytes = records.iter().map(|record| record.size_bytes).sum();
+    let start = cursor
+        .and_then(|cursor| records.iter().position(|record| record.reference == cursor))
+        .map_or(0, |index| index + 1);
+    let examples: Vec<_> = records.iter().skip(start).take(limit).cloned().collect();
+    let continuation = (start + examples.len() < records.len()).then(|| {
+        let cursor = examples.last().expect("continuation requires an example");
+        format!(
+            "homeboy cleanup retained-storage --limit {} --cursor {}",
+            limit,
+            quote_arg(&cursor.reference)
+        )
+    });
+    RetainedStorageReport {
+        command: "cleanup.retained_storage",
+        mode: "report",
+        inspected_count,
+        retained_count: inspected_count,
+        retained_bytes,
+        by_category: aggregate_retained(&records, |record| record.category.clone()),
+        by_reason: aggregate_retained(&records, |record| record.reason.clone()),
+        by_owner: aggregate_retained(&records, |record| match &record.run_id {
+            Some(run_id) => format!("{} (run {run_id})", record.owner),
+            None => record.owner.clone(),
+        }),
+        by_liveness: aggregate_retained(&records, |record| record.liveness.clone()),
+        by_age: aggregate_retained(&records, |record| record.age.clone()),
+        largest_examples: examples,
+        continuation,
+        safe_next_commands: vec![
+            "homeboy cleanup --include controller-scratch".to_string(),
+            "homeboy cleanup --include controller-runtimes".to_string(),
+            "homeboy cleanup --include shared-cargo-targets".to_string(),
+            "homeboy db status".to_string(),
+        ],
+        sqlite,
+    }
+}
+
+fn aggregate_retained(
+    records: &[RetainedStorageRecord],
+    key: impl Fn(&RetainedStorageRecord) -> String,
+) -> Vec<RetainedStorageAggregate> {
+    let mut totals: BTreeMap<String, (usize, u64)> = BTreeMap::new();
+    for record in records {
+        let entry = totals.entry(key(record)).or_default();
+        entry.0 += 1;
+        entry.1 += record.size_bytes;
+    }
+    totals
+        .into_iter()
+        .map(|(key, (count, size_bytes))| RetainedStorageAggregate {
+            key,
+            count,
+            size_bytes,
+        })
+        .collect()
+}
+
+fn age_bucket(age_seconds: u64) -> String {
+    match age_seconds {
+        0..=3_599 => "under_1h".to_string(),
+        3_600..=86_399 => "under_1d".to_string(),
+        86_400..=604_799 => "under_7d".to_string(),
+        _ => "7d_or_more".to_string(),
     }
 }
 
@@ -1296,6 +1568,120 @@ mod tests {
         assert!(args.include.contains(&CleanupCategoryArg::RepoArtifacts));
         assert!(args.include.contains(&CleanupCategoryArg::TaskWorktrees));
         assert_eq!(args.exclude, vec![CleanupCategoryArg::RuntimeTmp]);
+    }
+
+    #[test]
+    fn retained_storage_cli_accepts_a_bounded_example_limit() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "cleanup",
+            "retained-storage",
+            "--limit",
+            "3",
+            "--cursor",
+            "prior-reference",
+        ]);
+
+        let Commands::Cleanup(args) = cli.command else {
+            panic!("expected cleanup command");
+        };
+        let Some(CleanupCommand::RetainedStorage(args)) = args.command else {
+            panic!("expected retained storage command");
+        };
+        assert_eq!(args.limit, 3);
+        assert_eq!(args.cursor.as_deref(), Some("prior-reference"));
+    }
+
+    #[test]
+    fn retained_storage_aggregation_is_bounded_and_groups_lifecycle_dimensions() {
+        let records = vec![
+            RetainedStorageRecord {
+                category: "controller_runtimes".to_string(),
+                reason: "referenced by recoverable run".to_string(),
+                owner: "runtime-a".to_string(),
+                run_id: Some("run-1".to_string()),
+                liveness: "lifecycle_pinned".to_string(),
+                age: "under_1d".to_string(),
+                age_seconds: Some(7_200),
+                size_bytes: 30,
+                reference: "runtime-a".to_string(),
+            },
+            RetainedStorageRecord {
+                category: "shared_cargo_targets".to_string(),
+                reason: "active lease".to_string(),
+                owner: "cook-1".to_string(),
+                run_id: None,
+                liveness: "active".to_string(),
+                age: "unknown".to_string(),
+                age_seconds: None,
+                size_bytes: 50,
+                reference: "target-a".to_string(),
+            },
+            RetainedStorageRecord {
+                category: "shared_cargo_targets".to_string(),
+                reason: "within age and size budget".to_string(),
+                owner: "cook-2".to_string(),
+                run_id: None,
+                liveness: "unknown".to_string(),
+                age: "under_7d".to_string(),
+                age_seconds: Some(172_800),
+                size_bytes: 20,
+                reference: "target-b".to_string(),
+            },
+        ];
+        let report = build_retained_storage_report(
+            records,
+            2,
+            None,
+            RetainedStorageSqlite {
+                path: "homeboy.sqlite".to_string(),
+                exists: true,
+                size_bytes: 10,
+                status_command: "homeboy db status",
+                compaction: "delegated",
+            },
+        );
+
+        assert_eq!(report.retained_count, 3);
+        assert_eq!(report.retained_bytes, 100);
+        assert_eq!(report.largest_examples.len(), 2);
+        assert_eq!(report.largest_examples[0].reference, "target-a");
+        assert_eq!(
+            report.continuation.as_deref(),
+            Some("homeboy cleanup retained-storage --limit 2 --cursor runtime-a")
+        );
+        assert!(report
+            .by_category
+            .iter()
+            .any(|row| row.key == "shared_cargo_targets"
+                && row.count == 2
+                && row.size_bytes == 70));
+        assert!(report
+            .by_owner
+            .iter()
+            .any(|row| row.key == "runtime-a (run run-1)"));
+        assert!(report
+            .by_liveness
+            .iter()
+            .any(|row| row.key == "active" && row.size_bytes == 50));
+        assert!(report
+            .by_age
+            .iter()
+            .any(|row| row.key == "under_1d" && row.size_bytes == 30));
+        let continuation = build_retained_storage_report(
+            report.largest_examples.clone(),
+            1,
+            Some("target-a"),
+            RetainedStorageSqlite {
+                path: "homeboy.sqlite".to_string(),
+                exists: true,
+                size_bytes: 10,
+                status_command: "homeboy db status",
+                compaction: "delegated",
+            },
+        );
+        assert_eq!(continuation.largest_examples[0].reference, "runtime-a");
+        assert_eq!(age_bucket(3_600), "under_1d");
     }
 
     #[test]
