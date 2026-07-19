@@ -80,8 +80,7 @@ pub(super) fn exec_via_daemon(
         source: Some("runner-daemon".to_string()),
         kind: Some("runner.exec".to_string()),
         durable_run_id: run_id.clone(),
-        active_child_count: None,
-        active_cell_count: None,
+        ..Default::default()
     };
     let payload = json!({
         "runner_id": runner.id,

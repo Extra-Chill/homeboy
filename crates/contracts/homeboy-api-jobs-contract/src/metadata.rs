@@ -25,7 +25,7 @@ pub struct JobArtifactMetadata {
     pub metadata: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerJobLifecycleMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,

@@ -93,8 +93,7 @@ pub(super) fn exec_via_reverse_broker(
             source: Some("reverse-broker".to_string()),
             kind: Some("runner.exec".to_string()),
             durable_run_id: run_id.clone(),
-            active_child_count: None,
-            active_cell_count: None,
+            ..Default::default()
         }),
         require_paths: require_paths.clone(),
     };
