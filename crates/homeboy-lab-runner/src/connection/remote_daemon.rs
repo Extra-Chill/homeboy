@@ -47,7 +47,7 @@ pub(super) fn remote_homeboy_version(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RemoteHomeboyIdentity {
     pub(super) version: String,
-    pub(super) display: String,
+    pub(super) build_identity: Option<String>,
 }
 
 pub(super) fn remote_homeboy_identity(
@@ -65,7 +65,7 @@ pub(super) fn remote_homeboy_identity(
     let version = remote_homeboy_version(client, homeboy)?;
     Ok(RemoteHomeboyIdentity {
         version: normalize_homeboy_version_owned(&version),
-        display: version,
+        build_identity: None,
     })
 }
 
@@ -77,21 +77,51 @@ pub(super) fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyId
         .get("display")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(version);
+        .filter(|value| immutable_build_identity(value));
     if version.is_empty() {
         return None;
     }
+    let build_identity = display.map(str::to_string).or_else(|| {
+        let commit = data
+            .get("git_commit")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let dirty = data
+            .get("git_dirty")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Some(format!(
+            "homeboy {}+{}{}",
+            normalize_homeboy_version_owned(version),
+            commit,
+            if dirty { "-dirty" } else { "" }
+        ))
+    });
     Some(RemoteHomeboyIdentity {
         version: version.to_string(),
-        display: display.to_string(),
+        build_identity,
     })
 }
 
-pub(super) fn identities_match(left: Option<&str>, right: Option<&str>) -> bool {
+fn immutable_build_identity(identity: &str) -> bool {
+    normalize_homeboy_version_owned(identity)
+        .split_once('+')
+        .is_some_and(|(version, commit)| !version.is_empty() && !commit.is_empty())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IdentityComparison {
+    Match,
+    Mismatch,
+    Unverifiable,
+}
+
+pub(super) fn compare_identities(left: Option<&str>, right: Option<&str>) -> IdentityComparison {
     match (left, right) {
-        (Some(left), Some(right)) => versions_match(left, right),
-        _ => false,
+        (Some(left), Some(right)) if versions_match(left, right) => IdentityComparison::Match,
+        (Some(_), Some(_)) => IdentityComparison::Mismatch,
+        _ => IdentityComparison::Unverifiable,
     }
 }
 

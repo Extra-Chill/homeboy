@@ -472,7 +472,7 @@ fn runner_connect_persists_recovery_evidence_after_daemon_failure() {
             r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
-printf '%s\n' '{"success":true,"data":{"version":"0.284.0","display":"test"}}'
+printf '%s\n' '{"success":true,"data":{"version":"0.284.0","display":"homeboy 0.284.0+test"}}'
 ;;
 "daemon reconcile-leaseless-orphans")
 if [ "$3" = "--help" ]; then
@@ -546,7 +546,7 @@ esac
             evidence.contract,
             RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner
         );
-        assert_eq!(evidence.remote_command_identity, "test");
+        assert_eq!(evidence.remote_command_identity, "homeboy 0.284.0+test");
         assert_eq!(
             evidence
                 .recovery

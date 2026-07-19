@@ -589,6 +589,26 @@ impl RunnerStaleDaemonWarning {
         }
     }
 
+    pub fn with_identity_unverifiable(
+        mut self,
+        runner_id: &str,
+        configured_executable: &str,
+        unverifiable: bool,
+    ) -> Self {
+        if unverifiable {
+            self.message = format!(
+                "connected runner daemon build identity could not be verified against configured executable `{configured_executable}`; run `{} self identity` on the runner and ensure it reports `git_commit` or an exact `display`, then run recovery_commands if needed",
+                shell::quote_arg(configured_executable),
+            );
+            self.recovery_commands = vec![format!(
+                "homeboy runner refresh-homeboy {} --reconnect",
+                shell::quote_arg(runner_id),
+            )];
+            self.refresh_command = self.recovery_commands.join(" && ");
+        }
+        self
+    }
+
     pub fn with_runtime_paths(
         mut self,
         runner_id: &str,
