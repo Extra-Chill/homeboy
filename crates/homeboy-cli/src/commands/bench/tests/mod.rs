@@ -83,7 +83,7 @@ for scenario in $selected; do
     artifacts=", \"artifacts\": { \"visual_comparison_dir\": { \"path\": \"$visual_comparison_dir\", \"type\": \"directory\" } }"
   fi
   cat >> "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
-    $comma{ "id": "$scenario", "iterations": ${HOMEBOY_BENCH_ITERATIONS:-0}, "metrics": { "p95_ms": 1.0, "warmup_iterations": ${HOMEBOY_BENCH_WARMUP_ITERATIONS:--1} }$artifacts }
+    $comma{ "id": "$scenario", "iterations": ${HOMEBOY_BENCH_ITERATIONS:-0}, "metrics": { "p95_ms": 1.0, "warmup_iterations": ${HOMEBOY_BENCH_WARMUP_ITERATIONS:--1}, "bench_env_projected": $(if [ "$BENCH_ENV_PROJECTION" = "present" ]; then printf 1; else printf 0; fi) }$artifacts }
 JSON
   comma=",
 "

@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn local_rig_workloads_receive_dotted_and_typed_bench_env_settings() {
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let component = tempfile::TempDir::new().expect("component");
+        install_rig_package(home, "env-projection-rig", "studio", component.path());
+
+        for setting_args in [
+            SettingArgs {
+                setting: vec![(
+                    "bench_env.BENCH_ENV_PROJECTION".to_string(),
+                    "present".to_string(),
+                )],
+                ..Default::default()
+            },
+            SettingArgs {
+                setting_json: vec![(
+                    "bench_env".to_string(),
+                    serde_json::json!({ "BENCH_ENV_PROJECTION": "present" }),
+                )],
+                ..Default::default()
+            },
+        ] {
+            let mut args = run_args(None, vec!["env-projection-rig".to_string()], Vec::new());
+            args.run.setting_args = setting_args;
+            let (output, exit_code) =
+                run(args, &GlobalArgs {}).expect("local rig bench should run");
+
+            assert_eq!(exit_code, 0);
+            let BenchOutput::Single(output) = output else {
+                panic!("expected single bench output");
+            };
+            assert_eq!(
+                output.results.expect("results").scenarios[0]
+                    .metrics
+                    .get("bench_env_projected"),
+                Some(1.0),
+            );
+        }
+    });
+}
+
+#[test]
 fn single_rig_run_records_installed_rig_package_evidence_in_metadata() {
     with_isolated_home(|home| {
         write_bench_extension(home);

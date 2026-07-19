@@ -204,6 +204,13 @@ pub(crate) fn build_runner(
     .passthrough(false)
     .stderr_passthrough(bench_progress_enabled());
 
+    // Rig workloads receive bench_env as direct child-process variables. Add
+    // these before runner and CI environment so those explicit scopes retain
+    // their established override precedence.
+    for (key, value) in bench_env_vars(&args.settings, &args.settings_json) {
+        runner = runner.env(&key, &value);
+    }
+
     for (key, value) in &args.ci_env {
         runner = runner.env(key, value);
     }
@@ -235,6 +242,34 @@ pub(crate) fn build_runner(
     }
 
     Ok(runner)
+}
+
+fn bench_env_vars(
+    settings: &[(String, String)],
+    settings_json: &[(String, serde_json::Value)],
+) -> Vec<(String, String)> {
+    let mut env = settings
+        .iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("bench_env.")
+                .filter(|key| !key.is_empty() && !key.contains('.'))
+                .map(|key| (key.to_string(), value.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    if let Some((_, serde_json::Value::Object(values))) = settings_json
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "bench_env")
+    {
+        for (key, value) in values {
+            if let Some(value) = value.as_str() {
+                env.insert(key.clone(), value.to_string());
+            }
+        }
+    }
+
+    env.into_iter().collect()
 }
 
 pub(crate) fn clear_responsiveness_file(run_dir: &RunDir) -> Result<()> {
@@ -269,6 +304,39 @@ pub(crate) fn bench_progress_env_value() -> &'static str {
         "1"
     } else {
         "0"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bench_env_vars_projects_string_values_only() {
+        assert_eq!(
+            bench_env_vars(
+                &[],
+                &[(
+                    "bench_env".to_string(),
+                    serde_json::json!({ "FIXTURE": "/tmp/source.fig", "RETRIES": 2 }),
+                )]
+            ),
+            vec![("FIXTURE".to_string(), "/tmp/source.fig".to_string())]
+        );
+    }
+
+    #[test]
+    fn bench_env_vars_normalizes_dotted_overrides_before_typed_json() {
+        assert_eq!(
+            bench_env_vars(
+                &[("bench_env.FIXTURE".to_string(), "dotted".to_string())],
+                &[(
+                    "bench_env".to_string(),
+                    serde_json::json!({ "FIXTURE": "typed" })
+                )],
+            ),
+            vec![("FIXTURE".to_string(), "typed".to_string())]
+        );
     }
 }
 
