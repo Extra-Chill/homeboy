@@ -27,14 +27,14 @@ pub(crate) fn set_run_state(record: &mut AgentTaskRunRecord, state: AgentTaskRun
     if state == AgentTaskRunState::Running && record.lifecycle.execution.started_at.is_none() {
         record.lifecycle.execution.started_at = Some(timestamp.clone());
     }
-    if matches!(
-        state,
-        AgentTaskRunState::Succeeded
-            | AgentTaskRunState::PartialRecoverable
-            | AgentTaskRunState::PartialFailure
-            | AgentTaskRunState::Failed
-            | AgentTaskRunState::Cancelled
-    ) {
+    // A terminal run has finished executing, so stamp `finished_at`. Use the
+    // canonical terminal set (`is_terminal`) rather than a hand-listed subset:
+    // the previous inline list omitted `CandidateRecoverable`, so a run that
+    // finished with a recoverable candidate never got a `finished_at` here —
+    // while the legacy-record migration path (`health.rs`) stamps it for every
+    // non-Queued/Running state. This aligns the live setter with that path and
+    // with the single terminal definition.
+    if state.is_terminal() {
         record.lifecycle.execution.finished_at = Some(timestamp.clone());
     }
     record.lifecycle.updated_at = Some(timestamp);
