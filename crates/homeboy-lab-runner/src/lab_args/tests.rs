@@ -1647,6 +1647,45 @@ mod materialize_specs_tests {
     }
 
     #[test]
+    fn controller_attempt_plan_ignores_truncated_legacy_tasks_json() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plan = serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "controller-plan",
+            "tasks": [{ "task_id": "task-1", "instructions": "test" }]
+        })
+        .to_string();
+        let truncated_legacy_tasks = "[\n  {\n    \"prompt\": \"from an old workspace";
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--tasks".to_string(),
+            truncated_legacy_tasks.to_string(),
+            "--attempt-plan".to_string(),
+            plan,
+        ];
+
+        let mut synced = Vec::new();
+        let out = materialize_agent_task_specs_in_args(&args, &[], temp.path(), |spec| {
+            synced.push((spec.role, spec.spec.to_string()));
+            Ok(Some((format!("@/remote/{}", spec.filename), spec.role)))
+        })
+        .expect("authoritative attempt plan must bound Lab handoff parsing");
+
+        assert_eq!(synced.len(), 1);
+        assert_eq!(synced[0].0, "agent_task_attempt_plan_remapped");
+        assert!(!synced[0].1.contains("old workspace"));
+        assert_eq!(out.argv[4], truncated_legacy_tasks);
+        assert_eq!(out.argv[6], "@/remote/agent-task-attempt-plan.json");
+        assert_eq!(out.workspace_entries.len(), 1);
+        assert_eq!(
+            out.workspace_entries[0].step_id,
+            "lab.sync_remapped_agent_task_attempt_plan"
+        );
+    }
+
+    #[test]
     fn materialize_agent_task_specs_remaps_and_stages_cook_attempt_plan_for_runner_harvest() {
         let temp = tempfile::tempdir().expect("tempdir");
         let controller = temp.path().join("controller/worktree");
