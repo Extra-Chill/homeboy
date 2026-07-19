@@ -1970,6 +1970,33 @@ fn enqueue_exec_job(
         "path_materialization_plan": path_materialization_plan,
         "lifecycle": lifecycle.clone(),
     });
+
+    // Idempotent resubmission: a daemon `/exec` is not idempotent at the
+    // transport layer — a dropped connection or timeout can hide that the daemon
+    // already accepted this work. When the controller resubmits the same
+    // controller-minted `durable_run_id`, return the job already enqueued for it
+    // instead of spawning a duplicate. Only non-terminal (Queued/Running) jobs
+    // dedupe; a terminal job for the same run id is finished, so a resubmission
+    // is a genuinely new attempt and falls through to a fresh enqueue.
+    if let Some(durable_run_id) = lifecycle
+        .as_ref()
+        .and_then(|lifecycle| lifecycle.durable_run_id.as_deref())
+    {
+        if let Some(existing) = job_store.active_runner_job_for_durable_run_id(durable_run_id) {
+            let existing_job_id = existing.id;
+            return Ok(json!({
+                "command": "api.runner.exec.enqueue",
+                "job": existing,
+                "poll": {
+                    "job": format!("/jobs/{existing_job_id}"),
+                    "events": format!("/jobs/{existing_job_id}/events"),
+                },
+                "request": summary,
+                "idempotent_resubmission": true,
+            }));
+        }
+    }
+
     let operation = "runner.exec".to_string();
     let mut run_ref_metadata = exec_request_run_ref_metadata(
         lifecycle.as_ref(),
