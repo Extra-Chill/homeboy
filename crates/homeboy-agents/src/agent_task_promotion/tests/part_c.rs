@@ -742,27 +742,29 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
 }
 
 #[test]
-fn explicit_candidate_commit_adoption_promotes_and_records_green_gate_handoff() {
+fn explicit_candidate_adoption_ignores_recoverable_provider_patch_selection() {
     let (temp, repo, base, candidate) = adopted_commit_repo();
     let mut provider = FakePromotionWorkspaceProvider {
         workspace_path: Some(repo.clone()),
         ..Default::default()
     };
 
-    let report = promote_with_provider(
-        adopted_commit_options(
-            &temp,
-            &repo,
-            base,
-            candidate.clone(),
-            VerifyGateOptions {
-                verify: vec!["cargo test --lib".to_string()],
-                ..Default::default()
-            },
-        ),
-        &mut provider,
-    )
-    .expect("candidate adoption promotes");
+    let mut options = adopted_commit_options(
+        &temp,
+        &repo,
+        base,
+        candidate.clone(),
+        VerifyGateOptions {
+            verify: vec!["cargo test --lib".to_string()],
+            ..Default::default()
+        },
+    );
+    let mut source: Value = serde_json::from_str(&options.source).expect("adoption outcome");
+    source["status"] = Value::String("candidate_recoverable".to_string());
+    options.source = source.to_string();
+
+    let report = promote_with_provider(options, &mut provider)
+        .expect("recoverable candidate adoption promotes committed changes");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(

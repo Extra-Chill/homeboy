@@ -392,7 +392,8 @@ pub(super) fn promote_with_provider_and_checkpoint(
         ));
     }
 
-    if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
+    if options.candidate_ref.is_none()
+        && outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
         && outcome
             .artifacts
             .iter()
