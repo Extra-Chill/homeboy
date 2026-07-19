@@ -50,7 +50,8 @@ fn is_reserved_runner_workspace_path(relative: &str) -> bool {
 pub use homeboy_source_snapshot_contract::workspace_content_identity::{
     workspace_content_hash_algorithm, WorkspaceContentManifest, WorkspaceContentManifestEntry,
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
-    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
 pub(crate) const WORKSPACE_CONTENT_DIAGNOSTIC_PATH_LIMIT: usize = 192;
@@ -1339,14 +1340,10 @@ pub(super) fn snapshot_archive_command(
     target_command: &str,
     excludes: &[String],
 ) -> String {
-    // `-h`/`--dereference` follows symlinks and archives their target contents
-    // instead of recording the link itself. Controller-native workspaces often
-    // wire local dependencies into the tree via symlinks (e.g. a `.ci/<dep>`
-    // entry pointing at a sibling checkout/worktree). Archiving those as plain
-    // links produces a runner snapshot whose links dangle, so embedded plan
-    // paths that traverse a symlinked dependency resolve to missing files on the
-    // runner. Dereferencing materializes the real dependency contents into the
-    // snapshot so offloaded plans find them at the remapped path (#3913).
+    // A Git-backed snapshot overlays this archive onto an exact checkout. Keep
+    // links whose resolved targets stay in the source tree so tracked Git links
+    // retain their identity. Materialize only external dependency links: their
+    // targets are unavailable at the runner, but plans may traverse them (#3913).
     let root_anchored = excludes
         .iter()
         .filter(|pattern| pattern.starts_with("./"))
@@ -1357,13 +1354,27 @@ pub(super) fn snapshot_archive_command(
         .cloned()
         .collect::<Vec<_>>();
     let archive = format!(
-        "COPYFILE_DISABLE=1 tar --no-xattrs -h -C {src} {exclude} -cf -",
+        "COPYFILE_DISABLE=1 tar --no-xattrs -C \"$stage/source\" {exclude} -cf -",
+        exclude = tar_exclude_args(&excludes),
+    );
+    let source_archive = format!(
+        "COPYFILE_DISABLE=1 tar --no-xattrs -C {src} {exclude} -cf -",
         src = shell::quote_arg(&local_path.display().to_string()),
         exclude = tar_exclude_args(&excludes),
     );
+    let prepare = |source_stream: &str| {
+        format!(
+        "root=$(pwd -P) && stage=$(mktemp -d \"${{TMPDIR:-/tmp}}/homeboy-snapshot.XXXXXX\") && trap 'rm -rf \"$stage\"' EXIT && mkdir -p \"$stage/source\" && {source_stream} | tar --no-xattrs -C \"$stage/source\" -xf - && export root stage && find \"$stage/source\" -type l -exec sh -c {resolve} sh {{}} \\;",
+        resolve = shell::quote_arg(&format!("stage_link=$1; relative=${{stage_link#\"$stage/source\"/}}; original=\"$root/$relative\"; target=$(realpath \"$original\") || exit; case \"$target\" in \"$root\"|\"$root\"/*) ;; *) rm -f \"$stage_link\" && mkdir -p \"$(dirname \"$stage_link\")\" && COPYFILE_DISABLE=1 tar --no-xattrs -h -C \"$root\" {} -cf - \"$relative\" | tar --no-xattrs -C \"$stage/source\" -xf - ;; esac", tar_exclude_args(&excludes))),
+    )
+    };
 
     if root_anchored.is_empty() {
-        return format!("{archive} . | {target_command}");
+        let prepare = prepare(&format!("{source_archive} ."));
+        return format!(
+            "(cd {src} && {prepare} && {archive} .) | {target_command}",
+            src = shell::quote_arg(&local_path.display().to_string())
+        );
     }
 
     let root_filter = root_anchored
@@ -1371,8 +1382,10 @@ pub(super) fn snapshot_archive_command(
         .map(|pattern| format!("! -path {}", shell::quote_arg(pattern)))
         .collect::<Vec<_>>()
         .join(" ");
+    let root_input = format!("find . -mindepth 1 -maxdepth 1 {root_filter} -print0",);
+    let prepare = prepare(&format!("({root_input}) | {source_archive} --null -T -"));
     format!(
-        "(cd {src} && find . -mindepth 1 -maxdepth 1 {root_filter} -print0) | {archive} --null -T - | {target_command}",
+        "(cd {src} && {prepare} && ({root_input}) | {archive} --null -T -) | {target_command}",
         src = shell::quote_arg(&local_path.display().to_string()),
     )
 }

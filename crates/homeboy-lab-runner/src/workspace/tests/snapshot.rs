@@ -1125,7 +1125,7 @@ fn snapshot_archive_command_disables_extended_attributes() {
 }
 
 #[test]
-fn snapshot_archive_command_dereferences_symlinked_dependencies() {
+fn snapshot_archive_command_selectively_dereferences_external_symlinked_dependencies() {
     // Symlinked plan dependencies (e.g. a `.ci/<dep>` link to a sibling
     // checkout) must be materialized into the runner snapshot so offloaded
     // plans whose embedded paths traverse the symlink resolve on the runner
@@ -1137,9 +1137,97 @@ fn snapshot_archive_command_dereferences_symlinked_dependencies() {
     );
 
     assert!(
-        command.contains("tar --no-xattrs -h "),
-        "snapshot tar must dereference symlinks: {command}"
+        command.contains("find \"$stage/source\" -type l -exec sh -c"),
+        "snapshot archive must inspect symlink targets: {command}"
     );
+    assert!(command.contains("tar --no-xattrs -h -C \"$root\""));
+    assert!(
+        !command.contains("cp -a . \"$stage/source\""),
+        "the staging tree must be populated by the exclusion-filtered tar stream: {command}"
+    );
+    assert!(
+        command.contains("tar --no-xattrs -C \"$stage/source\""),
+        "the final snapshot archive must preserve internal symlink entries: {command}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn git_backed_snapshot_preserves_tracked_internal_file_and_directory_links() {
+    use std::os::unix::fs::symlink;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("source");
+        let runner_root = tempfile::tempdir().expect("runner root");
+        fs::create_dir_all(source.join("shared")).expect("shared directory");
+        fs::create_dir_all(source.join("links")).expect("links directory");
+        fs::write(source.join("shared/helper.mjs"), "export default 1;\n").expect("helper");
+        fs::write(source.join("shared/tool.mjs"), "export default 2;\n").expect("tool");
+        symlink("../shared/helper.mjs", source.join("links/helper.mjs"))
+            .expect("internal file link");
+        symlink("../shared", source.join("links/shared")).expect("internal directory link");
+        git(&source, &["init", "-b", "main"]);
+        git(&source, &["add", "."]);
+        git(
+            &source,
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=test@homeboy.invalid",
+                "commit",
+                "-m",
+                "source",
+            ],
+        );
+
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-internal-links","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let (output, _) = sync_workspace(
+            "lab-internal-links",
+            RunnerWorkspaceSyncOptions {
+                path: source.display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Snapshot,
+                ..Default::default()
+            },
+        )
+        .expect("materialize Git-backed snapshot");
+        let remote = Path::new(&output.remote_path);
+
+        assert!(remote
+            .join("links/helper.mjs")
+            .symlink_metadata()
+            .expect("file link metadata")
+            .file_type()
+            .is_symlink());
+        assert!(remote
+            .join("links/shared")
+            .symlink_metadata()
+            .expect("directory link metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_link(remote.join("links/helper.mjs")).expect("file link target"),
+            Path::new("../shared/helper.mjs")
+        );
+        assert_eq!(
+            fs::read_link(remote.join("links/shared")).expect("directory link target"),
+            Path::new("../shared")
+        );
+        assert!(
+            git_output(remote, &["status", "--porcelain=v1"])
+                .expect("remote status")
+                .is_empty(),
+            "tracked internal links must not change the exact Git checkout"
+        );
+    });
 }
 
 #[test]
@@ -1783,14 +1871,26 @@ fn copy_snapshot_materializes_symlinked_dependency_contents() {
     let source = controller.path().join("primary");
     let dependency = controller.path().join("dependency");
     let dependency_file = dependency.join("packages/cli/dist/index.js");
+    let excluded_dependency_file = dependency.join("generated-state/secret.txt");
     std::fs::create_dir_all(dependency_file.parent().unwrap()).expect("dependency dir");
+    std::fs::create_dir_all(excluded_dependency_file.parent().unwrap())
+        .expect("excluded dependency dir");
     std::fs::write(&dependency_file, "#!/usr/bin/env node\n").expect("dependency file");
+    std::fs::write(&excluded_dependency_file, "controller-only\n")
+        .expect("excluded dependency file");
     std::fs::create_dir_all(source.join(".ci")).expect("ci dir");
     std::os::unix::fs::symlink(&dependency, source.join(".ci/dep")).expect("dep symlink");
 
     let destination = controller.path().join("snapshot");
-    crate::workspace::snapshot::copy_snapshot_to_directory(&source, &destination, &[])
-        .expect("copy snapshot");
+    crate::workspace::snapshot::copy_snapshot_to_directory(
+        &source,
+        &destination,
+        &[
+            "generated-state".to_string(),
+            "generated-state/**".to_string(),
+        ],
+    )
+    .expect("copy snapshot");
 
     let materialized = destination.join(".ci/dep/packages/cli/dist/index.js");
     assert!(
@@ -1800,5 +1900,11 @@ fn copy_snapshot_materializes_symlinked_dependency_contents() {
     assert_eq!(
         std::fs::read_to_string(&materialized).expect("materialized dependency file"),
         "#!/usr/bin/env node\n"
+    );
+    assert!(
+        !destination
+            .join(".ci/dep/generated-state/secret.txt")
+            .exists(),
+        "snapshot exclusions must also apply inside dereferenced dependencies"
     );
 }
