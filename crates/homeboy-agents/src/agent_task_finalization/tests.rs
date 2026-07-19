@@ -835,6 +835,36 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
     assert_eq!(report.review_dossier.ai_assistance.model, "GPT-5.5");
     assert!(backend.committed && backend.pushed && backend.created);
 
+    let mut failed_recovery_lifecycle = recovery_lifecycle.clone();
+    failed_recovery_lifecycle.execution.state = RunExecutionState::Failed;
+    failed_recovery_lifecycle
+        .provider_runtime
+        .push(ProviderRuntimeLifecycle {
+            task_id: "task".to_string(),
+            backend: "opencode".to_string(),
+            state: ProviderRuntimeState::Failed,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({ "evidence_source": "canonical_executor_outcome" }),
+        });
+    let mut failed_backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(failed_recovery_lifecycle.clone()),
+        gate_proof: Some({
+            let mut proof = pre_provider_adoption_gate_proof();
+            proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+            proof
+        }),
+        ..Default::default()
+    };
+    let mut failed_finalization_options = options();
+    failed_finalization_options.manual_finalization = false;
+    failed_finalization_options.changed_files = vec!["src/lib.rs".to_string()];
+    let failed_report = finalize_pr_with_backend(failed_finalization_options, &mut failed_backend)
+        .expect("authenticated failed transport recovery publishes");
+    assert_eq!(failed_report.status, "review_ready");
+    assert!(failed_backend.committed && failed_backend.pushed && failed_backend.created);
+
     let rejected = |lifecycle: RunLifecycleRecord, gate_proof: AgentTaskPrDurableGateProof| {
         let mut backend = MockBackend {
             changed_files: vec!["src/lib.rs".to_string()],
@@ -850,9 +880,9 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
         assert!(!backend.committed && !backend.pushed && !backend.created);
     };
 
-    rejected(recovery_lifecycle.clone(), successful_gate_proof());
+    rejected(failed_recovery_lifecycle.clone(), successful_gate_proof());
 
-    let mut provider_executed = recovery_lifecycle.clone();
+    let mut provider_executed = failed_recovery_lifecycle.clone();
     provider_executed
         .provider_runtime
         .push(ProviderRuntimeLifecycle {
@@ -860,39 +890,44 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
             backend: "provider".to_string(),
             state: ProviderRuntimeState::Cancelled,
             stream_uri: None,
-            external_runtime_ids: Vec::new(),
+            external_runtime_ids: vec![ExternalRuntimeId {
+                kind: "provider_run_id".to_string(),
+                value: "provider-actual-run".to_string(),
+                provider: Some("provider".to_string()),
+                url: None,
+            }],
             metadata: serde_json::Value::Null,
         });
     rejected(provider_executed, pre_provider_adoption_gate_proof());
 
     let mut legacy = pre_provider_adoption_gate_proof();
     legacy.promotion.provenance["adoption"]["recovery"] = serde_json::Value::Null;
-    rejected(recovery_lifecycle.clone(), legacy);
+    rejected(failed_recovery_lifecycle.clone(), legacy);
 
     let mut mismatched = pre_provider_adoption_gate_proof();
     mismatched.promotion.provenance["adoption"]["source_run_id"] = json!("other-run");
-    rejected(recovery_lifecycle.clone(), mismatched);
+    rejected(failed_recovery_lifecycle.clone(), mismatched);
 
     let mut unbound_candidate = pre_provider_adoption_gate_proof();
     unbound_candidate.promotion.provenance["candidate"] = serde_json::Value::Null;
-    rejected(recovery_lifecycle.clone(), unbound_candidate);
+    rejected(failed_recovery_lifecycle.clone(), unbound_candidate);
 
     let mut mismatched_head = pre_provider_adoption_gate_proof();
     mismatched_head.promotion.provenance["candidate"]["fingerprint"]["head"] =
         json!("0000000000000000000000000000000000000000");
-    rejected(recovery_lifecycle.clone(), mismatched_head);
+    rejected(failed_recovery_lifecycle.clone(), mismatched_head);
 
     let mut missing_head = pre_provider_adoption_gate_proof();
     missing_head.promotion.provenance["candidate"]["fingerprint"]["head"] = json!("");
-    rejected(recovery_lifecycle.clone(), missing_head);
+    rejected(failed_recovery_lifecycle.clone(), missing_head);
 
     let mut missing_model = pre_provider_adoption_gate_proof();
     missing_model.promotion.provenance["adoption"]["ai_model"] = serde_json::Value::Null;
-    rejected(recovery_lifecycle.clone(), missing_model);
+    rejected(failed_recovery_lifecycle.clone(), missing_model);
 
     let mut non_green = pre_provider_adoption_gate_proof();
     non_green.promotion.gate_results[0].status = HomeboyGateStatus::Failed;
-    rejected(recovery_lifecycle, non_green);
+    rejected(failed_recovery_lifecycle, non_green);
 }
 
 #[test]

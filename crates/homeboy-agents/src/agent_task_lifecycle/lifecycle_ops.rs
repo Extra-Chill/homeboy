@@ -1260,28 +1260,44 @@ pub(crate) fn is_accepted_runner_handoff(record: &AgentTaskRunRecord) -> bool {
     record.has_accepted_lab_handoff()
 }
 
-/// Reconstruct the only aggregate-free failure that can safely admit an
-/// externally prepared immutable candidate: an expired handoff before the
-/// runner recorded a job or consumed a provider execution.
+/// Reconstruct an authenticated pre-provider transport failure that can safely
+/// admit an externally prepared immutable candidate. Expired handoffs retain
+/// their aggregate-free legacy shape; preacceptance failures retain their
+/// canonical failure aggregate and its synthetic runtime projection.
 pub fn candidate_adoption_recovery_outcome(
     record: &AgentTaskRunRecord,
     task: &AgentTaskRequest,
 ) -> Option<AgentTaskOutcome> {
-    let handoff = record.lab_handoff.as_ref()?;
-    let eligible = record.state == AgentTaskRunState::Cancelled
-        && record.aggregate_path.is_none()
-        && record.totals.is_none()
-        && record.artifact_refs.is_empty()
-        && record.provider_handles.is_empty()
-        && record.latest_executor_evidence.is_none()
-        && record.lab_handoff_validation_error().is_none()
-        && handoff.state == AgentTaskLabHandoffState::Expired
-        && handoff.runner_job_id.is_none()
-        && record.metadata["phase"] == "handoff_rejected"
+    let expired_handoff = record.lab_handoff.as_ref().is_some_and(|handoff| {
+        record.state == AgentTaskRunState::Cancelled
+            && record.aggregate_path.is_none()
+            && record.totals.is_none()
+            && record.artifact_refs.is_empty()
+            && record.provider_handles.is_empty()
+            && record.latest_executor_evidence.is_none()
+            && record.lab_handoff_validation_error().is_none()
+            && handoff.state == AgentTaskLabHandoffState::Expired
+            && handoff.runner_job_id.is_none()
+            && record.metadata["phase"] == "handoff_rejected"
+            && record.metadata["provider_executions_consumed"] == 0
+            && record.metadata["handoff_acceptance"]["state"] == "expired"
+            && record.metadata["handoff_acceptance"]["reason"] == EXPIRED_LAB_HANDOFF_REASON
+    });
+    let failed_preacceptance = record.state == AgentTaskRunState::Failed
+        && record.metadata["phase"] == "lab_handoff_preacceptance"
         && record.metadata["provider_executions_consumed"] == 0
-        && record.metadata["handoff_acceptance"]["state"] == "expired"
-        && record.metadata["handoff_acceptance"]["reason"] == EXPIRED_LAB_HANDOFF_REASON;
-    eligible.then(|| {
+        && record.provider_handles.is_empty()
+        && no_runner_job_recorded(record)
+        && record.lifecycle.external_runtime_ids.is_empty()
+        && record.lifecycle.provider_runtime.iter().all(|runtime| {
+            runtime.external_runtime_ids.is_empty()
+                && runtime.metadata["evidence_source"] == "canonical_executor_outcome"
+        })
+        && record.metadata["pre_execution_failure"]["phase"] == "lab_handoff_preacceptance"
+        && is_pre_provider_transport_recovery(
+            &record.metadata["pre_execution_failure"]["candidate_adoption_recovery"],
+        );
+    (expired_handoff || failed_preacceptance).then(|| {
         build_pre_execution_failure_outcome(
             &record.run_id,
             task,
@@ -1289,6 +1305,22 @@ pub fn candidate_adoption_recovery_outcome(
             &Error::internal_unexpected(EXPIRED_LAB_HANDOFF_REASON.to_string()),
         )
     })
+}
+
+fn no_runner_job_recorded(record: &AgentTaskRunRecord) -> bool {
+    record.runner_job_id().is_none()
+        && record
+            .lab_handoff
+            .as_ref()
+            .is_none_or(|handoff| handoff.runner_job_id.is_none())
+        && record.metadata["runner_job_id"].is_null()
+        && record.metadata["job_id"].is_null()
+}
+
+fn is_pre_provider_transport_recovery(recovery: &Value) -> bool {
+    recovery["schema"] == "homeboy/agent-task-candidate-adoption-recovery/v1"
+        && recovery["reason"] == "pre_provider_transport_failure"
+        && recovery["provider_executions_consumed"] == 0
 }
 
 fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
