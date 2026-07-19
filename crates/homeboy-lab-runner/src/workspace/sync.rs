@@ -34,8 +34,9 @@ use super::types::{
     RunnerWorkspaceMetadata, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
     RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
     RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
-    RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, DEFAULT_EXCLUDES,
+    RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotInvalidMetadata,
+    RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput, DEFAULT_EXCLUDES,
 };
 use super::util::{
     deterministic_remote_path, git_output, parent_remote_path, ssh_client_for_runner,
@@ -843,7 +844,7 @@ pub fn workspace_snapshots(
     validate_absolute_path("workspace_root", workspace_root)?;
     let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
     let limit = filters.limit.max(1);
-    let mut snapshots = match runner.kind {
+    let (mut snapshots, skipped_invalid_metadata) = match runner.kind {
         RunnerKind::Local => workspace_snapshots_local(Path::new(&lab_workspaces_root))?,
         RunnerKind::Ssh => workspace_snapshots_ssh(&runner, &lab_workspaces_root)?,
     };
@@ -870,6 +871,7 @@ pub fn workspace_snapshots(
                 limit,
             },
             snapshots,
+            skipped_invalid_metadata,
         },
         0,
     ))
@@ -941,11 +943,17 @@ fn list_ssh_lab_workspaces(
     Ok(paths.into_iter().take(limit).collect())
 }
 
-fn workspace_snapshots_local(root: &Path) -> Result<Vec<RunnerWorkspaceSnapshotEntry>> {
+fn workspace_snapshots_local(
+    root: &Path,
+) -> Result<(
+    Vec<RunnerWorkspaceSnapshotEntry>,
+    Vec<RunnerWorkspaceSnapshotInvalidMetadata>,
+)> {
     if !root.is_dir() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let mut snapshots = Vec::new();
+    let mut skipped_invalid_metadata = Vec::new();
     for entry in fs::read_dir(root).map_err(|err| {
         Error::internal_io(
             err.to_string(),
@@ -965,20 +973,30 @@ fn workspace_snapshots_local(root: &Path) -> Result<Vec<RunnerWorkspaceSnapshotE
         let Ok(content) = fs::read_to_string(&metadata_path) else {
             continue;
         };
-        let metadata: RunnerWorkspaceMetadata = serde_json::from_str(&content).map_err(|err| {
-            Error::internal_json(err.to_string(), Some(metadata_path.display().to_string()))
-        })?;
+        let metadata: RunnerWorkspaceMetadata = match serde_json::from_str(&content) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                skipped_invalid_metadata.push(invalid_workspace_metadata(
+                    &metadata_path.display().to_string(),
+                    error,
+                ));
+                continue;
+            }
+        };
         if let Some(snapshot) = workspace_snapshot_entry(metadata) {
             snapshots.push(snapshot);
         }
     }
-    Ok(snapshots)
+    Ok((snapshots, skipped_invalid_metadata))
 }
 
 fn workspace_snapshots_ssh(
     runner: &super::super::Runner,
     root: &str,
-) -> Result<Vec<RunnerWorkspaceSnapshotEntry>> {
+) -> Result<(
+    Vec<RunnerWorkspaceSnapshotEntry>,
+    Vec<RunnerWorkspaceSnapshotInvalidMetadata>,
+)> {
     let (_server, mut client) = ssh_client_for_runner(runner)?;
     client.env.extend(runner.env.clone());
     let command = workspace_snapshot_scan_command(root);
@@ -990,6 +1008,7 @@ fn workspace_snapshots_ssh(
         )));
     }
     let mut snapshots = Vec::new();
+    let mut skipped_invalid_metadata = Vec::new();
     for line in output.stdout.lines() {
         let parts = line.splitn(2, '\t').collect::<Vec<_>>();
         if parts.len() != 2 {
@@ -998,13 +1017,41 @@ fn workspace_snapshots_ssh(
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(parts[1])
             .map_err(|err| Error::internal_json(err.to_string(), None))?;
-        let metadata: RunnerWorkspaceMetadata = serde_json::from_slice(&decoded)
-            .map_err(|err| Error::internal_json(err.to_string(), Some(parts[0].to_string())))?;
+        let metadata: RunnerWorkspaceMetadata = match serde_json::from_slice(&decoded) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                skipped_invalid_metadata.push(invalid_workspace_metadata(parts[0], error));
+                continue;
+            }
+        };
         if let Some(snapshot) = workspace_snapshot_entry(metadata) {
             snapshots.push(snapshot);
         }
     }
-    Ok(snapshots)
+    Ok((snapshots, skipped_invalid_metadata))
+}
+
+fn invalid_workspace_metadata(
+    source: &str,
+    error: serde_json::Error,
+) -> RunnerWorkspaceSnapshotInvalidMetadata {
+    const MAX_PARSE_ERROR_BYTES: usize = 512;
+
+    let error = error.to_string();
+    let error = if error.len() > MAX_PARSE_ERROR_BYTES {
+        let mut end = MAX_PARSE_ERROR_BYTES;
+        while !error.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}... [truncated]", &error[..end])
+    } else {
+        error
+    };
+    RunnerWorkspaceSnapshotInvalidMetadata {
+        source: source.to_string(),
+        field: WORKSPACE_METADATA_FILE,
+        error,
+    }
 }
 
 pub(super) fn workspace_snapshot_scan_command(root: &str) -> String {

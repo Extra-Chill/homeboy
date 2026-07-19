@@ -355,6 +355,17 @@ pub struct RunnerWorkspaceSnapshotsOutput {
     pub lab_workspaces_root: String,
     pub filters: RunnerWorkspaceSnapshotAppliedFilters,
     pub snapshots: Vec<RunnerWorkspaceSnapshotEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped_invalid_metadata: Vec<RunnerWorkspaceSnapshotInvalidMetadata>,
+}
+
+/// A stale workspace must not prevent discovery of usable snapshots for a
+/// different task. Retain bounded diagnostics so operators can repair it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceSnapshotInvalidMetadata {
+    pub source: String,
+    pub field: &'static str,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
