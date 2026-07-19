@@ -347,6 +347,26 @@ pub(super) fn audit_internal(
         all_findings.extend(near_dup_findings);
     }
 
+    // Phase 4d1: Cross-name duplication (same body under different names).
+    // The exact/near-duplicate detectors key on the method name, so a shared
+    // primitive reimplemented under a local name is invisible to them. This pass
+    // groups bodies by hash regardless of name.
+    let cross_name_dup_findings = time_audit_detector(
+        &mut timing,
+        "detector.duplication.cross_name_duplicate",
+        plan.detector_enabled("duplication"),
+        || duplication::detect_cross_name_duplicates(&all_fingerprints),
+        Vec::new,
+    );
+    if !cross_name_dup_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Cross-name duplicates: {} finding(s) (identical bodies under different names)",
+            cross_name_dup_findings.len()
+        );
+        all_findings.extend(cross_name_dup_findings);
+    }
+
     // Phase 4d2: Parallel implementation detection (similar call patterns across files)
     let parallel_findings = time_audit_detector(
         &mut timing,

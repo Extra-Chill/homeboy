@@ -30,6 +30,10 @@ pub enum AuditFinding {
     DirectorySprawl,
     /// Function body is duplicated across files.
     DuplicateFunction,
+    /// Two functions with *different names* have identical normalized bodies —
+    /// the same logic reimplemented under a local name (often a copy of an
+    /// existing shared primitive). Name-keyed duplicate detection misses this.
+    CrossNameDuplicate,
     /// Function has identical structure but different identifiers/literals.
     NearDuplicate,
     /// Function parameter is declared but never used in the function body.
@@ -209,6 +213,7 @@ impl AuditFinding {
             "high_item_count",
             "directory_sprawl",
             "duplicate_function",
+            "cross_name_duplicate",
             "near_duplicate",
             "unused_parameter",
             "ignored_parameter",
