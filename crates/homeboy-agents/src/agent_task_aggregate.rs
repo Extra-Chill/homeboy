@@ -629,15 +629,10 @@ mod tests {
                 "timed-out",
                 AgentTaskOutcomeStatus::CandidateRecoverable,
                 vec![AgentTaskArtifact {
-                    schema: "homeboy/agent-task-artifact/v1".to_string(),
                     id: "uncommitted-changes".to_string(),
                     kind: "patch".to_string(),
-                    name: None,
-                    label: None,
                     role: Some("patch".to_string()),
-                    semantic_key: None,
                     path: Some(patch_path.display().to_string()),
-                    url: None,
                     mime: Some("text/x-patch".to_string()),
                     size_bytes: Some(patch.len() as u64),
                     sha256: Some(sha256),
@@ -650,6 +645,7 @@ mod tests {
                         "repository_identity": "repository-identity",
                         "workspace_identity": "workspace-identity"
                     }),
+                    ..Default::default()
                 }],
             )
         };
@@ -675,15 +671,10 @@ mod tests {
                 id,
                 AgentTaskOutcomeStatus::CandidateRecoverable,
                 vec![AgentTaskArtifact {
-                    schema: "homeboy/agent-task-artifact/v1".to_string(),
                     id: format!("{id}-patch"),
                     kind: "patch".to_string(),
-                    name: None,
-                    label: None,
                     role: Some("patch".to_string()),
-                    semantic_key: None,
                     path: Some(patch_path.display().to_string()),
-                    url: None,
                     mime: Some("text/x-patch".to_string()),
                     size_bytes: Some(size_bytes),
                     sha256: Some(sha256.to_string()),
@@ -692,6 +683,7 @@ mod tests {
                         "base_ref": "base-fingerprint", "provider_backend": "provider",
                         "repository_identity": "repository-identity", "workspace_identity": "workspace-identity"
                     }),
+                    ..Default::default()
                 }],
             )
         };
@@ -940,19 +932,14 @@ mod tests {
 
     fn artifact(id: &str, kind: &str, metadata: Value) -> AgentTaskArtifact {
         AgentTaskArtifact {
-            schema: super::super::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
             id: id.to_string(),
             kind: kind.to_string(),
             name: Some(format!("{id}.txt")),
-            label: None,
-            role: None,
-            semantic_key: None,
             path: Some(format!("artifacts/{id}.txt")),
-            url: None,
-            mime: None,
             size_bytes: Some(12),
             sha256: Some(format!("sha256:{id}")),
             metadata,
+            ..Default::default()
         }
     }
 }
