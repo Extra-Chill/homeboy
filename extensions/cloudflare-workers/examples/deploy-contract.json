@@ -1,0 +1,16 @@
+{
+  "schema": "homeboy/cloudflare-worker-deploy-contract/v1",
+  "repository": { "worktree": "/path/to/clean-worker-repository", "revision": "immutable-git-commit-sha", "ref": "refs/heads/example-release" },
+  "wrangler": { "binary": "wrangler", "config": "wrangler.toml", "config_ref": "wrangler.toml" },
+  "target": { "worker": "example-edge-service", "account_id": "account-id" },
+  "expected_bindings": ["CACHE", "API_ORIGIN"],
+  "secrets": [
+    { "name": "UPSTREAM_TOKEN", "env": "EXAMPLE_UPSTREAM_TOKEN" },
+    { "name": "SIGNING_KEY", "file": "../secure-inputs/signing-key" }
+  ],
+  "gates": [
+    { "id": "health", "url": "https://edge.example.test/health", "expected_status": 200, "expected_text": "healthy" }
+  ],
+  "durability": { "redeploy_same_revision": true },
+  "result_file": "cloudflare-worker-deploy-result.json"
+}
