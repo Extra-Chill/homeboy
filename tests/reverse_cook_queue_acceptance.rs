@@ -116,8 +116,6 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
         .args([
             "--runner",
             "lab",
-            "--placement",
-            "lab",
             "--detach-after-handoff",
             "agent-task",
             "cook",

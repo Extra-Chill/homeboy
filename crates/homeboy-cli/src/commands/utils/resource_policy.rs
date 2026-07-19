@@ -298,7 +298,12 @@ pub fn rerun_command(
     rerun.push(args[0].clone());
     if command.lab_offload_supported {
         if let Some(runner_id) = default_runner {
-            if !args.iter().any(|arg| arg == "--runner") {
+            if !args.iter().any(|arg| {
+                arg == "--runner"
+                    || arg.starts_with("--runner=")
+                    || arg == "--placement"
+                    || arg.starts_with("--placement=")
+            }) {
                 rerun.push("--runner".to_string());
                 rerun.push(runner_id.to_string());
             }
@@ -790,6 +795,27 @@ mod tests {
         assert_eq!(
             rerun.as_deref(),
             Some("homeboy --runner homeboy-lab review test homeboy")
+        );
+    }
+
+    #[test]
+    fn portable_rerun_preserves_explicit_placement_without_runner() {
+        let rerun = rerun_command(
+            lab_supported_hot("review test"),
+            &[
+                "homeboy".to_string(),
+                "--placement".to_string(),
+                "local".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+                "homeboy".to_string(),
+            ],
+            Some("homeboy-lab"),
+        );
+
+        assert_eq!(
+            rerun.as_deref(),
+            Some("homeboy --placement local review test homeboy")
         );
     }
 
