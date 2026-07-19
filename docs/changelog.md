@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.293.0] - 2026-07-19
+
+### Added
+- make daemon /exec idempotent on the controller durable run id (#8966)
+
+### Changed
+- Prevent runtime refresh from mutating symlink sources
+- move workspace-content identity spec into the source-snapshot contract
+
+### Fixed
+- validate committed candidate file sets
+
 ## [0.292.0] - 2026-07-18
 
 ### Added
