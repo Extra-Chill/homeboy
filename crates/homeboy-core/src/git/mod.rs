@@ -89,9 +89,9 @@ pub use primitives::{
 };
 pub use primitives::{is_git_repo, is_tracked_path};
 pub use primitives_query::{
-    current_branch, head_sha, head_sha_short, output_optional, output_optional_bytes,
-    remote_origin_url, remote_url, repo_root, rev_parse, short_head_revision, status_porcelain,
-    status_porcelain_bytes, toplevel,
+    current_branch, head_sha, head_sha_short, output_allow_empty, output_optional,
+    output_optional_bytes, remote_origin_url, remote_url, repo_root, rev_parse,
+    short_head_revision, status_porcelain, status_porcelain_bytes, toplevel,
 };
 
 use std::path::Path;

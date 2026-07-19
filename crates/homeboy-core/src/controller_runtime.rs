@@ -1361,21 +1361,11 @@ fn source_provenance() -> Value {
     let cwd = std::env::current_dir().ok();
     let revision = cwd
         .as_ref()
-        .and_then(|path| git_output(path, ["rev-parse", "HEAD"]));
-    let repository = cwd
-        .as_ref()
-        .and_then(|path| git_output(path, ["config", "--get", "remote.origin.url"]));
+        .and_then(|path| crate::git::output_allow_empty(path, &["rev-parse", "HEAD"]));
+    let repository = cwd.as_ref().and_then(|path| {
+        crate::git::output_allow_empty(path, &["config", "--get", "remote.origin.url"])
+    });
     json!({ "revision": revision, "repository": repository, "verification": "observed_from_process_cwd" })
-}
-
-fn git_output(path: &Path, args: impl IntoIterator<Item = &'static str>) -> Option<String> {
-    Command::new("git")
-        .args(["-C", &path.display().to_string()])
-        .args(args)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn run_command<const N: usize>(program: &str, args: [&str; N]) -> Result<()> {

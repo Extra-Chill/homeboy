@@ -13,6 +13,7 @@ use crate::agent_task_gate::{
     AgentTaskGateRevealPolicy, AgentTaskGateVisibility,
 };
 use homeboy_core::command_invocation::CommandInvocation;
+use homeboy_core::git::output_allow_empty;
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 use homeboy_core::{worktree_providers, Error, Result};
 
@@ -794,7 +795,7 @@ pub(crate) fn run_provider_command(
 }
 
 fn validate_provider_workspace_path(path: &Path) -> Result<()> {
-    match git_output(path, &["rev-parse", "--is-inside-work-tree"]) {
+    match output_allow_empty(path, &["rev-parse", "--is-inside-work-tree"]) {
         Some(value) if value == "true" => Ok(()),
         _ => Err(Error::validation_invalid_argument(
             "promotion_provider.response.workspace_path",
@@ -806,17 +807,4 @@ fn validate_provider_workspace_path(path: &Path) -> Result<()> {
             None,
         )),
     }
-}
-
-fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

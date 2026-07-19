@@ -2,6 +2,7 @@ use super::*;
 use crate as runner;
 use crate::Runner;
 use crate::RunnerExecOptions;
+use homeboy_core::git::output_allow_empty;
 use homeboy_core::Result;
 use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
 use homeboy_lab_runner_contract::RunnerKind;
@@ -11,18 +12,17 @@ use homeboy_lab_runner_contract::RunnerWorkspaceSyncOptions;
 use homeboy_upgrade::upgrade::current_version;
 use homeboy_upgrade::upgrade::InstallMethod;
 use std::path::Path;
-use std::process::Command;
 
 pub fn source_checkout_build_identity(source_path: &Path) -> Option<String> {
     // `rev-parse` must produce a commit hash; an empty result means we can't
     // identify the checkout, so treat it as failure.
-    let commit = git_output(source_path, &["rev-parse", "--short=12", "HEAD"])?;
+    let commit = output_allow_empty(source_path, &["rev-parse", "--short=12", "HEAD"])?;
     if commit.trim().is_empty() {
         return None;
     }
     // `git status --porcelain` returns empty output for a clean tree, which is
     // the normal, successful case — empty here must NOT be treated as failure.
-    let status = git_output(source_path, &["status", "--porcelain"])?;
+    let status = output_allow_empty(source_path, &["status", "--porcelain"])?;
     let dirty_suffix = if status.trim().is_empty() {
         ""
     } else {
@@ -35,23 +35,6 @@ pub fn source_checkout_build_identity(source_path: &Path) -> Option<String> {
         commit.trim(),
         dirty_suffix
     ))
-}
-
-pub fn git_output(source_path: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(source_path)
-        .args(args)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    // Return the (possibly empty) stdout on success. Empty output is valid for
-    // commands like `git status --porcelain` on a clean tree; callers that
-    // require non-empty output must validate it themselves.
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 pub fn prepare_runner_source_checkout_for_upgrade(
