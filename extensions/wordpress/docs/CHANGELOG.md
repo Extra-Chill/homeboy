@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.26.9] - 2026-07-19
+
+### Changed
+- Load component during Codebox PHPUnit lifecycle
+
 ## [3.26.8] - 2026-07-18
 
 ### Changed
