@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,6 +6,7 @@ use serde_json::Value;
 use crate::agent_task_gate::{AgentTaskGateReport, VerifyGateOptions};
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::gate::HomeboyGateResult;
+use homeboy_core::git::output_allow_empty;
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 
 pub const AGENT_TASK_PROMOTION_REPORT_SCHEMA: &str = "homeboy/agent-task-promotion-report/v1";
@@ -210,26 +210,15 @@ impl AgentTaskPromotionTarget {
         Self {
             worktree,
             path: path.map(|path| path.display().to_string()),
-            branch: path.and_then(|path| git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"])),
-            head: path.and_then(|path| git_output(path, &["rev-parse", "HEAD"])),
+            branch: path
+                .and_then(|path| output_allow_empty(path, &["rev-parse", "--abbrev-ref", "HEAD"])),
+            head: path.and_then(|path| output_allow_empty(path, &["rev-parse", "HEAD"])),
             dirty: path.and_then(|path| {
-                git_output(path, &["status", "--porcelain"]).map(|status| !status.is_empty())
+                output_allow_empty(path, &["status", "--porcelain"])
+                    .map(|status| !status.is_empty())
             }),
         }
     }
-}
-
-fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn promotion_report_schema() -> String {

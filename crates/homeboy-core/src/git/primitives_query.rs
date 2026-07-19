@@ -33,6 +33,29 @@ pub fn output_optional(git_root: &Path, args: &[&str]) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+/// Run a git command (via `git -C <path>`) and return trimmed stdout on success,
+/// *including* the empty string.
+///
+/// Unlike [`output_optional`], a successful command that produces no output
+/// yields `Some("")` rather than `None` — empty output is a valid result for
+/// commands like `git status --porcelain` on a clean tree, and some callers
+/// need to distinguish "ran clean" (`Some("")`) from "failed" (`None`). Callers
+/// that require non-empty output validate it themselves.
+pub fn output_allow_empty(path: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// Get the full HEAD commit SHA from a git directory.
 pub fn head_sha(git_root: &Path) -> Option<String> {
     output_optional(git_root, &["rev-parse", "HEAD"])
