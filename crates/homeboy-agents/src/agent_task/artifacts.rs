@@ -117,6 +117,31 @@ pub struct AgentTaskArtifact {
     pub metadata: Value,
 }
 
+impl Default for AgentTaskArtifact {
+    /// A defaulted artifact carries the current artifact schema and empty
+    /// `id`/`kind`, with every optional field `None`/`Value::Null`. Construct
+    /// with `..Default::default()` and set the meaningful fields (`id`, `kind`,
+    /// and whatever else applies) to drop the ~10 lines of `None`/`Value::Null`
+    /// boilerplate every call site otherwise repeats.
+    fn default() -> Self {
+        Self {
+            schema: artifact_schema(),
+            id: String::new(),
+            kind: String::new(),
+            name: None,
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: None,
+            url: None,
+            mime: None,
+            size_bytes: None,
+            sha256: None,
+            metadata: Value::Null,
+        }
+    }
+}
+
 impl AgentTaskArtifact {
     pub fn display_label(&self) -> Option<&str> {
         self.label
@@ -191,4 +216,39 @@ pub struct AgentTaskFollowUp {
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
+}
+
+#[cfg(test)]
+mod default_construction_tests {
+    use super::*;
+
+    #[test]
+    fn default_matches_the_fully_spelled_out_empty_artifact() {
+        let via_default = AgentTaskArtifact {
+            id: "artifact-1".to_string(),
+            kind: "report".to_string(),
+            ..Default::default()
+        };
+        let verbose = AgentTaskArtifact {
+            schema: artifact_schema(),
+            id: "artifact-1".to_string(),
+            kind: "report".to_string(),
+            name: None,
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: None,
+            url: None,
+            mime: None,
+            size_bytes: None,
+            sha256: None,
+            metadata: Value::Null,
+        };
+        assert_eq!(via_default, verbose);
+    }
+
+    #[test]
+    fn default_carries_the_current_artifact_schema() {
+        assert_eq!(AgentTaskArtifact::default().schema, artifact_schema());
+    }
 }

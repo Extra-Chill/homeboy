@@ -75,21 +75,13 @@ mod tests {
     #[test]
     fn artifact_projection_preserves_safe_relative_path() {
         let artifact = AgentTaskArtifact {
-            schema: "homeboy/agent-task-artifact/v1".to_string(),
             id: "patch".to_string(),
             kind: "patch".to_string(),
-            name: None,
-            label: None,
-            role: None,
-            semantic_key: None,
             path: Some("artifacts/patch.diff".to_string()),
             url: Some(
                 "homeboy://agent-task/run/run-1/artifacts#task=task-1&artifact=patch".to_string(),
             ),
-            mime: None,
-            size_bytes: None,
-            sha256: None,
-            metadata: serde_json::Value::Null,
+            ..Default::default()
         };
         assert_eq!(
             reviewer_facing_artifact(&artifact).path.as_deref(),
@@ -101,19 +93,10 @@ mod tests {
     #[test]
     fn local_only_artifact_projection_omits_operator_local_path() {
         let artifact = AgentTaskArtifact {
-            schema: "homeboy/agent-task-artifact/v1".to_string(),
             id: "local".to_string(),
             kind: "report".to_string(),
-            name: None,
-            label: None,
-            role: None,
-            semantic_key: None,
             path: Some("/private/operator/report.json".to_string()),
-            url: None,
-            mime: None,
-            size_bytes: None,
-            sha256: None,
-            metadata: serde_json::Value::Null,
+            ..Default::default()
         };
         assert_eq!(reviewer_facing_artifact(&artifact).path, None);
         assert_eq!(
@@ -125,21 +108,13 @@ mod tests {
     #[test]
     fn typed_artifact_projection_preserves_safe_embedded_path() {
         let artifact = AgentTaskArtifact {
-            schema: "homeboy/agent-task-artifact/v1".to_string(),
             id: "patch".to_string(),
             kind: "patch".to_string(),
-            name: None,
-            label: None,
-            role: None,
-            semantic_key: None,
             path: Some("artifacts\\patch.diff".to_string()),
             url: Some(
                 "homeboy://agent-task/run/run-1/artifacts#task=task-1&artifact=patch".to_string(),
             ),
-            mime: None,
-            size_bytes: None,
-            sha256: None,
-            metadata: serde_json::Value::Null,
+            ..Default::default()
         };
         let typed = AgentTaskTypedArtifact {
             name: "patch".to_string(),
@@ -162,19 +137,10 @@ mod tests {
     #[test]
     fn projection_clears_unsafe_paths_in_artifacts_bindings_and_lineage() {
         let artifact = AgentTaskArtifact {
-            schema: "homeboy/agent-task-artifact/v1".to_string(),
             id: "report".to_string(),
             kind: "report".to_string(),
-            name: None,
-            label: None,
-            role: None,
-            semantic_key: None,
             path: Some("C:\\controller\\report.json".to_string()),
-            url: None,
-            mime: None,
-            size_bytes: None,
-            sha256: None,
-            metadata: serde_json::Value::Null,
+            ..Default::default()
         };
         let binding = AgentTaskArtifactRunBinding {
             task_id: "task".to_string(),
