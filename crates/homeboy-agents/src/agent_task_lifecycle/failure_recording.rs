@@ -795,6 +795,60 @@ mod tests {
             .push(artifact("second-patch", "patch", Some("runner-b")));
         assert!(runner_id_from_artifact_provenance(&aggregate).is_err());
     }
+
+    #[test]
+    fn reusable_artifact_rejects_conflicting_persisted_logical_identity() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let store = homeboy_core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            let run = store
+                .start_run(
+                    homeboy_core::observation::NewRunRecord::builder("agent-task")
+                        .cwd_path(home.path())
+                        .build(),
+                )
+                .expect("run");
+            let path = home.path().join("patch.diff");
+            let bytes = b"patch";
+            std::fs::write(&path, bytes).expect("patch bytes");
+            let mut artifact = artifact("patch", "patch", None);
+            artifact.size_bytes = Some(bytes.len() as u64);
+            artifact.sha256 = Some(format!("{:x}", sha2::Sha256::digest(bytes)));
+            store
+                .record_artifact_with_id(
+                    &run.id,
+                    "patch",
+                    &path,
+                    "stable-patch",
+                    json!({
+                        "agent_task": {
+                            "task_id": "other-task",
+                            "logical_artifact_id": "patch",
+                        }
+                    }),
+                )
+                .expect("imported artifact");
+
+            let error = reusable_terminal_artifact(
+                &store,
+                &run.id,
+                "task",
+                &artifact,
+                "stable-patch",
+                &json!({
+                    "agent_task": {
+                        "task_id": "task",
+                        "logical_artifact_id": "patch",
+                    }
+                }),
+            )
+            .expect_err("conflicting logical identity must fail closed");
+
+            assert!(error
+                .message
+                .contains("conflicts with terminal artifact projection"));
+        });
+    }
 }
 
 /// Project finalized executor artifacts into the standard observation registry.
@@ -871,7 +925,14 @@ pub(crate) fn project_terminal_artifacts(
                     "runner_provenance": artifact.metadata,
                 }
             });
-            if reusable_terminal_artifact(&store, &record.run_id, artifact, &artifact_id)? {
+            if reusable_terminal_artifact(
+                &store,
+                &record.run_id,
+                &outcome.task_id,
+                artifact,
+                &artifact_id,
+                &metadata,
+            )? {
                 continue;
             }
             if let Some(runner_id) = record.runner_id().filter(|runner_id| {
@@ -1031,8 +1092,10 @@ pub(crate) fn project_terminal_artifacts(
 fn reusable_terminal_artifact(
     store: &homeboy_core::observation::ObservationStore,
     run_id: &str,
+    task_id: &str,
     artifact: &AgentTaskArtifact,
     artifact_id: &str,
+    metadata: &Value,
 ) -> Result<bool> {
     let Some(existing) = store.get_artifact(artifact_id)? else {
         return Ok(false);
@@ -1056,6 +1119,30 @@ fn reusable_terminal_artifact(
             .as_deref()
             == Some(expected_sha256);
     if matches {
+        let existing_task_id = existing
+            .metadata_json
+            .pointer("/agent_task/task_id")
+            .and_then(Value::as_str);
+        let existing_logical_id = existing
+            .metadata_json
+            .pointer("/agent_task/logical_artifact_id")
+            .and_then(Value::as_str);
+        if existing_task_id.is_some_and(|value| value != task_id)
+            || existing_logical_id.is_some_and(|value| value != artifact.id)
+        {
+            return Err(Error::validation_invalid_argument(
+                "artifact_id",
+                format!(
+                    "existing artifact record conflicts with terminal artifact projection: {artifact_id}"
+                ),
+                Some(artifact_id.to_string()),
+                None,
+            ));
+        }
+        // Imported bundles can carry the deterministic artifact id and verified
+        // bytes before terminal reconciliation adds controller lookup metadata.
+        // Stamp that single local record rather than creating a second projection.
+        store.update_artifact_metadata(artifact_id, metadata.clone())?;
         return Ok(true);
     }
 
