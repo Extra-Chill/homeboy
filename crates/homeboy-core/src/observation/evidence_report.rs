@@ -786,13 +786,8 @@ mod tests {
             path: "https://example.test/".to_string(),
             url: Some("https://example.test/".to_string()),
             public_url: Some("https://example.test/".to_string()),
-            viewer_url: None,
-            viewer_links: Vec::new(),
-            sha256: None,
-            size_bytes: None,
-            mime: None,
-            metadata_json: Value::Null,
             created_at: "2026-06-12T00:00:30Z".to_string(),
+            ..Default::default()
         }
     }
 

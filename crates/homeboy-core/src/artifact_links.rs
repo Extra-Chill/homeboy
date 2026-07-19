@@ -260,14 +260,7 @@ mod tests {
             id: "artifact-1".to_string(),
             run_id: "run-1".to_string(),
             kind: "preview-after".to_string(),
-            artifact_type: "file".to_string(),
             path: "/tmp/preview.after.json".to_string(),
-            url: None,
-            public_url: None,
-            viewer_url: None,
-            viewer_links: Vec::new(),
-            sha256: None,
-            size_bytes: None,
             mime: Some("application/json".to_string()),
             metadata_json: serde_json::json!({
                 "viewer": {
@@ -282,6 +275,7 @@ mod tests {
                 }
             }),
             created_at: "2026-06-12T00:00:00Z".to_string(),
+            ..Default::default()
         };
 
         let links = viewer_links(&artifact, Some("https://artifacts.example.test/a b.json"));
@@ -370,15 +364,9 @@ mod tests {
                 .path()
                 .display()
                 .to_string(),
-            url: None,
-            public_url: None,
-            viewer_url: None,
-            viewer_links: Vec::new(),
-            sha256: None,
-            size_bytes: None,
-            mime: None,
             metadata_json: serde_json::json!({}),
             created_at: "2026-06-12T00:00:00Z".to_string(),
+            ..Default::default()
         };
 
         assert_eq!(public_artifact_url(&artifact), None);
@@ -390,14 +378,7 @@ mod tests {
             id: "artifact-1".to_string(),
             run_id: "run-1".to_string(),
             kind: "preview-after".to_string(),
-            artifact_type: "file".to_string(),
             path: "/tmp/preview.after.json".to_string(),
-            url: None,
-            public_url: None,
-            viewer_url: None,
-            viewer_links: Vec::new(),
-            sha256: None,
-            size_bytes: None,
             mime: Some("application/json".to_string()),
             metadata_json: serde_json::json!({
                 "viewer": {
@@ -411,6 +392,7 @@ mod tests {
                 }
             }),
             created_at: "2026-06-12T00:00:00Z".to_string(),
+            ..Default::default()
         }
     }
 
