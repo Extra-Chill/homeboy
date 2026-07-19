@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.296.1] - 2026-07-19
+
+### Changed
+- add AgentTaskArtifact::default() and drop construction boilerplate
+
 ## [0.296.0] - 2026-07-19
 
 ### Added
