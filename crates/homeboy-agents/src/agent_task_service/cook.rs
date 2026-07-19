@@ -355,8 +355,9 @@ fn concrete_adoption_ai_model(value: &str) -> Result<String> {
     Ok(normalized.to_string())
 }
 
-/// Resolve an existing run first, then recover the exact persisted attempt when
-/// a controller stopped after writing its recipe and before writing the run.
+/// Resolve an existing run first, then recover a deterministic persisted
+/// attempt when a controller stopped after writing its recipe and before
+/// writing the run.
 fn resolve_adoption_target(
     cook_or_run_id: &str,
 ) -> Result<(
@@ -374,48 +375,30 @@ fn resolve_adoption_target(
         return Ok((record, super::load_recipe(&cook_id)?));
     }
 
-    if !super::recipe_exists(cook_or_run_id)? {
+    let recipe = if super::recipe_exists(cook_or_run_id)? {
+        super::load_recipe(cook_or_run_id)?
+    } else if let Some(recipe) = super::load_recipe_for_attempt(cook_or_run_id)? {
+        recipe
+    } else {
         return Err(Error::validation_invalid_argument(
             "run_or_cook_id",
             "unknown agent-task run or durable cook id",
             Some(cook_or_run_id.to_string()),
             None,
         ));
-    }
-
-    let recipe = super::load_recipe(cook_or_run_id)?;
-    let orphaned_attempts = recipe
-        .attempts
-        .iter()
-        .map(|attempt| {
-            Ok((
-                attempt,
-                agent_task_lifecycle::run_record_exists(&attempt.run_id)?,
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .filter_map(|(attempt, exists)| (!exists).then_some(attempt))
-        .collect::<Vec<_>>();
-    if orphaned_attempts.is_empty() {
-        let [attempt] = recipe.attempts.as_slice() else {
-            return Err(Error::validation_invalid_argument(
-                "cook_recipe.attempts",
-                "candidate adoption requires exactly one durable cook attempt",
-                Some(recipe.cook_id.clone()),
-                None,
-            ));
-        };
+    };
+    let attempt = if recipe.cook_id == cook_or_run_id {
+        resolve_cook_adoption_attempt(&recipe)?
+    } else {
+        recipe
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == cook_or_run_id)
+            .expect("attempt lookup returns a recipe that declares the run id")
+    };
+    if agent_task_lifecycle::run_record_exists(&attempt.run_id)? {
         return Ok((agent_task_lifecycle::status(&attempt.run_id)?, recipe));
     }
-    let [attempt] = orphaned_attempts.as_slice() else {
-        return Err(Error::validation_invalid_argument(
-            "cook_recipe.attempts",
-            "candidate adoption requires exactly one orphaned durable cook attempt",
-            Some(recipe.cook_id.clone()),
-            None,
-        ));
-    };
 
     agent_task_lifecycle::submit_plan(&attempt.plan, Some(&attempt.run_id))?;
     agent_task_lifecycle::record_cook_attempt(&recipe.cook_id, attempt.attempt, &attempt.run_id)?;
@@ -429,6 +412,44 @@ fn resolve_adoption_target(
         &recovery,
     )?;
     Ok((record, recipe))
+}
+
+/// A retried cook may have several lifecycle attempts for the same immutable
+/// plan. The earliest is the stable target; different plans require an explicit
+/// run ID so a candidate is never attached to the wrong policy.
+fn resolve_cook_adoption_attempt(
+    recipe: &super::AgentTaskCookRecipe,
+) -> Result<&super::AgentTaskCookRecipeAttempt> {
+    let first = recipe
+        .attempts
+        .first()
+        .expect("loaded cook recipes always contain an attempt");
+    if recipe
+        .attempts
+        .iter()
+        .all(|attempt| attempt.plan == first.plan)
+    {
+        return Ok(first);
+    }
+
+    let attempts = recipe
+        .attempts
+        .iter()
+        .map(|attempt| format!("attempt {}: {}", attempt.attempt, attempt.run_id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(Error::validation_invalid_argument(
+        "cook_recipe.attempts",
+        format!(
+            "candidate adoption by cook id is ambiguous because durable attempt plans differ ({attempts}); rerun with the exact owning run id, for example `homeboy agent-task adopt {}`",
+            first.run_id
+        ),
+        Some(recipe.cook_id.clone()),
+        Some(vec![
+            "Pass an attempt run id to select the candidate's exact recorded policy."
+                .to_string(),
+        ]),
+    ))
 }
 
 /// A bounded collection of independently durable cooks. Each cook retains the
@@ -2931,11 +2952,11 @@ mod tests {
     }
 
     #[test]
-    fn adoption_by_cook_id_rejects_multiple_recorded_recipe_attempts() {
+    fn adoption_by_cook_id_uses_the_first_of_repeated_equivalent_recipe_attempts() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            let cook_id = "cook-adopt-ambiguous-attempts";
-            let first_run_id = "cook-adopt-ambiguous-attempts-1";
-            let second_run_id = "cook-adopt-ambiguous-attempts-2";
+            let cook_id = "cook-adopt-equivalent-attempts";
+            let first_run_id = "cook-adopt-equivalent-attempts-1";
+            let second_run_id = "cook-adopt-equivalent-attempts-2";
             let mut options =
                 batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
             options.initial_run_id = first_run_id.to_string();
@@ -2947,13 +2968,43 @@ mod tests {
             agent_task_lifecycle::submit_plan(&options.initial_plan, Some(second_run_id))
                 .expect("persist second lifecycle record");
 
+            let (record, recipe) = resolve_adoption_target(cook_id)
+                .expect("equivalent attempts resolve deterministically");
+
+            assert_eq!(recipe.cook_id, cook_id);
+            assert_eq!(record.run_id, first_run_id);
+        });
+    }
+
+    #[test]
+    fn adoption_by_cook_id_rejects_conflicting_recipe_attempts_with_explicit_choices() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-adopt-conflicting-attempts";
+            let first_run_id = "cook-adopt-conflicting-attempts-1";
+            let second_run_id = "cook-adopt-conflicting-attempts-2";
+            let mut options =
+                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.initial_run_id = first_run_id.to_string();
+            super::super::persist_initial_recipe(&options).expect("persist recipe");
+            let mut conflicting_plan = options.initial_plan.clone();
+            conflicting_plan.plan_id = "conflicting-plan".to_string();
+            super::super::record_recipe_attempt(cook_id, 2, second_run_id, &conflicting_plan)
+                .expect("persist conflicting second recipe attempt");
+
             let error = resolve_adoption_target(cook_id)
-                .expect_err("ambiguous recipe adoption fails closed");
+                .expect_err("conflicting recipe adoption requires an explicit run id");
 
             assert_eq!(error.details["field"], "cook_recipe.attempts");
+            assert!(error.message.contains(first_run_id));
+            assert!(error.message.contains(second_run_id));
             assert!(error
                 .message
-                .contains("candidate adoption requires exactly one durable cook attempt"));
+                .contains(&format!("homeboy agent-task adopt {first_run_id}")));
+
+            let (record, recipe) = resolve_adoption_target(second_run_id)
+                .expect("an exact orphaned attempt run id selects its recipe");
+            assert_eq!(recipe.cook_id, cook_id);
+            assert_eq!(record.run_id, second_run_id);
         });
     }
 
