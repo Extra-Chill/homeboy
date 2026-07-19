@@ -66,6 +66,8 @@ pub struct ResourceCleanupOutput {
     pub applied_count: usize,
     pub success_count: usize,
     pub failure_count: usize,
+    pub skipped_count: usize,
+    pub remaining_count: usize,
     pub reclaimed_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<ArtifactCleanupOutput>,
@@ -82,12 +84,16 @@ pub struct ArtifactCleanupOutput {
     pub candidate_count: usize,
     pub skipped_count: usize,
     pub applied_count: usize,
+    pub success_count: usize,
+    pub failure_count: usize,
+    pub remaining_count: usize,
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
     pub summary: ArtifactCleanupSummary,
     pub candidates: Vec<ArtifactCleanupCandidate>,
     pub skipped: Vec<ArtifactCleanupSkipped>,
     pub applied: Vec<ArtifactCleanupApplied>,
+    pub failed: Vec<ArtifactCleanupFailed>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -135,6 +141,16 @@ pub struct ArtifactCleanupApplied {
     pub kind: String,
     pub size_bytes: u64,
     pub removed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ArtifactCleanupFailed {
+    pub worktree: String,
+    pub path: String,
+    pub relative_path: String,
+    pub kind: String,
+    pub size_bytes: u64,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,7 +202,6 @@ fn cleanup_artifacts_in_worktrees(
 ) -> Result<ArtifactCleanupOutput> {
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
-    let mut applied = Vec::new();
 
     for worktree in &worktrees {
         let safety = git_safety(&worktree.path)?;
@@ -254,26 +269,26 @@ fn cleanup_artifacts_in_worktrees(
 
     order_and_limit_candidates(&mut candidates, options.sort, options.limit);
 
-    if options.apply {
-        for candidate in &candidates {
+    let (applied, failed) = if options.apply {
+        apply_artifact_candidates(&candidates, |candidate| {
             let path = Path::new(&candidate.path);
-            if !path.exists() {
-                continue;
-            }
-            remove_artifact_path(path)?;
-            applied.push(applied_row(candidate));
-        }
-    }
+            path.exists().then(|| remove_artifact_path(path))
+        })
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let estimated_bytes = candidates.iter().map(|row| row.size_bytes).sum();
     let reclaimed_bytes = applied.iter().map(|row| row.size_bytes).sum();
-    let (remaining_candidate_count, remaining_candidate_bytes) =
-        remaining_candidate_totals(&candidates, options.apply);
+    let (success_count, remaining_count) =
+        artifact_cleanup_result_counts(candidates.len(), applied.len(), failed.len());
+    let failure_count = failed.len();
+    let (_, remaining_candidate_bytes) = remaining_candidate_totals(&candidates, options.apply);
     let summary = cleanup_summary(
         &root,
         options.apply,
         reclaimed_bytes,
-        remaining_candidate_count,
+        remaining_count,
         remaining_candidate_bytes,
     );
 
@@ -284,13 +299,17 @@ fn cleanup_artifacts_in_worktrees(
         worktree_count: worktrees.len(),
         candidate_count: candidates.len(),
         skipped_count: skipped.len(),
-        applied_count: applied.len(),
+        applied_count: success_count,
+        success_count,
+        failure_count,
+        remaining_count,
         estimated_bytes,
         reclaimed_bytes,
         summary,
         candidates,
         skipped,
         applied,
+        failed,
     })
 }
 
@@ -323,18 +342,40 @@ pub fn cleanup_resources_from_config(
         .as_ref()
         .map(|output| output.applied_count)
         .unwrap_or(0);
+    let artifact_success_count = artifacts
+        .as_ref()
+        .map(|output| output.success_count)
+        .unwrap_or(0);
+    let artifact_failure_count = artifacts
+        .as_ref()
+        .map(|output| output.failure_count)
+        .unwrap_or(0);
+    let skipped_count = artifacts
+        .as_ref()
+        .map(|output| output.skipped_count)
+        .unwrap_or(0);
+    let remaining_count = artifacts
+        .as_ref()
+        .map(|output| output.remaining_count)
+        .unwrap_or(0);
     let reclaimed_bytes = artifacts
         .as_ref()
         .map(|output| output.reclaimed_bytes)
         .unwrap_or(0);
-    let success_count = providers
+    let provider_success_count = providers
         .as_ref()
         .map(|output| output.success_count)
         .unwrap_or(0);
-    let failure_count = providers
+    let provider_failure_count = providers
         .as_ref()
         .map(|output| output.failure_count)
         .unwrap_or(0);
+
+    let (success_count, failure_count) = if providers.is_some() {
+        (provider_success_count, provider_failure_count)
+    } else {
+        (artifact_success_count, artifact_failure_count)
+    };
 
     Ok(ResourceCleanupOutput {
         command: "cleanup.resources",
@@ -343,6 +384,8 @@ pub fn cleanup_resources_from_config(
         applied_count,
         success_count,
         failure_count,
+        skipped_count,
+        remaining_count,
         reclaimed_bytes,
         artifacts,
         worktree_providers: providers,
@@ -463,6 +506,40 @@ fn remaining_candidate_totals(
         }
     }
     (count, bytes)
+}
+
+/// Produces the artifact-cleanup result counters from per-candidate outcomes.
+/// Skipped paths are filtered before candidacy, so each candidate is either
+/// successfully applied or remains after the invocation; failed removals are
+/// therefore a subset of remaining candidates.
+fn artifact_cleanup_result_counts(
+    candidate_count: usize,
+    applied_count: usize,
+    failure_count: usize,
+) -> (usize, usize) {
+    debug_assert!(applied_count <= candidate_count);
+    let remaining_count = candidate_count - applied_count;
+    debug_assert!(failure_count <= remaining_count);
+    (applied_count, remaining_count)
+}
+
+fn apply_artifact_candidates<Remove>(
+    candidates: &[ArtifactCleanupCandidate],
+    mut remove: Remove,
+) -> (Vec<ArtifactCleanupApplied>, Vec<ArtifactCleanupFailed>)
+where
+    Remove: FnMut(&ArtifactCleanupCandidate) -> Option<Result<()>>,
+{
+    let mut applied = Vec::new();
+    let mut failed = Vec::new();
+    for candidate in candidates {
+        match remove(candidate) {
+            Some(Ok(())) => applied.push(applied_row(candidate)),
+            Some(Err(error)) => failed.push(failed_row(candidate, error.message)),
+            None => {}
+        }
+    }
+    (applied, failed)
 }
 
 fn resolve_root(options: &ArtifactCleanupOptions) -> Result<PathBuf> {
@@ -656,6 +733,17 @@ fn applied_row(candidate: &ArtifactCleanupCandidate) -> ArtifactCleanupApplied {
         kind: candidate.kind.clone(),
         size_bytes: candidate.size_bytes,
         removed: true,
+    }
+}
+
+fn failed_row(candidate: &ArtifactCleanupCandidate, error: String) -> ArtifactCleanupFailed {
+    ArtifactCleanupFailed {
+        worktree: candidate.worktree.clone(),
+        path: candidate.path.clone(),
+        relative_path: candidate.relative_path.clone(),
+        kind: candidate.kind.clone(),
+        size_bytes: candidate.size_bytes,
+        error,
     }
 }
 
@@ -959,6 +1047,9 @@ mod tests {
         assert_eq!(output.candidate_count, 1);
         assert_eq!(output.applied_count, 0);
         assert_eq!(output.success_count, 1);
+        assert_eq!(output.failure_count, 0);
+        assert_eq!(output.skipped_count, 0);
+        assert_eq!(output.remaining_count, 1);
         assert!(repo.path().join("target/debug/app").exists());
         assert_eq!(
             output
@@ -1012,6 +1103,9 @@ mod tests {
         assert_eq!(output.candidate_count, 1);
         assert_eq!(output.applied_count, 1);
         assert_eq!(output.success_count, 1);
+        assert_eq!(output.failure_count, 0);
+        assert_eq!(output.skipped_count, 0);
+        assert_eq!(output.remaining_count, 0);
         assert!(!repo.path().join("target").exists());
         assert_eq!(
             output
@@ -1589,6 +1683,56 @@ mod tests {
     }
 
     #[test]
+    fn artifact_cleanup_result_counts_satisfy_outcome_invariants() {
+        let cases = [
+            // all-success
+            (3, 3, 0, 3, 0),
+            // partial failure: failures remain and are not reported as successes
+            (3, 1, 2, 1, 2),
+            // dry-run: candidates remain untouched
+            (3, 0, 0, 0, 3),
+            // no candidates
+            (0, 0, 0, 0, 0),
+        ];
+
+        for (candidates, applied, failures, expected_successes, expected_remaining) in cases {
+            let (successes, remaining) =
+                artifact_cleanup_result_counts(candidates, applied, failures);
+
+            assert_eq!(successes, expected_successes);
+            assert_eq!(remaining, expected_remaining);
+            assert_eq!(applied, successes);
+            assert_eq!(candidates, successes + remaining);
+            assert!(failures <= remaining);
+        }
+    }
+
+    #[test]
+    fn artifact_cleanup_reports_partial_removal_failures_without_aborting() {
+        let candidates = vec![
+            artifact_candidate("target"),
+            artifact_candidate("dist"),
+            artifact_candidate("node_modules"),
+        ];
+        let (applied, failed) = apply_artifact_candidates(&candidates, |candidate| match candidate
+            .relative_path
+            .as_str()
+        {
+            "target" => Some(Ok(())),
+            "dist" => Some(Err(Error::internal_unexpected("remove failed"))),
+            _ => None,
+        });
+        let (success_count, remaining_count) =
+            artifact_cleanup_result_counts(candidates.len(), applied.len(), failed.len());
+
+        assert_eq!(applied.len(), 1);
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].relative_path, "dist");
+        assert_eq!(success_count, 1);
+        assert_eq!(remaining_count, 2);
+    }
+
+    #[test]
     fn apply_skips_artifact_path_with_tracked_source_changes() {
         let repo = git_repo();
         write_file(
@@ -1892,6 +2036,19 @@ mod tests {
     fn write_file(path: &Path, content: &str) {
         fs::create_dir_all(path.parent().expect("parent")).expect("mkdir parent");
         fs::write(path, content).expect("write file");
+    }
+
+    fn artifact_candidate(relative_path: &str) -> ArtifactCleanupCandidate {
+        ArtifactCleanupCandidate {
+            worktree: "/repo".to_string(),
+            path: format!("/repo/{relative_path}"),
+            relative_path: relative_path.to_string(),
+            kind: "artifact".to_string(),
+            declared_by: "test".to_string(),
+            size_bytes: 1,
+            source_dirty: false,
+            unpushed_commits: false,
+        }
     }
 
     fn git(path: &Path, args: &[&str]) {
