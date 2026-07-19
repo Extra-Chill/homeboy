@@ -97,6 +97,53 @@ impl ObservationStore {
         )
     }
 
+    /// Import bytes whose stable identity and integrity metadata were published
+    /// by another durable store. Validate before publishing so a mirror never
+    /// turns an advertised artifact into controller-owned corrupt evidence.
+    pub fn record_verified_artifact_with_id(
+        &self,
+        run_id: &str,
+        kind: &str,
+        path: impl AsRef<Path>,
+        artifact_id: &str,
+        expected_size_bytes: Option<i64>,
+        expected_sha256: Option<&str>,
+        metadata_json: serde_json::Value,
+    ) -> Result<ArtifactRecord> {
+        let path = path.as_ref();
+        let metadata = fs::metadata(path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read artifact metadata {}", path.display())),
+            )
+        })?;
+        let actual_size_bytes = i64::try_from(metadata.len()).ok();
+        if expected_size_bytes.is_some() && expected_size_bytes != actual_size_bytes {
+            return Err(Error::validation_invalid_argument(
+                "artifact.size_bytes",
+                format!(
+                    "artifact `{artifact_id}` size does not match the published durable metadata"
+                ),
+                actual_size_bytes.map(|value| value.to_string()),
+                None,
+            ));
+        }
+        if let Some(expected_sha256) = expected_sha256 {
+            let actual_sha256 = crate::artifact_metadata::sha256_file(path)?;
+            if actual_sha256 != expected_sha256 {
+                return Err(Error::validation_invalid_argument(
+                    "artifact.sha256",
+                    format!(
+                        "artifact `{artifact_id}` SHA-256 does not match the published durable metadata"
+                    ),
+                    Some(actual_sha256),
+                    None,
+                ));
+            }
+        }
+        self.record_artifact_with_id(run_id, kind, path, artifact_id, metadata_json)
+    }
+
     fn record_artifact_with_id_and_metadata(
         &self,
         run_id: &str,
@@ -162,26 +209,41 @@ impl ObservationStore {
         })?;
         let size_bytes = i64::try_from(staged_metadata.len()).ok();
         let sha256 = Some(crate::artifact_metadata::sha256_file(&staged_path)?);
-        if let Some(existing) = self.get_artifact(&id)? {
-            let existing_path = Path::new(&existing.path);
-            let existing_matches = existing.run_id == run_id
-                && existing.kind == kind
-                && existing.size_bytes == size_bytes
-                && existing.sha256 == sha256
-                && fs::metadata(existing_path)
-                    .map(|value| value.is_file())
-                    .unwrap_or(false)
-                && crate::artifact_metadata::sha256_file(existing_path).ok() == sha256;
-            fs::remove_file(&staged_path).ok();
-            if existing_matches {
-                return Ok(existing);
+        let existing = self.get_artifact(&id)?;
+        let replacing_remote_projection = existing
+            .as_ref()
+            .filter(|artifact| {
+                artifact.artifact_type == "remote_file"
+                    && artifact.run_id == run_id
+                    && artifact.kind == kind
+                    && artifact.size_bytes == size_bytes
+                    && artifact.sha256 == sha256
+            })
+            .map(|artifact| artifact.created_at.clone());
+        if let Some(existing) = existing {
+            if replacing_remote_projection.is_none() {
+                let existing_path = Path::new(&existing.path);
+                let existing_matches = existing.run_id == run_id
+                    && existing.kind == kind
+                    && existing.size_bytes == size_bytes
+                    && existing.sha256 == sha256
+                    && fs::metadata(existing_path)
+                        .map(|value| value.is_file())
+                        .unwrap_or(false)
+                    && crate::artifact_metadata::sha256_file(existing_path).ok() == sha256;
+                fs::remove_file(&staged_path).ok();
+                if existing_matches {
+                    return Ok(existing);
+                }
+                return Err(Error::validation_invalid_argument(
+                    "artifact_id",
+                    format!(
+                        "stable artifact id '{id}' already records different content or ownership"
+                    ),
+                    Some(id),
+                    None,
+                ));
             }
-            return Err(Error::validation_invalid_argument(
-                "artifact_id",
-                format!("stable artifact id '{id}' already records different content or ownership"),
-                Some(id),
-                None,
-            ));
         }
         let published_new_file = match fs::hard_link(&staged_path, &stored_path) {
             Ok(()) => true,
@@ -217,7 +279,9 @@ impl ObservationStore {
                 )
             })?;
         }
-        let created_at = chrono::Utc::now().to_rfc3339();
+        let created_at = replacing_remote_projection
+            .clone()
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
         let mime = crate::artifact_metadata::content_type_from_path(path);
         let path_string = stored_path.to_string_lossy().to_string();
         let mut artifact = ArtifactRecord {
@@ -240,30 +304,62 @@ impl ObservationStore {
 
         let metadata_json_str = serialize_metadata(&artifact.metadata_json)?;
         let viewer_links_json = serialize_metadata(&serde_json::json!(artifact.viewer_links))?;
-        if let Err(error) = execute_with_retry("insert artifact record", || {
-            self.connection.execute(
-                r#"
-                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-                "#,
-                params![
-                    id,
-                    run_id,
-                    kind,
-                    "file",
-                    path_string,
-                    Option::<String>::None,
-                    artifact.public_url,
-                    artifact.viewer_url,
-                    viewer_links_json,
-                    sha256,
-                    size_bytes,
-                    mime,
-                    metadata_json_str,
-                    created_at,
-                ],
-            )
-        }) {
+        let persist_result = if replacing_remote_projection.is_some() {
+            execute_with_retry("promote remote artifact record", || {
+                self.connection.execute(
+                    r#"
+                    UPDATE artifacts
+                    SET run_id = ?2, kind = ?3, artifact_type = ?4, path = ?5, url = ?6,
+                        public_url = ?7, viewer_url = ?8, viewer_links_json = ?9,
+                        sha256 = ?10, size_bytes = ?11, mime = ?12, metadata_json = ?13,
+                        created_at = ?14
+                    WHERE id = ?1
+                    "#,
+                    params![
+                        &id,
+                        run_id,
+                        kind,
+                        "file",
+                        &path_string,
+                        Option::<String>::None,
+                        &artifact.public_url,
+                        &artifact.viewer_url,
+                        &viewer_links_json,
+                        &sha256,
+                        size_bytes,
+                        &mime,
+                        &metadata_json_str,
+                        &created_at,
+                    ],
+                )
+            })
+        } else {
+            execute_with_retry("insert artifact record", || {
+                self.connection.execute(
+                    r#"
+                    INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                    "#,
+                    params![
+                        &id,
+                        run_id,
+                        kind,
+                        "file",
+                        &path_string,
+                        Option::<String>::None,
+                        &artifact.public_url,
+                        &artifact.viewer_url,
+                        &viewer_links_json,
+                        &sha256,
+                        size_bytes,
+                        &mime,
+                        &metadata_json_str,
+                        &created_at,
+                    ],
+                )
+            })
+        };
+        if let Err(error) = persist_result {
             if published_new_file {
                 fs::remove_file(&stored_path).ok();
             }
@@ -1013,6 +1109,167 @@ mod tests {
                 fs::read(&first.path).expect("original persisted bytes"),
                 b"first bytes"
             );
+        });
+    }
+
+    #[test]
+    fn verified_stable_fuzz_artifact_rejects_published_integrity_mismatch_before_copying() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("fuzz").cwd_path(home.path()).build())
+                .expect("run");
+            let source = home.path().join("fuzz-results.json");
+            fs::write(&source, b"durable fuzz bytes").expect("write source");
+            let size = i64::try_from(fs::metadata(&source).expect("metadata").len())
+                .expect("test size fits i64");
+            let sha256 = crate::artifact_metadata::sha256_file(&source).expect("source hash");
+
+            let artifact = store
+                .record_verified_artifact_with_id(
+                    &run.id,
+                    "fuzz_results",
+                    &source,
+                    "remote-fuzz-results",
+                    Some(size),
+                    Some(&sha256),
+                    serde_json::json!({ "owner": "controller" }),
+                )
+                .expect("verified publication");
+            assert_eq!(
+                fs::read(&artifact.path).expect("controller bytes"),
+                b"durable fuzz bytes"
+            );
+
+            let error = store
+                .record_verified_artifact_with_id(
+                    &run.id,
+                    "fuzz_results",
+                    &source,
+                    "remote-fuzz-results-mismatch",
+                    Some(size + 1),
+                    Some(&sha256),
+                    serde_json::json!({}),
+                )
+                .expect_err("published size mismatch must fail closed");
+            assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
+            assert!(store
+                .get_artifact("remote-fuzz-results-mismatch")
+                .expect("lookup")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn verified_fuzz_artifact_promotes_matching_remote_projection_to_local_ownership() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("fuzz").cwd_path(home.path()).build())
+                .expect("run");
+            let source = home.path().join("fuzz-results.json");
+            fs::write(&source, b"durable fuzz bytes").expect("write source");
+            let size = i64::try_from(fs::metadata(&source).expect("metadata").len())
+                .expect("test size fits i64");
+            let sha256 = crate::artifact_metadata::sha256_file(&source).expect("source hash");
+            store
+                .import_artifact(&ArtifactRecord {
+                    id: "fuzz-results".to_string(),
+                    run_id: run.id.clone(),
+                    kind: "fuzz_results".to_string(),
+                    artifact_type: "remote_file".to_string(),
+                    path: "runner-artifact://lab/remote-run/fuzz-results".to_string(),
+                    url: None,
+                    public_url: None,
+                    viewer_url: None,
+                    viewer_links: Vec::new(),
+                    sha256: Some(sha256.clone()),
+                    size_bytes: Some(size),
+                    mime: Some("application/json".to_string()),
+                    metadata_json: serde_json::json!({ "runner_id": "lab" }),
+                    created_at: "2026-05-16T00:00:01Z".to_string(),
+                })
+                .expect("remote projection");
+
+            let promoted = store
+                .record_verified_artifact_with_id(
+                    &run.id,
+                    "fuzz_results",
+                    &source,
+                    "fuzz-results",
+                    Some(size),
+                    Some(&sha256),
+                    serde_json::json!({ "runner_id": "lab" }),
+                )
+                .expect("promote remote projection");
+
+            assert_eq!(promoted.artifact_type, "file");
+            assert_eq!(promoted.created_at, "2026-05-16T00:00:01Z");
+            fs::remove_file(source).expect("runner cleanup");
+            assert_eq!(
+                fs::read(promoted.path).expect("controller bytes"),
+                b"durable fuzz bytes"
+            );
+        });
+    }
+
+    #[test]
+    fn controller_owned_verified_fuzz_artifacts_survive_source_cleanup_and_remain_retrievable() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("fuzz").cwd_path(home.path()).build())
+                .expect("run");
+            let run_dir = crate::engine::run_dir::RunDir::create().expect("transient run dir");
+            let fixtures = [
+                ("fuzz-results", "fuzz_results", b"results".as_slice()),
+                (
+                    "execution-request",
+                    "fuzz_execution_request",
+                    b"request".as_slice(),
+                ),
+                (
+                    "result-envelope",
+                    "fuzz_result_envelope",
+                    b"envelope".as_slice(),
+                ),
+                ("coverage", "fuzz_coverage", b"coverage".as_slice()),
+            ];
+            let mut expected = Vec::new();
+            for (id, kind, bytes) in fixtures {
+                let source = run_dir.step_file(id);
+                fs::write(&source, bytes).expect("write runner artifact");
+                let size = i64::try_from(bytes.len()).expect("test size fits i64");
+                let sha256 = crate::artifact_metadata::sha256_file(&source).expect("source hash");
+                store
+                    .record_verified_artifact_with_id(
+                        &run.id,
+                        kind,
+                        &source,
+                        id,
+                        Some(size),
+                        Some(&sha256),
+                        serde_json::json!({ "owner": "controller" }),
+                    )
+                    .expect("controller mirror records bytes");
+                expected.push((id, size, sha256, bytes.to_vec()));
+            }
+
+            run_dir.cleanup();
+            for (id, size, sha256, bytes) in expected {
+                let artifact =
+                    crate::observation::runs_service::resolve_artifact_for_run(&store, &run.id, id)
+                        .expect("controller mirror resolves artifact after runner cleanup");
+                let output = home.path().join("retrieved").join(id);
+                let retrieved = crate::observation::runs_service::copy_local_file_artifact(
+                    artifact,
+                    Some(output.clone()),
+                )
+                .expect("controller mirror retrieves artifact while runner is unavailable");
+                assert_eq!(retrieved.size_bytes, Some(size));
+                assert_eq!(retrieved.sha256.as_deref(), Some(sha256.as_str()));
+                assert_eq!(fs::read(output).expect("retrieved bytes"), bytes);
+            }
         });
     }
 
