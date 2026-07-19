@@ -132,24 +132,28 @@ pub fn pr_refresh(
 
     let strategy = resolve_strategy(root, options.strategy, &branch)?;
     let update = match strategy {
-        PrRefreshStrategy::Rebase => {
-            git_output(root, &["rebase", &format!("origin/{}", pr.base_ref_name)])
-        }
-        PrRefreshStrategy::Merge => git_output(
+        PrRefreshStrategy::Rebase => super::run_git_output(
+            root,
+            &["rebase", &format!("origin/{}", pr.base_ref_name)],
+            "pr refresh",
+        ),
+        PrRefreshStrategy::Merge => super::run_git_output(
             root,
             &[
                 "merge",
                 "--no-edit",
                 &format!("origin/{}", pr.base_ref_name),
             ],
+            "pr refresh",
         ),
-        PrRefreshStrategy::FfOnly => git_output(
+        PrRefreshStrategy::FfOnly => super::run_git_output(
             root,
             &[
                 "merge",
                 "--ff-only",
                 &format!("origin/{}", pr.base_ref_name),
             ],
+            "pr refresh",
         ),
         PrRefreshStrategy::Auto => unreachable!("auto strategy resolved before update"),
     }?;
@@ -372,7 +376,7 @@ fn status_porcelain(root: &Path) -> Result<String> {
 }
 
 fn git_stdout_optional(root: &Path, args: &[&str]) -> Result<Option<String>> {
-    let output = git_output(root, args)?;
+    let output = super::run_git_output(root, args, "pr refresh")?;
     if output.status.success() {
         Ok(Some(
             String::from_utf8_lossy(&output.stdout).trim().to_string(),
@@ -388,7 +392,7 @@ fn git_stdout(root: &Path, args: &[&str], label: &str) -> Result<String> {
 }
 
 fn git_checked(root: &Path, args: &[&str], label: &str) -> Result<std::process::Output> {
-    let output = git_output(root, args)?;
+    let output = super::run_git_output(root, args, "pr refresh")?;
     if output.status.success() {
         Ok(output)
     } else {
@@ -397,14 +401,6 @@ fn git_checked(root: &Path, args: &[&str], label: &str) -> Result<std::process::
             String::from_utf8_lossy(&output.stderr)
         )))
     }
-}
-
-fn git_output(root: &Path, args: &[&str]) -> Result<std::process::Output> {
-    Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .map_err(|e| Error::git_command_failed(format!("git failed: {e}")))
 }
 
 #[cfg(test)]
