@@ -245,10 +245,9 @@ pub(crate) const REQUIRE_EXACT_RUNNER_VERSION_ENV: &str = "HOMEBOY_REQUIRE_EXACT
 /// Classification of controller↔runner Homeboy version drift for the Lab
 /// offload dispatch gate.
 ///
-/// Patch-level drift within the same `MAJOR.MINOR` is wire-compatible: the
-/// runner daemon and the controller speak the same provider/job contract, so
-/// the run can proceed with a warning. `MAJOR`/`MINOR` drift can genuinely
-/// change that contract and is refused.
+/// Patch-level drift within the same `MAJOR.MINOR` is wire-compatible when
+/// build provenance is unavailable. A complete build identity is authoritative:
+/// a differing identity is refused even when its semver matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunnerHomeboyVersionDrift {
     /// Controller and runner report the same version (no drift).
@@ -308,26 +307,44 @@ fn parse_major_minor(version: &str) -> Option<(u64, u64)> {
     parse_version_triplet(version).map(|(major, minor, _patch)| (major, minor))
 }
 
+fn canonical_build_identity(identity: &str) -> &str {
+    identity
+        .trim()
+        .strip_prefix("homeboy ")
+        .unwrap_or(identity.trim())
+}
+
 /// Classify controller↔runner Homeboy version drift using the same drift
 /// evidence the metadata builder reports (runner session version vs the
 /// compiled controller version).
 pub(crate) fn classify_runner_homeboy_version_drift(
     status: &RunnerStatusReport,
 ) -> RunnerHomeboyVersionDrift {
-    let controller_version = homeboy_product_identity::product_version();
-    let Some(runner_version) = status
-        .session
-        .as_ref()
-        .map(|session| session.homeboy_version.as_str())
-    else {
+    let controller = homeboy_product_identity::build_identity();
+    let Some(session) = status.session.as_ref() else {
         // No connected session means no version evidence to compare; leave
         // connectivity gating to the dedicated preflight checks.
         return RunnerHomeboyVersionDrift::None;
     };
 
-    // Preserve the existing exact-match fast path: byte-identical strings are
-    // unambiguously the same build.
-    if runner_version == controller_version {
+    if let Some(runner_identity) = session.homeboy_build_identity.as_deref() {
+        // Build provenance resolves representation differences between `0.x.y`
+        // and `homeboy 0.x.y+commit` without accepting distinct same-semver builds.
+        return if canonical_build_identity(runner_identity)
+            == canonical_build_identity(&controller.display)
+        {
+            RunnerHomeboyVersionDrift::None
+        } else {
+            RunnerHomeboyVersionDrift::Incompatible
+        };
+    }
+
+    let runner_version = session.homeboy_version.as_str();
+    let controller_version = controller.version.as_str();
+
+    // Version-only sessions do not prove a build, so preserve compatible patch
+    // handling for older runners that cannot report build provenance.
+    if canonical_build_identity(runner_version) == canonical_build_identity(controller_version) {
         return RunnerHomeboyVersionDrift::None;
     }
 

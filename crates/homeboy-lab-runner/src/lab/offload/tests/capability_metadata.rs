@@ -612,7 +612,7 @@ fn status_with_runner_version(runner_id: &str, version: &str) -> RunnerStatusRep
     let mut status = reverse_status(runner_id);
     if let Some(session) = status.session.as_mut() {
         session.homeboy_version = version.to_string();
-        session.homeboy_build_identity = Some(format!("{version}+test"));
+        session.homeboy_build_identity = None;
     }
     status
 }
@@ -849,6 +849,42 @@ fn exact_version_match_has_no_drift() {
     assert!(!lab_runner_homeboy_has_blocking_drift(&status, false));
     assert!(!lab_runner_homeboy_has_blocking_drift(&status, true));
     assert!(lab_runner_homeboy_compatible_drift_warning(&status, false).is_none());
+}
+
+#[test]
+fn matching_full_build_identities_have_no_drift_under_strict_mode() {
+    let mut status = status_with_runner_version("homeboy-lab", "homeboy 0.0.0");
+    status
+        .session
+        .as_mut()
+        .expect("runner session")
+        .homeboy_build_identity = Some(homeboy_product_identity::build_identity().display);
+
+    assert_eq!(
+        classify_runner_homeboy_version_drift(&status),
+        RunnerHomeboyVersionDrift::None
+    );
+    assert!(!lab_runner_homeboy_has_blocking_drift(&status, true));
+}
+
+#[test]
+fn same_semver_with_different_build_identity_is_refused() {
+    let mut status =
+        status_with_runner_version("homeboy-lab", homeboy_product_identity::product_version());
+    status
+        .session
+        .as_mut()
+        .expect("runner session")
+        .homeboy_build_identity = Some(format!(
+        "homeboy {}+different-build",
+        homeboy_product_identity::product_version()
+    ));
+
+    assert_eq!(
+        classify_runner_homeboy_version_drift(&status),
+        RunnerHomeboyVersionDrift::Incompatible
+    );
+    assert!(lab_runner_homeboy_has_blocking_drift(&status, false));
 }
 
 #[test]
