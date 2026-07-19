@@ -335,6 +335,18 @@ impl AgentTaskRunRecord {
             .filter(|value| !value.trim().is_empty())
     }
 
+    /// Whether the authoritative agent-task run state (`self.state`) and its
+    /// generic projection onto the durable lifecycle record
+    /// (`self.lifecycle.execution.state`) agree.
+    ///
+    /// `set_run_state` is the single writer that keeps these in lockstep; this
+    /// predicate is the same condition the record-health check uses to flag
+    /// `ConflictingProjections`. Exposed so callers (and a `debug_assert` in the
+    /// setter) can assert the invariant instead of silently diverging.
+    pub(crate) fn run_state_projections_agree(&self) -> bool {
+        RunExecutionState::from(self.state) == self.lifecycle.execution.state
+    }
+
     fn has_fresh_update(&self) -> bool {
         self.updated_at
             .as_deref()

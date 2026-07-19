@@ -38,6 +38,15 @@ pub(crate) fn set_run_state(record: &mut AgentTaskRunRecord, state: AgentTaskRun
         record.lifecycle.execution.finished_at = Some(timestamp.clone());
     }
     record.lifecycle.updated_at = Some(timestamp);
+    // `set_run_state` is the single writer that keeps the authoritative run
+    // state and its generic lifecycle projection in lockstep. Assert the
+    // invariant the record-health check enforces (`ConflictingProjections`) so a
+    // future edit to this setter that breaks the pairing fails fast in dev/tests
+    // rather than silently emitting divergent records.
+    debug_assert!(
+        record.run_state_projections_agree(),
+        "set_run_state must leave run-state projections in agreement"
+    );
 }
 
 pub(crate) fn update_lifecycle_heartbeat(record: &mut AgentTaskRunRecord) {
