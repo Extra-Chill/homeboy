@@ -250,6 +250,60 @@ pub fn recipe_exists(cook_id: &str) -> Result<bool> {
     Ok(recipe_path(cook_id)?.exists())
 }
 
+/// Locate an orphaned attempt by its exact durable run ID. This permits an
+/// operator to disambiguate a cook whose retry attempts have different plans.
+pub fn load_recipe_for_attempt(run_id: &str) -> Result<Option<AgentTaskCookRecipe>> {
+    let root = paths::homeboy_data()?.join("agent-task-cooks");
+    if !root.exists() {
+        return Ok(None);
+    }
+
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(&root)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?
+    {
+        let path = entry
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(root.display().to_string()))
+            })?
+            .path()
+            .join("recipe.json");
+        if !path.exists() {
+            continue;
+        }
+        let raw = fs::read_to_string(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?;
+        let recipe: AgentTaskCookRecipe = serde_json::from_str(&raw).map_err(|error| {
+            Error::validation_invalid_argument(
+                "cook_recipe",
+                format!("malformed durable cook recipe: {error}"),
+                Some(path.display().to_string()),
+                None,
+            )
+        })?;
+        validate_recipe(&recipe)?;
+        if recipe
+            .attempts
+            .iter()
+            .any(|attempt| attempt.run_id == run_id)
+        {
+            matches.push(recipe);
+        }
+    }
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => Err(Error::validation_invalid_argument(
+            "run_or_cook_id",
+            "durable run id is declared by multiple cook recipes; inspect the recipe records before adoption",
+            Some(run_id.to_string()),
+            None,
+        )),
+    }
+}
+
 pub fn enqueue_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool> {
     let recipe = load_recipe(cook_id)?;
     if !recipe
