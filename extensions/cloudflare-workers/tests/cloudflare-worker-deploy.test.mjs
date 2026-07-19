@@ -10,7 +10,7 @@ import { join, resolve } from 'node:path';
 const extension = resolve(import.meta.dirname, '..');
 const script = join(extension, 'scripts/cloudflare-worker-deploy.mjs');
 const root = mkdtempSync(join(os.tmpdir(), 'homeboy-cloudflare-test-')); const worker = join(root, 'worker'); const bin = join(root, 'bin'); mkdirSync(worker); mkdirSync(bin);
-writeFileSync(join(worker, 'wrangler.toml'), 'name = "example-worker"\naccount_id = "account-example"\n[[kv_namespaces]]\nbinding = "CACHE"\n');
+writeFileSync(join(worker, 'wrangler.toml'), 'name = "example-worker"\n[[kv_namespaces]]\nbinding = "CACHE"\n');
 writeFileSync(join(bin, 'wrangler'), `#!/usr/bin/env node
 const fs=require('fs'); const a=process.argv.slice(2); fs.appendFileSync(process.env.CALLS,JSON.stringify(a)+'\\n');
 if(a[0]==='whoami') process.stdout.write(JSON.stringify({accounts:[{id:'account-example'}]}));
@@ -32,6 +32,8 @@ const server=await listen('not-ready'); try { const failed=await run({...base,ga
 const failedSecret=await run({...base,durability:{redeploy_same_revision:false}}, {FAIL_SECRET:'1'}); assert.equal(failedSecret.status,1); const secretResult=outputResult(failedSecret.stdout); assert.equal(secretResult.failure.stage,'secret_provisioning'); assert.equal(secretResult.deployments.at(-1).rollback.restored_version_id,'version-old'); assert.match(readFileSync(calls,'utf8'),/"rollback","version-old"/);
 
 const invalidSecret=await run({...base,secrets:[{name:'../escape',env:'TEST_SECRET'}]}); assert.equal(invalidSecret.status,1); assert.equal(JSON.parse(invalidSecret.stderr).code,'invalid_contract');
+
+writeFileSync(join(worker,'wrangler.toml'),'name = "example-worker"\naccount_id = "another-account"\n[[kv_namespaces]]\nbinding = "CACHE"\n'); spawnSync('git',['add','wrangler.toml'],{cwd:worker}); spawnSync('git',['commit','-qm','declare conflicting account'],{cwd:worker}); const conflictingRevision=spawnSync('git',['rev-parse','HEAD'],{cwd:worker,encoding:'utf8'}).stdout.trim(); const mismatch=await run({...base,repository:{...base.repository,revision:conflictingRevision}}); assert.equal(mismatch.status,1); assert.equal(outputResult(mismatch.stdout).failure.code,'account_target_mismatch');
 
 rmSync(root,{recursive:true,force:true}); }
 async function run(contract, environment={}) { writeFileSync(calls,'');writeFileSync(state,'0');const path=join(root,'contract.json');writeFileSync(path,JSON.stringify(contract));const throughHomeboy=process.env.HOMEBOY_EXTENSION_RUN==='1';const command=throughHomeboy?'homeboy':process.execPath;const args=throughHomeboy?['extension','run','cloudflare-workers','--','--contract',path]:[script,'--contract',path];return new Promise((resolveRun,reject)=>{const child=spawn(command,args,{env:{...process.env,CALLS:calls,STATE:state,TEST_SECRET:'never-log-this-value',SECRET_VALUE:'never-log-this-value',...environment},stdio:['ignore','pipe','pipe']});let stdout='';let stderr='';child.stdout.on('data',c=>stdout+=c);child.stderr.on('data',c=>stderr+=c);child.once('error',reject);child.once('close',status=>resolveRun({status,stdout,stderr}));}); }

@@ -51,7 +51,7 @@ async function preflight(contract, root, result, redact, env) {
     const clean = await command('git', ['status', '--porcelain'], root, redact, env, contract.timeout_ms);
     if (clean.stdout.trim()) throw fail('source_not_clean', 'Repository worktree has uncommitted changes.');
     const config = await readConfig(resolvePath(root, contract.wrangler.config));
-    if (config.account_id !== contract.target.account_id) throw fail('account_target_mismatch', 'Wrangler config account_id differs from the declared target.');
+    if (config.account_id && config.account_id !== contract.target.account_id) throw fail('account_target_mismatch', 'Wrangler config account_id differs from the declared target.');
     for (const binding of contract.expected_bindings) if (!config.bindings.has(binding)) throw fail('binding_missing', `Wrangler config lacks expected binding ${binding}.`);
     const whoami = await command(contract.wrangler.binary, ['whoami', '--json', '--account', contract.target.account_id], root, redact, env, contract.timeout_ms);
     if (!authenticatedForAccount(whoami.stdout, contract.target.account_id)) throw fail('account_auth_failed', 'Wrangler authentication does not prove access to the declared account.');
