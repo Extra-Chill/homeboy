@@ -7,6 +7,14 @@ use tempfile::tempdir;
 // a separate crate registered at binary startup via `cli_runtime`. Integration
 // tests that exercise extension-backed dependency behavior must register those
 // providers explicitly (registration is an idempotent Mutex-backed slot).
+//
+// Every test that reaches an extension-backed runner path (a `script_stack_component`
+// whose scripts report dependencies, or a `deps::update` that runs a provider
+// install script) registers the runners itself rather than relying on a sibling
+// test having populated the process-global slot first. Depending on that leak
+// made results order- and scope-dependent: under a changed-scope/differential
+// test run that excludes a registering sibling, these tests failed with "no
+// component-script runner registered" (#8964).
 fn register_component_script_runner() {
     homeboy_extension::component_script::register_component_script_runner();
     homeboy_extension::build::register_component_build_runner();
@@ -97,6 +105,7 @@ fn status_prefers_neutral_adapter_manifest_over_builtin_manifests() {
 
 #[test]
 fn neutral_adapter_manifest_discovers_install_command_and_runs_update_install() {
+    register_component_script_runner();
     let dir = tempdir().unwrap();
     let root = dir.path();
     let root_path = root.display().to_string();
@@ -522,6 +531,7 @@ esac
 #[test]
 #[ignore = "integration test mutates real composer manifests/locks and shells out to composer"]
 fn update_with_constraint_changes_manifest_and_lock_for_local_path_package() {
+    register_component_script_runner();
     if std::process::Command::new("composer")
         .arg("--version")
         .output()
