@@ -65,7 +65,7 @@ impl NewRunRecord {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct RunRecord {
     pub id: String,
     pub kind: String,
@@ -179,6 +179,32 @@ mod tests {
 
         assert_eq!(record.kind, "lint");
         assert_eq!(record.metadata_json, serde_json::json!({}));
+    }
+
+    #[test]
+    fn run_record_default_matches_the_fully_spelled_out_empty_record() {
+        let via_default = RunRecord {
+            id: "run-1".to_string(),
+            kind: "agent-task".to_string(),
+            started_at: "2026-07-16T00:00:00Z".to_string(),
+            status: "running".to_string(),
+            ..Default::default()
+        };
+        let verbose = RunRecord {
+            id: "run-1".to_string(),
+            kind: "agent-task".to_string(),
+            component_id: None,
+            started_at: "2026-07-16T00:00:00Z".to_string(),
+            finished_at: None,
+            status: "running".to_string(),
+            command: None,
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: serde_json::Value::Null,
+        };
+        assert_eq!(via_default, verbose);
     }
 
     #[test]

@@ -769,11 +769,8 @@ mod tests {
             finished_at: Some("2026-06-12T00:01:00Z".to_string()),
             status: "pass".to_string(),
             command: Some("homeboy trace".to_string()),
-            cwd: None,
             homeboy_version: Some("test-version".to_string()),
-            git_sha: None,
-            rig_id: None,
-            metadata_json: Value::Null,
+            ..Default::default()
         }
     }
 
