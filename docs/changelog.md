@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.296.2] - 2026-07-19
+
+### Changed
+- drop legacy artifact promotion
+- Resolve Lab runner executable build identity
+
+### Fixed
+- Fix fuzz workload environment providers
+
 ## [0.296.1] - 2026-07-19
 
 ### Changed
