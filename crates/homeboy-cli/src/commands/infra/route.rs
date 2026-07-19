@@ -971,18 +971,14 @@ fn materialize_agent_task_retry_handoff(
     // Use the same resolution `retry` applies (a cook id resolves to its latest
     // run). A plain exact-match here let a resolvable id fall through and ship an
     // unrunnable `agent-task retry <id>` to a runner with no such record (#8390).
+    //
+    // When the id does NOT resolve to a controller record, the retry is not the
+    // controller's to materialize: it stays portable so the runner reads the run
+    // from its own store (a runner-owned retry). Returning `None` here preserves
+    // that behavior; only a resolvable controller record is materialized into a
+    // self-contained run-plan handoff.
     if !agent_task_lifecycle::run_record_exists_resolved(&retry.run_id)? {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            format!(
-                "agent-task retry --run cannot resolve a durable controller run record for `{}`; Lab offload needs the controller record to materialize the replacement run-plan",
-                retry.run_id
-            ),
-            Some(retry.run_id.clone()),
-            Some(vec![
-                "Inspect the run with `homeboy agent-task status <run-id>` and retry an existing run or cook id.".to_string(),
-            ]),
-        ));
+        return Ok(None);
     }
 
     let source_plan = agent_task_lifecycle::load_controller_plan(&retry.run_id)?;
