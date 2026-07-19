@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
@@ -9,6 +10,7 @@ use homeboy_core::{git, paths, Error, Result};
 
 pub const CONTROLLER_SCRATCH_SCHEMA: &str = "homeboy/controller-scratch/v1";
 const INTERRUPTED_RETENTION: &str = "P1D";
+const RETENTION_OWNER_SUMMARY_LIMIT: usize = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControllerScratchResource {
@@ -203,6 +205,7 @@ pub struct ControllerScratchCleanupOutput {
     pub reclaimed_bytes: u64,
     pub candidates: Vec<ControllerScratchCandidate>,
     pub skipped: Vec<ControllerScratchSkipped>,
+    pub retention_reasons: Vec<ControllerScratchRetentionReason>,
     pub remaining_candidate_count: usize,
     pub remaining_candidate_bytes: u64,
     pub has_more: bool,
@@ -231,6 +234,21 @@ pub struct ControllerScratchSkipped {
     pub owner_pid: Option<u32>,
     pub lifecycle_state: Option<String>,
     pub reason: String,
+}
+
+/// Bounded retention inventory for operators investigating cleanup convergence.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ControllerScratchRetentionReason {
+    pub reason: String,
+    pub resource_count: usize,
+    pub owners: Vec<ControllerScratchRetentionOwner>,
+    pub additional_owner_count: usize,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ControllerScratchRetentionOwner {
+    pub run_id: String,
+    pub resource_count: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -518,6 +536,7 @@ fn cleanup_unlocked(
         estimated_bytes,
         reclaimed_bytes,
         candidates,
+        retention_reasons: summarize_retention(&skipped),
         skipped,
         remaining_candidate_count,
         remaining_candidate_bytes,
@@ -528,6 +547,49 @@ fn cleanup_unlocked(
             limit: options.limit.saturating_mul(10).max(1),
         }),
     })
+}
+
+fn summarize_retention(
+    skipped: &[ControllerScratchSkipped],
+) -> Vec<ControllerScratchRetentionReason> {
+    let mut reasons = BTreeMap::<String, BTreeMap<String, usize>>::new();
+    for retained in skipped {
+        let Some(run_id) = retained.run_id.as_deref() else {
+            continue;
+        };
+        *reasons
+            .entry(retained.reason.clone())
+            .or_default()
+            .entry(run_id.to_string())
+            .or_default() += 1;
+    }
+    reasons
+        .into_iter()
+        .map(|(reason, owners)| {
+            let resource_count = owners.values().sum();
+            let mut owners = owners
+                .into_iter()
+                .map(|(run_id, resource_count)| ControllerScratchRetentionOwner {
+                    run_id,
+                    resource_count,
+                })
+                .collect::<Vec<_>>();
+            owners.sort_by(|left, right| {
+                right
+                    .resource_count
+                    .cmp(&left.resource_count)
+                    .then_with(|| left.run_id.cmp(&right.run_id))
+            });
+            let additional_owner_count = owners.len().saturating_sub(RETENTION_OWNER_SUMMARY_LIMIT);
+            owners.truncate(RETENTION_OWNER_SUMMARY_LIMIT);
+            ControllerScratchRetentionReason {
+                reason,
+                resource_count,
+                owners,
+                additional_owner_count,
+            }
+        })
+        .collect()
 }
 
 fn cleanup_block_reason(
@@ -552,22 +614,6 @@ fn cleanup_block_reason(
             "resource escaped its registered root bound".to_string(),
         ));
     }
-    if homeboy_core::process::pid_is_running(resource.owner_pid) {
-        return Ok(Some("owner process is still running".to_string()));
-    }
-    if resource.lifecycle_state == "active" {
-        resource.lifecycle_state = "interrupted".to_string();
-        resource.finalized_at = Some(now.to_rfc3339());
-        resource.interrupted_at = Some(now.to_rfc3339());
-        resource.terminal_reason = Some("owner_process_dead".to_string());
-        resource.terminal_evidence = Some(serde_json::json!({
-            "owner_pid": resource.owner_pid,
-            "stale_retention": INTERRUPTED_RETENTION,
-        }));
-        return Ok(Some(
-            "active lease owner is proven dead; interrupted retention has started".to_string(),
-        ));
-    }
     let terminal = ObservationStore::open_initialized()?
         .get_run(&resource.run_id)?
         .map(|run| run.status != "running")
@@ -575,12 +621,32 @@ fn cleanup_block_reason(
     if !terminal {
         return Ok(Some("owning run is still active".to_string()));
     }
+    if homeboy_core::process::pid_is_running(resource.owner_pid) {
+        return Ok(Some("owner process is still running".to_string()));
+    }
+    if resource.lifecycle_state == "active" {
+        resource.lifecycle_state = "orphaned".to_string();
+        resource.finalized_at = Some(now.to_rfc3339());
+        resource.interrupted_at = Some(now.to_rfc3339());
+        resource.terminal_reason = Some("terminal_run_or_missing_lease_owner".to_string());
+        resource.terminal_evidence = Some(serde_json::json!({
+            "owner_pid": resource.owner_pid,
+            "stale_retention": INTERRUPTED_RETENTION,
+        }));
+        return Ok(Some(
+            "terminal or missing run has a dead active lease owner; orphaned retention has started"
+                .to_string(),
+        ));
+    }
     if resource.finalized_at.is_none() {
         return Ok(Some(
             "resource has not been finalized by its owning run".to_string(),
         ));
     }
-    let retention = if resource.lifecycle_state == "interrupted" {
+    let retention = if matches!(
+        resource.lifecycle_state.as_str(),
+        "interrupted" | "orphaned"
+    ) {
         INTERRUPTED_RETENTION
     } else {
         &resource.retention
@@ -990,7 +1056,30 @@ mod tests {
     }
 
     #[test]
-    fn dead_active_owner_transitions_to_interrupted_and_waits_stale_retention() {
+    fn active_durable_run_protects_a_stale_lease_pid() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("root");
+            let scratch = root.path().join("scratch");
+            fs::create_dir(&scratch).expect("scratch");
+            let run = ObservationStore::open_initialized()
+                .expect("store")
+                .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
+                .expect("running run");
+            let mut resource = resource(&scratch, root.path());
+            resource.run_id = run.id;
+            resource.finalized_at = None;
+
+            assert_eq!(
+                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now()).expect("check"),
+                Some("owning run is still active".to_string())
+            );
+            assert_eq!(resource.lifecycle_state, "active");
+            assert!(resource.finalized_at.is_none());
+        });
+    }
+
+    #[test]
+    fn terminal_or_missing_run_with_dead_active_lease_becomes_orphaned_and_waits_retention() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("root");
             let scratch = root.path().join("scratch");
@@ -1014,7 +1103,7 @@ mod tests {
                     .find(|skipped| skipped.path == scratch.display().to_string())
                     .expect("scratch skip")
                     .reason,
-                "active lease owner is proven dead; interrupted retention has started"
+                "terminal or missing run has a dead active lease owner; orphaned retention has started"
             );
             let resource = read_index()
                 .expect("index")
@@ -1022,10 +1111,10 @@ mod tests {
                 .into_iter()
                 .next()
                 .expect("resource");
-            assert_eq!(resource.lifecycle_state, "interrupted");
+            assert_eq!(resource.lifecycle_state, "orphaned");
             assert_eq!(
                 resource.terminal_reason.as_deref(),
-                Some("owner_process_dead")
+                Some("terminal_run_or_missing_lease_owner")
             );
             assert_eq!(
                 resource.interrupted_at.as_deref(),
@@ -1047,7 +1136,38 @@ mod tests {
                 &scratch,
                 interrupted_at + chrono::Duration::days(1)
             ));
+            assert_eq!(output.retention_reasons.len(), 1);
+            assert_eq!(
+                output.retention_reasons[0].reason,
+                "terminal or missing run has a dead active lease owner; orphaned retention has started"
+            );
+            assert_eq!(output.retention_reasons[0].resource_count, 1);
+            assert_eq!(
+                output.retention_reasons[0].owners[0].run_id,
+                "missing-terminal-run"
+            );
         });
+    }
+
+    #[test]
+    fn retention_summary_is_bounded_and_groups_owners_by_reason() {
+        let skipped = (0..=RETENTION_OWNER_SUMMARY_LIMIT)
+            .map(|index| ControllerScratchSkipped {
+                path: format!("/scratch/{index}"),
+                run_id: Some(format!("run-{index:02}")),
+                owner_pid: None,
+                lifecycle_state: None,
+                reason: "retention has not expired".to_string(),
+            })
+            .collect::<Vec<_>>();
+
+        let summary = summarize_retention(&skipped);
+
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].resource_count, RETENTION_OWNER_SUMMARY_LIMIT + 1);
+        assert_eq!(summary[0].owners.len(), RETENTION_OWNER_SUMMARY_LIMIT);
+        assert_eq!(summary[0].additional_owner_count, 1);
+        assert_eq!(summary[0].owners[0].run_id, "run-00");
     }
 
     #[test]
