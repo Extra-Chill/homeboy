@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 
-use crate::agent_task::AgentTaskExecutor;
+use crate::agent_task::{AgentTaskExecutor, AgentTaskRequest};
 use crate::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
 };
@@ -203,27 +203,7 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
             None,
         ));
     }
-    let (source, source_path, recovery) =
-        if let Ok((source, path)) = agent_task_lifecycle::aggregate_source(&record.run_id) {
-            (source, Some(path), None)
-        } else if let Some(outcome) =
-            agent_task_lifecycle::candidate_adoption_recovery_outcome(&record, &source_request)
-        {
-            let recovery = outcome.metadata["candidate_adoption_recovery"].clone();
-            (
-                serde_json::to_string(&outcome).map_err(|error| {
-                    Error::internal_json(
-                        error.to_string(),
-                        Some("serialize candidate adoption recovery outcome".to_string()),
-                    )
-                })?,
-                None,
-                Some(recovery),
-            )
-        } else {
-            let (source, path) = promotion_source(&record.run_id)?;
-            (source, path, None)
-        };
+    let (source, source_path, recovery) = candidate_adoption_source(&record, &source_request)?;
     let mut promotion = promote_with_checkpoint(
         AgentTaskPromotionOptions {
             source,
@@ -329,6 +309,34 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
         None,
         exit_code,
     ))
+}
+
+fn candidate_adoption_source(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    source_request: &AgentTaskRequest,
+) -> Result<(String, Option<PathBuf>, Option<Value>)> {
+    // The authenticated recovery marker is authoritative over a canonical
+    // pre-execution aggregate, which exists only to record the transport error.
+    if let Some(outcome) =
+        agent_task_lifecycle::candidate_adoption_recovery_outcome(record, source_request)
+    {
+        let recovery = outcome.metadata["candidate_adoption_recovery"].clone();
+        return Ok((
+            serde_json::to_string(&outcome).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize candidate adoption recovery outcome".to_string()),
+                )
+            })?,
+            None,
+            Some(recovery),
+        ));
+    }
+    if let Ok((source, path)) = agent_task_lifecycle::aggregate_source(&record.run_id) {
+        return Ok((source, Some(path), None));
+    }
+    let (source, path) = promotion_source(&record.run_id)?;
+    Ok((source, path, None))
 }
 
 fn concrete_adoption_ai_model(value: &str) -> Result<String> {
@@ -2753,6 +2761,46 @@ mod tests {
                 "pre_provider_transport_failure"
             );
             assert!(agent_task_lifecycle::run_record_exists(run_id).expect("record exists"));
+        });
+    }
+
+    #[test]
+    fn adoption_prefers_authenticated_preacceptance_recovery_over_failure_aggregate() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "cook-adopt-preacceptance-recovery";
+            let options = batch_cook_options(
+                "cook-adopt-preacceptance",
+                Arc::new(AcceptedDetachedAttemptDispatcher),
+            );
+            let plan = options.initial_plan;
+            agent_task_lifecycle::record_lab_offload_phase(
+                run_id,
+                "homeboy-lab",
+                "lab_handoff_preacceptance",
+                None,
+                None,
+                None,
+                Some(&plan),
+            )
+            .expect("record preacceptance phase");
+            agent_task_lifecycle::record_pre_execution_failure(
+                run_id,
+                &plan,
+                "lab_handoff_preacceptance",
+                &Error::internal_unexpected("Lab handoff JSON was truncated"),
+            )
+            .expect("record failed preacceptance attempt");
+            let record = agent_task_lifecycle::status(run_id).expect("failed attempt");
+            assert!(record.aggregate_path.is_some());
+
+            let (_source, source_path, recovery) =
+                candidate_adoption_source(&record, &plan.tasks[0]).expect("recovery source");
+
+            assert!(source_path.is_none());
+            assert_eq!(
+                recovery.expect("recovery provenance")["reason"],
+                "pre_provider_transport_failure"
+            );
         });
     }
 

@@ -837,6 +837,16 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
 
     let mut failed_recovery_lifecycle = recovery_lifecycle.clone();
     failed_recovery_lifecycle.execution.state = RunExecutionState::Failed;
+    failed_recovery_lifecycle
+        .provider_runtime
+        .push(ProviderRuntimeLifecycle {
+            task_id: "task".to_string(),
+            backend: "opencode".to_string(),
+            state: ProviderRuntimeState::Failed,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({ "evidence_source": "canonical_executor_outcome" }),
+        });
     let mut failed_backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
         lifecycle: Some(failed_recovery_lifecycle.clone()),
@@ -880,7 +890,12 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
             backend: "provider".to_string(),
             state: ProviderRuntimeState::Cancelled,
             stream_uri: None,
-            external_runtime_ids: Vec::new(),
+            external_runtime_ids: vec![ExternalRuntimeId {
+                kind: "provider_run_id".to_string(),
+                value: "provider-actual-run".to_string(),
+                provider: Some("provider".to_string()),
+                url: None,
+            }],
             metadata: serde_json::Value::Null,
         });
     rejected(provider_executed, pre_provider_adoption_gate_proof());

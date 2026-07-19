@@ -234,6 +234,85 @@ fn detached_cook_preacceptance_failure_terminalizes_attempt_proxy() {
 }
 
 #[test]
+fn failed_lab_preacceptance_reconstructs_only_authenticated_zero_execution_recovery() {
+    with_isolated_home(|_| {
+        let run_id = "cook-preacceptance-recovery";
+        let plan = test_plan();
+        record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "materializing",
+            None,
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("pre-acceptance attempt record");
+        record_pre_execution_failure(
+            run_id,
+            &plan,
+            "lab_handoff_preacceptance",
+            &Error::internal_unexpected("truncated Lab handoff payload"),
+        )
+        .expect("terminal preacceptance failure");
+
+        let mut record = status(run_id).expect("failed record");
+        record.metadata["phase"] = json!("lab_handoff_preacceptance");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert!(record.aggregate_path.is_some());
+        assert!(!record.artifact_refs.is_empty());
+        assert_eq!(record.lifecycle.provider_runtime.len(), 1);
+        assert_eq!(
+            record.lifecycle.provider_runtime[0].metadata["evidence_source"],
+            "canonical_executor_outcome"
+        );
+        assert!(candidate_adoption_recovery_outcome(&record, &plan.tasks[0]).is_some());
+
+        let mut wrong_phase = record.clone();
+        wrong_phase.metadata["phase"] = json!("provider_dispatch");
+        assert!(candidate_adoption_recovery_outcome(&wrong_phase, &plan.tasks[0]).is_none());
+
+        let mut consumed_execution = record.clone();
+        consumed_execution.metadata["provider_executions_consumed"] = json!(1);
+        assert!(candidate_adoption_recovery_outcome(&consumed_execution, &plan.tasks[0]).is_none());
+
+        let mut provider_handle = record.clone();
+        provider_handle
+            .provider_handles
+            .push(AgentTaskRunProviderHandle {
+                kind: Default::default(),
+                task_id: "task-a".to_string(),
+                backend: "test".to_string(),
+                provider_run_id: "provider-actual-run".to_string(),
+                stream_uri: None,
+                state: Some(AgentTaskState::Failed),
+                metadata: Value::Null,
+            });
+        assert!(candidate_adoption_recovery_outcome(&provider_handle, &plan.tasks[0]).is_none());
+
+        let mut runner_job = record.clone();
+        runner_job.metadata["runner_job_id"] = json!("job-actual-provider");
+        assert!(candidate_adoption_recovery_outcome(&runner_job, &plan.tasks[0]).is_none());
+
+        let mut provider_runtime = record.clone();
+        provider_runtime.lifecycle.provider_runtime[0]
+            .external_runtime_ids
+            .push(homeboy_core::run_lifecycle_record::ExternalRuntimeId {
+                kind: "provider_run_id".to_string(),
+                value: "provider-actual-run".to_string(),
+                provider: Some("test".to_string()),
+                url: None,
+            });
+        assert!(candidate_adoption_recovery_outcome(&provider_runtime, &plan.tasks[0]).is_none());
+
+        let mut changed_recovery = record;
+        changed_recovery.metadata["pre_execution_failure"]["candidate_adoption_recovery"]
+            ["reason"] = json!("provider_failure");
+        assert!(candidate_adoption_recovery_outcome(&changed_recovery, &plan.tasks[0]).is_none());
+    });
+}
+
+#[test]
 fn failed_lab_handoff_retry_recovers_the_materialized_user_plan() {
     with_isolated_home(|_| {
         let mut plan = test_plan();

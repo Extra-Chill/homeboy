@@ -548,7 +548,7 @@ fn validate_durable_publication_eligibility(
     let authenticated_adoption = matches!(
         lifecycle.execution.state,
         RunExecutionState::Cancelled | RunExecutionState::Failed
-    ) && lifecycle.provider_runtime.is_empty()
+    ) && no_real_provider_execution(lifecycle)
         && promotion.provenance["adoption"]["source_run_id"]
             == promotion.source.run_id.clone().unwrap_or_default()
         && candidate_ref.is_some_and(is_git_commit_identity)
@@ -569,6 +569,14 @@ fn validate_durable_publication_eligibility(
     }
 
     Err(Error::validation_invalid_argument("run_id", "durable run must have succeeded execution and succeeded provider runtime before publication; the only exception is an applied, green, fingerprinted candidate-adoption recovery with durable zero-execution pre-provider transport provenance", None, None))
+}
+
+fn no_real_provider_execution(lifecycle: &RunLifecycleRecord) -> bool {
+    lifecycle.external_runtime_ids.is_empty()
+        && lifecycle.provider_runtime.iter().all(|runtime| {
+            runtime.external_runtime_ids.is_empty()
+                && runtime.metadata["evidence_source"] == "canonical_executor_outcome"
+        })
 }
 
 fn is_concrete_model(value: &str) -> bool {
