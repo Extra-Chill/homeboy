@@ -521,7 +521,7 @@ where
     F: FnOnce(&str) -> Result<std::path::PathBuf>,
 {
     // Only a fully identified remote artifact has a durable-byte contract.
-    // Leave legacy/incomplete remote references on their existing live-fetch path.
+    // References without integrity metadata remain on the live-fetch path.
     if artifact.artifact_type != "remote_file"
         || artifact.size_bytes.is_none()
         || artifact.sha256.as_deref().is_none_or(str::is_empty)
@@ -537,25 +537,15 @@ where
         {
             return Ok(());
         }
-        if existing.run_id == artifact.run_id
-            && existing.kind == artifact.kind
-            && existing.size_bytes == artifact.size_bytes
-            && existing.sha256 == artifact.sha256
-            && existing.artifact_type == "remote_file"
-        {
-            // Upgrade the matching legacy projection below while the runner is
-            // still available, before terminal retention can remove its bytes.
-        } else {
-            return Err(Error::validation_invalid_argument(
-                "artifact_id",
-                format!(
-                    "mirrored artifact `{}` conflicts with existing controller ownership or integrity metadata",
-                    artifact.id
-                ),
-                Some(artifact.id.clone()),
-                None,
-            ));
-        }
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "mirrored artifact `{}` conflicts with existing controller ownership or integrity metadata",
+                artifact.id
+            ),
+            Some(artifact.id.clone()),
+            None,
+        ));
     }
     let downloaded_path = download(&artifact.path)?;
     store.record_verified_artifact_with_id(
