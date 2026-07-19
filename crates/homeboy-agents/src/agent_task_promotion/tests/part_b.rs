@@ -128,6 +128,45 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
             .to_string(),
         )
         .expect("recovered aggregate");
+        let mut hash = Sha256::new();
+        hash.update(run_id.as_bytes());
+        hash.update([0]);
+        hash.update(task_id.as_bytes());
+        hash.update([0]);
+        hash.update(artifact_id.as_bytes());
+        let imported_id = format!("agent-task-{:x}", hash.finalize());
+        let imported = tempfile::NamedTempFile::new().expect("imported patch");
+        std::fs::write(imported.path(), VALID_PATCH).expect("write imported patch");
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        crate::agent_task_lifecycle::record_detached_lab_run(
+            crate::agent_task_lifecycle::DetachedLabRunRecord {
+                run_id,
+                runner_id: "homeboy-lab",
+                runner_job_id: "job-1",
+                remote_workspace: "/runner/homeboy",
+                remote_command: &command,
+            },
+        )
+        .expect("record detached Lab run");
+        homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .import_artifact(&homeboy_core::observation::ArtifactRecord {
+                id: imported_id,
+                run_id: run_id.to_string(),
+                kind: "patch".to_string(),
+                artifact_type: "file".to_string(),
+                path: imported.path().display().to_string(),
+                url: None,
+                public_url: None,
+                viewer_url: None,
+                viewer_links: Vec::new(),
+                sha256: Some(sha256_hex(VALID_PATCH)),
+                size_bytes: Some(VALID_PATCH.len() as i64),
+                mime: Some("text/x-patch".to_string()),
+                metadata_json: serde_json::json!({ "name": artifact_id }),
+                created_at: "2026-07-19T00:00:00Z".to_string(),
+            })
+            .expect("import matching bundle artifact");
         crate::agent_task_promotion::mirror_agent_task_run_plan_aggregate(
             "@runner-plan.json",
             run_id,
