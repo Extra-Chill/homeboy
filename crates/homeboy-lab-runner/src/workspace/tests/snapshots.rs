@@ -1,14 +1,127 @@
 use std::fs;
+use std::sync::{Mutex, OnceLock};
 
 use super::git;
 use crate::workspace::snapshot::{incremental_prepare_command_fits, snapshot_manifest_delta};
 use crate::workspace::sync::{
-    reuse_compatible_snapshot_workspace, sync_workspace, workspace_snapshots,
+    reuse_compatible_snapshot_workspace, sync_workspace, workspace_snapshot_scan_command,
+    workspace_snapshots,
 };
 use crate::workspace::types::{
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 use crate::workspace::{WorkspaceContentManifest, WorkspaceContentManifestEntry};
+
+static PATH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[test]
+fn workspace_snapshot_scan_skips_a_child_removed_during_atomic_promotion() {
+    let _path_guard = PATH_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("PATH lock");
+    let root = tempfile::tempdir().expect("workspace root");
+    let temporary = root.path().join("workspace.tmp-promoting");
+    fs::create_dir_all(temporary.join(".homeboy")).expect("temporary workspace");
+    fs::write(
+        temporary.join(".homeboy/runner-workspace.json"),
+        r#"{"schema":"homeboy/runner-workspace/v1"}"#,
+    )
+    .expect("temporary metadata");
+    let shim_root = tempfile::tempdir().expect("base64 shim root");
+    let shim = shim_root.path().join("base64");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nrm -rf -- {}\nexit 1\n",
+            shell_quote(temporary.as_path())
+        ),
+    )
+    .expect("base64 shim");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))
+            .expect("make shim executable");
+    }
+    let original_path = std::env::var_os("PATH").expect("PATH");
+    let mut paths = vec![shim_root.path().to_path_buf()];
+    paths.extend(std::env::split_paths(&original_path));
+    std::env::set_var("PATH", std::env::join_paths(paths).expect("PATH value"));
+    let output = std::process::Command::new("sh")
+        .args([
+            "-c",
+            &workspace_snapshot_scan_command(&root.path().display().to_string()),
+        ])
+        .output()
+        .expect("run snapshot scan");
+    std::env::set_var("PATH", original_path);
+
+    assert!(
+        output.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "vanished temporary workspace must be skipped"
+    );
+    assert!(
+        !temporary.exists(),
+        "shim must remove the temporary workspace during scan"
+    );
+}
+
+#[test]
+fn workspace_snapshot_scan_fails_when_its_root_disappears() {
+    let _path_guard = PATH_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("PATH lock");
+    let root = tempfile::tempdir().expect("workspace root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(workspace.join(".homeboy")).expect("workspace");
+    fs::write(workspace.join(".homeboy/runner-workspace.json"), "{}").expect("workspace metadata");
+    let shim_root = tempfile::tempdir().expect("base64 shim root");
+    let shim = shim_root.path().join("base64");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nrm -rf -- {}\nexit 1\n",
+            shell_quote(root.path())
+        ),
+    )
+    .expect("base64 shim");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))
+            .expect("make shim executable");
+    }
+    let original_path = std::env::var_os("PATH").expect("PATH");
+    let mut paths = vec![shim_root.path().to_path_buf()];
+    paths.extend(std::env::split_paths(&original_path));
+    std::env::set_var("PATH", std::env::join_paths(paths).expect("PATH value"));
+    let output = std::process::Command::new("sh")
+        .args([
+            "-c",
+            &workspace_snapshot_scan_command(&root.path().display().to_string()),
+        ])
+        .output()
+        .expect("run snapshot scan");
+    std::env::set_var("PATH", original_path);
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("runner workspace snapshot root disappeared during scan"));
+}
+
+fn shell_quote(path: &std::path::Path) -> String {
+    format!(
+        "'{}'",
+        path.display().to_string().replace('\'', "'\\\"'\\\"'")
+    )
+}
 
 #[test]
 fn workspace_snapshots_render_metadata_for_synced_workspace() {
