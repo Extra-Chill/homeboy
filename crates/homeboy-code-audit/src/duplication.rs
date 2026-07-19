@@ -183,6 +183,101 @@ pub(crate) fn detect_duplicates(
 }
 
 // ============================================================================
+// Cross-Name Duplication (same body, different names)
+// ============================================================================
+
+/// Minimum body lines for a cross-name duplicate to be worth flagging. A shared
+/// primitive reimplemented under local names is valuable to consolidate even
+/// when it is small, so this floor is lower than the near-duplicate floor — but
+/// still excludes truly trivial one/two-line bodies.
+const CROSS_NAME_MIN_BODY_LINES: usize = 1;
+
+/// Detect functions with **different names** but **identical normalized bodies**.
+///
+/// The exact- and near-duplicate detectors key on `(method_name, hash)`, so a
+/// primitive copied under a local name — e.g. a `git_output` that is byte-for-
+/// byte `homeboy_core::git::output_optional` — is invisible to them even though
+/// the body hash is name-independent. This pass groups method bodies by hash
+/// alone and flags groups that span two or more *distinct names*: the classic
+/// "you reimplemented an existing shared function under a new name" case.
+///
+/// `already_flagged_names` are method names already reported by the same-name
+/// exact detector; a cross-name group is still reported (its value is the
+/// *cross-name* link), but same-name-only groups are left to `detect_duplicates`.
+pub(crate) fn detect_cross_name_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+    // hash -> list of (file, method_name)
+    let mut by_body: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
+    for fp in fingerprints {
+        for (name, hash) in &fp.method_hashes {
+            // Skip generic-named helpers and trivial bodies to control noise.
+            if GENERIC_NAMES.contains(&name.as_str()) {
+                continue;
+            }
+            if count_body_lines(fp, name) < CROSS_NAME_MIN_BODY_LINES {
+                continue;
+            }
+            by_body
+                .entry(hash.as_str())
+                .or_default()
+                .push((fp.relative_path.as_str(), name.as_str()));
+        }
+    }
+
+    let mut findings = Vec::new();
+    for locations in by_body.values() {
+        let distinct_names: HashSet<&str> = locations.iter().map(|(_, name)| *name).collect();
+        // Only interesting when the same body appears under at least two
+        // different names — that is what the name-keyed detectors miss. Require
+        // at least two locations overall as well.
+        if distinct_names.len() < 2 || locations.len() < MIN_DUPLICATE_LOCATIONS {
+            continue;
+        }
+
+        let test_only = locations.iter().all(|(file, _)| is_test_path(file));
+        let severity = if test_only {
+            Severity::Info
+        } else {
+            Severity::Warning
+        };
+
+        let mut name_list: Vec<&str> = distinct_names.into_iter().collect();
+        name_list.sort();
+        let names_joined = name_list.join("`, `");
+
+        // One finding per location, listing the others it duplicates.
+        let mut sorted_locations = locations.clone();
+        sorted_locations.sort();
+        for (file, name) in &sorted_locations {
+            let others: Vec<String> = sorted_locations
+                .iter()
+                .filter(|(f, n)| !(f == file && n == name))
+                .map(|(f, n)| format!("`{n}` in {f}"))
+                .collect();
+            findings.push(Finding {
+                convention: "duplication".to_string(),
+                severity: severity.clone(),
+                file: file.to_string(),
+                description: format!(
+                    "Function `{name}` has the same body as differently-named functions: {}",
+                    others.join(", ")
+                ),
+                suggestion: format!(
+                    "`{name}` reimplements the same logic as `{names_joined}`. Consolidate onto one shared function (prefer an existing exported primitive) and delete the copies."
+                ),
+                kind: AuditFinding::CrossNameDuplicate,
+            });
+        }
+    }
+
+    findings.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then_with(|| a.description.cmp(&b.description))
+    });
+    findings
+}
+
+// ============================================================================
 // Near-Duplicate Detection (structural similarity)
 // ============================================================================
 

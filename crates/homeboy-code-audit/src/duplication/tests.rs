@@ -1005,4 +1005,80 @@ fn rebuild_twice(items: &[Item]) -> Result<()> {
     }
 }
 
+mod cross_name {
+    use super::*;
+
+    fn fingerprint_with_body(path: &str, name: &str, hash: &str) -> FileFingerprint {
+        // A multi-line body so count_body_lines clears CROSS_NAME_MIN_BODY_LINES.
+        let content = format!(
+            "fn {name}(path: &Path, args: &[&str]) -> Option<String> {{\n    let out = run(path, args);\n    out.filter(|value| !value.is_empty())\n}}\n"
+        );
+        FileFingerprint {
+            relative_path: path.to_string(),
+            language: Language::Rust,
+            methods: vec![name.to_string()],
+            method_hashes: [(name.to_string(), hash.to_string())].into_iter().collect(),
+            content,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn flags_identical_body_under_different_names() {
+        // The git_output-vs-output_optional case: same body hash, different names,
+        // different files — invisible to the name-keyed detectors.
+        let fp1 = fingerprint_with_body("src/release/deploy.rs", "git_output", "bodyhash-1");
+        let fp2 = fingerprint_with_body("src/core/git.rs", "output_optional", "bodyhash-1");
+
+        let findings = detect_cross_name_duplicates(&[&fp1, &fp2]);
+        assert_eq!(findings.len(), 2, "one finding per location");
+        assert!(findings
+            .iter()
+            .all(|f| f.kind == AuditFinding::CrossNameDuplicate));
+        // Each finding should name the other differently-named copy.
+        assert!(findings
+            .iter()
+            .any(|f| f.description.contains("output_optional")));
+        assert!(findings
+            .iter()
+            .any(|f| f.description.contains("git_output")));
+    }
+
+    #[test]
+    fn does_not_flag_same_name_only_duplicates() {
+        // Same name + same hash is a plain duplicate (detect_duplicates' job),
+        // not a cross-name reimplementation — this pass must ignore it.
+        let fp1 = fingerprint_with_body("src/a.rs", "git_output", "bodyhash-2");
+        let fp2 = fingerprint_with_body("src/b.rs", "git_output", "bodyhash-2");
+
+        let findings = detect_cross_name_duplicates(&[&fp1, &fp2]);
+        assert!(
+            findings.is_empty(),
+            "single-name duplicates are not cross-name findings"
+        );
+    }
+
+    #[test]
+    fn does_not_flag_different_bodies() {
+        let fp1 = fingerprint_with_body("src/a.rs", "alpha", "hash-a");
+        let fp2 = fingerprint_with_body("src/b.rs", "beta", "hash-b");
+
+        let findings = detect_cross_name_duplicates(&[&fp1, &fp2]);
+        assert!(findings.is_empty(), "different bodies must not be linked");
+    }
+
+    #[test]
+    fn skips_generic_named_helpers() {
+        // `status`/`run`/etc. are on the generic-name skip list — too noisy.
+        let fp1 = fingerprint_with_body("src/a.rs", "status", "hash-g");
+        let fp2 = fingerprint_with_body("src/b.rs", "run", "hash-g");
+
+        let findings = detect_cross_name_duplicates(&[&fp1, &fp2]);
+        assert!(
+            findings.is_empty(),
+            "generic-named helpers are excluded to control noise"
+        );
+    }
+}
+
 mod parallel;
