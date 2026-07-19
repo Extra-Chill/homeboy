@@ -150,15 +150,23 @@ fn detached_handoff_persists_redacted_submission_intent_before_broker_ack() {
         )
         .expect("persist intent");
 
-        let pending = status("intent-before-post").expect("pending intent status");
+        let pending = status("intent-before-post").expect("preparing intent status");
         assert_eq!(
             pending.metadata["runner_submission_intent"]["state"],
-            "pending"
+            "preparing"
         );
         assert_eq!(
             pending.metadata["runner_submission_intent"]["submission_key"],
-            "agent-task:homeboy-lab:intent-before-post"
+            "agent-task:v1:homeboy-lab:intent-before-post"
         );
+        assert!(pending.metadata["runner_submission_intent"]
+            .get("replay_request")
+            .is_none());
+        assert!(pending
+            .lab_handoff
+            .as_ref()
+            .and_then(|handoff| handoff.payload_fingerprint.as_deref())
+            .is_none());
         assert_eq!(pending.metadata["phase"], "waiting_for_runner_capacity");
         assert!(!serde_json::to_string(&pending)
             .expect("serialize record")

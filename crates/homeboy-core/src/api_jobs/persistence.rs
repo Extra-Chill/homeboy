@@ -183,6 +183,16 @@ pub(super) fn compact_terminal_jobs(
     durable
         .jobs
         .retain(|stored| !removed_job_ids.contains(&stored.job.id));
+    // Keep an explicit tombstone when compaction expires an idempotency key.
+    // Replaying an expired accepted submission must fail closed, never enqueue
+    // a second execution after the original evidence has been pruned.
+    for (key, submission) in std::mem::take(&mut durable.submission_keys) {
+        if removed_job_ids.contains(&submission.job_id) {
+            durable.expired_submission_keys.insert(key, submission);
+        } else {
+            durable.submission_keys.insert(key, submission);
+        }
+    }
     let evidence = JobStoreCompactionEvidence {
         timestamp_ms: timestamp_ms(),
         removed_terminal_jobs,

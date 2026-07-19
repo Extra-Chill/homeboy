@@ -12,7 +12,9 @@ use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
-use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
+use homeboy_core::api_jobs::{
+    Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest, RemoteRunnerSubmissionLookup,
+};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex, Once};
@@ -58,6 +60,7 @@ pub(super) fn fake_controller_artifact(
 pub(super) struct IntentReplayProvider {
     store: JobStore,
     submitted: Arc<Mutex<Vec<uuid::Uuid>>>,
+    lookups: Arc<Mutex<Vec<String>>>,
     fail_after_accept_once: Arc<Mutex<bool>>,
 }
 
@@ -105,6 +108,42 @@ impl RunnerContinuationProvider for IntentReplayProvider {
             ));
         }
         Ok(job)
+    }
+
+    fn lookup_reverse_broker_submission(
+        &self,
+        _runner_id: &str,
+        submission_key: &str,
+    ) -> Result<RemoteRunnerSubmissionLookup> {
+        self.lookups
+            .lock()
+            .expect("lookup log")
+            .push(submission_key.to_string());
+        Ok(self.store.lookup_remote_runner_submission(submission_key))
+    }
+}
+
+pub(super) fn replay_request(run_id: &str, command: &[String]) -> RemoteRunnerJobRequest {
+    RemoteRunnerJobRequest {
+        runner_id: "homeboy-lab".to_string(),
+        project_id: None,
+        operation: "runner.exec".to_string(),
+        command: command.to_vec(),
+        cwd: Some("/runner/workspace/homeboy".to_string()),
+        env: Default::default(),
+        secret_env_names: Vec::new(),
+        secret_env_plan: Default::default(),
+        env_materialization: None,
+        capture_patch: false,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        require_paths: Vec::new(),
+        lab_runner_workload: None,
+        lifecycle: None,
+        metadata: Some(json!({
+            "submission_key": format!("agent-task:v1:homeboy-lab:{run_id}"),
+            "durable_run_id": run_id,
+        })),
     }
 }
 

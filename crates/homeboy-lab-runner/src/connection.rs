@@ -1438,6 +1438,33 @@ pub fn submit_reverse_broker_job(runner_id: &str, request: RemoteRunnerJobReques
     })
 }
 
+pub fn lookup_reverse_broker_submission(
+    runner_id: &str,
+    submission_key: &str,
+) -> Result<homeboy_core::api_jobs::RemoteRunnerSubmissionLookup> {
+    let broker_url = reverse_broker_url(runner_id)?;
+    let client = broker_client("build reverse broker lookup client")?;
+    let response = broker_http::post_json(
+        &client,
+        &broker_url,
+        "/runner/jobs/submissions/lookup",
+        serde_json::json!({ "submission_key": submission_key }),
+        "look up reverse runner submission",
+        broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
+    )?;
+    serde_json::from_value(
+        response.get("result").cloned().ok_or_else(|| {
+            Error::internal_unexpected("reverse broker lookup returned no result")
+        })?,
+    )
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse reverse broker submission lookup".to_string()),
+        )
+    })
+}
+
 pub fn reverse_broker_artifact(runner_id: &str, job_id: &str, artifact_id: &str) -> Result<Value> {
     let broker_url = reverse_broker_url(runner_id)?;
     let artifact_id = homeboy_core::execution_contract::encode_uri_component(artifact_id);

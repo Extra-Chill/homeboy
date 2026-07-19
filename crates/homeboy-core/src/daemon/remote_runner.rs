@@ -126,6 +126,10 @@ pub(in crate::daemon) fn route(
             Ok(body) => daemon_endpoint_response("runner.jobs.submit", body),
             Err(err) => auth_or_bad_request(err),
         },
+        ("POST", "/runner/jobs/submissions/lookup") => match submission_lookup(body, job_store, auth) {
+            Ok(body) => daemon_endpoint_response("runner.jobs.submissions.lookup", body),
+            Err(err) => auth_or_bad_request(err),
+        },
         ("POST", "/runner/jobs/reconcile") => match reconcile(job_store) {
             Ok(body) => daemon_endpoint_response("runner.jobs.reconcile", body),
             Err(err) => error_response(400, err),
@@ -371,6 +375,24 @@ fn enqueue(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) 
             "events": format!("/jobs/{}/events", job.id),
         },
         "request": public_request,
+    }))
+}
+
+#[derive(Deserialize)]
+struct SubmissionLookupRequest {
+    submission_key: String,
+}
+
+fn submission_lookup(
+    body: Option<Value>,
+    job_store: &JobStore,
+    auth: &BrokerAuthContext,
+) -> Result<Value> {
+    auth.authorize(BrokerScope::Submit, None)?;
+    let request: SubmissionLookupRequest = parse_body(body, "remote runner submission lookup")?;
+    Ok(json!({
+        "command": "api.runner.jobs.submissions.lookup",
+        "result": job_store.lookup_remote_runner_submission(&request.submission_key),
     }))
 }
 

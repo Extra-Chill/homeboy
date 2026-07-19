@@ -2,6 +2,15 @@ use super::*;
 
 pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    // A pending POST may have been accepted despite a lost response. Resolve
+    // its key before cancellation so the original job is cancelled rather than
+    // left running on the runner. Preparing intents have no replay request and
+    // deliberately do not reach this lookup.
+    if record.state == AgentTaskRunState::Queued
+        && super::lifecycle_ops::bind_pending_runner_submission_if_accepted(&record.run_id)?
+    {
+        record = store::read_record(&record.run_id)?;
+    }
     if record.state == AgentTaskRunState::Cancelled {
         return Ok(record);
     }

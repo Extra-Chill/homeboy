@@ -13,6 +13,26 @@ use crate::source_snapshot::SourceSnapshot;
 use uuid::Uuid;
 
 #[test]
+fn remote_runner_submission_lookup_is_non_mutating() {
+    let store = JobStore::default();
+    let missing = store.lookup_remote_runner_submission("missing-key");
+    assert!(matches!(missing, RemoteRunnerSubmissionLookup::Absent));
+
+    let mut request = remote_runner_request("homeboy-lab", None);
+    request.metadata = Some(json!({ "submission_key": "lookup-key" }));
+    let accepted = store
+        .submit_remote_runner_job(request)
+        .expect("accept runner submission");
+
+    let lookup = store.lookup_remote_runner_submission("lookup-key");
+    assert!(matches!(
+        lookup,
+        RemoteRunnerSubmissionLookup::Accepted { job } if job.id == accepted.id
+    ));
+    assert_eq!(store.events(accepted.id).expect("events").len(), 1);
+}
+
+#[test]
 fn confirmed_recovery_fails_closed_for_unresolved_linked_durable_run() {
     let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
     let mut request = remote_runner_request("homeboy-lab", None);
@@ -1206,6 +1226,157 @@ fn remote_runner_submission_key_replays_one_redacted_durable_job() {
     let persisted = fs::read_to_string(path).expect("read durable store");
     assert!(!persisted.contains("never-persist"));
     assert!(persisted.contains("RUNNER_SECRET_TOKEN"));
+}
+
+#[test]
+fn remote_runner_submission_key_survives_restart_and_rejects_conflicts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open(&path).expect("durable store");
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.metadata = Some(json!({
+        "submission_key": "agent-task:v1:restart",
+        "transport": "initial-controller-post",
+        "evidence": { "attempt": 1 },
+    }));
+    let accepted = store
+        .submit_remote_runner_job(request.clone())
+        .expect("first submit");
+    drop(store);
+
+    let restarted = JobStore::open_without_reconciliation(&path).expect("restart store");
+    let mut replay_request = request.clone();
+    replay_request.metadata = Some(json!({
+        "submission_key": "agent-task:v1:restart",
+        "reconciled_from": "durable_detached_handoff_intent",
+        "transport": "controller-recovery",
+    }));
+    let replay = restarted
+        .submit_remote_runner_job(replay_request)
+        .expect("replay");
+    assert_eq!(replay.id, accepted.id);
+    request.command.push("different".to_string());
+    let conflict = restarted
+        .submit_remote_runner_job(request)
+        .expect_err("conflict fails closed");
+    assert_eq!(conflict.code, crate::ErrorCode::ValidationInvalidArgument);
+    assert_eq!(
+        conflict.details["schema"],
+        json!("homeboy/remote-runner-submission-conflict/v1")
+    );
+    assert_eq!(conflict.details["accepted_job_id"], json!(accepted.id));
+}
+
+#[test]
+fn remote_runner_submission_key_concurrent_replay_creates_one_job() {
+    let store = JobStore::default();
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.metadata = Some(json!({ "submission_key": "agent-task:v1:concurrent" }));
+    let first_store = store.clone();
+    let first_request = request.clone();
+    let first = std::thread::spawn(move || first_store.submit_remote_runner_job(first_request));
+    let second_store = store.clone();
+    let second = std::thread::spawn(move || second_store.submit_remote_runner_job(request));
+    let first = first.join().expect("first thread").expect("first submit");
+    let second = second
+        .join()
+        .expect("second thread")
+        .expect("second submit");
+    assert_eq!(first.id, second.id);
+    assert_eq!(store.list().len(), 1);
+}
+
+#[test]
+fn remote_runner_submission_key_conflicts_on_all_execution_semantic_inputs() {
+    let store = JobStore::default();
+    let mut base = remote_runner_request("homeboy-lab", Some("extrachill"));
+    base.metadata = Some(json!({ "submission_key": "agent-task:v1:semantic-inputs" }));
+    store
+        .submit_remote_runner_job(base.clone())
+        .expect("accept baseline");
+
+    let mut variants = Vec::new();
+    let mut changed_env = base.clone();
+    changed_env
+        .env
+        .insert("PUBLIC_FLAG".to_string(), "changed".to_string());
+    variants.push(changed_env);
+    let mut changed_capture = base.clone();
+    changed_capture.capture_patch = !changed_capture.capture_patch;
+    variants.push(changed_capture);
+    let mut changed_paths = base.clone();
+    changed_paths
+        .require_paths
+        .push("/opt/required".to_string());
+    variants.push(changed_paths);
+    let mut changed_source = base.clone();
+    changed_source.source_snapshot = Some(crate::source_snapshot::existing_remote(
+        "homeboy-lab",
+        "/srv/other-source",
+        Some("/srv"),
+    ));
+    variants.push(changed_source);
+    let mut changed_materialization = base;
+    changed_materialization.path_materialization_plan =
+        Some(crate::runner_execution_envelope::PathMaterializationPlan::new([]));
+    variants.push(changed_materialization);
+
+    for request in variants {
+        let error = store
+            .submit_remote_runner_job(request)
+            .expect_err("semantic input reuse fails closed");
+        assert_eq!(
+            error.details["schema"],
+            json!("homeboy/remote-runner-submission-conflict/v1")
+        );
+    }
+}
+
+#[test]
+fn compacted_submission_key_expires_without_creating_a_duplicate() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_with_retention(&path, 10, 1).expect("durable store");
+    let mut requests = Vec::new();
+    for key in ["agent-task:v1:compact-one", "agent-task:v1:compact-two"] {
+        let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+        request.metadata = Some(json!({ "submission_key": key }));
+        let job = store
+            .submit_remote_runner_job(request.clone())
+            .expect("submit");
+        store
+            .inner
+            .lock()
+            .expect("store")
+            .jobs
+            .get_mut(&job.id)
+            .expect("job")
+            .job
+            .status = JobStatus::Succeeded;
+        requests.push((key.to_string(), request));
+    }
+    store.persist().expect("compact terminal jobs");
+    let expired_key = store
+        .inner
+        .lock()
+        .expect("store")
+        .expired_submission_keys
+        .keys()
+        .next()
+        .cloned()
+        .expect("compacted submission tombstone");
+    let request = requests
+        .into_iter()
+        .find_map(|(key, request)| (key == expired_key).then_some(request))
+        .expect("expired request");
+    let error = store
+        .submit_remote_runner_job(request)
+        .expect_err("expired replay is explicit");
+    assert_eq!(
+        error.details["schema"],
+        json!("homeboy/remote-runner-submission-expired/v1")
+    );
+    assert_eq!(store.list().len(), 1);
 }
 
 #[test]

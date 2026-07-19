@@ -152,12 +152,14 @@ fn detached_cook_intent_reconciliation_converges_both_crash_windows_without_secr
     with_isolated_home(|_| {
         let store = JobStore::default();
         let submitted = Arc::new(Mutex::new(Vec::new()));
+        let lookups = Arc::new(Mutex::new(Vec::new()));
         let fail_after_accept_once = Arc::new(Mutex::new(false));
         // Scope the provider to this test so it cannot leak into later tests and
         // make lifecycle results order-dependent (#8964).
         let _runner = RunnerContinuationTestGuard::install(Box::new(IntentReplayProvider {
             store: store.clone(),
             submitted: Arc::clone(&submitted),
+            lookups: Arc::clone(&lookups),
             fail_after_accept_once: Arc::clone(&fail_after_accept_once),
         }));
         let command = vec![
@@ -185,6 +187,8 @@ fn detached_cook_intent_reconciliation_converges_both_crash_windows_without_secr
                 &["HOMEBOY_TEST_REVERSE_SECRET".to_string()],
             )
             .expect("persist redacted pre-submit intent");
+            record_lab_offload_submission_request(run_id, &replay_request(run_id, &command))
+                .expect("persist exact request before post");
 
             if post_accept_fault {
                 *fail_after_accept_once.lock().expect("fault flag") = true;
@@ -214,6 +218,228 @@ fn detached_cook_intent_reconciliation_converges_both_crash_windows_without_secr
         let persisted = serde_json::to_string(&store.get(submitted[0]).expect("broker job"))
             .expect("broker JSON");
         assert!(!persisted.contains("secret-value"));
+        assert!(lookups.lock().expect("lookup log").is_empty());
+    });
+}
+
+#[test]
+fn cancelled_or_expired_pending_handoff_never_submits_new_runner_work() {
+    with_isolated_home(|_| {
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let lookups = Arc::new(Mutex::new(Vec::new()));
+        register_runner_continuation_provider(Box::new(IntentReplayProvider {
+            store: JobStore::default(),
+            submitted: Arc::clone(&submitted),
+            lookups: Arc::clone(&lookups),
+            fail_after_accept_once: Arc::new(Mutex::new(false)),
+        }));
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+
+        for run_id in ["cancel-before-admission", "expire-before-admission"] {
+            record_lab_offload_planned(LabOffloadProxyPlan {
+                run_id,
+                runner_id: "homeboy-lab",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+                durable_plan: None,
+            })
+            .expect("record Lab admission");
+            record_lab_offload_submission_intent(
+                run_id,
+                "homeboy-lab",
+                "/runner/workspace/homeboy",
+                &command,
+                &[],
+            )
+            .expect("persist intent");
+        }
+
+        cancel_run("cancel-before-admission", Some("operator cancelled"))
+            .expect("cancel before daemon acceptance");
+        rewrite_record_for_test("expire-before-admission", |record| {
+            record
+                .lab_handoff
+                .as_mut()
+                .expect("handoff")
+                .acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
+        })
+        .expect("expire handoff");
+
+        assert!(
+            !reconcile_pending_runner_submission_intent("cancel-before-admission")
+                .expect("cancelled handoff is not submitted")
+        );
+        assert!(
+            !reconcile_pending_runner_submission_intent("expire-before-admission")
+                .expect("expired handoff is not submitted")
+        );
+        assert!(submitted.lock().expect("submission log").is_empty());
+        assert!(lookups.lock().expect("lookup log").is_empty());
+    });
+}
+
+#[test]
+fn preparing_crash_never_submits_or_queries_the_runner() {
+    with_isolated_home(|_| {
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let lookups = Arc::new(Mutex::new(Vec::new()));
+        register_runner_continuation_provider(Box::new(IntentReplayProvider {
+            store: JobStore::default(),
+            submitted: Arc::clone(&submitted),
+            lookups: Arc::clone(&lookups),
+            fail_after_accept_once: Arc::new(Mutex::new(false)),
+        }));
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "preparing-crash",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("planned handoff");
+        record_lab_offload_submission_intent(
+            "preparing-crash",
+            "homeboy-lab",
+            "/runner/workspace/homeboy",
+            &command,
+            &[],
+        )
+        .expect("preparing intent");
+
+        assert!(!reconcile_pending_runner_submission_intent("preparing-crash").expect("no replay"));
+        assert_eq!(
+            status("preparing-crash").expect("status").state,
+            AgentTaskRunState::Queued
+        );
+        assert!(submitted.lock().expect("submitted").is_empty());
+        assert!(lookups.lock().expect("lookups").is_empty());
+    });
+}
+
+#[test]
+fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() {
+    with_isolated_home(|_| {
+        let store = JobStore::default();
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let lookups = Arc::new(Mutex::new(Vec::new()));
+        register_runner_continuation_provider(Box::new(IntentReplayProvider {
+            store: store.clone(),
+            submitted: Arc::clone(&submitted),
+            lookups: Arc::clone(&lookups),
+            fail_after_accept_once: Arc::new(Mutex::new(false)),
+        }));
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+
+        for run_id in ["accepted-then-expired", "accepted-then-cancelled"] {
+            record_lab_offload_planned(LabOffloadProxyPlan {
+                run_id,
+                runner_id: "homeboy-lab",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+                durable_plan: None,
+            })
+            .expect("planned handoff");
+            record_lab_offload_submission_intent(
+                run_id,
+                "homeboy-lab",
+                "/runner/workspace/homeboy",
+                &command,
+                &[],
+            )
+            .expect("preparing intent");
+            let request = replay_request(run_id, &command);
+            record_lab_offload_submission_request(run_id, &request).expect("pending request");
+            let job = store
+                .submit_remote_runner_job(request)
+                .expect("accepted broker job");
+
+            if run_id == "accepted-then-expired" {
+                rewrite_record_for_test(run_id, |record| {
+                    record
+                        .lab_handoff
+                        .as_mut()
+                        .expect("handoff")
+                        .acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
+                })
+                .expect("expire deadline");
+                let record = status(run_id).expect("late acceptance reconciliation");
+                let job_id = job.id.to_string();
+                assert_eq!(record.runner_job_id(), Some(job_id.as_str()));
+                assert_eq!(record.state, AgentTaskRunState::Running);
+            } else {
+                let cancellation_store = store.clone();
+                let _guard = crate::agent_task_lifecycle::cancellation::test_cancel_hook::install(
+                    Box::new({
+                        let expected_job_id = job.id.to_string();
+                        move |runner_id, job_id, durable_run_id| {
+                            assert_eq!(runner_id, "homeboy-lab");
+                            assert_eq!(job_id, expected_job_id);
+                            assert_eq!(durable_run_id, "accepted-then-cancelled");
+                            Ok((cancellation_store.get(job.id).expect("job"), Vec::new()))
+                        }
+                    }),
+                );
+                let record =
+                    cancel_run(run_id, Some("operator cancellation")).expect("cancel bound job");
+                assert_eq!(record.state, AgentTaskRunState::Cancelled);
+                let job_id = job.id.to_string();
+                assert_eq!(record.runner_job_id(), Some(job_id.as_str()));
+            }
+        }
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "absent-after-deadline",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("planned absent handoff");
+        record_lab_offload_submission_intent(
+            "absent-after-deadline",
+            "homeboy-lab",
+            "/runner/workspace/homeboy",
+            &command,
+            &[],
+        )
+        .expect("preparing absent handoff");
+        record_lab_offload_submission_request(
+            "absent-after-deadline",
+            &replay_request("absent-after-deadline", &command),
+        )
+        .expect("pending absent handoff");
+        rewrite_record_for_test("absent-after-deadline", |record| {
+            record
+                .lab_handoff
+                .as_mut()
+                .expect("handoff")
+                .acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
+        })
+        .expect("expire absent handoff");
+        let absent = status("absent-after-deadline").expect("absent reconciliation");
+        assert_eq!(absent.state, AgentTaskRunState::Cancelled);
+        assert!(absent.runner_job_id().is_none());
+        assert!(submitted.lock().expect("submitted").is_empty());
+        let lookups = lookups.lock().expect("lookups");
+        for run_id in [
+            "accepted-then-expired",
+            "accepted-then-cancelled",
+            "absent-after-deadline",
+        ] {
+            assert!(lookups.contains(&format!("agent-task:v1:homeboy-lab:{run_id}")));
+        }
     });
 }
 
@@ -1005,6 +1231,8 @@ fn malformed_typed_pending_handoff_is_health_malformed_and_unreconciled() {
                 state: AgentTaskLabHandoffState::Pending,
                 authority: AgentTaskLabHandoffAuthority::Controller,
                 runner_id: "homeboy-lab".to_string(),
+                submission_key: None,
+                payload_fingerprint: None,
                 runner_job_id: None,
                 submitted_at: Some("invalid".to_string()),
                 acceptance_deadline_at: None,
