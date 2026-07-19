@@ -744,6 +744,7 @@ fn cook_retry_lab_source_is_the_derived_baseline_not_the_controller_workspace() 
             "baseline_commit": "baseline-commit",
             "baseline_tree": "baseline-tree",
             "parent_snapshot_identity": "snapshot:parent",
+            "preexisting_candidate": false,
         })
     );
 }
