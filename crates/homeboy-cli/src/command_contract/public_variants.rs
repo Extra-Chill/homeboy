@@ -500,7 +500,12 @@ mod tests {
 
     #[test]
     fn public_variant_contracts_have_discriminators_or_fixtures() {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // Golden fixtures live at the workspace root; after homeboy-cli was
+        // extracted into `crates/homeboy-cli`, CARGO_MANIFEST_DIR points at the
+        // crate, so climb back to the workspace root to find them.
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
         let fixtures = root.join("tests/fixtures/golden_json_contracts");
 
         for contract in PUBLIC_OUTPUT_VARIANT_CONTRACTS {

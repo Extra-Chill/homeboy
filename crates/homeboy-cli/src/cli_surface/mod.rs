@@ -797,8 +797,18 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    /// Repo-root-relative paths (docs/, README.md) resolve from the workspace
+    /// root, not this crate's manifest dir. After homeboy-cli was extracted into
+    /// `crates/homeboy-cli`, `CARGO_MANIFEST_DIR` points at the crate, so these
+    /// surface tests must climb back to the workspace root.
+    fn workspace_root() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+    }
+
     fn command_doc(command: &str) -> String {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = workspace_root();
         std::fs::read_to_string(root.join("docs/commands").join(format!("{command}.md")))
             .unwrap_or_else(|error| panic!("failed to read docs for {command}: {error}"))
     }
@@ -870,7 +880,7 @@ mod tests {
 
     #[test]
     fn command_registry_docs_paths_exist_and_are_indexed() {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = workspace_root();
         let index = commands_index();
 
         for entry in crate::command_contract::COMMAND_SPECS {
@@ -967,10 +977,8 @@ mod tests {
 
     #[test]
     fn documented_docs_surface_matches_manifest_and_parser() {
-        let readme = std::fs::read_to_string(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md"),
-        )
-        .expect("failed to read README");
+        let readme = std::fs::read_to_string(workspace_root().join("README.md"))
+            .expect("failed to read README");
         let manifest = current_command_safety_manifest();
 
         for argv in [
@@ -995,7 +1003,7 @@ mod tests {
 
     #[test]
     fn core_command_docs_do_not_drift_from_registry() {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = workspace_root();
         let registered_docs = crate::command_contract::COMMAND_SPECS
             .iter()
             .filter_map(|entry| entry.docs_slug)
@@ -1024,7 +1032,7 @@ mod tests {
 
     #[test]
     fn non_core_command_doc_registry_paths_exist() {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = workspace_root();
         let index = commands_index();
 
         for slug in crate::command_contract::non_core_command_doc_slugs() {
