@@ -35,11 +35,10 @@ pub fn persist_fuzz_coverage_reconciliation(
         )
     })?;
     let request: crate::FuzzExecutionRequest = serde_json::from_str(&raw).map_err(|error| {
-        homeboy_core::Error::validation_invalid_argument(
+        homeboy_core::Error::invalid_argument_for(
             "fuzz_execution_request",
             format!("failed to parse fuzz execution request for coverage reconciliation: {error}"),
-            Some(execution_request_path.display().to_string()),
-            None,
+            execution_request_path.display().to_string(),
         )
     })?;
     let reconciliation = reconcile_fuzz_coverage(&request, campaign);

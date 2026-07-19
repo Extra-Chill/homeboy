@@ -429,6 +429,27 @@ impl Error {
         Self::validation_invalid_argument_with_evidence(field, problem, id, tried, None)
     }
 
+    /// Ergonomic shorthand for the common invalid-argument case: just the field
+    /// and the problem, with no offending id and no suggested alternatives.
+    ///
+    /// Equivalent to `validation_invalid_argument(field, problem, None, None)` —
+    /// most call sites carry those two trailing `None`s as pure scaffolding.
+    pub fn invalid_argument(field: impl Into<String>, problem: impl Into<String>) -> Self {
+        Self::validation_invalid_argument(field, problem, None, None)
+    }
+
+    /// Ergonomic shorthand for an invalid argument that names the offending id
+    /// (e.g. a path or value) but has no suggested alternatives.
+    ///
+    /// Equivalent to `validation_invalid_argument(field, problem, Some(id), None)`.
+    pub fn invalid_argument_for(
+        field: impl Into<String>,
+        problem: impl Into<String>,
+        id: impl Into<String>,
+    ) -> Self {
+        Self::validation_invalid_argument(field, problem, Some(id.into()), None)
+    }
+
     /// Same as [`Self::validation_invalid_argument`] but attaches captured
     /// [`CommandEvidence`] (resolved command, cwd, exit code, stdout/stderr) so
     /// command-backed validation failures (e.g. the release `preflight.test`
@@ -1129,5 +1150,33 @@ impl Error {
             ),
             _ => self,
         }
+    }
+}
+
+#[cfg(test)]
+mod ergonomic_constructor_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_argument_equals_the_verbose_none_none_form() {
+        let short = Error::invalid_argument("field", "problem");
+        let verbose = Error::validation_invalid_argument("field", "problem", None, None);
+        assert_eq!(short.code, verbose.code);
+        assert_eq!(short.message, verbose.message);
+        assert_eq!(short.details, verbose.details);
+    }
+
+    #[test]
+    fn invalid_argument_for_equals_the_verbose_some_id_none_form() {
+        let short = Error::invalid_argument_for("field", "problem", "the-id");
+        let verbose = Error::validation_invalid_argument(
+            "field",
+            "problem",
+            Some("the-id".to_string()),
+            None,
+        );
+        assert_eq!(short.code, verbose.code);
+        assert_eq!(short.message, verbose.message);
+        assert_eq!(short.details, verbose.details);
     }
 }

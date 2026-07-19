@@ -24,14 +24,13 @@ pub fn parse_fuzz_results_file(path: &Path) -> Result<FuzzCampaign> {
         )
     })?;
     if campaign.schema != FUZZ_CAMPAIGN_SCHEMA {
-        return Err(Error::validation_invalid_argument(
+        return Err(Error::invalid_argument_for(
             "schema",
             format!(
                 "fuzz results schema must be {FUZZ_CAMPAIGN_SCHEMA}, got {}",
                 campaign.schema
             ),
-            Some(campaign.schema),
-            None,
+            campaign.schema,
         ));
     }
     Ok(campaign)
@@ -41,12 +40,7 @@ pub fn parse_fuzz_case_log_file(path: &Path) -> Result<Vec<FuzzCaseLogEntry>> {
     let contents = std::fs::read_to_string(path)
         .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
     let entries = parse_fuzz_case_log_contents(&contents).map_err(|message| {
-        Error::validation_invalid_argument(
-            "case_log",
-            message,
-            Some(path.display().to_string()),
-            None,
-        )
+        Error::invalid_argument_for("case_log", message, path.display().to_string())
     })?;
     Ok(entries)
 }
@@ -118,14 +112,13 @@ pub fn parse_fuzz_result_envelope_file(path: &Path) -> Result<FuzzResultEnvelope
         )
     })?;
     if envelope.schema != FUZZ_RESULT_ENVELOPE_SCHEMA {
-        return Err(Error::validation_invalid_argument(
+        return Err(Error::invalid_argument_for(
             "schema",
             format!(
                 "fuzz result envelope schema must be {FUZZ_RESULT_ENVELOPE_SCHEMA}, got {}",
                 envelope.schema
             ),
-            Some(envelope.schema),
-            None,
+            envelope.schema,
         ));
     }
     Ok(envelope)
@@ -145,12 +138,7 @@ pub fn parse_fuzz_target_inventory_file(path: &Path) -> Result<FuzzTargetInvento
         )
     })?;
     FuzzTargetInventory::from_value(value).map_err(|message| {
-        Error::validation_invalid_argument(
-            "inventory",
-            message,
-            Some(path.display().to_string()),
-            None,
-        )
+        Error::invalid_argument_for("inventory", message, path.display().to_string())
     })
 }
 
@@ -165,12 +153,7 @@ pub fn parse_fuzz_action_model_file(path: &Path) -> Result<FuzzActionModel> {
         )
     })?;
     FuzzActionModel::from_value(value).map_err(|message| {
-        Error::validation_invalid_argument(
-            "action_model",
-            message,
-            Some(path.display().to_string()),
-            None,
-        )
+        Error::invalid_argument_for("action_model", message, path.display().to_string())
     })
 }
 
@@ -185,12 +168,7 @@ pub fn parse_fuzz_workload_file(path: &Path) -> Result<FuzzWorkload> {
         )
     })?;
     FuzzWorkload::from_value(value).map_err(|message| {
-        Error::validation_invalid_argument(
-            "workload",
-            message,
-            Some(path.display().to_string()),
-            None,
-        )
+        Error::invalid_argument_for("workload", message, path.display().to_string())
     })
 }
 
@@ -208,12 +186,7 @@ pub fn parse_fuzz_exploration_policy_file(path: &Path) -> Result<FuzzExploration
         )
     })?;
     FuzzExplorationPolicy::from_value(value).map_err(|message| {
-        Error::validation_invalid_argument(
-            "exploration_policy",
-            message,
-            Some(path.display().to_string()),
-            None,
-        )
+        Error::invalid_argument_for("exploration_policy", message, path.display().to_string())
     })
 }
 
@@ -228,12 +201,7 @@ pub fn parse_fuzz_sequence_plan_file(path: &Path) -> Result<FuzzSequencePlan> {
         )
     })?;
     FuzzSequencePlan::from_value(value).map_err(|message| {
-        Error::validation_invalid_argument(
-            "sequence_plan",
-            message,
-            Some(path.display().to_string()),
-            None,
-        )
+        Error::invalid_argument_for("sequence_plan", message, path.display().to_string())
     })
 }
 
