@@ -159,6 +159,31 @@ struct GitSafety {
 pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactCleanupOutput> {
     let root = resolve_root(&options)?;
     let worktrees = discover_worktrees(&root)?;
+    cleanup_artifacts_in_worktrees(root, worktrees, &options, true)
+}
+
+/// Remove declared rebuildable artifacts from one completed worktree without
+/// inspecting sibling worktrees that may still be owned by active tasks.
+pub fn cleanup_worktree_artifacts(worktree: &Path) -> Result<ArtifactCleanupOutput> {
+    let root = git_root(worktree)?;
+    let worktree = root.clone();
+    cleanup_artifacts_in_worktrees(
+        root,
+        vec![WorktreeInfo { path: worktree }],
+        &ArtifactCleanupOptions {
+            apply: true,
+            ..Default::default()
+        },
+        false,
+    )
+}
+
+fn cleanup_artifacts_in_worktrees(
+    root: PathBuf,
+    worktrees: Vec<WorktreeInfo>,
+    options: &ArtifactCleanupOptions,
+    include_self_temp_artifacts: bool,
+) -> Result<ArtifactCleanupOutput> {
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
     let mut applied = Vec::new();
@@ -221,8 +246,10 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
         }
     }
 
-    for candidate in self_temp_artifact_candidates(&options)? {
-        candidates.push(candidate);
+    if include_self_temp_artifacts {
+        for candidate in self_temp_artifact_candidates(options)? {
+            candidates.push(candidate);
+        }
     }
 
     order_and_limit_candidates(&mut candidates, options.sort, options.limit);
@@ -871,6 +898,23 @@ mod tests {
         assert_eq!(target.kind, "rust_target");
         assert_eq!(target.declared_by, "homeboy:builtin_artifact_paths");
         assert!(repo.path().join("target/debug/app").exists());
+    }
+
+    #[test]
+    fn worktree_artifact_cleanup_removes_rebuildable_output_and_preserves_source() {
+        let repo = git_repo();
+        write_file(&repo.path().join("target/debug/app"), "artifact");
+        write_file(&repo.path().join("src/lib.rs"), "changed source");
+
+        let output = cleanup_worktree_artifacts(repo.path()).expect("cleanup worktree artifacts");
+
+        assert_eq!(output.worktree_count, 1);
+        assert_eq!(output.applied_count, 1);
+        assert!(!repo.path().join("target").exists());
+        assert_eq!(
+            fs::read_to_string(repo.path().join("src/lib.rs")).expect("source remains"),
+            "changed source"
+        );
     }
 
     #[test]

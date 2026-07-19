@@ -86,6 +86,11 @@ impl AttemptWorkspace {
     }
 
     pub(super) fn cleanup(&self) -> Result<(), String> {
+        // The provider has returned and this exact detached checkout is no
+        // longer leased. Remove only declared rebuildable output before the
+        // source-state guard decides whether the worktree itself is removable.
+        homeboy_core::cleanup::cleanup_worktree_artifacts(&self.root)
+            .map_err(|error| format!("cannot cleanup rebuildable artifacts: {}", error.message))?;
         let status = git_output(&self.root, &["status", "--porcelain=v1"])
             .map_err(|error| format!("cannot inspect attempt workspace state: {error:?}"))?;
         if !status.trim().is_empty() {
@@ -500,4 +505,71 @@ pub(crate) fn fingerprint(contents: &[u8]) -> String {
 
 fn sha256_hex(contents: &[u8]) -> String {
     format!("{:x}", Sha256::digest(contents))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    #[test]
+    fn terminal_cleanup_reclaims_build_output_before_preserving_changed_source() {
+        let source = tempfile::tempdir().expect("source repository");
+        git(source.path(), &["init", "-b", "main"]);
+        fs::create_dir_all(source.path().join("src")).expect("source directory");
+        fs::write(source.path().join("src/lib.rs"), "base").expect("source file");
+        git(source.path(), &["add", "src/lib.rs"]);
+        git(
+            source.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        let attempt_root = source.path().join("attempt");
+        git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                attempt_root.to_str().expect("attempt path"),
+                "HEAD",
+            ],
+        );
+        fs::create_dir_all(attempt_root.join("target/debug")).expect("target directory");
+        fs::write(attempt_root.join("target/debug/app"), "artifact").expect("target artifact");
+        fs::write(attempt_root.join("src/lib.rs"), "changed source").expect("changed source");
+
+        let workspace = AttemptWorkspace {
+            source_root: source.path().to_path_buf(),
+            root: attempt_root.clone(),
+            base_sha: git_output(&attempt_root, &["rev-parse", "HEAD"]).expect("attempt head"),
+        };
+        let error = workspace
+            .cleanup()
+            .expect_err("changed source retains worktree");
+
+        assert!(error.contains("uncommitted changes"));
+        assert!(!attempt_root.join("target").exists());
+        assert_eq!(
+            fs::read_to_string(attempt_root.join("src/lib.rs")).expect("source remains"),
+            "changed source"
+        );
+    }
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {:?} failed with {status}", args);
+    }
 }
