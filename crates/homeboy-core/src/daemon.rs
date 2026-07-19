@@ -420,6 +420,13 @@ struct ExecRequest {
     lifecycle: Option<RunnerJobLifecycleMetadata>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
+    /// Explicit, controller-asserted idempotency key. When present, the daemon
+    /// dedupes `/exec` on this key directly rather than reconstructing one from
+    /// nested lifecycle/metadata. Optional for compatibility with controllers
+    /// that predate the field — those fall back to the `durable_run_id`
+    /// extraction.
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1872,6 +1879,30 @@ fn method_not_allowed() -> HttpResponse {
     }
 }
 
+/// Resolve the effective exec idempotency key the daemon dedupes on.
+///
+/// Prefers the explicit, controller-asserted `idempotency_key`; falls back to
+/// the `durable_run_id` reconstructed from nested lifecycle/metadata for
+/// controllers that predate the explicit field. Empty/whitespace keys are
+/// ignored so a blank assertion never masks the fallback.
+fn resolve_exec_idempotency_key(
+    explicit_key: Option<&str>,
+    run_ref_metadata: Option<&serde_json::Value>,
+) -> Option<String> {
+    explicit_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            run_ref_metadata
+                .and_then(|metadata| metadata.get("durable_run_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .map(str::to_string)
+        })
+}
+
 fn enqueue_exec_job(
     body: Option<serde_json::Value>,
     job_store: &JobStore,
@@ -1939,17 +1970,20 @@ fn enqueue_exec_job(
     let path_materialization_plan = request.path_materialization_plan.clone();
 
     let mut lifecycle = request.lifecycle.take();
-    let canonical_durable_run_id = exec_request_run_ref_metadata(
-        lifecycle.as_ref(),
-        request.lab_runner_workload.as_ref(),
-        request.metadata.as_ref(),
-    )
-    .and_then(|metadata| {
-        metadata
-            .get("durable_run_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-    });
+    // Prefer the explicit, controller-asserted idempotency key. Fall back to
+    // reconstructing the durable run id from nested lifecycle/metadata for
+    // controllers that predate the explicit field. Either way the resolved key
+    // is folded into the lifecycle's `durable_run_id` below, which is what the
+    // job-store dedup guard keys on.
+    let canonical_durable_run_id = resolve_exec_idempotency_key(
+        request.idempotency_key.as_deref(),
+        exec_request_run_ref_metadata(
+            lifecycle.as_ref(),
+            request.lab_runner_workload.as_ref(),
+            request.metadata.as_ref(),
+        )
+        .as_ref(),
+    );
     if let Some(durable_run_id) = canonical_durable_run_id {
         lifecycle
             .get_or_insert_with(|| RunnerJobLifecycleMetadata {
@@ -2228,6 +2262,40 @@ mod tests {
     use crate::daemon::runner_exec_driver::{
         self, DaemonExecOutput, PreparedDaemonExec, RunnerExecDriver, RunnerExecPrepareRequest,
     };
+
+    #[test]
+    fn resolve_exec_idempotency_key_prefers_the_explicit_controller_key() {
+        let metadata = json!({ "durable_run_id": "run-from-metadata" });
+
+        // Explicit key wins over the metadata-reconstructed run id.
+        assert_eq!(
+            resolve_exec_idempotency_key(Some("explicit-run"), Some(&metadata)).as_deref(),
+            Some("explicit-run")
+        );
+
+        // The explicit key works on its own, even with no nested metadata — the
+        // whole point of asserting it up front instead of reconstructing it.
+        assert_eq!(
+            resolve_exec_idempotency_key(Some("explicit-run"), None).as_deref(),
+            Some("explicit-run")
+        );
+
+        // A blank/whitespace explicit key does not mask the metadata fallback.
+        assert_eq!(
+            resolve_exec_idempotency_key(Some("   "), Some(&metadata)).as_deref(),
+            Some("run-from-metadata")
+        );
+
+        // No explicit key falls back to the reconstructed durable run id.
+        assert_eq!(
+            resolve_exec_idempotency_key(None, Some(&metadata)).as_deref(),
+            Some("run-from-metadata")
+        );
+
+        // Nothing to key on at all.
+        assert_eq!(resolve_exec_idempotency_key(None, None), None);
+        assert_eq!(resolve_exec_idempotency_key(None, Some(&json!({}))), None);
+    }
     use crate::test_support::with_isolated_home;
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;

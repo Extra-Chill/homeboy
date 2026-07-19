@@ -98,6 +98,11 @@ pub(super) fn exec_via_daemon(
         "runner_workload": lab_runner_workload.clone(),
         "metadata": runner_exec_request_metadata(run_id.as_deref(), "daemon"),
         "lifecycle": lifecycle,
+        // Explicit, first-class idempotency key the daemon dedupes `/exec` on.
+        // The controller asserts it up front instead of the daemon having to
+        // reconstruct it from nested lifecycle/metadata, so a resubmission after
+        // a transport drop is a safe no-op. Uses the durable run id when present.
+        "idempotency_key": run_id,
     });
     let response = submit_daemon_exec_with_session_recovery(
         local_url,
