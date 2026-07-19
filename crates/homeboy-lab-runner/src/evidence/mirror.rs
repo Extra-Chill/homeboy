@@ -216,7 +216,7 @@ pub fn mirror_connected_runner_run(run_id: &str) -> Result<Option<RunRecord>> {
         let run = remote_detail_to_run_record(detail, &runner, None)?;
         import_run_if_absent(&store, &run)?;
         for artifact in remote_detail_artifacts(detail, &runner, &run.id)? {
-            import_artifact_if_absent(&store, &artifact)?;
+            import_mirrored_artifact(&store, &artifact)?;
         }
         return Ok(Some(run));
     }
@@ -455,7 +455,7 @@ fn mirror_remote_observation_runs(
         }
         import_run_if_absent(store, &run)?;
         for artifact in remote_detail_artifacts(detail, runner, &run.id)? {
-            import_artifact_if_absent(store, &artifact)?;
+            import_mirrored_artifact(store, &artifact)?;
         }
         mirrored.push(run);
     }
@@ -485,7 +485,7 @@ fn mirror_remote_observation_runs_by_id(
         }
         import_run_if_absent(store, &run)?;
         for artifact in remote_detail_artifacts(detail, runner, &run.id)? {
-            import_artifact_if_absent(store, &artifact)?;
+            import_mirrored_artifact(store, &artifact)?;
         }
         mirrored.push(run);
     }
@@ -501,6 +501,73 @@ fn import_artifact_if_absent(store: &ObservationStore, artifact: &ArtifactRecord
         return Ok(());
     }
     store.import_artifact(artifact)
+}
+
+/// A completed remote observation has already published immutable artifact
+/// identity and integrity metadata. Materialize those bytes in the controller
+/// store before terminal daemon-job retention can remove the remote lookup.
+fn import_mirrored_artifact(store: &ObservationStore, artifact: &ArtifactRecord) -> Result<()> {
+    import_mirrored_artifact_with_downloader(store, artifact, |path| {
+        Ok(super::download::download_remote_artifact(path, None)?.output_path)
+    })
+}
+
+pub(super) fn import_mirrored_artifact_with_downloader<F>(
+    store: &ObservationStore,
+    artifact: &ArtifactRecord,
+    download: F,
+) -> Result<()>
+where
+    F: FnOnce(&str) -> Result<std::path::PathBuf>,
+{
+    // Only a fully identified remote artifact has a durable-byte contract.
+    // Leave legacy/incomplete remote references on their existing live-fetch path.
+    if artifact.artifact_type != "remote_file"
+        || artifact.size_bytes.is_none()
+        || artifact.sha256.as_deref().is_none_or(str::is_empty)
+    {
+        return import_artifact_if_absent(store, artifact);
+    }
+    if let Some(existing) = store.get_artifact(&artifact.id)? {
+        if existing.run_id == artifact.run_id
+            && existing.kind == artifact.kind
+            && existing.size_bytes == artifact.size_bytes
+            && existing.sha256 == artifact.sha256
+            && existing.artifact_type == "file"
+        {
+            return Ok(());
+        }
+        if existing.run_id == artifact.run_id
+            && existing.kind == artifact.kind
+            && existing.size_bytes == artifact.size_bytes
+            && existing.sha256 == artifact.sha256
+            && existing.artifact_type == "remote_file"
+        {
+            // Upgrade the matching legacy projection below while the runner is
+            // still available, before terminal retention can remove its bytes.
+        } else {
+            return Err(Error::validation_invalid_argument(
+                "artifact_id",
+                format!(
+                    "mirrored artifact `{}` conflicts with existing controller ownership or integrity metadata",
+                    artifact.id
+                ),
+                Some(artifact.id.clone()),
+                None,
+            ));
+        }
+    }
+    let downloaded_path = download(&artifact.path)?;
+    store.record_verified_artifact_with_id(
+        &artifact.run_id,
+        &artifact.kind,
+        downloaded_path,
+        &artifact.id,
+        artifact.size_bytes,
+        artifact.sha256.as_deref(),
+        artifact.metadata_json.clone(),
+    )?;
+    Ok(())
 }
 
 pub(super) fn primary_mirrored_run(remote_runs: &[RunRecord]) -> Option<RunRecord> {

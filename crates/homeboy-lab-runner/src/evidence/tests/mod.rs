@@ -2,6 +2,7 @@ use std::fs;
 
 use reqwest::header;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{Runner, RunnerKind};
@@ -14,8 +15,9 @@ use super::detail::{
 };
 use super::download::{content_disposition_filename, download_remote_artifact};
 use super::mirror::{
-    bounded_remote_events, mirror_job_run, mirrored_patch_result, primary_mirrored_run,
-    MIRRORED_REMOTE_EVENT_LIMIT, MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
+    bounded_remote_events, import_mirrored_artifact_with_downloader, mirror_job_run,
+    mirrored_patch_result, primary_mirrored_run, MIRRORED_REMOTE_EVENT_LIMIT,
+    MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
 };
 use super::tokens::{
     is_reportable_artifact_evidence_path, is_retrievable_runner_artifact, runner_artifact_token,
@@ -560,6 +562,83 @@ fn test_remote_file_artifacts_are_indexed_as_runner_tokens() {
     assert_eq!(artifacts[0].id, "artifact-1");
     assert_eq!(artifacts[0].artifact_type, "remote_file");
     assert_eq!(artifacts[0].path, "runner-artifact://lab/run-1/artifact-1");
+}
+
+#[test]
+fn test_remote_fuzz_artifacts_become_controller_owned_before_runner_cleanup() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = RunRecord {
+            id: "requested-fuzz-run".to_string(),
+            kind: "fuzz".to_string(),
+            component_id: Some("component-a".to_string()),
+            started_at: "2026-05-16T00:00:00Z".to_string(),
+            finished_at: Some("2026-05-16T00:00:01Z".to_string()),
+            status: "pass".to_string(),
+            command: Some("homeboy fuzz run component-a".to_string()),
+            cwd: Some("/srv/component-a".to_string()),
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: json!({}),
+        };
+        store.import_run(&run).expect("import fuzz run");
+
+        let fixtures = [
+            ("fuzz-results", "fuzz_results", b"results".as_slice()),
+            (
+                "execution-request",
+                "fuzz_execution_request",
+                b"request".as_slice(),
+            ),
+            (
+                "result-envelope",
+                "fuzz_result_envelope",
+                b"envelope".as_slice(),
+            ),
+            ("coverage", "fuzz_coverage", b"coverage".as_slice()),
+        ];
+        let source_root = home.path().join("runner-artifacts");
+        fs::create_dir_all(&source_root).expect("create runner artifact root");
+
+        for (id, kind, bytes) in fixtures {
+            let source = source_root.join(id);
+            fs::write(&source, bytes).expect("write runner artifact");
+            let artifact = ArtifactRecord {
+                id: id.to_string(),
+                run_id: run.id.clone(),
+                kind: kind.to_string(),
+                artifact_type: "remote_file".to_string(),
+                path: runner_artifact_token("lab", "remote-fuzz-run", id),
+                url: None,
+                public_url: None,
+                viewer_url: None,
+                viewer_links: Vec::new(),
+                sha256: Some(format!("{:x}", Sha256::digest(bytes))),
+                size_bytes: Some(i64::try_from(bytes.len()).expect("fixture size")),
+                mime: None,
+                metadata_json: json!({ "runner_id": "lab" }),
+                created_at: "2026-05-16T00:00:01Z".to_string(),
+            };
+            import_mirrored_artifact_with_downloader(&store, &artifact, |_| Ok(source.clone()))
+                .expect("mirror runner artifact bytes");
+        }
+
+        fs::remove_dir_all(&source_root).expect("simulate runner cleanup");
+        for (id, _, bytes) in fixtures {
+            let artifact = store
+                .get_artifact(id)
+                .expect("artifact lookup")
+                .expect("controller-owned artifact");
+            assert_eq!(artifact.artifact_type, "file");
+            assert_eq!(fs::read(&artifact.path).expect("durable bytes"), bytes);
+            assert_eq!(artifact.size_bytes, Some(bytes.len() as i64));
+            assert_eq!(
+                artifact.sha256.as_deref(),
+                Some(format!("{:x}", Sha256::digest(bytes)).as_str())
+            );
+        }
+    });
 }
 
 #[test]
