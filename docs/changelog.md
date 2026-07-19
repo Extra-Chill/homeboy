@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.294.0] - 2026-07-19
+
+### Added
+- make the exec idempotency key an explicit controller-asserted field
+- report retained storage
+- close the exec enqueue-time race with an atomic durable-run-id dedup guard
+
+### Fixed
+- ignore runner staging in snapshot cleanliness
+- register the component-script runner in every runner-dependent deps test
+- make controller-to-daemon submission durably idempotent
+- use one Lab routing argument in reverse cook fixture
+- account for artifact cleanup outcomes
+- tolerate transient Lab snapshot paths
+- fix(agent-task): await detached handoff aggregate
+- preserve cook attempts during Lab transport readiness
+- adopt equivalent retried cook attempts
+- converge orphaned controller scratch lifecycle
+- converge task build artifacts after runs
+- let immutable adoption bypass patch selection
+- isolate three agent-task lifecycle tests from shared runtime state
+
 ## [0.293.0] - 2026-07-19
 
 ### Added
