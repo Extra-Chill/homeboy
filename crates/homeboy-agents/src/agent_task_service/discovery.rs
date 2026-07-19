@@ -306,7 +306,7 @@ fn classify_liveness(
         return AgentTaskLiveness::Active;
     }
 
-    if metadata_bool(&record.metadata, "stale_running") == Some(true) {
+    if record.is_stale_running() {
         return AgentTaskLiveness::Stale;
     }
 
@@ -403,9 +403,12 @@ fn discovery_run(
         runner_id,
         runner_job_id,
         remote_run_id: metadata_string(&record.metadata, "remote_run_id"),
-        stale: metadata_bool(&record.metadata, "stale_running"),
-        stale_reason: metadata_string(&record.metadata, "stale_running_reason"),
-        retryable: metadata_bool(&record.metadata, "retryable"),
+        stale: metadata_bool(&record.metadata, agent_task_lifecycle::METADATA_KEY_STALE_RUNNING),
+        stale_reason: metadata_string(
+            &record.metadata,
+            agent_task_lifecycle::METADATA_KEY_STALE_RUNNING_REASON,
+        ),
+        retryable: metadata_bool(&record.metadata, agent_task_lifecycle::METADATA_KEY_RETRYABLE),
         liveness,
         source,
         last_update,
