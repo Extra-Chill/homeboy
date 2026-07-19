@@ -624,6 +624,12 @@ where
     } else {
         options
     };
+    // Transport readiness can serialize on a reconnect/runtime-promotion
+    // lease. Complete it before entering the provider-attempt loop so that
+    // waiting for a shared Lab session never consumes a cook attempt.
+    if let Some(dispatcher) = &options.attempt_dispatcher {
+        dispatcher.prepare_for_cook()?;
+    }
     let max_attempts = options.max_attempts.max(1);
     let mut attempts = Vec::new();
     let mut run_id = options.initial_run_id.clone();
@@ -653,9 +659,6 @@ where
             .unwrap_or(true);
         if needs_execution {
             let execution = (|| {
-                if let Some(dispatcher) = &options.attempt_dispatcher {
-                    dispatcher.prepare_for_cook()?;
-                }
                 let initial_baseline = if attempt == 1 {
                     materialize_initial_candidate_baseline(
                         &plan,
@@ -2024,7 +2027,7 @@ mod tests {
         RunLifecycleRecord,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Barrier;
+    use std::sync::{Barrier, Condvar};
 
     #[test]
     fn cook_service_retry_uses_the_same_passed_context_after_ambient_mutation() {
@@ -2141,6 +2144,13 @@ mod tests {
         failures_remaining: AtomicUsize,
     }
 
+    #[derive(Debug)]
+    struct QueuedPreparationDispatcher {
+        barrier: Arc<Barrier>,
+        state: Arc<(Mutex<(bool, bool)>, Condvar)>,
+        connections: Arc<AtomicUsize>,
+    }
+
     impl AgentTaskCookAttemptDispatcher for FlakyPreparationDispatcher {
         fn durable_recipe(&self) -> Result<Value> {
             Ok(serde_json::json!({ "kind": "test-flaky-preparation" }))
@@ -2175,6 +2185,46 @@ mod tests {
                 },
             )
             .map(|_| ())
+        }
+    }
+
+    impl AgentTaskCookAttemptDispatcher for QueuedPreparationDispatcher {
+        fn durable_recipe(&self) -> Result<Value> {
+            Ok(serde_json::json!({ "kind": "test-queued-preparation" }))
+        }
+
+        fn prepare_for_cook(&self) -> Result<()> {
+            self.barrier.wait();
+            let (state_mutex, ready) = &*self.state;
+            let mut state = state_mutex.lock().expect("queued preparation state");
+            if state.1 {
+                return Ok(());
+            }
+            if state.0 {
+                while !state.1 {
+                    state = ready.wait(state).expect("queued preparation wait");
+                }
+                return Ok(());
+            }
+            state.0 = true;
+            drop(state);
+
+            self.connections.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            let mut state = state_mutex.lock().expect("queued preparation owner state");
+            state.1 = true;
+            ready.notify_all();
+            Ok(())
+        }
+
+        fn dispatch_attempt(
+            &self,
+            _plan: AgentTaskPlan,
+            _run_id: &str,
+            _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+        ) -> Result<()> {
+            panic!("transport preparation test does not dispatch a provider attempt")
         }
     }
 
@@ -2362,7 +2412,7 @@ mod tests {
     }
 
     #[test]
-    fn cook_retries_runner_unavailable_under_one_durable_identity() {
+    fn cook_transport_preparation_failure_does_not_create_a_provider_attempt() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let cook_id = "cook-runner-unavailable";
             let first_run_id = "cook-runner-unavailable-attempt-1";
@@ -2376,18 +2426,16 @@ mod tests {
             options.initial_run_id = first_run_id.to_string();
             options.max_attempts = 2;
 
-            let result = run_cook(options, UnusedExecutor).expect("cook recovers runner admission");
+            let error = run_cook(options, UnusedExecutor)
+                .expect_err("transport preparation is outside the provider-attempt loop");
 
-            assert_eq!(result.exit_code, 0);
-            assert_eq!(result.value.status, "in_flight");
-            assert_eq!(result.value.history_run_ids.len(), 2);
-            assert_eq!(result.value.history_run_ids[0], first_run_id);
-            let failed = agent_task_lifecycle::status(first_run_id).expect("failed attempt");
-            assert!(failed.provider_handles.is_empty());
-            assert_eq!(failed.metadata["provider_executions_consumed"], 0);
-            let resumed =
-                agent_task_lifecycle::status(cook_id).expect("cook alias resolves latest");
-            assert_eq!(resumed.run_id, result.value.history_run_ids[1]);
+            assert!(error.message.contains("fixture runner is unavailable"));
+            assert!(!agent_task_lifecycle::run_record_exists(first_run_id)
+                .expect("transport failure does not materialize an attempt"));
+            assert!(
+                agent_task_lifecycle::cook_index(cook_id).is_err(),
+                "transport failure must not consume a cook attempt"
+            );
         });
     }
 
@@ -2416,7 +2464,7 @@ mod tests {
     }
 
     #[test]
-    fn cook_terminally_exhausts_pre_execution_retries_without_provider_budget() {
+    fn cook_transport_preparation_failure_does_not_exhaust_cook_retries() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let cook_id = "cook-runner-exhaustion";
             let mut options = batch_cook_options(
@@ -2429,17 +2477,40 @@ mod tests {
             options.initial_run_id = "cook-runner-exhaustion-attempt-1".to_string();
             options.max_attempts = 2;
 
-            let result = run_cook(options, UnusedExecutor).expect("cook reports exhaustion");
+            let error = run_cook(options, UnusedExecutor)
+                .expect_err("transport preparation remains outside cook retries");
 
-            assert_eq!(result.exit_code, 1);
-            assert_eq!(result.value.status, "retries_exhausted");
-            assert_eq!(result.value.history_run_ids.len(), 2);
-            for run_id in &result.value.history_run_ids {
-                let record = agent_task_lifecycle::status(run_id).expect("failed attempt");
-                assert!(record.provider_handles.is_empty());
-                assert_eq!(record.metadata["provider_executions_consumed"], 0);
-            }
+            assert!(error.message.contains("fixture runner is unavailable"));
+            assert!(
+                !agent_task_lifecycle::run_record_exists("cook-runner-exhaustion-attempt-1")
+                    .expect("transport failure does not materialize an attempt")
+            );
         });
+    }
+
+    #[test]
+    fn concurrent_cooks_share_transport_readiness_before_first_provider_attempt() {
+        const COOKS: usize = 6;
+        let connections = Arc::new(AtomicUsize::new(0));
+        let dispatcher = Arc::new(QueuedPreparationDispatcher {
+            barrier: Arc::new(Barrier::new(COOKS)),
+            state: Arc::new((Mutex::new((false, false)), Condvar::new())),
+            connections: Arc::clone(&connections),
+        });
+        let preparations = (0..COOKS)
+            .map(|_| {
+                let dispatcher = Arc::clone(&dispatcher);
+                std::thread::spawn(move || dispatcher.prepare_for_cook())
+            })
+            .collect::<Vec<_>>();
+
+        for preparation in preparations {
+            preparation
+                .join()
+                .expect("cook preparation thread")
+                .expect("shared transport becomes ready");
+        }
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
     }
 
     #[test]
