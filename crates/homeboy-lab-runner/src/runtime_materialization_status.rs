@@ -229,9 +229,11 @@ mod tests {
         assert!(hint.contains("homeboy 0.259.0+daemon"));
         assert!(hint.contains("job command binary"));
         assert!(hint.contains("homeboy 0.262.0+binary"));
-        assert!(hint.contains(
-            "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
-        ));
+        // The refresh hint now names the `refresh-homeboy --reconnect` recovery
+        // command. Assert its stable shape rather than the embedded `--ref`
+        // version, which tracks the current release and would re-rot the test.
+        assert!(hint.contains("homeboy runner refresh-homeboy homeboy-lab"));
+        assert!(hint.contains("--reconnect"));
     }
 
     fn report(stale_daemon: Option<RunnerStaleDaemonWarning>) -> RunnerStatusReport {

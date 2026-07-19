@@ -20,7 +20,7 @@ fn workspace_materializer_builds_snapshot_atomic_replace_command() {
     assert!(command.contains("parent=/srv/homeboy/_lab_workspaces"));
     assert!(command.contains("dest=/srv/homeboy/_lab_workspaces/homeboy-abc"));
     assert!(command.contains("trap 'rm -rf \"$tmp\"' EXIT"));
-    assert!(command.contains("tar -C \"$tmp\" -xf -"));
+    assert!(command.contains("tar -p -C \"$tmp\" -xf -"));
     assert!(command.contains("rm -rf \"$dest\" && mv \"$tmp\" \"$dest\""));
     assert!(command.contains("owner_path=$parent"));
     assert!(command.contains("chown -R \"$owner\" $dest"));

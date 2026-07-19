@@ -1167,9 +1167,13 @@ mod tests {
             true,
         )
         .expect_err("a genuinely different dispatched command must fail");
-        assert_eq!(err.details["field"], "runner_workload.kind.command_label");
-        assert!(err.message.contains("runtime refresh"));
-        assert!(err.message.contains("trace"));
+        // `runtime refresh` (Workspace family) and `trace` (Quality family) are
+        // different workload families, so the mismatch surfaces as a command
+        // family drift rather than a label drift (#7972 canonicalizes same-family
+        // labels but still enforces the family).
+        assert_eq!(err.details["field"], "runner_workload.kind.command_family");
+        assert!(err.message.contains("Workspace"));
+        assert!(err.message.contains("Quality"));
     }
 
     #[test]
