@@ -14,7 +14,9 @@
 
 use std::sync::Mutex;
 
-use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
+use homeboy_core::api_jobs::{
+    Job, RemoteRunnerJobRequest, RemoteRunnerSubmissionLookup, RunnerJobLogSnapshot,
+};
 use homeboy_core::error::{Error, Result};
 
 /// Runner-side operations the agent-task lifecycle needs when reconciling or
@@ -48,6 +50,16 @@ pub trait RunnerContinuationProvider: Send + Sync {
         runner_id: &str,
         request: RemoteRunnerJobRequest,
     ) -> Result<Job>;
+
+    fn lookup_reverse_broker_submission(
+        &self,
+        _runner_id: &str,
+        _submission_key: &str,
+    ) -> Result<RemoteRunnerSubmissionLookup> {
+        Err(Error::internal_unexpected(
+            "runner subsystem is unavailable: cannot look up reverse broker submission",
+        ))
+    }
 }
 
 /// Default provider used when the runner subsystem is not present. Behaves like

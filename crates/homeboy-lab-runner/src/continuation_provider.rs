@@ -61,6 +61,14 @@ impl RunnerContinuationProvider for RunnerContinuation {
     ) -> Result<Job> {
         super::connection::submit_reverse_broker_job(runner_id, request)
     }
+
+    fn lookup_reverse_broker_submission(
+        &self,
+        runner_id: &str,
+        submission_key: &str,
+    ) -> Result<homeboy_core::api_jobs::RemoteRunnerSubmissionLookup> {
+        super::connection::lookup_reverse_broker_submission(runner_id, submission_key)
+    }
 }
 
 /// Register the runner continuation provider with core. Called once at startup.

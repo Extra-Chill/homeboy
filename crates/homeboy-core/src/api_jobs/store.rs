@@ -52,7 +52,17 @@ pub(super) struct JobStorePersistence {
 #[derive(Debug, Default)]
 pub(super) struct JobStoreInner {
     pub(super) jobs: HashMap<Uuid, StoredJob>,
+    pub(super) submission_keys: HashMap<String, RemoteRunnerSubmission>,
+    pub(super) expired_submission_keys: HashMap<String, RemoteRunnerSubmission>,
     pub(super) compaction: Option<JobStoreCompactionEvidence>,
+}
+
+/// A durable, caller-owned admission identity. The fingerprint makes reuse of a
+/// key with different work fail closed instead of silently selecting a job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct RemoteRunnerSubmission {
+    pub(super) fingerprint: String,
+    pub(super) job_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +117,10 @@ pub(crate) enum LocalChildStartDiscriminator {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(super) struct DurableJobStore {
     pub(super) jobs: Vec<StoredJob>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub(super) submission_keys: HashMap<String, RemoteRunnerSubmission>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub(super) expired_submission_keys: HashMap<String, RemoteRunnerSubmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) compaction: Option<JobStoreCompactionEvidence>,
 }
@@ -206,6 +220,8 @@ impl JobStore {
                     .into_iter()
                     .map(|stored| (stored.job.id, stored))
                     .collect(),
+                submission_keys: durable.submission_keys,
+                expired_submission_keys: durable.expired_submission_keys,
                 compaction: durable.compaction,
             })),
             next_event_sequence: Arc::new(AtomicU64::new(next_sequence)),
@@ -331,6 +347,8 @@ impl JobStore {
                     .into_iter()
                     .map(|stored| (stored.job.id, stored))
                     .collect(),
+                submission_keys: durable.submission_keys,
+                expired_submission_keys: durable.expired_submission_keys,
                 compaction: durable.compaction,
             })),
             next_event_sequence: Arc::new(AtomicU64::new(next_sequence)),
@@ -2027,6 +2045,8 @@ impl JobStore {
         if let Some(persistence) = &self.persistence {
             let mut durable = DurableJobStore {
                 jobs: inner.jobs.values().cloned().collect(),
+                submission_keys: inner.submission_keys.clone(),
+                expired_submission_keys: inner.expired_submission_keys.clone(),
                 compaction: inner.compaction.clone(),
             };
             compact_terminal_jobs(
@@ -2302,6 +2322,8 @@ impl JobStore {
         if let Some(persistence) = &self.persistence {
             let mut durable = DurableJobStore {
                 jobs: inner.jobs.values().cloned().collect(),
+                submission_keys: inner.submission_keys.clone(),
+                expired_submission_keys: inner.expired_submission_keys.clone(),
                 compaction: inner.compaction.clone(),
             };
             compact_terminal_jobs(
@@ -2398,6 +2420,8 @@ impl JobStore {
         let mut inner = self.inner.lock().expect("job store mutex poisoned");
         let mut durable = DurableJobStore {
             jobs: inner.jobs.values().cloned().collect(),
+            submission_keys: inner.submission_keys.clone(),
+            expired_submission_keys: inner.expired_submission_keys.clone(),
             compaction: inner.compaction.clone(),
         };
         compact_terminal_jobs(
@@ -2413,6 +2437,8 @@ impl JobStore {
             .cloned()
             .map(|stored| (stored.job.id, stored))
             .collect();
+        inner.submission_keys = durable.submission_keys;
+        inner.expired_submission_keys = durable.expired_submission_keys;
         inner.compaction = durable.compaction;
         Ok(())
     }

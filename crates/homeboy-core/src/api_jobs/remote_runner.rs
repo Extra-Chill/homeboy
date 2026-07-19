@@ -1,16 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
+use sha2::{Digest, Sha256};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
 use super::persistence::{apply_event_retention, job_not_found, timestamp_ms, validate_transition};
-use super::store::{JobStore, StoredJob};
+use super::store::{JobStore, RemoteRunnerSubmission, StoredJob};
 use super::types::{Job, JobEvent, JobEventKind, JobStatus};
 use crate::engine::command::CommandCaptureMetadata;
 use crate::env_materialization_plan::EnvMaterializationPlan;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::lab_contract::LabRunnerWorkload;
 use crate::runner_execution_envelope::{
     PathMaterializationPlan, RunnerExecutionDispatch, RunnerExecutionEnvelope,
@@ -34,6 +36,14 @@ pub use homeboy_api_jobs_contract::metadata::{JobArtifactMetadata, RunnerJobLife
 pub struct RunnerJobProjectionCancelRequest {
     pub expected_runner_id: String,
     pub expected_durable_run_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RemoteRunnerSubmissionLookup {
+    Accepted { job: Job },
+    Expired { job_id: Uuid },
+    Absent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -78,13 +88,54 @@ impl RemoteRunnerJobRequest {
     /// A caller-owned identity makes a retried POST safe across a lost response.
     /// It deliberately lives in metadata so older clients can continue submitting
     /// anonymous jobs while durable handoffs opt into replayable ownership.
-    pub(crate) fn submission_key(&self) -> Option<&str> {
+    pub fn submission_key(&self) -> Option<&str> {
         self.metadata
             .as_ref()
             .and_then(|metadata| metadata.get("submission_key"))
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|key| !key.is_empty())
+    }
+
+    /// Fingerprint the execution inputs that a lost-response replay can
+    /// reconstruct. Transport, lifecycle, and evidence metadata deliberately
+    /// do not participate in submission identity.
+    pub fn redacted_for_durable_replay(&self) -> Self {
+        let mut request = self.clone();
+        request.normalize();
+        request.public_metadata()
+    }
+
+    pub fn submission_payload_fingerprint(&self) -> Result<String> {
+        let request = self.redacted_for_durable_replay();
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema": "homeboy/remote-runner-submission-payload/v1",
+            "runner_id": request.runner_id,
+            "project_id": request.project_id,
+            "operation": request.operation,
+            "command": request.command,
+            "cwd": request.cwd,
+            "env": request.env,
+            "secret_env_names": request.secret_env_names,
+            "secret_env_plan": request.secret_env_plan,
+            "env_materialization": request.env_materialization,
+            "capture_patch": request.capture_patch,
+            "source_snapshot": request.source_snapshot,
+            "path_materialization_plan": request.path_materialization_plan,
+            "require_paths": request.require_paths,
+            "runner_workload": request.lab_runner_workload,
+            "command_assets": request
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("command_assets")),
+        }))
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("fingerprint runner submission".to_string()),
+            )
+        })?;
+        Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
     }
 
     pub(crate) fn normalize(&mut self) -> SecretEnvPlan {
@@ -196,7 +247,7 @@ impl RemoteRunnerJobRequest {
         envelope
     }
 
-    pub(crate) fn public_metadata(&self) -> Self {
+    pub fn public_metadata(&self) -> Self {
         let mut public = self.clone();
         public
             .env
@@ -387,6 +438,26 @@ pub(super) struct StoredRemoteRunnerJob {
 }
 
 impl JobStore {
+    pub fn lookup_remote_runner_submission(
+        &self,
+        submission_key: &str,
+    ) -> RemoteRunnerSubmissionLookup {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        if let Some(submission) = inner.submission_keys.get(submission_key) {
+            if let Some(stored) = inner.jobs.get(&submission.job_id) {
+                return RemoteRunnerSubmissionLookup::Accepted {
+                    job: stored.job.clone(),
+                };
+            }
+        }
+        if let Some(submission) = inner.expired_submission_keys.get(submission_key) {
+            return RemoteRunnerSubmissionLookup::Expired {
+                job_id: submission.job_id,
+            };
+        }
+        RemoteRunnerSubmissionLookup::Absent
+    }
+
     pub fn submit_remote_runner_job(&self, mut request: RemoteRunnerJobRequest) -> Result<Job> {
         if request.runner_id.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
@@ -421,17 +492,65 @@ impl JobStore {
         let now = timestamp_ms();
         let public_request = request.public_metadata();
         let submission_key = request.submission_key().map(str::to_string);
+        let submission_fingerprint = submission_key
+            .as_ref()
+            .map(|_| request.submission_payload_fingerprint())
+            .transpose()?;
         let mut inner = self.inner.lock().expect("job store mutex poisoned");
         if let Some(submission_key) = submission_key.as_deref() {
-            if let Some(existing) = inner.jobs.values().find(|stored| {
-                stored
-                    .remote_runner
-                    .as_ref()
-                    .and_then(|remote| remote.request.submission_key())
-                    == Some(submission_key)
-                    && stored.job.target_runner_id.as_deref() == Some(request.runner_id.as_str())
-            }) {
-                return Ok(existing.job.clone());
+            let fingerprint = submission_fingerprint
+                .as_deref()
+                .expect("key has fingerprint");
+            if let Some(existing) = inner.submission_keys.get(submission_key) {
+                if existing.fingerprint != fingerprint {
+                    return Err(Error::new(
+                        ErrorCode::ValidationInvalidArgument,
+                        "remote runner submission key is already bound to a different normalized payload",
+                        serde_json::json!({
+                            "schema": "homeboy/remote-runner-submission-conflict/v1",
+                            "submission_key": submission_key,
+                            "existing_fingerprint": existing.fingerprint,
+                            "submitted_fingerprint": fingerprint,
+                            "accepted_job_id": existing.job_id,
+                        }),
+                    ));
+                }
+                let job = inner
+                    .jobs
+                    .get(&existing.job_id)
+                    .map(|stored| stored.job.clone())
+                    .ok_or_else(|| {
+                        Error::internal_unexpected(
+                            "durable runner submission index references a missing job",
+                        )
+                    })?;
+                let evidence = serde_json::json!({
+                    "schema": "homeboy/remote-runner-submission/v1",
+                    "submission_key": submission_key,
+                    "payload_fingerprint": fingerprint,
+                    "decision": "replay",
+                    "accepted_job_id": job.id,
+                });
+                drop(inner);
+                self.append_event(
+                    job.id,
+                    JobEventKind::Progress,
+                    Some("remote runner submission replayed".to_string()),
+                    Some(evidence),
+                )?;
+                return Ok(job);
+            }
+            if let Some(expired) = inner.expired_submission_keys.get(submission_key) {
+                return Err(Error::new(
+                    ErrorCode::ValidationInvalidArgument,
+                    "remote runner submission key has expired with its retained job evidence",
+                    serde_json::json!({
+                        "schema": "homeboy/remote-runner-submission-expired/v1",
+                        "submission_key": submission_key,
+                        "payload_fingerprint": expired.fingerprint,
+                        "expired_job_id": expired.job_id,
+                    }),
+                ));
             }
         }
         let job = Job {
@@ -474,19 +593,60 @@ impl JobStore {
                 local_child: None,
             },
         );
-        drop(inner);
-
-        if let Some(metadata) = run_ref_metadata {
-            self.append_status_event_with_data(
-                job.id,
-                JobStatus::Queued,
-                "remote runner job queued",
-                metadata,
-            )?;
-        } else {
-            self.append_status_event(job.id, JobStatus::Queued, "remote runner job queued")?;
+        if let (Some(submission_key), Some(fingerprint)) =
+            (submission_key, submission_fingerprint.clone())
+        {
+            inner.submission_keys.insert(
+                submission_key,
+                RemoteRunnerSubmission {
+                    fingerprint,
+                    job_id: job.id,
+                },
+            );
         }
-        self.get(job.id)
+        let mut evidence = run_ref_metadata.unwrap_or_else(|| serde_json::json!({}));
+        if let (Some(submission_key), Some(fingerprint)) =
+            (request.submission_key(), submission_fingerprint.as_deref())
+        {
+            evidence["submission"] = serde_json::json!({
+                "schema": "homeboy/remote-runner-submission/v1",
+                "submission_key": submission_key,
+                "payload_fingerprint": fingerprint,
+                "decision": "new",
+                "accepted_job_id": job.id,
+            });
+        }
+        let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        let stored = inner.jobs.get_mut(&job.id).expect("newly inserted job");
+        stored.events.push(JobEvent {
+            sequence,
+            job_id: job.id,
+            kind: JobEventKind::Status,
+            timestamp_ms: now,
+            message: Some("remote runner job queued".to_string()),
+            data: Some(evidence),
+        });
+        stored.job.event_count = stored.events.len();
+        // Persist job creation, queue evidence, and key index as one locked
+        // snapshot. This is the admission commit point used by lost-response
+        // recovery and daemon restart replay.
+        if let Some(persistence) = &self.persistence {
+            let durable = super::store::DurableJobStore {
+                jobs: inner.jobs.values().cloned().collect(),
+                submission_keys: inner.submission_keys.clone(),
+                expired_submission_keys: inner.expired_submission_keys.clone(),
+                compaction: inner.compaction.clone(),
+            };
+            if let Err(error) = super::persistence::write_durable_store(&persistence.path, &durable)
+            {
+                inner.jobs.remove(&job.id);
+                if let Some(submission_key) = request.submission_key() {
+                    inner.submission_keys.remove(submission_key);
+                }
+                return Err(error);
+            }
+        }
+        Ok(job)
     }
 
     pub fn claim_remote_runner_job(

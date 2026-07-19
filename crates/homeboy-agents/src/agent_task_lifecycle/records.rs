@@ -107,6 +107,10 @@ pub struct AgentTaskLabHandoff {
     pub authority: AgentTaskLabHandoffAuthority,
     pub runner_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_job_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submitted_at: Option<String>,
@@ -369,6 +373,8 @@ impl AgentTaskLabHandoff {
             state: AgentTaskLabHandoffState::Pending,
             authority: AgentTaskLabHandoffAuthority::Controller,
             runner_id: runner_id.to_string(),
+            submission_key: None,
+            payload_fingerprint: None,
             runner_job_id: None,
             submitted_at: Some(submitted_at),
             acceptance_deadline_at: Some(acceptance_deadline_at),
@@ -382,6 +388,8 @@ impl AgentTaskLabHandoff {
             state: AgentTaskLabHandoffState::Accepted,
             authority: AgentTaskLabHandoffAuthority::RunnerDaemon,
             runner_id: self.runner_id.clone(),
+            submission_key: self.submission_key.clone(),
+            payload_fingerprint: self.payload_fingerprint.clone(),
             runner_job_id: Some(runner_job_id.to_string()),
             submitted_at: self.submitted_at.clone(),
             acceptance_deadline_at: self.acceptance_deadline_at.clone(),
@@ -395,6 +403,8 @@ impl AgentTaskLabHandoff {
             state: AgentTaskLabHandoffState::Expired,
             authority: AgentTaskLabHandoffAuthority::Controller,
             runner_id: self.runner_id.clone(),
+            submission_key: self.submission_key.clone(),
+            payload_fingerprint: self.payload_fingerprint.clone(),
             runner_job_id: None,
             submitted_at: self.submitted_at.clone(),
             acceptance_deadline_at: self.acceptance_deadline_at.clone(),
@@ -490,6 +500,8 @@ impl AgentTaskLabHandoff {
                     state: AgentTaskLabHandoffState::Accepted,
                     authority: AgentTaskLabHandoffAuthority::RunnerDaemon,
                     runner_id,
+                    submission_key: None,
+                    payload_fingerprint: None,
                     runner_job_id: Some(runner_job_id),
                     submitted_at: acceptance.get("started_at").and_then(optional_timestamp),
                     acceptance_deadline_at: acceptance
@@ -507,6 +519,8 @@ impl AgentTaskLabHandoff {
                     state: AgentTaskLabHandoffState::Expired,
                     authority: AgentTaskLabHandoffAuthority::Controller,
                     runner_id,
+                    submission_key: None,
+                    payload_fingerprint: None,
                     runner_job_id: None,
                     submitted_at: None,
                     acceptance_deadline_at: None,

@@ -85,7 +85,7 @@ pub(super) fn exec_via_reverse_broker(
             let mut metadata = runner_exec_request_metadata(run_id.as_deref(), "reverse_broker");
             if let Some(run_id) = run_id.as_deref() {
                 metadata["submission_key"] =
-                    serde_json::json!(format!("agent-task:{}:{run_id}", runner.id));
+                    serde_json::json!(format!("agent-task:v1:{}:{run_id}", runner.id));
             }
             metadata
         }),
@@ -107,6 +107,13 @@ pub(super) fn exec_via_reverse_broker(
             "schema": "homeboy/reverse-runner-command-assets/v1",
             "assets": command_assets,
         });
+    }
+    if detach_after_handoff {
+        if let Some(run_id) = run_id.as_deref() {
+            homeboy_agents::agent_task_lifecycle::record_lab_offload_submission_request(
+                run_id, &request,
+            )?;
+        }
     }
     let broker_token = homeboy_core::broker_auth::broker_submit_token_for_runner(&runner.id)?;
     let data = broker_http::post_json(
