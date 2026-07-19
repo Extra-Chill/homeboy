@@ -1310,7 +1310,7 @@ fn remote_runner_submission_key_conflicts_on_all_execution_semantic_inputs() {
         .push("/opt/required".to_string());
     variants.push(changed_paths);
     let mut changed_source = base.clone();
-    changed_source.source_snapshot = Some(SourceSnapshot::existing_remote(
+    changed_source.source_snapshot = Some(crate::source_snapshot::existing_remote(
         "homeboy-lab",
         "/srv/other-source",
         Some("/srv"),
