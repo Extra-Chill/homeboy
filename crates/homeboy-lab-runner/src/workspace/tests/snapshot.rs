@@ -214,7 +214,7 @@ fn git_backed_snapshot_reports_checkout_provenance_for_committed_harvest() {
             &synced.remote_path,
             Path::new(&synced.remote_path),
             snapshot,
-            lab,
+            lab.clone(),
         )
         .expect("committed-harvest provenance");
         super::super::provenance::verify_lab_workspace_git_root(
@@ -222,6 +222,43 @@ fn git_backed_snapshot_reports_checkout_provenance_for_committed_harvest() {
             &provenance,
         )
         .expect("committed-harvest Git root");
+
+        // Agent-task @plan staging is runner-owned execution state, not a
+        // source change. It can be staged by a runtime, so exercise the exact
+        // committed-harvest verifier with that state present.
+        let at_file =
+            Path::new(&synced.remote_path).join(".homeboy/lab-at-files/agent-task-plan.json");
+        fs::create_dir_all(at_file.parent().expect("@file parent")).expect("create @file parent");
+        fs::write(&at_file, "{}\n").expect("write staged agent-task plan");
+        std::process::Command::new("git")
+            .args([
+                "add",
+                "--force",
+                ".homeboy/lab-at-files/agent-task-plan.json",
+            ])
+            .current_dir(&synced.remote_path)
+            .status()
+            .expect("stage runner-owned plan");
+        super::super::provenance::verify_lab_workspace_git_root(
+            Path::new(&synced.remote_path),
+            &provenance,
+        )
+        .expect("runner-owned agent-task plan does not dirty the verified snapshot");
+
+        fs::write(
+            Path::new(&synced.remote_path).join("unexpected.txt"),
+            "unexpected\n",
+        )
+        .expect("write unexpected source change");
+        let error = super::super::provenance::verify_lab_workspace_git_root(
+            Path::new(&synced.remote_path),
+            &provenance,
+        )
+        .expect_err("unexpected source change remains dirty");
+        assert!(
+            error.contains("content hash") || error.contains("cleanliness does not match"),
+            "unexpected source change must remain bound to provenance: {error}"
+        );
     });
 }
 

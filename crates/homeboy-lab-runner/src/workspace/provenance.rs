@@ -228,9 +228,21 @@ fn verify_exact_snapshot_git_checkout(
     if git(workspace, &["rev-parse", "HEAD"])? != provenance.source_revision {
         return Err("snapshot-git HEAD does not match the verified source revision".to_string());
     }
+    // The staged checkout is also the runner's execution container. Its
+    // reserved bookkeeping and @file paths are excluded from the verified
+    // content hash, so they must not be reclassified as source dirt here.
+    // All non-reserved paths still have to match the captured source state.
     let dirty = !git(
         workspace,
-        &["status", "--porcelain", "--untracked-files=all"],
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ":(exclude).homeboy/runner-workspace.json",
+            ":(exclude).homeboy/lab-at-files/**",
+        ],
     )?
     .is_empty();
     if dirty != provenance.source_dirty {
