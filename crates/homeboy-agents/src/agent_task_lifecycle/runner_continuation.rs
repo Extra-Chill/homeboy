@@ -110,6 +110,41 @@ pub fn register_runner_continuation_provider(provider: Box<dyn RunnerContinuatio
     *slot = Some(provider);
 }
 
+/// Clear any registered runner-continuation provider so a fresh test starts from
+/// the no-op default. The provider slot is a process-global; without this reset a
+/// provider registered by one test would leak into every later test in the same
+/// process, making lifecycle results order-dependent (#8964).
+#[cfg(any(test, feature = "test-support"))]
+pub fn clear_runner_continuation_provider_for_test() {
+    let mut slot = provider_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *slot = None;
+}
+
+/// RAII guard that installs a runner-continuation provider for the duration of a
+/// test and restores the no-op default on drop (including on panic), so the
+/// registration cannot leak into another test.
+#[cfg(any(test, feature = "test-support"))]
+pub struct RunnerContinuationTestGuard {
+    _private: (),
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl RunnerContinuationTestGuard {
+    pub fn install(provider: Box<dyn RunnerContinuationProvider>) -> Self {
+        register_runner_continuation_provider(provider);
+        Self { _private: () }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for RunnerContinuationTestGuard {
+    fn drop(&mut self) {
+        clear_runner_continuation_provider_for_test();
+    }
+}
+
 /// Run `f` against the registered provider, falling back to the no-op provider
 /// when the runner subsystem is absent.
 pub(crate) fn with_runner_continuation<R>(

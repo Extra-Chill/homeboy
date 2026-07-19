@@ -49,6 +49,7 @@ fn submit_plan_persists_queued_status() {
 #[cfg(unix)]
 #[test]
 fn controller_runtime_retention_keeps_mutable_and_retained_terminal_runs() {
+    super::ensure_runner_continuation_provider_reset_hook();
     with_isolated_home(|_| {
         // Controller-runtime retention discovers referenced pins through the
         // agent-task pin-reference provider hook; register it so the report can
@@ -86,7 +87,13 @@ fn controller_runtime_retention_keeps_mutable_and_retained_terminal_runs() {
             recover_controller_runtime(&record.run_id, Some(artifact), None).expect("recover pin");
         }
         rewrite_record_for_test(&terminal.run_id, |record| {
-            record.state = AgentTaskRunState::Succeeded;
+            // Use `set_run_state` so the run state and its lifecycle execution
+            // projection stay consistent. A raw `record.state = Succeeded` write
+            // left `lifecycle.execution.state` unchanged, so `diagnose_run`
+            // flagged the record `ConflictingProjections` and dropped it from
+            // `list_records_with_health` — the source the retention report reads —
+            // making the terminal pin silently unreferenced (#8964).
+            set_run_state(record, AgentTaskRunState::Succeeded);
             record.lifecycle.artifact_retention.status = ArtifactRetentionStatus::Retained;
         })
         .expect("make terminal");

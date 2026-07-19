@@ -15,7 +15,20 @@ use crate::agent_task_scheduler::{
 use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
+
+/// Register the runner-continuation provider reset as a hermetic-home cache-reset
+/// hook exactly once. Every `with_isolated_home` setup then clears any provider a
+/// previous test left registered, so the process-global slot cannot leak across
+/// tests and make results order-dependent (#8964).
+pub(super) fn ensure_runner_continuation_provider_reset_hook() {
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        homeboy_core::test_support::register_test_cache_reset_hook(
+            clear_runner_continuation_provider_for_test,
+        );
+    });
+}
 
 #[cfg(unix)]
 pub(super) fn fake_controller_artifact(
@@ -92,6 +105,56 @@ impl RunnerContinuationProvider for IntentReplayProvider {
             ));
         }
         Ok(job)
+    }
+}
+
+/// A runner-continuation provider that reports a runner as connected and present
+/// without a backing job store. Detached-handoff tests use this so a freshly
+/// recorded running record reconciles against a connected runner rather than the
+/// no-op default (which reports every runner disconnected and flags the record
+/// `stale_running`), independent of any real runner subsystem (#8964).
+#[derive(Clone)]
+pub(super) struct ConnectedRunnerProvider;
+
+impl RunnerContinuationProvider for ConnectedRunnerProvider {
+    fn runner_job_log_snapshot(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+    ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
+        // No live snapshot; `reconcile_runner_job_state` treats an error from a
+        // connected runner as "no new progress" and leaves the record running.
+        Err(Error::internal_unexpected(
+            "no runner job log snapshot in test",
+        ))
+    }
+
+    fn is_runner_connected(&self, _runner_id: &str) -> bool {
+        true
+    }
+
+    fn runner_exists(&self, _runner_id: &str) -> bool {
+        true
+    }
+
+    fn run_continuation_exec(
+        &self,
+        _runner_id: &str,
+        _cwd: &str,
+        _command: &[String],
+        _run_id: &str,
+    ) -> Result<i32> {
+        Err(Error::internal_unexpected(
+            "no runner continuation exec in test",
+        ))
+    }
+
+    fn submit_reverse_broker_job(
+        &self,
+        _runner_id: &str,
+        _request: RemoteRunnerJobRequest,
+    ) -> Result<Job> {
+        Err(Error::internal_unexpected("no reverse broker job in test"))
     }
 }
 
