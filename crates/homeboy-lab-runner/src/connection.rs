@@ -182,6 +182,14 @@ fn connect_with_orphan_adoption_and_live_lease(
         ));
     };
     let version = identity.version.clone();
+    let Some(configured_build_identity) = identity.build_identity.clone() else {
+        return Ok(failed_connect(
+            runner_id,
+            session_path,
+            RunnerFailureKind::MissingRemoteHomeboy,
+            unverifiable_configured_identity_message(homeboy),
+        ));
+    };
     // A malformed local record is not ownership evidence. It remains fail
     // closed unless an operator supplies an exact live-lease expectation.
     let previous_session = match read_session_or_live_peer(runner_id) {
@@ -278,7 +286,7 @@ fn connect_with_orphan_adoption_and_live_lease(
                     runner_id,
                     session_path,
                     RunnerFailureKind::DaemonStartupFailure,
-                    format!("remote Homeboy {}: {message}", identity.display),
+                    format!("remote Homeboy {configured_build_identity}: {message}"),
                 ));
             }
         };
@@ -308,7 +316,7 @@ fn connect_with_orphan_adoption_and_live_lease(
         let recovery = decode_leaseless_recovery(envelope.data)?;
         recovery_evidence = Some(leaseless_recovery_evidence(
             contract,
-            &identity.display,
+            &configured_build_identity,
             recovery.clone(),
         ));
         leaseless_recovery = Some(recovery);
@@ -330,7 +338,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             remote_daemon_pid: Some(replacement.pid),
             remote_daemon_lease_id: Some(replacement.lease_id.clone()),
             homeboy_version: version.clone(),
-            homeboy_build_identity: Some(identity.display.clone()),
+            homeboy_build_identity: Some(configured_build_identity.clone()),
             connected_at: Utc::now().to_rfc3339(),
             worker_identity: None,
             worker_pid: None,
@@ -344,7 +352,7 @@ fn connect_with_orphan_adoption_and_live_lease(
         homeboy,
         runner_id,
         previous_session.as_ref(),
-        &identity.display,
+        &configured_build_identity,
         orphan_lease_id,
         confirmed_no_pid_job_ids,
         live_lease_expectation,
@@ -366,7 +374,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     let expected_identity = daemon
         .build_identity
         .clone()
-        .unwrap_or(identity.display.clone());
+        .unwrap_or(configured_build_identity.clone());
     let (local_port, tunnel_pid, local_url, daemon) = match connect_remote_daemon(
         &server,
         &client,
@@ -391,7 +399,7 @@ fn connect_with_orphan_adoption_and_live_lease(
         homeboy,
         live_lease_expectation,
         &daemon,
-        &identity.display,
+        &configured_build_identity,
     ) {
         return Ok(session_write_failure_report(
             runner_id,
@@ -419,8 +427,8 @@ fn connect_with_orphan_adoption_and_live_lease(
         tunnel_pid,
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id,
-        homeboy_version: version,
-        homeboy_build_identity: Some(identity.display),
+        homeboy_version: expected_version,
+        homeboy_build_identity: Some(expected_identity),
         connected_at: Utc::now().to_rfc3339(),
         worker_identity: None,
         worker_pid: None,
@@ -981,6 +989,22 @@ pub(crate) fn status_for_admission(runner_id: &str) -> Result<RunnerStatusReport
             None,
         ))
     })
+}
+
+/// Resolve the immutable identity of the executable that will start runner-side
+/// Homeboy jobs. Lab admission uses this instead of the controller build when
+/// validating a direct SSH daemon.
+pub(crate) fn configured_runner_homeboy_build_identity(
+    runner: &Runner,
+    homeboy: &str,
+) -> Result<Option<String>> {
+    let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
+        return Ok(None);
+    };
+
+    Ok(remote_homeboy_identity(&client, homeboy)
+        .ok()
+        .and_then(|identity| identity.build_identity))
 }
 
 fn status_for_admission_with<Status, Reconnect>(
@@ -1696,10 +1720,11 @@ fn stale_daemon_warning(
     let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
         return Ok(None);
     };
-    let current_identity = match remote_homeboy_identity(&client, homeboy) {
-        Ok(identity) => identity,
-        Err(_) => return Ok(None),
-    };
+    let current_identity =
+        remote_homeboy_identity(&client, homeboy).unwrap_or_else(|_| RemoteHomeboyIdentity {
+            version: session.homeboy_version.clone(),
+            build_identity: None,
+        });
     let current_version = current_identity.version.clone();
     let observed_session_version = session
         .local_url
@@ -1712,6 +1737,10 @@ fn stale_daemon_warning(
         .and_then(|local_url| daemon_http_identity(local_url).ok())
         .filter(|identity| !identity.trim().is_empty());
     let session_identity = daemon_identity.or_else(|| session.homeboy_build_identity.clone());
+    let identity_comparison = compare_identities(
+        session_identity.as_deref(),
+        current_identity.build_identity.as_deref(),
+    );
     let stale_runtime_paths = session
         .local_url
         .as_deref()
@@ -1725,7 +1754,7 @@ fn stale_daemon_warning(
         .unwrap_or_default();
     if versions_match(&observed_session_version, &current_version)
         && versions_match(&session.homeboy_version, &current_version)
-        && identities_match(session_identity.as_deref(), Some(&current_identity.display))
+        && identity_comparison == IdentityComparison::Match
         && stale_runtime_paths.is_empty()
         && changed_runtime_paths.is_empty()
     {
@@ -1737,10 +1766,22 @@ fn stale_daemon_warning(
             observed_session_version,
             current_version,
             session_identity,
-            Some(current_identity.display),
+            current_identity.build_identity,
+        )
+        .with_identity_unverifiable(
+            &runner.id,
+            homeboy,
+            identity_comparison == IdentityComparison::Unverifiable,
         )
         .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths),
     ))
+}
+
+fn unverifiable_configured_identity_message(homeboy: &str) -> String {
+    format!(
+        "configured runner executable `{homeboy}` did not report an immutable build identity; run `{} self identity` on the runner and ensure it reports `git_commit` or an exact `display`, then retry. If the binary is stale, run `homeboy runner refresh-homeboy <runner-id> --reconnect`",
+        shell::quote_arg(homeboy),
+    )
 }
 
 fn stale_reattach_warning_for_report(

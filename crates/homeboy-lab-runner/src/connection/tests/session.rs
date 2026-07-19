@@ -331,7 +331,67 @@ fn parses_self_identity_json_envelope() {
     .expect("identity");
 
     assert_eq!(identity.version, "0.228.13");
-    assert_eq!(identity.display, "homeboy 0.228.13+19a41cd5102d");
+    assert_eq!(
+        identity.build_identity.as_deref(),
+        Some("homeboy 0.228.13+19a41cd5102d")
+    );
+}
+
+#[test]
+fn resolves_immutable_identity_from_commit_when_display_is_release_only() {
+    let identity = parse_self_identity_output(
+        r#"{"success":true,"data":{"version":"0.294.0","git_commit":"19a41cd5102d","git_dirty":false,"display":"homeboy 0.294.0"}}"#,
+    )
+    .expect("identity");
+
+    assert_eq!(
+        identity.build_identity.as_deref(),
+        Some("homeboy 0.294.0+19a41cd5102d")
+    );
+}
+
+#[test]
+fn identity_comparison_distinguishes_match_unverifiable_and_mismatch() {
+    let exact = Some("homeboy 0.294.0+19a41cd5102d");
+    assert_eq!(compare_identities(exact, exact), IdentityComparison::Match);
+    assert_eq!(
+        compare_identities(exact, None),
+        IdentityComparison::Unverifiable
+    );
+    assert_eq!(
+        compare_identities(exact, Some("homeboy 0.294.0+different")),
+        IdentityComparison::Mismatch
+    );
+}
+
+#[test]
+fn release_only_self_identity_remains_unverifiable() {
+    let identity = parse_self_identity_output(
+        r#"{"success":true,"data":{"version":"0.294.0","display":"homeboy 0.294.0"}}"#,
+    )
+    .expect("version remains available");
+
+    assert_eq!(identity.build_identity, None);
+}
+
+#[test]
+fn unverifiable_identity_warning_is_actionable_without_claiming_a_mismatch() {
+    let warning = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.294.0".to_string(),
+        "0.294.0".to_string(),
+        Some("homeboy 0.294.0+19a41cd5102d".to_string()),
+        None,
+    )
+    .with_identity_unverifiable("homeboy-lab", "/opt/homeboy", true);
+
+    assert!(warning.message.contains("could not be verified"));
+    assert!(!warning.message.contains("different Homeboy build"));
+    assert!(warning.message.contains("/opt/homeboy self identity"));
+    assert_eq!(
+        warning.recovery_commands,
+        ["homeboy runner refresh-homeboy homeboy-lab --reconnect"]
+    );
 }
 
 #[test]

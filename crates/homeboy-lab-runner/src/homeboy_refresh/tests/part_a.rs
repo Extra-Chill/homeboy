@@ -1,7 +1,9 @@
 #![cfg(test)]
 
 use super::*;
-use crate::{RunnerActiveJobState, RunnerSessionState, RunnerStatusReport};
+use crate::{
+    RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
+};
 use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::test_support;
 
@@ -150,6 +152,30 @@ fn refreshed_daemon_verification_accepts_the_post_start_health_window() {
     )
     .expect("the persisted connected session identifies the requested daemon commit");
     assert_eq!(retries, 1, "the initial tunnel health race is retried once");
+}
+
+#[test]
+fn refreshed_daemon_verification_converges_after_exact_identity_refresh() {
+    let mut stale = refreshed_daemon_status(true, Some("homeboy 0.294.0+oldcommit"));
+    stale.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+        "lab",
+        "0.294.0".to_string(),
+        "0.294.0".to_string(),
+        Some("homeboy 0.294.0+oldcommit".to_string()),
+        Some("homeboy 0.294.0+19a41cd5102d".to_string()),
+    ));
+    let converged = refreshed_daemon_status(true, Some("homeboy 0.294.0+19a41cd5102d"));
+    let mut statuses = [stale, converged].into_iter();
+    let mut retries = 0;
+
+    verify_refreshed_daemon_identity_with(
+        "lab",
+        "19a41cd5102d",
+        || Ok(statuses.next().expect("refresh convergence status")),
+        || retries += 1,
+    )
+    .expect("refresh converges once daemon and configured executable identities match");
+    assert_eq!(retries, 1);
 }
 
 #[test]

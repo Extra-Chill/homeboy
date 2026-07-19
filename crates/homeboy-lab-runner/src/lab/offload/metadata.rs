@@ -366,6 +366,37 @@ pub(crate) fn lab_runner_homeboy_has_blocking_drift(
     status: &RunnerStatusReport,
     require_exact: bool,
 ) -> bool {
+    lab_runner_homeboy_has_blocking_drift_against_configured_identity(status, None, require_exact)
+}
+
+/// Direct SSH runners execute jobs with their configured executable rather
+/// than the controller binary. When that executable's immutable identity is
+/// available, it is the authoritative admission comparison for the active
+/// daemon. An unavailable identity fails closed.
+pub(crate) fn lab_runner_homeboy_has_blocking_drift_against_configured_identity(
+    status: &RunnerStatusReport,
+    configured_build_identity: Option<&str>,
+    require_exact: bool,
+) -> bool {
+    if status
+        .session
+        .as_ref()
+        .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
+    {
+        let Some(configured_build_identity) = configured_build_identity else {
+            return true;
+        };
+        let Some(active_daemon_identity) = status
+            .session
+            .as_ref()
+            .and_then(|session| session.homeboy_build_identity.as_deref())
+        else {
+            return true;
+        };
+        return canonical_build_identity(active_daemon_identity)
+            != canonical_build_identity(configured_build_identity);
+    }
+
     // Build-identity drift within the runner (active daemon control plane vs the
     // configured job command binary) is an internal-inconsistency signal that is
     // always blocking regardless of the controller↔runner version policy.
