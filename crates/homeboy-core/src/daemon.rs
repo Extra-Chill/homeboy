@@ -1986,13 +1986,7 @@ fn enqueue_exec_job(
     );
     if let Some(durable_run_id) = canonical_durable_run_id {
         lifecycle
-            .get_or_insert_with(|| RunnerJobLifecycleMetadata {
-                source: None,
-                kind: None,
-                durable_run_id: None,
-                active_child_count: None,
-                active_cell_count: None,
-            })
+            .get_or_insert_with(RunnerJobLifecycleMetadata::default)
             .durable_run_id = Some(durable_run_id);
     }
     let summary = json!({
