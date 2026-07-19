@@ -641,6 +641,91 @@ fn active_runner_job_for_durable_run_id_finds_the_enqueued_job_for_idempotent_re
 }
 
 #[test]
+fn capacity_queued_local_runner_enqueue_dedupes_on_durable_run_id() {
+    // Two enqueues carrying the same controller-minted durable_run_id must
+    // resolve to a single job — the atomic (in-lock) idempotency guard closes
+    // the enqueue-time race two near-simultaneous first submissions would
+    // otherwise create. The second enqueue reuses the first job and does not
+    // spawn a second worker.
+    let store = JobStore::default();
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let local_runner = |run_id: &str| super::store::LocalRunnerJob {
+        runner_id: "homeboy-lab".to_string(),
+        command: vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+        ],
+        cwd: Some("/runner/worktree".to_string()),
+        lifecycle: Some(RunnerJobLifecycleMetadata {
+            source: Some("runner-daemon".to_string()),
+            kind: Some("agent-task-run-plan".to_string()),
+            durable_run_id: Some(run_id.to_string()),
+            active_child_count: None,
+            active_cell_count: None,
+        }),
+    };
+
+    let first = store
+        .run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
+            "runner.exec",
+            None,
+            None,
+            None,
+            local_runner("dup-run"),
+            usize::MAX,
+            {
+                let wait = wait;
+                move |_job| {
+                    let _ = wait.recv();
+                    Ok(serde_json::json!({}))
+                }
+            },
+        );
+
+    // Resubmit the same durable run id while the first job is still active.
+    let second = store
+        .run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
+            "runner.exec",
+            None,
+            None,
+            None,
+            local_runner("dup-run"),
+            usize::MAX,
+            move |_job| Ok(serde_json::json!({})),
+        );
+
+    assert_eq!(
+        second.job_id, first.job_id,
+        "resubmission with the same durable run id must reuse the first job"
+    );
+    assert_eq!(
+        store.list().len(),
+        1,
+        "only one job may exist for a durable run id"
+    );
+    // The reused-enqueue handle completes immediately (no second worker).
+    second.handle.join().expect("reused enqueue handle joins");
+
+    release.send(()).expect("release first runner job");
+    first.handle.join().expect("first runner job exits");
+
+    // A different durable run id enqueues a distinct job.
+    let other = store
+        .run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
+            "runner.exec",
+            None,
+            None,
+            None,
+            local_runner("other-run"),
+            usize::MAX,
+            move |_job| Ok(serde_json::json!({})),
+        );
+    assert_ne!(other.job_id, first.job_id);
+    other.handle.join().expect("other runner job exits");
+}
+
+#[test]
 fn active_runner_job_for_durable_run_id_excludes_terminal_jobs() {
     // A terminal job for a durable_run_id must NOT be returned as an idempotent
     // match: the finished run is done, so a resubmission is a genuinely new
