@@ -39,6 +39,33 @@ pub struct AgentTaskOutcome {
     pub metadata: Value,
 }
 
+impl Default for AgentTaskOutcome {
+    /// A defaulted outcome carries the current schema, an empty `task_id`, and
+    /// `Failed` status, with every optional/collection field empty. `Failed` is
+    /// the deliberate status default: a not-yet-populated outcome must never
+    /// read as `Succeeded`. Construct with `..Default::default()` and override
+    /// `task_id`/`status` (and whatever else is meaningful) to drop the ~10
+    /// lines of `None`/`Vec::new()`/`Value::Null` boilerplate every call site
+    /// otherwise repeats.
+    fn default() -> Self {
+        Self {
+            schema: outcome_schema(),
+            task_id: String::new(),
+            status: AgentTaskOutcomeStatus::Failed,
+            summary: None,
+            failure_classification: None,
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
+}
+
 #[cfg(test)]
 impl AgentTaskOutcome {
     pub(crate) fn redacted(&self) -> Self {
@@ -178,5 +205,43 @@ impl AgentTaskWorkflowStepSuggestion {
         self.body = self.body.map(|value| policy.redact_string(&value));
         self.uri = self.uri.map(|value| policy.redact_url(&value));
         self
+    }
+}
+
+#[cfg(test)]
+mod default_construction_tests {
+    use super::*;
+
+    #[test]
+    fn default_matches_the_fully_spelled_out_empty_outcome() {
+        let via_default = AgentTaskOutcome {
+            task_id: "cook".to_string(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            ..Default::default()
+        };
+        let verbose = AgentTaskOutcome {
+            schema: outcome_schema(),
+            task_id: "cook".to_string(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: None,
+            failure_classification: None,
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        };
+        assert_eq!(via_default, verbose);
+    }
+
+    #[test]
+    fn default_status_is_failed_never_succeeded() {
+        assert_eq!(
+            AgentTaskOutcome::default().status,
+            AgentTaskOutcomeStatus::Failed
+        );
     }
 }

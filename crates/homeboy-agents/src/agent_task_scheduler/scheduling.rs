@@ -32,23 +32,16 @@ pub(crate) struct AgentTaskScheduleSupport;
 
 fn deferred_timeout_outcome(task_id: &str, timeout_ms: u64, source: &str) -> AgentTaskOutcome {
     AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: task_id.to_string(),
         status: AgentTaskOutcomeStatus::Timeout,
         summary: Some(format!("provider exceeded timeout_ms={timeout_ms}")),
         failure_classification: Some(AgentTaskFailureClassification::Timeout),
-        artifacts: Vec::new(),
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
         diagnostics: vec![AgentTaskDiagnostic {
             class: source.to_string(),
             message: format!("provider exceeded timeout_ms={timeout_ms}"),
             data: serde_json::json!({ "timeout_ms": timeout_ms }),
         }],
-        outputs: Value::Null,
-        workflow: None,
-        follow_up: None,
-        metadata: Value::Null,
+        ..Default::default()
     }
 }
 
@@ -353,13 +346,10 @@ impl AgentTaskScheduleSupport {
         summary: String,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id.clone(),
             status: AgentTaskOutcomeStatus::Failed,
             summary: Some(summary.clone()),
             failure_classification: Some(AgentTaskFailureClassification::InvalidInput),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "scheduler".to_string(),
                 uri: "homeboy://agent-task/output-dependency-skipped".to_string(),
@@ -370,10 +360,8 @@ impl AgentTaskScheduleSupport {
                 message: summary,
                 data: Value::Null,
             }],
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
             metadata: serde_json::json!({ "skipped": true, "skip_reason": "output_dependency_missing" }),
+            ..Default::default()
         }
     }
 
@@ -1032,23 +1020,15 @@ impl AgentTaskScheduleSupport {
 
     pub(super) fn cancelled_outcome(task_id: String, summary: String) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id,
             status: AgentTaskOutcomeStatus::Cancelled,
             summary: Some(summary),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "scheduler".to_string(),
                 uri: "homeboy://agent-task/cancelled".to_string(),
                 label: Some("scheduler cancellation".to_string()),
             }],
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 
@@ -1123,13 +1103,10 @@ impl AgentTaskScheduleSupport {
 
     pub(super) fn blocked_outcome(task_id: String, summary: String) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id,
             status: AgentTaskOutcomeStatus::Failed,
             summary: Some(summary.clone()),
             failure_classification: Some(AgentTaskFailureClassification::PolicyDenied),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "scheduler".to_string(),
                 uri: "homeboy://agent-task/backpressure".to_string(),
@@ -1140,10 +1117,7 @@ impl AgentTaskScheduleSupport {
                 message: summary,
                 data: Value::Null,
             }],
-            outputs: Value::Null,
-            follow_up: None,
-            metadata: Value::Null,
-            workflow: None,
+            ..Default::default()
         }
     }
 
