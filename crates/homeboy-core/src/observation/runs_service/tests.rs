@@ -396,14 +396,10 @@ fn labeled_run(id: &str, command: &str, metadata: Value) -> RunRecord {
         kind: "bench.matrix".into(),
         component_id: Some("homeboy".into()),
         started_at: "2026-06-26T00:00:00Z".into(),
-        finished_at: None,
         status: "fail".into(),
         command: Some(command.into()),
-        cwd: None,
-        homeboy_version: None,
-        git_sha: None,
-        rig_id: None,
         metadata_json: metadata,
+        ..Default::default()
     }
 }
 
@@ -614,12 +610,9 @@ fn lab_labeled_run(id: &str, kind: &str, label: &str, job_id: &str) -> RunRecord
         kind: kind.to_string(),
         component_id: Some("homeboy".to_string()),
         started_at: "2026-07-18T00:00:00Z".to_string(),
-        finished_at: None,
         status: "running".to_string(),
         command: Some(format!("homeboy {kind} --run-id {label}")),
         cwd: Some("/tmp/homeboy-fixture".to_string()),
-        homeboy_version: None,
-        git_sha: None,
         rig_id: Some("studio".to_string()),
         metadata_json: serde_json::json!({
             "requested_run_id": label,
@@ -628,6 +621,7 @@ fn lab_labeled_run(id: &str, kind: &str, label: &str, job_id: &str) -> RunRecord
                 "remote_job": { "id": job_id }
             }
         }),
+        ..Default::default()
     }
 }
 

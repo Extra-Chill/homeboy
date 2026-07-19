@@ -262,16 +262,9 @@ mod tests {
         RunRecord {
             id: id.to_string(),
             kind: "agent-task".to_string(),
-            component_id: None,
             started_at: "2026-07-16T00:00:00Z".to_string(),
-            finished_at: None,
             status: "running".to_string(),
-            command: None,
-            cwd: None,
-            homeboy_version: None,
-            git_sha: None,
-            rig_id: None,
-            metadata_json: Value::Null,
+            ..Default::default()
         }
     }
 
