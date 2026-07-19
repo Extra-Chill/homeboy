@@ -1311,3 +1311,37 @@ fn logs_include_normalized_event_envelopes() {
         assert_eq!(log.normalized_events[1].artifact_refs.len(), 1);
     });
 }
+
+#[test]
+fn set_run_state_stamps_finished_at_for_candidate_recoverable_terminal_runs() {
+    // A run that finished with a recoverable candidate is terminal, so
+    // set_run_state must stamp finished_at for it exactly as it does for the
+    // other terminal states. Regression guard for the drift where the setter's
+    // hand-listed terminal subset omitted CandidateRecoverable, leaving these
+    // runs without a finished_at while the legacy-record migration path stamped
+    // one.
+    with_isolated_home(|_| {
+        let record =
+            submit_plan(&test_plan(), Some("candidate-recoverable-finished-at")).expect("submit");
+        rewrite_record_for_test(&record.run_id, |record| {
+            set_run_state(record, AgentTaskRunState::CandidateRecoverable);
+            assert_eq!(record.state, AgentTaskRunState::CandidateRecoverable);
+            assert!(
+                record.lifecycle.execution.finished_at.is_some(),
+                "a terminal CandidateRecoverable run must stamp finished_at"
+            );
+        })
+        .expect("rewrite record");
+
+        // And a non-terminal state must NOT stamp finished_at.
+        rewrite_record_for_test(&record.run_id, |record| {
+            record.lifecycle.execution.finished_at = None;
+            set_run_state(record, AgentTaskRunState::Running);
+            assert!(
+                record.lifecycle.execution.finished_at.is_none(),
+                "a non-terminal Running run must not stamp finished_at"
+            );
+        })
+        .expect("rewrite record running");
+    });
+}
