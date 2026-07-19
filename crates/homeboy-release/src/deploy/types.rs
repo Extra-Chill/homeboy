@@ -8,6 +8,7 @@ use homeboy_core::artifact_inputs::ResolvedArtifactInput;
 use homeboy_core::component::Component;
 use homeboy_core::config;
 use homeboy_core::error::Result;
+use homeboy_core::git::output_optional;
 use homeboy_core::is_zero_u32;
 use homeboy_core::paths as base_path;
 use homeboy_core::phase_timing::PhaseTimingReport;
@@ -581,20 +582,20 @@ impl ComponentDeployResult {
     pub(super) fn with_source_identity(mut self, component: &Component, head_deploy: bool) -> Self {
         let path = Path::new(&component.local_path);
         self.local_path = Some(component.local_path.clone());
-        self.git_branch = git_output(path, &["branch", "--show-current"]);
-        self.git_head = git_output(path, &["rev-parse", "HEAD"]);
-        self.upstream_branch = git_output(path, &["rev-parse", "--abbrev-ref", "@{upstream}"])
+        self.git_branch = output_optional(path, &["branch", "--show-current"]);
+        self.git_head = output_optional(path, &["rev-parse", "HEAD"]);
+        self.upstream_branch = output_optional(path, &["rev-parse", "--abbrev-ref", "@{upstream}"])
             .or_else(|| homeboy_core::git::default_remote_branch(path));
         self.upstream_head = self
             .upstream_branch
             .as_deref()
-            .and_then(|upstream| git_output(path, &["rev-parse", upstream]));
+            .and_then(|upstream| output_optional(path, &["rev-parse", upstream]));
         self.is_worktree = detect_linked_worktree(path);
         self.behind_upstream = self
             .upstream_branch
             .as_deref()
             .and_then(|upstream| {
-                git_output(
+                output_optional(
                     path,
                     &[
                         "rev-list",
@@ -632,24 +633,9 @@ impl ComponentDeployResult {
     }
 }
 
-fn git_output(path: &Path, args: &[&str]) -> Option<String> {
-    std::process::Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| {
-            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            (!value.is_empty()).then_some(value)
-        })
-}
-
 fn detect_linked_worktree(path: &Path) -> Option<bool> {
-    let git_dir = git_output(path, &["rev-parse", "--path-format=absolute", "--git-dir"])?;
-    let common_dir = git_output(
+    let git_dir = output_optional(path, &["rev-parse", "--path-format=absolute", "--git-dir"])?;
+    let common_dir = output_optional(
         path,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;

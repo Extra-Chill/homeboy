@@ -1,6 +1,6 @@
 use crate::component::Component;
 use crate::engine::shell::quote_path;
-use crate::git::{run_git, run_git_output};
+use crate::git::{output_optional, run_git_output};
 use crate::transient_workspace_policy::TransientWorkspacePolicy;
 use std::path::{Path, PathBuf};
 
@@ -75,15 +75,15 @@ pub(super) fn local_path_diagnostic_for(
             .map(|path| path.to_string_lossy().to_string()),
         branch: git_root_path
             .as_ref()
-            .and_then(|path| git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"])),
+            .and_then(|path| output_optional(path, &["rev-parse", "--abbrev-ref", "HEAD"])),
         head: git_root_path
             .as_ref()
-            .and_then(|path| git_output(path, &["rev-parse", "--short", "HEAD"])),
+            .and_then(|path| output_optional(path, &["rev-parse", "--short", "HEAD"])),
         remote_url: git_root_path
             .as_ref()
-            .and_then(|path| git_output(path, &["config", "--get", "remote.origin.url"])),
+            .and_then(|path| output_optional(path, &["config", "--get", "remote.origin.url"])),
         upstream: git_root_path.as_ref().and_then(|path| {
-            git_output(
+            output_optional(
                 path,
                 &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
             )
@@ -127,15 +127,6 @@ pub(super) fn detect_git_root(path: &Path) -> Option<PathBuf> {
         None
     } else {
         Some(PathBuf::from(raw))
-    }
-}
-
-fn git_output(path: &Path, args: &[&str]) -> Option<String> {
-    let value = run_git(path, args, "git metadata").ok()?.trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
     }
 }
 
