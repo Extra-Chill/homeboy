@@ -424,12 +424,44 @@ impl JobStore {
         path_materialization_plan: Option<PathMaterializationPlan>,
         local_runner: Option<LocalRunnerJob>,
     ) -> Job {
+        self.create_or_reuse_active_local_runner_job(
+            operation,
+            source_snapshot,
+            metadata,
+            path_materialization_plan,
+            local_runner,
+        )
+        .0
+    }
+
+    /// Insert a new queued local-runner job, or reuse the existing non-terminal
+    /// job for the same controller-minted `durable_run_id`.
+    ///
+    /// The dedup lookup and the insert happen under one lock, so two
+    /// near-simultaneous first submissions of the same durable run id cannot
+    /// both create a job — the enqueue-time race the daemon's transport-layer
+    /// idempotency check cannot close. Returns `(job, created)`; `created` is
+    /// `false` when an existing active job was reused, letting the caller skip
+    /// spawning a duplicate worker for it.
+    fn create_or_reuse_active_local_runner_job(
+        &self,
+        operation: impl Into<String>,
+        source_snapshot: Option<SourceSnapshot>,
+        metadata: Option<Value>,
+        path_materialization_plan: Option<PathMaterializationPlan>,
+        local_runner: Option<LocalRunnerJob>,
+    ) -> (Job, bool) {
         let now = timestamp_ms();
         let runner_job_projection = metadata
             .as_ref()
             .and_then(|metadata| metadata.get("runner_job_projection"))
             .cloned()
             .and_then(|projection| serde_json::from_value::<RunnerJobProjection>(projection).ok());
+        let durable_run_id = local_runner
+            .as_ref()
+            .and_then(|local| local.lifecycle.as_ref())
+            .and_then(|lifecycle| lifecycle.durable_run_id.clone())
+            .filter(|run_id| !run_id.trim().is_empty());
         let job = Job {
             id: Uuid::new_v4(),
             operation: operation.into(),
@@ -454,6 +486,22 @@ impl JobStore {
         };
 
         let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        if let Some(durable_run_id) = durable_run_id.as_deref() {
+            if let Some(existing) = inner
+                .jobs
+                .values()
+                .filter(|stored| {
+                    matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                })
+                .filter(|stored| {
+                    stored_job_durable_run_id(stored).as_deref() == Some(durable_run_id)
+                })
+                .min_by_key(|stored| (stored.job.created_at_ms, stored.job.id))
+                .map(|stored| stored.job.clone())
+            {
+                return (existing, false);
+            }
+        }
         inner.jobs.insert(
             job.id,
             StoredJob {
@@ -472,8 +520,11 @@ impl JobStore {
             self.append_status_event(job.id, JobStatus::Queued, "job queued")
         }
         .expect("newly-created job must accept queued status event");
-        self.get(job.id)
-            .expect("newly-created job must be readable after insert")
+        (
+            self.get(job.id)
+                .expect("newly-created job must be readable after insert"),
+            true,
+        )
     }
 
     pub fn get(&self, job_id: Uuid) -> Result<Job> {
@@ -1747,7 +1798,7 @@ impl JobStore {
         T: Serialize + Send + 'static,
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
     {
-        let job = self.create_with_source_snapshot_metadata_path_materialization_and_local_runner(
+        let (job, created) = self.create_or_reuse_active_local_runner_job(
             operation,
             source_snapshot,
             metadata,
@@ -1755,6 +1806,14 @@ impl JobStore {
             Some(local_runner.clone()),
         );
         let job_id = job.id;
+        // An idempotent resubmission reused an already-enqueued job that already
+        // has its own worker. Do not spawn a second worker for it — return a
+        // handle to a thread that completes immediately so the caller's
+        // `JobRunner` contract is preserved.
+        if !created {
+            let handle = thread::spawn(|| {});
+            return JobRunner { job_id, handle };
+        }
         let handle_store = self.clone();
         let worker_store = self.clone();
         let handle = thread::spawn(move || {
