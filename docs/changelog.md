@@ -4,6 +4,24 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.294.1] - 2026-07-19
+
+### Changed
+- replace two duplicate git_output helpers with core::git::output_optional
+- derive Default for RunnerJobLifecycleMetadata and collapse redundant field constructions
+- centralize run terminality on AgentTaskRunState::is_terminal()
+- Authenticate failed pre-provider candidate recovery
+- centralize the untyped stale-running metadata keys behind constants and accessors
+
+### Fixed
+- keep a runner-owned retry portable instead of failing the Lab handoff
+- stamp finished_at for CandidateRecoverable terminal runs in set_run_state
+- isolate Lab snapshot metadata failures
+- harden the run-state projection invariant and stop tests from forging divergent records
+- publish authenticated external adoptions
+- Fix aligned Lab cook readiness
+- prefer controller attempt plan in Lab handoff
+
 ## [0.294.0] - 2026-07-19
 
 ### Added
