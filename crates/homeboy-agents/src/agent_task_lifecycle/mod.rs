@@ -50,6 +50,10 @@ pub use homeboy_core::controller_runtime::ControllerRuntimePruneResult;
 pub use lifecycle_ops::*;
 pub use lifecycle_record_ops::cook_attempt_run_id;
 pub use records::*;
+#[cfg(any(test, feature = "test-support"))]
+pub use runner_continuation::{
+    clear_runner_continuation_provider_for_test, RunnerContinuationTestGuard,
+};
 pub use runner_continuation::{register_runner_continuation_provider, RunnerContinuationProvider};
 
 pub(crate) use conversion::*;

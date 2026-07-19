@@ -95,7 +95,13 @@ fn execution_budget_future_version_fails_closed_without_rewrite() {
 
 #[test]
 fn detached_lab_handoff_persists_inspectable_running_record() {
+    super::ensure_runner_continuation_provider_reset_hook();
     with_isolated_home(|_| {
+        // A detached running record reconciles against runner connectivity. Install
+        // a connected runner so the record is not flagged `runner_disconnected`
+        // stale by the no-op default (#8964). The guard restores the default on drop.
+        let _runner =
+            RunnerContinuationTestGuard::install(Box::new(super::ConnectedRunnerProvider));
         for (run_id, handoff) in [
             ("agent-task-detached-cook", "cook"),
             ("agent-task-detached-batch", "cook-batch"),
@@ -142,11 +148,14 @@ fn detached_lab_handoff_persists_inspectable_running_record() {
 
 #[test]
 fn detached_cook_intent_reconciliation_converges_both_crash_windows_without_secret_leakage() {
+    super::ensure_runner_continuation_provider_reset_hook();
     with_isolated_home(|_| {
         let store = JobStore::default();
         let submitted = Arc::new(Mutex::new(Vec::new()));
         let fail_after_accept_once = Arc::new(Mutex::new(false));
-        register_runner_continuation_provider(Box::new(IntentReplayProvider {
+        // Scope the provider to this test so it cannot leak into later tests and
+        // make lifecycle results order-dependent (#8964).
+        let _runner = RunnerContinuationTestGuard::install(Box::new(IntentReplayProvider {
             store: store.clone(),
             submitted: Arc::clone(&submitted),
             fail_after_accept_once: Arc::clone(&fail_after_accept_once),
