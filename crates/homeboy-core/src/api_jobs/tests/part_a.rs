@@ -595,6 +595,86 @@ fn local_runner_jobs_retain_durable_identity_in_active_projection() {
 }
 
 #[test]
+fn active_runner_job_for_durable_run_id_finds_the_enqueued_job_for_idempotent_resubmission() {
+    let store = JobStore::default();
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let runner = store
+        .run_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
+            "runner.exec",
+            None,
+            None,
+            None,
+            Some(super::store::LocalRunnerJob {
+                runner_id: "homeboy-lab".to_string(),
+                command: vec!["homeboy".to_string(), "agent-task".to_string(), "run-plan".to_string()],
+                cwd: Some("/runner/worktree".to_string()),
+                lifecycle: Some(RunnerJobLifecycleMetadata {
+                    source: Some("runner-daemon".to_string()),
+                    kind: Some("agent-task-run-plan".to_string()),
+                    durable_run_id: Some("agent-task-durable-run".to_string()),
+                    active_child_count: None,
+                    active_cell_count: None,
+                }),
+            }),
+            move |_job| {
+                let _ = wait.recv();
+                Ok(serde_json::json!({}))
+            },
+        );
+
+    // A resubmission carrying the same controller-minted durable_run_id resolves
+    // to the already-enqueued job, so the daemon can return it instead of
+    // spawning a duplicate.
+    let existing = store
+        .active_runner_job_for_durable_run_id("agent-task-durable-run")
+        .expect("active job for the durable run id");
+    assert_eq!(existing.id.to_string(), runner.job_id.to_string());
+
+    // A different (or empty) run id must not collide with this job.
+    assert!(store
+        .active_runner_job_for_durable_run_id("some-other-run")
+        .is_none());
+    assert!(store.active_runner_job_for_durable_run_id("").is_none());
+
+    release.send(()).expect("release runner job");
+    runner.handle.join().expect("runner job exits");
+}
+
+#[test]
+fn active_runner_job_for_durable_run_id_excludes_terminal_jobs() {
+    // A terminal job for a durable_run_id must NOT be returned as an idempotent
+    // match: the finished run is done, so a resubmission is a genuinely new
+    // attempt that must enqueue a fresh job.
+    let store = JobStore::default();
+    let mut request = super::remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.lifecycle = Some(RunnerJobLifecycleMetadata {
+        source: Some("runner-daemon".to_string()),
+        kind: Some("agent-task-run-plan".to_string()),
+        durable_run_id: Some("terminal-durable-run".to_string()),
+        active_child_count: None,
+        active_cell_count: None,
+    });
+    let job = store
+        .submit_remote_runner_job(request)
+        .expect("submit remote runner job");
+
+    // While queued, the resubmission dedupes to this job.
+    assert_eq!(
+        store
+            .active_runner_job_for_durable_run_id("terminal-durable-run")
+            .expect("queued job matches")
+            .id,
+        job.id
+    );
+
+    // Once terminal, the same run id no longer matches.
+    store.fail(job.id, "runner exec failed").expect("job fails");
+    assert!(store
+        .active_runner_job_for_durable_run_id("terminal-durable-run")
+        .is_none());
+}
+
+#[test]
 fn test_start() {
     let store = JobStore::default();
     let job = store.create("audit");
