@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.296.0] - 2026-07-19
+
+### Added
+- add ergonomic invalid_argument constructors and migrate homeboy-fuzz
+
+### Changed
+- add AgentTaskOutcome::default() and drop construction boilerplate
+
+### Fixed
+- repair latent homeboy-cli surface tests broken by crate extraction
+- retain mirrored fuzz artifact bytes
+- project bench environment into rig workloads
+- reconcile imported agent task artifacts idempotently
+
 ## [0.295.0] - 2026-07-19
 
 ### Added
