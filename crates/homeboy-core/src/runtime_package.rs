@@ -5,6 +5,7 @@ use crate::config;
 use crate::engine::identifier;
 use crate::engine::local_files;
 use crate::error::{Error, Result};
+use crate::io::{copy_tree, EntryPolicy};
 use crate::{git, paths};
 
 #[derive(Debug, Clone)]
@@ -25,14 +26,20 @@ pub fn refresh(
     let runtime_id = identifier::slugify_id(runtime_id, "runtime_id")?;
     let runtime_root = paths::agent_runtimes()?;
     local_files::ensure_app_dirs()?;
-    std::fs::create_dir_all(&runtime_root).map_err(|e| {
+    let runtime_parent = runtime_root.parent().ok_or_else(|| {
+        Error::internal_io(
+            "runtime package directory has no parent".to_string(),
+            Some("prepare runtime package directory".to_string()),
+        )
+    })?;
+    std::fs::create_dir_all(runtime_parent).map_err(|e| {
         Error::internal_io(
             e.to_string(),
             Some("prepare runtime package directory".to_string()),
         )
     })?;
 
-    let temp_dir = runtime_root.join(format!(".refresh-tmp-{runtime_id}"));
+    let temp_dir = runtime_parent.join(format!(".refresh-tmp-{runtime_id}"));
     remove_path_if_exists(&temp_dir, "clean stale runtime package refresh temp")?;
 
     let (source_root, source_revision) = if crate::extension_update_check::is_git_url(source) {
@@ -57,13 +64,33 @@ pub fn refresh(
     validate_runtime_package(&package_source, &runtime_id)?;
 
     let target = runtime_root.join(&runtime_id);
-    let staged = runtime_root.join(format!(".refresh-stage-{runtime_id}"));
-    let backup = runtime_root.join(format!(".refresh-backup-{runtime_id}"));
+    let staged = runtime_parent.join(format!(".refresh-stage-{runtime_id}"));
+    let backup = runtime_parent.join(format!(".refresh-backup-{runtime_id}"));
     remove_path_if_exists(&staged, "clean stale runtime package refresh stage")?;
     remove_path_if_exists(&backup, "clean stale runtime package refresh backup")?;
 
     copy_dir_recursive(&package_source, &staged)?;
     write_source_metadata(&staged, source, source_revision.as_deref())?;
+
+    if is_symlink(&runtime_root) {
+        let replaced_existing = path_exists_or_symlink(&target);
+        return replace_symlinked_runtime_root(
+            &runtime_root,
+            &runtime_id,
+            &staged,
+            &temp_dir,
+            source,
+            source_revision,
+            replaced_existing,
+        );
+    }
+
+    std::fs::create_dir_all(&runtime_root).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("prepare runtime package directory".to_string()),
+        )
+    })?;
 
     let replaced_existing = path_exists_or_symlink(&target);
     if replaced_existing {
@@ -87,6 +114,70 @@ pub fn refresh(
         source: source.to_string(),
         path: target.clone(),
         manifest_path: target.join(format!("{runtime_id}.json")),
+        source_revision,
+        replaced_existing,
+    })
+}
+
+fn replace_symlinked_runtime_root(
+    runtime_root: &Path,
+    runtime_id: &str,
+    staged: &Path,
+    temp_dir: &Path,
+    source: &str,
+    source_revision: Option<String>,
+    replaced_existing: bool,
+) -> Result<RuntimePackageRefreshResult> {
+    let runtime_parent = runtime_root.parent().expect("runtime root has parent");
+    let materialized = runtime_parent.join(format!(".refresh-root-stage-{runtime_id}"));
+    let root_backup = runtime_parent.join(format!(".refresh-root-backup-{runtime_id}"));
+    remove_path_if_exists(&materialized, "clean stale runtime root refresh stage")?;
+    remove_path_if_exists(&root_backup, "clean stale runtime root refresh backup")?;
+
+    copy_tree(
+        runtime_root,
+        &materialized,
+        "copy runtime packages for root materialization",
+        EntryPolicy::CopyAnyNonDir,
+    )?;
+    let target = materialized.join(runtime_id);
+    remove_path_if_exists(&target, "replace staged runtime package")?;
+    rename_path(
+        staged,
+        &target,
+        "stage runtime package in materialized root",
+    )?;
+
+    rename_path(
+        runtime_root,
+        &root_backup,
+        "backup symlinked runtime package root",
+    )?;
+    if let Err(err) = rename_path(
+        &materialized,
+        runtime_root,
+        "install materialized runtime package root",
+    ) {
+        let _ = rename_path(
+            &root_backup,
+            runtime_root,
+            "restore symlinked runtime package root",
+        );
+        let _ = remove_path_if_exists(&materialized, "clean failed runtime root stage");
+        let _ = remove_path_if_exists(temp_dir, "clean runtime package refresh temp");
+        return Err(err);
+    }
+
+    remove_path_if_exists(&root_backup, "remove symlinked runtime package root backup")?;
+    remove_path_if_exists(temp_dir, "clean runtime package refresh temp")?;
+
+    Ok(RuntimePackageRefreshResult {
+        runtime_id: runtime_id.to_string(),
+        source: source.to_string(),
+        path: runtime_root.join(runtime_id),
+        manifest_path: runtime_root
+            .join(runtime_id)
+            .join(format!("{runtime_id}.json")),
         source_revision,
         replaced_existing,
     })
@@ -215,10 +306,15 @@ fn path_exists_or_symlink(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
+    use std::process::Command;
 
     fn write_runtime_package(root: &Path, runtime_id: &str, marker: &str) {
         let package = root.join("agent-runtimes").join(runtime_id);
@@ -235,6 +331,57 @@ mod tests {
         )
         .expect("runtime package manifest");
         std::fs::write(package.join("marker.txt"), marker).expect("runtime package marker");
+    }
+
+    fn tree_bytes(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn collect(root: &Path, path: &Path, entries: &mut Vec<(PathBuf, Vec<u8>)>) {
+            let mut children = std::fs::read_dir(path)
+                .expect("read source tree")
+                .map(|entry| entry.expect("source tree entry"))
+                .collect::<Vec<_>>();
+            children.sort_by_key(|entry| entry.file_name());
+            for child in children {
+                let path = child.path();
+                if path.is_dir() {
+                    collect(root, &path, entries);
+                } else {
+                    entries.push((
+                        path.strip_prefix(root)
+                            .expect("source tree relative path")
+                            .to_path_buf(),
+                        std::fs::read(&path).expect("read source tree file"),
+                    ));
+                }
+            }
+        }
+
+        let mut entries = Vec::new();
+        collect(root, root, &mut entries);
+        entries
+    }
+
+    fn commit_source(root: &Path) {
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=test@homeboy.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "initial",
+            ],
+        ] {
+            let status = Command::new("git")
+                .args(["-C", root.to_str().expect("source path")])
+                .args(args)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git command succeeds");
+        }
     }
 
     #[test]
@@ -273,6 +420,58 @@ mod tests {
                 std::fs::read_to_string(result.path.join("marker.txt")).unwrap(),
                 "v2"
             );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_materializes_symlinked_runtime_root_without_mutating_source() {
+        use std::os::unix::fs::symlink;
+
+        with_isolated_home(|home| {
+            let source = tempfile::TempDir::new().expect("source tempdir");
+            write_runtime_package(source.path(), "neutral-runtime", "new");
+            write_runtime_package(source.path(), "sibling-runtime", "sibling");
+            commit_source(source.path());
+            let source_before = tree_bytes(source.path());
+            let source_revision =
+                crate::git::short_head_revision(source.path()).expect("source revision");
+
+            let runtime_root = home.path().join(".config/homeboy/agent-runtimes");
+            std::fs::create_dir_all(runtime_root.parent().expect("runtime root parent"))
+                .expect("runtime root parent");
+            symlink(source.path().join("agent-runtimes"), &runtime_root)
+                .expect("symlink runtime root to source tree");
+
+            let result = refresh("neutral-runtime", &source.path().to_string_lossy(), None)
+                .expect("refresh runtime package");
+
+            assert_eq!(tree_bytes(source.path()), source_before);
+            assert!(!std::fs::symlink_metadata(&runtime_root)
+                .expect("materialized runtime root metadata")
+                .file_type()
+                .is_symlink());
+            assert_eq!(
+                std::fs::read_to_string(runtime_root.join("sibling-runtime/marker.txt"))
+                    .expect("preserved sibling runtime"),
+                "sibling"
+            );
+            assert_eq!(
+                std::fs::read_to_string(result.path.join(".source-revision"))
+                    .expect("installed revision metadata"),
+                source_revision
+            );
+
+            let manifest = crate::agent_runtime_manifest::discover_agent_runtime_catalog()
+                .manifests
+                .into_iter()
+                .find(|manifest| manifest.id == "neutral-runtime")
+                .expect("discovered installed runtime");
+            let plan = crate::agent_runtime_manifest::runtime_materialization_plan(
+                &manifest,
+                "test-provider",
+            );
+            assert_eq!(plan.selected_identity.revision, Some(source_revision));
         });
     }
 }
