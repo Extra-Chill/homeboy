@@ -991,6 +991,22 @@ pub(crate) fn status_for_admission(runner_id: &str) -> Result<RunnerStatusReport
     })
 }
 
+/// Resolve the immutable identity of the executable that will start runner-side
+/// Homeboy jobs. Lab admission uses this instead of the controller build when
+/// validating a direct SSH daemon.
+pub(crate) fn configured_runner_homeboy_build_identity(
+    runner: &Runner,
+    homeboy: &str,
+) -> Result<Option<String>> {
+    let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
+        return Ok(None);
+    };
+
+    Ok(remote_homeboy_identity(&client, homeboy)
+        .ok()
+        .and_then(|identity| identity.build_identity))
+}
+
 fn status_for_admission_with<Status, Reconnect>(
     runner_id: &str,
     mut status_fn: Status,

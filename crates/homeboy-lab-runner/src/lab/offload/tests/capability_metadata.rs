@@ -868,6 +868,42 @@ fn matching_full_build_identities_have_no_drift_under_strict_mode() {
 }
 
 #[test]
+fn direct_runner_admission_accepts_matching_configured_build_identity() {
+    let identity = "homeboy 0.295.0+b03d659866d1";
+    let mut status = status_with_runner_version("homeboy-lab", "0.295.0");
+    let session = status.session.as_mut().expect("runner session");
+    session.mode = RunnerTunnelMode::DirectSsh;
+    session.homeboy_build_identity = Some(identity.to_string());
+
+    assert!(
+        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(
+            &status,
+            Some(identity),
+            true,
+        )
+    );
+}
+
+#[test]
+fn direct_runner_admission_fails_closed_for_mismatched_or_unverifiable_configured_identity() {
+    let mut status = status_with_runner_version("homeboy-lab", "0.295.0");
+    let session = status.session.as_mut().expect("runner session");
+    session.mode = RunnerTunnelMode::DirectSsh;
+    session.homeboy_build_identity = Some("homeboy 0.295.0+b03d659866d1".to_string());
+
+    assert!(
+        lab_runner_homeboy_has_blocking_drift_against_configured_identity(
+            &status,
+            Some("homeboy 0.295.0+different"),
+            false,
+        )
+    );
+    assert!(
+        lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false,)
+    );
+}
+
+#[test]
 fn same_semver_with_different_build_identity_is_refused() {
     let mut status =
         status_with_runner_version("homeboy-lab", homeboy_product_identity::product_version());

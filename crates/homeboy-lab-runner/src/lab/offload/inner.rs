@@ -877,7 +877,7 @@ pub(crate) fn run_lab_offload_inner(
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner = load(runner_id)?;
-    let runner_status = status_for_admission(runner_id)?;
+    let mut runner_status = status_for_admission(runner_id)?;
     if runner.kind != super::super::super::RunnerKind::Ssh {
         return Err(Error::validation_invalid_argument(
             "runner",
@@ -1034,13 +1034,47 @@ pub(crate) fn run_lab_offload_inner(
     }
     let homeboy_path = remote_runner_homeboy_path(&runner, "Lab offload preflight")?;
     let require_exact_runner_version = require_exact_runner_version(&runner.settings);
+    let configured_build_identity =
+        configured_runner_homeboy_build_identity(&runner, homeboy_path)?;
+    if runner_status
+        .session
+        .as_ref()
+        .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
+        && runner_status.stale_daemon.is_none()
+    {
+        let session = runner_status
+            .session
+            .as_ref()
+            .expect("checked direct SSH session");
+        let active_identity = session.homeboy_build_identity.clone();
+        if configured_build_identity.as_deref() != active_identity.as_deref() {
+            runner_status.stale_daemon = Some(
+                RunnerStaleDaemonWarning::new(
+                    runner_id,
+                    session.homeboy_version.clone(),
+                    session.homeboy_version.clone(),
+                    active_identity,
+                    configured_build_identity.clone(),
+                )
+                .with_identity_unverifiable(
+                    runner_id,
+                    homeboy_path,
+                    configured_build_identity.is_none(),
+                ),
+            );
+        }
+    }
     let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, &runner_status);
     plan = with_step(
         plan,
         PlanStep::builder(
             "lab.runner_homeboy",
             "lab.runner_homeboy",
-            if lab_runner_homeboy_has_blocking_drift(&runner_status, require_exact_runner_version) {
+            if lab_runner_homeboy_has_blocking_drift_against_configured_identity(
+                &runner_status,
+                configured_build_identity.as_deref(),
+                require_exact_runner_version,
+            ) {
                 PlanStepStatus::Failed
             } else {
                 PlanStepStatus::Ready
@@ -1071,7 +1105,11 @@ pub(crate) fn run_lab_offload_inner(
                 shell::quote_arg(runner_id)
             ))
     );
-    if lab_runner_homeboy_has_blocking_drift(&runner_status, require_exact_runner_version) {
+    if lab_runner_homeboy_has_blocking_drift_against_configured_identity(
+        &runner_status,
+        configured_build_identity.as_deref(),
+        require_exact_runner_version,
+    ) {
         return Err(stale_runner_homeboy_error(
             runner_id,
             homeboy_path,
