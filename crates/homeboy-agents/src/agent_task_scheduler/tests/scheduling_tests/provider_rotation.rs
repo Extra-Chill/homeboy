@@ -304,9 +304,17 @@ mod provider_rotation_tests {
             .path
             .as_deref()
             .is_some_and(|path| path.contains("agent-task/attempt-patches/run-8081/task-1")));
+        // The first attempt left an uncommitted candidate (captured above as a
+        // promoted patch artifact), so scheduler cleanup retains its checkout for
+        // lifecycle cleanup rather than force-removing it (#8579). The second,
+        // cleanly-succeeding attempt holds no work and its checkout is retired.
         assert!(
-            !roots[0].exists() && !roots[1].exists(),
-            "attempt checkouts are retired after their executor threads stop"
+            roots[0].exists(),
+            "attempt with a retained uncommitted candidate keeps its checkout for lifecycle cleanup"
+        );
+        assert!(
+            !roots[1].exists(),
+            "clean succeeding attempt checkout is retired after its executor thread stops"
         );
     }
 
