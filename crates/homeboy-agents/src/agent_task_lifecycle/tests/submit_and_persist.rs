@@ -597,6 +597,52 @@ fn disconnected_proxy_projects_terminal_child_aggregate_once_reachable() {
 }
 
 #[test]
+fn terminal_daemon_status_waits_for_delayed_aggregate_then_projects_once() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-delayed-aggregate",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("accepted handoff");
+        let mut terminal_without_aggregate =
+            terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        terminal_without_aggregate.events.clear();
+
+        reconcile_runner_job_snapshot(&mut record, &terminal_without_aggregate)
+            .expect("terminal transport awaits aggregate synchronization");
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert!(store::read_aggregate(&record.run_id).is_err());
+
+        let aggregate = succeeded_aggregate(&test_plan());
+        let mut terminal_with_aggregate = terminal_child_snapshot(&aggregate);
+        let identity = terminal_with_aggregate.events[0]
+            .data
+            .as_mut()
+            .and_then(|event| event.get_mut("identity"))
+            .and_then(Value::as_object_mut)
+            .expect("terminal lifecycle identity");
+        identity.insert("persisted_run_id".to_string(), json!(record.run_id));
+        identity.insert("run_id".to_string(), json!(record.run_id));
+        reconcile_runner_job_snapshot(&mut record, &terminal_with_aggregate)
+            .expect("delayed aggregate terminalizes the handoff");
+        let terminal = record.clone();
+        reconcile_runner_job_snapshot(&mut record, &terminal_with_aggregate)
+            .expect("repeated aggregate reconciliation is idempotent");
+
+        assert_eq!(record, terminal);
+        assert_eq!(record.state, AgentTaskRunState::Succeeded);
+        assert_eq!(
+            store::read_aggregate(&record.run_id).expect("aggregate persisted"),
+            aggregate
+        );
+    });
+}
+
+#[test]
 fn accepted_handoff_projects_a_remote_timeout_aggregate_even_when_daemon_transport_succeeds() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
