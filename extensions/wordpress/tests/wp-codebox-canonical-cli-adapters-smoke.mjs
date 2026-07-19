@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'wp-codebox-canonical-adapter-'));
-const component = path.join(root, 'plugin');
+const component = path.join(root, 'canonical-plugin');
 const dependency = path.join(root, 'db-touching-dependency');
 const observed = path.join(root, 'observed.jsonl');
 const cli = path.join(root, 'wp-codebox');
@@ -45,7 +45,7 @@ try {
     HOMEBOY_SETTINGS_JSON: JSON.stringify({
       wp_codebox_source_root: '/workspace/monorepo',
       wp_codebox_source_subpath: 'plugins/canonical-plugin',
-      validation_dependencies: [dependency],
+      validation_dependencies: [component, dependency, dependency],
       wordpress_runtime_workloads: [{ id: 'canonical-workload', run: [] }],
       wordpress_runtime_blueprint: { steps: [] },
     }),
@@ -65,8 +65,14 @@ try {
     { source: '/workspace/monorepo', sourceSubpath: 'plugins/canonical-plugin', slug: 'canonical-plugin', activate: false },
     { source: '/workspace/monorepo', sourceSubpath: 'plugins/canonical-plugin', slug: 'canonical-plugin', activate: false },
   ]);
-  assert.deepEqual(options[1].extra_plugins[1], { source: dependency, slug: 'db-touching-dependency', activate: false });
-  assert.deepEqual(options[1].dependencyMounts, ['/wordpress/wp-content/plugins/db-touching-dependency']);
+  assert.deepEqual(options[1].extra_plugins.slice(1), [
+    { source: component, slug: 'canonical-plugin', activate: false },
+    { source: dependency, slug: 'db-touching-dependency', activate: false },
+  ]);
+  assert.deepEqual(options[1].dependencyMounts, [
+    '/wordpress/wp-content/plugins/canonical-plugin',
+    '/wordpress/wp-content/plugins/db-touching-dependency',
+  ]);
   assert.deepEqual(options[1].mounts, [{ source: path.join(extension, 'vendor'), target: '/wp-codebox-vendor', mode: 'readonly' }]);
   assert.equal(options[0].workloads[0].id, 'canonical-workload');
   assert.equal(Object.hasOwn(options[0], 'wp_codebox_workloads'), false);
