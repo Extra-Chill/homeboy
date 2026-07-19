@@ -490,7 +490,7 @@ fn discovery_active_marks_runner_backed_running_run_as_stale_retryable() {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-runner-stale"))
             .expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test("run-runner-stale", |record| {
-            record.state = AgentTaskRunState::Running;
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
             record.tasks[0].state = AgentTaskState::Running;
             record.metadata = serde_json::json!({
                 "runner_id": "homeboy-lab",
@@ -528,7 +528,7 @@ fn discovery_active_classifies_liveness_and_source() {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-live-stale"))
             .expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test("run-live-stale", |record| {
-            record.state = AgentTaskRunState::Running;
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
             record.tasks[0].state = AgentTaskState::Running;
             record.metadata = serde_json::json!({
                 "runner_id": "homeboy-lab",
@@ -571,7 +571,7 @@ fn reconcile_dry_run_reports_but_does_not_cancel_stale_runs() {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-reconcile-dry"))
             .expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test("run-reconcile-dry", |record| {
-            record.state = AgentTaskRunState::Running;
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
             record.tasks[0].state = AgentTaskState::Running;
             record.metadata = serde_json::json!({
                 "runner_id": "homeboy-lab",
@@ -598,7 +598,7 @@ fn reconcile_cancels_stale_running_record_without_manual_edit() {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-reconcile-live"))
             .expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test("run-reconcile-live", |record| {
-            record.state = AgentTaskRunState::Running;
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
             record.tasks[0].state = AgentTaskState::Running;
             record.metadata = serde_json::json!({
                 "runner_id": "homeboy-lab",
@@ -687,7 +687,7 @@ fn discovery_runner_backed_run_emits_runner_scoped_commands() {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-runner-commands"))
             .expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test("run-runner-commands", |record| {
-            record.state = AgentTaskRunState::Running;
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
             record.tasks[0].state = AgentTaskState::Running;
             record.metadata = serde_json::json!({
                 "runner_id": "homeboy-lab",

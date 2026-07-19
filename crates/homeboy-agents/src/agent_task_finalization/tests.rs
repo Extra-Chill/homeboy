@@ -931,6 +931,90 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
 }
 
 #[test]
+fn durable_finalization_accepts_only_authenticated_external_candidate_adoption() {
+    let partial_lifecycle = RunLifecycleRecord {
+        execution: RunExecutionLifecycle {
+            state: RunExecutionState::PartialFailure,
+            started_at: None,
+            finished_at: Some("2026-01-01T00:00:00Z".to_string()),
+            updated_at: None,
+        },
+        ..RunLifecycleRecord::default()
+    };
+    let finalize = |gate_proof: AgentTaskPrDurableGateProof| {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            lifecycle: Some(partial_lifecycle.clone()),
+            gate_proof: Some(gate_proof),
+            ..Default::default()
+        };
+        let mut finalization_options = options();
+        finalization_options.manual_finalization = false;
+        finalization_options.changed_files = vec!["src/lib.rs".to_string()];
+        let report = finalize_pr_with_backend(finalization_options, &mut backend);
+        (report, backend)
+    };
+
+    let mut accepted_proof = external_adoption_gate_proof();
+    accepted_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+    let (report, backend) = finalize(accepted_proof);
+    assert_eq!(
+        report.expect("authenticated adoption publishes").status,
+        "review_ready"
+    );
+    assert!(backend.committed && backend.pushed && backend.created);
+
+    let mut abbreviated_proof = external_adoption_gate_proof();
+    abbreviated_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+    abbreviated_proof.promotion.provenance["adoption"]["candidate_ref"] = json!("7f76933ef");
+    let (report, backend) = finalize(abbreviated_proof);
+    assert_eq!(
+        report
+            .expect("fingerprinted abbreviated candidate publishes")
+            .status,
+        "review_ready"
+    );
+    assert!(backend.committed && backend.pushed && backend.created);
+
+    let rejected = |proof: AgentTaskPrDurableGateProof| {
+        let (result, backend) = finalize(proof);
+        assert!(result.is_err());
+        assert!(!backend.committed && !backend.pushed && !backend.created);
+    };
+
+    rejected(successful_gate_proof());
+
+    let mut missing_candidate = external_adoption_gate_proof();
+    missing_candidate.promotion.provenance["candidate"] = serde_json::Value::Null;
+    rejected(missing_candidate);
+
+    let mut mismatched_candidate = external_adoption_gate_proof();
+    mismatched_candidate.promotion.provenance["candidate"]["fingerprint"]["head"] =
+        json!("0000000000000000000000000000000000000000");
+    rejected(mismatched_candidate);
+
+    let mut non_prefix_candidate = external_adoption_gate_proof();
+    non_prefix_candidate.promotion.provenance["adoption"]["candidate_ref"] = json!("7f76933e0");
+    rejected(non_prefix_candidate);
+
+    let mut missing_model = external_adoption_gate_proof();
+    missing_model.promotion.provenance["adoption"]["ai_model"] = serde_json::Value::Null;
+    rejected(missing_model);
+
+    let mut mismatched_source = external_adoption_gate_proof();
+    mismatched_source.promotion.provenance["adoption"]["source_run_id"] = json!("other-run");
+    rejected(mismatched_source);
+
+    let mut missing_commit_binding = external_adoption_gate_proof();
+    missing_commit_binding.promotion.provenance["commit_range"] = json!("base..other");
+    rejected(missing_commit_binding);
+
+    let mut non_green = external_adoption_gate_proof();
+    non_green.promotion.gate_results[0].status = HomeboyGateStatus::Failed;
+    rejected(non_green);
+}
+
+#[test]
 fn durable_finalization_publishes_clean_synced_recovered_candidate() {
     let mut gate_proof = successful_gate_proof();
     gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
@@ -1578,6 +1662,17 @@ fn pre_provider_adoption_gate_proof() -> AgentTaskPrDurableGateProof {
             }
         }
     });
+    proof
+}
+
+fn external_adoption_gate_proof() -> AgentTaskPrDurableGateProof {
+    let mut proof = pre_provider_adoption_gate_proof();
+    proof.promotion.provenance["adoption"]["recovery"] = serde_json::Value::Null;
+    proof.promotion.provenance["change_source"] = json!("local_commits");
+    proof.promotion.provenance["commit_range"] =
+        json!("base..7f76933ef002d195ee1cc5bf21069e0f40b1c972");
+    proof.promotion.provenance["commits"] =
+        json!([{"sha": "7f76933ef002d195ee1cc5bf21069e0f40b1c972"}]);
     proof
 }
 

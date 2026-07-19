@@ -33,7 +33,7 @@ use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskState,
 };
 use homeboy_core::command_invocation::CommandInvocation;
-use homeboy_core::{config, Error, Result};
+use homeboy_core::{config, Error, ErrorCode, Result};
 
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
@@ -728,6 +728,16 @@ where
                     promotion: None,
                     feedback: None,
                 });
+                if is_deterministic_pre_execution_failure(&error) {
+                    return Ok(cook_report(
+                        cook_id,
+                        "policy_failure",
+                        attempts,
+                        None,
+                        Some(error.to_string()),
+                        1,
+                    ));
+                }
                 if attempt == max_attempts {
                     return Ok(cook_report(
                         cook_id,
@@ -1069,6 +1079,18 @@ where
         Some("cook attempt budget exhausted".to_string()),
         1,
     ))
+}
+
+fn is_deterministic_pre_execution_failure(error: &Error) -> bool {
+    matches!(
+        error.code,
+        ErrorCode::ConfigInvalidJson
+            | ErrorCode::ConfigInvalidValue
+            | ErrorCode::ValidationMissingArgument
+            | ErrorCode::ValidationInvalidArgument
+            | ErrorCode::ValidationInvalidJson
+            | ErrorCode::ValidationMultipleErrors
+    )
 }
 
 /// Pre-execution failures happen before a provider can receive work. Persist a
@@ -2554,6 +2576,33 @@ mod tests {
                 .as_str()
                 .expect("failure message")
                 .contains("hash mismatch"));
+        });
+    }
+
+    #[test]
+    fn cook_does_not_retry_deterministic_pre_provider_input_failures() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "cook-invalid-input-attempt-1";
+            let mut options = batch_cook_options(
+                "cook-invalid-input",
+                Arc::new(AdmissionFailingAttemptDispatcher {
+                    message: "invalid controller-owned Lab handoff input",
+                }),
+            );
+            options.provider_command = Some("fixture-provider".to_string());
+            options.initial_run_id = run_id.to_string();
+            options.max_attempts = 2;
+
+            let result = run_cook(options, UnusedExecutor)
+                .expect("cook returns the persisted input failure");
+
+            assert_eq!(result.exit_code, 1);
+            assert_eq!(result.value.status, "policy_failure");
+            assert_eq!(result.value.attempts.len(), 1);
+            assert_eq!(result.value.history_run_ids, vec![run_id]);
+            let record = agent_task_lifecycle::status(run_id).expect("attempt exists");
+            assert!(record.provider_handles.is_empty());
+            assert_eq!(record.metadata["provider_executions_consumed"], 0);
         });
     }
 

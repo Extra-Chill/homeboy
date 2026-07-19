@@ -192,6 +192,49 @@ fn workspace_snapshots_render_metadata_for_synced_workspace() {
 }
 
 #[test]
+fn stale_truncated_metadata_does_not_block_current_workspace_sync() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        create_local_runner("lab-local-stale-metadata", runner_root.path());
+        let stale_metadata = runner_root
+            .path()
+            .join("_lab_workspaces/stale-unrelated/.homeboy/runner-workspace.json");
+        fs::create_dir_all(stale_metadata.parent().expect("metadata parent"))
+            .expect("stale workspace parent");
+        fs::write(&stale_metadata, "{\n  \"runner_id\": \"").expect("truncated metadata");
+
+        let source = git_source("homeboy@current-task", "fix/current-task", "source\n");
+        let (synced, _) = sync_workspace(
+            "lab-local-stale-metadata",
+            sync_options(
+                source.path().display().to_string(),
+                Some("current-run".to_string()),
+            ),
+        )
+        .expect("current workspace sync ignores unrelated stale metadata");
+
+        let (output, _) = workspace_snapshots(
+            "lab-local-stale-metadata",
+            RunnerWorkspaceSnapshotFilters {
+                run_id: Some("current-run".to_string()),
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .expect("current workspace snapshot discovery");
+
+        assert_eq!(output.snapshots.len(), 1);
+        assert_eq!(output.snapshots[0].remote_path, synced.remote_path);
+        assert_eq!(output.skipped_invalid_metadata.len(), 1);
+        let diagnostic = &output.skipped_invalid_metadata[0];
+        assert_eq!(diagnostic.source, stale_metadata.display().to_string());
+        assert_eq!(diagnostic.field, ".homeboy/runner-workspace.json");
+        assert!(diagnostic.error.contains("EOF while parsing a string"));
+        assert!(diagnostic.error.len() <= 512 + "... [truncated]".len());
+    });
+}
+
+#[test]
 fn workspace_snapshots_filters_by_repo_ref_commit_and_run() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");

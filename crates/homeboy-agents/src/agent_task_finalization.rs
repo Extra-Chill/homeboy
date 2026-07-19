@@ -521,6 +521,7 @@ fn report(
 enum DurablePublicationEligibility {
     ProviderRun,
     PreProviderCandidateAdoptionRecovery,
+    AuthenticatedExternalCandidateAdoption,
 }
 
 fn validate_durable_publication_eligibility(
@@ -568,7 +569,46 @@ fn validate_durable_publication_eligibility(
         return Ok(DurablePublicationEligibility::PreProviderCandidateAdoptionRecovery);
     }
 
-    Err(Error::validation_invalid_argument("run_id", "durable run must have succeeded execution and succeeded provider runtime before publication; the only exception is an applied, green, fingerprinted candidate-adoption recovery with durable zero-execution pre-provider transport provenance", None, None))
+    // An externally prepared commit has no successful provider runtime to
+    // attest. Its authenticated adoption promotion supplies equivalent,
+    // candidate-bound evidence instead.
+    let committed_change_provenance = promotion.provenance["change_source"] == "local_commits"
+        && promotion
+            .provenance
+            .get("commit_range")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|range| range.rsplit_once(".."))
+            .is_some_and(|(_, candidate)| Some(candidate) == candidate_head)
+        && promotion
+            .provenance
+            .get("commits")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|commits| !commits.is_empty());
+    let candidate_is_bound = candidate_ref.is_some_and(|candidate_ref| {
+        is_git_commit_identity(candidate_ref)
+            && candidate_head.is_some_and(|candidate_head| {
+                is_full_git_commit_identity(candidate_head)
+                    && (candidate_ref == candidate_head
+                        || candidate_head.starts_with(candidate_ref))
+            })
+    });
+    let authenticated_external_adoption = promotion.status
+        == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+        && promotion.provenance["adoption"]["source_run_id"]
+            == promotion.source.run_id.clone().unwrap_or_default()
+        && candidate_is_bound
+        && adoption_model.is_some_and(is_concrete_model)
+        && committed_change_provenance
+        && !promotion.gate_results.is_empty()
+        && promotion
+            .gate_results
+            .iter()
+            .all(|gate| gate.status == HomeboyGateStatus::Passed);
+    if authenticated_external_adoption {
+        return Ok(DurablePublicationEligibility::AuthenticatedExternalCandidateAdoption);
+    }
+
+    Err(Error::validation_invalid_argument("run_id", "durable run must have succeeded execution and succeeded provider runtime before publication; the only exceptions are an applied, green, fingerprinted candidate-adoption recovery with durable zero-execution pre-provider transport provenance or an applied, green, committed-change-provenance-bound authenticated external candidate adoption", None, None))
 }
 
 fn no_real_provider_execution(lifecycle: &RunLifecycleRecord) -> bool {
@@ -594,6 +634,10 @@ fn is_concrete_model(value: &str) -> bool {
 }
 
 fn is_git_commit_identity(value: &str) -> bool {
+    (7..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_full_git_commit_identity(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
