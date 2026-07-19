@@ -13,6 +13,19 @@ pub const AGENT_TASK_RECORD_HEALTH_SCHEMA: &str = "homeboy/agent-task-record-hea
 pub const AGENT_TASK_RECORD_RECONCILIATION_SCHEMA: &str =
     "homeboy/agent-task-record-reconciliation/v1";
 
+// Untyped run-record metadata keys for the controller's staleness / runner
+// liveness projection. Centralized so every read and write goes through one
+// name — a typo in any scattered string literal would otherwise silently break
+// staleness detection. (Step toward migrating these flags onto the typed
+// lifecycle state; for now this removes the string-drift hazard without
+// changing the on-disk format.)
+pub(crate) const METADATA_KEY_STALE_RUNNING: &str = "stale_running";
+pub(crate) const METADATA_KEY_STALE_RUNNING_REASON: &str = "stale_running_reason";
+pub(crate) const METADATA_KEY_RUNNER_LIVENESS: &str = "runner_liveness";
+pub(crate) const METADATA_KEY_RETRYABLE: &str = "retryable";
+pub(crate) const METADATA_KEY_RECLAIMED_STALE_RUNNING: &str = "reclaimed_stale_running";
+pub(crate) const METADATA_KEY_CANCELLED_STALE_RUNNING: &str = "cancelled_stale_running";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskRecordHealthReason {
@@ -233,12 +246,15 @@ impl AgentTaskRunRecord {
         metadata.insert("runner_pid".to_string(), json!(std::process::id()));
         metadata.insert("runner_started_at".to_string(), json!(now_timestamp()));
         if reclaimed_stale {
-            metadata.insert("reclaimed_stale_running".to_string(), json!(true));
+            metadata.insert(
+                METADATA_KEY_RECLAIMED_STALE_RUNNING.to_string(),
+                json!(true),
+            );
         } else {
-            metadata.remove("reclaimed_stale_running");
+            metadata.remove(METADATA_KEY_RECLAIMED_STALE_RUNNING);
         }
-        metadata.remove("stale_running");
-        metadata.remove("stale_running_reason");
+        metadata.remove(METADATA_KEY_STALE_RUNNING);
+        metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
     }
 
     pub(crate) fn annotate_stale_running(&mut self) {
@@ -259,8 +275,8 @@ impl AgentTaskRunRecord {
         };
         let provider_handle_count = self.provider_handles.len();
         let metadata = self.ensure_metadata_object();
-        metadata.insert("stale_running".to_string(), json!(true));
-        metadata.insert("stale_running_reason".to_string(), json!(reason));
+        metadata.insert(METADATA_KEY_STALE_RUNNING.to_string(), json!(true));
+        metadata.insert(METADATA_KEY_STALE_RUNNING_REASON.to_string(), json!(reason));
         metadata.insert(
             "provider_boundary".to_string(),
             json!({
@@ -268,7 +284,7 @@ impl AgentTaskRunRecord {
                 "provider_handle_count": provider_handle_count,
             }),
         );
-        metadata.insert("retryable".to_string(), json!(true));
+        metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     }
 
     /// A controller cannot infer progress from a runner connection that is no
@@ -279,23 +295,26 @@ impl AgentTaskRunRecord {
             return;
         }
         let metadata = self.ensure_metadata_object();
-        metadata.insert("runner_liveness".to_string(), json!("disconnected"));
-        metadata.insert("stale_running".to_string(), json!(true));
         metadata.insert(
-            "stale_running_reason".to_string(),
+            METADATA_KEY_RUNNER_LIVENESS.to_string(),
+            json!("disconnected"),
+        );
+        metadata.insert(METADATA_KEY_STALE_RUNNING.to_string(), json!(true));
+        metadata.insert(
+            METADATA_KEY_STALE_RUNNING_REASON.to_string(),
             json!("runner_disconnected"),
         );
-        metadata.insert("retryable".to_string(), json!(true));
+        metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     }
 
     /// A reachable runner job is authoritative liveness evidence. Clear only
     /// the controller's disconnected/stale projection, not unrelated metadata.
     pub(crate) fn record_runner_reachable(&mut self) {
         let metadata = self.ensure_metadata_object();
-        metadata.insert("runner_liveness".to_string(), json!("reachable"));
-        metadata.remove("stale_running");
-        metadata.remove("stale_running_reason");
-        metadata.remove("retryable");
+        metadata.insert(METADATA_KEY_RUNNER_LIVENESS.to_string(), json!("reachable"));
+        metadata.remove(METADATA_KEY_STALE_RUNNING);
+        metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
+        metadata.remove(METADATA_KEY_RETRYABLE);
     }
 
     pub(crate) fn owner_process_is_running(&self) -> bool {
@@ -333,6 +352,23 @@ impl AgentTaskRunRecord {
             .get("runner_id")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
+    }
+
+    /// Whether the controller has projected this run as stale (its runner
+    /// backing can no longer be confirmed live). Reads the centralized untyped
+    /// metadata flag.
+    pub(crate) fn is_stale_running(&self) -> bool {
+        self.metadata
+            .get(METADATA_KEY_STALE_RUNNING)
+            .and_then(Value::as_bool)
+            == Some(true)
+    }
+
+    /// The recorded reason a run was projected stale, if any.
+    pub(crate) fn stale_running_reason(&self) -> Option<&str> {
+        self.metadata
+            .get(METADATA_KEY_STALE_RUNNING_REASON)
+            .and_then(Value::as_str)
     }
 
     /// Whether the authoritative agent-task run state (`self.state`) and its

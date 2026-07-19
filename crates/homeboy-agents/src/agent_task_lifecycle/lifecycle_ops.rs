@@ -1327,7 +1327,7 @@ fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
         "phase_activity".to_string(),
         json!("runner handoff acceptance deadline expired before runner acceptance"),
     );
-    metadata.insert("retryable".to_string(), json!(true));
+    metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     metadata.insert(
         "runner_execution_record".to_string(),
         serde_json::to_value(
@@ -1426,7 +1426,7 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
     };
     let runner_job_id = transport_proxy_runner_job_id(&record);
     let metadata = record.ensure_metadata_object();
-    metadata.insert("retryable".to_string(), json!(true));
+    metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     metadata.insert("transport_recovery".to_string(), json!("required"));
     metadata.insert("runner_id".to_string(), json!(&runner_id));
 
@@ -2014,8 +2014,8 @@ pub(crate) fn apply_runner_job_terminal_state(
         "retryable".to_string(),
         json!(run_state != AgentTaskRunState::Succeeded),
     );
-    metadata.remove("stale_running");
-    metadata.remove("stale_running_reason");
+    metadata.remove(METADATA_KEY_STALE_RUNNING);
+    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
 }
 
 fn record_runner_job_terminal_metadata(
@@ -2491,9 +2491,9 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
         )
         .unwrap_or(Value::Null),
     );
-    metadata.insert("retryable".to_string(), json!(true));
-    metadata.remove("stale_running");
-    metadata.remove("stale_running_reason");
+    metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
+    metadata.remove(METADATA_KEY_STALE_RUNNING);
+    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
     store::write_record(&record)?;
     Ok(record)
 }
@@ -2620,7 +2620,7 @@ fn record_lab_offload_proxy(
     if !remote_command.is_empty() {
         metadata.insert("remote_command".to_string(), json!(remote_command));
     }
-    metadata.insert("retryable".to_string(), json!(true));
+    metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     metadata.insert(
         "runner_execution_record".to_string(),
         serde_json::to_value(
@@ -2651,7 +2651,7 @@ fn fail_missing_lab_attempt_plan(record: &mut AgentTaskRunRecord, error: &Error)
             "error": error.message,
         }),
     );
-    metadata.insert("retryable".to_string(), json!(true));
+    metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     store::write_record(record)
 }
 

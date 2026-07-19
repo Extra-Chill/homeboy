@@ -335,17 +335,11 @@ pub(crate) fn refresh_stale_running_child_actions(
             continue;
         };
         let run = agent_task_lifecycle::status(&run_id)?;
-        if run.state != AgentTaskRunState::Running
-            || run.metadata.get("stale_running").and_then(Value::as_bool) != Some(true)
-        {
+        if run.state != AgentTaskRunState::Running || !run.is_stale_running() {
             continue;
         }
 
-        let reason = run
-            .metadata
-            .get("stale_running_reason")
-            .and_then(Value::as_str)
-            .unwrap_or("stale_running");
+        let reason = run.stale_running_reason().unwrap_or("stale_running");
         let action = &mut record.next_actions[index];
         action.status = AgentTaskLoopActionStatus::Pending;
         action.reason = format!(

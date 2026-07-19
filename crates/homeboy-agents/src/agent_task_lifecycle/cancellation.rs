@@ -112,10 +112,13 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
         LiveCancellationOutcome::NotRunning => {}
     }
     if was_stale_running {
-        metadata.insert("cancelled_stale_running".to_string(), json!(true));
+        metadata.insert(
+            METADATA_KEY_CANCELLED_STALE_RUNNING.to_string(),
+            json!(true),
+        );
     }
-    metadata.remove("stale_running");
-    metadata.remove("stale_running_reason");
+    metadata.remove(METADATA_KEY_STALE_RUNNING);
+    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
 
     store::write_record(&record)?;
     Ok(record)
