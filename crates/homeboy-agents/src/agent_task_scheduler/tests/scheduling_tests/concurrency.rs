@@ -658,6 +658,10 @@ pub(super) mod concurrency_tests {
 
     #[test]
     fn retry_uses_clean_isolated_workspace_after_permission_denial() {
+        // Attempt worktrees are now retained when they hold work (#8579), so
+        // isolate the controller-scratch home to keep those retained checkouts
+        // out of the developer's real `~/.local/share/homeboy`.
+        let _home = homeboy_core::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
         let target = temp.path().join("target");
@@ -698,7 +702,15 @@ pub(super) mod concurrency_tests {
         assert_eq!(workspaces.len(), 2);
         assert_ne!(workspaces[0], workspaces[1]);
         assert!(workspaces.iter().all(|workspace| workspace != &source));
-        assert!(workspaces.iter().all(|workspace| !workspace.exists()));
+        // Attempt worktrees are intentionally retained for lifecycle cleanup when
+        // they still hold work (#8579): attempt 1 left uncommitted changes and
+        // attempt 2 committed beyond its base. The work itself is preserved as a
+        // promoted patch artifact (asserted below), so scheduler cleanup does not
+        // force-remove the checkouts and records a retention diagnostic instead.
+        assert!(aggregate.outcomes[0]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.class == "agent_task.attempt_workspace_retained" }));
         assert!(Command::new("git")
             .args(["status", "--porcelain"])
             .current_dir(&source)
