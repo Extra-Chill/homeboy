@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.295.0] - 2026-07-19
+
+### Added
+- detect cross-name duplication — same body under different names (#9074)
+
+### Changed
+- replace pr_refresh's local git_output with git::run_git_output
+- add git::output_allow_empty and consolidate the -C keep-empty git_output family
+
+### Fixed
+- preserve internal snapshot symlinks
+
 ## [0.294.1] - 2026-07-19
 
 ### Changed
