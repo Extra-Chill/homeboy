@@ -376,17 +376,13 @@ fn run_status(state: AgentTaskRunState) -> &'static str {
 }
 
 fn terminal_finished_at(record: &AgentTaskRunRecord) -> Option<String> {
-    match record.state {
-        AgentTaskRunState::Succeeded
-        | AgentTaskRunState::CandidateRecoverable
-        | AgentTaskRunState::PartialRecoverable
-        | AgentTaskRunState::PartialFailure
-        | AgentTaskRunState::Failed
-        | AgentTaskRunState::Cancelled => record
+    if record.state.is_terminal() {
+        record
             .updated_at
             .clone()
-            .or_else(|| Some(record.submitted_at.clone())),
-        AgentTaskRunState::Queued | AgentTaskRunState::Running => None,
+            .or_else(|| Some(record.submitted_at.clone()))
+    } else {
+        None
     }
 }
 

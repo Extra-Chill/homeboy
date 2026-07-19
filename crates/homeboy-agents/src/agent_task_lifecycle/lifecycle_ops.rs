@@ -642,7 +642,7 @@ pub fn record_run_aggregate(
 /// before the controller finalized its artifact-byte projection.
 pub fn reconcile_terminal_artifact_projection(run_id: &str) -> Result<bool> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
-    if !is_terminal_run_state(record.state) {
+    if !record.state.is_terminal() {
         return Ok(false);
     }
 
@@ -888,7 +888,7 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
         record.plan_path = controller_plan_path;
         store::write_record(&record)?;
     }
-    if !is_terminal_run_state(record.state) {
+    if !record.state.is_terminal() {
         if let Ok(aggregate) = store::read_aggregate(&record.run_id) {
             let aggregate_path = store::aggregate_path(&record.run_id)
                 .map(|path| path.display().to_string())
@@ -929,7 +929,7 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
             );
         }
     }
-    if is_terminal_run_state(record.state) {
+    if record.state.is_terminal() {
         if let Ok(aggregate) = store::read_aggregate(&record.run_id) {
             if !crate::agent_task_lifecycle::terminal_artifact_projection_is_verified(
                 &record, &aggregate,
@@ -1497,7 +1497,7 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
 /// job snapshot and cannot dispatch or resume provider work.
 pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
-    if !is_terminal_run_state(record.state) {
+    if !record.state.is_terminal() {
         return Ok(false);
     }
     let (Some(runner_id), Some(runner_job_id)) = (
@@ -1647,7 +1647,7 @@ pub(crate) fn reconcile_runner_job_snapshot(
     record: &mut AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
-    if is_terminal_run_state(record.state) {
+    if record.state.is_terminal() {
         // A transport-only terminal result can arrive before the daemon has
         // published the inner agent-task aggregate. Adopt that later evidence
         // when it proves the same controller run rather than losing its patch.
@@ -1923,18 +1923,6 @@ fn validate_terminal_child_identity(
         Some(record.run_id.clone()),
         None,
     ))
-}
-
-fn is_terminal_run_state(state: AgentTaskRunState) -> bool {
-    matches!(
-        state,
-        AgentTaskRunState::Succeeded
-            | AgentTaskRunState::CandidateRecoverable
-            | AgentTaskRunState::PartialRecoverable
-            | AgentTaskRunState::PartialFailure
-            | AgentTaskRunState::Failed
-            | AgentTaskRunState::Cancelled
-    )
 }
 
 fn aggregate_projection_plan(

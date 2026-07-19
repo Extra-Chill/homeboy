@@ -735,6 +735,28 @@ pub enum AgentTaskRunState {
     Cancelled,
 }
 
+impl AgentTaskRunState {
+    /// Whether this is a terminal run state — the run has finished (successfully,
+    /// with a recoverable candidate, partially, or by failure/cancellation) and
+    /// will not transition further on its own.
+    ///
+    /// The single definition of run terminality. Every place that used to
+    /// enumerate this set inline (`matches!(state, Succeeded | CandidateRecoverable
+    /// | ...)`) delegates here, so adding or reclassifying a run state cannot
+    /// leave a stale copy behind.
+    pub(crate) fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            AgentTaskRunState::Succeeded
+                | AgentTaskRunState::CandidateRecoverable
+                | AgentTaskRunState::PartialRecoverable
+                | AgentTaskRunState::PartialFailure
+                | AgentTaskRunState::Failed
+                | AgentTaskRunState::Cancelled
+        )
+    }
+}
+
 /// Canonical projection of a run's aggregate state onto the generic
 /// `RunExecutionState` carried by `RunLifecycleRecord`. The two enums share
 /// every agent-task variant 1:1 (`RunExecutionState` additionally models the
