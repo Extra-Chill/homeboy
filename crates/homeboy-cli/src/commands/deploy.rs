@@ -107,6 +107,10 @@ pub struct DeployArgs {
     exact_refs: BTreeMap<String, String>,
     #[arg(skip)]
     resolved_refs: BTreeMap<String, String>,
+    #[arg(skip)]
+    preflighted_source_paths: BTreeMap<String, String>,
+    #[arg(skip)]
+    preflighted_component_identities: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -183,7 +187,9 @@ pub fn run(
     let release_set = args.release_set.as_deref().map(load_release_set).transpose()?;
     validate_apply_boundary(&args)?;
     if let Some(release_set) = release_set.as_ref() {
-        apply_release_set(release_set, &mut args)?;
+        let (project_id, _) = resolve_single_deploy_target(&args)?;
+        args.target_id = Some(project_id.clone());
+        apply_release_set(release_set, &project_id, &mut args)?;
     }
 
     // Fleet deploy
@@ -313,17 +319,19 @@ fn load_release_set(path: &str) -> homeboy::core::Result<homeboy_core::release_s
 /// lifecycle creation, builds, transfers, or remote actions.
 fn apply_release_set(
     release_set: &homeboy_core::release_set::NormalizedReleaseSet,
+    project_id: &str,
     args: &mut DeployArgs,
 ) -> homeboy::core::Result<()> {
+    let project = homeboy::core::project::load(project_id)?;
     let mut active = Vec::new();
     for entry in &release_set.components {
-        match homeboy::core::component::load(&entry.id) {
+        match homeboy::core::project::resolve_project_component(&project, &entry.id) {
             Ok(component) => active.push((entry, component)),
             Err(_) if !entry.required => continue,
             Err(error) => {
                 return Err(homeboy::core::Error::validation_invalid_argument(
                     "release_set",
-                    format!("Required component '{}' is unavailable: {}", entry.id, error.message),
+                    format!("Required component '{}' is unavailable in project '{}': {}", entry.id, project_id, error.message),
                     None,
                     None,
                 ));
@@ -379,6 +387,21 @@ fn apply_release_set(
         .map(|(entry, _)| (entry.id.clone(), entry.requested_ref.clone()))
         .collect();
     args.resolved_refs = resolved_refs;
+    args.preflighted_source_paths = active
+        .iter()
+        .map(|(entry, component)| (entry.id.clone(), component.local_path.clone()))
+        .collect();
+    args.preflighted_component_identities = active
+        .iter()
+        .map(|(entry, component)| {
+            serde_json::to_string(component)
+                .map(|identity| (entry.id.clone(), identity))
+                .map_err(|error| homeboy::core::Error::internal_io(
+                    format!("Failed to encode release-set component '{}': {error}", entry.id),
+                    None,
+                ))
+        })
+        .collect::<homeboy::core::Result<_>>()?;
     Ok(())
 }
 
@@ -508,6 +531,8 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         requested_ref: args.requested_ref.clone(),
         requested_refs: args.exact_refs.clone(),
         resolved_refs: args.resolved_refs.clone(),
+        preflighted_source_paths: args.preflighted_source_paths.clone(),
+        preflighted_component_identities: args.preflighted_component_identities.clone(),
         tagged: args.tagged,
         prepared_artifact: None,
         resume_run_id: args.resume.clone(),

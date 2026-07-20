@@ -93,6 +93,10 @@ pub struct DeployConfig {
     pub requested_refs: BTreeMap<String, String>,
     /// Immutable commits accepted during release-set preflight, keyed by component ID.
     pub resolved_refs: BTreeMap<String, String>,
+    /// Effective project attachment paths accepted during release-set preflight.
+    pub preflighted_source_paths: BTreeMap<String, String>,
+    /// Effective component configuration identities accepted during release-set preflight.
+    pub preflighted_component_identities: BTreeMap<String, String>,
     /// Force tag-based deploy, ignoring any reusable build artifacts
     pub tagged: bool,
     /// An immutable artifact prepared by an upstream workflow.
@@ -124,6 +128,8 @@ impl DeployConfig {
             requested_ref: None,
             requested_refs: BTreeMap::new(),
             resolved_refs: BTreeMap::new(),
+            preflighted_source_paths: BTreeMap::new(),
+            preflighted_component_identities: BTreeMap::new(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

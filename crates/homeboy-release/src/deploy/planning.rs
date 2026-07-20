@@ -980,6 +980,8 @@ mod tests {
             requested_ref: None,
             requested_refs: Default::default(),
             resolved_refs: Default::default(),
+            preflighted_source_paths: Default::default(),
+            preflighted_component_identities: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

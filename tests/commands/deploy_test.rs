@@ -411,6 +411,8 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         resume: None,
         exact_refs: BTreeMap::new(),
         resolved_refs: BTreeMap::new(),
+        preflighted_source_paths: BTreeMap::new(),
+        preflighted_component_identities: BTreeMap::new(),
     };
     customize(&mut args);
     args

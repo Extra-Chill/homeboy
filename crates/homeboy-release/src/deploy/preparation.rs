@@ -744,6 +744,8 @@ impl DeployConfig {
             requested_ref: request.config.requested_ref.clone(),
             requested_refs: Default::default(),
             resolved_refs: Default::default(),
+            preflighted_source_paths: Default::default(),
+            preflighted_component_identities: Default::default(),
             tagged: request.config.tagged,
             prepared_artifact: None,
             resume_run_id: None,
