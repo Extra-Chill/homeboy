@@ -11,10 +11,10 @@
 //! extensions it handles and sends candidate files to that extension's
 //! `propagate_struct_fields` command. Any language whose refactor extension
 //! implements that command participates automatically — nothing in the scan
-//! loop is Rust-specific. Today only the Rust extension implements it;
-//! `find_struct_definition`/`extract_struct_source` parse Rust struct syntax, so
-//! a non-Rust implementation would supply its own definition source via
-//! `--definition`.
+//! loop is Rust-specific. Definition-finding and source-block extraction are
+//! also delegated to the language extension (via the `find_definition` command
+//! in [`crate::definition`]), so no struct syntax is parsed in this crate. Today
+//! only the Rust extension implements these commands.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -79,65 +79,61 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
     let root = config.root;
     let struct_name = config.struct_name;
 
-    // Step 1: Find the struct definition file
-    let def_file = if let Some(f) = config.definition_file {
-        PathBuf::from(f)
-    } else {
-        find_struct_definition(struct_name, root)?
-    };
+    // Discover every refactor-capable extension. Propagation is language-generic:
+    // any language whose refactor extension implements `propagate_struct_fields`
+    // (and `find_definition`) participates. Nothing below is Rust-specific — the
+    // Rust extension is merely the first implementer. Definition-finding and
+    // source extraction are delegated to the language extension via the
+    // `find_definition` command, so no struct syntax is parsed in this crate.
+    let refactor_exts = crate::definition::refactor_capable_extensions()?;
 
-    let def_path = if def_file.is_absolute() {
-        def_file.clone()
-    } else {
-        root.join(&def_file)
-    };
-
-    let def_content = std::fs::read_to_string(&def_path).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!(
-                "read struct definition from {}",
-                def_path.display()
-            )),
+    // Step 1 & 2: Locate the struct definition and extract its source block.
+    // When `--definition` is supplied the file is known but the source-block
+    // extraction is still language-specific, so it goes through the extension too.
+    let (def_file, struct_source) = if let Some(f) = config.definition_file {
+        let def_file = PathBuf::from(f);
+        let def_path = if def_file.is_absolute() {
+            def_file.clone()
+        } else {
+            root.join(&def_file)
+        };
+        let def_content = std::fs::read_to_string(&def_path).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!(
+                    "read struct definition from {}",
+                    def_path.display()
+                )),
+            )
+        })?;
+        let relative = def_file
+            .strip_prefix(root)
+            .unwrap_or(&def_file)
+            .to_string_lossy()
+            .to_string();
+        let source = crate::definition::extract_definition_source(
+            struct_name,
+            &def_content,
+            &relative,
+            &refactor_exts,
         )
-    })?;
-
-    // Step 2: Extract the struct source block
-    let struct_source = extract_struct_source(struct_name, &def_content).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "struct_name",
-            format!(
-                "Could not find struct `{}` in {}",
-                struct_name,
-                def_path.display()
-            ),
-            None,
-            None,
-        )
-    })?;
-
-    // Step 3: Discover every refactor-capable extension and the file extensions
-    // it handles. Propagation is language-generic: any language whose refactor
-    // extension implements the `propagate_struct_fields` command participates.
-    // The Rust extension is the first implementer, but nothing in the loop below
-    // is Rust-specific — a Go/Swift/PHP refactor extension that grows the same
-    // command is picked up automatically. (`find_struct_definition`/
-    // `extract_struct_source` currently parse Rust struct syntax; a non-Rust
-    // implementation would supply its own definition source via `--definition`.)
-    let refactor_exts: Vec<extension::ExtensionManifest> = extension::load_all_extensions()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|m| m.refactor_script().is_some() && !m.provided_file_extensions().is_empty())
-        .collect();
-
-    if refactor_exts.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "extension",
-            "No extension with refactor capability found. Install a language refactor extension (e.g. the Rust extension).",
-            None,
-            None,
-        ));
-    }
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "struct_name",
+                format!(
+                    "Could not find struct `{}` in {}",
+                    struct_name,
+                    def_path.display()
+                ),
+                None,
+                None,
+            )
+        })?;
+        (def_file, source)
+    } else {
+        let located = crate::definition::find_definition(struct_name, root, &refactor_exts)?;
+        (located.file, located.source)
+    };
 
     let def_relative = def_file
         .strip_prefix(root)
@@ -289,111 +285,6 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
 // ============================================================================
 // Internal helpers
 // ============================================================================
-
-/// Find the file containing a struct definition by scanning the codebase.
-pub(crate) fn find_struct_definition(struct_name: &str, root: &Path) -> Result<PathBuf, Error> {
-    let pattern = format!("pub struct {} ", struct_name);
-    let pattern_brace = format!("pub struct {} {{", struct_name);
-    let pattern_crate = format!("pub(crate) struct {} ", struct_name);
-    let pattern_crate_brace = format!("pub(crate) struct {} {{", struct_name);
-
-    let scan_config = ScanConfig {
-        extensions: ExtensionFilter::Only(vec!["rs".to_string()]),
-        skip_hidden: true,
-        ..Default::default()
-    };
-    let files = codebase_scan::walk_files(root, &scan_config);
-
-    for file_path in &files {
-        let Ok(content) = std::fs::read_to_string(file_path) else {
-            continue;
-        };
-        if content.contains(&pattern)
-            || content.contains(&pattern_brace)
-            || content.contains(&pattern_crate)
-            || content.contains(&pattern_crate_brace)
-        {
-            return Ok(file_path.clone());
-        }
-    }
-
-    Err(Error::validation_invalid_argument(
-        "struct_name",
-        format!(
-            "Could not find struct `{}` in any .rs file under {}",
-            struct_name,
-            root.display()
-        ),
-        None,
-        Some(vec![format!(
-            "homeboy refactor propagate --struct-name {} --definition src/path/to/file.rs",
-            struct_name
-        )]),
-    ))
-}
-
-/// Extract the full struct source block (including doc comments and attributes)
-/// from file content.
-pub(crate) fn extract_struct_source(struct_name: &str, content: &str) -> Option<String> {
-    let lines: Vec<&str> = content.lines().collect();
-
-    let struct_pattern = format!("struct {} ", struct_name);
-    let struct_pattern_brace = format!("struct {} {{", struct_name);
-    let mut start_line = None;
-
-    for (i, line) in lines.iter().enumerate() {
-        if line.contains(&struct_pattern) || line.contains(&struct_pattern_brace) {
-            // Walk backwards to include attributes and doc comments
-            let mut actual_start = i;
-            for j in (0..i).rev() {
-                let trimmed = lines[j].trim();
-                if trimmed.starts_with('#')
-                    || trimmed.starts_with("///")
-                    || trimmed.starts_with("//!")
-                {
-                    actual_start = j;
-                } else if trimmed.is_empty() {
-                    if j > 0
-                        && (lines[j - 1].trim().starts_with('#')
-                            || lines[j - 1].trim().starts_with("///"))
-                    {
-                        actual_start = j;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            start_line = Some(actual_start);
-            break;
-        }
-    }
-
-    let start = start_line?;
-
-    // Find the closing brace
-    let mut depth = 0i32;
-    let mut found_open = false;
-    let mut end_line = start;
-
-    for (i, line_content) in lines.iter().enumerate().skip(start) {
-        for ch in line_content.chars() {
-            if ch == '{' {
-                depth += 1;
-                found_open = true;
-            } else if ch == '}' {
-                depth -= 1;
-            }
-        }
-        if found_open && depth == 0 {
-            end_line = i;
-            break;
-        }
-    }
-
-    Some(lines[start..=end_line].join("\n"))
-}
 
 /// Extract field information from propagation edits.
 ///
