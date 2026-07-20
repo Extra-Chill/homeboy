@@ -440,22 +440,45 @@ fn mirror_remote_observation_runs_by_id(
     run_ids: &[String],
     notification_route: Option<&NotificationRoute>,
 ) -> Result<Vec<RunRecord>> {
+    mirror_remote_observation_runs_by_id_with(
+        store,
+        runner,
+        job,
+        run_ids,
+        notification_route,
+        |run_id| {
+            let detail_data = daemon_api_get(
+                &runner.id,
+                &format!("/runs/{}", encode_uri_component(run_id)),
+            )?;
+            let detail_body = canonical_daemon_body(&detail_data, "runner run detail response")?;
+            Ok(detail_body.get("run").cloned())
+        },
+    )
+}
+
+pub(super) fn mirror_remote_observation_runs_by_id_with<F>(
+    store: &ObservationStore,
+    runner: &Runner,
+    job: &Job,
+    run_ids: &[String],
+    notification_route: Option<&NotificationRoute>,
+    mut fetch_detail: F,
+) -> Result<Vec<RunRecord>>
+where
+    F: FnMut(&str) -> Result<Option<Value>>,
+{
     let mut mirrored = Vec::new();
     for run_id in run_ids {
-        let detail_data = daemon_api_get(
-            &runner.id,
-            &format!("/runs/{}", encode_uri_component(run_id)),
-        )?;
-        let detail_body = canonical_daemon_body(&detail_data, "runner run detail response")?;
-        let Some(detail) = detail_body.get("run") else {
+        let Some(detail) = fetch_detail(run_id)? else {
             continue;
         };
-        let mut run = remote_detail_to_run_record(detail, runner, Some(job))?;
+        let mut run = remote_detail_to_run_record(&detail, runner, Some(job))?;
         if let Some(notification_route) = notification_route {
             notification_route.insert_into_metadata(&mut run.metadata_json);
         }
         import_run_if_absent(store, &run)?;
-        for artifact in remote_detail_artifacts(detail, runner, &run.id)? {
+        for artifact in remote_detail_artifacts(&detail, runner, &run.id)? {
             import_mirrored_artifact(store, &artifact)?;
         }
         mirrored.push(run);

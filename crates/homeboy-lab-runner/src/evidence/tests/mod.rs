@@ -19,8 +19,8 @@ use super::detail::{
 use super::download::{content_disposition_filename, download_remote_artifact};
 use super::mirror::{
     bounded_remote_events, import_mirrored_artifact_with_downloader, mirror_job_run,
-    mirrored_patch_result, primary_mirrored_run, MIRRORED_REMOTE_EVENT_LIMIT,
-    MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
+    mirror_remote_observation_runs_by_id_with, mirrored_patch_result, primary_mirrored_run,
+    MIRRORED_REMOTE_EVENT_LIMIT, MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
 };
 use super::tokens::{
     is_reportable_artifact_evidence_path, is_retrievable_runner_artifact, runner_artifact_token,
@@ -841,7 +841,7 @@ fn test_explicit_observation_run_ids_prefers_result_lineage() {
 }
 
 #[test]
-fn terminal_mirroring_keeps_overlapping_jobs_and_artifacts_bound_to_their_durable_runs() {
+fn terminal_mirroring_imports_only_the_submitted_overlapping_job_run_and_artifacts() {
     let mut first = Job {
         id: Uuid::new_v4(),
         operation: "runner.exec".to_string(),
@@ -893,14 +893,67 @@ fn terminal_mirroring_keeps_overlapping_jobs_and_artifacts_bound_to_their_durabl
         });
     }
 
-    // Both jobs occupy the same terminal window. Each terminal mirror must use
-    // its accepted durable run and artifact reference, never the other job's.
-    assert_eq!(
-        explicit_observation_run_ids(&json!({}), &first),
-        vec!["first-run".to_string()]
-    );
-    assert_eq!(
-        explicit_observation_run_ids(&json!({}), &second),
-        vec!["second-run".to_string()]
-    );
+    for (job, expected_run, other_run, artifact_id) in [
+        (&first, "first-run", "second-run", "first-result"),
+        (&second, "second-run", "first-run", "second-result"),
+    ] {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let runner = ssh_runner();
+            let details = std::collections::HashMap::from([
+                (
+                    "first-run",
+                    json!({
+                        "id": "first-run",
+                        "kind": "fuzz",
+                        "started_at": "2023-11-14T22:13:20Z",
+                        "finished_at": "2023-11-14T22:13:21Z",
+                        "status": "pass",
+                        "artifacts": [{"id": "first-result", "kind": "fuzz_results"}]
+                    }),
+                ),
+                (
+                    "second-run",
+                    json!({
+                        "id": "second-run",
+                        "kind": "fuzz",
+                        "started_at": "2023-11-14T22:13:20Z",
+                        "finished_at": "2023-11-14T22:13:21Z",
+                        "status": "fail",
+                        "artifacts": [{"id": "second-result", "kind": "fuzz_results"}]
+                    }),
+                ),
+            ]);
+
+            let run_ids = explicit_observation_run_ids(&json!({}), job);
+            let mirrored = mirror_remote_observation_runs_by_id_with(
+                &store,
+                &runner,
+                job,
+                &run_ids,
+                None,
+                |run_id| Ok(details.get(run_id).cloned()),
+            )
+            .expect("mirror submitted terminal run");
+
+            assert_eq!(mirrored.len(), 1);
+            assert_eq!(mirrored[0].id, expected_run);
+            assert_eq!(
+                mirrored[0].metadata_json["lab"]["remote_job_id"],
+                job.id.to_string()
+            );
+            assert!(store
+                .get_run(other_run)
+                .expect("other run lookup")
+                .is_none());
+            assert_eq!(
+                store
+                    .get_artifact(artifact_id)
+                    .expect("artifact lookup")
+                    .expect("mirrored artifact")
+                    .run_id,
+                expected_run
+            );
+        });
+    }
 }
