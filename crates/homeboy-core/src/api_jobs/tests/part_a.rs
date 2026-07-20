@@ -385,6 +385,7 @@ fn capacity_queued_agent_task_spawns_once_after_claiming_an_idle_slot() {
         None,
         None,
         local_runner(),
+        None,
         1,
         move |job| {
             job.start_with_reserved_child_identity(
@@ -412,6 +413,7 @@ fn capacity_queued_agent_task_spawns_once_after_claiming_an_idle_slot() {
         None,
         None,
         local_runner(),
+        None,
         1,
         move |job| {
             job.start_with_reserved_child_identity(
@@ -461,6 +463,7 @@ fn capacity_queued_agent_task_persists_typed_failure_before_child_identity() {
             cwd: Some("/runner/worktree".to_string()),
             lifecycle: None,
         },
+        None,
         1,
         move |_job| {
             Err::<serde_json::Value, _>(Error::internal_io(
@@ -779,6 +782,7 @@ fn capacity_queued_local_runner_enqueue_dedupes_on_durable_run_id() {
             None,
             None,
             local_runner("dup-run"),
+            None,
             usize::MAX,
             {
                 let wait = wait;
@@ -797,6 +801,7 @@ fn capacity_queued_local_runner_enqueue_dedupes_on_durable_run_id() {
             None,
             None,
             local_runner("dup-run"),
+            None,
             usize::MAX,
             move |_job| Ok(serde_json::json!({})),
         );
@@ -824,6 +829,7 @@ fn capacity_queued_local_runner_enqueue_dedupes_on_durable_run_id() {
             None,
             None,
             local_runner("other-run"),
+            None,
             usize::MAX,
             move |_job| Ok(serde_json::json!({})),
         );
