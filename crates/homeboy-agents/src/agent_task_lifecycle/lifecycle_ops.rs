@@ -597,6 +597,95 @@ pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     Ok(record)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderExecutionReservation {
+    Acquired,
+    AlreadyReserved,
+}
+
+/// Durably reserve one provider execution before the scheduler blocks on the
+/// backend. A resumed controller must reconcile an existing reservation rather
+/// than dispatching the same `(task_id, attempt)` a second time.
+pub fn reserve_provider_execution(
+    run_id: &str,
+    task: &AgentTaskRequest,
+    attempt: u32,
+) -> Result<ProviderExecutionReservation> {
+    let run_id = sanitize_run_id(run_id);
+    let execution_key = format!("{}:{attempt}", task.task_id);
+    let mut reservation = ProviderExecutionReservation::AlreadyReserved;
+    store::mutate_record(&run_id, |record| {
+        let metadata = record.ensure_metadata_object();
+        let consumed = {
+            let executions = metadata
+                .entry("provider_executions".to_string())
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .expect("provider_executions must be an array");
+            if executions
+                .iter()
+                .any(|execution| execution["key"] == execution_key)
+            {
+                return false;
+            }
+            executions.push(json!({
+                "key": execution_key,
+                "task_id": task.task_id,
+                "attempt": attempt,
+                "backend": task.executor.backend,
+                "model": task.executor.model(),
+                "state": "running",
+                "started_at": now_timestamp(),
+            }));
+            executions.len()
+        };
+        metadata.insert("provider_executions_consumed".to_string(), json!(consumed));
+        reservation = ProviderExecutionReservation::Acquired;
+        true
+    })?;
+    Ok(reservation)
+}
+
+/// Record the provider's terminal result before controller-owned patch
+/// harvesting. Harvesting can fail or be interrupted independently of the
+/// provider execution, so it must not leave this reservation running.
+pub fn record_provider_execution_terminal(
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    state: &str,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let execution_key = format!("{task_id}:{attempt}");
+    let mut found = false;
+    let record = store::mutate_record(&run_id, |record| {
+        let Some(execution) = record
+            .ensure_metadata_object()
+            .get_mut("provider_executions")
+            .and_then(Value::as_array_mut)
+            .and_then(|executions| {
+                executions
+                    .iter_mut()
+                    .find(|execution| execution["key"] == execution_key)
+            })
+        else {
+            return false;
+        };
+        execution["state"] = json!(state);
+        execution["finished_at"] = json!(now_timestamp());
+        found = true;
+        true
+    })?;
+    if !found {
+        return Err(Error::internal_unexpected(
+            "provider execution reached a terminal result without its durable attempt record",
+        ));
+    }
+    record.ok_or_else(|| {
+        Error::internal_unexpected("provider execution terminal record was unchanged")
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn rewrite_record_for_test<F>(run_id: &str, mut rewrite: F) -> Result<AgentTaskRunRecord>
 where

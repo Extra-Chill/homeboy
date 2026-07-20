@@ -20,7 +20,7 @@ use homeboy_core::worktree;
 use serde_json::Value;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 
 #[test]
 fn cook_usage_reads_scheduler_rotation_metadata_and_decrements_budget() {
@@ -89,6 +89,92 @@ fn service_run_loaded_plan_persists_durable_lifecycle() {
         assert_eq!(record.state, AgentTaskRunState::Succeeded);
         assert_eq!(record.tasks[0].state, AgentTaskState::Succeeded);
         assert!(record.aggregate_path.is_some());
+        assert_eq!(record.metadata["provider_executions_consumed"], 1);
+        assert_eq!(record.lifecycle.provider_runtime.len(), 1);
+        assert_eq!(
+            record.lifecycle.provider_runtime[0].state,
+            homeboy_core::run_lifecycle_record::ProviderRuntimeState::Succeeded
+        );
+        assert_eq!(
+            record.lifecycle.provider_runtime[0].metadata["evidence_source"],
+            "durable_provider_execution"
+        );
+    });
+}
+
+#[test]
+fn provider_execution_reservation_is_exactly_once_and_terminal() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some("provider-reservation"))
+            .expect("run submitted");
+        let task = &plan.tasks[0];
+
+        assert_eq!(
+            agent_task_lifecycle::reserve_provider_execution("provider-reservation", task, 1)
+                .expect("first reservation"),
+            agent_task_lifecycle::ProviderExecutionReservation::Acquired
+        );
+        assert_eq!(
+            agent_task_lifecycle::reserve_provider_execution("provider-reservation", task, 1)
+                .expect("restart observes reservation"),
+            agent_task_lifecycle::ProviderExecutionReservation::AlreadyReserved
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        AgentTaskScheduler::new(CountingExecutor {
+            calls: Arc::clone(&calls),
+        })
+        .with_run_id("provider-reservation")
+        .run(plan.clone());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "an existing reservation must be reconciled, never redispatched"
+        );
+        agent_task_lifecycle::record_provider_execution_terminal(
+            "provider-reservation",
+            &task.task_id,
+            1,
+            "cancelled",
+        )
+        .expect("terminal cancellation recorded");
+
+        let record = lifecycle_status("provider-reservation").expect("durable record");
+        assert_eq!(record.metadata["provider_executions_consumed"], 1);
+        assert_eq!(
+            record.metadata["provider_executions"][0]["state"],
+            "cancelled"
+        );
+    });
+}
+
+#[test]
+fn concurrent_schedulers_dispatch_one_reserved_provider_execution() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some("concurrent-provider-reservation"))
+            .expect("run submitted");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(2));
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let plan = plan.clone();
+            let calls = Arc::clone(&calls);
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                AgentTaskScheduler::new(CountingExecutor { calls })
+                    .with_run_id("concurrent-provider-reservation")
+                    .run(plan)
+            }));
+        }
+        for thread in threads {
+            let _ = thread.join().expect("scheduler thread completes");
+        }
+
+        let record = lifecycle_status("concurrent-provider-reservation").expect("durable record");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(record.metadata["provider_executions_consumed"], 1);
     });
 }
 
@@ -253,6 +339,15 @@ fn service_persists_timed_out_run_record_and_evidence_refs() {
         assert_eq!(record.tasks[0].state, AgentTaskState::TimedOut);
         assert_eq!(record.totals.as_ref().expect("totals").timed_out, 1);
         assert!(record.aggregate_path.is_some());
+        assert_eq!(record.metadata["provider_executions_consumed"], 1);
+        assert_eq!(
+            record.metadata["provider_executions"][0]["state"],
+            "timed_out"
+        );
+        assert_eq!(
+            record.lifecycle.provider_runtime[0].state,
+            homeboy_core::run_lifecycle_record::ProviderRuntimeState::TimedOut
+        );
         assert!(record
             .artifact_refs
             .iter()
@@ -894,6 +989,35 @@ impl AgentTaskExecutorAdapter for TimeoutExecutor {
 
 struct CapturingExecutor {
     observed_request: Arc<Mutex<Option<AgentTaskRequest>>>,
+}
+
+struct CountingExecutor {
+    calls: Arc<AtomicUsize>,
+}
+
+impl AgentTaskExecutorAdapter for CountingExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("ok".to_string()),
+            failure_classification: None,
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
 }
 
 struct RotationThenSuccess {

@@ -529,12 +529,16 @@ fn validate_durable_publication_eligibility(
     promotion: &AgentTaskPromotionReport,
 ) -> Result<DurablePublicationEligibility> {
     use homeboy_core::run_lifecycle_record::{ProviderRuntimeState, RunExecutionState};
-    if lifecycle.execution.state == RunExecutionState::Succeeded
-        && !lifecycle.provider_runtime.is_empty()
+    if !lifecycle.provider_runtime.is_empty()
         && lifecycle
             .provider_runtime
             .iter()
             .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded)
+        && (lifecycle.execution.state == RunExecutionState::Succeeded
+            || (lifecycle.execution.state == RunExecutionState::PartialFailure
+                && lifecycle.provider_runtime.iter().all(|runtime| {
+                    runtime.metadata["evidence_source"] == "durable_provider_execution"
+                })))
     {
         return Ok(DurablePublicationEligibility::ProviderRun);
     }
