@@ -1648,8 +1648,41 @@ mod tests {
         }
     }
 
+    /// Shared, process-wide root for fixture provider scripts.
+    ///
+    /// Each fixture script needs a stable on-disk path that outlives the helper
+    /// that creates it (the test executes it later). Previously each helper
+    /// `.keep()`-ed its own `tempfile::tempdir()`, which permanently disables
+    /// `TempDir`'s `Drop` cleanup — leaking one directory per fixture on every
+    /// run (see #9173 follow-up). Instead, anchor all fixture scripts under a
+    /// single `TempDir` owned by this `OnceLock`: it is created once, cleans up
+    /// when the test process exits normally, and is `hb-test-` prefixed so the
+    /// startup sweep (#9177) reclaims it even if the process is killed.
+    fn fixture_script_root() -> &'static std::path::Path {
+        static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        ROOT.get_or_init(|| {
+            tempfile::Builder::new()
+                .prefix("hb-test-worktree-fixtures-")
+                .tempdir()
+                .expect("fixture script root tempdir")
+        })
+        .path()
+    }
+
+    /// Allocate a fresh, unique subdirectory under [`fixture_script_root`] for a
+    /// single fixture script. Uniqueness avoids collisions between fixtures
+    /// within one test run; cleanup is handled by the shared root.
+    fn unique_fixture_script_dir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = fixture_script_root().join(format!("fixture-{id}"));
+        fs::create_dir_all(&dir).expect("create fixture script dir");
+        dir
+    }
+
     fn fake_provider_script() -> String {
-        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let dir = unique_fixture_script_dir();
         let script = dir.join("provider");
         fs::write(&script, "#!/bin/sh\nprintf '{\"mode\":\"%s\"}\n' \"$1\"\n")
             .expect("write script");
@@ -1658,7 +1691,7 @@ mod tests {
     }
 
     fn fake_provider_script_with_refs() -> String {
-        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let dir = unique_fixture_script_dir();
         let script = dir.join("provider");
         fs::write(
             &script,
@@ -1674,7 +1707,7 @@ mod tests {
     }
 
     fn fake_list_provider_script(output: Value) -> String {
-        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let dir = unique_fixture_script_dir();
         let script = dir.join("provider");
         fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", output))
             .expect("write script");
@@ -1683,7 +1716,7 @@ mod tests {
     }
 
     fn fake_list_provider_script_with_marker(output: Value, marker: &std::path::Path) -> String {
-        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let dir = unique_fixture_script_dir();
         let script = dir.join("provider");
         fs::write(
             &script,
@@ -1699,7 +1732,7 @@ mod tests {
     }
 
     fn fake_failing_provider_script() -> String {
-        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let dir = unique_fixture_script_dir();
         let script = dir.join("provider");
         fs::write(
             &script,
