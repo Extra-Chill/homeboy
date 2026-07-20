@@ -1555,29 +1555,48 @@ fn reserve_admission(
                 None,
             )
         })?;
+    let idempotency_key = body
+        .get("idempotency_key")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let daemon_lease = heartbeat_lease()?;
     validate_admission_lease(expected_daemon_lease_id, &daemon_lease.lease_id)?;
-    let job = job_store.create_with_source_snapshot_metadata_and_path_materialization_plan(
-        "runner.admission",
-        None,
-        Some(json!({
-            "runner_job_projection": {
-                "runner_id": runner_id,
-                "command": command,
-                "cwd": serde_json::Value::Null,
-                "source": "runner-daemon",
-                "kind": "runner.admission",
-                "lifecycle": serde_json::Value::Null,
-            },
-            "admission": {
-                "runner_id": runner_id,
-                "state": "reserved",
-                "daemon_lease_id": daemon_lease.lease_id.clone(),
-            },
-        })),
-        None,
-    );
-    Ok(json!({ "job": job, "daemon_lease_id": daemon_lease.lease_id }))
+    let metadata = json!({
+        "runner_job_projection": {
+            "runner_id": runner_id,
+            "command": command,
+            "cwd": serde_json::Value::Null,
+            "source": "runner-daemon",
+            "kind": "runner.admission",
+            "lifecycle": serde_json::Value::Null,
+        },
+        "admission": {
+            "runner_id": runner_id,
+            "state": "reserved",
+            "daemon_lease_id": daemon_lease.lease_id.clone(),
+            "idempotency_key": idempotency_key,
+        },
+    });
+    let (job, created) = match idempotency_key {
+        Some(idempotency_key) => {
+            job_store.create_or_reuse_active_admission(metadata, idempotency_key)
+        }
+        None => (
+            job_store.create_with_source_snapshot_metadata_and_path_materialization_plan(
+                "runner.admission",
+                None,
+                Some(metadata),
+                None,
+            ),
+            true,
+        ),
+    };
+    Ok(json!({
+        "job": job,
+        "daemon_lease_id": daemon_lease.lease_id,
+        "idempotent_resubmission": !created,
+    }))
 }
 
 fn validate_admission_lease(expected_lease_id: &str, actual_lease_id: &str) -> Result<()> {
@@ -2371,6 +2390,50 @@ mod tests {
                 0
             );
             assert!(store.active_runner_jobs().is_empty());
+        });
+    }
+
+    #[test]
+    fn admission_reservation_dedupes_a_detached_run_and_releases_it() {
+        with_isolated_home(|_| {
+            let lease_id = "lease-deduped-admission";
+            write_test_lease(lease_id);
+            let store = JobStore::default();
+            let request = || {
+                Some(json!({
+                    "runner_id": "lab",
+                    "command": "homeboy agent-task run-plan",
+                    "expected_daemon_lease_id": lease_id,
+                    "idempotency_key": "mdi-134-bootstrap-hash-attempt-1",
+                }))
+            };
+
+            let first = reserve_admission(request(), &store).expect("reserve admission");
+            let replay = reserve_admission(request(), &store).expect("dedupe admission replay");
+            let job_id = first["job"]["id"].as_str().expect("reservation job ID");
+
+            assert_eq!(replay["job"]["id"], job_id);
+            assert_eq!(replay["idempotent_resubmission"], true);
+            assert_eq!(
+                store
+                    .list()
+                    .into_iter()
+                    .filter(|job| job.operation == "runner.admission")
+                    .count(),
+                1,
+                "one durable attempt creates exactly one admission reservation"
+            );
+
+            let released = release_admission(&format!("/admissions/{job_id}/release"), &store)
+                .expect("release reservation after failed handoff");
+            assert_eq!(released["job"]["status"], "cancelled");
+            assert_eq!(
+                daemon_freshness_report(&store)
+                    .expect("freshness after release")
+                    .active_jobs,
+                0,
+                "a failed or timed-out handoff leaves no active admission job"
+            );
         });
     }
 

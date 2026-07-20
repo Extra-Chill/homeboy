@@ -1249,6 +1249,7 @@ pub(crate) fn run_lab_offload_inner(
             local_url,
             &redact_argv_shell_display(&command_prefix.argv),
             expected_daemon_lease_id,
+            pre_acceptance_run_id.as_deref(),
         )
     })
     .transpose()?;
