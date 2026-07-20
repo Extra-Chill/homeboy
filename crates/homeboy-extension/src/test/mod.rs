@@ -311,19 +311,33 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
     }
 
     if filter_args.len() == 1 {
+        // A module filter (`cargo test -- <module>`) is applied against every
+        // target cargo builds. At a workspace root that only tests the root
+        // package (no `--workspace` for filter scopes), a filter naming a
+        // *member crate's* module matches zero tests in the root package and
+        // the run fails closed with "0 tests". Bind the filter to the owning
+        // crate's lib target with `-p <crate> --lib` so it executes against the
+        // package that actually defines the module. (#8758)
+        let owning_package = files
+            .first()
+            .and_then(|file| owning_workspace_member_package(component, file));
+
+        let runner_args = match &owning_package {
+            Some(package) => format!("-p\n{package}\n--lib\n--\n{}", filter_args[0]),
+            None => format!("--\n{}", filter_args[0]),
+        };
+        let message = match &owning_package {
+            Some(package) => format!("Scoped to changed files in {package}: {}", filter_args[0]),
+            None => format!("Scoped to changed files: {}", filter_args[0]),
+        };
+
         return vec![
             (
                 "HOMEBOY_TEST_SCOPE_KIND".to_string(),
                 "rust_filter".to_string(),
             ),
-            (
-                "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
-                format!("--\n{}", filter_args[0]),
-            ),
-            (
-                "HOMEBOY_TEST_SCOPE_MESSAGE".to_string(),
-                format!("Scoped to changed files: {}", filter_args[0]),
-            ),
+            ("HOMEBOY_TEST_RUNNER_ARGS".to_string(), runner_args),
+            ("HOMEBOY_TEST_SCOPE_MESSAGE".to_string(), message),
         ];
     }
 
@@ -369,6 +383,67 @@ fn cargo_relative_test_path(component: &Component, test_file: &str) -> Option<St
             return None;
         }
     }
+}
+
+/// Resolve the workspace-member package that owns `test_file`, when it is a
+/// crate strictly below the component root.
+///
+/// When the component is itself a single crate (its root `Cargo.toml` is a
+/// `[package]`), a bare module filter already runs against that package, so no
+/// package selector is needed and this returns `None`. When the component is a
+/// workspace and the changed file lives in a member crate under the root, the
+/// module filter must be scoped to that crate's lib target — otherwise cargo
+/// applies it only to the root package and matches zero tests. In that case
+/// this returns the owning member crate's package name. (#8758)
+fn owning_workspace_member_package(component: &Component, test_file: &str) -> Option<String> {
+    let component_root = component_source_path(component);
+    let file_path = component_root.join(test_file);
+    let mut directory = file_path.parent()?;
+
+    loop {
+        let manifest = directory.join("Cargo.toml");
+        if manifest.is_file() {
+            // The component root's own manifest is the default cargo scope; a
+            // filter already resolves against it, so it needs no `-p`.
+            if directory == component_root {
+                return None;
+            }
+            return cargo_manifest_package_name(&manifest);
+        }
+        directory = directory.parent()?;
+        if !directory.starts_with(&component_root) {
+            return None;
+        }
+    }
+}
+
+/// Extract the `[package] name` from a `Cargo.toml`.
+///
+/// Returns `None` for virtual-workspace manifests (no `[package]`) or when the
+/// name cannot be read; callers then fall back to an unscoped filter.
+fn cargo_manifest_package_name(manifest: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(manifest).ok()?;
+    let mut in_package_section = false;
+
+    for raw in contents.lines() {
+        let line = raw.trim();
+        if let Some(section) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            in_package_section = section.trim() == "package";
+            continue;
+        }
+        if !in_package_section {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("name") {
+            let value = rest.trim_start().strip_prefix('=')?.trim();
+            let name = value.trim_matches(|c| c == '"' || c == '\'').trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+
+    None
 }
 
 /// Returns `true` when `test_file` is an inline test module (lives under a
@@ -808,10 +883,55 @@ mod tests {
             "HOMEBOY_TEST_SCOPE_KIND".to_string(),
             "rust_filter".to_string()
         )));
+        // The changed file lives in the `homeboy-lab-runner` member crate, not
+        // the workspace root, so the module filter must bind to that crate's lib
+        // target (`-p homeboy-lab-runner --lib`). A bare `-- <module>` filter at
+        // the workspace root only tests the root package and matches zero tests,
+        // which fails the release-blocking changed-scope gate. (#8758)
         assert!(
             env.contains(&(
                 "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
-                "--\nworkspace::tests::snapshot".to_string()
+                "-p\nhomeboy-lab-runner\n--lib\n--\nworkspace::tests::snapshot".to_string()
+            )),
+            "env: {env:?}"
+        );
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_keeps_component_root_crate_filter_unscoped() {
+        // When the component *is* the crate (its root Cargo.toml is a
+        // `[package]`), a bare module filter already runs against that package;
+        // no `-p` selector should be emitted. (#8758)
+        let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture-crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write component Cargo.toml");
+        let test_rel = "src/core/tests/scope.rs";
+        let test_path = dir.path().join(test_rel);
+        std::fs::create_dir_all(test_path.parent().expect("parent dir"))
+            .expect("create test module dirs");
+        std::fs::write(&test_path, "#[test]\nfn runs() { assert!(true); }\n")
+            .expect("write inline test module");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(&component, &[test_rel.to_string()]);
+
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            "rust_filter".to_string()
+        )));
+        assert!(
+            env.contains(&(
+                "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
+                "--\ncore::tests::scope".to_string()
             )),
             "env: {env:?}"
         );
