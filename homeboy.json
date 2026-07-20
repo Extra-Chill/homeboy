@@ -132,13 +132,13 @@
         "description": "Core boundary leak (core-agnostic-source) configured ecosystem term `{term}` appears at line {line} in {classification} context `{context}`",
         "exclude_path_contains": [
           "crates/homeboy-core/src/execution_contract.rs",
-          "crates/homeboy-core/src/code_audit/conventions/",
-          "crates/homeboy-core/src/code_audit/comment_blocks.rs",
-          "crates/homeboy-core/src/code_audit/comment_hygiene.rs",
-          "crates/homeboy-core/src/code_audit/core_fingerprint/mod.rs",
-          "crates/homeboy-core/src/code_audit/core_fingerprint/relationships.rs",
-          "crates/homeboy-core/src/code_audit/detectors/test_coverage.rs",
-          "crates/homeboy-core/src/code_audit/detectors/global_env_guard.rs",
+          "crates/homeboy-code-audit/src/conventions/",
+          "crates/homeboy-code-audit/src/comment_blocks.rs",
+          "crates/homeboy-code-audit/src/comment_hygiene.rs",
+          "crates/homeboy-code-audit/src/core_fingerprint/mod.rs",
+          "crates/homeboy-code-audit/src/core_fingerprint/relationships.rs",
+          "crates/homeboy-code-audit/src/detectors/test_coverage.rs",
+          "crates/homeboy-code-audit/src/detectors/global_env_guard.rs",
           "crates/homeboy-core/src/runner/tool_registry.rs",
           "crates/homeboy-core/src/cleanup.rs",
           "crates/homeboy-core/src/cleanup/self_artifacts.rs",
@@ -276,15 +276,15 @@
         "default_match": "token",
         "description": "Core boundary leak (detector-agnostic-source) configured ecosystem term `{term}` appears at line {line} in {classification} context `{context}`",
         "exclude_path_contains": [
-          "crates/homeboy-core/src/code_audit/detectors/test_coverage.rs",
-          "crates/homeboy-core/src/code_audit/detectors/global_env_guard.rs"
+          "crates/homeboy-code-audit/src/detectors/test_coverage.rs",
+          "crates/homeboy-code-audit/src/detectors/global_env_guard.rs"
         ],
         "id": "detector-agnostic-source",
         "ignore_after_line_equals": [
           "#[cfg(test)]"
         ],
         "include_path_contains": [
-          "crates/homeboy-core/src/code_audit/detectors/"
+          "crates/homeboy-code-audit/src/detectors/"
         ],
         "kind": "core_boundary_leak",
         "suggestion": "Move ecosystem-specific behavior into extension metadata/rules, or add an explicit audit allowlist for intentional examples.",
