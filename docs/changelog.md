@@ -4,6 +4,50 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.298.0] - 2026-07-20
+
+### Added
+- detect raw commands that bypass a thin-wrapper helper (#9236)
+- detect literals that bypass an existing named constant (#9233)
+- detect skeleton-duplicate functions (#9217)
+
+### Changed
+- weekly full-tree audit debt sweep that files tracking issues
+- Bind Lab snapshot identity before validation
+- Canonicalize recoverable cook patch artifacts
+- Allow zero-downtime runner daemon upgrades
+- Preserve managed cook retry workspace identity
+- Queue concurrent cook controller admission
+- cap skeleton-duplicate group size to cut idiomatic noise
+- Continue authorized dirty candidates through Lab Cook
+- Supervise candidate adoption gates
+- share one scheduler-side Git runner
+- resolve a task's declared source root in one place
+
+### Fixed
+- fix(lab-runner): ignore session sidecars
+- fix(lab-runner): migrate generation registry identity
+- remove duplicate Lab snapshot binder
+- preserve gate feedback baseline (#9204)
+- ignore runner metadata in preflight
+- bind Lab snapshot job identity
+- fix(lab-runner): scope synthetic snapshot cleanliness check to source paths
+- make snapshot identity portable
+- consume Lab admission on exec handoff
+- preserve symlinked runtime closure
+- add missing VerifyGateOptions fields in promotion provider test
+- report canonical GitHub release URL
+- materialize local executor dependencies
+- fix(test-support): set git identity in fixture command helpers
+- persist provider execution reservations (#9180)
+- generate evidence-backed review dossiers (#8058)
+- honor source build identity (#4466)
+- isolate inherited gate failures (#8964)
+- canonicalize release-set attachment identity
+- retry against the managed worktree, not a cleaned-up baseline
+- fix(lab-runner): project explicit runner terminal status
+- fix(agent-task): exclude runner metadata from provider deltas
+
 ## [0.297.2] - 2026-07-20
 
 ### Changed
