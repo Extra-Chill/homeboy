@@ -1884,6 +1884,7 @@ pub(crate) fn reconcile_runner_job_snapshot(
             preserve_terminal_runner_identity(record, &event)?;
         }
     }
+    bind_pending_lab_handoff_snapshot(record, snapshot);
     validate_runner_job_snapshot(record, snapshot)?;
     let mut reconciled = record.clone();
     reconciled.record_runner_reachable();
@@ -2206,6 +2207,49 @@ fn validate_runner_job_snapshot(
         Some(record.run_id.clone()),
         None,
     ))
+}
+
+/// A daemon snapshot is acceptance evidence for a controller-owned pending
+/// handoff. Bind that identity before validating the snapshot so an absent
+/// controller field never becomes an empty-string comparison.
+fn bind_pending_lab_handoff_snapshot(
+    record: &mut AgentTaskRunRecord,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) {
+    if record.runner_job_id().is_some() {
+        return;
+    }
+    let Some(pending_handoff) = record
+        .lab_handoff
+        .as_ref()
+        .filter(|handoff| {
+            handoff.state == AgentTaskLabHandoffState::Pending
+                && handoff.authority == AgentTaskLabHandoffAuthority::Controller
+                && snapshot
+                    .job
+                    .target_runner_id
+                    .as_deref()
+                    .is_none_or(|runner_id| runner_id == handoff.runner_id)
+        })
+        .cloned()
+    else {
+        return;
+    };
+
+    let runner_job_id = snapshot.job.id.to_string();
+    let accepted_at = now_timestamp();
+    record.lab_handoff = Some(pending_handoff.accepted(&runner_job_id, accepted_at.clone()));
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("runner_id".to_string(), json!(&pending_handoff.runner_id));
+    metadata.insert("runner_job_id".to_string(), json!(&runner_job_id));
+    metadata.insert(
+        "handoff_acceptance".to_string(),
+        json!({
+            "state": "accepted",
+            "accepted_at": accepted_at,
+            "runner_job_id": runner_job_id,
+        }),
+    );
 }
 
 fn validate_terminal_child_identity(

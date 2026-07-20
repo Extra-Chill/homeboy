@@ -458,6 +458,65 @@ fn detached_cook_attempt_proxy_advances_after_daemon_acceptance() {
 }
 
 #[test]
+fn preacceptance_snapshot_binds_the_accepted_daemon_job_before_validation() {
+    with_isolated_home(|_| {
+        let run_id = "cook-preacceptance-snapshot";
+        let plan = test_plan();
+        let mut record = record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "lab_handoff_preacceptance",
+            Some("/runner/workspace/homeboy"),
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("persist pending controller handoff");
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
+        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+        snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
+        snapshot.events.clear();
+
+        reconcile_transport_proxy_snapshot(&mut record, &snapshot)
+            .expect("accepted daemon snapshot binds before validation");
+
+        let accepted_job_id = snapshot.job.id.to_string();
+        assert_eq!(record.runner_job_id(), Some(accepted_job_id.as_str()));
+        assert_eq!(
+            record.lab_handoff.as_ref().expect("handoff").state,
+            AgentTaskLabHandoffState::Accepted
+        );
+        assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
+    });
+}
+
+#[test]
+fn preacceptance_snapshot_rejects_a_different_bound_daemon_job() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "cook-preacceptance-mismatch",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("persist accepted controller handoff");
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.job.id =
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000456").expect("snapshot job id");
+        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+        snapshot.events.clear();
+
+        let error = reconcile_transport_proxy_snapshot(&mut record, &snapshot)
+            .expect_err("different accepted daemon job fails closed");
+
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert!(error.message.contains("does not match controller job"));
+    });
+}
+
+#[test]
 fn missing_lab_attempt_plan_is_recovered_before_handoff_or_terminalized() {
     with_isolated_home(|_| {
         let run_id = "cook-8096-attempt-1";
