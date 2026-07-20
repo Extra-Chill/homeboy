@@ -1,11 +1,11 @@
 use super::detectors::layer_ownership::run as run_layer_ownership;
 use super::detectors::{
-    aggregate_construction, command_status_contracts, config_key_usage, constant_bypass,
-    dead_guard, deprecation_age, enum_dispatch_contracts, facade_passthrough, global_env_guard,
-    mutating_resource_access, parallel_runner_setup, public_registry_exposure, redirect_validation,
-    remote_execution_preflight, repeated_literal_shape, requested_detectors, shared_scaffolding,
-    source_policy, test_coverage, test_topology, test_wiring, thin_command_adapter,
-    unbounded_output_capture, wrapper_inference,
+    aggregate_construction, command_status_contracts, command_wrapper_bypass, config_key_usage,
+    constant_bypass, dead_guard, deprecation_age, enum_dispatch_contracts, facade_passthrough,
+    global_env_guard, mutating_resource_access, parallel_runner_setup, public_registry_exposure,
+    redirect_validation, remote_execution_preflight, repeated_literal_shape, requested_detectors,
+    shared_scaffolding, source_policy, test_coverage, test_topology, test_wiring,
+    thin_command_adapter, unbounded_output_capture, wrapper_inference,
 };
 use super::doc_drift::detect_doc_drift;
 use super::reference::{fingerprint_component_reference_files, fingerprint_reference_paths};
@@ -57,6 +57,9 @@ fn run_fingerprint_descriptor(
                 .repeated_literal_shape_extensions,
         ),
         FingerprintDetectorRunner::ConstantBypass => constant_bypass::run(context.all_fingerprints),
+        FingerprintDetectorRunner::CommandWrapperBypass => {
+            command_wrapper_bypass::run(context.all_fingerprints)
+        }
         FingerprintDetectorRunner::SharedScaffolding => {
             shared_scaffolding::run(context.all_fingerprints)
         }

@@ -109,6 +109,7 @@ pub(crate) enum FingerprintDetectorRunner {
     FacadePassthrough,
     LiteralShapes,
     ConstantBypass,
+    CommandWrapperBypass,
     SharedScaffolding,
     AggregateConstruction,
 }
@@ -353,6 +354,15 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         timing_id: "detector.constant_bypass",
         log_label: "Constant bypass",
         log_summary: "literals duplicating a named constant",
+    },
+    DetectorDescriptor {
+        id: "command_wrapper_bypass",
+        findings: &[AuditFinding::CommandWrapperBypass],
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Fingerprint(FingerprintDetectorRunner::CommandWrapperBypass),
+        timing_id: "detector.command_wrapper_bypass",
+        log_label: "Command wrapper bypass",
+        log_summary: "raw commands duplicating a thin-wrapper helper",
     },
     DetectorDescriptor {
         id: "deprecation_age",
