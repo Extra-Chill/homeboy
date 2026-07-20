@@ -6,6 +6,15 @@ use homeboy_core::paths;
 
 use crate::{RollingGenerations, RunnerDaemonGenerationStatus, RunnerSession};
 
+/// The durable generation registry is scoped to one runner. Keep this wrapper
+/// at the state-store boundary so rolling ownership remains reusable in memory.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GenerationRegistry<E> {
+    runner_id: String,
+    #[serde(flatten)]
+    generations: RollingGenerations<E>,
+}
+
 fn path(runner_id: &str) -> Result<PathBuf> {
     Ok(paths::runner_sessions_dir()?
         .join(runner_id)
@@ -31,16 +40,115 @@ pub(crate) fn read(
     let raw = std::fs::read_to_string(&path).map_err(|error| {
         Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
     })?;
-    serde_json::from_str(&raw)
-        .map(Some)
-        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+    validate_registry_shape(&value)?;
+    match serde_json::from_str::<GenerationRegistry<RunnerSession>>(&raw) {
+        Ok(registry) if registry.runner_id == runner_id => Ok(Some(registry.generations)),
+        Ok(registry) => Err(Error::config_invalid_value(
+            "runner_id",
+            Some(registry.runner_id),
+            format!("generation registry must match runner-scoped path `{runner_id}`"),
+        )),
+        Err(error) => recover_missing_runner_id(runner_id, &path, &raw, error),
+    }
+}
+
+fn validate_registry_shape(value: &serde_json::Value) -> Result<()> {
+    let Some(object) = value.as_object() else {
+        return Err(Error::config_invalid_value(
+            "generation_registry",
+            None,
+            "generation registry must be a JSON object",
+        ));
+    };
+    if let Some(field) = object.keys().find(|key| {
+        !matches!(
+            key.as_str(),
+            "runner_id"
+                | "admission_owner"
+                | "generations"
+                | "job_owners"
+                | "run_owners"
+                | "artifact_owners"
+        )
+    }) {
+        return Err(Error::config_invalid_value(
+            format!("generation_registry.{field}"),
+            None,
+            "generation registry has an unsupported top-level field",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn write(
     runner_id: &str,
     generations: &RollingGenerations<RunnerSession>,
 ) -> Result<()> {
-    homeboy_core::engine::local_files::write_json_file(&path(runner_id)?, generations)
+    homeboy_core::engine::local_files::write_json_file(
+        &path(runner_id)?,
+        &GenerationRegistry {
+            runner_id: runner_id.to_string(),
+            generations: generations.clone(),
+        },
+    )
+}
+
+/// A prior writer omitted the registry's runner identity. Repair only that
+/// exact shape when every persisted endpoint independently confirms this path.
+/// The normal atomic writer retains every ownership map during the rewrite.
+fn recover_missing_runner_id(
+    runner_id: &str,
+    path: &std::path::Path,
+    raw: &str,
+    deserialize_error: serde_json::Error,
+) -> Result<Option<RollingGenerations<RunnerSession>>> {
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+    if value.get("runner_id").is_some() {
+        return Err(Error::config_invalid_json(
+            path.display().to_string(),
+            deserialize_error,
+        ));
+    }
+    let generations = serde_json::from_value::<RollingGenerations<RunnerSession>>(value)
+        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+    if runner_id.trim().is_empty() {
+        return Err(Error::config_invalid_value(
+            "runner_id",
+            Some(runner_id.to_string()),
+            "runner-scoped generation registry path has an empty runner ID",
+        ));
+    }
+    if generations.generations.is_empty() {
+        return Err(Error::config_invalid_value(
+            "generations",
+            Some("{}".to_string()),
+            "prior generation registry has no endpoints to establish its runner identity",
+        ));
+    }
+    for (generation, entry) in &generations.generations {
+        let endpoint_runner_id = &entry.endpoint.runner_id;
+        if endpoint_runner_id.trim().is_empty() {
+            return Err(Error::config_invalid_value(
+                format!("generations.{generation}.endpoint.runner_id"),
+                Some(endpoint_runner_id.clone()),
+                format!("prior generation `{generation}` has an empty endpoint runner ID"),
+            ));
+        }
+        if endpoint_runner_id != runner_id {
+            return Err(Error::config_invalid_value(
+                format!("generations.{generation}.endpoint.runner_id"),
+                Some(endpoint_runner_id.clone()),
+                format!(
+                    "prior generation `{generation}` endpoint runner ID does not match runner-scoped path `{runner_id}`"
+                ),
+            ));
+        }
+    }
+    write(runner_id, &generations)?;
+    Ok(Some(generations))
 }
 
 pub(crate) fn admission_session(
@@ -402,6 +510,208 @@ mod tests {
         fn terminate_tunnel(&self, pid: u32) {
             self.terminated_pids.borrow_mut().push(pid);
         }
+    }
+
+    fn persisted_registry(runner_id: &str) -> serde_json::Value {
+        let raw = std::fs::read_to_string(path(runner_id).expect("registry path"))
+            .expect("read registry");
+        serde_json::from_str(&raw).expect("parse registry")
+    }
+
+    #[test]
+    fn missing_runner_identity_recovers_without_changing_generation_routing() {
+        test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon-a", Some(101));
+            let b = session("lease-b", "daemon-b", Some(202));
+            let mut prior = RollingGenerations::new("lease-a", a.clone());
+            prior.admit_job("job-a");
+            assert!(prior.record_run("job-a", "run-a"));
+            assert!(prior.record_artifact("job-a", "artifact-a"));
+            prior.begin("build-b", b.clone());
+            prior.activate("build-b");
+            prior.admit_job("job-b");
+            homeboy_core::engine::local_files::write_json_file(
+                &path("runner-a").expect("registry path"),
+                &prior,
+            )
+            .expect("write prior registry");
+
+            let restored = read("runner-a", None)
+                .expect("load prior registry")
+                .expect("registry");
+            assert_eq!(restored.admission_owner, "build-b");
+            assert_eq!(restored.job_owner("job-a"), Some("lease-a"));
+            assert_eq!(restored.job_owner("job-b"), Some("build-b"));
+            assert_eq!(
+                restored.endpoint_owner(None, Some("run-a"), None),
+                Some("lease-a")
+            );
+            assert_eq!(
+                restored.endpoint_owner(None, None, Some("artifact-a")),
+                Some("lease-a")
+            );
+            assert_eq!(
+                admission_session("runner-a", None).expect("route admission"),
+                Some(b)
+            );
+            assert_eq!(
+                job_session("runner-a", "job-a", None).expect("route draining job"),
+                Some(a)
+            );
+
+            let persisted = persisted_registry("runner-a");
+            assert_eq!(persisted["runner_id"], "runner-a");
+            assert_eq!(persisted["job_owners"]["job-a"], "lease-a");
+            assert_eq!(persisted["run_owners"]["run-a"], "lease-a");
+            assert_eq!(persisted["artifact_owners"]["artifact-a"], "lease-a");
+        });
+    }
+
+    #[test]
+    fn registry_rejects_an_explicit_mismatched_runner_id() {
+        test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon-a", Some(101));
+            homeboy_core::engine::local_files::write_json_file(
+                &path("runner-a").expect("registry path"),
+                &GenerationRegistry {
+                    runner_id: "runner-b".to_string(),
+                    generations: RollingGenerations::new("lease-a", a),
+                },
+            )
+            .expect("write registry");
+
+            let error = read("runner-a", None).expect_err("mismatched registry rejects");
+            assert_eq!(error.code.as_str(), "config.invalid_value");
+            assert_eq!(error.details["value"], "runner-b");
+            assert!(error.details["problem"]
+                .as_str()
+                .expect("problem")
+                .contains("runner-scoped path `runner-a`"));
+        });
+    }
+
+    #[test]
+    fn missing_runner_identity_rejects_empty_and_conflicting_endpoints() {
+        test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon-a", Some(101));
+            let mut b = session("lease-b", "daemon-b", Some(202));
+            b.runner_id = "runner-b".to_string();
+            let mut generations = RollingGenerations::new("lease-a", a);
+            generations.begin("build-b", b);
+            homeboy_core::engine::local_files::write_json_file(
+                &path("runner-a").expect("registry path"),
+                &generations,
+            )
+            .expect("write conflicted prior registry");
+
+            let error = read("runner-a", None).expect_err("conflicting endpoint rejects");
+            assert_eq!(error.code.as_str(), "config.invalid_value");
+            assert_eq!(error.details["value"], "runner-b");
+            assert!(error.details["problem"]
+                .as_str()
+                .expect("problem")
+                .contains("generation `build-b` endpoint runner ID does not match"));
+            assert!(persisted_registry("runner-a").get("runner_id").is_none());
+
+            let mut empty = session("lease-a", "daemon-a", Some(101));
+            empty.runner_id.clear();
+            homeboy_core::engine::local_files::write_json_file(
+                &path("runner-a").expect("registry path"),
+                &RollingGenerations::new("lease-a", empty),
+            )
+            .expect("write empty prior registry");
+            let error = read("runner-a", None).expect_err("empty endpoint rejects");
+            assert_eq!(error.code.as_str(), "config.invalid_value");
+            assert_eq!(error.details["value"], "");
+            assert!(error.details["problem"]
+                .as_str()
+                .expect("problem")
+                .contains("empty endpoint runner ID"));
+            assert!(persisted_registry("runner-a").get("runner_id").is_none());
+        });
+    }
+
+    #[test]
+    fn malformed_prior_registry_is_not_migrated() {
+        test_support::with_isolated_home(|_| {
+            let registry_path = path("runner-a").expect("registry path");
+            std::fs::create_dir_all(registry_path.parent().expect("registry directory"))
+                .expect("create registry directory");
+            std::fs::write(&registry_path, r#"{"generations": []}"#)
+                .expect("write malformed registry");
+
+            let error = read("runner-a", None).expect_err("malformed registry rejects");
+            assert_eq!(error.code.as_str(), "config.invalid_json");
+            assert_eq!(
+                std::fs::read_to_string(registry_path).expect("read malformed registry"),
+                r#"{"generations": []}"#
+            );
+        });
+    }
+
+    #[test]
+    fn unsupported_registry_shape_fails_closed() {
+        test_support::with_isolated_home(|_| {
+            let registry_path = path("runner-a").expect("registry path");
+            std::fs::create_dir_all(registry_path.parent().expect("registry directory"))
+                .expect("create registry directory");
+            std::fs::write(
+                &registry_path,
+                r#"{"runner_id":"runner-a","unexpected":true}"#,
+            )
+            .expect("write unsupported registry");
+
+            let error = read("runner-a", None).expect_err("unsupported registry rejects");
+            assert_eq!(error.code.as_str(), "config.invalid_value");
+            assert_eq!(error.details["key"], "generation_registry.unexpected");
+            assert_eq!(
+                std::fs::read_to_string(registry_path).expect("read unsupported registry"),
+                r#"{"runner_id":"runner-a","unexpected":true}"#
+            );
+        });
+    }
+
+    #[test]
+    fn atomic_rewrites_keep_runner_identity_through_promotion_and_drain() {
+        test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon-a", Some(101));
+            let b = session("lease-b", "daemon-b", Some(202));
+
+            record_job("runner-a", &a, "job-a").expect("record A job");
+            record_job_run("runner-a", &a, "job-a", "run-a").expect("record A run");
+            record_job_artifacts("runner-a", &a, "job-a", ["artifact-a".to_string()])
+                .expect("record A artifact");
+            let initial = persisted_registry("runner-a");
+            assert_eq!(initial["runner_id"], "runner-a");
+            assert_eq!(initial["job_owners"]["job-a"], "lease-a");
+            assert_eq!(initial["run_owners"]["run-a"], "lease-a");
+            assert_eq!(initial["artifact_owners"]["artifact-a"], "lease-a");
+
+            activate(
+                "runner-a",
+                &a,
+                "build-b".to_string(),
+                b.clone(),
+                &["job-a".to_string()],
+            )
+            .expect("promote B");
+            let promoted = persisted_registry("runner-a");
+            assert_eq!(promoted["runner_id"], "runner-a");
+            assert_eq!(promoted["admission_owner"], "build-b");
+            assert_eq!(promoted["job_owners"]["job-a"], "lease-a");
+            assert_eq!(promoted["run_owners"]["run-a"], "lease-a");
+            assert_eq!(promoted["artifact_owners"]["artifact-a"], "lease-a");
+
+            let operations = FakeEndpointOperations::default();
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-a".to_string(), 0);
+            reconcile_with("runner-a", Some(&b), &operations).expect("drain A");
+            let drained = persisted_registry("runner-a");
+            assert_eq!(drained["runner_id"], "runner-a");
+            assert_eq!(drained["admission_owner"], "build-b");
+        });
     }
 
     #[test]
