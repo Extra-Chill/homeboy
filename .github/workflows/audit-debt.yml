@@ -1,0 +1,80 @@
+# Full-tree audit debt sweep.
+#
+# The PR pipeline (ci.yml) runs a `--profile=pr --changed-since` audit: fast,
+# scoped to the diff, and it only runs the cheap RootOnly detector families.
+# The whole-tree discovery detectors (duplication, dead code, constant/command
+# bypass, god files, …) are deliberately OFF in the PR profile — they need the
+# entire codebase to work and would re-report repo-wide debt on every unrelated
+# PR.
+#
+# Those discovery detectors are the "code factory" roadmap: each finding kind
+# becomes one deduplicated tracking issue (via homeboy-action's auto-issue
+# filing), and the issue closes when that fix kind gets automated. Nothing was
+# ever running the full-tree audit, so that roadmap was never populated. This
+# workflow does — on a weekly cadence, decoupled from releases so a full audit
+# never taxes the release path — and files/refreshes one issue per finding kind.
+#
+# It is advisory only: it never blocks anything (there is no gate), it just
+# keeps the audit-debt issue set current.
+
+name: Audit Debt
+
+on:
+  schedule:
+    # Mondays 07:00 UTC — once a week is plenty for slow-moving structural debt.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Audit profile to run (full = all discovery detectors).'
+        required: false
+        default: 'full'
+
+concurrency:
+  group: audit-debt
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  full-audit:
+    name: Full-tree audit → tracking issues
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check out Homeboy Action
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: v2
+          path: .homeboy-action
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - uses: ./.homeboy-action
+        with:
+          source: .
+          component: homeboy
+          commands: review audit
+          # Full profile enables the whole-tree discovery detectors. No
+          # --changed-since: this is a deliberate repo-wide sweep.
+          args: --profile=${{ github.event.inputs.profile || 'full' }}
+          # File one deduplicated tracking issue per finding kind. The action
+          # auto-enables this on non-PR events, but set it explicitly so the
+          # intent of this workflow is unambiguous.
+          auto-issue: 'true'
+          # Advisory sweep — never autofix, never push. Findings become the
+          # roadmap; fixes land through their own reviewed PRs.
+          autofix: 'false'
+          app-token: ${{ steps.app-token.outputs.token || '' }}
