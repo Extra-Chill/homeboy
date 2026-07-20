@@ -585,6 +585,10 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
 #[test]
 fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        // The in-process daemon's /exec endpoint drives runner processes through
+        // the RunnerExecDriver hook (production wires this at CLI startup); register
+        // the runner-side driver so this end-to-end handoff can run the child.
+        crate::register_runner_daemon_exec_driver();
         let run_id = "cook-8332-attempt-1";
         homeboy_agents::agent_task_lifecycle::record_lab_offload_phase(
             run_id,

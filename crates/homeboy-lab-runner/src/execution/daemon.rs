@@ -167,7 +167,23 @@ pub(super) fn exec_via_daemon(
         // The daemon has durably accepted this child. Bind it before waiting so
         // a lost controller still leaves cancellation and reconciliation with a
         // concrete runner job identity.
-        if run_id_owns_generic_exec {
+        if detach_after_handoff {
+            // A detached handoff must durably transition the controller's pending
+            // Lab handoff to accepted before the response can be lost, exactly as
+            // the reverse-broker path does. Binding only the metadata runner job
+            // id (below) leaves the typed handoff pending, so `runner_job_id()`
+            // — which reads the accepted handoff first — reports no bound job and
+            // the controller can expire or re-dispatch an already-accepted run.
+            homeboy_agents::agent_task_lifecycle::record_detached_lab_run(
+                homeboy_agents::agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: &runner.id,
+                    runner_job_id: &job.id.to_string(),
+                    remote_workspace: &cwd,
+                    remote_command: &command,
+                },
+            )?;
+        } else if run_id_owns_generic_exec {
             homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
                 run_id,
                 &runner.id,
