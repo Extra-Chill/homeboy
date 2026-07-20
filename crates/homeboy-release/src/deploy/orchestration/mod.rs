@@ -121,30 +121,8 @@ pub(super) fn deploy_components(
         validate_effective_remote_paths(&components, &project, base_path)?;
     }
 
-    // Release assets are immutable remote inputs. Resolve and verify them before
-    // touching any configured checkout, then reuse the same run-scoped bytes for
-    // every target/project that requests this component.
-    let mut resolved_release_artifacts: HashMap<String, ReleaseArtifactLease> = HashMap::new();
-    for component in &components {
-        if let ReleaseArtifactPlan::Reuse { tag, .. } =
-            release_artifact_plan(component, config, false, false)
-        {
-            let artifact = resolve_planned_release_artifact(component, &tag, release_artifacts)
-                .map_err(|error| {
-                    Error::validation_invalid_argument("releaseArtifact", error, None, None)
-                })?;
-            homeboy_core::log_status!(
-                "deploy",
-                "Verified release asset: tag={} name={} size={} sha256={} source={}",
-                artifact.tag,
-                artifact.name,
-                artifact.size,
-                artifact.sha256,
-                artifact.url
-            );
-            resolved_release_artifacts.insert(component.id.clone(), artifact);
-        }
-    }
+    let resolved_release_artifacts =
+        resolve_release_artifacts_for_deploy(&components, config, release_artifacts)?;
 
     // Resolve first, then materialize immutable detached worktrees for real deploys.
     // Dry-run resolves in `run_dry_run_mode` and never creates a worktree.
@@ -433,6 +411,52 @@ pub(super) fn deploy_components(
             skipped: 0,
         },
     })
+}
+
+/// Resolve and verify reusable GitHub release assets for a deploy.
+///
+/// Release assets are immutable remote inputs: resolving them downloads the
+/// bytes from GitHub (which can 404 or otherwise fail per component) so a real
+/// deploy can reuse the same run-scoped bytes across every target.
+///
+/// Read-only modes (`--check`, `--dry-run`) return before the resolved map is
+/// ever consumed, so resolving here would only waste work and — worse — abort
+/// the entire project probe on the first unresolvable component (e.g. a release
+/// tag with no matching asset, or a component whose path resolution yields an
+/// empty path). Non-mutating modes therefore resolve nothing, matching the
+/// remote-path guard (#8190) and the exact-ref checkout guard. (#9169)
+fn resolve_release_artifacts_for_deploy(
+    components: &[Component],
+    config: &DeployConfig,
+    release_artifacts: &mut ReleaseArtifactStore,
+) -> Result<HashMap<String, ReleaseArtifactLease>> {
+    let mut resolved_release_artifacts: HashMap<String, ReleaseArtifactLease> = HashMap::new();
+    if config.check || config.dry_run {
+        return Ok(resolved_release_artifacts);
+    }
+
+    for component in components {
+        if let ReleaseArtifactPlan::Reuse { tag, .. } =
+            release_artifact_plan(component, config, false, false)
+        {
+            let artifact = resolve_planned_release_artifact(component, &tag, release_artifacts)
+                .map_err(|error| {
+                    Error::validation_invalid_argument("releaseArtifact", error, None, None)
+                })?;
+            homeboy_core::log_status!(
+                "deploy",
+                "Verified release asset: tag={} name={} size={} sha256={} source={}",
+                artifact.tag,
+                artifact.name,
+                artifact.size,
+                artifact.sha256,
+                artifact.url
+            );
+            resolved_release_artifacts.insert(component.id.clone(), artifact);
+        }
+    }
+
+    Ok(resolved_release_artifacts)
 }
 
 fn validate_preflighted_component_identities(
@@ -860,6 +884,61 @@ mod tests {
 
         assert!(err.message.contains("unsupported legacy build_command"));
         assert_eq!(err.details["field"].as_str(), Some("build_command"));
+    }
+
+    // A project `deploy --check` must not resolve/download release assets: that
+    // network step can fail per component (missing asset, empty path) and would
+    // abort the whole read-only probe. Check and dry-run resolve nothing; only a
+    // real deploy resolves (and would surface the failure). (#9169)
+    #[test]
+    fn check_and_dry_run_skip_release_asset_resolution() {
+        with_isolated_home(|_| {
+            // A component whose release plan is `Reuse` (github remote_url +
+            // build_artifact + expected_version) but whose asset cannot resolve.
+            let component = Component {
+                id: "cli-binary".to_string(),
+                remote_url: Some("https://github.com/example/does-not-exist".to_string()),
+                build_artifact: Some("build/cli-binary.zip".to_string()),
+                ..Default::default()
+            };
+
+            let mut check_config = base_deploy_config();
+            check_config.check = true;
+            check_config.expected_version = Some("9.9.9".to_string());
+            let mut store = ReleaseArtifactStore::default();
+            let resolved = resolve_release_artifacts_for_deploy(
+                &[component.clone()],
+                &check_config,
+                &mut store,
+            )
+            .expect("check mode must not abort on release-asset resolution");
+            assert!(
+                resolved.is_empty(),
+                "check mode must resolve no release assets"
+            );
+
+            let mut dry_run_config = base_deploy_config();
+            dry_run_config.dry_run = true;
+            dry_run_config.expected_version = Some("9.9.9".to_string());
+            let resolved = resolve_release_artifacts_for_deploy(
+                &[component.clone()],
+                &dry_run_config,
+                &mut store,
+            )
+            .expect("dry-run must not abort on release-asset resolution");
+            assert!(
+                resolved.is_empty(),
+                "dry-run must resolve no release assets"
+            );
+
+            // A real deploy still resolves — and surfaces the failure loudly.
+            let mut deploy_config = base_deploy_config();
+            deploy_config.expected_version = Some("9.9.9".to_string());
+            let err =
+                resolve_release_artifacts_for_deploy(&[component], &deploy_config, &mut store)
+                    .expect_err("a real deploy must still fail on an unresolvable release asset");
+            assert_eq!(err.details["field"].as_str(), Some("releaseArtifact"));
+        });
     }
 
     #[test]
