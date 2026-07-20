@@ -1321,6 +1321,20 @@ pub fn route(method: &str, path: &str) -> HttpResponse {
     route_with_job_store(method, path, daemon_job_store())
 }
 
+/// In-process daemon dispatch against a caller-owned job store, with an optional
+/// request body. This is the same trusted-local router the network entry point
+/// uses after authentication; it lets callers in higher crates (e.g. the runner
+/// crate that registers the real `RunnerExecDriver`) exercise the `/exec` and
+/// file routes end to end without standing up an HTTP listener.
+pub fn route_with_body(
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+    job_store: &JobStore,
+) -> HttpResponse {
+    route_with_job_store_and_body(method, path, body, job_store)
+}
+
 fn route_with_job_store(method: &str, path: &str, job_store: &JobStore) -> HttpResponse {
     route_with_job_store_and_body(method, path, None, job_store)
 }
