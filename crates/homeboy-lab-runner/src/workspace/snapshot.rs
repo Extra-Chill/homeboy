@@ -236,15 +236,37 @@ fn collect_content_hash_entries_v2(
         let link_metadata = fs::symlink_metadata(&entry_path).map_err(|err| {
             Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
         })?;
+        // A symlink whose target resolves is dereferenced so its target content
+        // stays provenance-bound (target drift changes the hash). A symlink whose
+        // target is intentionally unavailable on the controller (e.g. a tracked
+        // `blogs.dir -> /nfs`) is a valid Git workspace shape: bind its target
+        // text deterministically instead of refusing the whole hash. (#8374)
         let resolved = if link_metadata.file_type().is_symlink() {
-            entry_path.canonicalize().map_err(|err| {
-                Error::validation_invalid_argument(
-                    "workspace",
-                    "workspace content hash refused an unresolved symlink",
-                    Some(err.to_string()),
-                    None,
-                )
-            })?
+            match entry_path.canonicalize() {
+                Ok(resolved) => resolved,
+                Err(_) => {
+                    let target = fs::read_link(&entry_path).map_err(|err| {
+                        Error::internal_io(
+                            err.to_string(),
+                            Some("read sync symlink target".to_string()),
+                        )
+                    })?;
+                    let target = target.to_string_lossy().replace('\\', "/");
+                    hasher.update(relative.as_bytes());
+                    hasher.update(b"\0symlink\0");
+                    hasher.update((target.len() as u64).to_le_bytes());
+                    hasher.update(target.as_bytes());
+                    record_workspace_content_manifest_entry(
+                        &mut manifest,
+                        relative,
+                        "symlink",
+                        Some(format!("sha256:{:x}", Sha256::digest(target.as_bytes()))),
+                        Some(target.len() as u64),
+                        None,
+                    );
+                    continue;
+                }
+            }
         } else {
             entry_path.clone()
         };
@@ -436,15 +458,24 @@ fn collect_content_hash_entries_v1(
         let link_metadata = fs::symlink_metadata(&entry_path).map_err(|err| {
             Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
         })?;
+        // Resolvable symlinks are dereferenced (target content stays bound); a
+        // tracked symlink with an unavailable target binds its target text
+        // instead of failing the hash. See the v2 collector for rationale. (#8374)
         let resolved = if link_metadata.file_type().is_symlink() {
-            entry_path.canonicalize().map_err(|err| {
-                Error::validation_invalid_argument(
-                    "workspace",
-                    "workspace content hash refused an unresolved symlink",
-                    Some(err.to_string()),
-                    None,
-                )
-            })?
+            match entry_path.canonicalize() {
+                Ok(resolved) => resolved,
+                Err(_) => {
+                    let target = fs::read_link(&entry_path).map_err(|err| {
+                        Error::internal_io(
+                            err.to_string(),
+                            Some("read sync symlink target".to_string()),
+                        )
+                    })?;
+                    let target = target.to_string_lossy().replace('\\', "/");
+                    entries.push((relative, "\0symlink\0", 0, target.into_bytes()));
+                    continue;
+                }
+            }
         } else {
             entry_path.clone()
         };

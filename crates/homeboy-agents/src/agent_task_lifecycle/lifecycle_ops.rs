@@ -885,15 +885,15 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
         let _ = expire_unaccepted_lab_handoff(&resolved_run_id)?;
         record = store::read_record(&resolved_run_id)?;
     }
-    let controller_plan = store::read_controller_plan(&record.run_id)?;
-    let controller_plan_path = store::controller_plan_path(&record.run_id)?
-        .display()
-        .to_string();
-    if record.plan_path != controller_plan_path {
-        record.plan_path = controller_plan_path;
-        store::write_record(&record)?;
-    }
     if !record.state.is_terminal() {
+        let controller_plan = store::read_controller_plan(&record.run_id)?;
+        let controller_plan_path = store::controller_plan_path(&record.run_id)?
+            .display()
+            .to_string();
+        if record.plan_path != controller_plan_path {
+            record.plan_path = controller_plan_path;
+            store::write_record(&record)?;
+        }
         if let Ok(aggregate) = store::read_aggregate(&record.run_id) {
             let aggregate_path = store::aggregate_path(&record.run_id)
                 .map(|path| path.display().to_string())
