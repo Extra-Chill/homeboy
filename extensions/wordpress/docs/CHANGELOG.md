@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.27.0] - 2026-07-20
+
+### Added
+- add reusable multisite E2E rig
+
 ## [3.26.10] - 2026-07-20
 
 ### Fixed
