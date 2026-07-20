@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.296.3] - 2026-07-20
+
+### Changed
+- refactor(lifecycle-contract): add ArtifactRecord::default() and drop construction boilerplate
+- derive Default for RunRecord and drop construction boilerplate
+
+### Fixed
+- update three lab-runner tests that drifted from current behavior
+- align scheduler attempt-workspace tests with the retention policy
+
 ## [0.296.2] - 2026-07-19
 
 ### Changed
