@@ -363,6 +363,8 @@ pub(crate) fn cook_report(
             attempts,
             finalization,
             stop_reason,
+            terminal_phase: None,
+            terminal_failure_classification: None,
         },
         exit_code,
     }
