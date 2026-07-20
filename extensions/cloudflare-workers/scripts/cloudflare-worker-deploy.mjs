@@ -91,15 +91,15 @@ async function deployAndGate(contract, root, prior, id, result, redact, env) {
     await command(contract.wrangler.binary, ['deploy', '--config', resolvePath(root, contract.wrangler.config), '--name', contract.target.worker], root, redact, env, contract.timeout_ms);
     deployed = await deployedState(contract, root, redact, env);
     result.deployments.push({ stage: id, source_revision: contract.repository.revision, prior_deployment: prior, deployed });
-    await runGates(contract.gates, id);
-    finish(stage, 'succeeded', { prior_deployment: prior, deployed, gate_ids: contract.gates.map(({ id: gateId }) => gateId) });
+    const gates = await runGates(contract.gates, id);
+    finish(stage, 'succeeded', { prior_deployment: prior, deployed, gate_ids: contract.gates.map(({ id: gateId }) => gateId), gates });
   } catch (error) {
     error.stage ||= id;
     const rollbackResult = prior?.version_id ? await rollback(contract, root, prior, redact, env) : { status: 'not_available', reason: 'No single prior production version was recorded.' };
     const existing = result.deployments.find((deployment) => deployment.stage === id);
     if (existing) existing.rollback = rollbackResult;
     else result.deployments.push({ stage: id, source_revision: contract.repository.revision, prior_deployment: prior, deployed, rollback: rollbackResult });
-    finish(stage, 'failed', { code: error.code || 'deployment_failed', rollback: rollbackResult }); throw error;
+    finish(stage, 'failed', { code: error.code || 'deployment_failed', rollback: rollbackResult, ...(error.gates ? { gates: error.gates } : {}) }); throw error;
   }
 }
 
@@ -131,13 +131,42 @@ async function rollback(contract, root, prior, redact, env) {
 }
 
 async function runGates(gates, stage) {
+  const evidence = [];
   for (const gate of gates) {
-    const response = await fetch(gate.url, { redirect: 'manual', signal: AbortSignal.timeout(gate.timeout_ms || 10000) });
-    const body = await boundedBody(response, gate.max_body_bytes || MAX_GATE_BODY_BYTES);
-    if (response.status !== (gate.expected_status || 200)) throw fail('http_gate_status_failed', `Gate ${gate.id} returned HTTP ${response.status}.`, stage);
-    if (gate.expected_text && !body.includes(gate.expected_text)) throw fail('http_gate_text_failed', `Gate ${gate.id} did not contain expected text.`, stage);
+    try { evidence.push(await runGate(gate, stage)); }
+    catch (error) { error.gates = [...evidence, { id: gate.id, attempts: error.gate_attempts || [] }]; throw error; }
   }
+  return evidence;
 }
+
+async function runGate(gate, stage) {
+  const attempts = [];
+  const retry = gate.retry;
+  const maximumAttempts = retry?.attempts || 1;
+  try { for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    const startedAt = performance.now();
+    try {
+      const response = await fetch(gate.url, { redirect: 'manual', signal: AbortSignal.timeout(gate.timeout_ms || 10000) });
+      const entry = { attempt, status: response.status, elapsed_ms: Math.round(performance.now() - startedAt) };
+      attempts.push(entry);
+      if (response.status !== (gate.expected_status || 200)) {
+        if (attempt < maximumAttempts && retry.transient_statuses.includes(response.status)) { await delay(retry.retry_delay_ms); continue; }
+        throw fail('http_gate_status_failed', `Gate ${gate.id} returned HTTP ${response.status}.`, stage);
+      }
+      const body = await boundedBody(response, gate.max_body_bytes || MAX_GATE_BODY_BYTES);
+      if (gate.expected_text && !body.includes(gate.expected_text)) throw fail('http_gate_text_failed', `Gate ${gate.id} did not contain expected text.`, stage);
+      return { id: gate.id, attempts };
+    } catch (error) {
+      if (error.code?.startsWith('http_gate_')) throw error;
+      const timeout = error.name === 'TimeoutError' || error.name === 'AbortError';
+      attempts.push({ attempt, status: timeout ? 'timeout' : 'network_error', elapsed_ms: Math.round(performance.now() - startedAt) });
+      if (retry && attempt < maximumAttempts) { await delay(retry.retry_delay_ms); continue; }
+      throw fail(timeout ? 'http_gate_timeout' : 'http_gate_network_failed', `Gate ${gate.id} ${timeout ? 'timed out' : 'could not be reached'}.`, stage);
+    }
+  } } catch (error) { error.gate_attempts = attempts; throw error; }
+}
+
+function delay(milliseconds) { return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds)); }
 
 async function boundedBody(response, limit) { const reader = response.body?.getReader(); if (!reader) return ''; let size = 0; const chunks = []; while (true) { const { done, value } = await reader.read(); if (done) break; size += value.byteLength; if (size > limit) { await reader.cancel(); throw fail('http_gate_body_too_large', 'Gate response exceeded its declared body limit.'); } chunks.push(value); } return new TextDecoder().decode(Buffer.concat(chunks)); }
 async function readSecret(secret, root) { if (secret.env) { if (!process.env[secret.env]) throw fail('secret_unavailable', `Required secret ${secret.name} is unavailable.`); return process.env[secret.env]; } const path = resolvePath(root, secret.file); if (!(await stat(path)).isFile()) throw fail('secret_unavailable', `Required secret ${secret.name} is unavailable.`); return readFile(path, 'utf8'); }
@@ -150,6 +179,6 @@ async function command(executable, args, cwd, redact, env, timeoutMs = 120000, i
 function start(result, id) { const stage = { id, status: 'running', evidence: null }; result.stages.push(stage); return stage; } function finish(stage, status, evidence) { stage.status = status; stage.evidence = evidence; } function fail(code, message, stage) { const error = new Error(message); error.code = code; error.stage = stage; return error; }
 function remediation(code) { return ({ ambiguous_deployment_versions: ['Use a single-version production deployment or declare a weighted-version selection policy.'], source_not_clean: ['Commit or discard source changes before deployment.'], source_revision_mismatch: ['Check out the declared immutable revision before deployment.'], http_gate_status_failed: ['Correct the deployed route or expected status before retrying the immutable revision.'] }[code] || ['Inspect redacted stage evidence and correct the deployment contract.']); }
 function resolvePath(root, value) { if (!value) throw fail('invalid_contract', 'Required path is missing.'); return isAbsolute(value) ? value : resolve(root, value); } function requiredArgument(name) { const index = process.argv.indexOf(name); if (index < 0 || !process.argv[index + 1]) throw new Error(`${name} is required`); return process.argv[index + 1]; }
-function validate(contract) { if (contract.schema !== 'homeboy/cloudflare-worker-deploy-contract/v1') throw new Error('Unsupported deployment contract schema.'); for (const path of ['repository.worktree', 'repository.revision', 'wrangler.binary', 'wrangler.config', 'wrangler.config_ref', 'target.worker', 'target.account_id']) if (!path.split('.').reduce((value, key) => value?.[key], contract)) throw new Error(`Missing ${path}.`); contract.expected_bindings ||= []; contract.secrets ||= []; contract.gates ||= []; contract.timeout_ms ||= 120000; for (const secret of contract.secrets) if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(secret.name || '') || Boolean(secret.env) === Boolean(secret.file)) throw new Error('Each secret requires a safe environment-style name and exactly one environment or file descriptor.'); }
+function validate(contract) { if (contract.schema !== 'homeboy/cloudflare-worker-deploy-contract/v1') throw new Error('Unsupported deployment contract schema.'); for (const path of ['repository.worktree', 'repository.revision', 'wrangler.binary', 'wrangler.config', 'wrangler.config_ref', 'target.worker', 'target.account_id']) if (!path.split('.').reduce((value, key) => value?.[key], contract)) throw new Error(`Missing ${path}.`); contract.expected_bindings ||= []; contract.secrets ||= []; contract.gates ||= []; contract.timeout_ms ||= 120000; for (const secret of contract.secrets) if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(secret.name || '') || Boolean(secret.env) === Boolean(secret.file)) throw new Error('Each secret requires a safe environment-style name and exactly one environment or file descriptor.'); for (const gate of contract.gates) if (gate.retry && (!Number.isInteger(gate.retry.attempts) || gate.retry.attempts < 2 || !Number.isInteger(gate.retry.retry_delay_ms) || gate.retry.retry_delay_ms < 0 || !Array.isArray(gate.retry.transient_statuses) || !gate.retry.transient_statuses.length || gate.retry.transient_statuses.some((status) => !Number.isInteger(status) || status < 100 || status > 599))) throw new Error('Each gate retry policy requires attempts of at least 2, a non-negative retry_delay_ms, and declared transient_statuses.'); }
 async function writeResult(root, contract, result) { if (contract.result_file) await writeFile(resolvePath(root, contract.result_file), `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 }); }
 main().catch((error) => { process.stderr.write(`${JSON.stringify({ schema: SCHEMA, status: 'failed', code: error.code || 'invalid_contract', error: error.message })}\n`); process.exitCode = 1; });

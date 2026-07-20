@@ -14,6 +14,23 @@ The contract requires a clean worktree, exact Git revision, Wrangler config, Wor
 
 The result is `homeboy/cloudflare-worker-deploy-result/v1`. It records source revision, redacted deterministic stage progress, prior and deployed Worker deployment/version IDs, rollback status, and remediation. Raw Wrangler output and gate bodies are omitted.
 
+Gates run once by default. To opt into bounded readiness retries, declare all retry fields on that gate:
+
+```json
+{
+  "id": "health",
+  "url": "https://example.com/health",
+  "expected_status": 200,
+  "retry": {
+    "attempts": 3,
+    "retry_delay_ms": 1000,
+    "transient_statuses": [500, 502, 503, 504]
+  }
+}
+```
+
+The retry budget includes the first request. Listed unexpected HTTP statuses, timeouts, and network errors use the remaining budget. Text, response-body-limit, and all other status mismatches fail immediately and retain rollback behavior. Gate evidence records each attempt's ordinal, status (HTTP status, `timeout`, or `network_error`), and elapsed milliseconds; it omits response bodies, URLs, headers, and secrets.
+
 The `cli` manifest exposes the generic CLI-compatible surface. Current Homeboy also requires an `executable.runtime.run_command` to run an extension, so this extension supplies that runtime adapter for the same command. The `deployment_providers` descriptor is retained as declarative metadata for a future Homeboy deployment-provider lowering; it is not invoked by current Homeboy releases.
 
 Set `durability.redeploy_same_revision` to redeploy the same checked-out revision after the first successful gate sequence and run the same gates again. Secrets are provisioned once before the first deploy; set `durability.rotate_secrets: true` only when the durability proof explicitly requires a second secret write. This proves the declared external behavior survives a runtime replacement; it does not prove durability of state that the declared gates do not exercise.
