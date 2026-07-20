@@ -231,7 +231,7 @@ where
         }),
         HttpEndpoint::Run { id } => json!({
             "command": "api.runs.show",
-            "run": show_run(id)?,
+            "run": show_run(id, job_store)?,
         }),
         HttpEndpoint::RunArtifacts { id } => {
             let store = ObservationStore::open_initialized()?;
@@ -631,9 +631,26 @@ fn active_runner_job_run_summary_if_durable(job: ActiveRunnerJobSummary) -> Opti
     })
 }
 
-fn show_run(run_id: &str) -> Result<RunDetail> {
+fn show_run(run_id: &str, job_store: &JobStore) -> Result<RunDetail> {
     let store = ObservationStore::open_initialized()?;
     reconcile_stale_running_runs_for_read(&store)?;
+    if let Some(run) = store.get_run(run_id)? {
+        if let Some(job) = active_runner_job_for_durable_run(job_store, run_id) {
+            if run.status != RunStatus::Running.as_str() || run_claims_other_runner_job(&run, &job)
+            {
+                return Ok(active_runner_job_run_detail(run_id, &job, Some(&run)));
+            }
+        }
+        return Ok(RunDetail {
+            summary: run_summary(run.clone()),
+            homeboy_version: run.homeboy_version,
+            metadata: run.metadata_json,
+            artifacts: store.list_artifacts(run_id)?,
+        });
+    }
+    if let Some(job) = active_runner_job_for_durable_run(job_store, run_id) {
+        return Ok(active_runner_job_run_detail(run_id, &job, None));
+    }
     let run = require_run(&store, run_id)?;
     Ok(RunDetail {
         summary: run_summary(run.clone()),
@@ -641,6 +658,51 @@ fn show_run(run_id: &str) -> Result<RunDetail> {
         metadata: run.metadata_json,
         artifacts: store.list_artifacts(run_id)?,
     })
+}
+
+fn active_runner_job_for_durable_run(
+    job_store: &JobStore,
+    run_id: &str,
+) -> Option<ActiveRunnerJobSummary> {
+    job_store
+        .active_runner_jobs()
+        .into_iter()
+        .find(|job| job.durable_run_id.as_deref() == Some(run_id))
+}
+
+fn active_runner_job_run_detail(
+    run_id: &str,
+    job: &ActiveRunnerJobSummary,
+    persisted_run: Option<&RunRecord>,
+) -> RunDetail {
+    let projection_state = match persisted_run {
+        None => "missing_durable_run_record",
+        Some(run) if run.status != RunStatus::Running.as_str() => "stale_durable_run_record",
+        Some(_) => "foreign_durable_run_record",
+    };
+    let summary = active_runner_job_run_summary_if_durable(job.clone())
+        .expect("active runner job is selected by its durable run id");
+    RunDetail {
+        summary,
+        homeboy_version: None,
+        metadata: json!({
+            "runner_job_projection": {
+                "state": projection_state,
+                "durable_run_id": run_id,
+                "runner_id": job.runner_id,
+                "job_id": job.job_id,
+                "message": "The daemon job is active and authoritative; durable-run hydration is unavailable for this projection.",
+            }
+        }),
+        artifacts: Vec::new(),
+    }
+}
+
+fn run_claims_other_runner_job(run: &RunRecord, job: &ActiveRunnerJobSummary) -> bool {
+    ["/lab/remote_job/id", "/lab/remote_job_id"]
+        .into_iter()
+        .filter_map(|pointer| run.metadata_json.pointer(pointer).and_then(Value::as_str))
+        .any(|recorded_job_id| recorded_job_id != job.job_id)
 }
 
 fn reconcile_stale_running_runs_for_read(store: &ObservationStore) -> Result<()> {

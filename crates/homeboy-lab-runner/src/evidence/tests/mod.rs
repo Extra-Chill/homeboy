@@ -10,6 +10,7 @@ use homeboy_core::api_jobs::{
     Job, JobArtifactMetadata, JobEvent, JobEventKind, JobStatus, RunnerJobLifecycleMetadata,
     RunnerJobProjection,
 };
+use homeboy_core::error::{Error, ErrorCode};
 use homeboy_core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use homeboy_core::server::{RunnerPolicy, RunnerSettings};
 
@@ -42,6 +43,31 @@ fn ssh_runner() -> Runner {
         secret_env: Default::default(),
         resources: Default::default(),
         policy: RunnerPolicy::default(),
+    }
+}
+
+fn terminal_runner_job() -> Job {
+    Job {
+        id: Uuid::new_v4(),
+        operation: "runner.exec".to_string(),
+        status: JobStatus::Succeeded,
+        created_at_ms: 1_700_000_000_000,
+        updated_at_ms: 1_700_000_001_000,
+        started_at_ms: Some(1_700_000_000_000),
+        finished_at_ms: Some(1_700_000_001_000),
+        event_count: 0,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        stale_reason: None,
+        daemon_lease_id: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: Vec::new(),
+        runner_job_projection: None,
     }
 }
 
@@ -842,38 +868,18 @@ fn test_explicit_observation_run_ids_prefers_result_lineage() {
 
 #[test]
 fn terminal_mirroring_imports_only_the_submitted_overlapping_job_run_and_artifacts() {
-    let mut first = Job {
-        id: Uuid::new_v4(),
-        operation: "runner.exec".to_string(),
-        status: JobStatus::Succeeded,
-        created_at_ms: 1_700_000_000_000,
-        updated_at_ms: 1_700_000_001_000,
-        started_at_ms: Some(1_700_000_000_000),
-        finished_at_ms: Some(1_700_000_001_000),
-        event_count: 0,
-        source_snapshot: None,
-        path_materialization_plan: None,
-        stale_reason: None,
-        daemon_lease_id: None,
-        target_runner_id: None,
-        target_project_id: None,
-        claim_id: None,
-        claimed_by_runner_id: None,
-        claimed_at_ms: None,
-        claim_expires_at_ms: None,
-        artifacts: vec![JobArtifactMetadata {
-            id: "first-result".to_string(),
-            name: Some("fuzz_results".to_string()),
-            path: Some("runner-artifact://lab/first-run/first-result".to_string()),
-            url: None,
-            mime: None,
-            size_bytes: None,
-            sha256: None,
-            content_base64: None,
-            metadata: None,
-        }],
-        runner_job_projection: None,
-    };
+    let mut first = terminal_runner_job();
+    first.artifacts = vec![JobArtifactMetadata {
+        id: "first-result".to_string(),
+        name: Some("fuzz_results".to_string()),
+        path: Some("runner-artifact://lab/first-run/first-result".to_string()),
+        url: None,
+        mime: None,
+        size_bytes: None,
+        sha256: None,
+        content_base64: None,
+        metadata: None,
+    }];
     let mut second = first.clone();
     second.id = Uuid::new_v4();
     second.artifacts[0].id = "second-result".to_string();
@@ -956,4 +962,64 @@ fn terminal_mirroring_imports_only_the_submitted_overlapping_job_run_and_artifac
             );
         });
     }
+}
+
+#[test]
+fn terminal_mirroring_accepts_two_missing_optional_durable_run_projections() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let run_ids = vec![
+            "concurrent-run-a".to_string(),
+            "concurrent-run-b".to_string(),
+        ];
+        let job = terminal_runner_job();
+        let mut requested = Vec::new();
+
+        let mirrored = mirror_remote_observation_runs_by_id_with(
+            &store,
+            &ssh_runner(),
+            &job,
+            &run_ids,
+            None,
+            |run_id| {
+                requested.push(run_id.to_string());
+                Err(Error::new(
+                    ErrorCode::InternalUnexpected,
+                    "daemon request failed: run record not found",
+                    json!({ "http_status": 404, "path": format!("/runs/{run_id}") }),
+                ))
+            },
+        )
+        .expect("terminal jobs succeed when optional durable projections are missing");
+
+        assert!(mirrored.is_empty());
+        assert_eq!(requested, run_ids);
+    });
+}
+
+#[test]
+fn terminal_mirroring_rejects_unrelated_missing_run_projections() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let run_ids = vec!["expected-run".to_string()];
+        let job = terminal_runner_job();
+
+        let error = mirror_remote_observation_runs_by_id_with(
+            &store,
+            &ssh_runner(),
+            &job,
+            &run_ids,
+            None,
+            |_| {
+                Err(Error::new(
+                    ErrorCode::InternalUnexpected,
+                    "daemon request failed: run record not found",
+                    json!({ "http_status": 404, "path": "/runs/other-run" }),
+                ))
+            },
+        )
+        .expect_err("unrelated missing projection must remain fail-closed");
+
+        assert_eq!(error.details["path"], "/runs/other-run");
+    });
 }

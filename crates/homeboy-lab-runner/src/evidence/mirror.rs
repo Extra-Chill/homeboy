@@ -470,8 +470,13 @@ where
 {
     let mut mirrored = Vec::new();
     for run_id in run_ids {
-        let Some(detail) = fetch_detail(run_id)? else {
-            continue;
+        let detail = match fetch_detail(run_id) {
+            Ok(Some(detail)) => detail,
+            Ok(None) => continue,
+            // The terminal daemon job and its events are authoritative. A
+            // durable-run projection is optional and can be unavailable.
+            Err(error) if missing_optional_run_projection(&error, run_id) => continue,
+            Err(error) => return Err(error),
         };
         let mut run = remote_detail_to_run_record(&detail, runner, Some(job))?;
         if let Some(notification_route) = notification_route {
@@ -484,6 +489,12 @@ where
         mirrored.push(run);
     }
     Ok(mirrored)
+}
+
+fn missing_optional_run_projection(error: &Error, run_id: &str) -> bool {
+    error.details.get("http_status").and_then(Value::as_u64) == Some(404)
+        && error.details.get("path").and_then(Value::as_str)
+            == Some(&format!("/runs/{}", encode_uri_component(run_id)))
 }
 
 fn import_run_if_absent(store: &ObservationStore, run: &RunRecord) -> Result<()> {
