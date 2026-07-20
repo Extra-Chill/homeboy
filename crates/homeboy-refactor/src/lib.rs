@@ -10,6 +10,7 @@ use std::path::PathBuf;
 pub mod add;
 pub mod audit_fixability_provider;
 pub mod auto;
+pub mod collapse;
 pub mod decompose;
 pub mod edit_op_tagged;
 pub mod move_items;
@@ -70,6 +71,7 @@ pub use auto::{
     apply_fix_policy, apply_fixes_via_edit_ops, ApplyChunkResult, ChunkStatus, Fix, FixPolicy,
     FixResult, Insertion, InsertionKind, NewFile, PolicySummary, RefactorPrimitive, SkippedFile,
 };
+pub use collapse::{collapse, CollapseConfig, CollapseEdit, CollapseResult};
 pub use decompose::{
     apply_plan, apply_plan_skeletons, build_plan, DecomposeAuditImpact, DecomposeGroup,
     DecomposePlan,

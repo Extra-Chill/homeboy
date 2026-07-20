@@ -257,7 +257,7 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
 // ============================================================================
 
 /// Find the file containing a struct definition by scanning the codebase.
-fn find_struct_definition(struct_name: &str, root: &Path) -> Result<PathBuf, Error> {
+pub(crate) fn find_struct_definition(struct_name: &str, root: &Path) -> Result<PathBuf, Error> {
     let pattern = format!("pub struct {} ", struct_name);
     let pattern_brace = format!("pub struct {} {{", struct_name);
     let pattern_crate = format!("pub(crate) struct {} ", struct_name);
@@ -300,7 +300,7 @@ fn find_struct_definition(struct_name: &str, root: &Path) -> Result<PathBuf, Err
 
 /// Extract the full struct source block (including doc comments and attributes)
 /// from file content.
-fn extract_struct_source(struct_name: &str, content: &str) -> Option<String> {
+pub(crate) fn extract_struct_source(struct_name: &str, content: &str) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
 
     let struct_pattern = format!("struct {} ", struct_name);

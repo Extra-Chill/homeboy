@@ -193,6 +193,34 @@ enum RefactorCommand {
         write_mode: WriteModeArgs,
     },
 
+    /// Collapse default-valued fields in struct instantiations into
+    /// `..Default::default()` (the inverse of `propagate`).
+    ///
+    /// Scans the codebase for instantiations of the named struct and, for each,
+    /// removes fields whose value equals the type's default (None, Vec::new(),
+    /// Value::Null, String::new(), false, 0, etc.), replacing them with a single
+    /// trailing `..Default::default()`. Conservative: skips literals that already
+    /// spread, contain an interspersed comment, or set an unknown-type field.
+    /// The struct must have a `Default` impl for the result to compile.
+    ///
+    /// Dry-run by default — pass `--write` to apply.
+    ///
+    /// Example: `refactor collapse-defaults --struct-name AgentTaskOutcome --component homeboy`
+    CollapseDefaults {
+        /// Name of the struct to collapse defaults for
+        #[arg(long, value_name = "NAME")]
+        struct_name: String,
+
+        /// File containing the struct definition (auto-detected if omitted)
+        #[arg(long, value_name = "FILE")]
+        definition: Option<String>,
+
+        #[command(flatten)]
+        target: RefactorTargetArgs,
+        #[command(flatten)]
+        write_mode: WriteModeArgs,
+    },
+
     /// Apply an ad-hoc pattern-based find/replace transform across a codebase
     ///
     /// Example: `refactor transform --find "old" --replace "new" --files "**/*.php" --component C`
@@ -386,6 +414,18 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             write_mode.write,
         ),
 
+        Some(RefactorCommand::CollapseDefaults {
+            struct_name,
+            definition,
+            target,
+            write_mode,
+        }) => operations_command::run_collapse_defaults(
+            &struct_name,
+            definition.as_deref(),
+            &target,
+            write_mode.write,
+        ),
+
         Some(RefactorCommand::Transform {
             find,
             replace,
@@ -528,6 +568,13 @@ pub enum RefactorOutput {
     Propagate {
         #[serde(flatten)]
         result: refactor::PropagateResult,
+        dry_run: bool,
+    },
+
+    #[serde(rename = "refactor.collapse_defaults")]
+    CollapseDefaults {
+        #[serde(flatten)]
+        result: refactor::CollapseResult,
         dry_run: bool,
     },
 
