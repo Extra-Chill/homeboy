@@ -338,6 +338,52 @@ pub fn refresh_homeboy_binary(
         ));
     }
 
+    // A reconnect replaces the daemon control plane. Prove it is admissible
+    // before selecting the new global binary: a deferred refresh must leave
+    // the active daemon and its configured control binary untouched.
+    let deferred_active_jobs = if options.reconnect {
+        promotion_lease.assert_generation()?;
+        let active_jobs = active_jobs_before_daemon_replacement(&plan.runner_id)?;
+        match protect_active_jobs_before_reconnect(&plan.runner_id, &active_jobs, options.force) {
+            Ok(_) => None,
+            Err(_) => Some(active_jobs),
+        }
+    } else {
+        None
+    };
+    if let Some(active_jobs) = deferred_active_jobs {
+        let active_job_ids = active_jobs
+            .iter()
+            .map(|job| job.job_id.clone())
+            .collect::<Vec<_>>();
+        let followup_commands = active_job_followups(&plan.runner_id, &active_job_ids);
+        return Ok((
+            HomeboyBinaryRefreshOutput {
+                variant: "refresh_homeboy",
+                command: "runner.refresh_homeboy",
+                runner_id: plan.runner_id.clone(),
+                dry_run: false,
+                plan: plan.clone(),
+                identity: parse_identity(&exec_output.stdout).ok(),
+                updated_fields: Vec::new(),
+                daemon_refreshed: false,
+                interrupted_job_ids: Vec::new(),
+                selected_binary_path: plan.binary_path.clone(),
+                reconnect_required: true,
+                followup_commands: followup_commands.clone(),
+                reconnect_deferred: Some(HomeboyReconnectDeferred {
+                    reason: "active_daemon_jobs",
+                    active_job_ids,
+                    selected_binary_path: plan.binary_path.clone(),
+                    followup_commands,
+                }),
+                failure: None,
+                bootstrap_provenance: None,
+            },
+            1,
+        ));
+    }
+
     promotion_lease.assert_generation()?;
     // Only a reconnect replaces the daemon, so it is the only mode allowed to
     // change the runner-global daemon control binary. A non-reconnecting
@@ -432,65 +478,19 @@ pub fn refresh_homeboy_binary(
             options.force,
         ) {
             Ok(job_ids) => job_ids,
-            Err(_) => {
-                let active_job_ids = active_jobs
-                    .iter()
-                    .map(|job| job.job_id.clone())
-                    .collect::<Vec<_>>();
-                let followup_commands = active_job_followups(&plan.runner_id, &active_job_ids);
-                return Ok((
-                    HomeboyBinaryRefreshOutput {
-                        variant: "refresh_homeboy",
-                        command: "runner.refresh_homeboy",
-                        runner_id: plan.runner_id.clone(),
-                        dry_run: false,
-                        plan: plan.clone(),
-                        identity: Some(identity.clone()),
-                        updated_fields: updated_fields.clone(),
-                        daemon_refreshed: false,
-                        interrupted_job_ids: Vec::new(),
-                        selected_binary_path: plan.binary_path.clone(),
-                        reconnect_required: true,
-                        followup_commands: followup_commands.clone(),
-                        reconnect_deferred: Some(HomeboyReconnectDeferred {
-                            reason: "active_daemon_jobs",
-                            active_job_ids,
-                            selected_binary_path: plan.binary_path.clone(),
-                            followup_commands,
-                        }),
-                        failure: None,
-                        bootstrap_provenance: Some(HomeboyBootstrapProvenance {
-                            transport: if disconnected_ssh {
-                                "ssh_bootstrap"
-                            } else {
-                                "daemon"
-                            },
-                            requested_ref: plan.git_ref.clone(),
-                            resolved_source_sha: bootstrap.source_sha,
-                            binary_commit: identity
-                                .get("data")
-                                .unwrap_or(&identity)
-                                .get("git_commit")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
-                            binary_identity: identity,
-                            timeout_ms: disconnected_ssh
-                                .then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT.as_millis()),
-                            config_fields_changed: updated_fields,
-                        }),
-                    },
-                    1,
-                ));
-            }
+            Err(_) => unreachable!("reconnect admission was checked before binary promotion"),
         };
         if let Err(error) =
             disconnect_with_session(&plan.runner_id, refresh_session.as_ref(), options.force)
         {
-            return rollback_refresh_error(
-                &plan.runner_id,
-                previous_homeboy_path.as_deref(),
-                error,
-            );
+            return rollback_refresh_error_with(error, || {
+                restore_runner_homeboy_path_if_selected(
+                    &plan.runner_id,
+                    &plan.binary_path,
+                    previous_homeboy_path.as_deref(),
+                )
+                .map(|_| ())
+            });
         }
         let (report, connect_exit_code) = match connect_with_orphan_adoption(
             &plan.runner_id,
@@ -503,11 +503,39 @@ pub fn refresh_homeboy_binary(
         ) {
             Ok(result) => result,
             Err(error) => {
-                return rollback_refresh_connect_error(
-                    &plan.runner_id,
-                    previous_homeboy_path.as_deref(),
+                return rollback_refresh_connect_error_with(
                     error,
-                )
+                    || {
+                        restore_runner_homeboy_path_if_selected(
+                            &plan.runner_id,
+                            &plan.binary_path,
+                            previous_homeboy_path.as_deref(),
+                        )
+                        .map(|_| ())
+                    },
+                    || {
+                        let (report, exit_code) = connect_with_orphan_adoption(
+                            &plan.runner_id,
+                            None,
+                            &[],
+                            false,
+                            None,
+                            None,
+                            None,
+                        )?;
+                        if exit_code != 0 || !report.connected {
+                            return Err(Error::validation_invalid_argument(
+                                "reconnect",
+                                report.failure_message.unwrap_or_else(|| {
+                                    "rollback reconnect did not persist an active daemon session".to_string()
+                                }),
+                                Some(plan.runner_id.clone()),
+                                None,
+                            ));
+                        }
+                        Ok(())
+                    },
+                );
             }
         };
         let daemon_identity_verification = (connect_exit_code == 0)
@@ -1210,6 +1238,26 @@ fn restore_runner_homeboy_path(runner_id: &str, homeboy_path: Option<&str>) -> R
         let patch = serde_json::json!({ "homeboy_path": homeboy_path });
         match merge(Some(runner_id), &patch.to_string(), &[])? {
             MergeOutput::Single(_) | MergeOutput::Bulk(_) => Ok(()),
+        }
+    })
+}
+
+/// Restore only if this promotion still owns the selected value. A later
+/// serialized transaction may have selected another binary after this one
+/// failed; compensation must never overwrite that newer owner.
+fn restore_runner_homeboy_path_if_selected(
+    runner_id: &str,
+    selected_homeboy_path: &str,
+    previous_homeboy_path: Option<&str>,
+) -> Result<bool> {
+    homeboy_core::config::with_config_lock(|| {
+        let runner = load(runner_id)?;
+        if runner.settings.homeboy_path.as_deref() != Some(selected_homeboy_path) {
+            return Ok(false);
+        }
+        let patch = serde_json::json!({ "homeboy_path": previous_homeboy_path });
+        match merge(Some(runner_id), &patch.to_string(), &[])? {
+            MergeOutput::Single(_) | MergeOutput::Bulk(_) => Ok(true),
         }
     })
 }

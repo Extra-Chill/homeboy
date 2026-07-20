@@ -659,6 +659,62 @@ fn reconnect_error_after_disconnect_restores_the_pre_refresh_binary() {
 }
 
 #[test]
+fn reconnect_rollback_restores_only_its_own_selected_binary() {
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab-local","kind":"local","homeboy_path":"/newer/homeboy"}"#,
+            false,
+        )
+        .expect("runner");
+
+        let restored = restore_runner_homeboy_path_if_selected(
+            "lab-local",
+            "/selected/homeboy",
+            Some("/stable/homeboy"),
+        )
+        .expect("compare and restore");
+
+        assert!(!restored);
+        assert_eq!(
+            crate::load("lab-local")
+                .expect("reload")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            Some("/newer/homeboy")
+        );
+    });
+}
+
+#[test]
+fn reconnect_rollback_restores_its_own_selected_binary() {
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab-local","kind":"local","homeboy_path":"/selected/homeboy"}"#,
+            false,
+        )
+        .expect("runner");
+
+        let restored = restore_runner_homeboy_path_if_selected(
+            "lab-local",
+            "/selected/homeboy",
+            Some("/stable/homeboy"),
+        )
+        .expect("compare and restore");
+
+        assert!(restored);
+        assert_eq!(
+            crate::load("lab-local")
+                .expect("reload")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            Some("/stable/homeboy")
+        );
+    });
+}
+
+#[test]
 fn reconnect_failure_after_stop_restores_and_reconnects_before_returning() {
     let operations = std::cell::RefCell::new(Vec::new());
 
