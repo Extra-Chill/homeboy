@@ -1268,7 +1268,37 @@ pub(super) fn provider_command_env(
         )
         .map_err(ProviderCommandEnvError::Secret)?,
     );
+    // Enforce the executor git-mutation boundary: strip git push credentials so a
+    // provider cannot push a candidate to a real remote from its isolated attempt
+    // checkout before Homeboy's verification/promotion/finalization. Homeboy
+    // harvests candidates via local `git diff` and performs its own commit/push
+    // from a separate finalization worktree, so the provider never needs network
+    // git. Appended last so these override any inherited auth env. (#8486)
+    env.extend(git_mutation_boundary_env());
     Ok(env)
+}
+
+/// Environment that denies a provider the ability to authenticate a `git push`.
+///
+/// Blocks every credential path: no askpass helper, no interactive terminal
+/// prompt, no system config, and an empty `credential.helper` (which resets any
+/// inherited helper list) so a cached-credential helper cannot supply a token.
+/// A push to an authenticated remote (production `origin`) then fails regardless
+/// of the remote name used, so this holds even if a provider adds a new remote.
+fn git_mutation_boundary_env() -> Vec<(String, String)> {
+    vec![
+        ("GIT_ASKPASS".to_string(), "/bin/false".to_string()),
+        ("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()),
+        ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
+        // Inject `credential.helper=` via git's environment config so it resets
+        // any inherited helper list (git-config(1) empty-helper semantics).
+        ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+        (
+            "GIT_CONFIG_KEY_0".to_string(),
+            "credential.helper".to_string(),
+        ),
+        ("GIT_CONFIG_VALUE_0".to_string(), String::new()),
+    ]
 }
 
 fn agent_tool_dispatch_command() -> String {

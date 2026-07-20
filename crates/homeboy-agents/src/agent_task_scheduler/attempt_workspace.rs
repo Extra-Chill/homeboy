@@ -403,6 +403,15 @@ pub(super) fn prepare_attempt_workspace(
         &root,
         &["worktree", "add", "--detach", &attempt_root_string, base],
     )?;
+    // Deny push from the attempt checkout as defense-in-depth for the executor
+    // git-mutation boundary (#8486). The provider produces candidate artifacts
+    // only; Homeboy harvests via local diff and pushes from a separate
+    // finalization worktree. A per-worktree `origin` push URL override rejects
+    // the common `git push origin ...` immediately with a clear reason and,
+    // being worktree-scoped, never affects the shared parent repo. The primary
+    // boundary is credential stripping in the provider environment; this makes
+    // the block explicit and legible for the default remote.
+    block_attempt_worktree_push(&attempt_root);
     // Establish cleanup ownership before anything that can fail below.
     let mut workspace = Arc::new(AttemptWorkspace {
         source_root: root.clone(),
@@ -435,6 +444,31 @@ pub(super) fn prepare_attempt_workspace(
         adoption,
     });
     Ok(Some(workspace))
+}
+
+/// Best-effort per-worktree push block for the attempt checkout.
+///
+/// Sets a worktree-scoped `remote.origin.pushurl` to a sentinel that has no git
+/// transport, so `git push origin ...` from the attempt fails immediately with a
+/// clear reason. `extensions.worktreeConfig` scopes the override to this
+/// worktree so the shared parent repository's remote is never modified. This is
+/// defense-in-depth for the `origin` case; the authoritative boundary is the
+/// credential stripping applied to the provider environment. Failure to set it
+/// is non-fatal — the credential boundary still holds. (#8486)
+fn block_attempt_worktree_push(attempt_root: &Path) {
+    let _ = git_output(
+        attempt_root,
+        &["config", "extensions.worktreeConfig", "true"],
+    );
+    let _ = git_output(
+        attempt_root,
+        &[
+            "config",
+            "--worktree",
+            "remote.origin.pushurl",
+            "homeboy-blocked://agent-task-attempt-may-not-push",
+        ],
+    );
 }
 
 fn apply_gate_feedback_baseline(
@@ -579,6 +613,88 @@ mod tests {
             fs::read_to_string(attempt_root.join("src/lib.rs")).expect("source remains"),
             "changed source"
         );
+    }
+
+    #[test]
+    fn attempt_worktree_push_is_blocked_without_affecting_parent_or_local_reads() {
+        let origin = tempfile::tempdir().expect("origin");
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        let source = tempfile::tempdir().expect("source repository");
+        git(source.path(), &["init", "-b", "main"]);
+        git(source.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        fs::write(source.path().join("f.txt"), "base").expect("source file");
+        git(source.path(), &["add", "f.txt"]);
+        git(source.path(), &["commit", "-m", "initial"]);
+        git(
+            source.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("file://{}", origin.path().display()),
+            ],
+        );
+        git(source.path(), &["push", "origin", "main"]);
+
+        let attempt_root = source.path().join("attempt");
+        git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                attempt_root.to_str().expect("attempt path"),
+                "HEAD",
+            ],
+        );
+
+        block_attempt_worktree_push(&attempt_root);
+
+        // A provider commit + push from the attempt is rejected.
+        git(&attempt_root, &["config", "user.name", "Provider"]);
+        git(
+            &attempt_root,
+            &["config", "user.email", "provider@example.test"],
+        );
+        fs::write(attempt_root.join("f.txt"), "executor change").expect("attempt edit");
+        git(&attempt_root, &["commit", "-am", "executor change"]);
+        let push = Command::new("git")
+            .args(["push", "origin", "HEAD:main"])
+            .current_dir(&attempt_root)
+            .output()
+            .expect("run git push");
+        assert!(
+            !push.status.success(),
+            "push from the attempt worktree must be blocked"
+        );
+
+        // The bare origin's main is unchanged (still the base commit).
+        let origin_head = git_output(origin.path(), &["rev-parse", "main"]).expect("origin head");
+        let base_head = git_output(source.path(), &["rev-parse", "main"]).expect("source head");
+        assert_eq!(
+            origin_head, base_head,
+            "the remote branch must not advance from a blocked attempt push"
+        );
+
+        // The parent repo's origin push URL is untouched (block is worktree-scoped).
+        let parent_pushurl = git_output(
+            source.path(),
+            &["config", "--get-all", "remote.origin.pushurl"],
+        )
+        .unwrap_or_default();
+        assert!(
+            parent_pushurl.is_empty(),
+            "parent repo must not inherit the attempt push block, got: {parent_pushurl}"
+        );
+
+        // Homeboy's local diff harvest still works in the attempt.
+        let diff = git_output(&attempt_root, &["diff", "--name-only", "HEAD~1", "HEAD"])
+            .expect("local diff");
+        assert!(diff.contains("f.txt"), "local diff harvest must still work");
     }
 
     fn git(cwd: &Path, args: &[&str]) {
