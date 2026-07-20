@@ -607,8 +607,8 @@ pub(super) fn promote_with_provider_and_checkpoint(
         options.to_worktree.clone(),
         applied_worktree_path.as_deref(),
     );
-    if let Some(worktree_path) = applied_worktree_path.as_deref() {
-        checkpoint(&post_apply_report(
+    let post_apply = if let Some(worktree_path) = applied_worktree_path.as_deref() {
+        let report = post_apply_report(
             &options,
             &source_kind,
             &outcome,
@@ -624,8 +624,12 @@ pub(super) fn promote_with_provider_and_checkpoint(
             worktree_path,
             &outcome.schema,
             artifact.metadata.clone(),
-        )?)?;
-    }
+        )?;
+        checkpoint(&report)?;
+        Some(report)
+    } else {
+        None
+    };
     let verified_base = if let Some(worktree_path) = applied_worktree_path.as_deref() {
         let verified_base = capture_declared_base(worktree_path, options.base_ref.as_deref())?;
         (
@@ -637,16 +641,15 @@ pub(super) fn promote_with_provider_and_checkpoint(
     };
     let (gates, verified_base) = verified_base;
     let operator_notification = promotion_notification(gates.status, &target);
-    let candidate = if gates.status.patch_promoted() {
-        applied_worktree_path
-            .as_deref()
-            .map(|path| {
-                crate::agent_task_promotion::candidate_fingerprint(&path.display().to_string())
-            })
-            .transpose()?
-    } else {
-        None
-    };
+    // Gates can create incidental files. Feedback must retain the identity that
+    // was captured immediately after applying the provider candidate.
+    let candidate = post_apply
+        .as_ref()
+        .and_then(|report| report.provenance.get("candidate").cloned())
+        .and_then(|value| serde_json::from_value(value).ok());
+    let gate_feedback_baseline = post_apply
+        .as_ref()
+        .and_then(|report| report.provenance.get("gate_feedback_baseline").cloned());
 
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
@@ -673,6 +676,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
             "candidate": candidate,
             "destination_baseline": candidate,
             "prior_baseline": promotion_chain_baseline,
+            "gate_feedback_baseline": gate_feedback_baseline,
         }),
         operator_notification,
     })
@@ -1020,8 +1024,8 @@ fn promote_committed_changes(
         options.to_worktree.clone(),
         applied_worktree_path.as_deref(),
     );
-    if let Some(path) = applied_worktree_path.as_deref() {
-        checkpoint(&post_apply_report(
+    let post_apply = if let Some(path) = applied_worktree_path.as_deref() {
+        let report = post_apply_report(
             options,
             source_kind,
             outcome,
@@ -1039,8 +1043,12 @@ fn promote_committed_changes(
             artifact
                 .map(|artifact| artifact.metadata.clone())
                 .unwrap_or(Value::Null),
-        )?)?;
-    }
+        )?;
+        checkpoint(&report)?;
+        Some(report)
+    } else {
+        None
+    };
     let verified_base = if let Some(path) = applied_worktree_path.as_deref() {
         let verified_base = capture_declared_base(path, options.base_ref.as_deref())?;
         (run_promotion_gates(options, provider, path)?, verified_base)
@@ -1049,16 +1057,13 @@ fn promote_committed_changes(
     };
     let (gates, verified_base) = verified_base;
     let operator_notification = promotion_notification(gates.status, &target);
-    let candidate = if gates.status == AgentTaskPromotionStatus::Applied {
-        applied_worktree_path
-            .as_deref()
-            .map(|path| {
-                crate::agent_task_promotion::candidate_fingerprint(&path.display().to_string())
-            })
-            .transpose()?
-    } else {
-        None
-    };
+    let candidate = post_apply
+        .as_ref()
+        .and_then(|report| report.provenance.get("candidate").cloned())
+        .and_then(|value| serde_json::from_value(value).ok());
+    let gate_feedback_baseline = post_apply
+        .as_ref()
+        .and_then(|report| report.provenance.get("gate_feedback_baseline").cloned());
 
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
@@ -1088,6 +1093,7 @@ fn promote_committed_changes(
             "commits": committed_patch.commits,
             "candidate": candidate,
             "destination_baseline": candidate,
+            "gate_feedback_baseline": gate_feedback_baseline,
         }),
         operator_notification,
     })
@@ -1399,6 +1405,13 @@ fn post_apply_report(
     let candidate =
         crate::agent_task_promotion::candidate_fingerprint(&worktree_path.display().to_string())
             .ok();
+    let gate_feedback_baseline = match candidate.as_ref() {
+        Some(crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { .. }) => Some(json!({
+            "schema": "homeboy/agent-task-gate-feedback-baseline/v1",
+            "current_diff": candidate_current_diff(worktree_path)?,
+        })),
+        _ => None,
+    };
     // A base observation is recorded when the target can reach its remote. The
     // post-apply checkpoint must still survive a transient remote failure so it
     // can protect the already-applied candidate for recovery.
@@ -1425,6 +1438,7 @@ fn post_apply_report(
             "post_apply": true,
             "candidate": candidate,
             "destination_baseline": candidate,
+            "gate_feedback_baseline": gate_feedback_baseline,
             "resume_inputs": {
                 "base_ref": options.base_ref,
                 "task_base_sha": options.task_base_sha,
@@ -1433,6 +1447,42 @@ fn post_apply_report(
         }),
         operator_notification,
     })
+}
+
+/// Capture the complete candidate delta without changing the destination index.
+fn candidate_current_diff(worktree_path: &Path) -> Result<String> {
+    let index = tempfile::NamedTempFile::new().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create gate-feedback candidate index".to_string()),
+        )
+    })?;
+    let index_path = index.path().display().to_string();
+    for arguments in [vec!["read-tree", "HEAD"], vec!["add", "--all"]] {
+        let output = Command::new("git")
+            .args(arguments)
+            .env("GIT_INDEX_FILE", &index_path)
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|error| Error::git_command_failed(error.to_string()))?;
+        if !output.status.success() {
+            return Err(Error::git_command_failed(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
+        }
+    }
+    let output = Command::new("git")
+        .args(["diff", "--cached", "--binary", "--full-index", "HEAD"])
+        .env("GIT_INDEX_FILE", index_path)
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !output.status.success() {
+        return Err(Error::git_command_failed(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn persisted_changed_files(

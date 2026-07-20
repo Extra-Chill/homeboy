@@ -46,6 +46,17 @@ use super::cook_promotion::{
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
 
+/// The promotion checkpoint captures this before gates run, when it is the only
+/// complete authorization for reusing the dirty managed destination.
+fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -> String {
+    promotion
+        .provenance
+        .pointer("/gate_feedback_baseline/current_diff")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Executes one provider attempt while cook retains ownership of promotion,
 /// gates, retries, and finalization.
 pub trait AgentTaskCookAttemptDispatcher: Send + Sync + std::fmt::Debug {
@@ -416,7 +427,7 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
         attempt: 1,
         max_attempts: options.max_attempts,
         source_run_id: Some(record.run_id.clone()),
-        current_diff: String::new(),
+        current_diff: gate_feedback_current_diff(&promotion),
         metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
     });
     let attempt = AgentTaskCookAttemptReport {
@@ -1217,7 +1228,7 @@ where
             attempt,
             max_attempts,
             source_run_id: Some(run_id.clone()),
-            current_diff: String::new(),
+            current_diff: gate_feedback_current_diff(&promotion),
             metadata: Value::Null,
         });
         let feedback_status = feedback.status;

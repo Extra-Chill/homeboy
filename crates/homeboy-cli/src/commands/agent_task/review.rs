@@ -548,6 +548,13 @@ pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
         .as_deref()
         .map(config::read_json_spec_to_string)
         .transpose()?
+        .or_else(|| {
+            promotion_report
+                .provenance
+                .pointer("/gate_feedback_baseline/current_diff")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .unwrap_or_default();
     let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
         source_request,

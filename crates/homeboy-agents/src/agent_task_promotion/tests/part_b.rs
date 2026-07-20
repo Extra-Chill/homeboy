@@ -865,6 +865,84 @@ fn explicit_candidate_gate_failure_is_recorded_after_normal_promotion_handoff() 
 }
 
 #[test]
+fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    git(&workspace, &["init", "-b", "main"]);
+    git(&workspace, &["config", "user.email", "test@example.com"]);
+    git(&workspace, &["config", "user.name", "Homeboy Test"]);
+    std::fs::create_dir_all(workspace.join("src")).expect("source directory");
+    std::fs::write(workspace.join("src/lib.rs"), "old\n").expect("base file");
+    git(&workspace, &["add", "."]);
+    git(&workspace, &["commit", "-m", "base"]);
+    let (source_path, source) = write_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(workspace.clone()),
+        apply_to_git: true,
+        verify_exit_code: 1,
+        ..Default::default()
+    };
+    let mut checkpoint = None;
+    let report = promote_with_provider_and_checkpoint(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("gate-failure-run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "fixture@target".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["failing-gate".to_string()],
+                ..Default::default()
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+        &mut |saved| {
+            checkpoint = Some(saved.clone());
+            Ok(())
+        },
+    )
+    .expect("gate failure is durable promotion evidence");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
+    let baseline = report.provenance["gate_feedback_baseline"].clone();
+    assert_eq!(
+        checkpoint.expect("post-apply checkpoint").provenance["gate_feedback_baseline"],
+        baseline
+    );
+    assert!(baseline["current_diff"]
+        .as_str()
+        .is_some_and(|diff| !diff.is_empty()));
+
+    let feedback_baseline = serde_json::json!({
+        "current_diff": baseline["current_diff"],
+        "patch_artifact": report.patch_artifact,
+    });
+    crate::agent_task_candidate_baseline::validate_gate_feedback_candidate_baseline(
+        &workspace,
+        &feedback_baseline,
+    )
+    .expect("exactly matching applied candidate is safe to retry");
+
+    std::fs::write(workspace.join("unrelated.txt"), "drift\n").expect("divergent dirt");
+    assert!(
+        crate::agent_task_candidate_baseline::validate_gate_feedback_candidate_baseline(
+            &workspace,
+            &feedback_baseline,
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn provider_failure_surfaces_bounded_stdout_and_stderr_evidence() {
     let request = AgentTaskPromotionApplyRequest {
         schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
