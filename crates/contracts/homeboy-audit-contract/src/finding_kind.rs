@@ -43,6 +43,11 @@ pub enum AuditFinding {
     /// catches hand-rolled wrappers like per-module `git_output` helpers that
     /// map failures onto different error enums.
     SkeletonDuplicate,
+    /// A raw string literal whose value is byte-identical to a named constant
+    /// already defined elsewhere in the codebase — the constant was bypassed
+    /// with a hand-typed copy. Editing the constant leaves these copies stale,
+    /// so they should reference the constant instead.
+    ConstantBypassLiteral,
     /// Function parameter is declared but never used in the function body.
     /// When call-site data is available, this means no callers pass a value
     /// for this position — truly dead, safe to remove.
@@ -223,6 +228,7 @@ impl AuditFinding {
             "cross_name_duplicate",
             "near_duplicate",
             "skeleton_duplicate",
+            "constant_bypass_literal",
             "unused_parameter",
             "ignored_parameter",
             "dead_code_marker",
