@@ -703,7 +703,12 @@ fn force_stop_lease_mismatch_cannot_signal_a_process() {
 
     let error = force_stop_for_lease("other-lease").expect_err("mismatched lease is rejected");
 
-    assert!(error.message.contains("refusing to signal"));
+    assert!(
+        error.message.contains("refusing to signal")
+            || error
+                .message
+                .contains("exact process environment ownership checks")
+    );
     assert!(pid_is_running(child.id()));
     child.kill().expect("cleanup test process");
     child.wait().expect("reap test process");
@@ -725,9 +730,13 @@ fn force_stop_active_jobs_block_signaling() {
     let job = store.create("runner.exec");
     store.start(job.id).expect("start job");
 
-    let error = force_stop_for_lease(&state.lease_id).expect_err("active job blocks force stop");
-
-    assert_eq!(error.details["active_job_ids"], serde_json::json!([job.id]));
+    for result in [
+        stop_for_lease(&state.lease_id),
+        force_stop_for_lease(&state.lease_id),
+    ] {
+        let error = result.expect_err("active job blocks stale daemon stop");
+        assert_eq!(error.details["active_job_ids"], serde_json::json!([job.id]));
+    }
     assert!(pid_is_running(child.id()));
     child.kill().expect("cleanup test process");
     child.wait().expect("reap test process");
@@ -756,6 +765,52 @@ fn force_stop_matching_zero_job_stale_daemon_is_terminated_and_verified() {
     assert!(evidence.os_evidence.contains("process death verified"));
     assert!(!pid_is_running(pid));
     assert!(!state_path().expect("state path").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lease_bound_stop_recovers_only_the_exact_daemon_after_binary_rebuild() {
+    let _home = HomeGuard::new();
+    let executable_dir = tempfile::tempdir().expect("executable fixture");
+    let executable = executable_dir.path().join("homeboy");
+    std::fs::write(&executable, "build-a").expect("write build A");
+    let build_a = sha256_file_optional(&executable)
+        .expect("hash build A")
+        .expect("build A hash");
+    let owner_token = "rebuilt-daemon-owner";
+    let unrelated_token = "unrelated-daemon-owner";
+    let owner = spawn_force_stop_test_process(Some(owner_token));
+    let mut unrelated = spawn_force_stop_test_process(Some(unrelated_token));
+    let owner_pid = owner.id();
+    let unrelated_pid = unrelated.id();
+    let mut state = daemon_state_for_test(owner_pid, "127.0.0.1:1");
+    state.lease_id = "build-a-lease".to_string();
+    state.startup_token = owner_token.to_string();
+    state.binary_sha256 = Some(build_a);
+    write_daemon_state_for_test(&state);
+
+    // The configured executable path is rebuilt in place while build A remains
+    // active. The replacement client observes build B at that same path.
+    std::fs::write(&executable, "build-b").expect("replace executable with build B");
+    let build_b = sha256_file_optional(&executable)
+        .expect("hash build B")
+        .expect("build B hash");
+    std::env::set_var(DAEMON_BINARY_SHA_OVERRIDE_ENV, build_b);
+
+    let wrong_lease = stop_for_lease("other-lease").expect_err("wrong lease is rejected");
+    assert!(wrong_lease.message.contains("expected lease `other-lease`"));
+    assert!(pid_is_running(owner_pid));
+    assert!(pid_is_running(unrelated_pid));
+
+    let result = stop_for_lease(&state.lease_id).expect("replacement stops recorded lease");
+
+    assert!(result.stopped);
+    assert_eq!(result.pid, Some(owner_pid));
+    assert!(!pid_is_running(owner_pid));
+    assert!(pid_is_running(unrelated_pid));
+    assert!(!state_path().expect("state path").exists());
+    unrelated.kill().expect("cleanup unrelated process");
+    unrelated.wait().expect("reap unrelated process");
 }
 
 #[cfg(unix)]
@@ -797,10 +852,14 @@ fn lease_bound_stop_does_not_report_live_stale_owner_as_already_absent() {
     state.binary_sha256 = Some("stale-binary-hash".to_string());
     write_daemon_state_for_test(&state);
 
-    let result = stop_for_lease(&state.lease_id).expect("lease-bound stale stop");
+    let error = stop_for_lease(&state.lease_id).expect_err("unproven stale owner is rejected");
 
-    assert!(!result.stopped);
-    assert!(!result.already_absent);
+    assert!(
+        error.message.contains("refusing to signal")
+            || error
+                .message
+                .contains("exact process environment ownership checks")
+    );
     assert!(state_path().expect("state path").exists());
 }
 
