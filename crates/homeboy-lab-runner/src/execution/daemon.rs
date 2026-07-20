@@ -331,6 +331,15 @@ pub(super) fn exec_via_daemon(
         run_id.as_deref(),
         mirror_run_id.as_deref(),
     )?;
+    if let Some(run_id) = run_id.as_deref() {
+        homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(
+            run_id,
+            &homeboy_core::api_jobs::RunnerJobLogSnapshot {
+                job: job.clone(),
+                events: events.clone(),
+            },
+        )?;
+    }
     let artifacts = job.artifacts.clone();
     let mutation_artifacts = mutation_artifacts_from_job(&job, &result);
     if print_handoff_output {
