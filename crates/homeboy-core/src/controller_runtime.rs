@@ -1896,27 +1896,64 @@ mod tests {
     }
 
     #[test]
-    fn admission_queue_preserves_fifo_status_cancellation_and_stale_owner_recovery() {
+    fn admission_queue_serializes_waiters_and_recovers_cancelled_and_stale_requests() {
         crate::test_support::with_isolated_home(|_| {
             let root = runtime_root().expect("runtime root");
             let lock = root.join(ADMISSION_LOCK_DIR);
-            enqueue_admission_request(&lock, "first").expect("enqueue first");
-            enqueue_admission_request(&lock, "second").expect("enqueue second");
+            let first = admit_current_for("first").expect("first admission");
+            let (acquired, acquired_result) = std::sync::mpsc::channel();
+            let (release, release_result) = std::sync::mpsc::channel();
+            let waiter = std::thread::spawn(move || match admit_current_for("second") {
+                Ok(admission) => {
+                    acquired.send(Ok(())).expect("report second admission");
+                    release_result.recv().expect("release second admission");
+                    drop(admission);
+                }
+                Err(error) => acquired
+                    .send(Err(error.message))
+                    .expect("report failed second admission"),
+            });
 
+            let waiting = (0..40)
+                .map(|_| {
+                    let status = admission_status("second").expect("second status");
+                    if status["state"] == "waiting" {
+                        Some(status)
+                    } else {
+                        std::thread::sleep(Duration::from_millis(25));
+                        None
+                    }
+                })
+                .find_map(|status| status)
+                .expect("second admission waits behind first");
+            assert_eq!(waiting["position"], 2);
             assert_eq!(
-                admission_status("first").expect("first status")["position"],
-                1
-            );
-            assert_eq!(
-                admission_status("second").expect("second status")["position"],
-                2
-            );
-            cancel_admission("first").expect("cancel first");
-            assert_eq!(
-                admission_status("second").expect("second promoted")["position"],
-                1
+                admission_status("first").expect("first status")["state"],
+                "admitted"
             );
 
+            drop(first);
+            assert_eq!(
+                acquired_result
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("second admission resolves"),
+                Ok(())
+            );
+            assert_eq!(
+                admission_status("second").expect("second admitted")["state"],
+                "admitted"
+            );
+            release.send(()).expect("release second admission");
+            waiter.join().expect("waiter exits");
+
+            enqueue_admission_request(&lock, "cancelled").expect("enqueue cancellation target");
+            cancel_admission("cancelled").expect("cancel waiting request");
+            assert_eq!(
+                admission_status("cancelled").expect("cancelled status")["state"],
+                "none"
+            );
+
+            enqueue_admission_request(&lock, "stale-waiter").expect("enqueue stale waiter");
             update_admission_queue(&lock, |queue| {
                 queue["owner"] = json!({
                     "request_id": "crashed-owner",
@@ -1925,7 +1962,7 @@ mod tests {
                 });
             })
             .expect("persist stale owner");
-            let status = admission_status("second").expect("reclaim stale owner");
+            let status = admission_status("stale-waiter").expect("reclaim stale owner");
             assert!(status["owner"].is_null());
             assert!(status["wait_duration_ms"].as_u64().is_some());
         });
