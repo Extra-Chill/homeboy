@@ -36,11 +36,22 @@ pub fn from_main_workflow_with_ci_context(
         &result.status,
         exit_code,
         result.test_counts.as_ref(),
+        result
+            .findings
+            .as_ref()
+            .is_some_and(|findings| !findings.is_empty()),
     ));
     let failure = if exit_code == 0 {
         None
     } else {
-        Some(test_phase_failure(exit_code, result.test_counts.as_ref()))
+        Some(test_phase_failure(
+            exit_code,
+            result.test_counts.as_ref(),
+            result
+                .findings
+                .as_ref()
+                .is_some_and(|findings| !findings.is_empty()),
+        ))
     };
 
     (
@@ -145,7 +156,12 @@ pub fn from_auto_fix_drift_workflow(
     )
 }
 
-fn test_phase_report(status: &str, exit_code: i32, counts: Option<&TestCounts>) -> PhaseReport {
+fn test_phase_report(
+    status: &str,
+    exit_code: i32,
+    counts: Option<&TestCounts>,
+    has_findings: bool,
+) -> PhaseReport {
     if status == "skipped" {
         return PhaseReport {
             phase: VerificationPhase::Test,
@@ -170,6 +186,8 @@ fn test_phase_report(status: &str, exit_code: i32, counts: Option<&TestCounts>) 
             }
         } else if counts.map(|counts| counts.total == 0).unwrap_or(false) {
             "test runner reported zero executed tests".to_string()
+        } else if has_findings {
+            format!("test phase reported structured failures (exit {exit_code})")
         } else if exit_code >= 2 {
             format!("test harness infrastructure failure (exit {})", exit_code)
         } else if counts.map(|counts| counts.failed == 0).unwrap_or(false) {
@@ -191,8 +209,14 @@ fn test_phase_report(status: &str, exit_code: i32, counts: Option<&TestCounts>) 
     }
 }
 
-fn test_phase_failure(exit_code: i32, counts: Option<&TestCounts>) -> PhaseFailure {
-    let category = if exit_code != 0 && counts.map(|counts| counts.total == 0).unwrap_or(false) {
+fn test_phase_failure(
+    exit_code: i32,
+    counts: Option<&TestCounts>,
+    has_findings: bool,
+) -> PhaseFailure {
+    let category = if has_findings {
+        PhaseFailureCategory::Findings
+    } else if exit_code != 0 && counts.map(|counts| counts.total == 0).unwrap_or(false) {
         PhaseFailureCategory::Findings
     } else if exit_code != 0 && counts.map(|counts| counts.failed == 0).unwrap_or(false) {
         PhaseFailureCategory::Infrastructure
@@ -315,6 +339,7 @@ mod tests {
         assert_eq!(json["findings"][0]["message"], "assertion failed");
         assert_eq!(json["findings"][0]["file"], "tests/fails.rs");
         assert_eq!(json["findings"][0]["line"], 42);
+        assert_eq!(json["failure"]["category"], "findings");
     }
 
     #[test]
