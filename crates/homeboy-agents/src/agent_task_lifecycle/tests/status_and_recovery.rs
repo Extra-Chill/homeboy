@@ -17,6 +17,91 @@ use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
+#[test]
+fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
+    with_isolated_home(|_| {
+        let record = submit_plan(&test_plan(), Some("adoption-progress")).expect("submit");
+        let candidate = "a3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1";
+
+        start_candidate_adoption(
+            &record.run_id,
+            candidate,
+            "openai/gpt-5.6-terra",
+            "cargo test",
+        )
+        .expect("claim before verifier starts");
+        let running = status(&record.run_id).expect("status exposes active adoption");
+        let adoption = running
+            .candidate_adoption
+            .expect("durable adoption attempt");
+        assert_eq!(adoption.state, "verification_running");
+        assert_eq!(adoption.candidate_sha, candidate);
+        assert_eq!(adoption.active_gate, "cargo test");
+
+        let duplicate = start_candidate_adoption(
+            &record.run_id,
+            candidate,
+            "openai/gpt-5.6-terra",
+            "cargo test",
+        )
+        .expect_err("live duplicate is rejected");
+        assert_eq!(duplicate.details["field"], "candidate_ref");
+
+        rewrite_record_for_test(&record.run_id, |record| {
+            record
+                .candidate_adoption
+                .as_mut()
+                .expect("attempt")
+                .owner_pid = u32::MAX;
+        })
+        .expect("make owner stale without sleeping");
+        let interrupted = status(&record.run_id).expect("status reconciles stale owner");
+        assert_eq!(
+            interrupted.candidate_adoption.expect("attempt").state,
+            "interrupted"
+        );
+
+        for (other_candidate, other_model) in [
+            (
+                "b3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1",
+                "openai/gpt-5.6-terra",
+            ),
+            (candidate, "openai/gpt-5.6-sol"),
+        ] {
+            let conflict = start_candidate_adoption(
+                &record.run_id,
+                other_candidate,
+                other_model,
+                "cargo test",
+            )
+            .expect_err("interrupted attempt only resumes with exact candidate and model");
+            assert_eq!(conflict.details["field"], "candidate_ref");
+        }
+
+        start_candidate_adoption(
+            &record.run_id,
+            candidate,
+            "openai/gpt-5.6-terra",
+            "cargo test",
+        )
+        .expect("same immutable candidate resumes");
+        checkpoint_candidate_adoption(&record.run_id, "finalization", "finalize pull request")
+            .expect("finalization checkpoint");
+        let finalizing = status(&record.run_id).expect("finalization status");
+        let adoption = finalizing.candidate_adoption.expect("attempt");
+        assert_eq!(adoption.phase, "finalization");
+        assert_eq!(adoption.active_gate, "finalize pull request");
+        finish_candidate_adoption(&record.run_id, None).expect("terminal completion");
+        let completed = status(&record.run_id).expect("completed status");
+        let adoption = completed
+            .candidate_adoption
+            .expect("terminal attempt retained");
+        assert_eq!(adoption.state, "completed");
+        assert_eq!(adoption.resume_count, 1);
+        assert!(adoption.completed_at.is_some());
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn artifact_recovery_rejects_wrong_hash_and_identity_without_record_mutation() {

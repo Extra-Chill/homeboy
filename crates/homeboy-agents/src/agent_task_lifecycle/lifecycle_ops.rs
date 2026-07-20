@@ -374,6 +374,7 @@ where
         latest_executor_evidence: None,
         lifecycle: lifecycle_for_submitted_plan(plan),
         lab_handoff: None,
+        candidate_adoption: None,
         metadata,
     };
     store::write_record(&record)?;
@@ -873,6 +874,9 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let resolved_run_id = resolve_run_id(run_id)?;
     let _ = reconcile_deferred_candidate(&resolved_run_id)?;
     let mut record = store::read_record(&resolved_run_id)?;
+    if reconcile_candidate_adoption(&mut record) {
+        store::write_record(&record)?;
+    }
     if reconcile_pending_runner_submission_intent(&resolved_run_id)? {
         record = store::read_record(&resolved_run_id)?;
     }
@@ -1010,6 +1014,164 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
         }
     }
     Ok(record)
+}
+
+/// Claim or resume the one controller-owned candidate adoption for a run. The
+/// record is written before promotion can invoke a workspace provider or gate.
+pub fn start_candidate_adoption(
+    run_id: &str,
+    candidate_sha: &str,
+    ai_model: &str,
+    active_gate: &str,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let candidate_sha = candidate_sha.to_string();
+    let ai_model = ai_model.to_string();
+    let active_gate = active_gate.to_string();
+    let mut conflict = false;
+    let record = store::mutate_record(&run_id, |record| {
+        let now = now_timestamp();
+        if let Some(existing) = record.candidate_adoption.as_mut() {
+            if existing.state == "verification_running" {
+                if homeboy_core::process::pid_is_running(existing.owner_pid) {
+                    conflict = true;
+                    return false;
+                }
+                existing.state = "interrupted".to_string();
+                existing.phase = "owner_stale".to_string();
+                existing.updated_at = now.clone();
+                existing.terminal_error = Some("adoption owner process is not running".to_string());
+            }
+            if existing.state == "interrupted"
+                && existing.candidate_sha == candidate_sha
+                && existing.ai_model == ai_model
+            {
+                existing.state = "verification_running".to_string();
+                existing.phase = "verification".to_string();
+                existing.active_gate = active_gate.clone();
+                existing.owner_pid = std::process::id();
+                existing.heartbeat_at = now.clone();
+                existing.updated_at = now.clone();
+                existing.resume_count += 1;
+                existing.terminal_error = None;
+                record.updated_at = Some(now);
+                return true;
+            }
+            if existing.state == "verification_running" || existing.state == "interrupted" {
+                conflict = true;
+                return false;
+            }
+        }
+        record.candidate_adoption = Some(AgentTaskCandidateAdoptionAttempt {
+            candidate_sha: candidate_sha.clone(),
+            ai_model: ai_model.clone(),
+            state: "verification_running".to_string(),
+            phase: "verification".to_string(),
+            active_gate: active_gate.clone(),
+            started_at: now.clone(),
+            updated_at: now.clone(),
+            owner_pid: std::process::id(),
+            heartbeat_at: now.clone(),
+            resume_count: 0,
+            terminal_error: None,
+            completed_at: None,
+        });
+        record.updated_at = Some(now);
+        true
+    })?;
+    let record = match record {
+        Some(record) => record,
+        None => store::read_record(&run_id)?,
+    };
+    if conflict {
+        return Err(Error::validation_invalid_argument(
+            "candidate_ref",
+            "candidate adoption conflicts with an existing durable attempt; use its immutable candidate SHA and model after recovery",
+            Some(candidate_sha),
+            None,
+        ));
+    }
+    let attempt = record.candidate_adoption.as_ref().ok_or_else(|| {
+        Error::internal_unexpected("candidate adoption claim did not persist a durable attempt")
+    })?;
+    if attempt.state != "verification_running"
+        || attempt.owner_pid != std::process::id()
+        || attempt.candidate_sha != candidate_sha
+        || attempt.ai_model != ai_model
+    {
+        return Err(Error::validation_invalid_argument(
+            "candidate_ref",
+            "candidate adoption conflicts with an existing durable attempt; use its immutable candidate SHA and model after recovery",
+            Some(candidate_sha),
+            None,
+        ));
+    }
+    Ok(record)
+}
+
+pub fn checkpoint_candidate_adoption(run_id: &str, phase: &str, active_gate: &str) -> Result<()> {
+    let run_id = sanitize_run_id(run_id);
+    store::mutate_record(&run_id, |record| {
+        let Some(attempt) = record.candidate_adoption.as_mut() else {
+            return false;
+        };
+        if attempt.state != "verification_running" {
+            return false;
+        }
+        let now = now_timestamp();
+        attempt.phase = phase.to_string();
+        attempt.active_gate = active_gate.to_string();
+        attempt.updated_at = now.clone();
+        attempt.heartbeat_at = now.clone();
+        record.updated_at = Some(now);
+        true
+    })?;
+    Ok(())
+}
+
+pub fn finish_candidate_adoption(
+    run_id: &str,
+    error: Option<String>,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        let Some(attempt) = record.candidate_adoption.as_mut() else {
+            return false;
+        };
+        let now = now_timestamp();
+        attempt.updated_at = now.clone();
+        attempt.heartbeat_at = now.clone();
+        attempt.completed_at = Some(now.clone());
+        attempt.terminal_error = error.clone();
+        attempt.state = if error.is_some() {
+            "failed"
+        } else {
+            "completed"
+        }
+        .to_string();
+        attempt.phase = "terminal".to_string();
+        record.updated_at = Some(now);
+        true
+    })?;
+    Ok(record.unwrap_or(store::read_record(&run_id)?))
+}
+
+fn reconcile_candidate_adoption(record: &mut AgentTaskRunRecord) -> bool {
+    let Some(attempt) = record.candidate_adoption.as_mut() else {
+        return false;
+    };
+    if attempt.state != "verification_running"
+        || homeboy_core::process::pid_is_running(attempt.owner_pid)
+    {
+        return false;
+    }
+    let now = now_timestamp();
+    attempt.state = "interrupted".to_string();
+    attempt.phase = "owner_stale".to_string();
+    attempt.updated_at = now.clone();
+    attempt.terminal_error = Some("adoption owner process is not running; rerun adopt with the recorded candidate SHA to resume".to_string());
+    record.updated_at = Some(now);
+    true
 }
 
 /// Refresh accepted runner handoffs and expire unbound controller handoffs before

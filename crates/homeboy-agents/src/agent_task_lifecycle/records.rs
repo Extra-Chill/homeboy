@@ -108,8 +108,31 @@ pub struct AgentTaskRunRecord {
     pub lifecycle: RunLifecycleRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lab_handoff: Option<AgentTaskLabHandoff>,
+    /// Controller-owned progress for an externally prepared candidate being
+    /// verified against this durable cook run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_adoption: Option<AgentTaskCandidateAdoptionAttempt>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCandidateAdoptionAttempt {
+    pub candidate_sha: String,
+    pub ai_model: String,
+    pub state: String,
+    pub phase: String,
+    pub active_gate: String,
+    pub started_at: String,
+    pub updated_at: String,
+    pub owner_pid: u32,
+    pub heartbeat_at: String,
+    #[serde(default)]
+    pub resume_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
 }
 
 /// Durable authority for a controller-to-Lab runner handoff. This lives on the

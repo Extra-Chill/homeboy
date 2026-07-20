@@ -125,6 +125,10 @@ fn ensure_clean_source(cwd: &Path) -> Result<()> {
     ))
 }
 
+pub(crate) fn resolve_candidate_revision(cwd: &Path, requested: &str) -> Result<String> {
+    resolve_candidate(cwd, Some(requested))
+}
+
 fn resolve_candidate(cwd: &Path, requested: Option<&str>) -> Result<String> {
     let candidate = requested.unwrap_or("HEAD");
     git_stdout(

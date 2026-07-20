@@ -11,6 +11,7 @@
 
 mod apply;
 mod committed_changes;
+pub(crate) use committed_changes::resolve_candidate_revision;
 mod fingerprint;
 mod patch;
 mod promote;
