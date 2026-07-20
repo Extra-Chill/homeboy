@@ -85,6 +85,18 @@ pub(super) fn run_propagate(
     })
 }
 
+pub(super) fn run_collapse_defaults(
+    struct_name: &str,
+    definition_file: Option<&str>,
+    target: &RefactorTargetArgs,
+    write: bool,
+) -> CmdResult<RefactorOutput> {
+    let targets = target.resolve_targets()?;
+    run_across_targets("collapse-defaults", targets, |component_id, path| {
+        run_collapse_defaults_single(struct_name, definition_file, component_id, path, write)
+    })
+}
+
 pub(super) fn run_decompose(
     file: &str,
     strategy: &str,
@@ -360,6 +372,79 @@ fn run_propagate_single(
     let exit_code = if result.edits.is_empty() { 0 } else { 1 };
     Ok((
         RefactorOutput::Propagate {
+            result,
+            dry_run: !write,
+        },
+        exit_code,
+    ))
+}
+
+fn run_collapse_defaults_single(
+    struct_name: &str,
+    definition_file: Option<&str>,
+    component_id: Option<&str>,
+    path: Option<&str>,
+    write: bool,
+) -> CmdResult<RefactorOutput> {
+    let root = refactor::move_items::resolve_root(component_id, path)?;
+
+    if write {
+        // Capture an undo snapshot of the files the collapse would touch before
+        // mutating them, so `refactor undo` can restore prior state.
+        let preview_config = refactor::CollapseConfig {
+            struct_name,
+            definition_file,
+            root: &root,
+            write: false,
+        };
+        let preview = refactor::collapse(&preview_config)?;
+        let affected_files: Vec<&str> = preview.edits.iter().map(|e| e.file.as_str()).collect();
+        homeboy::core::engine::undo::UndoSnapshot::capture_and_save(
+            &root,
+            "refactor collapse-defaults",
+            affected_files,
+        );
+    }
+
+    let config = refactor::CollapseConfig {
+        struct_name,
+        definition_file,
+        root: &root,
+        write,
+    };
+    let result = refactor::collapse(&config)?;
+
+    homeboy::log_status!(
+        "collapse-defaults",
+        "{} instantiation(s) found, {} collapsed, {} edit(s){}",
+        result.instantiations_found,
+        result.instantiations_collapsed,
+        result.edits.len(),
+        if write {
+            if result.applied {
+                " (applied)".to_string()
+            } else {
+                " (nothing to apply)".to_string()
+            }
+        } else {
+            " (dry run)".to_string()
+        }
+    );
+
+    for edit in &result.edits {
+        homeboy::log_status!(
+            "edit",
+            "{}:{}-{} — {}",
+            edit.file,
+            edit.start_line,
+            edit.end_line,
+            edit.description
+        );
+    }
+
+    let exit_code = if result.edits.is_empty() { 0 } else { 1 };
+    Ok((
+        RefactorOutput::CollapseDefaults {
             result,
             dry_run: !write,
         },
