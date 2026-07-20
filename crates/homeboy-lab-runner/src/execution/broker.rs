@@ -67,6 +67,14 @@ pub(super) fn exec_via_reverse_broker(
     )?;
     let redaction_env = env.clone();
     let redaction_secret_env_names = secret_env_names.clone();
+    let mut env = env;
+    // Snapshot the configured command binary into the durable job. A later
+    // daemon refresh must not redirect work that has already been accepted.
+    if !env.contains_key("HOMEBOY_COMMAND") {
+        if let Some(homeboy_path) = runner.settings.homeboy_path.as_deref() {
+            env.insert("HOMEBOY_COMMAND".to_string(), homeboy_path.to_string());
+        }
+    }
     let mut request = RemoteRunnerJobRequest {
         runner_id: runner.id.clone(),
         project_id,

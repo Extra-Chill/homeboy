@@ -339,11 +339,19 @@ pub fn refresh_homeboy_binary(
     }
 
     promotion_lease.assert_generation()?;
+    // Only a reconnect replaces the daemon, so it is the only mode allowed to
+    // change the runner-global daemon control binary. A non-reconnecting
+    // refresh materializes a command build for a workflow without creating
+    // stale-daemon drift for unrelated jobs.
+    let promote_daemon_binary = options.reconnect;
     let bootstrap = if disconnected_ssh {
         ssh_bootstrap_promote_with(
             &plan,
             || Ok(exec_output.stdout.clone()),
             |homeboy_path| {
+                if !promote_daemon_binary {
+                    return Ok(Vec::new());
+                }
                 homeboy_core::config::with_config_lock(|| {
                     let patch = refreshed_runner_patch(&plan.runner_id, homeboy_path)?;
                     match merge(Some(&plan.runner_id), &patch.to_string(), &[])? {
@@ -363,13 +371,17 @@ pub fn refresh_homeboy_binary(
                 None,
             )
         })?;
-        let updated_fields = homeboy_core::config::with_config_lock(|| {
-            let patch = refreshed_runner_patch(&plan.runner_id, &plan.binary_path)?;
-            match merge(Some(&plan.runner_id), &patch.to_string(), &[])? {
-                MergeOutput::Single(result) => Ok(result.updated_fields),
-                MergeOutput::Bulk(_) => Ok(Vec::new()),
-            }
-        })?;
+        let updated_fields = if promote_daemon_binary {
+            homeboy_core::config::with_config_lock(|| {
+                let patch = refreshed_runner_patch(&plan.runner_id, &plan.binary_path)?;
+                match merge(Some(&plan.runner_id), &patch.to_string(), &[])? {
+                    MergeOutput::Single(result) => Ok(result.updated_fields),
+                    MergeOutput::Bulk(_) => Ok(Vec::new()),
+                }
+            })?
+        } else {
+            Vec::new()
+        };
         Ok(SshBootstrapPromotion {
             identity,
             source_sha: source_sha_from_output(&exec_output.stdout),

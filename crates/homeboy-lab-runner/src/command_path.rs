@@ -46,10 +46,10 @@ pub(crate) fn normalize_runner_command_env_for_homeboy_path(
         return;
     };
     prepend_path_entry(env, parent);
-    env.insert(
-        "HOMEBOY_COMMAND".to_string(),
-        homeboy_path.display().to_string(),
-    );
+    // A durable runner job can pin its command binary. Configuration selects
+    // the daemon control binary only when the job did not make that selection.
+    env.entry("HOMEBOY_COMMAND".to_string())
+        .or_insert_with(|| homeboy_path.display().to_string());
 }
 
 fn prepend_path_entry(env: &mut HashMap<String, String>, entry: &str) {
@@ -677,6 +677,33 @@ mod tests {
         normalize_runner_command_env(&mut env);
 
         assert_eq!(env.get("PATH").map(String::as_str), Some("/custom/bin"));
+    }
+
+    #[test]
+    fn explicit_job_binary_is_not_replaced_by_runner_configuration() {
+        let mut env = HashMap::from([(
+            "HOMEBOY_COMMAND".to_string(),
+            "/build-b/homeboy".to_string(),
+        )]);
+
+        normalize_runner_command_env_for_homeboy_path(&mut env, Some("/build-a/homeboy"));
+
+        assert_eq!(
+            env.get("HOMEBOY_COMMAND"),
+            Some(&"/build-b/homeboy".to_string())
+        );
+    }
+
+    #[test]
+    fn configured_binary_is_used_when_job_does_not_select_one() {
+        let mut env = HashMap::new();
+
+        normalize_runner_command_env_for_homeboy_path(&mut env, Some("/build-a/homeboy"));
+
+        assert_eq!(
+            env.get("HOMEBOY_COMMAND"),
+            Some(&"/build-a/homeboy".to_string())
+        );
     }
 
     #[test]
