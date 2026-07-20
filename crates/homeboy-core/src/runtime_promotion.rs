@@ -112,6 +112,7 @@ pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimeProm
     let pid = std::process::id();
     let generation = current_generation();
     let subprocess_capability = subprocess_capability_from_env();
+    ensure_no_foreign_generation_pin(&root, pid, subprocess_capability.as_ref())?;
 
     match acquire_lease_dir_with_retry(
         || create_lease_dir(&path),
@@ -256,9 +257,10 @@ pub fn pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
     prune_pins(&root)?;
     let pid = std::process::id();
     let path = root.join(format!(
-        "{}-{}.json",
+        "{}-{}-{}.json",
         paths::sanitize_path_segment(cook_id),
-        pid
+        pid,
+        uuid::Uuid::new_v4(),
     ));
     let pin = RuntimeGenerationPin {
         pid,
@@ -414,6 +416,47 @@ fn prune_pins(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A running Cook pins its controller generation so a concurrent refresh cannot
+/// replace the configured job binary while that Cook is selecting a generation.
+/// The owning process may still acquire nested leases for its own handoff.
+fn ensure_no_foreign_generation_pin(
+    root: &Path,
+    pid: u32,
+    subprocess_capability: Option<&SubprocessLeaseCapability>,
+) -> Result<()> {
+    let pins = root.join(PIN_DIR);
+    if !pins.exists() {
+        return Ok(());
+    }
+    prune_pins(&pins)?;
+    for entry in fs::read_dir(&pins).map_err(io("read runtime generation pins"))? {
+        let path = entry.map_err(io("read runtime generation pin"))?.path();
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(pin) = serde_json::from_str::<RuntimeGenerationPin>(&content) else {
+            continue;
+        };
+        if pin.pid != pid
+            && !subprocess_capability.is_some_and(|capability| capability.owner_pid == pin.pid)
+        {
+            return Err(Error::new(
+                ErrorCode::RuntimePromotionContended,
+                format!(
+                    "runtime promotion is blocked by active Cook `{}` on generation `{}`",
+                    pin.cook_id, pin.generation
+                ),
+                serde_json::json!({
+                    "cook_id": pin.cook_id,
+                    "generation": pin.generation,
+                    "holder_pid": pin.pid,
+                }),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn current_generation() -> String {
     build_identity::current().display
 }
@@ -536,6 +579,30 @@ mod tests {
         assert_eq!(error.code, ErrorCode::InternalIoError);
         assert_eq!(create_calls, 1);
         assert_eq!(read_calls, 1);
+    }
+
+    #[test]
+    fn duplicate_cook_pins_keep_the_remaining_guard_live() {
+        crate::test_support::with_isolated_home(|_| {
+            let first = pin_cook_generation("duplicate-cook").expect("first cook pin");
+            let second = pin_cook_generation("duplicate-cook").expect("second cook pin");
+            let pins = paths::runtime_promotion_dir()
+                .expect("runtime promotion directory")
+                .join(PIN_DIR);
+            assert_eq!(
+                fs::read_dir(&pins).expect("list pins").count(),
+                2,
+                "each concurrent cook guard owns a distinct pin"
+            );
+
+            drop(first);
+            assert_eq!(
+                fs::read_dir(&pins).expect("list remaining pin").count(),
+                1,
+                "dropping one duplicate cook guard must retain the other pin"
+            );
+            assert!(second.path.exists(), "the second guard still owns its pin");
+        });
     }
 
     #[test]

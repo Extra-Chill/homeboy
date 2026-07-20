@@ -1098,8 +1098,15 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     reconcile_session_metadata_with_observed_daemon(&runner, &mut session, connected)?;
     super::generation_store::reconcile(runner_id, session.as_ref())?;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
-    let mut daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?
-        .or_else(|| remote_daemon_recovery_freshness(runner_id, &runner));
+    let local_daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;
+    // A direct tunnel health response proves this session is safe for new
+    // admission. Keep active jobs on prior generations, but make status and
+    // Cook agree on this freshly verified endpoint.
+    if let (Some(session), Some(_)) = (session.as_ref(), local_daemon_freshness.as_ref()) {
+        super::generation_store::reconcile_admission_session(runner_id, session)?;
+    }
+    let mut daemon_freshness =
+        local_daemon_freshness.or_else(|| remote_daemon_recovery_freshness(runner_id, &runner));
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
     let direct_daemon_active_jobs =
         matches!(active_job_source, Some(RunnerActiveJobSource::DirectDaemon))

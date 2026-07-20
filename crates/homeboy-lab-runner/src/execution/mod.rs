@@ -770,7 +770,11 @@ pub(crate) fn exec_with_status_snapshot(
     let connected = if should_force_diagnostic_ssh(&runner, &options) {
         None
     } else {
-        Some(execution_status(runner_id, status_snapshot)?)
+        Some(execution_status(
+            runner_id,
+            status_snapshot,
+            options.detach_after_handoff,
+        )?)
     };
 
     let extension_parity_plan = plan_extension_parity(
@@ -901,15 +905,7 @@ pub(crate) fn exec_with_status_snapshot(
             options.path_materialization_plan,
             options.diagnostic_ssh_timeout,
         ),
-        RunnerTransport::Unavailable => Err(Error::validation_invalid_argument(
-            "runner",
-            "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` or pass `--ssh` for explicit SSH diagnostics",
-            Some(runner.id.clone()),
-            Some(vec![
-                "Daemon-backed execution preserves job metadata and artifact discovery.".to_string(),
-                "SSH execution is intended for MVP diagnostics and must be explicit.".to_string(),
-            ]),
-        )),
+        RunnerTransport::Unavailable => Err(unavailable_daemon_admission_error(&runner.id)),
     };
     result.map(|(mut output, exit_code)| {
         append_runner_exec_binary_diagnostics(&mut output, &runner, connected.session.as_ref());
@@ -918,11 +914,38 @@ pub(crate) fn exec_with_status_snapshot(
     })
 }
 
+fn unavailable_daemon_admission_error(runner_id: &str) -> Error {
+    Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        format!(
+            "runner `{runner_id}` has no healthy daemon admission session; reconnect it before retrying the Lab handoff"
+        ),
+        json!({ "runner_id": runner_id, "phase": "lab_handoff" }),
+    )
+    .with_retryable(true)
+    .with_hint(format!(
+        "Run `homeboy runner status {runner_id}` to inspect the current admission session."
+    ))
+}
+
 fn execution_status(
     runner_id: &str,
     status_snapshot: Option<RunnerStatusReport>,
+    reconcile_direct_admission: bool,
 ) -> Result<RunnerStatusReport> {
     match status_snapshot {
+        // A preflight snapshot may point at a generation whose local tunnel
+        // disappeared during reconnect. Direct admission must always use the
+        // current health-checked session instead of that cached endpoint.
+        Some(status)
+            if reconcile_direct_admission
+                && status
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh) =>
+        {
+            crate::connection::status_for_admission(runner_id)
+        }
         Some(status) if status.connected => Ok(status),
         Some(status) => {
             if status

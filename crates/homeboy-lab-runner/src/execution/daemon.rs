@@ -625,7 +625,16 @@ where
         Err(error) if daemon_submission_connection_was_lost(&error) => {
             let accepted_session = accepted_session.ok_or(error)?;
             let recovered_endpoint = recover(accepted_session)?;
-            submit(&recovered_endpoint)
+            submit(&recovered_endpoint).map_err(|retry_error| {
+                if daemon_submission_connection_was_lost(&retry_error) {
+                    recovered_admission_transport_error(
+                        &accepted_session.runner_id,
+                        "lost the replacement admission tunnel before daemon acceptance",
+                    )
+                } else {
+                    retry_error
+                }
+            })
         }
         Err(error) => Err(error),
     }
@@ -643,52 +652,40 @@ fn recovered_daemon_submission_endpoint(
     runner_id: &str,
     accepted_session: &RunnerSession,
 ) -> Result<String> {
-    let accepted_lease = accepted_session
-        .remote_daemon_lease_id
-        .as_deref()
-        .filter(|lease| !lease.is_empty())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "runner",
-                format!(
-                    "runner `{runner_id}` lost its submission tunnel without a proven daemon lease; refusing to submit through a replacement session"
-                ),
-                Some(runner_id.to_string()),
-                None,
-            )
-        })?;
+    if accepted_session.mode != crate::RunnerTunnelMode::DirectSsh {
+        return Err(recovered_admission_transport_error(
+            runner_id,
+            "lost its direct admission tunnel before daemon acceptance",
+        ));
+    }
     let recovered = crate::connection::status_for_admission(runner_id)?;
     let session = recovered
         .session
         .filter(|_| recovered.connected)
         .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "runner",
-                format!("runner `{runner_id}` did not recover a connected daemon session"),
-                Some(runner_id.to_string()),
-                None,
+            recovered_admission_transport_error(
+                runner_id,
+                "did not recover a healthy daemon admission session",
             )
         })?;
-    if session.mode != crate::RunnerTunnelMode::DirectSsh
-        || session.remote_daemon_lease_id.as_deref() != Some(accepted_lease)
-    {
-        return Err(Error::validation_invalid_argument(
-            "runner",
-            format!(
-                "runner `{runner_id}` recovered a different daemon lease; refusing to submit a request proven for lease `{accepted_lease}`"
-            ),
-            Some(runner_id.to_string()),
-            None,
+    if session.mode != crate::RunnerTunnelMode::DirectSsh {
+        return Err(recovered_admission_transport_error(
+            runner_id,
+            "recovered a non-direct session for direct Lab admission",
         ));
     }
     session.local_url.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "runner",
-            format!("runner `{runner_id}` recovered without a direct daemon endpoint"),
-            Some(runner_id.to_string()),
-            None,
-        )
+        recovered_admission_transport_error(runner_id, "recovered without a direct daemon endpoint")
     })
+}
+
+fn recovered_admission_transport_error(runner_id: &str, reason: &str) -> Error {
+    Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        format!("runner `{runner_id}` {reason}"),
+        json!({ "runner_id": runner_id, "phase": "lab_handoff" }),
+    )
+    .with_retryable(true)
 }
 
 pub(super) fn preflight_runner_capability_plan(
