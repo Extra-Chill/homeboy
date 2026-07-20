@@ -9,7 +9,7 @@ use homeboy_core::error::{Error, ErrorCode, Result};
 
 use super::super::broker_http;
 use super::super::daemon_http_get::{daemon_get, parse_daemon_response_json};
-use super::super::{load, status, RunnerTunnelMode};
+use super::super::{load, status, RunnerSession, RunnerTunnelMode};
 
 #[allow(unused_imports)]
 use super::*;
@@ -94,6 +94,20 @@ fn with_daemon_post_options(request: RequestBuilder, options: DaemonPostOptions)
 
 pub fn daemon_api_get(runner_id: &str, path: &str) -> Result<Value> {
     daemon_api_request(runner_id, path, "GET")
+}
+
+/// Query one known direct-daemon generation without re-resolving ownership.
+/// Generation reconciliation uses this only after a job lookup returned 404.
+pub(crate) fn daemon_api_get_for_session(session: &RunnerSession, path: &str) -> Result<Value> {
+    let local_url = session.local_url.as_deref().ok_or_else(|| {
+        Error::internal_unexpected("known daemon generation has no direct local endpoint")
+    })?;
+    let client = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| Error::internal_unexpected(format!("build daemon HTTP client: {err}")))?;
+    daemon_get(&client, local_url, path)
 }
 
 pub fn daemon_api_post(runner_id: &str, path: &str) -> Result<Value> {

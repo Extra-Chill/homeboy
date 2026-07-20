@@ -1508,21 +1508,72 @@ fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) -> Result<()> {
     ) else {
         return Ok(());
     };
-    let snapshot = match super::runner_continuation::with_runner_continuation(|p| {
-        p.runner_job_log_snapshot(&runner_id, &job_id)
+    match super::runner_continuation::with_runner_continuation(|p| {
+        p.reconcile_runner_job(&runner_id, &job_id)
     }) {
-        Ok(snapshot) => snapshot,
-        Err(_) => {
+        super::runner_continuation::RunnerJobReconciliation::Snapshot(snapshot) => {
+            reconcile_runner_job_snapshot(record, &snapshot)
+        }
+        super::runner_continuation::RunnerJobReconciliation::ConfirmedAbsent {
+            checked_generations,
+        } => terminalize_lost_accepted_lab_job(record, checked_generations),
+        super::runner_continuation::RunnerJobReconciliation::UnconfirmedAbsence => {
             let disconnected = super::runner_continuation::with_runner_continuation(|p| {
                 !p.is_runner_connected(&runner_id)
             });
             if disconnected {
                 record.annotate_runner_disconnected();
             }
-            return Ok(());
+            Ok(())
         }
-    };
-    reconcile_runner_job_snapshot(record, &snapshot)
+    }
+}
+
+fn terminalize_lost_accepted_lab_job(
+    record: &mut AgentTaskRunRecord,
+    checked_generations: usize,
+) -> Result<()> {
+    if !record.has_accepted_lab_handoff() || !record.provider_handles.is_empty() {
+        return Ok(());
+    }
+    let plan = store::read_controller_plan(&record.run_id)?;
+    let run_id = record.run_id.clone();
+    let runner_id = record.runner_id().unwrap_or_default().to_string();
+    let runner_job_id = record.runner_job_id().unwrap_or_default().to_string();
+    let mut error = Error::internal_unexpected(format!(
+        "accepted Lab runner job '{runner_job_id}' was not found in any of {checked_generations} authoritative known daemon generation(s)"
+    ))
+    .with_hint(format!("Retry safely: homeboy agent-task retry {run_id} --run"));
+    error.retryable = Some(true);
+    let mut terminal = crate::agent_task_lifecycle::record_pre_execution_failure(
+        &run_id,
+        &plan,
+        "accepted_lab_runner_job_lost",
+        &error,
+    )?;
+    let metadata = terminal.ensure_metadata_object();
+    metadata.insert("phase".to_string(), json!("accepted_lab_runner_job_lost"));
+    metadata.insert(
+        "phase_activity".to_string(),
+        json!("accepted runner job was confirmed absent across authoritative daemon generations"),
+    );
+    metadata.insert("provider_executions_consumed".to_string(), json!(0));
+    metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
+    metadata.insert(
+        "lost_accepted_runner_job".to_string(),
+        json!({
+            "runner_id": runner_id,
+            "runner_job_id": runner_job_id,
+            "checked_generations": checked_generations,
+            "safe_next_action": format!("homeboy agent-task retry {run_id} --run"),
+        }),
+    );
+    if let Some(handoff) = metadata.get_mut("runner_handoff") {
+        handoff["state"] = json!("lost");
+    }
+    store::write_record(&terminal)?;
+    *record = terminal;
+    Ok(())
 }
 
 #[cfg(test)]

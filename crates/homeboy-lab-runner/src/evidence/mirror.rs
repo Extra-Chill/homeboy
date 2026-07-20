@@ -236,6 +236,29 @@ pub fn runner_job_log_snapshot(runner_id: &str, job_id: &str) -> Result<RunnerJo
     })
 }
 
+pub(crate) fn runner_job_log_snapshot_for_session(
+    session: &crate::RunnerSession,
+    job_id: &str,
+) -> Result<RunnerJobLogSnapshot> {
+    let job_data =
+        crate::execution::daemon_api_get_for_session(session, &format!("/jobs/{job_id}"))?;
+    let events_data =
+        crate::execution::daemon_api_get_for_session(session, &format!("/jobs/{job_id}/events"))?;
+    let job_body = canonical_daemon_body(&job_data, "daemon job response")?;
+    let events_body = canonical_daemon_body(&events_data, "daemon job events response")?;
+    Ok(RunnerJobLogSnapshot {
+        job: serde_json::from_value(job_body["job"].clone()).map_err(|error| {
+            Error::internal_json(error.to_string(), Some("parse daemon job".to_string()))
+        })?,
+        events: serde_json::from_value(events_body["events"].clone()).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse daemon job events".to_string()),
+            )
+        })?,
+    })
+}
+
 pub fn mirrored_runner_job_identity(run: &RunRecord) -> Option<(String, String)> {
     let lab = run.metadata_json.get("lab")?;
     let runner_id = lab

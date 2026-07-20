@@ -551,6 +551,30 @@ pub(crate) fn record_job(runner_id: &str, session: &RunnerSession, job_id: &str)
     })
 }
 
+/// Persist a daemon that has already passed the authenticated connection and
+/// endpoint identity checks as the admission owner. This survives controller
+/// session-file drift, while retaining older generations for any work pinned
+/// to them.
+pub(crate) fn record_authenticated_admission(
+    runner_id: &str,
+    session: &RunnerSession,
+) -> Result<()> {
+    let generation = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
+        Error::internal_unexpected("authenticated daemon session has no lease ID")
+    })?;
+    let mut generations = read(runner_id, None)?
+        .unwrap_or_else(|| RollingGenerations::new(generation, session.clone()));
+    if let Some(entry) = generations.generations.get_mut(generation) {
+        // A reattached daemon gets a fresh local tunnel, so update the endpoint
+        // without disturbing jobs already pinned to this lease.
+        entry.endpoint = session.clone();
+    } else {
+        generations.begin(generation, session.clone());
+    }
+    generations.activate(generation);
+    write(runner_id, &generations)
+}
+
 pub(crate) fn record_job_run(
     runner_id: &str,
     legacy: &RunnerSession,

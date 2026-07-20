@@ -60,7 +60,9 @@ pub use records::*;
 pub use runner_continuation::{
     clear_runner_continuation_provider_for_test, RunnerContinuationTestGuard,
 };
-pub use runner_continuation::{register_runner_continuation_provider, RunnerContinuationProvider};
+pub use runner_continuation::{
+    register_runner_continuation_provider, RunnerContinuationProvider, RunnerJobReconciliation,
+};
 
 pub(crate) use conversion::*;
 pub(crate) use lifecycle_record_ops::*;

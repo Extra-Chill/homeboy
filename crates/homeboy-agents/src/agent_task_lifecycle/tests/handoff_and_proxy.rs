@@ -17,6 +17,92 @@ use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
+enum TestRunnerReconciliation {
+    Snapshot(homeboy_core::api_jobs::RunnerJobLogSnapshot),
+    ConfirmedAbsent(usize),
+    Unconfirmed,
+}
+
+struct ReconciliationProvider {
+    result: Mutex<Option<TestRunnerReconciliation>>,
+}
+
+impl RunnerContinuationProvider for ReconciliationProvider {
+    fn runner_job_log_snapshot(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+    ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
+        Err(Error::internal_unexpected(
+            "snapshot must use generation reconciliation",
+        ))
+    }
+
+    fn reconcile_runner_job(&self, _runner_id: &str, _job_id: &str) -> RunnerJobReconciliation {
+        match self.result.lock().expect("reconciliation result").take() {
+            Some(TestRunnerReconciliation::Snapshot(snapshot)) => {
+                RunnerJobReconciliation::Snapshot(snapshot)
+            }
+            Some(TestRunnerReconciliation::ConfirmedAbsent(checked_generations)) => {
+                RunnerJobReconciliation::ConfirmedAbsent {
+                    checked_generations,
+                }
+            }
+            Some(TestRunnerReconciliation::Unconfirmed) | None => {
+                RunnerJobReconciliation::UnconfirmedAbsence
+            }
+        }
+    }
+
+    fn is_runner_connected(&self, _runner_id: &str) -> bool {
+        true
+    }
+
+    fn runner_exists(&self, _runner_id: &str) -> bool {
+        true
+    }
+
+    fn run_continuation_exec(
+        &self,
+        _runner_id: &str,
+        _cwd: &str,
+        _command: &[String],
+        _run_id: &str,
+    ) -> Result<i32> {
+        Err(Error::internal_unexpected("not used by reconciliation"))
+    }
+
+    fn submit_reverse_broker_job(
+        &self,
+        _runner_id: &str,
+        _request: RemoteRunnerJobRequest,
+    ) -> Result<Job> {
+        Err(Error::internal_unexpected("not used by reconciliation"))
+    }
+}
+
+fn accepted_detached_handoff(run_id: &str) -> AgentTaskRunRecord {
+    let plan = test_plan();
+    record_lab_offload_phase(
+        run_id,
+        "homeboy-lab",
+        "lab_handoff_preacceptance",
+        Some("/runner/workspace/homeboy"),
+        None,
+        None,
+        Some(&plan),
+    )
+    .expect("persist pending handoff");
+    record_detached_lab_run(DetachedLabRunRecord {
+        run_id,
+        runner_id: "homeboy-lab",
+        runner_job_id: "00000000-0000-0000-0000-000000000123",
+        remote_workspace: "/runner/workspace/homeboy",
+        remote_command: &[],
+    })
+    .expect("accept handoff")
+}
+
 #[test]
 fn submit_plan_persists_queued_status() {
     with_isolated_home(|_| {
@@ -515,6 +601,75 @@ fn detached_cook_attempt_proxy_advances_after_daemon_acceptance() {
             accepted.metadata["runner_execution_record"]["status"],
             "running"
         );
+    });
+}
+
+#[test]
+fn accepted_handoff_adopts_a_job_found_on_another_known_generation() {
+    with_isolated_home(|_| {
+        let run_id = "generation-move-recovery";
+        accepted_detached_handoff(run_id);
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+        snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
+        snapshot.events.clear();
+        let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
+            // This represents a 404 on the current generation followed by a
+            // matching snapshot on another generation in the durable ledger.
+            result: Mutex::new(Some(TestRunnerReconciliation::Snapshot(snapshot))),
+        }));
+
+        let reconciled = status(run_id).expect("adopted generation snapshot");
+
+        assert_eq!(reconciled.state, AgentTaskRunState::Running);
+        assert_eq!(reconciled.metadata["runner_job_status"], "running");
+        assert_eq!(reconciled.metadata["provider_executions_consumed"], 0);
+        assert!(reconciled.provider_handles.is_empty());
+    });
+}
+
+#[test]
+fn accepted_handoff_fails_after_confirmed_absence_across_generations() {
+    with_isolated_home(|_| {
+        let run_id = "generation-confirmed-absence";
+        accepted_detached_handoff(run_id);
+        let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
+            result: Mutex::new(Some(TestRunnerReconciliation::ConfirmedAbsent(2))),
+        }));
+
+        let terminal = status(run_id).expect("terminal lost accepted job");
+
+        assert_eq!(terminal.state, AgentTaskRunState::Failed);
+        assert_eq!(terminal.metadata["phase"], "accepted_lab_runner_job_lost");
+        assert_eq!(
+            terminal.metadata["lost_accepted_runner_job"]["checked_generations"],
+            2
+        );
+        assert_eq!(terminal.metadata["provider_executions_consumed"], 0);
+        assert!(terminal.provider_handles.is_empty());
+        let aggregate = read_aggregate(run_id).expect("failure aggregate");
+        assert!(aggregate.outcomes[0]
+            .summary
+            .as_deref()
+            .is_some_and(|summary| { summary.contains("accepted Lab runner job") }));
+    });
+}
+
+#[test]
+fn accepted_handoff_does_not_terminalize_unconfirmed_generation_absence() {
+    with_isolated_home(|_| {
+        let run_id = "generation-unconfirmed-absence";
+        accepted_detached_handoff(run_id);
+        let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
+            result: Mutex::new(Some(TestRunnerReconciliation::Unconfirmed)),
+        }));
+
+        let retained = status(run_id).expect("retain unconfirmed handoff");
+
+        assert_eq!(retained.state, AgentTaskRunState::Running);
+        assert!(retained.metadata.get("lost_accepted_runner_job").is_none());
+        assert_eq!(retained.metadata["provider_executions_consumed"], 0);
+        assert!(retained.provider_handles.is_empty());
     });
 }
 
