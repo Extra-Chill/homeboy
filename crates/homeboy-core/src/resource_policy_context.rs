@@ -41,6 +41,17 @@ pub struct ResourcePolicyRunnerSelection {
     /// Runner selected before command execution, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_id: Option<String>,
+    /// IDs of connected runners that can accept a Lab job now.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_runner_ids: Vec<String>,
+    /// Runner inventory readiness at policy preflight.
+    pub readiness_state: String,
+    /// Why the inventory could not select a runner, when applicable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readiness_reasons: Vec<String>,
+    /// Commands that resolve the reported runner condition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remediation_commands: Vec<String>,
     /// Why this command is expected to run locally or through Lab.
     pub reason: String,
 }
