@@ -50,13 +50,30 @@ fn argvec_regex() -> &'static Regex {
 /// helpers inside `#[cfg(test)] mod tests { fn head() … }`, impl methods — are
 /// excluded. Canonical command wrappers are module-level; indented one-call
 /// helpers are almost always test fixtures and would otherwise seed the map
-/// with git-setup arg-vectors. Group 1 is the name.
+/// with git-setup arg-vectors. Group 1 is the visibility prefix (`pub` /
+/// `pub(...)` / empty); group 2 is the name.
 fn fn_decl_regex() -> &'static Regex {
     static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"(?m)^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+([a-z_][a-z0-9_]*)\s*[(<]")
+        Regex::new(r"(?m)^(pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+([a-z_][a-z0-9_]*)\s*[(<]")
             .expect("valid fn regex")
     });
     &RE
+}
+
+/// A wrapper is *reachable* from another crate only if it is `pub` (crate-wide
+/// `pub` — a helper visible outside its own crate). `pub(crate)`, `pub(super)`,
+/// `pub(in …)`, and private helpers are unreachable across a crate boundary, so
+/// attributing a cross-crate raw command to them is a false positive.
+fn visibility_is_crate_public(vis_prefix: &str) -> bool {
+    let vis = vis_prefix.trim();
+    vis == "pub"
+}
+
+/// The crate name for a `crates/<crate>/…` path, else `None` (non-workspace
+/// layout — fall back to conservative behavior).
+fn crate_of_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("crates/")?;
+    rest.split('/').next().filter(|s| !s.is_empty())
 }
 
 /// Parse the inner string elements of an arg-vector match into a canonical key.
@@ -99,6 +116,10 @@ struct WrapperDef {
     /// Byte offset of the arg-vector literal in the wrapper body, so we never
     /// flag the wrapper's own definition.
     argv_offset: usize,
+    /// Whether the wrapper is crate-`pub` — required to attribute a bypass from
+    /// a different crate. A private/`pub(crate)` helper is unreachable
+    /// cross-crate, so flagging it there is a false positive.
+    is_public: bool,
 }
 
 fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
@@ -109,7 +130,7 @@ fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Findi
         if is_test_path(&fp.relative_path) {
             continue;
         }
-        for (name, body, body_offset) in thin_wrapper_bodies(&fp.content) {
+        for (name, is_public, body, body_offset) in thin_wrapper_bodies(&fp.content) {
             // A thin wrapper's body contains exactly one arg-vector literal.
             let matches: Vec<_> = argvec_regex().find_iter(&body).collect();
             if matches.len() != 1 {
@@ -138,6 +159,7 @@ fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Findi
                 name: name.clone(),
                 file: fp.relative_path.clone(),
                 argv_offset: body_offset + m.start(),
+                is_public,
             });
         }
     }
@@ -174,6 +196,21 @@ fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Findi
             if fp.relative_path == def.file && m.start() == def.argv_offset {
                 continue;
             }
+            // Only attribute a bypass to a helper the call site can actually
+            // reach. A private/`pub(crate)` helper in a DIFFERENT crate is
+            // unreachable, so suggesting "call it instead" is a false positive.
+            // Same-crate calls are always fine; cross-crate requires `pub`.
+            let call_crate = crate_of_path(&fp.relative_path);
+            let def_crate = crate_of_path(&def.file);
+            let cross_crate = match (call_crate, def_crate) {
+                (Some(a), Some(b)) => a != b,
+                // Unknown layout on either side — be conservative and treat as
+                // same-crate (do not suppress) to preserve prior behavior.
+                _ => false,
+            };
+            if cross_crate && !def.is_public {
+                continue;
+            }
             let cmd = elems.join(" ");
             findings.push(Finding {
                 convention: "command_wrapper_bypass".to_string(),
@@ -201,11 +238,12 @@ fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Findi
     findings
 }
 
-/// Yield `(fn_name, body_text, body_start_offset)` for functions whose body is
-/// small enough to be a thin wrapper (few statements). Uses brace matching from
-/// each `fn` declaration; bounded to short bodies so we only consider genuine
-/// one-call wrappers, not large functions that happen to contain one arg-vector.
-fn thin_wrapper_bodies(content: &str) -> Vec<(String, String, usize)> {
+/// Yield `(fn_name, is_public, body_text, body_start_offset)` for functions
+/// whose body is small enough to be a thin wrapper (few statements). Uses brace
+/// matching from each `fn` declaration; bounded to short bodies so we only
+/// consider genuine one-call wrappers, not large functions that happen to
+/// contain one arg-vector. `is_public` is true only for crate-`pub` helpers.
+fn thin_wrapper_bodies(content: &str) -> Vec<(String, bool, String, usize)> {
     /// Max characters in a wrapper body — a one-call delegation is tiny; this
     /// keeps us from treating a large function's incidental arg-vector as the
     /// canonical definition.
@@ -214,7 +252,11 @@ fn thin_wrapper_bodies(content: &str) -> Vec<(String, String, usize)> {
     let bytes = content.as_bytes();
     let mut out = Vec::new();
     for caps in fn_decl_regex().captures_iter(content) {
-        let name = caps[1].to_string();
+        let is_public = caps
+            .get(1)
+            .map(|m| visibility_is_crate_public(m.as_str()))
+            .unwrap_or(false);
+        let name = caps[2].to_string();
         let decl_end = caps.get(0).unwrap().end();
         // Find the opening brace of the body after the signature.
         let Some(brace_rel) = content[decl_end..].find('{') else {
@@ -244,7 +286,7 @@ fn thin_wrapper_bodies(content: &str) -> Vec<(String, String, usize)> {
         if body.len() > MAX_BODY_CHARS {
             continue;
         }
-        out.push((name, body.to_string(), body_start));
+        out.push((name, is_public, body.to_string(), body_start));
     }
     out
 }

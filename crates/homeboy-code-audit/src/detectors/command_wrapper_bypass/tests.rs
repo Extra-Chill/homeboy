@@ -127,3 +127,58 @@ fn still_flags_production_argvector_alongside_an_inline_test_block() {
     );
     assert_eq!(findings[0].file, "src/agent/materialization.rs");
 }
+
+#[test]
+fn does_not_flag_cross_crate_call_of_a_private_helper() {
+    // A private (`pub(crate)`) thin wrapper in one crate cannot be called from
+    // another crate, so a raw arg-vector there is not a reachable bypass.
+    let helper = fp(
+        "crates/homeboy-lab-runner/src/homeboy_refresh.rs",
+        "pub(crate) fn git_dirty(p: &Path) -> bool {\n    run_git_output(p, &[\"status\", \"--porcelain\"], \"x\")\n}\n",
+    );
+    let caller = fp(
+        "crates/homeboy-agents/src/promotion.rs",
+        "fn f(p: &str) {\n    let s = git_output(p, &[\"status\", \"--porcelain\"]);\n}\n",
+    );
+    assert!(
+        detect_command_wrapper_bypass(&[&helper, &caller]).is_empty(),
+        "a private helper in another crate is unreachable — not a bypass"
+    );
+}
+
+#[test]
+fn flags_cross_crate_call_of_a_public_helper() {
+    // A `pub` helper IS reachable across a crate boundary (e.g. homeboy-core is
+    // a dependency of homeboy-agents), so the raw arg-vector is a real bypass.
+    let helper = fp(
+        "crates/homeboy-core/src/git/primitives_query.rs",
+        "pub fn head_sha(p: &Path) -> Option<String> {\n    output_optional(p, &[\"rev-parse\", \"HEAD\"])\n}\n",
+    );
+    let caller = fp(
+        "crates/homeboy-agents/src/promotion.rs",
+        "fn f(p: &str) {\n    let h = git_output(p, &[\"rev-parse\", \"HEAD\"]);\n}\n",
+    );
+    let findings = detect_command_wrapper_bypass(&[&helper, &caller]);
+    assert_eq!(findings.len(), 1, "public cross-crate helper is reachable");
+    assert!(findings[0].description.contains("head_sha"));
+}
+
+#[test]
+fn flags_same_crate_call_of_a_private_helper() {
+    // Within the SAME crate, a private helper is reachable, so a raw arg-vector
+    // duplicating it is still a bypass.
+    let helper = fp(
+        "crates/homeboy-agents/src/git_util.rs",
+        "fn git_dirty(p: &Path) -> bool {\n    run_git_output(p, &[\"status\", \"--porcelain\"], \"x\")\n}\n",
+    );
+    let caller = fp(
+        "crates/homeboy-agents/src/promotion.rs",
+        "fn f(p: &str) {\n    let s = git_output(p, &[\"status\", \"--porcelain\"]);\n}\n",
+    );
+    let findings = detect_command_wrapper_bypass(&[&helper, &caller]);
+    assert_eq!(
+        findings.len(),
+        1,
+        "same-crate private helper is reachable — still a bypass"
+    );
+}
