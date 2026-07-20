@@ -40,7 +40,17 @@ pub(super) fn harvest_uncommitted_patch(
     // Git's binary patch generation include tracked, staged, and untracked files.
     // Homeboy-owned runner metadata is excluded from the diff so it never lands
     // in a candidate patch as checkout drift. (#8534)
-    git_output(root, &["add", "--all"])?;
+    git_output(
+        root,
+        &[
+            "add",
+            "--all",
+            "--",
+            ".",
+            HARVEST_METADATA_EXCLUDE_PATHSPECS[0],
+            HARVEST_METADATA_EXCLUDE_PATHSPECS[1],
+        ],
+    )?;
     let mut uncommitted_patch_args = vec![
         "diff",
         "--cached",
@@ -419,8 +429,29 @@ pub(crate) fn git_output(cwd: &Path, args: &[&str]) -> Result<String, HarvestErr
 /// Preserve byte-sensitive Git output such as patches. Metadata callers use
 /// `git_output` so commit IDs and status values stay normalized.
 pub(crate) fn git_output_raw(cwd: &Path, args: &[&str]) -> Result<String, HarvestError> {
+    git_output_raw_with_env(cwd, args, &[])
+}
+
+/// Trimmed Git output with extra environment (e.g. `GIT_INDEX_FILE` for a
+/// scratch index). This is the single scheduler-side Git runner; no-env and
+/// byte-preserving callers delegate here so the command/error shape stays
+/// identical across the harvest and attempt-workspace paths.
+pub(crate) fn git_output_with_env(
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<String, HarvestError> {
+    Ok(git_output_raw_with_env(cwd, args, env)?.trim().to_string())
+}
+
+fn git_output_raw_with_env(
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<String, HarvestError> {
     let output = Command::new("git")
         .args(args)
+        .envs(env.iter().copied())
         .current_dir(cwd)
         .output()
         .map_err(|error| HarvestError::Git {

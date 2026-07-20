@@ -1081,4 +1081,207 @@ mod cross_name {
     }
 }
 
+fn make_fingerprint_with_skeleton(
+    path: &str,
+    methods: &[&str],
+    structural: &[(&str, &str)],
+    skeleton: &[(&str, &str)],
+) -> FileFingerprint {
+    FileFingerprint {
+        relative_path: path.to_string(),
+        language: Language::Rust,
+        methods: methods.iter().map(|s| s.to_string()).collect(),
+        structural_hashes: structural
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        skeleton_hashes: skeleton
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn skeleton_duplicate_flags_same_backbone_with_different_error_tail() {
+    // Same skeleton hash, DIFFERENT structural hashes (different error tails).
+    let fp1 = make_fingerprint_with_skeleton(
+        "crates/a/src/harvest.rs",
+        &["git_output"],
+        &[("git_output", "structuralAAA")],
+        &[("git_output", "6:skelSAME")],
+    );
+    let fp2 = make_fingerprint_with_skeleton(
+        "crates/b/src/cook_baseline.rs",
+        &["git_output"],
+        &[("git_output", "structuralBBB")],
+        &[("git_output", "6:skelSAME")],
+    );
+
+    let findings = detect_skeleton_duplicates(&[&fp1, &fp2]);
+    assert_eq!(findings.len(), 2, "one finding per location");
+    assert!(findings
+        .iter()
+        .all(|f| f.kind == AuditFinding::SkeletonDuplicate));
+    assert!(findings.iter().any(|f| f.file.contains("harvest.rs")));
+    assert!(findings.iter().any(|f| f.file.contains("cook_baseline.rs")));
+}
+
+#[test]
+fn skeleton_duplicate_ignores_group_with_one_shared_structural_hash() {
+    // Same skeleton AND same structural hash — the near-duplicate pass owns
+    // this; skeleton must not double-report it.
+    let fp1 = make_fingerprint_with_skeleton(
+        "crates/a/src/x.rs",
+        &["run_it"],
+        &[("run_it", "structuralSAME")],
+        &[("run_it", "6:skelSAME")],
+    );
+    let fp2 = make_fingerprint_with_skeleton(
+        "crates/b/src/y.rs",
+        &["run_it"],
+        &[("run_it", "structuralSAME")],
+        &[("run_it", "6:skelSAME")],
+    );
+    assert!(detect_skeleton_duplicates(&[&fp1, &fp2]).is_empty());
+}
+
+#[test]
+fn skeleton_duplicate_suppresses_large_idiomatic_groups() {
+    // Six functions sharing one skeleton = an idiomatic shape (e.g. an
+    // `.iter().map().collect()` accessor), not a reimplemented primitive.
+    let fps: Vec<FileFingerprint> = (0..6)
+        .map(|i| {
+            make_fingerprint_with_skeleton(
+                &format!("crates/c{i}/src/x{i}.rs"),
+                &[&format!("accessor_{i}")],
+                &[(&format!("accessor_{i}"), &format!("struct{i}"))],
+                &[(&format!("accessor_{i}"), "6:skelSAME")],
+            )
+        })
+        .collect();
+    let refs: Vec<&FileFingerprint> = fps.iter().collect();
+    assert!(
+        detect_skeleton_duplicates(&refs).is_empty(),
+        "a skeleton shared by many unrelated functions must be treated as idiomatic, not duplication"
+    );
+}
+
+#[test]
+fn skeleton_duplicate_respects_token_floor_and_generic_names() {
+    // Below the token floor -> ignored.
+    let below = make_fingerprint_with_skeleton(
+        "crates/a/src/x.rs",
+        &["do_thing"],
+        &[("do_thing", "sA")],
+        &[("do_thing", "2:skelSAME")],
+    );
+    let below2 = make_fingerprint_with_skeleton(
+        "crates/b/src/y.rs",
+        &["do_thing"],
+        &[("do_thing", "sB")],
+        &[("do_thing", "2:skelSAME")],
+    );
+    assert!(detect_skeleton_duplicates(&[&below, &below2]).is_empty());
+
+    // Generic name -> ignored even above the floor.
+    let generic1 = make_fingerprint_with_skeleton(
+        "crates/a/src/x.rs",
+        &["run"],
+        &[("run", "sA")],
+        &[("run", "6:skelSAME")],
+    );
+    let generic2 = make_fingerprint_with_skeleton(
+        "crates/b/src/y.rs",
+        &["run"],
+        &[("run", "sB")],
+        &[("run", "6:skelSAME")],
+    );
+    assert!(detect_skeleton_duplicates(&[&generic1, &generic2]).is_empty());
+}
+
+/// End-to-end proof of the #9217 gap: two real `git_output` helpers with the
+/// same backbone but different error tails, fingerprinted through the actual
+/// Rust grammar, must now be flagged (they produced zero findings before).
+#[test]
+fn skeleton_duplicate_flags_real_git_output_helpers_via_grammar() {
+    let grammar_path =
+        std::path::Path::new("/var/lib/datamachine/workspace/homeboy-extensions/rust/grammar.toml");
+    if !grammar_path.exists() {
+        // The Rust grammar ships with the rust extension; skip cleanly where it
+        // is not on disk (the synthetic tests above cover the detector logic).
+        return;
+    }
+    let grammar =
+        homeboy_engine_primitives::grammar::load_grammar(grammar_path).expect("load rust grammar");
+    let fp = |content: &str, path: &str| {
+        crate::core_fingerprint::fingerprint_from_grammar(content, &grammar, path)
+            .expect("fingerprint")
+    };
+
+    let harvest = fp(
+        r#"
+pub fn git_output(cwd: &Path, args: &[&str]) -> Result<String, HarvestError> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| HarvestError::Git {
+            command: format!("git {}", args.join(" ")),
+            message: error.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(HarvestError::Git {
+            command: format!("git {}", args.join(" ")),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+"#,
+        "crates/agents/src/harvest.rs",
+    );
+    let cook = fp(
+        r#"
+pub fn git_output(cwd: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("git {}", args.join(" "))))
+        })?;
+    if !output.status.success() {
+        return Err(Error::validation_invalid_argument(
+            "promotion",
+            format!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim()),
+            None,
+            None,
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+"#,
+        "crates/agents/src/cook_baseline.rs",
+    );
+
+    // Precondition: the near-duplicate pass still misses them (structural
+    // hashes differ) — this is the gap #9217 documents.
+    assert!(
+        detect_near_duplicates(&[&harvest, &cook]).is_empty(),
+        "near-duplicate is expected to miss the differing error tails"
+    );
+
+    // The new skeleton pass catches them.
+    let findings = detect_skeleton_duplicates(&[&harvest, &cook]);
+    assert!(
+        !findings.is_empty(),
+        "skeleton-duplicate must flag the two git_output helpers"
+    );
+    assert!(findings
+        .iter()
+        .all(|f| f.kind == AuditFinding::SkeletonDuplicate));
+}
+
 mod parallel;

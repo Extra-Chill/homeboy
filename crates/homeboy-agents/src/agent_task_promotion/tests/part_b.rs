@@ -611,6 +611,7 @@ fn promote_no_op_outcome_uses_audited_committed_candidate() {
                 verify: vec!["true".to_string()],
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
             },
             provider_command: None,
             provider_invocation: None,
@@ -757,6 +758,7 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
             verify: vec!["true".to_string()],
             private_verify: Vec::new(),
             private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            ..Default::default()
         },
         provider_command: None,
         provider_invocation: None,
@@ -809,6 +811,7 @@ fn promotion_options_keep_flat_verify_gate_serialized_shape() {
             verify: vec!["cargo test".to_string()],
             private_verify: vec!["cargo test --lib hidden".to_string()],
             private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+            ..Default::default()
         },
         provider_command: None,
         provider_invocation: None,

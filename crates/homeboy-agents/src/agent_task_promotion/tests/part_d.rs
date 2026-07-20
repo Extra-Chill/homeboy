@@ -243,6 +243,7 @@ fn empty_patch_runs_public_and_private_gates_against_pinned_candidate() {
                 verify: vec!["public-check".to_string()],
                 private_verify: vec!["private-check".to_string()],
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+                ..Default::default()
             },
             provider_command: None,
             provider_invocation: None,
@@ -304,6 +305,7 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
                 verify: vec!["true".to_string()],
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
             },
             provider_command: None,
             provider_invocation: None,
@@ -368,6 +370,7 @@ fn promote_dry_run_validates_provider_request_without_applying() {
                 verify: Vec::new(),
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
             },
             provider_command: None,
             provider_invocation: None,
@@ -417,6 +420,7 @@ fn promote_verification_failure_keeps_the_applied_target_recoverable() {
                 verify: vec!["false".to_string()],
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
             },
             provider_command: None,
             provider_invocation: None,
@@ -477,6 +481,7 @@ fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
                 verify: Vec::new(),
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+                ..Default::default()
             },
             provider_command: None,
             provider_invocation: None,

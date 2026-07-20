@@ -583,7 +583,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
 
     fn dispatch_attempt(
         &self,
-        plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+        mut plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
         run_id: &str,
         derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> homeboy::core::Result<()> {
@@ -591,6 +591,9 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
         // baseline to this retry; only its evidence crosses the Lab boundary.
         let verified_cook_baseline =
             derived_cook_baseline.map(DerivedCookBaselineCapability::verified_baseline_provenance);
+        if let Some(verified_cook_baseline) = verified_cook_baseline.as_ref() {
+            attach_verified_cook_baseline(&mut plan, verified_cook_baseline);
+        }
         let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
@@ -697,6 +700,26 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                 )]),
             )),
             LabRouteOutcome::InFlight(_) => Ok(()),
+        }
+    }
+}
+
+fn attach_verified_cook_baseline(
+    plan: &mut homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    baseline: &serde_json::Value,
+) {
+    let Some(source_task_id) = baseline
+        .get("source_task_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    for task in &mut plan.tasks {
+        if task.task_id == source_task_id {
+            if !task.metadata.is_object() {
+                task.metadata = serde_json::json!({});
+            }
+            task.metadata["verified_cook_baseline"] = baseline.clone();
         }
     }
 }
@@ -886,28 +909,37 @@ fn materialize_agent_task_run_handoff(
     }))
 }
 
+/// The single place that reads a task's declared source root, in priority
+/// order: `workspace.root`, then `executor.config.workspace_root`, then
+/// `metadata.workspace.root`. Both the run and retry handoff paths resolve the
+/// primary checkout from this one chain so they never drift apart.
+fn task_declared_source_root(
+    task: &homeboy::agents::agent_tasks::AgentTaskRequest,
+) -> Option<&str> {
+    task.workspace
+        .root
+        .as_deref()
+        .or_else(|| {
+            task.executor
+                .config
+                .get("workspace_root")
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            task.metadata
+                .get("workspace")
+                .and_then(|workspace| workspace.get("root"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .filter(|root| !root.trim().is_empty())
+}
+
 fn plan_primary_workspace(
     plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
 ) -> homeboy::core::Result<PathBuf> {
     let mut roots = BTreeSet::new();
     for task in &plan.tasks {
-        let root = task
-            .workspace
-            .root
-            .as_deref()
-            .or_else(|| {
-                task.executor
-                    .config
-                    .get("workspace_root")
-                    .and_then(serde_json::Value::as_str)
-            })
-            .or_else(|| {
-                task.metadata
-                    .get("workspace")
-                    .and_then(|workspace| workspace.get("root"))
-                    .and_then(serde_json::Value::as_str)
-            });
-        if let Some(root) = root.filter(|root| !root.trim().is_empty()) {
+        if let Some(root) = task_declared_source_root(task) {
             roots.insert(PathBuf::from(root));
         }
     }
@@ -1062,28 +1094,86 @@ fn retry_handoff_prefix(args: &[String]) -> Vec<String> {
     rewritten
 }
 
+/// Resolve the durable managed worktree a retry task should continue against.
+///
+/// Returns `Ok(Some(git_root))` when the task carries a Homeboy worktree handle
+/// (its recorded `workspace.slug`) that still resolves to an active checkout,
+/// `Ok(None)` when the task was never anchored to a managed worktree (so the
+/// caller falls back to the recorded `workspace.root`), and a precise
+/// recoverable error when the handle is recorded but no longer usable. This is
+/// what keeps a cleaned-up ephemeral initial-baseline directory from being
+/// mistaken for the canonical continuation workspace (#9195).
+fn retry_task_managed_worktree(
+    task: &homeboy::agents::agent_tasks::AgentTaskRequest,
+) -> homeboy::core::Result<Option<PathBuf>> {
+    let Some(handle) = task
+        .workspace
+        .slug
+        .as_deref()
+        .filter(|handle| !handle.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let Some(record) = homeboy::core::worktree::resolve_workspace_ref_if_present(handle)? else {
+        // No Homeboy record for this handle: the task was not anchored to a
+        // managed worktree, so leave resolution to the recorded root fallback.
+        return Ok(None);
+    };
+
+    if record.state() != &homeboy::core::worktree::TaskWorktreeState::Active {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            format!(
+                "agent-task retry task '{}' managed worktree '{}' is no longer active; its work is unavailable for continuation",
+                task.task_id,
+                record.handle()
+            ),
+            Some(handle.to_string()),
+            Some(vec![
+                "Recreate the worktree with `homeboy worktree add`, or retry against an explicit replacement workspace.".to_string(),
+            ]),
+        ));
+    }
+
+    let path = PathBuf::from(record.path());
+    let git_root = git::repo_root(&path).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace",
+            format!(
+                "agent-task retry task '{}' managed worktree '{}' points at a missing checkout {}",
+                task.task_id,
+                record.handle(),
+                path.display()
+            ),
+            Some(path.display().to_string()),
+            Some(vec![
+                "Recreate the worktree with `homeboy worktree add`, or remove the stale record and retry against an explicit replacement workspace.".to_string(),
+            ]),
+        )
+    })?;
+    Ok(Some(git_root))
+}
+
 fn retry_plan_primary_workspace(
     plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
 ) -> homeboy::core::Result<PathBuf> {
     let mut roots = BTreeSet::new();
     for task in &plan.tasks {
-        let root = task
-            .workspace
-            .root
-            .as_deref()
-            .or_else(|| {
-                task.executor
-                    .config
-                    .get("workspace_root")
-                    .and_then(serde_json::Value::as_str)
-            })
-            .or_else(|| {
-                task.metadata
-                    .get("workspace")
-                    .and_then(|workspace| workspace.get("root"))
-                    .and_then(serde_json::Value::as_str)
-            });
-        if let Some(root) = root.filter(|root| !root.trim().is_empty()) {
+        // The authoritative continuation workspace is the managed worktree the
+        // task was recorded against, not whichever `workspace.root` the original
+        // plan captured. A pre-provider or gate-failed cook may have run against
+        // an ephemeral initial-baseline directory that has since been cleaned
+        // up; trusting that path fails retry with "not inside a git checkout"
+        // even though the durable worktree record still resolves. Prefer the
+        // recorded worktree handle so baseline artifacts stay evidence, never
+        // the canonical continuation workspace (#9195).
+        if let Some(git_root) = retry_task_managed_worktree(task)? {
+            roots.insert(git_root);
+            continue;
+        }
+
+        if let Some(root) = task_declared_source_root(task) {
             let path = PathBuf::from(root);
             let git_root = git::repo_root(&path).ok_or_else(|| {
                 Error::validation_invalid_argument(
@@ -1094,7 +1184,7 @@ fn retry_plan_primary_workspace(
                     ),
                     Some(path.display().to_string()),
                     Some(vec![
-                        "Retry the task from a plan with a git-backed workspace root.".to_string(),
+                        "Retry the task from a plan with a git-backed workspace root, or record its managed worktree handle so retry can resolve the durable checkout.".to_string(),
                     ]),
                 )
             })?;

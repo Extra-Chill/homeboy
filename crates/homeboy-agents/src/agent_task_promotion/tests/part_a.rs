@@ -350,6 +350,7 @@ fn empty_patch_failing_gate_is_reported_against_pinned_candidate() {
                 verify: vec!["failing-check".to_string()],
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
             },
             provider_command: None,
             provider_invocation: None,
@@ -477,6 +478,7 @@ fn spoofed_generated_patch_provenance_does_not_change_promotion_artifact_id() {
                 verify: Vec::new(),
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
             },
             provider_command: None,
             provider_invocation: None,
@@ -549,6 +551,7 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
                 verify: vec!["true".to_string()],
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
             },
             provider_command: None,
             provider_invocation: None,
@@ -609,6 +612,7 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
             verify: vec!["true".to_string()],
             private_verify: Vec::new(),
             private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            ..Default::default()
         },
         provider_command: None,
         provider_invocation: None,
@@ -656,6 +660,7 @@ fn promote_rejects_unresolved_configured_provider_for_apply() {
                 verify: Vec::new(),
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
             },
             provider_command: None,
             provider_invocation: None,

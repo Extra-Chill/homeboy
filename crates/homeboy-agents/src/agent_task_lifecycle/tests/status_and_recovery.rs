@@ -242,6 +242,144 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
         assert_eq!(adoption.state, "completed");
         assert_eq!(adoption.resume_count, 1);
         assert!(adoption.completed_at.is_some());
+        assert!(start_candidate_adoption(
+            &record.run_id,
+            candidate,
+            "openai/gpt-5.6-terra",
+            "cargo test",
+        )
+        .is_err());
+        start_candidate_adoption_with_rerun_policy(
+            &record.run_id,
+            candidate,
+            "openai/gpt-5.6-terra",
+            "cargo test",
+            true,
+        )
+        .expect("explicit recipe policy permits a completed gate rerun");
+    });
+}
+
+#[test]
+fn candidate_adoption_gate_heartbeats_are_durable() {
+    with_isolated_home(|_| {
+        let record = submit_plan(&test_plan(), Some("adoption-gate-supervision")).expect("submit");
+        start_candidate_adoption(
+            &record.run_id,
+            "c3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1",
+            "openai/gpt-5.6-terra",
+            "cargo test",
+        )
+        .expect("start adoption");
+        start_candidate_adoption_gate(&record.run_id, "cargo test", u32::MAX, 1800)
+            .expect("persist gate identity before child work");
+        heartbeat_candidate_adoption_gate(&record.run_id, "running output tail")
+            .expect("persist periodic gate heartbeat");
+        let running = status(&record.run_id).expect("read running adoption");
+        let adoption = running.candidate_adoption.expect("active adoption");
+        assert_eq!(adoption.phase, "gate_running");
+        assert_eq!(adoption.gate_process_group, Some(u32::MAX));
+        assert_eq!(adoption.gate_timeout_seconds, Some(1800));
+        assert_eq!(adoption.gate_output_tail, "running output tail");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_adoption_reconciles_and_cancels_an_orphaned_gate_group() {
+    with_isolated_home(|_| {
+        let record = submit_plan(&test_plan(), Some("adoption-orphaned-gate")).expect("submit");
+        start_candidate_adoption(
+            &record.run_id,
+            "d3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1",
+            "openai/gpt-5.6-terra",
+            "sleep 30",
+        )
+        .expect("start adoption");
+        let mut command = std::process::Command::new("sh");
+        command.args(["-lc", "sleep 30"]);
+        homeboy_core::engine::command::isolate_process_tree(&mut command);
+        let mut child = command.spawn().expect("spawn isolated fake gate");
+        start_candidate_adoption_gate(&record.run_id, "sleep 30", child.id(), 1800)
+            .expect("persist gate identity");
+        rewrite_record_for_test(&record.run_id, |record| {
+            record
+                .candidate_adoption
+                .as_mut()
+                .expect("adoption")
+                .owner_pid = u32::MAX;
+        })
+        .expect("simulate controller interruption");
+
+        let interrupted = status(&record.run_id).expect("reconcile orphaned gate");
+        assert_eq!(
+            interrupted.candidate_adoption.expect("adoption").phase,
+            "gate_orphaned"
+        );
+        assert!(start_candidate_adoption(
+            &record.run_id,
+            "d3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1",
+            "openai/gpt-5.6-terra",
+            "sleep 30",
+        )
+        .is_err());
+        let cancelled = cancel_run(&record.run_id, Some("recover orphaned gate"))
+            .expect("cancel orphaned gate");
+        assert_eq!(
+            cancelled.candidate_adoption.expect("adoption").state,
+            "cancelled"
+        );
+        assert!(
+            !homeboy_core::process::isolated_process_group_is_running(child.id())
+                .expect("inspect terminated gate group")
+        );
+        let _ = child.wait();
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_adoption_cancellation_persists_request_before_group_termination() {
+    with_isolated_home(|_| {
+        let record = submit_plan(&test_plan(), Some("adoption-cancel-race")).expect("submit");
+        start_candidate_adoption(
+            &record.run_id,
+            "e3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1",
+            "openai/gpt-5.6-terra",
+            "sleep 30",
+        )
+        .expect("start adoption");
+        let mut command = std::process::Command::new("sh");
+        command.args(["-lc", "trap '' TERM; while :; do :; done"]);
+        homeboy_core::engine::command::isolate_process_tree(&mut command);
+        let mut child = command.spawn().expect("spawn isolated gate");
+        start_candidate_adoption_gate(&record.run_id, "sleep 30", child.id(), 1800)
+            .expect("persist gate identity");
+
+        let run_id = record.run_id.clone();
+        let cancellation = std::thread::spawn(move || cancel_run(&run_id, Some("operator cancel")));
+        let observed_request = (0..100).any(|_| {
+            let state = status(&record.run_id)
+                .expect("read adoption")
+                .candidate_adoption
+                .expect("adoption")
+                .state;
+            if state == "cancel_requested" {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            false
+        });
+        let cancelled = cancellation
+            .join()
+            .expect("join cancellation")
+            .expect("cancelled");
+        assert!(observed_request, "cancellation request was never durable");
+        assert_eq!(
+            cancelled.candidate_adoption.expect("adoption").state,
+            "cancelled"
+        );
+        let _ = child.wait();
     });
 }
 

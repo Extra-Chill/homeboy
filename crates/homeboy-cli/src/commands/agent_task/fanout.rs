@@ -525,6 +525,12 @@ struct BatchCookSpec {
     private_verify: Vec<String>,
     #[serde(default = "default_private_gate_reveal")]
     private_gate_reveal: AgentTaskGateRevealPolicy,
+    #[serde(default = "default_gate_timeout_seconds")]
+    gate_timeout_seconds: u64,
+    #[serde(default = "default_gate_heartbeat_interval_seconds")]
+    gate_heartbeat_interval_seconds: u64,
+    #[serde(default)]
+    rerun_completed_gates: bool,
     #[serde(default = "default_max_attempts")]
     max_attempts: u32,
     #[serde(default)]
@@ -664,6 +670,9 @@ impl BatchCookSpec {
                     verify: self.verify.clone(),
                     private_verify: self.private_verify.clone(),
                     private_gate_reveal: self.private_gate_reveal,
+                    gate_timeout_seconds: self.gate_timeout_seconds,
+                    gate_heartbeat_interval_seconds: self.gate_heartbeat_interval_seconds,
+                    rerun_completed_gates: self.rerun_completed_gates,
                 },
                 max_attempts: self.max_attempts,
                 no_finalize: self.no_finalize,
@@ -797,6 +806,9 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             verify: args.gates.verify.clone(),
             private_verify: args.gates.private_verify.clone(),
             private_gate_reveal: args.gates.private_gate_reveal,
+            gate_timeout_seconds: args.gates.gate_timeout_seconds,
+            gate_heartbeat_interval_seconds: args.gates.gate_heartbeat_interval_seconds,
+            rerun_completed_gates: args.gates.rerun_completed_gates,
             max_attempts: default_max_attempts(),
             no_finalize: false,
             base: args.base.clone(),
@@ -1065,6 +1077,14 @@ fn default_base() -> String {
 
 fn default_private_gate_reveal() -> AgentTaskGateRevealPolicy {
     AgentTaskGateRevealPolicy::SummaryOnly
+}
+
+fn default_gate_timeout_seconds() -> u64 {
+    30 * 60
+}
+
+fn default_gate_heartbeat_interval_seconds() -> u64 {
+    5
 }
 
 fn default_ai_tool() -> String {
@@ -1364,6 +1384,9 @@ mod tests {
                 verify: vec!["cargo test --lib".to_string()],
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+                gate_timeout_seconds: 30 * 60,
+                gate_heartbeat_interval_seconds: 5,
+                rerun_completed_gates: false,
             },
             dry_run: true,
             run_plan: false,

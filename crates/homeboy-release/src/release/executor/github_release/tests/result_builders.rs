@@ -3,7 +3,8 @@
 use crate::release::types::ReleaseStepStatus;
 
 use super::super::{
-    create_failed_result, not_created_result, upload_failed_result, upload_success_result,
+    create_failed_result, not_created_result, published_release_url, upload_failed_result,
+    upload_success_result,
 };
 use super::{data_bool, data_str, test_body, test_repair, test_repo};
 
@@ -147,11 +148,45 @@ fn verified_upload_result_is_successful_only_after_publication() {
     assert_eq!(result.status, ReleaseStepStatus::Success);
     assert_eq!(data_str(&result, "action"), Some("github.release.upload"));
     assert_eq!(
+        data_str(&result, "url"),
+        Some("https://github.com/example-org/studio-web/releases/tag/v0.10.6")
+    );
+    assert_eq!(
         result
             .data
             .as_ref()
             .and_then(|data| data.get("artifact_count"))
             .and_then(|value| value.as_u64()),
         Some(2)
+    );
+}
+
+#[test]
+fn published_release_url_ignores_transient_draft_url() {
+    let url = published_release_url(
+        &test_repo(),
+        "v0.49.4",
+        "https://github.com/example-org/studio-web/releases/tag/untagged-944964b141cb713e104d\n",
+        "",
+    );
+
+    assert_eq!(
+        url,
+        "https://github.com/example-org/studio-web/releases/tag/v0.49.4"
+    );
+}
+
+#[test]
+fn published_release_url_prefers_final_publish_response() {
+    let url = published_release_url(
+        &test_repo(),
+        "v0.49.4",
+        "https://github.com/example-org/studio-web/releases/tag/untagged-944964b141cb713e104d\n",
+        "https://github.com/example-org/studio-web/releases/tag/v0.49.4\n",
+    );
+
+    assert_eq!(
+        url,
+        "https://github.com/example-org/studio-web/releases/tag/v0.49.4"
     );
 }

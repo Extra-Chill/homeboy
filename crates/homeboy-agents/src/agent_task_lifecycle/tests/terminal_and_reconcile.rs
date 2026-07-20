@@ -522,11 +522,20 @@ fn terminal_child_projection_rejects_mismatched_persisted_run_identity() {
 }
 
 #[test]
-fn late_inner_aggregate_recovers_patch_after_transport_only_terminal_result() {
+fn transport_only_reconciliation_stays_pending_until_foreground_projection_or_inner_aggregate() {
     with_isolated_home(|_| {
+        let run_id = "foreground-transport-only";
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let inner_patch = b"late aggregate patch";
+        let inner_patch_sha256 = format!("{:x}", sha2::Sha256::digest(inner_patch));
+        let finalized_dir = homeboy_core::paths::artifact_root()
+            .expect("artifact root")
+            .join("executor-finalized");
+        std::fs::create_dir_all(&finalized_dir).expect("controller finalized artifact directory");
+        std::fs::write(finalized_dir.join("inner-patch"), inner_patch)
+            .expect("controller finalized artifact bytes");
         let mut record = record_detached_lab_run(DetachedLabRunRecord {
-            run_id: "agent-task-disconnected-child",
+            run_id,
             runner_id: "homeboy-lab",
             runner_job_id: "00000000-0000-0000-0000-000000000123",
             remote_workspace: "/runner/workspace/repo",
@@ -540,11 +549,29 @@ fn late_inner_aggregate_recovers_patch_after_transport_only_terminal_result() {
         transport_only.events.clear();
         reconcile_runner_job_snapshot(&mut record, &transport_only)
             .expect("transport-only terminal result");
-        assert_eq!(record.state, AgentTaskRunState::Succeeded);
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(record.metadata["phase"], "awaiting_runner_synchronization");
+        assert_eq!(
+            record.metadata["runner_result_synchronization"]["state"],
+            "pending"
+        );
         assert!(artifacts(&record.run_id)
             .expect("transport-only artifacts")
             .artifacts
             .is_empty());
+
+        assert!(
+            project_terminal_runner_result(&record.run_id, &transport_only)
+                .expect("foreground transport result projects the explicit run")
+        );
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        let projected = status(&record.run_id).expect("foreground terminal projection");
+        assert_eq!(projected.state, AgentTaskRunState::Succeeded);
+        assert_eq!(
+            projected.metadata["runner_result_synchronization"]["state"],
+            "projected"
+        );
+        record = projected;
 
         let mut aggregate = succeeded_aggregate(&test_plan());
         aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
@@ -556,23 +583,34 @@ fn late_inner_aggregate_recovers_patch_after_transport_only_terminal_result() {
             role: Some("patch".to_string()),
             semantic_key: None,
             path: Some("artifacts/candidate.patch".to_string()),
-            url: Some("homeboy://agent-task/run/agent-task-disconnected-child/artifacts#task=task-a&artifact=inner-patch".to_string()),
+            url: Some(format!(
+                "homeboy://agent-task/run/{run_id}/artifacts#task=task-a&artifact=inner-patch"
+            )),
             mime: Some("text/x-diff".to_string()),
-            size_bytes: Some(18_928),
-            sha256: Some("062f5c460c2dfb279277b75d5a16a04e3178ace1f35ce7b10da5e17441b37071".to_string()),
+            size_bytes: Some(inner_patch.len() as u64),
+            sha256: Some(inner_patch_sha256.clone()),
             metadata: Value::Null,
         });
-        let lifecycle_snapshot = terminal_child_snapshot(&aggregate);
+        let mut lifecycle_snapshot = terminal_child_snapshot(&aggregate);
+        let identity = &mut lifecycle_snapshot.events[0]
+            .data
+            .as_mut()
+            .expect("lifecycle event data")["identity"];
+        identity["run_id"] = json!(run_id);
+        identity["persisted_run_id"] = json!(run_id);
         reconcile_runner_job_snapshot(&mut record, &lifecycle_snapshot)
             .expect("late inner lifecycle evidence is adopted");
 
         let artifacts = artifacts(&record.run_id).expect("controller-visible artifacts");
         assert_eq!(artifacts.artifacts.len(), 1);
         assert_eq!(artifacts.artifacts[0].id, "inner-patch");
-        assert_eq!(artifacts.artifacts[0].size_bytes, Some(18_928));
+        assert_eq!(
+            artifacts.artifacts[0].size_bytes,
+            Some(inner_patch.len() as u64)
+        );
         assert_eq!(
             artifacts.artifacts[0].sha256.as_deref(),
-            Some("062f5c460c2dfb279277b75d5a16a04e3178ace1f35ce7b10da5e17441b37071")
+            Some(inner_patch_sha256.as_str())
         );
         assert_eq!(
             store::read_aggregate(&record.run_id)
@@ -581,8 +619,67 @@ fn late_inner_aggregate_recovers_patch_after_transport_only_terminal_result() {
                 .artifacts[0]
                 .sha256
                 .as_deref(),
-            Some("062f5c460c2dfb279277b75d5a16a04e3178ace1f35ce7b10da5e17441b37071")
+            Some(inner_patch_sha256.as_str())
         );
+    });
+}
+
+#[test]
+fn foreground_terminal_daemon_projection_finishes_success_and_failure_runs_once() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        for (run_id, daemon_status, expected_run, expected_task, expected_execution_status) in [
+            (
+                "foreground-daemon-success",
+                homeboy_core::api_jobs::JobStatus::Succeeded,
+                AgentTaskRunState::Succeeded,
+                AgentTaskState::Succeeded,
+                "succeeded",
+            ),
+            (
+                "foreground-daemon-failure",
+                homeboy_core::api_jobs::JobStatus::Failed,
+                AgentTaskRunState::Failed,
+                AgentTaskState::Failed,
+                "failed",
+            ),
+        ] {
+            record_detached_lab_run(DetachedLabRunRecord {
+                run_id,
+                runner_id: "homeboy-lab",
+                runner_job_id: "00000000-0000-0000-0000-000000000123",
+                remote_workspace: "/runner/workspace/repo",
+                remote_command: &command,
+            })
+            .expect("accepted detached handoff");
+            let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+            snapshot.job.status = daemon_status;
+            snapshot.events.clear();
+
+            assert!(project_terminal_runner_result(run_id, &snapshot)
+                .expect("foreground daemon result is projected"));
+            assert!(!project_terminal_runner_result(run_id, &snapshot)
+                .expect("repeated terminal result is idempotent"));
+
+            let projected = status(run_id).expect("terminal durable run");
+            assert_eq!(projected.state, expected_run);
+            assert_eq!(projected.tasks[0].state, expected_task);
+            assert_eq!(projected.lifecycle.execution.state, expected_run.into());
+            assert!(projected.lifecycle.execution.finished_at.is_some());
+            assert_eq!(
+                projected.metadata["runner_job_status"],
+                json!(daemon_status)
+            );
+            assert_eq!(
+                projected.metadata["runner_execution_record"]["status"],
+                expected_execution_status
+            );
+            assert_eq!(projected.metadata["runner_handoff"]["state"], "terminal");
+            assert_eq!(
+                projected.metadata["runner_result_synchronization"]["state"],
+                "projected"
+            );
+        }
     });
 }
 

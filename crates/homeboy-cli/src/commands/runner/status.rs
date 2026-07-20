@@ -25,6 +25,9 @@ pub(super) fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
     let preferred_lab_runner = runner::resolve_default_lab_runner()?;
     if let Some(id) = id {
         let report = runner::status(id)?;
+        // Also polls draining generations and retires only those that report
+        // authoritative zero active jobs.
+        let generation_inventory = runner::runner_generation_inventory(id)?;
         let operator_hints = runner_status_operator_hints(&report);
         let operator_commands = runner_status_operator_commands(&report);
         let selected_lab_runner = selected_lab_runner_status(Some(id), Some(report.clone()))?;
@@ -34,6 +37,7 @@ pub(super) fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
                 id: Some(id.to_string()),
                 extra: RunnerExtra {
                     connection: Some(RunnerConnectionOutput::Status(report)),
+                    generation_inventory,
                     preferred_lab_runner,
                     selected_lab_runner,
                     managed_followups: runner_followups(Some(id)),

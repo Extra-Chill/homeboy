@@ -9,6 +9,23 @@ use super::repair::{
     existing_draft_repair_hints, repair_data, repair_hints, GitHubReleaseRepairCommands,
 };
 
+pub(crate) fn published_release_url(
+    github: &GitHubRepo,
+    tag: &str,
+    _draft_response: &str,
+    publish_response: &str,
+) -> String {
+    let published_url = publish_response.trim();
+    if !published_url.is_empty() {
+        return published_url.to_string();
+    }
+
+    format!(
+        "https://{}/{}/{}/releases/tag/{}",
+        github.host, github.owner, github.repo, tag
+    )
+}
+
 /// A successful but no-op result for an idempotent retry where the GitHub
 /// Release object already exists. The release exists, so this is `Success`.
 pub(super) fn skipped_result(
@@ -167,6 +184,7 @@ pub(crate) fn upload_success_result(
     github: &GitHubRepo,
     artifact_count: usize,
 ) -> ReleaseStepResult {
+    let url = published_release_url(github, tag, "", "");
     step_success(
         "github.release",
         "github.release",
@@ -176,6 +194,7 @@ pub(crate) fn upload_success_result(
             "host": github.host,
             "owner": github.owner,
             "repo": github.repo,
+            "url": url,
             "artifact_count": artifact_count,
         })),
         Vec::new(),

@@ -1011,6 +1011,7 @@ where
     // A restart cannot resume the thread that owned a pre-spawn reservation.
     // Expire only reservations that never recorded a child identity.
     job_store.reconcile_expired_local_child_reservations()?;
+    job_store.reconcile_expired_admissions()?;
     let _ = daemon_runtime_snapshot();
     let loopback_bind = local_addr.ip().is_loopback();
 
@@ -1046,6 +1047,7 @@ const LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS: u64 = 5;
 fn spawn_local_child_reservation_reconciler(job_store: JobStore) {
     std::thread::spawn(move || loop {
         let _ = job_store.reconcile_expired_local_child_reservations();
+        let _ = job_store.reconcile_expired_admissions();
         std::thread::sleep(std::time::Duration::from_secs(
             LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS,
         ));
@@ -1239,8 +1241,14 @@ where
             Err(err) => error_response(400, err),
         },
         ("POST", path) if path.starts_with("/admissions/") && path.ends_with("/release") => {
-            match release_admission(path, job_store) {
+            match release_admission(path, body, job_store) {
                 Ok(body) => daemon_endpoint_response("admissions.release", body),
+                Err(err) => error_response(400, err),
+            }
+        }
+        ("POST", path) if path.starts_with("/admissions/") && path.ends_with("/renew") => {
+            match renew_admission(path, body, job_store) {
+                Ok(body) => daemon_endpoint_response("admissions.renew", body),
                 Err(err) => error_response(400, err),
             }
         }
@@ -1370,24 +1378,51 @@ fn reserve_admission(
             "idempotency_key": idempotency_key,
         },
     });
-    let (job, created) = match idempotency_key {
-        Some(idempotency_key) => {
-            job_store.create_or_reuse_active_admission(metadata, idempotency_key)
-        }
-        None => (
-            job_store.create_with_source_snapshot_metadata_and_path_materialization_plan(
-                "runner.admission",
-                None,
-                Some(metadata),
-                None,
+    // Lease protocol is opt-in so an older controller can finish an admission
+    // after a daemon upgrade. New controllers also tolerate old daemons that
+    // ignore this field and return the legacy response shape.
+    let lease_protocol_v1 = body
+        .get("admission_lease_protocol")
+        .and_then(serde_json::Value::as_u64)
+        == Some(1);
+    if !lease_protocol_v1 {
+        let (job, created) = match idempotency_key {
+            Some(idempotency_key) => {
+                job_store.create_or_reuse_active_admission(metadata, idempotency_key)
+            }
+            None => (
+                job_store.create_with_source_snapshot_metadata_and_path_materialization_plan(
+                    "runner.admission",
+                    None,
+                    Some(metadata),
+                    None,
+                ),
+                true,
             ),
-            true,
-        ),
+        };
+        return Ok(json!({
+            "job": job,
+            "daemon_lease_id": daemon_lease.lease_id,
+            "idempotent_resubmission": !created,
+        }));
+    }
+    let reservation = match idempotency_key {
+        Some(idempotency_key) => job_store.create_or_renew_admission_at(
+            metadata,
+            idempotency_key,
+            crate::api_jobs::timestamp_ms(),
+        )?,
+        None => job_store.create_admission_at(metadata, crate::api_jobs::timestamp_ms())?,
     };
     Ok(json!({
-        "job": job,
+        "job": reservation.job,
         "daemon_lease_id": daemon_lease.lease_id,
-        "idempotent_resubmission": !created,
+        "idempotent_resubmission": !reservation.created,
+        "admission_token": reservation.token,
+        "lease": {
+            "expires_at_ms": reservation.expires_at_ms,
+            "renewable": true,
+        },
     }))
 }
 
@@ -1405,37 +1440,92 @@ fn validate_admission_lease(expected_lease_id: &str, actual_lease_id: &str) -> R
     ))
 }
 
-fn release_admission(path: &str, job_store: &JobStore) -> Result<serde_json::Value> {
+fn admission_job_id(path: &str, suffix: &str) -> Result<uuid::Uuid> {
     let job_id = path
         .trim_start_matches("/admissions/")
-        .trim_end_matches("/release")
+        .trim_end_matches(suffix)
         .trim_end_matches('/');
-    let job_id = uuid::Uuid::parse_str(job_id).map_err(|error| {
+    uuid::Uuid::parse_str(job_id).map_err(|error| {
         Error::validation_invalid_argument(
             "job_id",
             format!("invalid admission job ID: {error}"),
             Some(job_id.to_string()),
             None,
         )
-    })?;
-    let job = job_store.get(job_id)?;
-    if job.operation != "runner.admission" {
-        return Err(Error::validation_invalid_argument(
-            "job_id",
-            "job is not an admission reservation",
-            Some(job_id.to_string()),
+    })
+}
+
+fn admission_token(body: Option<serde_json::Value>) -> Result<String> {
+    body.and_then(|body| {
+        body.get("admission_token")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    })
+    .filter(|token| !token.trim().is_empty())
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "admission_token",
+            "admission reservation requires its opaque token",
             None,
-        ));
-    }
-    let job = if matches!(
-        job.status,
-        JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
-    ) {
-        job
-    } else {
-        job_store.cancel(job_id, "admission reservation released")?
+            None,
+        )
+    })
+}
+
+fn release_admission(
+    path: &str,
+    body: Option<serde_json::Value>,
+    job_store: &JobStore,
+) -> Result<serde_json::Value> {
+    let job_id = admission_job_id(path, "/release")?;
+    let job = match body
+        .and_then(|body| {
+            body.get("admission_token")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|token| !token.trim().is_empty())
+    {
+        Some(token) => {
+            job_store.release_admission_at(job_id, &token, crate::api_jobs::timestamp_ms())?
+        }
+        None => {
+            if job_store.admission_is_leased(job_id)? {
+                return Err(Error::validation_invalid_argument(
+                    "admission_token",
+                    "admission reservation requires its opaque token",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            let job = job_store.get(job_id)?;
+            if job.operation != "runner.admission" {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "job is not an admission reservation",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            job_store.cancel(job_id, "admission reservation released")?
+        }
     };
     Ok(json!({ "job": job }))
+}
+
+fn renew_admission(
+    path: &str,
+    body: Option<serde_json::Value>,
+    job_store: &JobStore,
+) -> Result<serde_json::Value> {
+    let job_id = admission_job_id(path, "/renew")?;
+    let token = admission_token(body)?;
+    let reservation =
+        job_store.renew_admission_at(job_id, &token, crate::api_jobs::timestamp_ms())?;
+    Ok(json!({
+        "job": reservation.job,
+        "lease": { "expires_at_ms": reservation.expires_at_ms, "renewable": true },
+    }))
 }
 
 fn lifecycle_stop_request(body: Option<serde_json::Value>) -> Result<LifecycleStopRequest> {
@@ -1906,6 +1996,9 @@ fn enqueue_exec_job(
             Some(run_ref_metadata),
             path_materialization_plan.clone(),
             local_runner,
+            lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.durable_run_id.clone()),
             capacity,
             move |job| {
                 let mut plan = plan;
@@ -2172,8 +2265,9 @@ mod tests {
             assert_eq!(active_jobs[0].operation, "runner.admission");
             assert_eq!(active_jobs[0].kind, "runner.admission");
 
-            let released = release_admission(&format!("/admissions/{job_id}/release"), &store)
-                .expect("release admission");
+            let released =
+                release_admission(&format!("/admissions/{job_id}/release"), None, &store)
+                    .expect("release admission");
             assert_eq!(released["job"]["status"], "cancelled");
             assert_eq!(
                 daemon_freshness_report(&store)
@@ -2216,8 +2310,9 @@ mod tests {
                 "one durable attempt creates exactly one admission reservation"
             );
 
-            let released = release_admission(&format!("/admissions/{job_id}/release"), &store)
-                .expect("release reservation after failed handoff");
+            let released =
+                release_admission(&format!("/admissions/{job_id}/release"), None, &store)
+                    .expect("release reservation after failed handoff");
             assert_eq!(released["job"]["status"], "cancelled");
             assert_eq!(
                 daemon_freshness_report(&store)
@@ -2226,6 +2321,72 @@ mod tests {
                 0,
                 "a failed or timed-out handoff leaves no active admission job"
             );
+        });
+    }
+
+    #[test]
+    fn direct_daemon_exec_consumes_its_matching_admission_before_returning_identity() {
+        with_isolated_home(|_| {
+            register_enqueue_test_driver();
+            let lease_id = "lease-direct-handoff";
+            let run_id = "cook-9061-attempt-1";
+            write_test_lease(lease_id);
+            let store = JobStore::default();
+            let reservation = reserve_admission(
+                Some(json!({
+                    "runner_id": "lab",
+                    "command": "homeboy agent-task run-plan",
+                    "expected_daemon_lease_id": lease_id,
+                    "idempotency_key": run_id,
+                    "admission_lease_protocol": 1,
+                })),
+                &store,
+            )
+            .expect("reserve controller handoff");
+            let admission_id = reservation["job"]["id"]
+                .as_str()
+                .expect("admission identity")
+                .to_string();
+
+            let accepted = enqueue_exec_job(
+                Some(json!({
+                    "runner_id": "lab",
+                    "cwd": "/tmp",
+                    "command": ["homeboy", "agent-task", "run-plan"],
+                    "idempotency_key": run_id,
+                    "lifecycle": {
+                        "durable_run_id": run_id,
+                        "source": "runner-daemon",
+                        "kind": "runner.exec",
+                    },
+                })),
+                &store,
+            )
+            .expect("daemon accepts execution");
+            let execution_id = accepted["job"]["id"].as_str().expect("execution identity");
+
+            assert_ne!(execution_id, admission_id);
+            assert_eq!(
+                store
+                    .get(uuid::Uuid::parse_str(&admission_id).expect("admission UUID"))
+                    .expect("admission record")
+                    .status,
+                JobStatus::Cancelled,
+                "accepting the execution must release its capacity reservation"
+            );
+            assert_eq!(
+                store
+                    .active_runner_jobs()
+                    .iter()
+                    .filter(|job| job.operation == "runner.exec")
+                    .count(),
+                1,
+                "one durable attempt creates exactly one active provider execution"
+            );
+            assert!(store
+                .active_runner_jobs()
+                .iter()
+                .all(|job| { job.operation != "runner.admission" || job.job_id != admission_id }));
         });
     }
 
