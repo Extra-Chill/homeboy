@@ -1,7 +1,7 @@
 use super::*;
 use homeboy_core::observation::{ObservationStore, RunRecord};
 
-const HEALTH_SAMPLE_LIMIT: usize = 20;
+pub(crate) const HEALTH_SAMPLE_LIMIT: usize = 20;
 const QUARANTINE_KEY: &str = "agent_task_lifecycle_quarantine";
 
 pub(crate) fn diagnose_run(
