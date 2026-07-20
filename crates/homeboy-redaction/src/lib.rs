@@ -125,7 +125,7 @@ impl RedactionPolicy {
             .map(|part| self.redact_query_part(part))
             .collect::<Vec<_>>()
             .join("&");
-        let mut redacted = format!("{base}?{query}");
+        let mut redacted = format!("{}?{query}", self.redact_string(base));
         if let Some(fragment) = fragment {
             redacted.push('#');
             redacted.push_str(fragment);
@@ -317,9 +317,16 @@ fn normalize_key(key: &str) -> String {
 fn redact_authorization_schemes(value: &str, replacement: &str) -> String {
     let pattern = Regex::new(r"(?i)\b(bearer|basic)\s+[^\s,;]+")
         .expect("authorization redaction regex is valid");
-    pattern
+    let value = pattern
         .replace_all(value, |captures: &Captures<'_>| {
             format!("{} {replacement}", &captures[1])
+        })
+        .into_owned();
+    let credentials = Regex::new(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^@/\s]+@")
+        .expect("URL credential redaction regex is valid");
+    credentials
+        .replace_all(&value, |captures: &Captures<'_>| {
+            format!("{}{}@", &captures[1], replacement)
         })
         .into_owned()
 }
@@ -369,6 +376,21 @@ mod tests {
         assert_eq!(
             policy.redact_string("proxy Basic dXNlcjpzZWNyZXQ="),
             "proxy Basic [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn redacts_connection_string_credentials_in_strings_and_urls() {
+        let policy = RedactionPolicy::default();
+        let secret = "postgres://app:super-secret@db.example.test/app";
+
+        assert_eq!(
+            policy.redact_string(secret),
+            "postgres://[REDACTED]@db.example.test/app"
+        );
+        assert_eq!(
+            policy.redact_url("postgres://app:super-secret@db.example.test/app?token=also-secret"),
+            "postgres://[REDACTED]@db.example.test/app?token=[REDACTED]"
         );
     }
 
