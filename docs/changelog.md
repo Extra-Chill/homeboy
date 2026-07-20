@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.297.2] - 2026-07-20
+
+### Changed
+- Lease runner admission reservations
+- push struct definition-finding down to language extensions
+
+### Fixed
+- persist attempts before baseline staging
+- normalize agent task log events
+- recover cooks after preflight failure
+- report actionable Lab readiness
+- exclude Homeboy runner metadata from candidate patches
+- fix(lab-runner): bind tracked unresolved symlinks in workspace content hash
+
 ## [0.297.1] - 2026-07-20
 
 ### Changed
