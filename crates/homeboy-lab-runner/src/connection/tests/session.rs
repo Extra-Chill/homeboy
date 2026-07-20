@@ -365,6 +365,97 @@ fn identity_comparison_distinguishes_match_unverifiable_and_mismatch() {
 }
 
 #[test]
+fn equal_version_build_identity_and_runtime_paths_are_current() {
+    assert!(daemon_runtime_is_current(
+        "0.296.3",
+        "homeboy 0.296.3",
+        "0.296.3",
+        IdentityComparison::Match,
+        &[],
+        &[],
+    ));
+}
+
+#[test]
+fn equal_versions_with_different_build_identities_are_stale_and_name_both_builds() {
+    let warning = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.296.3".to_string(),
+        "0.296.3".to_string(),
+        Some("homeboy 0.296.3+daemon-build".to_string()),
+        Some("homeboy 0.296.3+job-build".to_string()),
+    );
+
+    assert!(!daemon_runtime_is_current(
+        "0.296.3",
+        "0.296.3",
+        "0.296.3",
+        IdentityComparison::Mismatch,
+        &[],
+        &[],
+    ));
+    assert!(warning.message.contains("build identity"));
+    assert!(warning.message.contains("homeboy 0.296.3+daemon-build"));
+    assert!(warning.message.contains("homeboy 0.296.3+job-build"));
+    assert!(!warning.message.contains("version `0.296.3` differs"));
+}
+
+#[test]
+fn runtime_path_drift_is_stale_and_names_the_changed_generation() {
+    let warning = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.296.3".to_string(),
+        "0.296.3".to_string(),
+        Some("homeboy 0.296.3+same-build".to_string()),
+        Some("homeboy 0.296.3+same-build".to_string()),
+    )
+    .with_runtime_paths(
+        "homeboy-lab",
+        vec![RunnerStaleRuntimePath {
+            env: "HOMEBOY_EXTENSION_PATH".to_string(),
+            path: "/srv/extensions".to_string(),
+            loaded_fingerprint: "sha256:old".to_string(),
+            current_fingerprint: "sha256:new".to_string(),
+        }],
+        Vec::new(),
+    );
+
+    assert!(!daemon_runtime_is_current(
+        "0.296.3",
+        "0.296.3",
+        "0.296.3",
+        IdentityComparison::Match,
+        &warning.stale_runtime_paths,
+        &warning.changed_runtime_paths,
+    ));
+    assert!(warning.message.contains("HOMEBOY_EXTENSION_PATH"));
+    assert!(warning.message.contains("sha256:old"));
+    assert!(warning.message.contains("sha256:new"));
+}
+
+#[test]
+fn differing_versions_are_stale_and_name_both_versions() {
+    let warning = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.296.2".to_string(),
+        "0.296.3".to_string(),
+        Some("homeboy 0.296.2+old".to_string()),
+        Some("homeboy 0.296.3+new".to_string()),
+    );
+
+    assert!(!daemon_runtime_is_current(
+        "0.296.2",
+        "0.296.2",
+        "0.296.3",
+        IdentityComparison::Mismatch,
+        &[],
+        &[],
+    ));
+    assert!(warning.message.contains("version `0.296.2`"));
+    assert!(warning.message.contains("version `0.296.3`"));
+}
+
+#[test]
 fn release_only_self_identity_remains_unverifiable() {
     let identity = parse_self_identity_output(
         r#"{"success":true,"data":{"version":"0.294.0","display":"homeboy 0.294.0"}}"#,

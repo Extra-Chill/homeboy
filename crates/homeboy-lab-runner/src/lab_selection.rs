@@ -648,10 +648,8 @@ fn connected_runner_not_ready_reason(
             ));
         }
         return Some(format!(
-            "connected runner `{runner_id}` daemon is stale (severity={}): active daemon control plane reports {}, but the job command binary reports {}; stale runner runtimes can return malformed or misleading provider output; refresh with `{restart}`",
-            warning.severity,
-            warning.active_daemon_control_plane_version,
-            warning.job_command_binary_version
+            "connected runner `{runner_id}` daemon is stale (severity={}): {}; refresh with `{restart}`",
+            warning.severity, warning.message
         ));
     }
 

@@ -99,8 +99,17 @@ impl RuntimeMaterializationStatus {
         let job_binary = self.job_command_binary_display()?;
         let severity = self.stale_daemon_severity?;
         let refresh = self.stale_daemon_refresh_command.as_deref()?;
+        let reason = self
+            .active_daemon
+            .build_identity
+            .as_deref()
+            .zip(self.job_command_binary_build_identity.as_deref())
+            .map(|(active, job)| {
+                format!("active daemon build `{active}`, job command build `{job}`")
+            })
+            .unwrap_or_else(|| "inspect the runner stale-daemon diagnostic".to_string());
         Some(format!(
-            "Runner `{}` stale daemon severity={severity}: active daemon control plane is `{active_daemon}`, but the job command binary is `{job_binary}`. Refresh with `{refresh}` before using runner/Lab status as version evidence.",
+            "Runner `{}` stale daemon severity={severity}: {reason}; active daemon control plane is `{active_daemon}`, job command binary is `{job_binary}`. Refresh with `{refresh}` before using runner/Lab status as version evidence.",
             self.runner_id
         ))
     }
