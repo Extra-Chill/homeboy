@@ -135,6 +135,14 @@ pub fn project_terminal_runner_result(
     }
 
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    // Bind a still-pending controller handoff to this authoritative terminal
+    // snapshot's daemon job before validating identity (issue #9240). An
+    // accepted Lab job can reach a terminal daemon snapshot before the
+    // controller has persisted the accepted runner job id; binding here
+    // establishes that identity from the same evidence rather than rejecting a
+    // valid terminal snapshot against an empty controller job id. No-ops once
+    // the run is already bound.
+    bind_pending_lab_handoff_snapshot(&mut record, snapshot)?;
     validate_runner_job_snapshot(&record, snapshot)?;
     if let Some(event) = terminal_runner_lifecycle_event(&record, snapshot)? {
         if store::read_aggregate(&record.run_id).ok().as_ref() == Some(&event.aggregate) {
@@ -358,7 +366,28 @@ fn validate_runner_job_snapshot(
     record: &AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
-    let expected_job_id = record.runner_job_id().unwrap_or_default();
+    // Distinguish "controller identity not yet established" from a genuine
+    // identity mismatch. When the controller has never persisted an accepted
+    // runner job id, `runner_job_id()` is `None` and comparing a valid runner
+    // snapshot UUID against an empty string spuriously rejects it as a mismatch
+    // (issue #9240: "runner snapshot job <uuid> does not match controller job "
+    // — the blank trailing value is the missing-identity signal, not a mismatch).
+    // Callers must bind or propagate the accepted Lab job id before validation;
+    // surface the absence as its own diagnostic so it is fixed at the source
+    // instead of being presented as a runner mismatch and classified as a
+    // non-retryable runner error.
+    let Some(expected_job_id) = record.runner_job_id() else {
+        return Err(Error::validation_invalid_argument(
+            "runner_job_id",
+            format!(
+                "controller run has no accepted runner job identity to validate runner snapshot job {} against; \
+                 the accepted Lab handoff job id must be bound before snapshot validation",
+                snapshot.job.id
+            ),
+            Some(record.run_id.clone()),
+            None,
+        ));
+    };
     if expected_job_id == snapshot.job.id.to_string() {
         return Ok(());
     }
