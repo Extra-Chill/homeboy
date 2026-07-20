@@ -9,6 +9,7 @@ use homeboy_core::error::ErrorCode;
 use homeboy_core::server::{self, RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 
 mod daemon_exec;
+mod daemon_file_api;
 mod exec;
 mod handoff;
 mod policy;

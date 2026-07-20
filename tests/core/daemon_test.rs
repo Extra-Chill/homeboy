@@ -225,29 +225,6 @@ fn health_route_refreshes_daemon_lease_heartbeat() {
 }
 
 #[test]
-fn file_route_rejects_paths_outside_runner_workspace_root() {
-    let _home = HomeGuard::new();
-    let (_temp, workspace) = file_api_workspace(true);
-
-    let response = route_with_job_store_and_body(
-        "POST",
-        "/files/download",
-        Some(serde_json::json!({
-            "runner_id": "file-lab",
-            "path": workspace.join("..").join("secret.txt").display().to_string(),
-        })),
-        &JobStore::default(),
-    );
-
-    assert_eq!(response.status_code, 400);
-    assert_eq!(response.body["details"]["field"], "path");
-    assert!(response.body["message"]
-        .as_str()
-        .expect("message")
-        .contains("workspace_root"));
-}
-
-#[test]
 fn file_route_requires_broker_submit_auth_for_untrusted_requests() {
     let _home = HomeGuard::new();
     let (_temp, _workspace) = file_api_workspace(true);
@@ -290,50 +267,6 @@ fn file_route_accepts_request_workspace_root_without_runner_config() {
 
     assert_eq!(response.status_code, 200, "mkdir body: {}", response.body);
     assert!(workspace.join("artifacts").is_dir());
-}
-
-#[test]
-fn file_routes_upload_and_download_inside_runner_workspace_root() {
-    let _home = HomeGuard::new();
-    let (_temp, workspace) = file_api_workspace(true);
-
-    let upload = route_with_job_store_and_body(
-        "POST",
-        "/files/upload",
-        Some(serde_json::json!({
-            "runner_id": "file-lab",
-            "path": "nested/report.json",
-            "content_base64": base64::engine::general_purpose::STANDARD.encode(br#"{"ok":true}"#),
-        })),
-        &JobStore::default(),
-    );
-    assert_eq!(upload.status_code, 200, "upload body: {}", upload.body);
-    assert_eq!(
-        std::fs::read_to_string(workspace.join("nested/report.json")).expect("uploaded file"),
-        r#"{"ok":true}"#
-    );
-
-    let download = route_with_job_store_and_body(
-        "POST",
-        "/files/download",
-        Some(serde_json::json!({
-            "runner_id": "file-lab",
-            "path": workspace.join("nested/report.json").display().to_string(),
-        })),
-        &JobStore::default(),
-    );
-    assert_eq!(
-        download.status_code, 200,
-        "download body: {}",
-        download.body
-    );
-    let encoded = download.body["body"]["content_base64"]
-        .as_str()
-        .expect("content_base64");
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .expect("decode content");
-    assert_eq!(decoded, br#"{"ok":true}"#);
 }
 
 #[test]
