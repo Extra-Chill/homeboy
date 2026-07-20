@@ -278,7 +278,10 @@ pub(super) fn prepare_committed_harvest(
     } else if let Some(baseline) = verified_initial_cook_candidate_baseline(root, request)? {
         Some(baseline)
     } else {
-        Some(verified_gate_feedback_baseline(root, request, &status)?)
+        Some(
+            verified_preexisting_cook_baseline(root, request, context)
+                .unwrap_or_else(|| verified_gate_feedback_baseline(root, request, &status))?,
+        )
     };
     Ok(HarvestPreflight {
         base_sha: Some(git_output(root, &["rev-parse", "HEAD"])?),
@@ -343,6 +346,95 @@ fn verified_initial_cook_candidate_baseline(
     Ok(Some(CandidateBaseline {
         patch: git_output_raw(root, &["diff", "--binary", "--full-index", "HEAD", commit])?,
     }))
+}
+
+/// Lab may carry an explicitly authorized initial Cook candidate as a dirty
+/// snapshot. Accept it only when the controller-issued baseline evidence is
+/// also present in the authenticated Lab metadata and reproduces this tree.
+fn verified_preexisting_cook_baseline(
+    root: &Path,
+    request: &AgentTaskRequest,
+    context: &HarvestExecutionContext,
+) -> Option<Result<CandidateBaseline, HarvestError>> {
+    let baseline = request.metadata.get("verified_cook_baseline")?;
+    if baseline
+        .get("preexisting_candidate")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+        || baseline
+            .get("source_task_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(request.task_id.as_str())
+    {
+        return Some(Err(HarvestError::DirtyWorkspace {
+            status: "untrusted Cook baseline contract".to_string(),
+        }));
+    }
+    let Some(snapshot) = context.source_snapshot.as_ref() else {
+        return Some(Err(HarvestError::DirtyWorkspace {
+            status: "Cook baseline contract requires Lab snapshot evidence".to_string(),
+        }));
+    };
+    let Some(lab_baseline) = context
+        .lab_offload
+        .as_ref()
+        .and_then(|metadata| metadata.pointer("/source_provenance/verified_cook_baseline"))
+    else {
+        return Some(Err(HarvestError::DirtyWorkspace {
+            status: "Cook baseline contract is absent from Lab metadata".to_string(),
+        }));
+    };
+    if !snapshot.dirty || lab_baseline != baseline {
+        return Some(Err(HarvestError::DirtyWorkspace {
+            status: "Cook baseline contract does not match the dirty Lab snapshot".to_string(),
+        }));
+    }
+    let Some(expected_tree) = baseline
+        .get("baseline_tree")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Some(Err(HarvestError::DirtyWorkspace {
+            status: "Cook baseline contract has no baseline tree".to_string(),
+        }));
+    };
+    Some(workspace_patch_for_tree(root, expected_tree).map(|patch| CandidateBaseline { patch }))
+}
+
+fn workspace_patch_for_tree(root: &Path, expected_tree: &str) -> Result<String, HarvestError> {
+    let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
+        command: "create Cook baseline Git index".to_string(),
+        message: error.to_string(),
+    })?;
+    let index_path = index.path().display().to_string();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .env("GIT_INDEX_FILE", &index_path)
+            .current_dir(root)
+            .output()
+            .map_err(|error| HarvestError::Git {
+                command: args.join(" "),
+                message: error.to_string(),
+            })?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            Err(HarvestError::CandidateBaselineMismatch {
+                message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            })
+        }
+    };
+    let head = git(&["rev-parse", "HEAD"])?;
+    git(&["read-tree", &head])?;
+    git(&["add", "--all"])?;
+    let tree = git(&["write-tree"])?;
+    if tree != expected_tree {
+        return Err(HarvestError::CandidateBaselineMismatch {
+            message: "dirty workspace does not reproduce the authorized Cook baseline tree"
+                .to_string(),
+        });
+    }
+    git(&["diff", "--cached", "--binary", "HEAD"])
 }
 
 fn verified_gate_feedback_baseline(
@@ -755,6 +847,36 @@ mod tests {
         let diff = git_output(&attempt_root, &["diff", "--name-only", "HEAD~1", "HEAD"])
             .expect("local diff");
         assert!(diff.contains("f.txt"), "local diff harvest must still work");
+    }
+
+    #[test]
+    fn authorized_cook_baseline_patch_includes_untracked_candidate_files() {
+        let source = tempfile::tempdir().expect("source repository");
+        git(source.path(), &["init", "-b", "main"]);
+        fs::write(source.path().join("tracked.txt"), "base").expect("base file");
+        git(source.path(), &["add", "tracked.txt"]);
+        git(
+            source.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        fs::write(source.path().join("tracked.txt"), "candidate").expect("candidate file");
+        fs::write(source.path().join("untracked.txt"), "candidate").expect("untracked file");
+        git(source.path(), &["add", "--all"]);
+        let tree = git_output(source.path(), &["write-tree"]).expect("candidate tree");
+        git(source.path(), &["reset", "--mixed", "HEAD"]);
+
+        let patch = workspace_patch_for_tree(source.path(), &tree).expect("authorized baseline");
+
+        assert!(patch.contains("tracked.txt"));
+        assert!(patch.contains("untracked.txt"));
     }
 
     fn git(cwd: &Path, args: &[&str]) {

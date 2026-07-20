@@ -750,6 +750,35 @@ fn cook_retry_lab_source_is_the_derived_baseline_not_the_controller_workspace() 
 }
 
 #[test]
+fn lab_cook_attempt_preserves_authorized_dirty_baseline_in_the_run_plan() {
+    let mut plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        "cook-dirty-baseline",
+        vec![serde_json::from_value(serde_json::json!({
+            "task_id": "task",
+            "executor": { "backend": "fixture" },
+            "instructions": "continue",
+            "workspace": { "root": "/runner/workspace" }
+        }))
+        .expect("task")],
+    );
+    let baseline = serde_json::json!({
+        "source_run_id": "cook-dirty-baseline",
+        "source_task_id": "task",
+        "baseline_tree": "0123456789012345678901234567890123456789",
+        "preexisting_candidate": true,
+    });
+
+    super::attach_verified_cook_baseline(&mut plan, &baseline);
+    let serialized = serde_json::to_string(&plan).expect("serialize run plan");
+    let run_plan: serde_json::Value = serde_json::from_str(&serialized).expect("parse run plan");
+
+    assert_eq!(
+        run_plan["tasks"][0]["metadata"]["verified_cook_baseline"],
+        baseline
+    );
+}
+
+#[test]
 fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_failure() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
