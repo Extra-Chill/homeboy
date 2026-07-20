@@ -4,7 +4,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use super::git;
-use crate::workspace::git::{git_bundle_install_command, git_snapshot, materialize_git_command};
+use crate::workspace::git::{
+    git_bundle_install_command, git_snapshot, materialize_git_command, ref_has_missing_objects,
+};
 use crate::workspace::sync::sync_workspace;
 use crate::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use crate::workspace::util::git_output;
@@ -238,6 +240,184 @@ fn changed_since_retry_route_materializes_private_unavailable_origin_from_bundle
             "M file.txt"
         );
     });
+}
+
+#[test]
+fn changed_since_bundle_includes_a_local_only_head_over_a_promisor_base() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let origin = tempfile::tempdir().expect("origin tempdir");
+        let author = tempfile::tempdir().expect("author tempdir");
+        let source = tempfile::tempdir().expect("source tempdir");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        git(origin.path(), &["config", "uploadpack.allowFilter", "true"]);
+        git(author.path(), &["init", "-b", "main"]);
+        git(author.path(), &["config", "user.email", "test@example.com"]);
+        git(author.path(), &["config", "user.name", "Test User"]);
+        fs::write(author.path().join("base-only.txt"), "base\n").expect("write base file");
+        git(author.path(), &["add", "."]);
+        git(author.path(), &["commit", "-m", "base"]);
+        let base = git_output(author.path(), &["rev-parse", "HEAD"]).expect("base revision");
+        let base_blob = git_output(author.path(), &["rev-parse", "HEAD:base-only.txt"])
+            .expect("base blob revision");
+        git(
+            author.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("file://{}", origin.path().display()),
+            ],
+        );
+        // Only the base is ever pushed. The head commit stays local-only.
+        git(author.path(), &["push", "origin", "main"]);
+
+        // Partial clone of the pushed base into the controller source checkout.
+        git(
+            source.path(),
+            &[
+                "clone",
+                "--filter=blob:none",
+                &format!("file://{}", origin.path().display()),
+                ".",
+            ],
+        );
+        git(source.path(), &["config", "user.email", "test@example.com"]);
+        git(source.path(), &["config", "user.name", "Test User"]);
+        // Create a NEW commit locally and never push it — this is the clean
+        // worktree HEAD that a changed-since run selects. It is fully present in
+        // the local object database but absent from the promisor remote. The
+        // head drops `base-only.txt` so the working tree no longer needs the
+        // promisor blob, letting the fixture evict it below. (#8309)
+        fs::remove_file(source.path().join("base-only.txt")).expect("remove base file");
+        fs::write(source.path().join("file.txt"), "head\n").expect("write head file");
+        git(source.path(), &["add", "-A"]);
+        git(source.path(), &["commit", "-m", "local-only head"]);
+        let head = git_output(source.path(), &["rev-parse", "HEAD"]).expect("head revision");
+        assert_ne!(head, base, "the head must be a distinct local-only commit");
+
+        // Point origin at an unreachable URL so materialization must use the
+        // controller bundle fallback rather than a network clone.
+        git(source.path(), &["remote", "rename", "origin", "controller"]);
+        git(
+            source.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://127.0.0.1:1/example-org/private-source.git",
+            ],
+        );
+        // Retain a commit-graph so a stale promisor entry survives pack removal.
+        git(source.path(), &["commit-graph", "write", "--reachable"]);
+
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-only-head","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        // Evict the promisor packs so the base blob is genuinely absent locally;
+        // the controller must hydrate it through the promisor transport while
+        // leaving the local-only head untouched.
+        remove_local_packs(source.path());
+        assert!(
+            git_without_lazy_fetch(source.path(), &["cat-file", "-e", &base_blob]).is_err(),
+            "the fixture must omit the promised base blob locally"
+        );
+        assert!(
+            git_without_lazy_fetch(
+                source.path(),
+                &["cat-file", "-e", &format!("{head}^{{commit}}")]
+            )
+            .is_ok(),
+            "the local-only head must remain fully present after pack eviction"
+        );
+
+        let sync_result = sync_workspace(
+            "lab-local-only-head",
+            RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Git,
+                controller_routed_git: false,
+                changed_since_base: Some(base.clone()),
+                git_fetch_refs: Vec::new(),
+                snapshot_includes: Vec::new(),
+                allow_dirty_lab_workspace: false,
+                run_isolation_token: None,
+            },
+        );
+
+        let (output, exit_code) = sync_result
+            .expect("a local-only head over a promisor base must materialize from a bundle");
+        assert_eq!(exit_code, 0);
+
+        let remote = Path::new(&output.remote_path);
+        // The bundle is self-contained: both the local-only head and the
+        // hydrated base (with ancestry) are present on the runner.
+        assert_eq!(git_output(remote, &["rev-parse", "HEAD"]).unwrap(), head);
+        assert_eq!(git_output(remote, &["rev-parse", &base]).unwrap(), base);
+        assert_eq!(
+            git_output(remote, &["merge-base", &base, "HEAD"]).unwrap(),
+            base
+        );
+        assert_eq!(
+            git_output(remote, &["cat-file", "-e", &base_blob]).unwrap(),
+            ""
+        );
+        assert_eq!(
+            fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
+            "head\n"
+        );
+        assert!(git_output(remote, &["status", "--porcelain=v1"])
+            .expect("read final checkout status")
+            .is_empty());
+    });
+}
+
+#[test]
+fn ref_missing_object_probe_skips_a_fully_local_commit_but_flags_an_evicted_base() {
+    let author = tempfile::tempdir().expect("author tempdir");
+    let source = tempfile::tempdir().expect("source tempdir");
+    git(author.path(), &["init", "-b", "main"]);
+    git(author.path(), &["config", "user.email", "test@example.com"]);
+    git(author.path(), &["config", "user.name", "Test User"]);
+    fs::write(author.path().join("base-only.txt"), "base\n").expect("write base file");
+    git(author.path(), &["add", "."]);
+    git(author.path(), &["commit", "-m", "base"]);
+
+    // Clone, then author a new local-only commit that drops the base file.
+    git(
+        source.path(),
+        &["clone", &format!("file://{}", author.path().display()), "."],
+    );
+    git(source.path(), &["config", "user.email", "test@example.com"]);
+    git(source.path(), &["config", "user.name", "Test User"]);
+    let base = git_output(source.path(), &["rev-parse", "HEAD"]).expect("base revision");
+    fs::remove_file(source.path().join("base-only.txt")).expect("remove base file");
+    fs::write(source.path().join("file.txt"), "head\n").expect("write head file");
+    git(source.path(), &["add", "-A"]);
+    git(source.path(), &["commit", "-m", "local-only head"]);
+    let head = git_output(source.path(), &["rev-parse", "HEAD"]).expect("head revision");
+
+    // A fully-local commit has a complete object closure: it must be skipped so
+    // the promisor remote is never asked for an unpushed commit. (#8309)
+    assert!(
+        !ref_has_missing_objects(source.path(), &head).expect("probe local-only head"),
+        "a fully-local commit must report no missing objects"
+    );
+
+    // Evict packs so the base commit's objects are absent locally; the probe
+    // must flag it so the promisor fetch still hydrates the promised base.
+    remove_local_packs(source.path());
+    git(source.path(), &["config", "remote.origin.promisor", "true"]);
+    assert!(
+        ref_has_missing_objects(source.path(), &base).expect("probe evicted base"),
+        "a ref whose objects were evicted must report missing objects"
+    );
 }
 
 fn remove_local_packs(path: &Path) {
