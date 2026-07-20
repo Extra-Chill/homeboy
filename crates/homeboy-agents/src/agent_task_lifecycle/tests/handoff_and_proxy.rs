@@ -770,6 +770,7 @@ fn detached_runner_failure_transitions_parent_and_task_terminal() {
         lifecycle: lifecycle_for_submitted_plan(&plan),
         lab_handoff: None,
         candidate_adoption: None,
+        adoption_run_id: None,
         metadata: json!({ "runner_id": "homeboy-lab", "runner_job_id": "job-123" }),
     };
     record.tasks[0].state = AgentTaskState::Running;
