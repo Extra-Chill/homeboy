@@ -857,6 +857,25 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                     .as_ref()
                     .and_then(|readiness| readiness.selected_runner_id.as_deref()),
             );
+            let runner_admits_offload = if hot_command.allows_warm_runner_coordination {
+                resource_policy::admits_warm_runner_coordination(
+                    hot_command,
+                    &resources,
+                    cli.runner.as_deref(),
+                    lab_readiness.as_ref(),
+                )
+            } else {
+                selected_lab_runner.is_some_and(|runner_id| {
+                    lab_readiness.as_ref().is_some_and(|readiness| {
+                        readiness.state
+                            == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
+                            && readiness
+                                .available_runner_ids
+                                .iter()
+                                .any(|available| available == runner_id)
+                    })
+                })
+            };
             let warning = resource_policy::evaluate_with_runner_hint(
                 hot_command,
                 &resources,
@@ -902,7 +921,9 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                         &std::env::args().collect::<Vec<_>>(),
                         selected_lab_runner,
                     ),
-                    selected_lab_runner,
+                    runner_admits_offload
+                        .then_some(selected_lab_runner)
+                        .flatten(),
                 ) {
                     output_runtime::emit_json_result(Err(err), output_file, 2);
                     return Some(2);

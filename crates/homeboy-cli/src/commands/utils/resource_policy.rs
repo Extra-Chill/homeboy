@@ -23,6 +23,7 @@ pub struct HotCommand {
     pub label: &'static str,
     pub lab_offload_supported: bool,
     pub lab_offload_unsupported_reason: Option<&'static str>,
+    pub allows_warm_runner_coordination: bool,
 }
 
 impl HotCommand {
@@ -31,6 +32,7 @@ impl HotCommand {
             label,
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
+            allows_warm_runner_coordination: false,
         }
     }
 
@@ -39,6 +41,7 @@ impl HotCommand {
             label,
             lab_offload_supported: false,
             lab_offload_unsupported_reason: reason,
+            allows_warm_runner_coordination: false,
         }
     }
 }
@@ -193,9 +196,12 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
             command: agent_task::AgentTaskCommand::Cook(_),
         })
     ) {
-        return Some(HotCommand::lab_supported(
-            "agent-task cook/run-plan/retry --run",
-        ));
+        return Some(HotCommand {
+            label: "agent-task cook/run-plan/retry --run",
+            lab_offload_supported: true,
+            lab_offload_unsupported_reason: None,
+            allows_warm_runner_coordination: true,
+        });
     }
 
     let contract = command.lab_contract()?;
@@ -273,6 +279,35 @@ pub fn evaluate_with_runner_hint(
             message: warning_message(command, recommendation, resources, lab_readiness),
         }),
     }
+}
+
+/// Cook keeps durable coordination, promotion, and gates on the controller,
+/// but its provider attempt can be pinned to Lab. A warm controller may admit
+/// that lightweight coordination only when its own CPU, memory, and process
+/// capacity are healthy and the explicitly requested runner can accept work.
+pub fn admits_warm_runner_coordination(
+    command: HotCommand,
+    resources: &DoctorOutput,
+    explicit_runner: Option<&str>,
+    lab_readiness: Option<&LabRunnerReadiness>,
+) -> bool {
+    command.allows_warm_runner_coordination
+        && resources.recommendation == ResourceRecommendation::Warm
+        && resources.load.recommendation == ResourceRecommendation::Ok
+        && resources
+            .memory
+            .as_ref()
+            .is_none_or(|memory| memory.recommendation == ResourceRecommendation::Ok)
+        && resources.processes.recommendation == ResourceRecommendation::Ok
+        && explicit_runner.is_some_and(|runner_id| {
+            lab_readiness.is_some_and(|readiness| {
+                readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
+                    && readiness
+                        .available_runner_ids
+                        .iter()
+                        .any(|available| available == runner_id)
+            })
+        })
 }
 
 pub fn non_interactive_preflight_error(
@@ -502,6 +537,7 @@ mod tests {
             label,
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
+            allows_warm_runner_coordination: false,
         }
     }
 
@@ -515,11 +551,20 @@ mod tests {
         }
     }
 
+    fn warm_coordination_resources() -> DoctorOutput {
+        let mut output = resources(ResourceRecommendation::Warm);
+        output.load.recommendation = ResourceRecommendation::Ok;
+        output.rig_leases.active_count = 1;
+        output.rig_leases.recommendation = ResourceRecommendation::Warm;
+        output
+    }
+
     fn local_only_hot(label: &'static str, reason: &'static str) -> HotCommand {
         HotCommand {
             label,
             lab_offload_supported: false,
             lab_offload_unsupported_reason: Some(reason),
+            allows_warm_runner_coordination: false,
         }
     }
 
@@ -709,7 +754,65 @@ mod tests {
         ]);
         let command = hot_command(&cli.command).expect("verified cook is hot");
         assert!(command.lab_offload_supported);
+        assert!(command.allows_warm_runner_coordination);
         assert_eq!(command.label, "agent-task cook/run-plan/retry --run");
+    }
+
+    #[test]
+    fn warm_cook_coordination_admits_only_an_explicit_ready_runner() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "homeboy@cook-routing",
+            "--verify",
+            "cargo test --locked",
+        ]);
+        let command = hot_command(&cli.command).expect("cook is resource managed");
+        let resources = warm_coordination_resources();
+        let ready = ready_lab();
+
+        assert!(admits_warm_runner_coordination(
+            command,
+            &resources,
+            Some("homeboy-lab"),
+            Some(&ready),
+        ));
+        assert!(!admits_warm_runner_coordination(
+            command,
+            &resources,
+            None,
+            Some(&ready),
+        ));
+        assert!(!admits_warm_runner_coordination(
+            command,
+            &resources,
+            Some("missing-lab"),
+            Some(&ready),
+        ));
+    }
+
+    #[test]
+    fn warm_cook_coordination_retains_controller_capacity_checks() {
+        let command = HotCommand {
+            label: "agent-task cook/run-plan/retry --run",
+            lab_offload_supported: true,
+            lab_offload_unsupported_reason: None,
+            allows_warm_runner_coordination: true,
+        };
+        let ready = ready_lab();
+        let mut resources = warm_coordination_resources();
+        resources.load.recommendation = ResourceRecommendation::Warm;
+
+        assert!(!admits_warm_runner_coordination(
+            command,
+            &resources,
+            Some("homeboy-lab"),
+            Some(&ready),
+        ));
     }
 
     #[test]
