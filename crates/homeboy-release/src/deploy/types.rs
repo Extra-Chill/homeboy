@@ -91,6 +91,8 @@ pub struct DeployConfig {
     pub requested_ref: Option<String>,
     /// Exact Git refs keyed by component ID for a multi-ref release set.
     pub requested_refs: BTreeMap<String, String>,
+    /// Immutable commits accepted during release-set preflight, keyed by component ID.
+    pub resolved_refs: BTreeMap<String, String>,
     /// Force tag-based deploy, ignoring any reusable build artifacts
     pub tagged: bool,
     /// An immutable artifact prepared by an upstream workflow.
@@ -121,6 +123,7 @@ impl DeployConfig {
             head: true,
             requested_ref: None,
             requested_refs: BTreeMap::new(),
+            resolved_refs: BTreeMap::new(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
@@ -134,6 +137,10 @@ impl DeployConfig {
             .get(component_id)
             .map(String::as_str)
             .or(self.requested_ref.as_deref())
+    }
+
+    pub(crate) fn resolved_ref_for(&self, component_id: &str) -> Option<&str> {
+        self.resolved_refs.get(component_id).map(String::as_str)
     }
 
     pub(crate) fn has_requested_refs(&self) -> bool {

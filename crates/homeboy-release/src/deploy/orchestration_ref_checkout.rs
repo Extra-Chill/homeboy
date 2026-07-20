@@ -38,9 +38,21 @@ pub(crate) fn resolve_exact_ref(
 }
 
 impl ExactRefCheckout {
-    pub(crate) fn materialize(component: &Component, requested_ref: &str) -> Result<Self> {
-        let identity = resolve_exact_ref(component, requested_ref)?;
+    pub(crate) fn materialize(
+        component: &Component,
+        requested_ref: &str,
+        accepted_sha: Option<&str>,
+    ) -> Result<Self> {
         let source_root = source_root(component)?;
+        let identity = match accepted_sha {
+            Some(resolved_sha) => ExactRefIdentity {
+                requested_ref: requested_ref.to_string(),
+                resolved_sha: resolved_sha.to_string(),
+                source: source_root.to_string_lossy().to_string(),
+                resolution_mode: "release-set-preflight".to_string(),
+            },
+            None => resolve_exact_ref(component, requested_ref)?,
+        };
         ensure_resolved_commit_is_available(&source_root, component, &identity)?;
         let component_prefix = git::get_component_path_prefix(&component.local_path);
         let parent = std::env::temp_dir().join("homeboy-deploy-ref");
@@ -653,7 +665,7 @@ mod tests {
         assert_ne!(accepted_sha, checkout_head);
 
         let worktree_path = {
-            let checkout = ExactRefCheckout::materialize(&component, "accepted")
+            let checkout = ExactRefCheckout::materialize(&component, "accepted", None)
                 .expect("materialize accepted branch");
             assert_eq!(checkout.identity.resolved_sha, accepted_sha);
             assert_eq!(
@@ -725,7 +737,7 @@ mod tests {
         let named_head = git_output(&named_checkout, &["rev-parse", "HEAD"]);
         let named_index = git_output(&named_checkout, &["write-tree"]);
         let named_state = materialization_source_state(&named_checkout);
-        let checkout = ExactRefCheckout::materialize(&named_component, "accepted")
+        let checkout = ExactRefCheckout::materialize(&named_component, "accepted", None)
             .expect("fetch and materialize named remote ref");
         assert_eq!(checkout.identity.resolved_sha, fixture.target_sha);
         assert_eq!(checkout.identity.resolution_mode, "remote_named_ref");
@@ -765,6 +777,39 @@ mod tests {
     }
 
     #[test]
+    fn preflighted_sha_is_materialized_after_the_requested_branch_moves() {
+        let fixture = remote_fixture();
+        let checkout = stale_clone(&fixture);
+        let component = fixture_component(&checkout);
+        let accepted_sha = crate::deploy::preflight_exact_refs(&[(&component, "accepted")])
+            .expect("preflight accepted branch")
+            .remove("fixture")
+            .expect("accepted SHA");
+
+        std::fs::write(checkout.join("payload.txt"), "moved\n").expect("moved payload");
+        git(&checkout, &["add", "payload.txt"]);
+        commit(&checkout, "move accepted branch");
+        let moved_sha = git_output(&checkout, &["rev-parse", "HEAD"]);
+        git(
+            &checkout,
+            &["push", "-q", "--force", "origin", "HEAD:accepted"],
+        );
+        assert_ne!(accepted_sha, moved_sha);
+
+        let materialized =
+            ExactRefCheckout::materialize(&component, "accepted", Some(&accepted_sha))
+                .expect("materialize preflighted commit");
+        assert_eq!(materialized.identity.resolved_sha, accepted_sha);
+        assert_eq!(
+            std::fs::read_to_string(
+                Path::new(&materialized.component.local_path).join("payload.txt")
+            )
+            .expect("materialized payload"),
+            "accepted\n"
+        );
+    }
+
+    #[test]
     fn missing_remote_ref_and_transport_failure_are_actionable() {
         let fixture = remote_fixture();
         let checkout = stale_clone(&fixture);
@@ -794,7 +839,7 @@ mod tests {
         git(repo.path(), &["add", "other.txt"]);
         commit(repo.path(), "other commit");
         let other_sha = git_output(repo.path(), &["rev-parse", "HEAD"]);
-        let checkout = ExactRefCheckout::materialize(&component, "accepted")
+        let checkout = ExactRefCheckout::materialize(&component, "accepted", None)
             .expect("materialize accepted branch");
         git(
             Path::new(&checkout.component.local_path),
@@ -822,8 +867,8 @@ mod tests {
         let component = fixture_component(repo.path());
 
         let temporary_path = {
-            let checkout =
-                ExactRefCheckout::materialize(&component, "HEAD").expect("materialize exact ref");
+            let checkout = ExactRefCheckout::materialize(&component, "HEAD", None)
+                .expect("materialize exact ref");
             let temporary_path = PathBuf::from(&checkout.component.local_path);
             let error = checkout
                 .hydrate_dependencies(false)
@@ -854,7 +899,8 @@ mod tests {
         git(repo.path(), &["add", "homeboy-deps.json"]);
         commit(repo.path(), "add failing provider");
         let component = fixture_component(repo.path());
-        let checkout = ExactRefCheckout::materialize(&component, "HEAD").expect("materialize");
+        let checkout =
+            ExactRefCheckout::materialize(&component, "HEAD", None).expect("materialize");
 
         assert!(checkout
             .hydrate_dependencies(true)

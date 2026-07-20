@@ -146,7 +146,11 @@ pub(super) fn deploy_components(
                     config
                         .requested_ref_for(&component.id)
                         .map(|requested_ref| {
-                            ExactRefCheckout::materialize(component, requested_ref)
+                            ExactRefCheckout::materialize(
+                                component,
+                                requested_ref,
+                                config.resolved_ref_for(&component.id),
+                            )
                         })
                 })
                 .collect::<Result<Vec<_>>>()?
@@ -508,6 +512,7 @@ mod tests {
             head: false,
             requested_ref: None,
             requested_refs: Default::default(),
+            resolved_refs: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
@@ -1326,7 +1331,7 @@ mod tests {
                 "fixture-packager".to_string(),
                 homeboy_core::component::ScopedExtensionConfig::default(),
             )]));
-            let checkout = ExactRefCheckout::materialize(&component, "requested")
+            let checkout = ExactRefCheckout::materialize(&component, "requested", None)
                 .expect("materialize requested ref");
             checkout.verify().expect("verify requested ref");
 
@@ -1437,8 +1442,8 @@ mod tests {
             }),
             ..Component::default()
         };
-        let checkout =
-            ExactRefCheckout::materialize(&component, "target").expect("materialize target ref");
+        let checkout = ExactRefCheckout::materialize(&component, "target", None)
+            .expect("materialize target ref");
         checkout.verify().expect("verify target ref");
         if let Some(barrier) = barrier {
             barrier.wait();

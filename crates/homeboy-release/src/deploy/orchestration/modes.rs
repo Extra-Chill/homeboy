@@ -116,7 +116,16 @@ pub(super) fn run_dry_run_mode(
                 )
                 .with_source_identity(c, config.head);
             if let Some(requested_ref) = config.requested_ref_for(&c.id) {
-                let identity = resolve_exact_ref(c, requested_ref)?;
+                let identity = if let Some(resolved_sha) = config.resolved_ref_for(&c.id) {
+                    super::super::orchestration_ref_checkout::ExactRefIdentity {
+                        requested_ref: requested_ref.to_string(),
+                        resolved_sha: resolved_sha.to_string(),
+                        source: c.local_path.clone(),
+                        resolution_mode: "release-set-preflight".to_string(),
+                    }
+                } else {
+                    resolve_exact_ref(c, requested_ref)?
+                };
                 if let Some(artifact) = config.prepared_artifact.as_ref() {
                     artifact.validate_exact_source(
                         &c.id,
@@ -323,6 +332,7 @@ mod tests {
             head: false,
             requested_ref: Some("reviewed".to_string()),
             requested_refs: Default::default(),
+            resolved_refs: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
@@ -415,6 +425,7 @@ mod tests {
                 ("first".to_string(), "first-ref".to_string()),
                 ("second".to_string(), "second-ref".to_string()),
             ]),
+            resolved_refs: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
@@ -505,6 +516,7 @@ mod tests {
             head: false,
             requested_ref: Some(sha.clone()),
             requested_refs: Default::default(),
+            resolved_refs: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
@@ -569,6 +581,7 @@ mod tests {
             head: true,
             requested_ref: None,
             requested_refs: Default::default(),
+            resolved_refs: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

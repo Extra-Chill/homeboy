@@ -449,7 +449,7 @@ fn prepare_payload(
         .config
         .requested_ref
         .as_deref()
-        .map(|reference| ExactRefCheckout::materialize(&component, reference))
+        .map(|reference| ExactRefCheckout::materialize(&component, reference, None))
         .transpose()?;
     if let Some(checkout) = checkout.as_ref() {
         checkout.verify()?;
@@ -743,6 +743,7 @@ impl DeployConfig {
             head: request.config.head,
             requested_ref: request.config.requested_ref.clone(),
             requested_refs: Default::default(),
+            resolved_refs: Default::default(),
             tagged: request.config.tagged,
             prepared_artifact: None,
             resume_run_id: None,
@@ -777,6 +778,7 @@ mod tests {
             head: false,
             requested_ref: None,
             requested_refs: Default::default(),
+            resolved_refs: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

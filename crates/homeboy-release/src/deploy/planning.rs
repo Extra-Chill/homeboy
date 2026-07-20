@@ -979,6 +979,7 @@ mod tests {
             head: false,
             requested_ref: None,
             requested_refs: Default::default(),
+            resolved_refs: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

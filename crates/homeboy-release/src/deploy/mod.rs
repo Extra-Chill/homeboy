@@ -46,10 +46,15 @@ pub fn preflight_exact_ref(
 
 /// Resolve every exact source identity before a caller crosses a mutation boundary.
 /// Remote inspection uses `ls-remote`, so this cannot update configured checkouts.
-pub fn preflight_exact_refs(refs: &[(&component::Component, &str)]) -> Result<()> {
-    refs.iter().try_for_each(|(component, requested_ref)| {
-        orchestration_ref_checkout::resolve_exact_ref(component, requested_ref).map(|_| ())
-    })
+pub fn preflight_exact_refs(
+    refs: &[(&component::Component, &str)],
+) -> Result<std::collections::BTreeMap<String, String>> {
+    refs.iter()
+        .map(|(component, requested_ref)| {
+            orchestration_ref_checkout::resolve_exact_ref(component, requested_ref)
+                .map(|identity| (component.id.clone(), identity.resolved_sha))
+        })
+        .collect()
 }
 
 use homeboy_core::component;
@@ -271,6 +276,7 @@ pub fn run_multi(
             head: config.head,
             requested_ref: config.requested_ref.clone(),
             requested_refs: config.requested_refs.clone(),
+            resolved_refs: config.resolved_refs.clone(),
             tagged: config.tagged,
             prepared_artifact: config.prepared_artifact.clone(),
             resume_run_id: None,
@@ -536,6 +542,7 @@ mod tests {
             head: false,
             requested_ref: None,
             requested_refs: Default::default(),
+            resolved_refs: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

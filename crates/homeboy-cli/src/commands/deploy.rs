@@ -105,6 +105,8 @@ pub struct DeployArgs {
     // Populated only by a validated release-set manifest.
     #[arg(skip)]
     exact_refs: BTreeMap<String, String>,
+    #[arg(skip)]
+    resolved_refs: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -369,13 +371,14 @@ fn apply_release_set(
         }
         refs.push((component, entry.requested_ref.as_str()));
     }
-    homeboy_release::deploy::preflight_exact_refs(&refs)?;
+    let resolved_refs = homeboy_release::deploy::preflight_exact_refs(&refs)?;
     args.component = Some(active.iter().map(|(entry, _)| entry.id.clone()).collect());
     args.component_ids.clear();
     args.exact_refs = active
         .iter()
         .map(|(entry, _)| (entry.id.clone(), entry.requested_ref.clone()))
         .collect();
+    args.resolved_refs = resolved_refs;
     Ok(())
 }
 
@@ -504,6 +507,7 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         head: args.head,
         requested_ref: args.requested_ref.clone(),
         requested_refs: args.exact_refs.clone(),
+        resolved_refs: args.resolved_refs.clone(),
         tagged: args.tagged,
         prepared_artifact: None,
         resume_run_id: args.resume.clone(),

@@ -410,6 +410,7 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         tagged: false,
         resume: None,
         exact_refs: BTreeMap::new(),
+        resolved_refs: BTreeMap::new(),
     };
     customize(&mut args);
     args
