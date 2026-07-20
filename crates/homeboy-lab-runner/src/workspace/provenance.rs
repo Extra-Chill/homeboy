@@ -105,7 +105,9 @@ pub(crate) fn verify_lab_workspace_git_root(
 ) -> std::result::Result<(), String> {
     match provenance.materialization_mode.as_str() {
         "git" => verify_git_materialization_root(workspace, provenance),
-        "snapshot" => verify_synthetic_snapshot_git_baseline(workspace, provenance),
+        "snapshot" | "filesystem_snapshot" => {
+            verify_synthetic_snapshot_git_baseline(workspace, provenance)
+        }
         "snapshot-git" => verify_materialized_snapshot_git_checkout(workspace, provenance),
         mode => Err(format!(
             "unsupported workspace materialization mode `{mode}`"
@@ -408,7 +410,10 @@ pub(crate) fn verify_lab_workspace(
             snapshot.sync_mode
         ));
     }
-    if !matches!(materialization_mode, "git" | "snapshot" | "snapshot-git") {
+    if !matches!(
+        materialization_mode,
+        "git" | "snapshot" | "filesystem_snapshot" | "snapshot-git"
+    ) {
         return Err(format!(
             "has untrusted workspace materialization mode `{materialization_mode}`"
         ));
@@ -613,7 +618,7 @@ fn verify_snapshot_workspace_content(
                 shell::quote_arg(&provenance.runner_id),
                 shell::quote_arg(&provenance.remote_workspace_path),
             ),
-            "snapshot" => format!(
+            "snapshot" | "filesystem_snapshot" => format!(
                 "homeboy runner workspace sync --mode snapshot --path {} {}",
                 shell::quote_arg(
                     provenance
@@ -823,6 +828,19 @@ mod tests {
         WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
     };
     use super::*;
+    use homeboy_agents::agent_task::{
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
+        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
+        AGENT_TASK_REQUEST_SCHEMA,
+    };
+    use homeboy_agents::agent_task_scheduler::{
+        AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
+        HarvestExecutionContext,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     fn snapshot(path: &Path) -> SourceSnapshot {
         SourceSnapshot {
@@ -1073,7 +1091,7 @@ mod tests {
 
     #[test]
     fn snapshot_materializations_reject_content_hash_mismatch() {
-        for mode in ["snapshot", "snapshot-git"] {
+        for mode in ["snapshot", "filesystem_snapshot", "snapshot-git"] {
             let workspace = tempfile::tempdir().expect("workspace");
             std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
             let snapshot = snapshot(workspace.path());
@@ -1171,17 +1189,19 @@ mod tests {
     }
 
     #[test]
-    fn verified_snapshot_baseline_supports_committed_and_uncommitted_candidate_harvesting() {
+    fn filesystem_snapshot_baseline_supports_committed_and_uncommitted_candidate_harvesting() {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
         let snapshot = snapshot(workspace.path());
+        let mut lab = lab(workspace.path(), &snapshot);
+        lab["sync_mode"] = serde_json::json!("filesystem_snapshot");
         let baseline = materialize_verified_lab_snapshot_git_baseline(
             &workspace.path().display().to_string(),
             workspace.path(),
             snapshot.clone(),
-            lab(workspace.path(), &snapshot),
+            lab,
         )
-        .expect("verified snapshot baseline");
+        .expect("verified filesystem snapshot baseline");
 
         assert_eq!(
             git(workspace.path(), &["rev-parse", "HEAD"]).unwrap(),
@@ -1221,11 +1241,136 @@ mod tests {
     }
 
     #[test]
+    fn filesystem_snapshot_baseline_has_no_candidate_when_provider_makes_no_change() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        let snapshot = snapshot(workspace.path());
+        let mut lab = lab(workspace.path(), &snapshot);
+        lab["sync_mode"] = serde_json::json!("filesystem_snapshot");
+        let baseline = materialize_verified_lab_snapshot_git_baseline(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            lab,
+        )
+        .expect("verified filesystem snapshot baseline");
+
+        assert!(
+            git(workspace.path(), &["diff", "--binary", &baseline, "HEAD"])
+                .expect("empty candidate diff")
+                .is_empty()
+        );
+    }
+
+    #[derive(Clone)]
+    struct FilesystemSnapshotProvider {
+        dispatched: Arc<AtomicBool>,
+    }
+
+    impl AgentTaskExecutorAdapter for FilesystemSnapshotProvider {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let workspace = PathBuf::from(request.workspace.root.expect("attempt workspace"));
+            assert!(
+                workspace.join(".git").exists(),
+                "verified baseline is Git-backed"
+            );
+            std::fs::write(workspace.join("provider-change.txt"), "candidate\n")
+                .expect("write provider candidate");
+            self.dispatched.store(true, Ordering::SeqCst);
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("provider completed".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: serde_json::Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: serde_json::Value::Null,
+            }
+        }
+    }
+
+    #[test]
+    fn filesystem_snapshot_dispatches_provider_and_harvests_a_candidate_patch() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        crate::register_lab_workspace_provenance_provider();
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        let snapshot = snapshot(workspace.path());
+        let mut lab = lab(workspace.path(), &snapshot);
+        lab["sync_mode"] = serde_json::json!("filesystem_snapshot");
+        let request = AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "filesystem-snapshot-task".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "fake".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: serde_json::Value::Null,
+            },
+            instructions: "write a candidate".to_string(),
+            inputs: serde_json::Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace {
+                root: Some(workspace.path().display().to_string()),
+                ..Default::default()
+            },
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            metadata: serde_json::Value::Null,
+        };
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let scheduler = AgentTaskScheduler::new(FilesystemSnapshotProvider {
+            dispatched: Arc::clone(&dispatched),
+        })
+        .with_run_id("filesystem-snapshot-run")
+        .with_harvest_context(
+            HarvestExecutionContext::from_lab_transport(snapshot, lab)
+                .expect("paired Lab transport"),
+        );
+
+        let aggregate = scheduler.run(AgentTaskPlan::new(
+            "filesystem-snapshot-plan",
+            vec![request],
+        ));
+
+        assert!(dispatched.load(Ordering::SeqCst), "provider was dispatched");
+        assert_eq!(aggregate.outcomes.len(), 1);
+        let patch = aggregate.outcomes[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "patch")
+            .and_then(|artifact| artifact.path.as_deref())
+            .expect("harvested candidate patch");
+        assert!(std::fs::read_to_string(patch)
+            .expect("read candidate patch")
+            .contains("provider-change.txt"));
+    }
+
+    #[test]
     fn verified_snapshot_baseline_replay_reuses_only_the_matching_baseline() {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
         let snapshot = snapshot(workspace.path());
-        let lab = lab(workspace.path(), &snapshot);
+        let mut lab = lab(workspace.path(), &snapshot);
+        lab["sync_mode"] = serde_json::json!("filesystem_snapshot");
         let baseline = materialize_verified_lab_snapshot_git_baseline(
             &workspace.path().display().to_string(),
             workspace.path(),
