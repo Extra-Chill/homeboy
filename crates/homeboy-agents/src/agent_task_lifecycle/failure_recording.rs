@@ -149,7 +149,7 @@ fn candidate_adoption_recovery(phase: &str) -> Option<serde_json::Value> {
     )
     .then(|| {
         json!({
-            "schema": "homeboy/agent-task-candidate-adoption-recovery/v1",
+            "schema": super::CANDIDATE_ADOPTION_RECOVERY_SCHEMA,
             "reason": "pre_provider_transport_failure",
             "provider_executions_consumed": 0,
         })

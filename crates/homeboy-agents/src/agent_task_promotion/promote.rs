@@ -769,11 +769,7 @@ fn has_pre_provider_transport_recovery_eligibility(outcome: &AgentTaskOutcome) -
         .get("candidate_adoption_recovery")
         .or_else(|| outcome.outputs.get("candidate_adoption_recovery"));
     eligibility
-        .filter(|value| {
-            value["schema"] == "homeboy/agent-task-candidate-adoption-recovery/v1"
-                && value["reason"] == "pre_provider_transport_failure"
-                && value["provider_executions_consumed"] == 0
-        })
+        .filter(|value| crate::agent_task_lifecycle::is_pre_provider_transport_recovery(value))
         .is_some()
 }
 

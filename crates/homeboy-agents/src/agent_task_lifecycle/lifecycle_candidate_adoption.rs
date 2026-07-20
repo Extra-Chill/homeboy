@@ -370,8 +370,24 @@ fn no_runner_job_recorded(record: &AgentTaskRunRecord) -> bool {
         && record.metadata["job_id"].is_null()
 }
 
-fn is_pre_provider_transport_recovery(recovery: &Value) -> bool {
-    recovery["schema"] == "homeboy/agent-task-candidate-adoption-recovery/v1"
+/// Schema tag stamped on the pre-provider candidate-adoption recovery marker
+/// produced when a Lab handoff fails before any provider executes. It is the
+/// single source of truth for that marker's identity across the adoption
+/// pipeline (recording, promotion eligibility, publication eligibility).
+pub(crate) const CANDIDATE_ADOPTION_RECOVERY_SCHEMA: &str =
+    "homeboy/agent-task-candidate-adoption-recovery/v1";
+
+/// True when `recovery` is an authenticated pre-provider transport-failure
+/// recovery marker: the exact shape that authorizes adopting an externally
+/// prepared candidate whose original attempt never ran a provider.
+///
+/// This is the *one* definition of that check. The adoption recovery pipeline
+/// validates the same marker at several independent boundaries (candidate
+/// source resolution, promotion eligibility, publication eligibility); routing
+/// them all through here keeps those boundaries from drifting apart — the drift
+/// that made this path regress repeatedly (issue #8983).
+pub(crate) fn is_pre_provider_transport_recovery(recovery: &Value) -> bool {
+    recovery["schema"] == CANDIDATE_ADOPTION_RECOVERY_SCHEMA
         && recovery["reason"] == "pre_provider_transport_failure"
         && recovery["provider_executions_consumed"] == 0
 }
