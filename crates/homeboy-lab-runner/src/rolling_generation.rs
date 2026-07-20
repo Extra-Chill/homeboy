@@ -14,6 +14,12 @@ pub struct RollingGenerations<E> {
     /// daemon for logs, cancellation acknowledgement, and artifact lookup.
     #[serde(default)]
     pub job_owners: BTreeMap<String, String>,
+    /// Run and artifact reads are pinned with the job that created them. These
+    /// maps survive controller restarts while the producing generation drains.
+    #[serde(default)]
+    pub run_owners: BTreeMap<String, String>,
+    #[serde(default)]
+    pub artifact_owners: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,6 +56,8 @@ impl<E> RollingGenerations<E> {
                 },
             )]),
             job_owners: BTreeMap::new(),
+            run_owners: BTreeMap::new(),
+            artifact_owners: BTreeMap::new(),
         }
     }
 
@@ -118,6 +126,34 @@ impl<E> RollingGenerations<E> {
 
     pub fn job_owner(&self, job_id: &str) -> Option<&str> {
         self.job_owners.get(job_id).map(String::as_str)
+    }
+
+    pub fn record_run(&mut self, job_id: &str, run_id: impl Into<String>) -> bool {
+        let Some(owner) = self.job_owner(job_id).map(str::to_string) else {
+            return false;
+        };
+        self.run_owners.insert(run_id.into(), owner);
+        true
+    }
+
+    pub fn record_artifact(&mut self, job_id: &str, artifact_id: impl Into<String>) -> bool {
+        let Some(owner) = self.job_owner(job_id).map(str::to_string) else {
+            return false;
+        };
+        self.artifact_owners.insert(artifact_id.into(), owner);
+        true
+    }
+
+    pub fn endpoint_owner(
+        &self,
+        job_id: Option<&str>,
+        run_id: Option<&str>,
+        artifact_id: Option<&str>,
+    ) -> Option<&str> {
+        job_id
+            .and_then(|id| self.job_owner(id))
+            .or_else(|| run_id.and_then(|id| self.run_owners.get(id).map(String::as_str)))
+            .or_else(|| artifact_id.and_then(|id| self.artifact_owners.get(id).map(String::as_str)))
     }
 
     /// Returns true if the completion retired a drained generation.
@@ -256,6 +292,28 @@ mod tests {
         assert_eq!(recovered.job_owner("job-b"), Some("B"));
         assert!(recovered.complete_job("job-a"));
         assert!(!recovered.generations.contains_key("A"));
+    }
+
+    #[test]
+    fn persisted_run_and_artifact_ownership_keep_using_draining_a() {
+        let mut generations = RollingGenerations::new("A", "endpoint-a");
+        generations.admit_job("job-a");
+        assert!(generations.record_run("job-a", "run-a"));
+        assert!(generations.record_artifact("job-a", "artifact-a"));
+        generations.begin("B", "endpoint-b");
+        generations.activate("B");
+
+        let serialized = serde_json::to_string(&generations).expect("serialize");
+        let restored: RollingGenerations<&str> =
+            serde_json::from_str(&serialized).expect("deserialize");
+        assert_eq!(
+            restored.endpoint_owner(None, Some("run-a"), None),
+            Some("A")
+        );
+        assert_eq!(
+            restored.endpoint_owner(None, None, Some("artifact-a")),
+            Some("A")
+        );
     }
 
     #[test]

@@ -58,20 +58,39 @@ pub(crate) fn disconnect_with_session(
         }
     }
     if let Some(session) = &session {
+        // The legacy controller record names only the admission owner. Drain
+        // generations have their own lease and tunnel, so teardown is complete
+        // only after every persisted endpoint is resolved independently.
+        let generations = super::super::generation_store::live_sessions(runner_id, Some(session))?;
+        let mut unresolved = Vec::new();
+        for generation in generations {
+            if generation.mode == RunnerTunnelMode::DirectSsh {
+                if let Err(error) = disconnect_remote_daemon(&generation, force) {
+                    unresolved.push(serde_json::json!({
+                        "lease_id": generation.remote_daemon_lease_id,
+                        "pid": generation.remote_daemon_pid,
+                        "address": generation.remote_daemon_address,
+                        "error": error,
+                    }));
+                    continue;
+                }
+            }
+            if let Some(pid) = generation.tunnel_pid {
+                terminate_pid(pid);
+            }
+        }
+        if !unresolved.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "disconnect",
+                format!("runner `{runner_id}` has unresolved daemon generations; sessions and ledger were retained"),
+                Some(runner_id.to_string()),
+                Some(unresolved.into_iter().map(|entry| entry.to_string()).collect()),
+            ));
+        }
+        super::super::generation_store::clear(runner_id)?;
         let ownership = read_ownership(runner_id)?;
         if should_stop_remote_daemon(session, ownership.as_ref(), has_live_peer_session(session)?) {
-            disconnect_remote_daemon(session, force).map_err(|err| {
-                Error::validation_invalid_argument(
-                    "disconnect",
-                    format!("refusing to disconnect runner `{runner_id}` because its remote daemon was not stopped safely: {err}"),
-                    Some(runner_id.to_string()),
-                    Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
-                )
-            })?;
             remove_ownership(runner_id)?;
-        }
-        if let Some(pid) = session.tunnel_pid {
-            terminate_pid(pid);
         }
     }
     remove_session(runner_id)?;

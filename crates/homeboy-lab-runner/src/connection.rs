@@ -153,26 +153,40 @@ pub(crate) fn rotate_daemon_generation(
         inspected_freshness: None,
     };
     let session_path = session_path(runner_id)?;
-    let (local_port, tunnel_pid, local_url, daemon) = connect_remote_daemon(
+    let (local_port, tunnel_pid, local_url, daemon) = match connect_remote_daemon(
         &server,
         &client,
         candidate_homeboy,
-        daemon,
+        daemon.clone(),
         "",
         candidate_identity,
         runner_id,
         &session_path,
-    )
-    .map_err(|(report, _)| {
-        Error::validation_invalid_argument(
-            "reconnect",
-            report
-                .failure_message
-                .unwrap_or_else(|| "candidate daemon tunnel validation failed".to_string()),
-            Some(runner_id.to_string()),
-            None,
-        )
-    })?;
+    ) {
+        Ok(connection) => connection,
+        Err((report, _)) => {
+            // Startup may have created the candidate lease even though tunnel
+            // or identity validation failed. Stop that exact lease and erase a
+            // pre-existing candidate ledger entry before returning to A.
+            if let Some(lease_id) = daemon.lease_id.as_deref() {
+                let command = format!(
+                    "{} daemon stop --force --lease-id {}",
+                    shell::quote_arg(candidate_homeboy),
+                    shell::quote_arg(lease_id),
+                );
+                let _ = client.execute(&command);
+            }
+            let _ = super::generation_store::rollback_candidate(runner_id, &current, &generation);
+            return Err(Error::validation_invalid_argument(
+                "reconnect",
+                report
+                    .failure_message
+                    .unwrap_or_else(|| "candidate daemon tunnel validation failed".to_string()),
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
+    };
     let candidate = RunnerSession {
         runner_id: runner_id.to_string(),
         mode: RunnerTunnelMode::DirectSsh,
@@ -341,6 +355,12 @@ fn connect_with_orphan_adoption_and_live_lease(
         Err(error) if error.code == homeboy_core::error::ErrorCode::ConfigInvalidJson => None,
         Err(error) => return Err(error),
     };
+    // A controller can lose its local tunnel after B became admission owner.
+    // Rehydrate B from the durable ledger rather than treating the legacy
+    // record (which may still name draining A) as the reconnect target.
+    let previous_session =
+        super::generation_store::admission_session(runner_id, previous_session.as_ref())?
+            .or(previous_session);
 
     let mut leaseless_recovery = None;
     let mut state_loss_recovery = None;
@@ -1671,7 +1691,7 @@ pub fn reverse_broker_artifact_content(
 /// sessions use the broker content endpoint.
 pub fn runner_artifact_content(runner_id: &str, job_id: &str, artifact_id: &str) -> Result<Value> {
     let report = status(runner_id)?;
-    let Some(session) = report.session.filter(|_| report.connected) else {
+    let Some(legacy_session) = report.session.filter(|_| report.connected) else {
         return Err(Error::validation_invalid_argument(
             "runner_id",
             format!("runner `{runner_id}` is not connected"),
@@ -1679,6 +1699,14 @@ pub fn runner_artifact_content(runner_id: &str, job_id: &str, artifact_id: &str)
             None,
         ));
     };
+    let session = super::generation_store::endpoint_session(
+        runner_id,
+        Some(job_id),
+        None,
+        Some(artifact_id),
+        Some(&legacy_session),
+    )?
+    .unwrap_or(legacy_session);
     match artifact_content_transport(&session)? {
         RunnerArtifactContentTransport::DirectDaemon => {
             direct_daemon_job_artifact_content(runner_id, job_id, artifact_id)

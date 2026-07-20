@@ -70,6 +70,24 @@ pub(crate) fn job_session(
     }))
 }
 
+/// Resolve every generation-aware endpoint through one persisted ownership
+/// ledger. Callers supply whichever lifecycle identity they have; job ownership
+/// wins because it is the original admission authority.
+pub(crate) fn endpoint_session(
+    runner_id: &str,
+    job_id: Option<&str>,
+    run_id: Option<&str>,
+    artifact_id: Option<&str>,
+    legacy: Option<&RunnerSession>,
+) -> Result<Option<RunnerSession>> {
+    Ok(read(runner_id, legacy)?.and_then(|generations| {
+        generations
+            .endpoint_owner(job_id, run_id, artifact_id)
+            .and_then(|owner| generations.generations.get(owner))
+            .map(|generation| generation.endpoint.clone())
+    }))
+}
+
 pub(crate) fn status_projection(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
@@ -92,6 +110,34 @@ pub(crate) fn status_projection(
                 .collect()
         }),
     )
+}
+
+pub(crate) fn live_sessions(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+) -> Result<Vec<RunnerSession>> {
+    Ok(
+        read(runner_id, legacy)?.map_or_else(Vec::new, |generations| {
+            generations
+                .generations
+                .into_values()
+                .map(|generation| generation.endpoint)
+                .collect()
+        }),
+    )
+}
+
+pub(crate) fn clear(runner_id: &str) -> Result<()> {
+    let path = path(runner_id)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("delete {}", path.display())),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 trait GenerationEndpointOperations {
@@ -199,6 +245,34 @@ pub(crate) fn record_job(runner_id: &str, session: &RunnerSession, job_id: &str)
     write(runner_id, &generations)
 }
 
+pub(crate) fn record_job_run(
+    runner_id: &str,
+    legacy: &RunnerSession,
+    job_id: &str,
+    run_id: &str,
+) -> Result<()> {
+    let Some(mut generations) = read(runner_id, Some(legacy))? else {
+        return Ok(());
+    };
+    generations.record_run(job_id, run_id);
+    write(runner_id, &generations)
+}
+
+pub(crate) fn record_job_artifacts(
+    runner_id: &str,
+    legacy: &RunnerSession,
+    job_id: &str,
+    artifact_ids: impl IntoIterator<Item = String>,
+) -> Result<()> {
+    let Some(mut generations) = read(runner_id, Some(legacy))? else {
+        return Ok(());
+    };
+    for artifact_id in artifact_ids {
+        generations.record_artifact(job_id, artifact_id);
+    }
+    write(runner_id, &generations)
+}
+
 pub(crate) fn activate(
     runner_id: &str,
     current: &RunnerSession,
@@ -223,6 +297,22 @@ pub(crate) fn activate(
         }
     }
     write(runner_id, &generations)
+}
+
+/// Remove an unactivated candidate from the durable ledger. This is safe to
+/// call after any candidate validation failure and never changes admission.
+pub(crate) fn rollback_candidate(
+    runner_id: &str,
+    legacy: &RunnerSession,
+    generation: &str,
+) -> Result<()> {
+    let Some(mut generations) = read(runner_id, Some(legacy))? else {
+        return Ok(());
+    };
+    if generations.rollback(generation) {
+        write(runner_id, &generations)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

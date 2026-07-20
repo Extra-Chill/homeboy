@@ -172,16 +172,21 @@ fn daemon_api_session_for_path(
     path: &str,
     legacy_session: RunnerSession,
 ) -> Result<RunnerSession> {
-    Ok(path
-        .strip_prefix("/jobs/")
-        .and_then(|suffix| suffix.split('/').next())
-        .filter(|job_id| !job_id.is_empty())
-        .map(|job_id| {
-            super::super::generation_store::job_session(runner_id, job_id, Some(&legacy_session))
-        })
-        .transpose()?
-        .flatten()
-        .unwrap_or(legacy_session))
+    let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    let (job_id, run_id, artifact_id) = match segments.as_slice() {
+        ["jobs", job_id, "artifacts", artifact_id, ..] => (Some(*job_id), None, Some(*artifact_id)),
+        ["jobs", job_id, ..] => (Some(*job_id), None, None),
+        ["runs", run_id, ..] => (None, Some(*run_id), None),
+        _ => (None, None, None),
+    };
+    Ok(super::super::generation_store::endpoint_session(
+        runner_id,
+        job_id.filter(|id| !id.is_empty()),
+        run_id.filter(|id| !id.is_empty()),
+        artifact_id.filter(|id| !id.is_empty()),
+        Some(&legacy_session),
+    )?
+    .unwrap_or(legacy_session))
 }
 
 #[cfg(test)]

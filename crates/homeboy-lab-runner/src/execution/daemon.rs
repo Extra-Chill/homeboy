@@ -160,6 +160,14 @@ pub(super) fn exec_via_daemon(
         // wait or evidence work can fail. Follow-up operations route by this
         // durable job identity while an older generation drains.
         super::super::generation_store::record_job(&runner.id, session, &job.id.to_string())?;
+        if let Some(durable_run_id) = run_id.as_deref() {
+            super::super::generation_store::record_job_run(
+                &runner.id,
+                session,
+                &job.id.to_string(),
+                durable_run_id,
+            )?;
+        }
     }
     persist_runner_execution_transition(
         &RunnerExecutionRecord::in_flight(job.id.to_string(), runner.id.clone(), "daemon")
