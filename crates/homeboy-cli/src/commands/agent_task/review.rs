@@ -729,6 +729,16 @@ fn promotion_candidates(
     review
         .apply_candidates
         .iter()
+        .chain(review.review_candidates.iter().filter(|candidate| {
+            aggregate
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.task_id == candidate.task_id)
+                .is_some_and(|outcome| {
+                    outcome.status
+                        == homeboy::agents::agent_tasks::AgentTaskOutcomeStatus::CandidateRecoverable
+                })
+        }))
         .flat_map(|candidate| {
             let artifact_ids = aggregate
                 .outcomes
@@ -1013,25 +1023,6 @@ mod tests {
         aggregate
     }
 
-    fn recoverable_review_report() -> AgentTaskAggregateReport {
-        AgentTaskAggregateReport {
-            schema: "homeboy/agent-task-aggregate-report/v1".to_string(),
-            summary: AgentTaskAggregateSummary::default(),
-            tasks: Vec::new(),
-            artifact_inventory: Vec::new(),
-            apply_candidates: vec![AgentTaskDecisionRef {
-                task_id: "task-1".to_string(),
-                decision: AgentTaskReconciliationDecision::ApplyCandidate,
-                reason: "recoverable patch".to_string(),
-                artifact_ids: vec!["candidate-0".to_string(), "candidate-1".to_string()],
-            }],
-            issue_report_candidates: Vec::new(),
-            retry_plan: Vec::new(),
-            review_candidates: Vec::new(),
-            matrix: Vec::new(),
-        }
-    }
-
     #[test]
     fn promotion_candidates_preserve_provider_argv() {
         let review = AgentTaskAggregateReport {
@@ -1098,7 +1089,11 @@ mod tests {
     #[test]
     fn promotion_candidates_canonicalize_aliases_and_preserve_attempt_choices() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let review = recoverable_review_report();
+        let equivalent_aggregate = recoverable_review_aggregate(&temp, &[1, 1]);
+        let equivalent_review =
+            AgentTaskAggregateReport::from(equivalent_aggregate.outcomes.clone());
+        assert_eq!(equivalent_review.apply_candidates.len(), 0);
+        assert_eq!(equivalent_review.review_candidates.len(), 1);
         let equivalent = promotion_candidates(
             "review-run",
             None,
@@ -1106,14 +1101,16 @@ mod tests {
             Some("fixture@target"),
             None,
             &[],
-            &recoverable_review_aggregate(&temp, &[1, 1]),
-            &review,
+            &equivalent_aggregate,
+            &equivalent_review,
         );
         assert_eq!(equivalent.len(), 1);
         assert_eq!(equivalent[0]["artifact_id"], "candidate-0");
         assert_eq!(equivalent[0]["selection_required"], false);
         assert_eq!(equivalent[0]["command"][9], "fixture@target");
 
+        let distinct_aggregate = recoverable_review_aggregate(&temp, &[1, 2]);
+        let distinct_review = AgentTaskAggregateReport::from(distinct_aggregate.outcomes.clone());
         let distinct = promotion_candidates(
             "review-run",
             None,
@@ -1121,8 +1118,8 @@ mod tests {
             Some("fixture@target"),
             None,
             &[],
-            &recoverable_review_aggregate(&temp, &[1, 2]),
-            &review,
+            &distinct_aggregate,
+            &distinct_review,
         );
         assert_eq!(distinct.len(), 2);
         assert!(distinct
