@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.18] - 2026-07-20
+
+### Fixed
+- categorize review-prefixed audit/lint/test commands
+
 ## [2.8.17] - 2026-07-17
 
 ### Changed
