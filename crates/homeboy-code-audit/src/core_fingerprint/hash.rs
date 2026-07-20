@@ -18,6 +18,115 @@ pub(super) fn structural_hash(body: &str, grammar: &Grammar) -> String {
     sha256_hex16(&normalized)
 }
 
+/// Number of significant call/keyword tokens a body must have before its
+/// skeleton is worth comparing. Below this, near-identical skeletons are just
+/// trivial wrappers (one call + `?`) and would spam findings.
+pub(super) const SKELETON_MIN_TOKENS: usize = 4;
+
+/// Compute a coarse *skeleton* signature: the ordered sequence of significant
+/// call names and control-flow keywords, with all argument interiors and error
+/// construction elided. `Some((token_count, hash))` when the body has at least
+/// [`SKELETON_MIN_TOKENS`] significant tokens, else `None`.
+///
+/// This is deliberately coarser than [`structural_hash`]. The structural hash
+/// still encodes the *shape* of every expression, so two functions with an
+/// identical happy-path call chain but different error/return tails
+/// (e.g. two `git_output` helpers that map failures onto different local error
+/// enums) hash apart. The skeleton signature keeps only the call/keyword
+/// backbone, so those same-primitive-different-plumbing reimplementations
+/// collapse together. It stays language-agnostic: control-flow keywords and
+/// ignorable call names come entirely from grammar config.
+pub(super) fn skeleton_signature(body: &str, grammar: &Grammar) -> Option<(usize, String)> {
+    let tokens = skeleton_tokens(body, grammar);
+    if tokens.len() < SKELETON_MIN_TOKENS {
+        return None;
+    }
+    Some((tokens.len(), sha256_hex16(&tokens.join(" "))))
+}
+
+/// Extract the call/keyword backbone of a body as an order-independent set.
+///
+/// A "significant token" is either:
+/// - a **method-chain call** — a name reached through `.` and immediately
+///   followed by `(`, i.e. `.args(`, `.output(`, `.map_err(`. These are the
+///   receiver pipeline that defines what the function *does*.
+/// - a **control-flow keyword** the grammar lists (`if`, `for`, `while`,
+///   `match`, `return`, `loop`, …).
+///
+/// Free-function and constructor calls (`Error::validation_invalid_argument(`,
+/// `HarvestError::Git {`) are **not** collected: those are overwhelmingly where
+/// error/return construction lives, and they are exactly what differs between
+/// the same primitive wrapped in different local error types. Collecting the
+/// tokens as a **sorted, de-duplicated set** further absorbs the incidental
+/// ordering/repetition of ubiquitous formatting calls (`.to_string()`,
+/// `.join()`) in the error tail, so two functions with the same pipeline match
+/// regardless of how each spells its failure path.
+///
+/// Calls the grammar marks non-structural (`skip_calls`, e.g. `println`,
+/// `assert`) are dropped, as they are for the structural hash. The result is
+/// language-agnostic: method-chain syntax plus grammar-provided keyword and
+/// skip-call sets.
+fn skeleton_tokens(body: &str, grammar: &Grammar) -> Vec<String> {
+    // Strip to body, remove string/number literals so quoted parens/keywords
+    // never register as structure.
+    let text = if let Some(pos) = body.find('{') {
+        &body[pos..]
+    } else {
+        body
+    };
+    let text = replace_string_literals(text);
+    let text = replace_numeric_literals(&text);
+
+    let control_keywords: HashSet<&str> = grammar
+        .fingerprint
+        .keywords
+        .iter()
+        .map(|keyword| keyword.as_str())
+        .filter(|keyword| SKELETON_CONTROL_KEYWORDS.contains(keyword))
+        .collect();
+    let skip_calls: HashSet<&str> = grammar
+        .fingerprint
+        .skip_calls
+        .iter()
+        .map(|call| call.as_str())
+        .collect();
+
+    // Method-chain call: `.name(` (optionally with whitespace before `(`).
+    static METHOD_CALL_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\.([A-Za-z_][A-Za-z0-9_]*)\s*\(").unwrap());
+    // Bare word, for control-flow keyword detection.
+    static WORD_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"[A-Za-z_][A-Za-z0-9_]*").unwrap());
+
+    let mut token_set: HashSet<String> = HashSet::new();
+    for caps in METHOD_CALL_RE.captures_iter(&text) {
+        let name = &caps[1];
+        if skip_calls.contains(name) {
+            continue;
+        }
+        token_set.insert(format!("call:{name}"));
+    }
+    for m in WORD_RE.find_iter(&text) {
+        let word = m.as_str();
+        if control_keywords.contains(word) {
+            token_set.insert(format!("kw:{word}"));
+        }
+    }
+
+    let mut tokens: Vec<String> = token_set.into_iter().collect();
+    tokens.sort_unstable();
+    tokens
+}
+
+/// Control-flow keywords that shape a body's skeleton across languages. Only
+/// keywords a grammar actually lists in `fingerprint.keywords` are used; this
+/// set filters that grammar-provided list down to the structural ones (so we
+/// never invent a keyword the language does not have).
+const SKELETON_CONTROL_KEYWORDS: &[&str] = &[
+    "if", "else", "for", "while", "loop", "match", "switch", "case", "return", "try", "catch",
+    "throw", "break", "continue",
+];
+
 /// Normalize whitespace: collapse all runs to single space.
 pub(super) fn normalize_whitespace(s: &str) -> String {
     let mut result = String::with_capacity(s.len());

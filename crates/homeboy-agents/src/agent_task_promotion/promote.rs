@@ -1,5 +1,7 @@
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 
@@ -32,6 +34,26 @@ use super::types::{
 mod gate_run;
 
 use gate_run::PromotionGateRun;
+
+thread_local! {
+    static GATE_SUPERVISION: RefCell<Option<Arc<crate::agent_task_gate::GateSupervision>>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn with_gate_supervision<T>(
+    supervision: crate::agent_task_gate::GateSupervision,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    GATE_SUPERVISION.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "promotion gate supervision scopes cannot nest"
+        );
+        *slot.borrow_mut() = Some(Arc::new(supervision));
+        let result = operation();
+        *slot.borrow_mut() = None;
+        result
+    })
+}
 
 pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionReport> {
     promote_with_checkpoint(options, |_| Ok(()))
@@ -1171,14 +1193,27 @@ fn run_promotion_gate(
             return Err(error);
         }
     };
-    let result = provider.verify_with_runtime_tmpdir(
-        worktree_path,
-        index,
-        command,
-        visibility,
-        reveal_policy,
-        &runtime_tmpdir.context().tmp_dir,
-    );
+    let supervision = GATE_SUPERVISION.with(|slot| slot.borrow().clone());
+    let result = if let Some(supervision) = supervision.as_deref() {
+        crate::agent_task_gate::run_gate_command_with_supervision(
+            worktree_path,
+            index,
+            command,
+            visibility,
+            reveal_policy,
+            Some(&runtime_tmpdir.context().tmp_dir),
+            Some(supervision),
+        )
+    } else {
+        provider.verify_with_runtime_tmpdir(
+            worktree_path,
+            index,
+            command,
+            visibility,
+            reveal_policy,
+            &runtime_tmpdir.context().tmp_dir,
+        )
+    };
     let evidence = match &result {
         Ok(report) => serde_json::json!({
             "gate_id": report.id,

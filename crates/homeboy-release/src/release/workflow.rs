@@ -1195,6 +1195,47 @@ mod tests {
         assert!(summary.contains(&"No GitHub Release created".to_string()));
     }
 
+    #[test]
+    fn release_summary_reports_canonical_published_release_url() {
+        let canonical_url =
+            "https://github.com/Extra-Chill/data-machine-events/releases/tag/v0.49.4";
+        let run = ReleaseRun {
+            component_id: "data-machine-events".to_string(),
+            enabled: true,
+            result: ReleaseRunResult {
+                steps: vec![
+                    ReleaseStepResult {
+                        id: "git.tag".to_string(),
+                        step_type: "git.tag".to_string(),
+                        status: ReleaseStepStatus::Success,
+                        data: Some(serde_json::json!({ "tag": "v0.49.4" })),
+                        ..Default::default()
+                    },
+                    ReleaseStepResult {
+                        id: "github.release".to_string(),
+                        step_type: "github.release".to_string(),
+                        status: ReleaseStepStatus::Success,
+                        data: Some(serde_json::json!({
+                            "tag": "v0.49.4",
+                            "url": canonical_url,
+                        })),
+                        ..Default::default()
+                    },
+                ],
+                status: ReleaseStepStatus::Success,
+                warnings: vec![],
+                summary: None,
+                phase_timings: None,
+            },
+        };
+
+        let summary = release_summary_from_run(&run);
+
+        assert!(summary.contains(&format!("Release created: v0.49.4 ({canonical_url})")));
+        assert!(summary.contains(&format!("GitHub Release created: {canonical_url}")));
+        assert!(summary.iter().all(|line| !line.contains("untagged-")));
+    }
+
     // ----- Recover-time orphan-tag warning (issue #2234 ask #3) -----
 
     fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {

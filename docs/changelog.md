@@ -4,6 +4,68 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.297.2] - 2026-07-20
+
+### Changed
+- Lease runner admission reservations
+- push struct definition-finding down to language extensions
+
+### Fixed
+- persist attempts before baseline staging
+- normalize agent task log events
+- recover cooks after preflight failure
+- report actionable Lab readiness
+- exclude Homeboy runner metadata from candidate patches
+- fix(lab-runner): bind tracked unresolved symlinks in workspace content hash
+
+## [0.297.1] - 2026-07-20
+
+### Changed
+- Bound artifact staging filenames
+- collapse ReleaseStepResult defaults via homeboy refactor collapse-defaults
+- Make runner binary selection workflow-safe
+- Diagnose actual stale runner identity drift
+- Support coherent multi-ref release-set deploys
+- Preserve runner success without durable run projections
+- prove agent-task record health stays bounded with many malformed records
+- extract daemon lease staleness/freshness logic into daemon_lease
+- bound controller runtime fixture costs
+- extract follow-up baseline materialization from cook.rs into cook_baseline
+- Recover lease-bound daemon stops after rebuild
+- extract promotion/finalization from cook.rs into cook_promotion
+- run daemon file-API tests against the real workspace-root provider
+- run daemon /exec result tests against the real driver in lab-runner
+
+### Fixed
+- preserve redacted release test failure evidence
+- bound extension ready_check recursion with a re-entry guard
+- stop leaking fixture-script tempdirs via .keep() (#9173 follow-up)
+- skip release-asset resolution in read-only check/dry-run
+- fix(test-support): sweep leaked hb-test-* tempdirs on startup (#9173)
+- project adoption through cook status
+- consume release asset after release build cleanup
+- reject out-of-contract remote advance during finalization
+- rebuild cook baseline on retry
+- deny executor git push from the attempt checkout
+- fix(lab-runner): update refresh rollback tests to the current API
+- skip remote-path validation for read-only check/dry-run
+- persist candidate adoption progress
+- derive AI disclosure metadata from the selected model
+- make git workspace materialization atomic so partial clones are never reusable
+- stop cook retries before provider dispatch
+- prefer Homeboy worktree records for cook
+- ignore generated .homeboy-build manifests in duplicate scan
+- make runner job cancellation idempotent
+- preserve the primary test result when the failure sidecar is malformed
+- dedupe direct Lab admission handoffs
+- authorize exact chained promotion baselines
+- harvest filesystem snapshot candidates
+- skip fully-local refs when hydrating controller bundle commits
+- bind changed-scope Rust module filters to the owning crate
+- Fix Lab terminal evidence correlation
+- make refresh replacement atomic
+- stop exact stale runner daemon owner
+
 ## [0.297.0] - 2026-07-20
 
 ### Added

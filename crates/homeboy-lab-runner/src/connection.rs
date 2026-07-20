@@ -265,6 +265,34 @@ pub(crate) fn terminate_generation_tunnel(pid: u32) {
     terminate_pid(pid);
 }
 
+fn cleanup_direct_generation_with<Fallback, Tunnel>(
+    session: &RunnerSession,
+    graceful_stop: Result<()>,
+    mut force_stop_remote: Fallback,
+    mut terminate_tunnel: Tunnel,
+) -> Result<()>
+where
+    Fallback: FnMut(u32) -> Result<()>,
+    Tunnel: FnMut(u32),
+{
+    let cleanup_result = match graceful_stop {
+        Ok(()) => Ok(()),
+        Err(graceful_error) => match session.remote_daemon_pid {
+            Some(pid) => force_stop_remote(pid).map_err(|fallback_error| {
+                Error::internal_unexpected(format!(
+                    "generation graceful cleanup failed ({}) and exact PID fallback failed ({})",
+                    graceful_error.message, fallback_error.message
+                ))
+            }),
+            None => Err(graceful_error),
+        },
+    };
+    if let Some(pid) = session.tunnel_pid {
+        terminate_tunnel(pid);
+    }
+    cleanup_result
+}
+
 /// Connect using an explicit dead-lease or missing-lease selector. A
 /// lease-less store is handled by its dedicated operator-confirmed path.
 pub fn connect_with_recovery(

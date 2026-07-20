@@ -745,6 +745,10 @@ pub fn run_git_fixture_command(repo: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)
+        .env("GIT_AUTHOR_NAME", "homeboy-test")
+        .env("GIT_AUTHOR_EMAIL", "homeboy-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "homeboy-test")
+        .env("GIT_COMMITTER_EMAIL", "homeboy-test@example.invalid")
         .output()
         .expect("git fixture command");
     assert!(
@@ -779,6 +783,10 @@ pub fn git_fixture_output(repo: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)
+        .env("GIT_AUTHOR_NAME", "homeboy-test")
+        .env("GIT_AUTHOR_EMAIL", "homeboy-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "homeboy-test")
+        .env("GIT_COMMITTER_EMAIL", "homeboy-test@example.invalid")
         .output()
         .expect("git fixture command");
     assert!(

@@ -16,6 +16,10 @@ use crate::agent_task_finalization::{
     AgentTaskPrFinalizationBackend, RealAgentTaskPrFinalizationBackend,
 };
 use crate::agent_task_gate::VerifyGateOptions;
+use crate::agent_task_gate::{
+    failure_fingerprint, run_gate_command_with_timeout, AgentTaskGateBaselineComparison,
+    AgentTaskGateStatus,
+};
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::resolve_candidate_revision;
 use crate::agent_task_promotion::{
@@ -36,7 +40,8 @@ use super::cook_budget::{
 };
 use super::cook_promotion::{
     attempt_needs_execution, cook_report, finalize_or_load_cook_pr,
-    finalize_or_load_cook_pr_with_backend, promote_or_load_attempt, promotion_source,
+    finalize_or_load_cook_pr_with_backend, persisted_promotion_for_attempt,
+    promote_or_load_attempt, promotion_source,
 };
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
@@ -236,42 +241,117 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
     } else {
         options.gates.verify.join(" && ")
     };
-    agent_task_lifecycle::start_candidate_adoption(
+    if !options.gates.rerun_completed_gates
+        && record.candidate_adoption.as_ref().is_some_and(|adoption| {
+            adoption.state == "completed"
+                && adoption.candidate_sha == candidate_sha
+                && adoption.ai_model == adoption_ai_model
+        })
+    {
+        let promotion = persisted_promotion_for_attempt(&record.run_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "candidate_ref",
+                "completed candidate adoption is missing its persisted promotion result",
+                Some(candidate_sha.clone()),
+                None,
+            )
+        })?;
+        let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request,
+            promotion_report: promotion.clone(),
+            attempt: 1,
+            max_attempts: options.max_attempts,
+            source_run_id: Some(record.run_id.clone()),
+            current_diff: String::new(),
+            metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
+        });
+        let finalization = record.metadata.get("cook_finalization").cloned();
+        let status = finalization
+            .as_ref()
+            .and_then(|value| value["status"].as_str())
+            .unwrap_or("green_no_finalize")
+            .to_string();
+        return Ok(cook_report(
+            cook_id.to_string(),
+            &status,
+            vec![AgentTaskCookAttemptReport {
+                attempt: 1,
+                run_id: record.run_id.clone(),
+                run_state: format!("{:?}", record.state),
+                aggregate_path: record.aggregate_path.clone(),
+                promotion: Some(promotion),
+                feedback: Some(feedback),
+            }],
+            finalization,
+            Some("reused the completed candidate adoption result; set rerun_completed_gates to rerun its gates".to_string()),
+            if status == "review_ready" || status == "green_no_finalize" { 0 } else { 1 },
+        ));
+    }
+    agent_task_lifecycle::start_candidate_adoption_with_rerun_policy(
         &record.run_id,
         &candidate_sha,
         &adoption_ai_model,
         &gate_identity,
+        options.gates.rerun_completed_gates,
     )?;
-    let promotion = promote_with_checkpoint(
-        AgentTaskPromotionOptions {
-            source,
-            source_run_id: Some(record.run_id.clone()),
-            source_path,
-            source_worktree_path: options.source_worktree_path.clone(),
-            base_ref: Some(options.base.clone()),
-            task_base_sha: options.task_base_sha.clone(),
-            candidate_ref: Some(candidate_sha.clone()),
-            to_worktree: options.to_worktree.clone(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: options.gates.clone(),
-            provider_command: options.provider_command.clone(),
-            provider_invocation: options.provider_invocation.clone(),
+    let gate_run_id = record.run_id.clone();
+    let promotion = crate::agent_task_promotion::with_gate_supervision(
+        crate::agent_task_gate::GateSupervision {
+            timeout: options.gates.gate_timeout(),
+            heartbeat_interval: options.gates.gate_heartbeat_interval(),
+            on_spawn: Arc::new({
+                let run_id = gate_run_id.clone();
+                move |pid, command| {
+                    agent_task_lifecycle::start_candidate_adoption_gate(
+                        &run_id,
+                        command,
+                        pid,
+                        options.gates.gate_timeout_seconds,
+                    )
+                }
+            }),
+            on_heartbeat: Arc::new({
+                let run_id = gate_run_id.clone();
+                move |tail| agent_task_lifecycle::heartbeat_candidate_adoption_gate(&run_id, tail)
+            }),
+            is_cancelled: Arc::new(move || {
+                agent_task_lifecycle::candidate_adoption_cancel_requested(&gate_run_id)
+                    .unwrap_or(false)
+            }),
         },
-        |checkpoint| {
-            let checkpoint = serde_json::to_value(checkpoint).map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("serialize adopted candidate checkpoint".to_string()),
-                )
-            })?;
-            agent_task_lifecycle::checkpoint_candidate_adoption(
-                &record.run_id,
-                "post_apply_verification",
-                &gate_identity,
-            )?;
-            agent_task_lifecycle::record_promotion(&record.run_id, checkpoint).map(|_| ())
+        || {
+            promote_with_checkpoint(
+                AgentTaskPromotionOptions {
+                    source,
+                    source_run_id: Some(record.run_id.clone()),
+                    source_path,
+                    source_worktree_path: options.source_worktree_path.clone(),
+                    base_ref: Some(options.base.clone()),
+                    task_base_sha: options.task_base_sha.clone(),
+                    candidate_ref: Some(candidate_sha.clone()),
+                    to_worktree: options.to_worktree.clone(),
+                    task_id: None,
+                    artifact_id: None,
+                    dry_run: false,
+                    gates: options.gates.clone(),
+                    provider_command: options.provider_command.clone(),
+                    provider_invocation: options.provider_invocation.clone(),
+                },
+                |checkpoint| {
+                    let checkpoint = serde_json::to_value(checkpoint).map_err(|error| {
+                        Error::internal_json(
+                            error.to_string(),
+                            Some("serialize adopted candidate checkpoint".to_string()),
+                        )
+                    })?;
+                    agent_task_lifecycle::checkpoint_candidate_adoption(
+                        &record.run_id,
+                        "post_apply_verification",
+                        &gate_identity,
+                    )?;
+                    agent_task_lifecycle::record_promotion(&record.run_id, checkpoint).map(|_| ())
+                },
+            )
         },
     );
     let mut promotion = match promotion {
@@ -284,6 +364,36 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
             return Err(error);
         }
     };
+    if agent_task_lifecycle::candidate_adoption_cancel_requested(&record.run_id)? {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "candidate adoption was cancelled before baseline verification",
+            Some(record.run_id.clone()),
+            None,
+        ));
+    }
+    let task_base_sha = options.task_base_sha.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "task_base_sha",
+            "candidate adoption requires the recorded immutable task base for baseline-aware verification",
+            None,
+            None,
+        )
+    })?;
+    compare_adoption_gate_failures_to_base(
+        &mut promotion,
+        source_worktree,
+        task_base_sha,
+        &record.run_id,
+    )?;
+    if agent_task_lifecycle::candidate_adoption_cancel_requested(&record.run_id)? {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "candidate adoption was cancelled before promotion could finalize",
+            Some(record.run_id.clone()),
+            None,
+        ));
+    }
     // The adopted candidate did not run through this cook's provider lifecycle.
     // Bind its declared model to the authenticated promotion instead of inferring
     // one from the immutable execution plan.
@@ -379,6 +489,130 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
         None,
         exit_code,
     ))
+}
+
+/// Candidate adoption can prove that an otherwise-red broad command is
+/// inherited only by executing the identical command at the recorded base.
+/// A changed failure fingerprint is deliberately still a hard gate failure.
+fn compare_adoption_gate_failures_to_base(
+    promotion: &mut AgentTaskPromotionReport,
+    source_worktree: &std::path::Path,
+    task_base_sha: &str,
+    run_id: &str,
+) -> Result<()> {
+    if !promotion.status.gate_failed() {
+        return Ok(());
+    }
+    let baseline_root = tempfile::tempdir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create candidate-adoption gate baseline".to_string()),
+        )
+    })?;
+    let baseline_path = baseline_root.path().join("base");
+    let output = std::process::Command::new("git")
+        .args(["worktree", "add", "--detach"])
+        .arg(&baseline_path)
+        .arg(task_base_sha)
+        .current_dir(source_worktree)
+        .output()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("materialize candidate-adoption gate baseline".to_string()),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(Error::internal_io(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            Some("materialize immutable candidate-adoption gate baseline".to_string()),
+        ));
+    }
+    let baseline_result = (|| -> Result<bool> {
+        // Match promotion's dependency and isolated-runtime setup before the
+        // base command is allowed to serve as comparison evidence.
+        homeboy_core::hygiene::materialize_worktree_dependencies(&baseline_path)?;
+        let mut all_failures_inherited = true;
+        let failed_gate_count = promotion
+            .deterministic_gates
+            .iter()
+            .filter(|gate| gate.status == AgentTaskGateStatus::Failed)
+            .count();
+        if failed_gate_count == 0 {
+            return Ok(false);
+        }
+        let mut compared = 0;
+        for (index, gate) in promotion.deterministic_gates.iter_mut().enumerate() {
+            if gate.status != AgentTaskGateStatus::Failed {
+                continue;
+            }
+            compared += 1;
+            agent_task_lifecycle::checkpoint_candidate_adoption(
+                run_id,
+                "baseline_verification",
+                &format!("baseline gate {compared}/{failed_gate_count}"),
+            )?;
+            let command = gate.command.last().cloned().unwrap_or_default();
+            let baseline_run_dir = homeboy_core::engine::run_dir::RunDir::create()?;
+            let baseline_runtime = homeboy_core::engine::invocation::InvocationGuard::acquire(
+                &baseline_run_dir,
+                &homeboy_core::engine::invocation::InvocationRequirements::default(),
+            )?;
+            let baseline = run_gate_command_with_timeout(
+                &baseline_path,
+                index + 1,
+                &command,
+                gate.visibility,
+                gate.reveal_policy,
+                &baseline_runtime.context().tmp_dir,
+                std::time::Duration::from_secs(5 * 60),
+            )?;
+            let candidate_fingerprint = failure_fingerprint(&gate.stdout, &gate.stderr);
+            let baseline_fingerprint = failure_fingerprint(&baseline.stdout, &baseline.stderr);
+            let matches = baseline.status == AgentTaskGateStatus::Failed
+                && candidate_fingerprint == baseline_fingerprint;
+            gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                base_ref: task_base_sha.to_string(),
+                exit_code: baseline.exit_code,
+                failure_fingerprint: baseline_fingerprint,
+                matches_candidate_failure: matches,
+            });
+            all_failures_inherited &= matches;
+            if matches {
+                gate.accept_inherited_failure();
+            }
+        }
+        Ok(all_failures_inherited)
+    })();
+    let cleanup = std::process::Command::new("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(&baseline_path)
+        .current_dir(source_worktree)
+        .status()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("remove candidate-adoption gate baseline".to_string()),
+            )
+        })?;
+    if !cleanup.success() {
+        return Err(Error::internal_io(
+            "git worktree remove failed".to_string(),
+            Some("remove candidate-adoption gate baseline".to_string()),
+        ));
+    }
+    let all_failures_inherited = baseline_result?;
+    if all_failures_inherited {
+        promotion.status = crate::agent_task_promotion::AgentTaskPromotionStatus::Applied;
+        for result in &mut promotion.gate_results {
+            if result.status == homeboy_core::gate::HomeboyGateStatus::Failed {
+                result.status = homeboy_core::gate::HomeboyGateStatus::Passed;
+                result.summary = "candidate failure matches the immutable baseline; no candidate regression detected".to_string();
+                result.retryable = Some(false);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn candidate_adoption_source(
@@ -702,11 +936,20 @@ where
     } else {
         options
     };
+    materialize_initial_cook_attempt(&options)?;
     // Transport readiness can serialize on a reconnect/runtime-promotion
     // lease. Complete it before entering the provider-attempt loop so that
     // waiting for a shared Lab session never consumes a cook attempt.
     if let Some(dispatcher) = &options.attempt_dispatcher {
-        dispatcher.prepare_for_cook()?;
+        if let Err(error) = dispatcher.prepare_for_cook() {
+            agent_task_lifecycle::record_pre_execution_failure(
+                &options.initial_run_id,
+                &options.initial_plan,
+                dispatcher.pre_execution_failure_phase(),
+                &error,
+            )?;
+            return Err(error);
+        }
     }
     let max_attempts = options.max_attempts.max(1);
     let mut attempts = Vec::new();
@@ -724,18 +967,26 @@ where
         };
         let needs_execution = agent_task_lifecycle::status(&run_id)
             .map(|record| {
-                !matches!(
+                (!matches!(
                     record.state,
                     agent_task_lifecycle::AgentTaskRunState::Succeeded
                         | agent_task_lifecycle::AgentTaskRunState::PartialFailure
                         | agent_task_lifecycle::AgentTaskRunState::Failed
                         | agent_task_lifecycle::AgentTaskRunState::Cancelled
-                ) && !record.lab_handoff.as_ref().is_some_and(|handoff| {
-                    handoff.state == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
-                })
+                ) || retryable_pre_execution_failure(&record))
+                    && !record.lab_handoff.as_ref().is_some_and(|handoff| {
+                        handoff.state == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
+                    })
             })
             .unwrap_or(true);
         if needs_execution {
+            // Claim the durable attempt before candidate baseline staging. That
+            // staging can take longer than the foreground controller's timeout;
+            // a restarted controller must find the same immutable plan rather
+            // than create an ownerless Lab admission.
+            if !agent_task_lifecycle::run_record_exists(&run_id)? {
+                agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
+            }
             let execution = (|| {
                 let initial_baseline = if attempt == 1 {
                     materialize_initial_candidate_baseline(
@@ -783,6 +1034,16 @@ where
             })();
             if let Err(error) = execution {
                 let record = match agent_task_lifecycle::status(&run_id) {
+                    Ok(record)
+                        if record.state == agent_task_lifecycle::AgentTaskRunState::Queued =>
+                    {
+                        let phase = pre_execution_failure_phase(
+                            &error,
+                            options.attempt_dispatcher.as_deref(),
+                        );
+                        record_pre_execution_failure(&plan, &run_id, &error, phase)?;
+                        agent_task_lifecycle::status(&run_id).ok()
+                    }
                     Ok(record) => Some(record),
                     Err(_) => {
                         let phase = pre_execution_failure_phase(
@@ -1159,6 +1420,35 @@ where
     ))
 }
 
+/// Persist the controller-owned initial attempt before transport preparation so
+/// runner eligibility failures remain addressable through the cook alias.
+fn materialize_initial_cook_attempt(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    if agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
+        return Ok(());
+    }
+    match agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id)) {
+        Ok(_) => {
+            agent_task_lifecycle::record_cook_attempt(&options.cook_id, 1, &options.initial_run_id)
+                .map(|_| ())
+        }
+        Err(error) => {
+            // `submit_plan` persists admission failures before returning them.
+            if agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
+                agent_task_lifecycle::record_cook_attempt(
+                    &options.cook_id,
+                    1,
+                    &options.initial_run_id,
+                )?;
+            }
+            Err(error)
+        }
+    }
+}
+
+fn retryable_pre_execution_failure(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
+    record.metadata["pre_execution_failure"]["retryable"] == Value::Bool(true)
+}
+
 #[derive(Debug)]
 struct PreExecutionFailureDetails {
     retryable: bool,
@@ -1241,9 +1531,10 @@ fn record_pre_execution_failure(
     error: &Error,
     phase: &str,
 ) -> Result<()> {
-    if agent_task_lifecycle::submit_plan(plan, Some(run_id)).is_ok() {
-        agent_task_lifecycle::record_pre_execution_failure(run_id, plan, phase, error)?;
+    if !agent_task_lifecycle::run_record_exists(run_id)? {
+        agent_task_lifecycle::submit_plan(plan, Some(run_id))?;
     }
+    agent_task_lifecycle::record_pre_execution_failure(run_id, plan, phase, error)?;
     Ok(())
 }
 
@@ -1520,7 +1811,8 @@ mod tests {
                     "fixture runner is unavailable",
                     None,
                     None,
-                ));
+                )
+                .with_retryable(true));
             }
             Ok(())
         }
@@ -1773,7 +2065,7 @@ mod tests {
                 0
             );
             assert_eq!(
-                logs.events.last().map(|event| event.state),
+                logs.events.last().map(|event| event.status),
                 Some(AgentTaskState::Failed)
             );
             assert_eq!(retry.metadata["retry_of"], run_id);
@@ -1848,7 +2140,7 @@ mod tests {
     }
 
     #[test]
-    fn cook_transport_preparation_failure_does_not_create_a_provider_attempt() {
+    fn cook_transport_preparation_failure_is_durable_and_resumes_after_runner_recovery() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let cook_id = "cook-runner-unavailable";
             let first_run_id = "cook-runner-unavailable-attempt-1";
@@ -1862,15 +2154,30 @@ mod tests {
             options.initial_run_id = first_run_id.to_string();
             options.max_attempts = 2;
 
-            let error = run_cook(options, UnusedExecutor)
+            let error = run_cook(options.clone(), UnusedExecutor)
                 .expect_err("transport preparation is outside the provider-attempt loop");
 
             assert!(error.message.contains("fixture runner is unavailable"));
-            assert!(!agent_task_lifecycle::run_record_exists(first_run_id)
-                .expect("transport failure does not materialize an attempt"));
-            assert!(
-                agent_task_lifecycle::cook_index(cook_id).is_err(),
-                "transport failure must not consume a cook attempt"
+            let blocked = agent_task_lifecycle::status(cook_id)
+                .expect("cook alias exposes the preflight-blocked attempt");
+            assert_eq!(blocked.run_id, first_run_id);
+            assert_eq!(
+                blocked.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert_eq!(
+                blocked.metadata["pre_execution_failure"]["retryable"],
+                Value::Bool(true)
+            );
+
+            let resumed = run_cook(options, UnusedExecutor)
+                .expect("repaired runner resumes the immutable cook attempt");
+            assert_eq!(resumed.value.status, "in_flight");
+            assert_eq!(
+                agent_task_lifecycle::status(cook_id)
+                    .expect("resumed cook alias")
+                    .runner_job_id(),
+                Some("accepted-daemon-job")
             );
         });
     }
@@ -1909,6 +2216,119 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            use std::os::unix::fs::PermissionsExt;
+
+            let temp = tempfile::tempdir().expect("temp source root");
+            let source = temp.path().join("source");
+            std::fs::create_dir(&source).expect("create source repository");
+            for args in [
+                vec!["init"],
+                vec!["config", "user.email", "agent@example.test"],
+                vec!["config", "user.name", "Agent"],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("run git")
+                    .success());
+            }
+            std::fs::write(source.join("lib.rs"), "base\n").expect("write base");
+            for args in [vec!["add", "lib.rs"], vec!["commit", "-m", "base"]] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("run git")
+                    .success());
+            }
+            std::fs::write(source.join("lib.rs"), "candidate\n").expect("dirty candidate");
+
+            let entered = temp.path().join("baseline-entered");
+            let release = temp.path().join("baseline-release");
+            let wrapper = temp.path().join("git");
+            std::fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\nif test \"$1\" = status; then touch \"{}\"; while ! test -f \"{}\"; do sleep 0.01; done; fi\nexec /usr/bin/git \"$@\"\n",
+                    entered.display(),
+                    release.display(),
+                ),
+            )
+            .expect("write slow git wrapper");
+            let mut permissions = std::fs::metadata(&wrapper)
+                .expect("wrapper metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
+            let previous_path = std::env::var_os("PATH");
+            std::env::set_var(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    temp.path().display(),
+                    previous_path
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                ),
+            );
+
+            let dispatches = Arc::new(AtomicUsize::new(0));
+            let mut options = batch_cook_options(
+                "cook-slow-baseline",
+                Arc::new(RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::clone(&dispatches),
+                }),
+            );
+            options.initial_run_id = "cook-slow-baseline-attempt-1".to_string();
+            options.provider_command = Some("fixture-provider".to_string());
+            options.source_worktree_path = Some(source);
+            let resume_options = options.clone();
+            let controller = std::thread::spawn(move || run_cook(options, UnusedExecutor));
+            let entered_staging = (0..500).any(|_| {
+                if entered.exists() {
+                    true
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    false
+                }
+            });
+            let durable = entered_staging.then(|| {
+                agent_task_lifecycle::status("cook-slow-baseline-attempt-1")
+                    .expect("staging attempt is durable before controller completion")
+            });
+            std::fs::write(&release, "release").expect("release baseline staging");
+            let result = controller
+                .join()
+                .expect("controller thread")
+                .expect("accepted detached attempt");
+            match previous_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+
+            assert!(entered_staging, "baseline materialization did not block");
+            let durable = durable.expect("durable record while staging was blocked");
+            assert_eq!(
+                durable.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+            assert!(agent_task_lifecycle::load_plan(&durable.run_id).is_ok());
+            assert_eq!(result.value.status, "in_flight");
+            assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+
+            let resumed =
+                run_cook(resume_options, UnusedExecutor).expect("resume accepted handoff");
+            assert_eq!(resumed.value.status, "in_flight");
+            assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        });
+    }
+
     #[test]
     fn cook_transport_preparation_failure_does_not_exhaust_cook_retries() {
         homeboy_core::test_support::with_isolated_home(|_| {
@@ -1927,10 +2347,13 @@ mod tests {
                 .expect_err("transport preparation remains outside cook retries");
 
             assert!(error.message.contains("fixture runner is unavailable"));
-            assert!(
-                !agent_task_lifecycle::run_record_exists("cook-runner-exhaustion-attempt-1")
-                    .expect("transport failure does not materialize an attempt")
+            let record = agent_task_lifecycle::status("cook-runner-exhaustion")
+                .expect("transport failure remains inspectable");
+            assert_eq!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
             );
+            assert_eq!(record.metadata["provider_executions_consumed"], 0);
         });
     }
 
@@ -2795,6 +3218,7 @@ mod tests {
             "target": {"worktree": "homeboy@8058", "path": "/repo"},
             "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
             "changed_files": ["src/lib.rs"],
+            "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-lc", "cargo test --locked agent_task_promotion --lib"], "exit_code": 0}],
             "gate_results": [{"id": "gate", "name": "cargo test --locked agent_task_promotion --lib", "kind": "command", "status": "passed"}],
             "operator_notification": {"status": "completed", "message": "complete"},
             "verified_base": {"base": "main", "sha": "verified-base"},
@@ -2855,6 +3279,7 @@ mod tests {
                     verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
                     private_verify: Vec::new(),
                     private_gate_reveal: Default::default(),
+                    ..Default::default()
                 },
                 max_attempts: 1,
                 no_finalize: false,
@@ -2883,7 +3308,12 @@ mod tests {
                 "## AI assistance",
                 "openai/gpt-5.6-terra",
                 "Verified finalization base: main at verified-base",
-                "1. Run `cargo test --locked agent_task_promotion --lib`; expect passes.",
+                "Verified candidate changed 1 file(s): src/lib.rs.",
+                "Cook completed 1 deterministic verification gate(s) before finalization.",
+                "1. Run `cargo test --locked agent_task_promotion --lib`; expect passes as recorded by Cook's deterministic gate.",
+                "Compatibility impact is unknown from durable task and promotion evidence.",
+                "Verified candidate scope: 1 changed file(s): src/lib.rs.",
+                "Cook deterministic verification: 1 gate(s) completed green.",
             ] {
                 assert!(
                     backend.body.contains(section),
@@ -2904,6 +3334,54 @@ mod tests {
                 );
             }
             assert!(backend.committed && backend.pushed && backend.created);
+        });
+    }
+
+    #[test]
+    fn cook_rejects_test_claim_without_matching_durable_gate() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "cook-8058-mismatch";
+            let plan = AgentTaskPlan::new("cook-8058", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+            let options = AgentTaskCookServiceOptions {
+                cook_id: "cook-8058".to_string(),
+                initial_run_id: run_id.to_string(),
+                initial_plan: AgentTaskPlan::new("cook-8058", Vec::new()),
+                to_worktree: "homeboy@8058".to_string(),
+                source_worktree_path: None,
+                provider_command: None,
+                provider_invocation: None,
+                gates: VerifyGateOptions {
+                    verify: vec!["cargo test unsupported".to_string()],
+                    private_verify: Vec::new(),
+                    private_gate_reveal: Default::default(),
+                    ..VerifyGateOptions::default()
+                },
+                max_attempts: 1,
+                no_finalize: false,
+                base: "main".to_string(),
+                task_base_sha: Some("task-candidate-base".to_string()),
+                head: Some("fix/8058".to_string()),
+                title: "Close #8058".to_string(),
+                commit_message: "test".to_string(),
+                source_refs: Vec::new(),
+                protected_branches: vec!["main".to_string()],
+                ai_tool: "OpenCode".to_string(),
+                ai_model: Some("openai/gpt-5.6-terra".to_string()),
+                ai_used_for: "Drafted test coverage.".to_string(),
+                attempt_dispatcher: None,
+                harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
+            };
+            let error = finalize_cook_pr_with_backend(
+                &options,
+                run_id,
+                &promotion(run_id),
+                &mut CaptureBackend::default(),
+            )
+            .expect_err("unsupported test claim is rejected");
+            assert!(error
+                .message
+                .contains("matching successful visible durable gate"));
         });
     }
 

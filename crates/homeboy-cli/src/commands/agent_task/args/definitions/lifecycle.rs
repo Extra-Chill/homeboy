@@ -36,6 +36,13 @@ pub struct StatusArgs {
     pub full: bool,
 }
 #[derive(Args, Debug)]
+pub struct LogsArgs {
+    pub run_id: String,
+    /// Include unprojected runner transport frames under `raw_events` for diagnostics.
+    #[arg(long)]
+    pub raw: bool,
+}
+#[derive(Args, Debug)]
 pub struct EvidenceArgs {
     pub run_id: String,
     #[arg(long = "kind", value_name = "KIND")]

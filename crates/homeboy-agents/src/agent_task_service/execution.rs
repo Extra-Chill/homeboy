@@ -347,6 +347,10 @@ pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
     agent_task_lifecycle::logs(run_id)
 }
 
+pub fn logs_with_raw(run_id: &str) -> Result<AgentTaskRunLog> {
+    agent_task_lifecycle::logs_with_raw(run_id, true)
+}
+
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
     agent_task_lifecycle::artifacts(run_id)
 }

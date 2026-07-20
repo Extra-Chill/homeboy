@@ -597,6 +597,95 @@ pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     Ok(record)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderExecutionReservation {
+    Acquired,
+    AlreadyReserved,
+}
+
+/// Durably reserve one provider execution before the scheduler blocks on the
+/// backend. A resumed controller must reconcile an existing reservation rather
+/// than dispatching the same `(task_id, attempt)` a second time.
+pub fn reserve_provider_execution(
+    run_id: &str,
+    task: &AgentTaskRequest,
+    attempt: u32,
+) -> Result<ProviderExecutionReservation> {
+    let run_id = sanitize_run_id(run_id);
+    let execution_key = format!("{}:{attempt}", task.task_id);
+    let mut reservation = ProviderExecutionReservation::AlreadyReserved;
+    store::mutate_record(&run_id, |record| {
+        let metadata = record.ensure_metadata_object();
+        let consumed = {
+            let executions = metadata
+                .entry("provider_executions".to_string())
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .expect("provider_executions must be an array");
+            if executions
+                .iter()
+                .any(|execution| execution["key"] == execution_key)
+            {
+                return false;
+            }
+            executions.push(json!({
+                "key": execution_key,
+                "task_id": task.task_id,
+                "attempt": attempt,
+                "backend": task.executor.backend,
+                "model": task.executor.model(),
+                "state": "running",
+                "started_at": now_timestamp(),
+            }));
+            executions.len()
+        };
+        metadata.insert("provider_executions_consumed".to_string(), json!(consumed));
+        reservation = ProviderExecutionReservation::Acquired;
+        true
+    })?;
+    Ok(reservation)
+}
+
+/// Record the provider's terminal result before controller-owned patch
+/// harvesting. Harvesting can fail or be interrupted independently of the
+/// provider execution, so it must not leave this reservation running.
+pub fn record_provider_execution_terminal(
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    state: &str,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let execution_key = format!("{task_id}:{attempt}");
+    let mut found = false;
+    let record = store::mutate_record(&run_id, |record| {
+        let Some(execution) = record
+            .ensure_metadata_object()
+            .get_mut("provider_executions")
+            .and_then(Value::as_array_mut)
+            .and_then(|executions| {
+                executions
+                    .iter_mut()
+                    .find(|execution| execution["key"] == execution_key)
+            })
+        else {
+            return false;
+        };
+        execution["state"] = json!(state);
+        execution["finished_at"] = json!(now_timestamp());
+        found = true;
+        true
+    })?;
+    if !found {
+        return Err(Error::internal_unexpected(
+            "provider execution reached a terminal result without its durable attempt record",
+        ));
+    }
+    record.ok_or_else(|| {
+        Error::internal_unexpected("provider execution terminal record was unchanged")
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn rewrite_record_for_test<F>(run_id: &str, mut rewrite: F) -> Result<AgentTaskRunRecord>
 where
@@ -885,15 +974,15 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
         let _ = expire_unaccepted_lab_handoff(&resolved_run_id)?;
         record = store::read_record(&resolved_run_id)?;
     }
-    let controller_plan = store::read_controller_plan(&record.run_id)?;
-    let controller_plan_path = store::controller_plan_path(&record.run_id)?
-        .display()
-        .to_string();
-    if record.plan_path != controller_plan_path {
-        record.plan_path = controller_plan_path;
-        store::write_record(&record)?;
-    }
     if !record.state.is_terminal() {
+        let controller_plan = store::read_controller_plan(&record.run_id)?;
+        let controller_plan_path = store::controller_plan_path(&record.run_id)?
+            .display()
+            .to_string();
+        if record.plan_path != controller_plan_path {
+            record.plan_path = controller_plan_path;
+            store::write_record(&record)?;
+        }
         if let Ok(aggregate) = store::read_aggregate(&record.run_id) {
             let aggregate_path = store::aggregate_path(&record.run_id)
                 .map(|path| path.display().to_string())
@@ -1078,6 +1167,16 @@ pub fn start_candidate_adoption(
     ai_model: &str,
     active_gate: &str,
 ) -> Result<AgentTaskRunRecord> {
+    start_candidate_adoption_with_rerun_policy(run_id, candidate_sha, ai_model, active_gate, false)
+}
+
+pub fn start_candidate_adoption_with_rerun_policy(
+    run_id: &str,
+    candidate_sha: &str,
+    ai_model: &str,
+    active_gate: &str,
+    rerun_completed_gates: bool,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let candidate_sha = candidate_sha.to_string();
     let ai_model = ai_model.to_string();
@@ -1086,6 +1185,12 @@ pub fn start_candidate_adoption(
     let record = store::mutate_record(&run_id, |record| {
         let now = now_timestamp();
         if let Some(existing) = record.candidate_adoption.as_mut() {
+            if existing.gate_process_group.is_some_and(|pgid| {
+                homeboy_core::process::isolated_process_group_is_running(pgid).unwrap_or(false)
+            }) {
+                conflict = true;
+                return false;
+            }
             if existing.state == "verification_running" {
                 if homeboy_core::process::pid_is_running(existing.owner_pid) {
                     conflict = true;
@@ -1111,6 +1216,14 @@ pub fn start_candidate_adoption(
                 record.updated_at = Some(now);
                 return true;
             }
+            if existing.state == "completed"
+                && existing.candidate_sha == candidate_sha
+                && existing.ai_model == ai_model
+                && !rerun_completed_gates
+            {
+                conflict = true;
+                return false;
+            }
             if existing.state == "verification_running" || existing.state == "interrupted" {
                 conflict = true;
                 return false;
@@ -1126,6 +1239,10 @@ pub fn start_candidate_adoption(
             updated_at: now.clone(),
             owner_pid: std::process::id(),
             heartbeat_at: now.clone(),
+            gate_process_group: None,
+            gate_started_at: None,
+            gate_timeout_seconds: None,
+            gate_output_tail: String::new(),
             resume_count: 0,
             terminal_error: None,
             completed_at: None,
@@ -1163,6 +1280,61 @@ pub fn start_candidate_adoption(
     Ok(record)
 }
 
+pub fn start_candidate_adoption_gate(
+    run_id: &str,
+    command: &str,
+    process_group: u32,
+    timeout_seconds: u64,
+) -> Result<()> {
+    let run_id = sanitize_run_id(run_id);
+    store::mutate_record(&run_id, |record| {
+        let Some(attempt) = record.candidate_adoption.as_mut() else {
+            return false;
+        };
+        if attempt.state != "verification_running" {
+            return false;
+        }
+        let now = now_timestamp();
+        attempt.phase = "gate_running".to_string();
+        attempt.active_gate = command.to_string();
+        attempt.gate_process_group = Some(process_group);
+        attempt.gate_started_at = Some(now.clone());
+        attempt.gate_timeout_seconds = Some(timeout_seconds);
+        attempt.gate_output_tail.clear();
+        attempt.heartbeat_at = now.clone();
+        attempt.updated_at = now.clone();
+        record.updated_at = Some(now);
+        true
+    })?;
+    Ok(())
+}
+
+pub fn heartbeat_candidate_adoption_gate(run_id: &str, output_tail: &str) -> Result<()> {
+    let run_id = sanitize_run_id(run_id);
+    store::mutate_record(&run_id, |record| {
+        let Some(attempt) = record.candidate_adoption.as_mut() else {
+            return false;
+        };
+        if attempt.state != "verification_running" {
+            return false;
+        }
+        let now = now_timestamp();
+        attempt.heartbeat_at = now.clone();
+        attempt.updated_at = now.clone();
+        attempt.gate_output_tail = output_tail.to_string();
+        record.updated_at = Some(now);
+        true
+    })?;
+    Ok(())
+}
+
+pub fn candidate_adoption_cancel_requested(run_id: &str) -> Result<bool> {
+    Ok(store::read_record(&sanitize_run_id(run_id))?
+        .candidate_adoption
+        .as_ref()
+        .is_some_and(|attempt| attempt.state == "cancel_requested" || attempt.state == "cancelled"))
+}
+
 pub fn checkpoint_candidate_adoption(run_id: &str, phase: &str, active_gate: &str) -> Result<()> {
     let run_id = sanitize_run_id(run_id);
     store::mutate_record(&run_id, |record| {
@@ -1192,6 +1364,9 @@ pub fn finish_candidate_adoption(
         let Some(attempt) = record.candidate_adoption.as_mut() else {
             return false;
         };
+        if attempt.state == "cancelled" || attempt.state == "cancel_requested" {
+            return false;
+        }
         let now = now_timestamp();
         attempt.updated_at = now.clone();
         attempt.heartbeat_at = now.clone();
@@ -1221,9 +1396,20 @@ fn reconcile_candidate_adoption(record: &mut AgentTaskRunRecord) -> bool {
     }
     let now = now_timestamp();
     attempt.state = "interrupted".to_string();
-    attempt.phase = "owner_stale".to_string();
+    attempt.phase = if attempt.gate_process_group.is_some_and(|pgid| {
+        homeboy_core::process::isolated_process_group_is_running(pgid).unwrap_or(false)
+    }) {
+        "gate_orphaned"
+    } else {
+        "owner_stale"
+    }
+    .to_string();
     attempt.updated_at = now.clone();
-    attempt.terminal_error = Some("adoption owner process is not running; rerun adopt with the recorded candidate SHA to resume".to_string());
+    attempt.terminal_error = Some(if attempt.phase == "gate_orphaned" {
+        "adoption controller stopped while its gate process group remains live; cancel the adoption before resuming"
+    } else {
+        "adoption owner process is not running; rerun adopt with the recorded candidate SHA to resume"
+    }.to_string());
     record.updated_at = Some(now);
     true
 }
@@ -1952,9 +2138,40 @@ pub(crate) fn reconcile_runner_job_snapshot(
     Ok(())
 }
 
-/// A terminal daemon transport result is not an agent-task result on its own.
-/// Keep the controller record live until the daemon publishes the aggregate
-/// lifecycle event, which is the single authoritative terminal projection.
+/// Project an authoritative terminal daemon snapshot into its persisted run.
+/// The daemon calls this before returning a foreground `runner exec --run-id`,
+/// so its caller never reports a terminal command while the durable run remains
+/// active. Replaying the same terminal snapshot is a no-op once projected.
+pub fn project_terminal_runner_result(
+    run_id: &str,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) -> Result<bool> {
+    if !matches!(
+        snapshot.job.status,
+        homeboy_core::api_jobs::JobStatus::Succeeded
+            | homeboy_core::api_jobs::JobStatus::Failed
+            | homeboy_core::api_jobs::JobStatus::Cancelled
+    ) {
+        return Ok(false);
+    }
+
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    validate_runner_job_snapshot(&record, snapshot)?;
+    if let Some(event) = terminal_runner_lifecycle_event(&record, snapshot)? {
+        if store::read_aggregate(&record.run_id).ok().as_ref() == Some(&event.aggregate) {
+            return Ok(false);
+        }
+        project_terminal_runner_lifecycle_event(&mut record, snapshot, &event)?;
+        return Ok(true);
+    }
+    if record.state.is_terminal() {
+        return Ok(false);
+    }
+    project_terminal_runner_job_snapshot(&mut record, snapshot);
+    store::write_record(&record)?;
+    Ok(true)
+}
+
 fn record_pending_runner_synchronization(
     record: &mut AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
@@ -1980,6 +2197,66 @@ fn record_pending_runner_synchronization(
     );
 }
 
+fn project_terminal_runner_job_snapshot(
+    record: &mut AgentTaskRunRecord,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) {
+    // Only the explicit foreground runner-exec path reaches this helper.
+    // Detached reconciliation remains pending until its inner aggregate arrives.
+    record.updated_at = Some(now_timestamp());
+    let (run_state, task_state, phase) = match snapshot.job.status {
+        homeboy_core::api_jobs::JobStatus::Succeeded => (
+            AgentTaskRunState::Succeeded,
+            AgentTaskState::Succeeded,
+            "completed",
+        ),
+        homeboy_core::api_jobs::JobStatus::Failed => {
+            (AgentTaskRunState::Failed, AgentTaskState::Failed, "failed")
+        }
+        homeboy_core::api_jobs::JobStatus::Cancelled => (
+            AgentTaskRunState::Cancelled,
+            AgentTaskState::Cancelled,
+            "cancelled",
+        ),
+        homeboy_core::api_jobs::JobStatus::Queued | homeboy_core::api_jobs::JobStatus::Running => {
+            return
+        }
+    };
+    set_run_state(record, run_state);
+    for task in &mut record.tasks {
+        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+            task.state = task_state;
+        }
+    }
+    record_runner_job_terminal_metadata(record, snapshot.job.status, &snapshot.events);
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("phase".to_string(), json!(phase));
+    metadata.insert(
+        "phase_activity".to_string(),
+        json!("authoritative runner daemon result projected"),
+    );
+    metadata.insert("provider_state".to_string(), json!(phase));
+    metadata.insert(
+        "runner_result_synchronization".to_string(),
+        json!({
+            "state": "projected",
+            "runner_job_status": snapshot.job.status,
+        }),
+    );
+    if let Some(handoff) = metadata.get_mut("runner_handoff") {
+        handoff["state"] = json!("terminal");
+    }
+    metadata.insert(
+        METADATA_KEY_RETRYABLE.to_string(),
+        json!(run_state != AgentTaskRunState::Succeeded),
+    );
+    metadata.remove(METADATA_KEY_STALE_RUNNING);
+    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
+}
+
+/// Extracts the richer inner agent-task aggregate when the terminal daemon
+/// result includes one. Generic reconciliation retains a transport-only result
+/// as pending; foreground explicit runner execution projects it directly.
 fn terminal_runner_lifecycle_event(
     record: &AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
@@ -3058,26 +3335,38 @@ fn restore_initial_cook_candidate_workspace(plan: &mut AgentTaskPlan) -> Result<
 }
 
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
+    logs_with_raw(run_id, false)
+}
+
+pub fn logs_with_raw(run_id: &str, include_raw: bool) -> Result<AgentTaskRunLog> {
     // Status reconciliation fetches the live daemon snapshot for a bound Lab
     // child, making executor progress visible before the child is terminal.
     let record = status(run_id)?;
     let run_id = record.run_id.clone();
-    let (events, artifact_refs) = match store::read_aggregate(&run_id) {
+    let (events, artifact_refs, raw_events) = match store::read_aggregate(&run_id) {
         Ok(aggregate) => {
             let refs = artifact_refs_for_outcomes(&aggregate.outcomes);
-            (aggregate.events, refs)
+            (aggregate.events, refs, Vec::new())
         }
-        Err(_) => (
-            runner_job_progress_events(&record).unwrap_or_else(|| queued_events(&record.tasks)),
-            record.artifact_refs.clone(),
-        ),
+        Err(_) => {
+            let raw_events = runner_job_raw_events(&record);
+            (
+                runner_job_progress_events(&record).unwrap_or_else(|| queued_events(&record.tasks)),
+                record.artifact_refs.clone(),
+                raw_events,
+            )
+        }
     };
-    let normalized_events = normalize_progress_events(&run_id, &events, &artifact_refs);
+    let events = if raw_events.is_empty() {
+        normalize_progress_events(&run_id, &events, &artifact_refs)
+    } else {
+        normalize_runner_job_events(&run_id, &raw_events, &record, &artifact_refs)
+    };
     Ok(AgentTaskRunLog {
         schema: schemas::RUN_LOG.to_string(),
         run_id,
         events,
-        normalized_events,
+        raw_events: include_raw.then_some(raw_events).unwrap_or_default(),
     })
 }
 
@@ -3095,10 +3384,95 @@ fn runner_job_progress_events(record: &AgentTaskRunRecord) -> Option<Vec<AgentTa
                 task_id: task_id.clone(),
                 state: AgentTaskState::Running,
                 attempt: 0,
-                message: serde_json::to_string(event).ok(),
+                message: event
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        event
+                            .pointer("/data/message")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    }),
             })
             .collect(),
     )
+}
+
+fn runner_job_raw_events(record: &AgentTaskRunRecord) -> Vec<Value> {
+    record
+        .metadata
+        .get("runner_job_events")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn normalize_runner_job_events(
+    run_id: &str,
+    raw_events: &[Value],
+    record: &AgentTaskRunRecord,
+    artifact_refs: &[AgentTaskArtifactRef],
+) -> Vec<AgentTaskEventEnvelope> {
+    let task_id = record
+        .tasks
+        .first()
+        .map(|task| task.task_id.clone())
+        .unwrap_or_else(|| record.run_id.clone());
+    let provider = record
+        .provider_handles
+        .first()
+        .map(|handle| handle.backend.clone());
+
+    raw_events
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            let data = raw.get("data").cloned().unwrap_or(Value::Null);
+            let kind = raw
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("progress");
+            let phase =
+                string_field(&data, "phase").or_else(|| string_field(&record.metadata, "phase"));
+            let activity = string_field(&data, "activity")
+                .or_else(|| string_field(&data, "status_note"))
+                .or_else(|| string_field(&data, "progress"));
+            AgentTaskEventEnvelope {
+                schema: schemas::EVENT.to_string(),
+                run_id: run_id.to_string(),
+                task_id: task_id.clone(),
+                // The lifecycle cursor is positional and has always been one-based.
+                sequence: (index + 1) as u64,
+                event_type: format!("agent_task.runner_{kind}"),
+                status: AgentTaskState::Running,
+                message: raw
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| string_field(&data, "message")),
+                provider: string_field(&data, "provider")
+                    .or_else(|| string_field(&data, "backend"))
+                    .or_else(|| provider.clone()),
+                phase,
+                activity,
+                heartbeat_at_ms: matches!(kind, "progress" | "status")
+                    .then(|| raw.get("timestamp_ms").and_then(Value::as_u64))
+                    .flatten(),
+                progress: json!({ "attempt": 0 }),
+                artifact_refs: artifact_refs
+                    .iter()
+                    .filter(|reference| reference.task_id == task_id)
+                    .cloned()
+                    .collect(),
+                metadata: data,
+            }
+        })
+        .collect()
+}
+
+fn string_field(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {

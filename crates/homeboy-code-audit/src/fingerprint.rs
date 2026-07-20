@@ -58,6 +58,13 @@ pub struct FileFingerprint {
     /// Identifiers/literals replaced with positional tokens before hashing.
     /// Populated by extension scripts that support it; empty otherwise.
     pub structural_hashes: HashMap<String, String>,
+    /// Method name → `"<token_count>:<hash>"` skeleton signature for
+    /// skeleton-duplicate detection. Captures only the call/control-flow
+    /// backbone (argument interiors and error tails elided), so a primitive
+    /// reimplemented with a different local error type still matches. Populated
+    /// by the core grammar engine; empty when the fingerprint source (e.g. an
+    /// extension script) does not compute it.
+    pub skeleton_hashes: HashMap<String, String>,
     /// Method name → visibility ("public", "protected", "private").
     pub visibility: HashMap<String, String>,
     /// Public/protected class properties (e.g., ["string $name", "$data"]).
@@ -179,6 +186,9 @@ pub(crate) fn fingerprint_extension_content(
         content: content.to_string(),
         method_hashes: output.method_hashes,
         structural_hashes: output.structural_hashes,
+        // Extension fingerprint scripts do not compute skeleton signatures yet;
+        // the skeleton-duplicate detector simply sees no candidates from them.
+        skeleton_hashes: HashMap::new(),
         visibility: output.visibility,
         properties: output.properties,
         hooks: output.hooks,

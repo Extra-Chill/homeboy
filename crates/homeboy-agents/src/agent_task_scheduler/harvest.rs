@@ -5,6 +5,16 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 
+/// Git pathspecs excluding Homeboy-owned runner workspace metadata from captured
+/// candidate patches. The runner writes `.homeboy/runner-workspace.json` (and
+/// scratch under `.homeboy/`) after the snapshot baseline is established, so it
+/// is checkout drift rather than provider output — including it produces a patch
+/// that deletes/rewrites runner metadata and cannot be promoted cleanly. (#8534)
+const HARVEST_METADATA_EXCLUDE_PATHSPECS: &[&str] = &[
+    ":(exclude).homeboy/runner-workspace.json",
+    ":(exclude).homeboy/lab-at-files/**",
+];
+
 pub(super) fn harvest_committed_patch(
     outcome: &mut AgentTaskOutcome,
     running: &RunningTask,
@@ -28,22 +38,37 @@ pub(super) fn harvest_uncommitted_patch(
     }
     // This checkout belongs solely to this dispatch. Staging all changes makes
     // Git's binary patch generation include tracked, staged, and untracked files.
-    git_output(root, &["add", "--all"])?;
-    let patch = git_output_raw(
+    // Homeboy-owned runner metadata is excluded from the diff so it never lands
+    // in a candidate patch as checkout drift. (#8534)
+    git_output(
         root,
         &[
-            "diff",
-            "--cached",
-            "--binary",
-            "--full-index",
-            "--find-renames",
-            "HEAD",
+            "add",
+            "--all",
+            "--",
+            ".",
+            HARVEST_METADATA_EXCLUDE_PATHSPECS[0],
+            HARVEST_METADATA_EXCLUDE_PATHSPECS[1],
         ],
     )?;
+    let mut uncommitted_patch_args = vec![
+        "diff",
+        "--cached",
+        "--binary",
+        "--full-index",
+        "--find-renames",
+        "HEAD",
+        "--",
+        ".",
+    ];
+    uncommitted_patch_args.extend_from_slice(HARVEST_METADATA_EXCLUDE_PATHSPECS);
+    let patch = git_output_raw(root, &uncommitted_patch_args)?;
     if patch.trim().is_empty() {
         return Ok(());
     }
-    let changed_files = git_changed_files(root, &["diff", "--cached", "--name-only", "HEAD"])?;
+    let mut uncommitted_changed_args = vec!["diff", "--cached", "--name-only", "HEAD", "--", "."];
+    uncommitted_changed_args.extend_from_slice(HARVEST_METADATA_EXCLUDE_PATHSPECS);
+    let changed_files = git_changed_files(root, &uncommitted_changed_args)?;
     let path = attempt_patch_path(running, "uncommitted")?;
     std::fs::write(&path, patch.as_bytes()).map_err(|error| HarvestError::ArtifactWrite {
         path: path.clone(),
@@ -205,17 +230,18 @@ fn harvest_committed_patch_with_metadata(
             head,
         });
     }
-    let patch = git_output_raw(
-        root,
-        &[
-            "diff",
-            "--binary",
-            "--full-index",
-            "--find-renames",
-            base,
-            "HEAD",
-        ],
-    )?;
+    let mut committed_patch_args = vec![
+        "diff",
+        "--binary",
+        "--full-index",
+        "--find-renames",
+        base,
+        "HEAD",
+        "--",
+        ".",
+    ];
+    committed_patch_args.extend_from_slice(HARVEST_METADATA_EXCLUDE_PATHSPECS);
+    let patch = git_output_raw(root, &committed_patch_args)?;
     if patch.trim().is_empty() {
         return Ok(());
     }
@@ -236,7 +262,9 @@ fn harvest_committed_patch_with_metadata(
         Vec::new(),
     ));
     let commits = collect_metadata(root, &range)?;
-    let changed_files = git_changed_files(root, &["diff", "--name-only", base, "HEAD"])?;
+    let mut committed_changed_args = vec!["diff", "--name-only", base, "HEAD", "--", "."];
+    committed_changed_args.extend_from_slice(HARVEST_METADATA_EXCLUDE_PATHSPECS);
+    let changed_files = git_changed_files(root, &committed_changed_args)?;
     outcome
         .artifacts
         .last_mut()
@@ -401,8 +429,29 @@ pub(crate) fn git_output(cwd: &Path, args: &[&str]) -> Result<String, HarvestErr
 /// Preserve byte-sensitive Git output such as patches. Metadata callers use
 /// `git_output` so commit IDs and status values stay normalized.
 pub(crate) fn git_output_raw(cwd: &Path, args: &[&str]) -> Result<String, HarvestError> {
+    git_output_raw_with_env(cwd, args, &[])
+}
+
+/// Trimmed Git output with extra environment (e.g. `GIT_INDEX_FILE` for a
+/// scratch index). This is the single scheduler-side Git runner; no-env and
+/// byte-preserving callers delegate here so the command/error shape stays
+/// identical across the harvest and attempt-workspace paths.
+pub(crate) fn git_output_with_env(
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<String, HarvestError> {
+    Ok(git_output_raw_with_env(cwd, args, env)?.trim().to_string())
+}
+
+fn git_output_raw_with_env(
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<String, HarvestError> {
     let output = Command::new("git")
         .args(args)
+        .envs(env.iter().copied())
         .current_dir(cwd)
         .output()
         .map_err(|error| HarvestError::Git {
@@ -838,6 +887,116 @@ mod committed_harvest_tests {
             diagnostic.class == "agent_task.committed_harvest_git_failed"
                 && diagnostic.data["command"] == "git log injected metadata failure"
         }));
+    }
+
+    #[test]
+    fn uncommitted_harvest_excludes_homeboy_runner_metadata_drift() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        git(&workspace, &["init", "-b", "main"]);
+        git(&workspace, &["config", "user.email", "test@example.com"]);
+        git(&workspace, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(workspace.join("file.txt"), "base\n").expect("base file");
+        // The runner metadata exists at the baseline; the runner rewrites it after
+        // materialization, which is checkout drift, not provider output. (#8534)
+        std::fs::create_dir_all(workspace.join(".homeboy")).expect(".homeboy dir");
+        std::fs::write(
+            workspace.join(".homeboy/runner-workspace.json"),
+            "{\"stage\":\"baseline\"}\n",
+        )
+        .expect("runner metadata baseline");
+        git(&workspace, &["add", "-A"]);
+        git(&workspace, &["commit", "-m", "base"]);
+        let base = git(&workspace, &["rev-parse", "HEAD"]);
+
+        // The provider edits one file; the runner rewrites its metadata (drift).
+        std::fs::write(workspace.join("file.txt"), "provider change\n").expect("provider edit");
+        std::fs::write(
+            workspace.join(".homeboy/runner-workspace.json"),
+            "{\"stage\":\"final\"}\n",
+        )
+        .expect("runner metadata drift");
+
+        let request = AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "task-1".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "test".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: serde_json::Value::Null,
+            },
+            instructions: String::new(),
+            inputs: serde_json::Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace {
+                root: Some(workspace.display().to_string()),
+                ..Default::default()
+            },
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            metadata: serde_json::Value::Null,
+        };
+        let running = RunningTask {
+            task_id: "task-1".to_string(),
+            request,
+            workspace_key: None,
+            executor_key: "test".to_string(),
+            model_key: None,
+            resource_units: 1,
+            exclusive_resource_keys: Vec::new(),
+            attempt: 1,
+            started_at: Instant::now(),
+            timeout_ms: None,
+            execution_deadline_unix_ms: None,
+            timeout_cancel_requested: false,
+            rotation_index: 0,
+            rotation_attempts: Vec::new(),
+            candidate_artifacts: Vec::new(),
+            retry_attempts: Vec::new(),
+            source_workspace_root: None,
+            _attempt_workspace: None,
+            run_id: Some("metadata-exclude-test".to_string()),
+            artifact_nonce: "test-artifact".to_string(),
+            task_base_sha: Some(base),
+            source_provenance: None,
+            scratch: crate::controller_scratch::ControllerScratchAllocation {
+                path: temp.path().join("controller-scratch"),
+                lease_id: "test-lease-1".to_string(),
+                index_path: temp.path().join("resources.json"),
+            },
+            adoption: None,
+            join_handle: None,
+        };
+        std::fs::create_dir_all(&running.scratch.path).expect("scratch dir");
+
+        let mut outcome = committed_harvest_preflight_outcome("task-1".to_string());
+        outcome.status = AgentTaskOutcomeStatus::Succeeded;
+        harvest_uncommitted_patch(&mut outcome, &running).expect("harvest uncommitted patch");
+
+        let patch_path = outcome.artifacts[0]
+            .path
+            .clone()
+            .expect("uncommitted patch path");
+        let patch = std::fs::read_to_string(&patch_path).expect("read patch");
+        assert!(
+            patch.contains("file.txt") && patch.contains("+provider change"),
+            "the provider edit must be captured: {patch}"
+        );
+        assert!(
+            !patch.contains("runner-workspace.json"),
+            "Homeboy runner metadata drift must be excluded from the candidate patch: {patch}"
+        );
     }
 
     #[test]

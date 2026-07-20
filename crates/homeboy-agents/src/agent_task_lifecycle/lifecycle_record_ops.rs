@@ -61,12 +61,24 @@ pub(crate) fn update_lifecycle_heartbeat(record: &mut AgentTaskRunRecord) {
 pub(crate) fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan: &AgentTaskPlan) {
     set_run_state(record, record.state);
     record.lifecycle.cleanup = cleanup_lifecycle_for_plan(plan, record.updated_at.clone());
+    let durable_task_ids: std::collections::HashSet<&str> = record.metadata["provider_executions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|execution| execution["task_id"].as_str())
+        .collect();
     let mut provider_runtime: Vec<ProviderRuntimeLifecycle> = record
         .provider_handles
         .iter()
+        .filter(|handle| !durable_task_ids.contains(handle.task_id.as_str()))
         .map(provider_runtime_for_handle)
         .collect();
     for task in &record.tasks {
+        let durable_executions = provider_executions_for_task(record, &task.task_id);
+        if !durable_executions.is_empty() {
+            provider_runtime.extend(durable_executions);
+            continue;
+        }
         if record
             .provider_handles
             .iter()
@@ -114,6 +126,41 @@ pub(crate) fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan
         policy: Some("retain".to_string()),
         updated_at: record.updated_at.clone(),
     };
+}
+
+fn provider_executions_for_task(
+    record: &AgentTaskRunRecord,
+    task_id: &str,
+) -> Vec<ProviderRuntimeLifecycle> {
+    record.metadata["provider_executions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|execution| execution["task_id"] == task_id)
+        .filter_map(|execution| {
+            let backend = execution["backend"].as_str()?.to_string();
+            let state = match execution["state"].as_str() {
+                Some("running") => ProviderRuntimeState::Running,
+                Some("succeeded") => ProviderRuntimeState::Succeeded,
+                Some("cancelled") => ProviderRuntimeState::Cancelled,
+                Some("timed_out") | Some("candidate_recoverable") => ProviderRuntimeState::TimedOut,
+                _ => ProviderRuntimeState::Failed,
+            };
+            Some(ProviderRuntimeLifecycle {
+                task_id: task_id.to_string(),
+                backend,
+                state,
+                stream_uri: None,
+                external_runtime_ids: Vec::new(),
+                metadata: json!({
+                    "evidence_source": "durable_provider_execution",
+                    "execution_key": execution["key"],
+                    "attempt": execution["attempt"],
+                    "model": execution["model"],
+                }),
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn cleanup_lifecycle_for_plan(

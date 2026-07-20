@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) mod schemas {
     pub(crate) const RUN: &str = "homeboy/agent-task-run/v1";
-    pub(crate) const RUN_LOG: &str = "homeboy/agent-task-run-log/v1";
+    pub(crate) const RUN_LOG: &str = "homeboy/agent-task-run-log/v2";
     pub(crate) const EVENT: &str = "homeboy/agent-task-event/v1";
     pub(crate) const RUN_STATUS: &str = "homeboy/agent-task-run-status/v1";
     pub(crate) const RUN_ARTIFACTS: &str = "homeboy/agent-task-run-artifacts/v1";
@@ -131,6 +131,14 @@ pub struct AgentTaskCandidateAdoptionAttempt {
     pub updated_at: String,
     pub owner_pid: u32,
     pub heartbeat_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_process_group: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gate_output_tail: String,
     #[serde(default)]
     pub resume_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -860,9 +868,11 @@ pub struct AgentTaskRunProviderHandle {
 pub struct AgentTaskRunLog {
     pub schema: String,
     pub run_id: String,
-    pub events: Vec<AgentTaskProgressEvent>,
+    /// The canonical consumer event stream. v1 exposed the same information
+    /// twice as `events` and `normalized_events`.
+    pub events: Vec<AgentTaskEventEnvelope>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub normalized_events: Vec<AgentTaskEventEnvelope>,
+    pub raw_events: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -876,6 +886,14 @@ pub struct AgentTaskEventEnvelope {
     pub status: AgentTaskState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub progress: Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -339,6 +340,15 @@ pub(super) fn exec_via_daemon(
         run_id.as_deref(),
         mirror_run_id.as_deref(),
     )?;
+    if let Some(run_id) = run_id.as_deref() {
+        homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(
+            run_id,
+            &homeboy_core::api_jobs::RunnerJobLogSnapshot {
+                job: job.clone(),
+                events: events.clone(),
+            },
+        )?;
+    }
     let artifacts = job.artifacts.clone();
     let mutation_artifacts = mutation_artifacts_from_job(&job, &result);
     if print_handoff_output {
@@ -387,6 +397,9 @@ pub(super) fn exec_via_daemon(
         Some(&runner_result),
     );
     persist_runner_execution_transition(&execution_record, &cwd, &command)?;
+    // A completed job is a durable lifecycle transition. It is the primary
+    // trigger for draining-generation retirement, not a side effect of status.
+    super::super::generation_store::reconcile(&runner.id, accepted_session.as_ref())?;
 
     Ok((
         RunnerExecOutput {
@@ -427,6 +440,9 @@ pub(super) fn exec_via_daemon(
 pub(crate) struct DaemonAdmissionReservation {
     local_url: String,
     job_id: String,
+    token: Option<String>,
+    renewer_stop: Option<Sender<()>>,
+    renewer: Option<std::thread::JoinHandle<()>>,
     pub(crate) daemon_lease_id: String,
 }
 
@@ -438,6 +454,12 @@ impl DaemonAdmissionReservation {
 
 impl Drop for DaemonAdmissionReservation {
     fn drop(&mut self) {
+        if let Some(stop) = self.renewer_stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(renewer) = self.renewer.take() {
+            let _ = renewer.join();
+        }
         let Ok(client) = Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(10))
@@ -449,7 +471,11 @@ impl Drop for DaemonAdmissionReservation {
             &client,
             &self.local_url,
             &format!("/admissions/{}/release", self.job_id),
-            &json!({}),
+            &self
+                .token
+                .as_ref()
+                .map(|token| json!({ "admission_token": token }))
+                .unwrap_or_else(|| json!({})),
             DaemonPostOptions::default(),
         );
     }
@@ -478,6 +504,7 @@ pub(crate) fn reserve_daemon_admission(
             "command": command,
             "expected_daemon_lease_id": expected_daemon_lease_id,
             "idempotency_key": idempotency_key,
+            "admission_lease_protocol": 1,
         }),
         DaemonPostOptions::default(),
     )?;
@@ -523,11 +550,61 @@ pub(crate) fn reserve_daemon_admission(
             Some("parse daemon admission job".to_string()),
         )
     })?;
+    let token = body
+        .get("admission_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string);
+    let (renewer_stop, renewer) = match token.as_deref() {
+        Some(token) => {
+            let (stop, renewer) = spawn_admission_renewer(
+                local_url.to_string(),
+                job.id.to_string(),
+                token.to_string(),
+            );
+            (Some(stop), Some(renewer))
+        }
+        // Older daemons ignore the opt-in marker and retain their legacy,
+        // explicit-release-only reservation contract.
+        None => (None, None),
+    };
     Ok(DaemonAdmissionReservation {
         local_url: local_url.to_string(),
         job_id: job.id.to_string(),
+        token,
+        renewer_stop,
+        renewer,
         daemon_lease_id: daemon_lease_id.to_string(),
     })
+}
+
+/// Renew at half the daemon's bounded lease interval while staging keeps the
+/// handoff alive. Explicit release remains authoritative when the context ends.
+fn spawn_admission_renewer(
+    local_url: String,
+    job_id: String,
+    token: String,
+) -> (Sender<()>, std::thread::JoinHandle<()>) {
+    let (stop, shutdown) = mpsc::channel();
+    let renewer = std::thread::spawn(move || {
+        while shutdown.recv_timeout(Duration::from_secs(15)).is_err() {
+            let Ok(client) = Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(10))
+                .build()
+            else {
+                continue;
+            };
+            let _ = daemon_post_json_text(
+                &client,
+                &local_url,
+                &format!("/admissions/{job_id}/renew"),
+                &json!({ "admission_token": token }),
+                DaemonPostOptions::default(),
+            );
+        }
+    });
+    (stop, renewer)
 }
 
 /// Recover only a connection that failed before the daemon could answer. A

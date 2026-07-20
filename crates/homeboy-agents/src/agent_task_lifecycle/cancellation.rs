@@ -2,6 +2,65 @@ use super::*;
 
 pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if record
+        .candidate_adoption
+        .as_ref()
+        .filter(|attempt| {
+            attempt.is_active()
+                || attempt.state == "cancel_requested"
+                || attempt.phase == "gate_orphaned"
+        })
+        .is_some()
+    {
+        let process_group = record
+            .candidate_adoption
+            .as_ref()
+            .and_then(|attempt| attempt.gate_process_group);
+        let reason = reason.unwrap_or("cancel requested").to_string();
+        let now = now_timestamp();
+        let attempt = record.candidate_adoption.as_mut().expect("active adoption");
+        attempt.state = "cancel_requested".to_string();
+        attempt.phase = "cancelling_gate".to_string();
+        attempt.terminal_error = Some(reason.clone());
+        attempt.updated_at = now.clone();
+        attempt.heartbeat_at = now.clone();
+        record.updated_at = Some(now);
+        store::write_record(&record)?;
+
+        if let Some(process_group) = process_group {
+            if homeboy_core::process::isolated_process_group_is_running(process_group).map_err(
+                |error| {
+                    Error::internal_unexpected(format!(
+                        "inspect adoption gate process group: {error}"
+                    ))
+                },
+            )? {
+                homeboy_core::process::terminate_isolated_process_group(process_group)?;
+                if homeboy_core::process::isolated_process_group_is_running(process_group).map_err(
+                    |error| {
+                        Error::internal_unexpected(format!(
+                            "verify adoption gate process group termination: {error}"
+                        ))
+                    },
+                )? {
+                    return Err(Error::internal_unexpected(format!(
+                        "adoption gate process group {process_group} remains alive after cancellation"
+                    )));
+                }
+            }
+        }
+        let now = now_timestamp();
+        let attempt = record.candidate_adoption.as_mut().expect("active adoption");
+        attempt.state = "cancelled".to_string();
+        attempt.phase = "terminal".to_string();
+        attempt.terminal_error = Some(reason);
+        attempt.completed_at = Some(now.clone());
+        attempt.updated_at = now.clone();
+        attempt.heartbeat_at = now.clone();
+        record.updated_at = Some(now);
+        store::write_record(&record)?;
+        return Ok(record);
+    }
     // A pending POST may have been accepted despite a lost response. Resolve
     // its key before cancellation so the original job is cancelled rather than
     // left running on the runner. Preparing intents have no replay request and
