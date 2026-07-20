@@ -16,6 +16,22 @@ pub struct HarvestExecutionContext {
 }
 
 impl HarvestExecutionContext {
+    /// Bind a scheduler to the exact paired Lab transport it must verify.
+    pub fn from_lab_transport(
+        source_snapshot: homeboy_core::source_snapshot::SourceSnapshot,
+        lab_offload: serde_json::Value,
+    ) -> homeboy_core::Result<Self> {
+        if !lab_offload.is_object() {
+            return Err(incomplete_transport_error(
+                "Lab offload metadata must be a JSON object".to_string(),
+            ));
+        }
+        Ok(Self {
+            source_snapshot: Some(source_snapshot),
+            lab_offload: Some(lab_offload),
+        })
+    }
+
     pub fn from_current_process() -> homeboy_core::Result<Self> {
         let source = std::env::var(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV).ok();
         let lab = std::env::var(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV).ok();
@@ -30,12 +46,12 @@ impl HarvestExecutionContext {
                         "Lab offload metadata must be a JSON object".to_string(),
                     ));
                 }
-                Ok(Self {
-                    source_snapshot: serde_json::from_str(&source).map_err(|error| {
+                Self::from_lab_transport(
+                    serde_json::from_str(&source).map_err(|error| {
                         incomplete_transport_error(format!("invalid source snapshot metadata: {error}"))
                     })?,
-                    lab_offload: Some(lab_offload),
-                })
+                    lab_offload,
+                )
             }
             (source, lab) => Err(incomplete_transport_error(format!(
                 "expected paired non-empty source snapshot and Lab offload metadata (source_snapshot={}, lab_offload={})",
@@ -190,9 +206,10 @@ pub(super) fn prepare_committed_harvest(
                     "snapshot workspace unexpectedly contains root .git metadata".to_string(),
                 ));
             }
-            if provenance.materialization_mode != "snapshot"
-                && provenance.materialization_mode != "snapshot-git"
-            {
+            if !matches!(
+                provenance.materialization_mode.as_str(),
+                "snapshot" | "filesystem_snapshot" | "snapshot-git"
+            ) {
                 return Err(snapshot_harvest_error(format!(
                     "unsupported snapshot materialization mode `{}`",
                     provenance.materialization_mode

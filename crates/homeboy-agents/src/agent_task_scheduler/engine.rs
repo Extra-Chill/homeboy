@@ -51,7 +51,7 @@ where
         self
     }
 
-    pub(crate) fn with_harvest_context(mut self, context: HarvestExecutionContext) -> Self {
+    pub fn with_harvest_context(mut self, context: HarvestExecutionContext) -> Self {
         self.harvest_context = context;
         self
     }
