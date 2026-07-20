@@ -46,6 +46,7 @@ fn deferred_reconnect_reports_selected_binary_and_exact_active_job_followups() {
         active_job_ids: vec![job_id.clone()],
         selected_binary_path: "/runner/homeboy".to_string(),
         followup_commands: followups.clone(),
+        ownership_contention: None,
     };
 
     assert_eq!(deferred.active_job_ids, vec![job_id]);
@@ -654,6 +655,125 @@ fn reconnect_error_after_disconnect_restores_the_pre_refresh_binary() {
                 .homeboy_path
                 .as_deref(),
             Some("/stable/homeboy")
+        );
+    });
+}
+
+#[test]
+fn reconnect_rollback_restores_only_its_own_selected_binary() {
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab-local","kind":"local","homeboy_path":"/newer/homeboy"}"#,
+            false,
+        )
+        .expect("runner");
+
+        let restored = restore_runner_homeboy_path_if_selected(
+            "lab-local",
+            "/selected/homeboy",
+            Some("/stable/homeboy"),
+        )
+        .expect("compare and restore");
+
+        assert!(!restored);
+        assert_eq!(
+            crate::load("lab-local")
+                .expect("reload")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            Some("/newer/homeboy")
+        );
+    });
+}
+
+#[test]
+fn reconnect_rollback_restores_its_own_selected_binary() {
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab-local","kind":"local","homeboy_path":"/selected/homeboy"}"#,
+            false,
+        )
+        .expect("runner");
+
+        let restored = restore_runner_homeboy_path_if_selected(
+            "lab-local",
+            "/selected/homeboy",
+            Some("/stable/homeboy"),
+        )
+        .expect("compare and restore");
+
+        assert!(restored);
+        assert_eq!(
+            crate::load("lab-local")
+                .expect("reload")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            Some("/stable/homeboy")
+        );
+    });
+}
+
+#[test]
+fn post_promotion_active_job_race_restores_prior_selection_without_stopping_daemon() {
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab-local","kind":"local","homeboy_path":"/selected/homeboy"}"#,
+            false,
+        )
+        .expect("runner");
+
+        let deferred = defer_reconnect_after_promotion_race(
+            "lab-local",
+            "/selected/homeboy",
+            Some("/stable/homeboy"),
+            &[active_admission("job-raced-after-precheck")],
+        )
+        .expect("defer raced reconnect");
+
+        assert_eq!(deferred.reason, "active_daemon_jobs");
+        assert_eq!(deferred.active_job_ids, ["job-raced-after-precheck"]);
+        assert!(deferred.ownership_contention.is_none());
+        assert_eq!(
+            crate::load("lab-local")
+                .expect("reload")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            Some("/stable/homeboy")
+        );
+    });
+}
+
+#[test]
+fn post_promotion_active_job_race_preserves_newer_selector_as_contention() {
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab-local","kind":"local","homeboy_path":"/newer/homeboy"}"#,
+            false,
+        )
+        .expect("runner");
+
+        let deferred = defer_reconnect_after_promotion_race(
+            "lab-local",
+            "/selected/homeboy",
+            Some("/stable/homeboy"),
+            &[active_admission("job-raced-after-precheck")],
+        )
+        .expect("defer raced reconnect");
+
+        assert!(deferred
+            .ownership_contention
+            .as_deref()
+            .is_some_and(|message| message.contains("preserving the newer owner")));
+        assert_eq!(
+            crate::load("lab-local")
+                .expect("reload")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            Some("/newer/homeboy")
         );
     });
 }

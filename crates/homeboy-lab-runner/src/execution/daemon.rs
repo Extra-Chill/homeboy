@@ -82,6 +82,15 @@ pub(super) fn exec_via_daemon(
         durable_run_id: run_id.clone(),
         ..Default::default()
     };
+    let mut env = env;
+    // `/exec` persists this environment with the accepted job. Snapshot the
+    // command binary now so a later runner refresh cannot redirect queued or
+    // running direct-daemon work.
+    if !env.contains_key("HOMEBOY_COMMAND") {
+        if let Some(homeboy_path) = runner.settings.homeboy_path.as_deref() {
+            env.insert("HOMEBOY_COMMAND".to_string(), homeboy_path.to_string());
+        }
+    }
     let payload = json!({
         "runner_id": runner.id,
         "runner": runner,
