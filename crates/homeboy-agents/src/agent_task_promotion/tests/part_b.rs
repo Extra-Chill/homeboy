@@ -348,6 +348,87 @@ fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
 }
 
 #[test]
+fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let patch_path = temp.path().join("follow-up.patch");
+    std::fs::write(&patch_path, VALID_PATCH).expect("write follow-up patch");
+    let prior_sha256 = "b".repeat(64);
+    let source_tree = "c".repeat(40);
+    let source = serde_json::json!({
+        "schema": AGENT_TASK_OUTCOME_SCHEMA,
+        "task_id": "follow-up",
+        "status": "succeeded",
+        "artifacts": [{
+            "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+            "id": "patch",
+            "kind": "patch",
+            "path": patch_path,
+            "size_bytes": VALID_PATCH.len(),
+            "sha256": sha256_hex(VALID_PATCH),
+            "metadata": {
+                "source_provenance": {
+                    "verified_cook_baseline": {
+                        "source_run_id": "v1-run",
+                        "source_task_id": "v1-task",
+                        "promoted_patch_artifact_sha256": prior_sha256,
+                        "baseline_tree": source_tree
+                    }
+                }
+            }
+        }]
+    })
+    .to_string();
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("v2-run".to_string()),
+            source_path: None,
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "fixture@target".to_string(),
+            task_id: Some("follow-up".to_string()),
+            artifact_id: Some("patch".to_string()),
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("promote follow-up");
+
+    assert_eq!(
+        provider.apply_calls[0].gate_feedback_baseline,
+        Some(serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-chain-baseline/v1",
+            "source_tree": source_tree,
+            "prior_patch_artifact": {
+                "sha256": prior_sha256,
+                "source_run_id": "v1-run",
+                "source_task_id": "v1-task"
+            }
+        }))
+    );
+    assert_eq!(
+        report.provenance["prior_baseline"]["source_tree"],
+        source_tree
+    );
+    assert_eq!(
+        report.provenance["prior_baseline"]["prior_patch_artifact"]["sha256"],
+        prior_sha256
+    );
+    assert_eq!(report.patch_artifact.id, "patch");
+    assert!(report.provenance["destination_baseline"].is_object());
+}
+
+#[test]
 fn promote_recoverable_candidate_rejects_multiple_actionable_patches() {
     let (result, apply_calls) = promote_recoverable_patch_count(2);
     assert!(result
