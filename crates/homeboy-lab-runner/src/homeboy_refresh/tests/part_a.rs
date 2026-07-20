@@ -605,15 +605,21 @@ fn disconnect_failure_after_selection_restores_the_pre_refresh_binary() {
             refreshed_runner_patch("lab-local", "/selected/homeboy").expect("selection patch");
         merge(Some("lab-local"), &patch.to_string(), &[]).expect("select binary");
 
-        let error = rollback_refresh_error::<()>(
-            "lab-local",
-            Some("/stable/homeboy"),
+        let error = rollback_refresh_error_with::<(), _>(
             Error::validation_invalid_argument(
                 "disconnect",
                 "request lease-bound daemon stop: tunnel unavailable",
                 None,
                 None,
             ),
+            || {
+                restore_runner_homeboy_path_if_selected(
+                    "lab-local",
+                    "/selected/homeboy",
+                    Some("/stable/homeboy"),
+                )
+                .map(|_| ())
+            },
         )
         .expect_err("disconnect failure rolls back selection");
         assert!(error.message.contains("lease-bound daemon stop"));
@@ -641,10 +647,16 @@ fn reconnect_error_after_disconnect_restores_the_pre_refresh_binary() {
             refreshed_runner_patch("lab-local", "/selected/homeboy").expect("selection patch");
         merge(Some("lab-local"), &patch.to_string(), &[]).expect("select binary");
 
-        let error = rollback_refresh_error::<()>(
-            "lab-local",
-            Some("/stable/homeboy"),
+        let error = rollback_refresh_error_with::<(), _>(
             Error::internal_io("reconnect transport failed".to_string(), None),
+            || {
+                restore_runner_homeboy_path_if_selected(
+                    "lab-local",
+                    "/selected/homeboy",
+                    Some("/stable/homeboy"),
+                )
+                .map(|_| ())
+            },
         )
         .expect_err("reconnect error rolls back selection");
         assert_eq!(error.details["error"], "reconnect transport failed");
