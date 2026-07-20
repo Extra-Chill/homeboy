@@ -48,6 +48,12 @@ pub enum AuditFinding {
     /// with a hand-typed copy. Editing the constant leaves these copies stale,
     /// so they should reference the constant instead.
     ConstantBypassLiteral,
+    /// A raw subprocess call whose literal argument vector is byte-identical to
+    /// the one wrapped by an existing thin helper — the command analog of
+    /// `ConstantBypassLiteral`. The caller re-invoked the primitive raw instead
+    /// of calling the helper (e.g. `git ["rev-parse","HEAD"]` when `head_sha`
+    /// exists), so the command spelling can drift out of one place.
+    CommandWrapperBypass,
     /// Function parameter is declared but never used in the function body.
     /// When call-site data is available, this means no callers pass a value
     /// for this position — truly dead, safe to remove.
@@ -229,6 +235,7 @@ impl AuditFinding {
             "near_duplicate",
             "skeleton_duplicate",
             "constant_bypass_literal",
+            "command_wrapper_bypass",
             "unused_parameter",
             "ignored_parameter",
             "dead_code_marker",
