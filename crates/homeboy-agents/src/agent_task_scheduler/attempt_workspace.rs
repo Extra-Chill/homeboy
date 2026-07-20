@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use super::harvest::{git_is_repository, git_output_raw, git_output_with_env};
+use super::harvest::{
+    git_is_repository, git_output_raw, git_output_with_env, git_status_ignoring_runner_metadata,
+    RUNNER_METADATA_EXCLUDE_PATHSPECS,
+};
 use super::*;
 
 /// Immutable provenance for one scheduler execution. Controller-local callers
@@ -107,7 +110,7 @@ impl AttemptWorkspace {
         // source-state guard decides whether the worktree itself is removable.
         homeboy_core::cleanup::cleanup_worktree_artifacts(&self.root)
             .map_err(|error| format!("cannot cleanup rebuildable artifacts: {}", error.message))?;
-        let status = git_output(&self.root, &["status", "--porcelain=v1"])
+        let status = git_status_ignoring_runner_metadata(&self.root)
             .map_err(|error| format!("cannot inspect attempt workspace state: {error:?}"))?;
         if !status.trim().is_empty() {
             return Err("attempt workspace has uncommitted changes".to_string());
@@ -272,7 +275,7 @@ pub(super) fn prepare_committed_harvest(
             message: "Git top-level does not exactly match the managed workspace root".to_string(),
         });
     }
-    let status = git_output(root, &["status", "--porcelain", "--untracked-files=all"])?;
+    let status = git_status_ignoring_runner_metadata(root)?;
     let candidate_baseline = if status.trim().is_empty() {
         None
     } else if let Some(baseline) = verified_initial_cook_candidate_baseline(root, request)? {
@@ -336,7 +339,9 @@ fn verified_initial_cook_candidate_baseline(
     let index_path = index.path().display().to_string();
     let index_env: &[(&str, &str)] = &[("GIT_INDEX_FILE", index_path.as_str())];
     git_output_with_env(root, &["read-tree", "HEAD"], index_env)?;
-    git_output_with_env(root, &["add", "--all"], index_env)?;
+    let mut add_args = vec!["add", "--all", "--", "."];
+    add_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
+    git_output_with_env(root, &add_args, index_env)?;
     let actual_tree = git_output_with_env(root, &["write-tree"], index_env)?;
     if actual_tree != expected_tree {
         return Err(HarvestError::CandidateBaselineMismatch {
@@ -426,7 +431,9 @@ fn workspace_patch_for_tree(root: &Path, expected_tree: &str) -> Result<String, 
     };
     let head = git(&["rev-parse", "HEAD"])?;
     git(&["read-tree", &head])?;
-    git(&["add", "--all"])?;
+    let mut add_args = vec!["add", "--all", "--", "."];
+    add_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
+    git(&add_args)?;
     let tree = git(&["write-tree"])?;
     if tree != expected_tree {
         return Err(HarvestError::CandidateBaselineMismatch {
@@ -504,7 +511,7 @@ fn validate_derived_cook_baseline(
             "derived baseline capability does not bind this workspace and task".to_string(),
         ));
     }
-    let status = git_output(root, &["status", "--porcelain", "--untracked-files=all"])?;
+    let status = git_status_ignoring_runner_metadata(root)?;
     if !status.is_empty() {
         return Err(HarvestError::DirtyWorkspace { status });
     }
@@ -869,7 +876,15 @@ mod tests {
         );
         fs::write(source.path().join("tracked.txt"), "candidate").expect("candidate file");
         fs::write(source.path().join("untracked.txt"), "candidate").expect("untracked file");
-        git(source.path(), &["add", "--all"]);
+        fs::create_dir_all(source.path().join(".homeboy/lab-at-files"))
+            .expect("runner metadata directory");
+        fs::write(source.path().join(".homeboy/runner-workspace.json"), "{}")
+            .expect("runner workspace metadata");
+        fs::write(source.path().join(".homeboy/lab-at-files/plan.json"), "{}")
+            .expect("Lab input metadata");
+        let mut add_args = vec!["add", "--all", "--", "."];
+        add_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
+        git(source.path(), &add_args);
         let tree = git_output(source.path(), &["write-tree"]).expect("candidate tree");
         git(source.path(), &["reset", "--mixed", "HEAD"]);
 
@@ -877,6 +892,56 @@ mod tests {
 
         assert!(patch.contains("tracked.txt"));
         assert!(patch.contains("untracked.txt"));
+        assert!(!patch.contains("runner-workspace.json"));
+        assert!(!patch.contains("lab-at-files"));
+    }
+
+    #[test]
+    fn runner_metadata_is_clean_but_unrelated_untracked_files_are_not() {
+        let workspace = tempfile::tempdir().expect("workspace repository");
+        git(workspace.path(), &["init", "-b", "main"]);
+        fs::write(workspace.path().join("tracked.txt"), "base").expect("base file");
+        git(workspace.path(), &["add", "tracked.txt"]);
+        git(
+            workspace.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        fs::create_dir_all(workspace.path().join(".homeboy/lab-at-files"))
+            .expect("runner metadata directory");
+        fs::write(
+            workspace.path().join(".homeboy/runner-workspace.json"),
+            "{}",
+        )
+        .expect("runner workspace metadata");
+        fs::write(
+            workspace.path().join(".homeboy/lab-at-files/plan.json"),
+            "{}",
+        )
+        .expect("Lab input metadata");
+
+        assert!(
+            git_status_ignoring_runner_metadata(workspace.path())
+                .expect("runner metadata status")
+                .is_empty(),
+            "runner-owned metadata must not make a candidate workspace dirty"
+        );
+
+        fs::write(workspace.path().join("user-output.txt"), "candidate")
+            .expect("unrelated untracked file");
+        let status = git_status_ignoring_runner_metadata(workspace.path())
+            .expect("candidate workspace status");
+        assert!(
+            status.contains("user-output.txt"),
+            "unrelated untracked files must still fail the cleanliness check: {status}"
+        );
     }
 
     fn git(cwd: &Path, args: &[&str]) {
