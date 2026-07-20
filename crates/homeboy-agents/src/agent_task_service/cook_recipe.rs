@@ -844,7 +844,7 @@ mod tests {
             _plan: AgentTaskPlan,
             _run_id: &str,
             _derived_cook_baseline: Option<
-                &crate::agent_task_service::cook::DerivedCookBaselineCapability,
+                &crate::agent_task_service::cook_baseline::DerivedCookBaselineCapability,
             >,
         ) -> Result<()> {
             Ok(())

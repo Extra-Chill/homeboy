@@ -19,7 +19,7 @@ use crate::agent_task_secrets::validate_secret_env_with_fallbacks;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::{config, worktree, Error, Result};
 
-use super::cook::DerivedCookBaselineCapability;
+use super::cook_baseline::DerivedCookBaselineCapability;
 use super::discovery::source_uri;
 
 #[derive(Debug, Clone)]
