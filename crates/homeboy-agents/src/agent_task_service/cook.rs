@@ -1824,7 +1824,7 @@ mod tests {
                 0
             );
             assert_eq!(
-                logs.events.last().map(|event| event.state),
+                logs.events.last().map(|event| event.status),
                 Some(AgentTaskState::Failed)
             );
             assert_eq!(retry.metadata["retry_of"], run_id);

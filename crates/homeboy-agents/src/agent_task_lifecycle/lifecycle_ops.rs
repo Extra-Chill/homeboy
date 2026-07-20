@@ -3058,26 +3058,38 @@ fn restore_initial_cook_candidate_workspace(plan: &mut AgentTaskPlan) -> Result<
 }
 
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
+    logs_with_raw(run_id, false)
+}
+
+pub fn logs_with_raw(run_id: &str, include_raw: bool) -> Result<AgentTaskRunLog> {
     // Status reconciliation fetches the live daemon snapshot for a bound Lab
     // child, making executor progress visible before the child is terminal.
     let record = status(run_id)?;
     let run_id = record.run_id.clone();
-    let (events, artifact_refs) = match store::read_aggregate(&run_id) {
+    let (events, artifact_refs, raw_events) = match store::read_aggregate(&run_id) {
         Ok(aggregate) => {
             let refs = artifact_refs_for_outcomes(&aggregate.outcomes);
-            (aggregate.events, refs)
+            (aggregate.events, refs, Vec::new())
         }
-        Err(_) => (
-            runner_job_progress_events(&record).unwrap_or_else(|| queued_events(&record.tasks)),
-            record.artifact_refs.clone(),
-        ),
+        Err(_) => {
+            let raw_events = runner_job_raw_events(&record);
+            (
+                runner_job_progress_events(&record).unwrap_or_else(|| queued_events(&record.tasks)),
+                record.artifact_refs.clone(),
+                raw_events,
+            )
+        }
     };
-    let normalized_events = normalize_progress_events(&run_id, &events, &artifact_refs);
+    let events = if raw_events.is_empty() {
+        normalize_progress_events(&run_id, &events, &artifact_refs)
+    } else {
+        normalize_runner_job_events(&run_id, &raw_events, &record, &artifact_refs)
+    };
     Ok(AgentTaskRunLog {
         schema: schemas::RUN_LOG.to_string(),
         run_id,
         events,
-        normalized_events,
+        raw_events: include_raw.then_some(raw_events).unwrap_or_default(),
     })
 }
 
@@ -3095,10 +3107,95 @@ fn runner_job_progress_events(record: &AgentTaskRunRecord) -> Option<Vec<AgentTa
                 task_id: task_id.clone(),
                 state: AgentTaskState::Running,
                 attempt: 0,
-                message: serde_json::to_string(event).ok(),
+                message: event
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        event
+                            .pointer("/data/message")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    }),
             })
             .collect(),
     )
+}
+
+fn runner_job_raw_events(record: &AgentTaskRunRecord) -> Vec<Value> {
+    record
+        .metadata
+        .get("runner_job_events")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn normalize_runner_job_events(
+    run_id: &str,
+    raw_events: &[Value],
+    record: &AgentTaskRunRecord,
+    artifact_refs: &[AgentTaskArtifactRef],
+) -> Vec<AgentTaskEventEnvelope> {
+    let task_id = record
+        .tasks
+        .first()
+        .map(|task| task.task_id.clone())
+        .unwrap_or_else(|| record.run_id.clone());
+    let provider = record
+        .provider_handles
+        .first()
+        .map(|handle| handle.backend.clone());
+
+    raw_events
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            let data = raw.get("data").cloned().unwrap_or(Value::Null);
+            let kind = raw
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("progress");
+            let phase =
+                string_field(&data, "phase").or_else(|| string_field(&record.metadata, "phase"));
+            let activity = string_field(&data, "activity")
+                .or_else(|| string_field(&data, "status_note"))
+                .or_else(|| string_field(&data, "progress"));
+            AgentTaskEventEnvelope {
+                schema: schemas::EVENT.to_string(),
+                run_id: run_id.to_string(),
+                task_id: task_id.clone(),
+                // The lifecycle cursor is positional and has always been one-based.
+                sequence: (index + 1) as u64,
+                event_type: format!("agent_task.runner_{kind}"),
+                status: AgentTaskState::Running,
+                message: raw
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| string_field(&data, "message")),
+                provider: string_field(&data, "provider")
+                    .or_else(|| string_field(&data, "backend"))
+                    .or_else(|| provider.clone()),
+                phase,
+                activity,
+                heartbeat_at_ms: matches!(kind, "progress" | "status")
+                    .then(|| raw.get("timestamp_ms").and_then(Value::as_u64))
+                    .flatten(),
+                progress: json!({ "attempt": 0 }),
+                artifact_refs: artifact_refs
+                    .iter()
+                    .filter(|reference| reference.task_id == task_id)
+                    .cloned()
+                    .collect(),
+                metadata: data,
+            }
+        })
+        .collect()
+}
+
+fn string_field(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {

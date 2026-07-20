@@ -754,7 +754,11 @@ fn logs_expose_mirrored_live_runner_events_before_terminal_aggregate() {
             kind: JobEventKind::Progress,
             timestamp_ms: 42,
             message: Some("provider started".to_string()),
-            data: Some(json!({"provider": "openai/gpt-5.6-terra"})),
+            data: Some(json!({
+                "provider": "openai/gpt-5.6-terra",
+                "phase": "implementing",
+                "activity": "editing lifecycle projection"
+            })),
         }]);
         store::write_record(&record).expect("persist mirrored event");
 
@@ -765,6 +769,28 @@ fn logs_expose_mirrored_live_runner_events_before_terminal_aggregate() {
             .message
             .as_deref()
             .is_some_and(|message| message.contains("provider started")));
+        assert_eq!(
+            log.events[0].provider.as_deref(),
+            Some("openai/gpt-5.6-terra")
+        );
+        assert_eq!(log.events[0].phase.as_deref(), Some("implementing"));
+        assert_eq!(
+            log.events[0].activity.as_deref(),
+            Some("editing lifecycle projection")
+        );
+        assert_eq!(log.events[0].heartbeat_at_ms, Some(42));
+        assert!(log.raw_events.is_empty(), "raw transport is opt-in");
+
+        let raw_log = logs_with_raw("live-runner-events", true).expect("raw logs resolve");
+        assert_eq!(
+            raw_log.events[0].metadata["provider"],
+            "openai/gpt-5.6-terra"
+        );
+        assert_eq!(raw_log.raw_events.len(), 1);
+        assert_eq!(
+            raw_log.raw_events[0]["data"]["activity"],
+            "editing lifecycle projection"
+        );
     });
 }
 
@@ -1333,7 +1359,7 @@ fn lifecycle_store_round_trips_record_log_artifacts_and_lifecycle_contract() {
             ArtifactRetentionStatus::Retained
         );
         assert_eq!(log.schema, schemas::RUN_LOG);
-        assert_eq!(log.events[0].state, AgentTaskState::Succeeded);
+        assert_eq!(log.events[0].status, AgentTaskState::Succeeded);
         assert_eq!(artifact_report.schema, schemas::RUN_ARTIFACTS);
         assert_eq!(artifact_report.artifacts[0].id, "patch");
         assert_eq!(artifact_report.evidence_refs[0].kind, "transcript");
@@ -1529,14 +1555,16 @@ fn logs_include_normalized_event_envelopes() {
 
         let log = logs("run-event-envelope").expect("logs");
 
-        assert_eq!(log.normalized_events.len(), 2);
-        assert_eq!(log.normalized_events[0].schema, schemas::EVENT);
-        assert_eq!(log.normalized_events[0].run_id, "run-event-envelope");
-        assert_eq!(log.normalized_events[0].task_id, "task-a");
-        assert_eq!(log.normalized_events[0].sequence, 1);
-        assert_eq!(log.normalized_events[0].status, AgentTaskState::Running);
-        assert_eq!(log.normalized_events[1].message.as_deref(), Some("ok"));
-        assert_eq!(log.normalized_events[1].artifact_refs.len(), 1);
+        assert_eq!(log.schema, "homeboy/agent-task-run-log/v2");
+        assert_eq!(log.events.len(), 2);
+        assert_eq!(log.events[0].schema, schemas::EVENT);
+        assert_eq!(log.events[0].run_id, "run-event-envelope");
+        assert_eq!(log.events[0].task_id, "task-a");
+        assert_eq!(log.events[0].sequence, 1);
+        assert_eq!(log.events[0].status, AgentTaskState::Running);
+        assert_eq!(log.events[1].message.as_deref(), Some("ok"));
+        assert_eq!(log.events[1].artifact_refs.len(), 1);
+        assert!(log.raw_events.is_empty());
     });
 }
 

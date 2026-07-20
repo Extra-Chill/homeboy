@@ -19,8 +19,8 @@ use homeboy::runner::runners::{self as runner, RunnerKind};
 
 use super::super::CmdResult;
 use super::args::{
-    CancelArgs, DiagnoseArgs, EvidenceArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs,
-    RuntimeValidateArgs, StatusArgs,
+    CancelArgs, DiagnoseArgs, EvidenceArgs, LogsArgs, ReplayProviderBoundaryArgs,
+    RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
 };
 use crate::commands::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandNextAction, CommandNextActionKind,
@@ -420,8 +420,12 @@ fn attach_actionable_metadata(value: &mut Value, metadata: CommandActionableMeta
     }
 }
 
-pub(super) fn logs(args: StatusArgs) -> CmdResult<Value> {
-    let log = agent_task_service::logs(&args.run_id)?;
+pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
+    let log = if args.raw {
+        agent_task_service_direct::logs_with_raw(&args.run_id)?
+    } else {
+        agent_task_service_direct::logs(&args.run_id)?
+    };
     let mut value = serde_json::to_value(log).unwrap_or(Value::Null);
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
     Ok((value, 0))
