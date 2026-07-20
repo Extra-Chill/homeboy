@@ -2929,7 +2929,8 @@ pub fn mark_resuming(run_id: &str) -> Result<AgentTaskRunRecord> {
 
 pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRunRecord> {
     let source = store::read_record(&resolve_run_id(run_id)?)?;
-    let plan = load_controller_plan(&source.run_id)?;
+    let mut plan = load_controller_plan(&source.run_id)?;
+    restore_initial_cook_candidate_workspace(&mut plan)?;
     let mut retry = submit_plan(&plan, requested_run_id)?;
     let metadata = retry.ensure_metadata_object();
     if let Some(route) =
@@ -2966,6 +2967,40 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
     metadata.insert("retry_requested_at".to_string(), json!(now_timestamp()));
     store::write_record(&retry)?;
     Ok(retry)
+}
+
+/// Cook's first dirty-candidate baseline is process-local and removed after a
+/// failed admission. A retry returns to the durable source checkout; scheduler
+/// preflight verifies its recorded tree before it creates a fresh attempt.
+fn restore_initial_cook_candidate_workspace(plan: &mut AgentTaskPlan) -> Result<()> {
+    for task in &mut plan.tasks {
+        let Some(baseline) = task.metadata.get("cook_initial_candidate_baseline") else {
+            continue;
+        };
+        let source_root = baseline
+            .get("source_root")
+            .and_then(Value::as_str)
+            .filter(|path| !path.trim().is_empty())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "workspace.metadata.cook_initial_candidate_baseline.source_root",
+                    "retry cannot reconstruct the original Cook candidate workspace",
+                    None,
+                    None,
+                )
+            })?;
+        if !std::path::Path::new(source_root).is_dir() {
+            return Err(Error::validation_invalid_argument(
+                "workspace.metadata.cook_initial_candidate_baseline.source_root",
+                format!("retry source workspace no longer exists: {source_root}"),
+                None,
+                None,
+            ));
+        }
+        task.workspace.root = Some(source_root.to_string());
+        task.executor.remap_workspace_root(source_root);
+    }
+    Ok(())
 }
 
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
