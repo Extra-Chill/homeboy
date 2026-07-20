@@ -26,7 +26,7 @@ use regex::Regex;
 use super::super::conventions::AuditFinding;
 use super::super::findings::{Finding, Severity};
 use super::super::fingerprint::FileFingerprint;
-use super::super::walker::is_test_path;
+use super::super::walker::{cfg_test_regions, is_test_path, offset_in_cfg_test_region};
 
 /// Minimum arg-vector length to consider. Single-element commands (`["init"]`,
 /// `["fetch"]`) are too generic to attribute to one wrapper.
@@ -158,7 +158,7 @@ fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Findi
         // ranges here and skip matches that fall inside them.
         let test_regions = cfg_test_regions(&fp.content);
         for m in argvec_regex().find_iter(&fp.content) {
-            if offset_in_any_region(m.start(), &test_regions) {
+            if offset_in_cfg_test_region(m.start(), &test_regions) {
                 continue;
             }
             let inner = argvec_regex()
@@ -247,59 +247,6 @@ fn thin_wrapper_bodies(content: &str) -> Vec<(String, String, usize)> {
         out.push((name, body.to_string(), body_start));
     }
     out
-}
-
-/// Byte ranges (start..end) of inline `#[cfg(test)]` blocks in `content`.
-///
-/// Matches a `#[cfg(test)]` attribute, then brace-matches the module/item that
-/// follows it. Both `#[cfg(test)] mod tests { … }` and `#[cfg(test)] fn … { … }`
-/// are covered. Ranges span from the attribute to the closing brace so any
-/// arg-vector inside is skipped by the finding pass.
-fn cfg_test_regions(content: &str) -> Vec<(usize, usize)> {
-    let bytes = content.as_bytes();
-    let mut regions = Vec::new();
-    let mut search_from = 0usize;
-    while let Some(rel) = content[search_from..].find("#[cfg(test)]") {
-        let attr_start = search_from + rel;
-        // Advance past this attribute for the next iteration regardless of
-        // whether we find a brace (avoids infinite loops on malformed input).
-        search_from = attr_start + "#[cfg(test)]".len();
-
-        // Find the first `{` after the attribute (skips `mod tests`, `fn …`,
-        // where-clauses, etc.). If none, the attribute closes an item with no
-        // block (e.g. `#[cfg(test)] use …;`) — nothing to exclude.
-        let Some(brace_rel) = content[search_from..].find('{') else {
-            continue;
-        };
-        let open = search_from + brace_rel;
-        let mut depth = 0i32;
-        let mut close = None;
-        for (i, &b) in bytes[open..].iter().enumerate() {
-            if b == b'{' {
-                depth += 1;
-            } else if b == b'}' {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(open + i);
-                    break;
-                }
-            }
-        }
-        if let Some(close) = close {
-            regions.push((attr_start, close));
-            // Continue searching after this block so sibling test modules and
-            // nested cfg(test) items are still discovered.
-            search_from = close + 1;
-        }
-    }
-    regions
-}
-
-/// Whether `offset` falls within any `(start, end)` region.
-fn offset_in_any_region(offset: usize, regions: &[(usize, usize)]) -> bool {
-    regions
-        .iter()
-        .any(|(start, end)| offset >= *start && offset <= *end)
 }
 
 #[cfg(test)]
