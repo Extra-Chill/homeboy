@@ -16,7 +16,10 @@ fn changed_since_retry_route_materializes_private_unavailable_origin_from_bundle
         let author = tempfile::tempdir().expect("author tempdir");
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        git(origin.path(), &["init", "--bare"]);
+        // Initialize the bare origin on `main` so its HEAD symref matches the
+        // author's branch; without it git falls back to the host default branch
+        // (often `master`), breaking base-ref resolution against the origin.
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
         git(origin.path(), &["config", "uploadpack.allowFilter", "true"]);
         git(author.path(), &["init", "-b", "main"]);
         git(author.path(), &["config", "user.email", "test@example.com"]);

@@ -494,6 +494,20 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
         let broker_url = format!("http://{addr}");
 
         let stable_run_id = "agent-task-run-123";
+        // The reverse-broker submission records a submission request against the
+        // controller's durable run, so materialize that controller proxy record
+        // first (mirroring the controller submitting the plan before the runner
+        // handoff) rather than leaving the submission to fail on a missing record.
+        homeboy_agents::agent_task_lifecycle::record_lab_offload_planned(
+            homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
+                run_id: stable_run_id,
+                runner_id: "lab",
+                remote_workspace: "/srv/homeboy/project",
+                remote_command: &["homeboy".to_string(), "test".to_string()],
+                durable_plan: None,
+            },
+        )
+        .expect("controller proxy run recorded before reverse-broker handoff");
         let (output, exit_code) = exec_via_reverse_broker(
             &ssh_runner(),
             &broker_url,

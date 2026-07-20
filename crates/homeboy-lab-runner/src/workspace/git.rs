@@ -429,8 +429,16 @@ fn refetch_controller_bundle_commits(
     remote: &str,
     refs: &[String],
 ) -> Result<()> {
+    // Fetch only the closure of the requested refs. `--refetch` was used here to
+    // reapply the partial-clone filter, but it "fetches all objects as a fresh
+    // clone would" (git-fetch(1)), re-pulling objects reachable from unrelated
+    // refs the server happens to pack alongside the requested ones. That
+    // over-fetch is non-deterministic and violated the changed-scope contract
+    // that the controller must hydrate only the promised base/head closure.
+    // Naming the exact refs completes their closure through the promisor
+    // transport without re-fetching unrelated history.
     let output = Command::new("git")
-        .args(["fetch", "--refetch", "--no-tags", "--filter=blob:none"])
+        .args(["fetch", "--no-tags", "--filter=blob:none"])
         .arg(remote)
         .args(refs)
         .current_dir(local_path)
