@@ -180,6 +180,7 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
 
     store::write_record(&record)?;
+    homeboy_core::controller_runtime::cancel_admission(&record.run_id)?;
     Ok(record)
 }
 

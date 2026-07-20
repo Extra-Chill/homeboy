@@ -1888,7 +1888,7 @@ mod tests {
             run_id: &str,
             _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
         ) -> Result<()> {
-            agent_task_lifecycle::submit_plan_with_runtime_admission(&plan, Some(run_id), || {
+            agent_task_lifecycle::submit_plan_with_runtime_admission(&plan, Some(run_id), |_| {
                 Err::<Value, _>(Error::validation_invalid_argument(
                     "controller_admission",
                     self.message,
