@@ -114,6 +114,7 @@
         "provider_owned_auth",
         "provider_owned_session",
         "provider_owned_cancellation",
+        "live_progress_events",
         "nested_orchestrator",
         "run_scoped_scratch"
       ],

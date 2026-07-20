@@ -97,6 +97,7 @@ assert.equal(provider.redacted_metadata_keys.includes('opencode_auth'), true);
 assert.equal(provider.capabilities.includes('repo_workspace'), true);
 assert.equal(provider.capabilities.includes('patch_artifacts'), true);
 assert.equal(provider.capabilities.includes('run_scoped_scratch'), true);
+assert.equal(provider.capabilities.includes('live_progress_events'), true);
 assert.equal(provider.capabilities.includes('browser_runtime'), false);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'opencode.json'), 'utf8'));
@@ -765,8 +766,12 @@ process.exit(0);
 	assert.equal(recoveredResult.failure_classification, undefined);
 	assert.equal(recoveredResult.failure_code, undefined);
 	assert.equal(recoveredResult.metadata.denied_tool_call, undefined);
-	assert.deepEqual(recoveredResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'opencode-runtime-stdout', 'patch', 'transcript']);
+	assert.deepEqual(recoveredResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'opencode-runtime-stdout', 'patch', 'progress_events', 'transcript']);
 	assert.equal(recoveredResult.diagnostics.some((diagnostic) => diagnostic.class === 'opencode.policy_denied'), false);
+	assert.deepEqual(recoveredResult.metadata.opencode_progress, { emitted: 1, coalesced_or_dropped: 0, last_type: 'command.failed' });
+	const recoveredProgress = fs.readFileSync(recoveredResult.artifacts.find((artifact) => artifact.name === 'progress_events').path, 'utf8');
+	assert.match(recoveredProgress, /"type":"command.failed"/);
+	assert.equal(recoveredProgress.includes('/tmp'), false);
 	const recoveredAgentResult = JSON.parse(fs.readFileSync(recoveredResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
 	assert.equal(recoveredAgentResult.status, 'succeeded');
 	assert.equal(recoveredAgentResult.failure_classification, undefined);
@@ -805,7 +810,7 @@ process.exit(1);
 	assert.equal(deniedResult.failure_category, 'task.policy_denied');
 	assert.equal(deniedResult.retryable, false);
 	assert.equal(deniedResult.metadata.missing_declared_artifacts, undefined);
-	assert.deepEqual(deniedResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'opencode-runtime-stdout', 'patch', 'transcript']);
+	assert.deepEqual(deniedResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'opencode-runtime-stdout', 'patch', 'progress_events', 'transcript']);
 	assert.deepEqual(deniedResult.metadata.denied_tool_call, {
 		tool: 'bash',
 		command: 'cd /tmp && git clone https://example.invalid/private.git',

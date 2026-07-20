@@ -62,3 +62,23 @@ command args may be supplied with
 
 The outcome includes status, diagnostics, and bounded metadata. It intentionally
 does not include raw child stdout, stderr, argv, or secret environment values.
+
+## Live Progress
+
+While OpenCode runs, the executor translates its JSONL tool frames into
+`homeboy/agent-task-progress/v1` envelopes. Each envelope has a stable per-run
+`sequence` and `cursor`, a runtime-neutral activity type, and structured bounded
+data. The executor writes them to `progress_events_path` (or its run artifact
+directory) and also delivers them through the optional `onProgress` callback.
+
+The adapter exposes tool, command, file, retry, and provider activity only. It
+omits model messages and reasoning, redacts declared secret values and secret-like
+command assignments, converts workspace paths to relative paths, and replaces all
+other absolute paths with `<private-path>`. Repeated frames are coalesced and the
+stream is capped at `max_progress_events` (default 200). The terminal result records
+the same event summary and exposes `progress_events` when events were emitted.
+
+This is the runtime-side producer for Homeboy #8282. Homeboy must ingest the JSONL
+file or callback as its single canonical structured event stream, preserving the
+cursor rather than serializing frames into log messages; that adoption is tracked by
+Homeboy #9162.

@@ -14,6 +14,9 @@ const {
 	createCliAgentTaskExecutor,
 	timeoutSecondsFromLimits,
 } = require('../../lib/cli-agent-task-executor');
+const {
+	createOpenCodeProgressAdapter,
+} = require('./opencode-progress-events');
 
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -70,6 +73,7 @@ const OPENCODE_CAPABILITIES = [
 	'provider_owned_auth',
 	'provider_owned_session',
 	'provider_owned_cancellation',
+	'live_progress_events',
 	'nested_orchestrator',
 	'run_scoped_scratch',
 ];
@@ -471,6 +475,7 @@ function opencodeSuccessOutcome(context) {
 		metadata: {
 			exit_code: 0,
 			opencode_session: sessionMetadata(context),
+			opencode_progress: progressMetadata(context),
 		},
 		...collectOpenCodeArtifacts(context),
 	});
@@ -487,6 +492,7 @@ function opencodeFailureOutcome(context) {
 			exit_code: context.spawnResult.status,
 			...(context.spawnResult.signal ? { signal: context.spawnResult.signal } : {}),
 			opencode_session: sessionMetadata(context),
+			opencode_progress: progressMetadata(context),
 		},
 		...collectOpenCodeArtifacts(context),
 	});
@@ -680,6 +686,7 @@ function collectOpenCodeArtifacts(context = {}) {
 			transcript: transcript !== '',
 		},
 		opencode_session: sessionMetadata(context),
+		opencode_progress: progressMetadata(context),
 	}, null, 2);
 
 	for (const requirement of requirements) {
@@ -689,6 +696,12 @@ function collectOpenCodeArtifacts(context = {}) {
 			addArtifact(requirement, `${safeFileSegment(request.task_id)}-opencode-transcript.txt`, transcript, 'agent-runtime-transcript');
 		} else if (requirement.name === 'agent_result') {
 			addArtifact(requirement, `${safeFileSegment(request.task_id)}-opencode-result.json`, `${resultEnvelope}\n`, 'json');
+		} else if (requirement.name === 'progress_events') {
+			const progressPath = context.progressEventPath;
+			if (progressPath && fs.existsSync(progressPath) && fs.statSync(progressPath).size > 0) {
+				const progress = fs.readFileSync(progressPath, 'utf8');
+				addArtifact(requirement, `${safeFileSegment(request.task_id)}-opencode-progress.jsonl`, progress, 'agent-task-progress');
+			}
 		}
 	}
 
@@ -732,6 +745,18 @@ function collectOpenCodeRuntimeLogs(context = {}) {
 	return { artifacts, evidence_refs };
 }
 
+function collectOpenCodeProgressEvents(context = {}) {
+	const filePath = context.progressEventPath;
+	if (!filePath || !fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
+		return {};
+	}
+	const bytes = fs.statSync(filePath).size;
+	return {
+		artifacts: [{ id: 'progress_events', name: 'progress_events', kind: 'agent-task-progress', path: filePath, bytes }],
+		evidence_refs: [{ kind: 'agent-task-progress', label: 'OpenCode progress events', uri: fileUri(filePath) }],
+	};
+}
+
 function fileUri(filePath) {
 	return `file://${filePath}`;
 }
@@ -746,6 +771,10 @@ function mergeEvidence(primary = {}, secondary = {}) {
 function sessionMetadata(context = {}) {
 	const explicit = context.spawnResult?.opencode_session || context.spawnResult?.opencodeSession;
 	return explicit && typeof explicit === 'object' && !Array.isArray(explicit) ? explicit : OPENCODE_SESSION_METADATA_ABSENT;
+}
+
+function progressMetadata(context = {}) {
+	return context.spawnResult?.progress || { emitted: 0, coalesced_or_dropped: 0, last_type: '' };
 }
 
 function gitRevision(cwd) {
@@ -790,6 +819,7 @@ function canonicalArtifactRequirements(request = {}) {
 		{ name: 'patch', kind: 'git-diff', required: true },
 		{ name: 'transcript', kind: 'agent-runtime-transcript', required: true },
 		{ name: 'agent_result', kind: 'json', required: true },
+		{ name: 'progress_events', kind: 'agent-task-progress', required: false },
 	];
 	const declared = uniqueDeclaredArtifactRequirements(request);
 	return [...canonical, ...declared].filter((requirement, index, all) => (
@@ -909,6 +939,7 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 	const spawnExtra = { env: { ...opencodeSpawnEnv(request, options), PWD: cwd } };
 	const timeoutSeconds = timeoutSecondsFromLimits(request.limits, config.timeout_seconds);
 	const runtimeLogPaths = openCodeRuntimeLogPaths(request, config);
+	const progressEventPath = openCodeProgressEventPath(request, config);
 	const initialRevision = gitRevision(cwd);
 	const spawnResult = await spawnOpenCodeStreaming(commandSpec.command, args, {
 		cwd,
@@ -916,9 +947,18 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 		timeoutMs: timeoutSeconds > 0 ? timeoutSeconds * 1000 : 0,
 		runtimeLogPaths,
 		diagnosticLogPath: openCodeDiagnosticLogPath(config, spawnExtra.env),
+		progress: createOpenCodeProgressAdapter({
+			taskId: request.task_id,
+			cwd,
+			env: spawnExtra.env,
+			filePath: progressEventPath,
+			maxEvents: config.max_progress_events || config.maxProgressEvents,
+			onProgress: options.onProgress || options.on_progress,
+		}),
 	});
-	const context = { request, config, commandSpec, cwd, initialRevision, spawnResult, spawnExtra, runtimeLogPaths };
+	const context = { request, config, commandSpec, cwd, initialRevision, spawnResult, spawnExtra, runtimeLogPaths, progressEventPath };
 	const runtimeLogs = collectOpenCodeRuntimeLogs(context);
+	const progressEvidence = collectOpenCodeProgressEvents(context);
 
 	if (spawnResult.error?.code === 'ENOENT') {
 		return outcome(request, {
@@ -927,7 +967,8 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 			failure_code: 'agent_task.opencode_command_not_found',
 			summary: 'OpenCode command was not found.',
 			diagnostics: [{ classification: 'provider_setup', message: 'Install opencode or configure executor.config.command.' }],
-			...runtimeLogs,
+			metadata: { opencode_progress: progressMetadata(context) },
+			...mergeEvidence(runtimeLogs, progressEvidence),
 		});
 	}
 
@@ -944,8 +985,8 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 				classification: fatalRuntimeError?.classification || (timedOut ? 'timeout' : 'provider_setup'),
 				message: spawnResult.error.message,
 			}],
-			metadata: { opencode_session: sessionMetadata(context) },
-			...runtimeLogs,
+			metadata: { opencode_session: sessionMetadata(context), opencode_progress: progressMetadata(context) },
+			...mergeEvidence(runtimeLogs, progressEvidence),
 		});
 	}
 
@@ -987,6 +1028,15 @@ function openCodeRuntimeLogPaths(request = {}, config = {}) {
 		stdout: path.join(artifactDir, `${safeFileSegment(request.task_id)}-opencode-runtime-stdout.log`),
 		stderr: path.join(artifactDir, `${safeFileSegment(request.task_id)}-opencode-runtime-stderr.log`),
 	};
+}
+
+function openCodeProgressEventPath(request = {}, config = {}) {
+	const configured = config.progress_events_path || config.progressEventsPath || request.progress_events_path || request.progressEventsPath || process.env.HOMEBOY_AGENT_TASK_PROGRESS_EVENTS_FILE || '';
+	if (configured) {
+		return configured;
+	}
+	const artifactDir = resolveArtifactDir({ request, config });
+	return artifactDir ? path.join(artifactDir, `${safeFileSegment(request.task_id)}-opencode-progress.jsonl`) : '';
 }
 
 function openCodeDiagnosticLogPath(config = {}, env = process.env) {
@@ -1047,6 +1097,7 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			if (filePath) {
 				fs.appendFileSync(filePath, content);
 			}
+			options.progress?.consume(stream, content);
 			fatalStreamBuffers[stream] = `${fatalStreamBuffers[stream]}${content}`.slice(-1200);
 			const matched = findOpenCodeFatalRuntimeError(fatalStreamBuffers[stream]);
 			if (matched) {
@@ -1071,6 +1122,7 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			resolve({
 				stdout: stdoutChunks.join(''),
 				stderr: stderrChunks.join(''),
+				progress: options.progress?.finish() || { emitted: 0, coalesced_or_dropped: 0, last_type: '' },
 				...(fatalRuntimeError ? { fatalRuntimeError } : {}),
 				...result,
 			});
