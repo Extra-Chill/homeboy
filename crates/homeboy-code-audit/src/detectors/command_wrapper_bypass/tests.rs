@@ -86,3 +86,44 @@ fn does_not_treat_a_dynamic_arg_wrapper_as_canonical() {
         "a wrapper taking a dynamic arg is not a fixed-command canonical wrapper"
     );
 }
+
+#[test]
+fn ignores_argvectors_inside_inline_cfg_test_blocks() {
+    let helper = fp(
+        "src/git/x.rs",
+        "pub fn head_sha(p: &Path) -> Option<String> {\n    output_optional(p, &[\"rev-parse\", \"HEAD\"])\n}\n",
+    );
+    // A production file whose ONLY raw arg-vector lives in its inline
+    // `#[cfg(test)] mod tests { … }` block — a fixture reading a freshly-built
+    // repo, not production command drift.
+    let production_with_inline_tests = fp(
+        "src/agent/materialization.rs",
+        "fn prod(p: &str) {\n    do_something(p);\n}\n\n#[cfg(test)]\nmod tests {\n    fn setup(p: &str) {\n        let head = git(p, &[\"rev-parse\", \"HEAD\"]);\n    }\n}\n",
+    );
+    assert!(
+        detect_command_wrapper_bypass(&[&helper, &production_with_inline_tests]).is_empty(),
+        "raw arg-vectors inside inline #[cfg(test)] blocks are test fixtures, not bypasses"
+    );
+}
+
+#[test]
+fn still_flags_production_argvector_alongside_an_inline_test_block() {
+    let helper = fp(
+        "src/git/x.rs",
+        "pub fn head_sha(p: &Path) -> Option<String> {\n    output_optional(p, &[\"rev-parse\", \"HEAD\"])\n}\n",
+    );
+    // Same file has a REAL production bypass plus a test-only arg-vector; only
+    // the production site is flagged, proving the cfg(test) skip is scoped to
+    // the test region and doesn't suppress legitimate findings.
+    let mixed = fp(
+        "src/agent/materialization.rs",
+        "fn prod(p: &str) {\n    let head = git(p, &[\"rev-parse\", \"HEAD\"]);\n}\n\n#[cfg(test)]\nmod tests {\n    fn setup(p: &str) {\n        let h = git(p, &[\"rev-parse\", \"HEAD\"]);\n    }\n}\n",
+    );
+    let findings = detect_command_wrapper_bypass(&[&helper, &mixed]);
+    assert_eq!(
+        findings.len(),
+        1,
+        "the production bypass is flagged, the inline-test one is not"
+    );
+    assert_eq!(findings[0].file, "src/agent/materialization.rs");
+}
