@@ -1148,6 +1148,27 @@ fn skeleton_duplicate_ignores_group_with_one_shared_structural_hash() {
 }
 
 #[test]
+fn skeleton_duplicate_suppresses_large_idiomatic_groups() {
+    // Six functions sharing one skeleton = an idiomatic shape (e.g. an
+    // `.iter().map().collect()` accessor), not a reimplemented primitive.
+    let fps: Vec<FileFingerprint> = (0..6)
+        .map(|i| {
+            make_fingerprint_with_skeleton(
+                &format!("crates/c{i}/src/x{i}.rs"),
+                &[&format!("accessor_{i}")],
+                &[(&format!("accessor_{i}"), &format!("struct{i}"))],
+                &[(&format!("accessor_{i}"), "6:skelSAME")],
+            )
+        })
+        .collect();
+    let refs: Vec<&FileFingerprint> = fps.iter().collect();
+    assert!(
+        detect_skeleton_duplicates(&refs).is_empty(),
+        "a skeleton shared by many unrelated functions must be treated as idiomatic, not duplication"
+    );
+}
+
+#[test]
 fn skeleton_duplicate_respects_token_floor_and_generic_names() {
     // Below the token floor -> ignored.
     let below = make_fingerprint_with_skeleton(

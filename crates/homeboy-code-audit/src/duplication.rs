@@ -546,6 +546,13 @@ pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<F
 /// produced by an older engine.
 const SKELETON_MIN_TOKENS: usize = 4;
 
+/// Maximum locations a skeleton group may span before it is treated as an
+/// idiomatic shape rather than a reimplemented primitive. A backbone shared by
+/// more than a handful of unrelated functions (trivial accessor/`collect`
+/// chains, uniform JSON builders) is boilerplate, not consolidatable
+/// duplication; primitive-reimplementation clusters are small.
+const SKELETON_MAX_GROUP: usize = 4;
+
 /// Split a stored skeleton value (`"<token_count>:<hash>"`) into its parts.
 fn parse_skeleton_value(value: &str) -> Option<(usize, &str)> {
     let (count, hash) = value.split_once(':')?;
@@ -611,6 +618,17 @@ pub(crate) fn detect_skeleton_duplicates(fingerprints: &[&FileFingerprint]) -> V
         // Group must span at least two files.
         let distinct_files: HashSet<&str> = locations.iter().map(|(f, _, _)| *f).collect();
         if distinct_files.len() < MIN_DUPLICATE_LOCATIONS {
+            continue;
+        }
+
+        // A skeleton shared by *many* unrelated functions is an idiomatic shape
+        // (e.g. `.iter().map().collect()` accessor chains, `json!`-building
+        // helpers), not a reimplemented primitive. Those large groups are noise
+        // — consolidating a dozen unrelated one-liners behind one signature is
+        // never the right call — so cap the group size. Real
+        // primitive-reimplementation clusters (the scattered `git_output` /
+        // `run_git` family) are small and stay well under this ceiling.
+        if locations.len() > SKELETON_MAX_GROUP {
             continue;
         }
 
