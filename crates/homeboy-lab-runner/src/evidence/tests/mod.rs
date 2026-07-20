@@ -6,7 +6,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{Runner, RunnerKind};
-use homeboy_core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobEventKind, JobStatus};
+use homeboy_core::api_jobs::{
+    Job, JobArtifactMetadata, JobEvent, JobEventKind, JobStatus, RunnerJobLifecycleMetadata,
+    RunnerJobProjection,
+};
 use homeboy_core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use homeboy_core::server::{RunnerPolicy, RunnerSettings};
 
@@ -834,5 +837,70 @@ fn test_explicit_observation_run_ids_prefers_result_lineage() {
             "run-from-job".to_string(),
             "run-from-ref".to_string(),
         ]
+    );
+}
+
+#[test]
+fn terminal_mirroring_keeps_overlapping_jobs_and_artifacts_bound_to_their_durable_runs() {
+    let mut first = Job {
+        id: Uuid::new_v4(),
+        operation: "runner.exec".to_string(),
+        status: JobStatus::Succeeded,
+        created_at_ms: 1_700_000_000_000,
+        updated_at_ms: 1_700_000_001_000,
+        started_at_ms: Some(1_700_000_000_000),
+        finished_at_ms: Some(1_700_000_001_000),
+        event_count: 0,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        stale_reason: None,
+        daemon_lease_id: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: vec![JobArtifactMetadata {
+            id: "first-result".to_string(),
+            name: Some("fuzz_results".to_string()),
+            path: Some("runner-artifact://lab/first-run/first-result".to_string()),
+            url: None,
+            mime: None,
+            size_bytes: None,
+            sha256: None,
+            content_base64: None,
+            metadata: None,
+        }],
+        runner_job_projection: None,
+    };
+    let mut second = first.clone();
+    second.id = Uuid::new_v4();
+    second.artifacts[0].id = "second-result".to_string();
+    second.artifacts[0].path = Some("runner-artifact://lab/second-run/second-result".to_string());
+
+    for (job, run_id) in [(&mut first, "first-run"), (&mut second, "second-run")] {
+        job.runner_job_projection = Some(RunnerJobProjection {
+            runner_id: "lab".to_string(),
+            command: "homeboy fuzz run".to_string(),
+            cwd: Some("/srv/homeboy/project".to_string()),
+            source: "runner-daemon".to_string(),
+            kind: "runner.exec".to_string(),
+            lifecycle: Some(RunnerJobLifecycleMetadata {
+                durable_run_id: Some(run_id.to_string()),
+                ..Default::default()
+            }),
+        });
+    }
+
+    // Both jobs occupy the same terminal window. Each terminal mirror must use
+    // its accepted durable run and artifact reference, never the other job's.
+    assert_eq!(
+        explicit_observation_run_ids(&json!({}), &first),
+        vec!["first-run".to_string()]
+    );
+    assert_eq!(
+        explicit_observation_run_ids(&json!({}), &second),
+        vec!["second-run".to_string()]
     );
 }

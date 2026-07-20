@@ -15,7 +15,6 @@ use super::super::execution::{canonical_daemon_body, daemon_api_get, result_even
 use super::super::{load, Runner};
 use super::detail::{
     explicit_observation_run_ids, remote_detail_artifacts, remote_detail_to_run_record,
-    remote_run_matches_job_window,
 };
 use super::tokens::{is_retrievable_runner_artifact, runner_artifact_token};
 use super::util::{
@@ -428,38 +427,10 @@ fn mirror_remote_observation_runs(
         );
     }
 
-    let data = daemon_api_get(&runner.id, "/runs?limit=100")?;
-    let body = canonical_daemon_body(&data, "runner runs response")?;
-    let Some(remote_runs) = body.get("runs").and_then(Value::as_array) else {
-        return Ok(Vec::new());
-    };
-    let mut mirrored = Vec::new();
-    for summary in remote_runs {
-        let Some(run_id) = summary.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        if !remote_run_matches_job_window(summary, job) {
-            continue;
-        }
-        let detail_data = daemon_api_get(
-            &runner.id,
-            &format!("/runs/{}", encode_uri_component(run_id)),
-        )?;
-        let detail_body = canonical_daemon_body(&detail_data, "runner run detail response")?;
-        let Some(detail) = detail_body.get("run") else {
-            continue;
-        };
-        let mut run = remote_detail_to_run_record(detail, runner, Some(job))?;
-        if let Some(notification_route) = notification_route {
-            notification_route.insert_into_metadata(&mut run.metadata_json);
-        }
-        import_run_if_absent(store, &run)?;
-        for artifact in remote_detail_artifacts(detail, runner, &run.id)? {
-            import_mirrored_artifact(store, &artifact)?;
-        }
-        mirrored.push(run);
-    }
-    Ok(mirrored)
+    // A timestamp window can contain unrelated concurrent runner work. Without
+    // a result, artifact, or submitted durable-run reference, the job mirror is
+    // the only evidence whose ownership is proven.
+    Ok(Vec::new())
 }
 
 fn mirror_remote_observation_runs_by_id(
