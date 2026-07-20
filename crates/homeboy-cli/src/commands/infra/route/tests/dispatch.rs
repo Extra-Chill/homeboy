@@ -1211,6 +1211,95 @@ fn retry_handoff_refuses_multiple_task_workspaces() {
 }
 
 #[test]
+fn retry_prefers_managed_worktree_over_cleaned_up_ephemeral_baseline() {
+    crate::test_support::with_isolated_home(|_| {
+        // The authoritative managed worktree the cook was anchored to. It
+        // outlives the attempt and stays a real git checkout.
+        let managed = tempfile::tempdir().expect("managed worktree");
+        git_init(managed.path());
+        homeboy::core::worktree::adopt(homeboy::core::worktree::WorktreeAdoptOptions {
+            handle: "fixture@cook".to_string(),
+            path: managed.path().display().to_string(),
+            kind: None,
+            provenance: None,
+        })
+        .expect("adopt managed worktree");
+
+        // The ephemeral initial-baseline directory the original plan recorded
+        // as workspace.root, then cleaned up before retry.
+        let ephemeral = tempfile::tempdir().expect("ephemeral baseline");
+        let ephemeral_root = ephemeral.path().to_path_buf();
+        git_init(&ephemeral_root);
+        drop(ephemeral); // simulate baseline cleanup: the path no longer exists.
+        assert!(!ephemeral_root.exists());
+
+        // The persisted task still carries both the dead ephemeral root and the
+        // durable managed worktree handle (its slug).
+        let task: homeboy::agents::agent_tasks::AgentTaskRequest =
+            serde_json::from_value(serde_json::json!({
+                "task_id": "cook-task",
+                "executor": { "backend": "fixture" },
+                "instructions": "retry",
+                "workspace": { "root": ephemeral_root, "slug": "fixture@cook" }
+            }))
+            .expect("task");
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            "cleaned-up-baseline",
+            vec![task],
+        );
+
+        let resolved = retry_plan_primary_workspace(&plan)
+            .expect("retry resolves the managed worktree despite the cleaned-up baseline");
+        let expected = homeboy::core::git::repo_root(managed.path()).expect("managed git root");
+        assert_eq!(
+            resolved, expected,
+            "retry must continue against the managed worktree, never the deleted ephemeral baseline"
+        );
+    });
+}
+
+#[test]
+fn retry_reports_recoverable_state_when_the_managed_worktree_is_gone() {
+    crate::test_support::with_isolated_home(|_| {
+        // A managed worktree was recorded, then its checkout removed from disk
+        // while the record still points at it.
+        let managed = tempfile::tempdir().expect("managed worktree");
+        let managed_path = managed.path().to_path_buf();
+        git_init(&managed_path);
+        homeboy::core::worktree::adopt(homeboy::core::worktree::WorktreeAdoptOptions {
+            handle: "fixture@gone".to_string(),
+            path: managed_path.display().to_string(),
+            kind: None,
+            provenance: None,
+        })
+        .expect("adopt managed worktree");
+        drop(managed);
+        assert!(!managed_path.exists());
+
+        let task: homeboy::agents::agent_tasks::AgentTaskRequest =
+            serde_json::from_value(serde_json::json!({
+                "task_id": "cook-task",
+                "executor": { "backend": "fixture" },
+                "instructions": "retry",
+                "workspace": { "slug": "fixture@gone" }
+            }))
+            .expect("task");
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            "missing-worktree",
+            vec![task],
+        );
+
+        let error = retry_plan_primary_workspace(&plan)
+            .expect_err("a missing managed worktree must return a precise recoverable state");
+        assert!(
+            error.message.contains("points at a missing checkout"),
+            "unexpected error: {}",
+            error.message
+        );
+    });
+}
+
+#[test]
 fn retry_handoff_identifies_an_original_plan_without_a_workspace() {
     crate::test_support::with_isolated_home(|_| {
         let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
