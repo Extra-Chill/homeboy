@@ -616,6 +616,88 @@ fn preacceptance_snapshot_rejects_a_different_bound_daemon_job() {
 }
 
 #[test]
+fn foreground_terminal_projection_binds_a_pending_handoff_before_validation() {
+    // Issue #9240: an accepted Lab job can reach an authoritative terminal
+    // daemon snapshot before the controller has persisted its accepted runner
+    // job id. `project_terminal_runner_result` must bind the still-pending
+    // controller handoff to that snapshot's daemon job before validating
+    // identity, rather than rejecting a valid terminal snapshot against an empty
+    // controller job id.
+    with_isolated_home(|_| {
+        let run_id = "cook-terminal-preacceptance-bind";
+        let plan = test_plan();
+        let record = record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "lab_handoff_preacceptance",
+            Some("/runner/workspace/homeboy"),
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("persist pending controller handoff");
+        assert!(
+            record.runner_job_id().is_none(),
+            "handoff must still be unbound before the terminal snapshot arrives"
+        );
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
+        let accepted_job_id = snapshot.job.id.to_string();
+        // Point the terminal child lifecycle event at this controller run so the
+        // downstream child-identity validation sees the run/job the bind
+        // establishes from the same snapshot.
+        let identity = &mut snapshot.events[0].data.as_mut().expect("event data")["identity"];
+        identity["run_id"] = json!(run_id);
+        identity["persisted_run_id"] = json!(run_id);
+
+        let projected = project_terminal_runner_result(run_id, &snapshot)
+            .expect("terminal snapshot binds the pending handoff before validation");
+        assert!(
+            projected,
+            "authoritative terminal snapshot projects the run"
+        );
+
+        let bound = status(run_id).expect("bound terminal projection");
+        assert_eq!(bound.runner_job_id(), Some(accepted_job_id.as_str()));
+        assert_eq!(bound.state, AgentTaskRunState::Succeeded);
+    });
+}
+
+#[test]
+fn snapshot_validation_reports_missing_controller_identity_distinctly() {
+    // Issue #9240: when the controller has never established an accepted runner
+    // job identity and no pending handoff can bind one, snapshot validation must
+    // surface the missing identity as its own diagnostic instead of comparing a
+    // valid runner UUID against an empty string and presenting it as a spurious
+    // "does not match controller job " mismatch.
+    with_isolated_home(|_| {
+        let run_id = "cook-terminal-no-identity";
+        let plan = test_plan();
+        // A freshly submitted run has no lab handoff and no metadata
+        // runner_job_id: there is no controller identity to validate against and
+        // no pending handoff to bind one from.
+        let record = submit_plan(&plan, Some(run_id)).expect("submitted");
+        assert!(record.lab_handoff.is_none());
+        assert!(record.runner_job_id().is_none());
+
+        let snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
+        let error = project_terminal_runner_result(&record.run_id, &snapshot)
+            .expect_err("missing controller identity fails closed with a distinct diagnostic");
+
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert!(
+            error.message.contains("no accepted runner job identity"),
+            "expected a missing-identity diagnostic, got: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("does not match controller job"),
+            "missing identity must not be presented as a runner mismatch: {}",
+            error.message
+        );
+    });
+}
+
+#[test]
 fn missing_lab_attempt_plan_is_recovered_before_handoff_or_terminalized() {
     with_isolated_home(|_| {
         let run_id = "cook-8096-attempt-1";
