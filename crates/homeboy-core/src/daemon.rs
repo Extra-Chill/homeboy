@@ -1996,6 +1996,9 @@ fn enqueue_exec_job(
             Some(run_ref_metadata),
             path_materialization_plan.clone(),
             local_runner,
+            lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.durable_run_id.clone()),
             capacity,
             move |job| {
                 let mut plan = plan;
@@ -2318,6 +2321,72 @@ mod tests {
                 0,
                 "a failed or timed-out handoff leaves no active admission job"
             );
+        });
+    }
+
+    #[test]
+    fn direct_daemon_exec_consumes_its_matching_admission_before_returning_identity() {
+        with_isolated_home(|_| {
+            register_enqueue_test_driver();
+            let lease_id = "lease-direct-handoff";
+            let run_id = "cook-9061-attempt-1";
+            write_test_lease(lease_id);
+            let store = JobStore::default();
+            let reservation = reserve_admission(
+                Some(json!({
+                    "runner_id": "lab",
+                    "command": "homeboy agent-task run-plan",
+                    "expected_daemon_lease_id": lease_id,
+                    "idempotency_key": run_id,
+                    "admission_lease_protocol": 1,
+                })),
+                &store,
+            )
+            .expect("reserve controller handoff");
+            let admission_id = reservation["job"]["id"]
+                .as_str()
+                .expect("admission identity")
+                .to_string();
+
+            let accepted = enqueue_exec_job(
+                Some(json!({
+                    "runner_id": "lab",
+                    "cwd": "/tmp",
+                    "command": ["homeboy", "agent-task", "run-plan"],
+                    "idempotency_key": run_id,
+                    "lifecycle": {
+                        "durable_run_id": run_id,
+                        "source": "runner-daemon",
+                        "kind": "runner.exec",
+                    },
+                })),
+                &store,
+            )
+            .expect("daemon accepts execution");
+            let execution_id = accepted["job"]["id"].as_str().expect("execution identity");
+
+            assert_ne!(execution_id, admission_id);
+            assert_eq!(
+                store
+                    .get(uuid::Uuid::parse_str(&admission_id).expect("admission UUID"))
+                    .expect("admission record")
+                    .status,
+                JobStatus::Cancelled,
+                "accepting the execution must release its capacity reservation"
+            );
+            assert_eq!(
+                store
+                    .active_runner_jobs()
+                    .iter()
+                    .filter(|job| job.operation == "runner.exec")
+                    .count(),
+                1,
+                "one durable attempt creates exactly one active provider execution"
+            );
+            assert!(store
+                .active_runner_jobs()
+                .iter()
+                .all(|job| { job.operation != "runner.admission" || job.job_id != admission_id }));
         });
     }
 

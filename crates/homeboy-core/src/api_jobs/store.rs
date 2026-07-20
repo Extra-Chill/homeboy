@@ -764,7 +764,8 @@ impl JobStore {
                     matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
                 })
                 .filter(|stored| {
-                    stored.admission_idempotency_key.as_deref() == Some(idempotency_key)
+                    (local_runner.is_none() || stored.job.operation != "runner.admission")
+                        && stored.admission_idempotency_key.as_deref() == Some(idempotency_key)
                 })
                 .min_by_key(|stored| (stored.job.created_at_ms, stored.job.id))
                 .map(|stored| stored.job.clone())
@@ -787,18 +788,35 @@ impl JobStore {
                 return (existing, false);
             }
         }
+        let consumes_admission = local_runner.is_some();
         inner.jobs.insert(
             job.id,
             StoredJob {
                 job: job.clone(),
                 events: Vec::new(),
-                admission_idempotency_key,
+                admission_idempotency_key: admission_idempotency_key.clone(),
                 admission_lease: None,
                 remote_runner: None,
                 local_runner,
                 local_child: None,
             },
         );
+        if let (Some(idempotency_key), true) =
+            (admission_idempotency_key.as_deref(), consumes_admission)
+        {
+            for stored in inner.jobs.values_mut() {
+                if stored.job.operation == "runner.admission"
+                    && matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                    && stored.admission_idempotency_key.as_deref() == Some(idempotency_key)
+                {
+                    stored.job.status = JobStatus::Cancelled;
+                    stored.job.updated_at_ms = now;
+                    stored.job.finished_at_ms = Some(now);
+                    stored.job.stale_reason =
+                        Some("admission reservation consumed by runner execution".to_string());
+                }
+            }
+        }
         drop(inner);
 
         if let Some(metadata) = metadata {
@@ -2110,6 +2128,7 @@ impl JobStore {
         metadata: Option<Value>,
         path_materialization_plan: Option<PathMaterializationPlan>,
         local_runner: LocalRunnerJob,
+        admission_idempotency_key: Option<String>,
         capacity: usize,
         run: F,
     ) -> JobRunner
@@ -2123,7 +2142,7 @@ impl JobStore {
             metadata,
             path_materialization_plan,
             Some(local_runner.clone()),
-            None,
+            admission_idempotency_key,
         );
         let job_id = job.id;
         // An idempotent resubmission reused an already-enqueued job that already
