@@ -21,6 +21,7 @@ use homeboy_engine_primitives::output_parse::ParseSpec;
 pub use homeboy_extension_contract::test_results::TestRunWorkflowResult;
 pub use homeboy_extension_contract::test_workflow::RawTestOutput;
 use homeboy_refactor_contract::AppliedRefactor;
+use regex::Regex;
 use serde::Serialize;
 use std::path::Path;
 
@@ -45,6 +46,7 @@ pub struct TestRunWorkflowArgs {
 }
 
 const RAW_OUTPUT_TAIL_LINES: usize = 80;
+const COMPILER_FAILURE_LIMIT: usize = 20;
 const PHPUNIT_NO_DISCOVERY_MARKER: &str = "NO PHPUNIT TEST FILES DISCOVERED";
 const REQUIRE_PHPUNIT_TESTS_SETTING: &str = "require_phpunit_tests";
 
@@ -322,8 +324,11 @@ fn run_main_test_workflow_inner(
     // real underlying failure (e.g. a pre-test runtime/bind failure whose
     // structured evidence the runner already reported). Degrade to no
     // enrichment and attach the parse problem as a secondary diagnostic. (#8489)
-    let (failure_analysis_input, sidecar_diagnostic) =
+    let (mut failure_analysis_input, sidecar_diagnostic) =
         parse_optional_failure_sidecar(&failures_file);
+    if failure_analysis_input.is_none() && !output.success {
+        failure_analysis_input = parse_compiler_failures(&output.stdout, &output.stderr);
+    }
     let findings = failure_analysis_input
         .as_ref()
         .and_then(homeboy_findings_from_test_analysis_input);
@@ -484,8 +489,8 @@ fn run_main_test_workflow_inner(
             None
         } else {
             Some(RawTestOutput {
-                stdout_tail,
-                stderr_tail,
+                stdout_tail: homeboy_core::redaction::redact_string(&stdout_tail),
+                stderr_tail: homeboy_core::redaction::redact_string(&stderr_tail),
                 truncated: stdout_truncated || stderr_truncated,
                 stdout_truncated,
                 stderr_truncated,
@@ -536,6 +541,49 @@ fn run_main_test_workflow_inner(
         summary,
         raw_output,
         extension_phase_timings: output.extension_phase_timings,
+    })
+}
+
+fn parse_compiler_failures(stdout: &str, stderr: &str) -> Option<TestAnalysisInput> {
+    let diagnostic = Regex::new(r"^error\[(E\d+)\]: (.+)$").expect("compiler regex is valid");
+    let location = Regex::new(r"^\s*--> (.+):(\d+):\d+$").expect("location regex is valid");
+    let symbol = Regex::new(r"`([^`]+)`").expect("symbol regex is valid");
+    let lines = stdout.lines().chain(stderr.lines()).collect::<Vec<_>>();
+    let mut failures = Vec::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let Some(captures) = diagnostic.captures(line) else {
+            continue;
+        };
+        let Some((source_file, source_line)) = lines[index + 1..].iter().take(6).find_map(|line| {
+            let captures = location.captures(line)?;
+            Some((captures[1].to_string(), captures[2].parse::<u32>().ok()?))
+        }) else {
+            continue;
+        };
+        let code = captures[1].to_string();
+        let message = captures[2].to_string();
+        let symbol = symbol
+            .captures(&message)
+            .map(|captures| captures[1].to_string())
+            .unwrap_or_else(|| message.clone());
+        failures.push(crate::test::TestFailure {
+            test_name: format!("{code}: {symbol}"),
+            test_file: String::new(),
+            error_type: format!("compiler_error:{code}"),
+            message,
+            source_file,
+            source_line,
+        });
+        if failures.len() == COMPILER_FAILURE_LIMIT {
+            break;
+        }
+    }
+
+    (!failures.is_empty()).then_some(TestAnalysisInput {
+        failures,
+        total: 0,
+        passed: 0,
     })
 }
 
@@ -654,7 +702,7 @@ fn failed_test_workflow(
         summary: json_summary.then(|| build_test_summary(None, None, 2)),
         raw_output: Some(RawTestOutput {
             stdout_tail: String::new(),
-            stderr_tail: message.clone(),
+            stderr_tail: homeboy_core::redaction::redact_string(&message),
             truncated: false,
             stdout_truncated: false,
             stderr_truncated: false,
@@ -950,8 +998,8 @@ pub fn run_self_check_test_workflow_with_progress(
         let (stdout_tail, stdout_truncated) = tail_lines(&output.stdout, RAW_OUTPUT_TAIL_LINES);
         let (stderr_tail, stderr_truncated) = tail_lines(&output.stderr, RAW_OUTPUT_TAIL_LINES);
         RawTestOutput {
-            stdout_tail,
-            stderr_tail,
+            stdout_tail: homeboy_core::redaction::redact_string(&stdout_tail),
+            stderr_tail: homeboy_core::redaction::redact_string(&stderr_tail),
             truncated: stdout_truncated
                 || stderr_truncated
                 || output.capture.stdout.truncated
@@ -1156,6 +1204,49 @@ mod tests {
             diagnostic.is_none(),
             "a valid sidecar must not attach a diagnostic"
         );
+    }
+
+    #[test]
+    fn compiler_diagnostics_become_release_visible_findings_without_a_sidecar() {
+        let output = r#"error[E0425]: cannot find function `rollback_refresh_error` in this scope
+   --> crates/homeboy-lab-runner/src/homeboy_refresh/tests/part_a.rs:608:21
+    |
+608 |         let error = rollback_refresh_error::<()>(
+    |                     ^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+"#;
+        let input = parse_compiler_failures(output, "").expect("compiler finding");
+        let findings = homeboy_findings_from_test_analysis_input(&input).expect("findings");
+        let (report, exit_code) = super::super::report::from_main_workflow(TestRunWorkflowResult {
+            status: "failed".to_string(),
+            component: "homeboy".to_string(),
+            exit_code: 101,
+            test_counts: None,
+            findings: Some(findings),
+            failure_analysis_input: Some(input),
+            coverage: None,
+            baseline_comparison: None,
+            analysis: None,
+            autofix: None,
+            hints: None,
+            test_scope: None,
+            summary: None,
+            raw_output: None,
+            extension_phase_timings: Vec::new(),
+        });
+        let json = serde_json::to_value(report).expect("report json");
+
+        assert_eq!(exit_code, 101);
+        assert_eq!(json["failure"]["category"], "findings");
+        assert_eq!(json["findings"][0]["rule"], "compiler_error:E0425");
+        assert!(json["findings"][0]["message"]
+            .as_str()
+            .expect("finding message")
+            .contains("rollback_refresh_error"));
+        assert_eq!(
+            json["findings"][0]["file"],
+            "crates/homeboy-lab-runner/src/homeboy_refresh/tests/part_a.rs"
+        );
+        assert_eq!(json["findings"][0]["line"], 608);
     }
 
     #[test]

@@ -1278,6 +1278,37 @@ fn snapshot_archive_command_selectively_dereferences_external_symlinked_dependen
 
 #[cfg(unix)]
 #[test]
+fn content_hash_binds_tracked_unresolved_symlinks_deterministically() {
+    use std::os::unix::fs::symlink;
+
+    // A tracked symlink whose target is intentionally unavailable on the
+    // controller (e.g. `blogs.dir -> /nfs`) is a valid Git workspace shape and
+    // must not fail content hashing. (#8374)
+    let dir = tempfile::tempdir().expect("workspace");
+    symlink("/nfs", dir.path().join("blogs.dir")).expect("unresolved symlink");
+    fs::write(dir.path().join("regular.txt"), "content\n").expect("regular file");
+
+    let hash = workspace_content_hash(dir.path(), &[])
+        .expect("an unresolved tracked symlink must not fail content hashing");
+    assert!(!hash.is_empty());
+    // Deterministic: re-hashing the same shape yields the same identity.
+    let repeat = workspace_content_hash(dir.path(), &[]).expect("repeat hash");
+    assert_eq!(hash, repeat, "content hash must be deterministic");
+    // The legacy v1 algorithm must also bind it rather than refuse.
+    workspace_content_hash_v1(dir.path(), &[]).expect("v1 must also bind the symlink");
+
+    // The symlink target text is part of the identity: changing it changes hash.
+    let other = tempfile::tempdir().expect("other workspace");
+    symlink("/different-target", other.path().join("blogs.dir")).expect("other symlink");
+    fs::write(other.path().join("regular.txt"), "content\n").expect("regular file");
+    let other_hash = workspace_content_hash(other.path(), &[]).expect("other hash");
+    assert_ne!(
+        hash, other_hash,
+        "a different symlink target must change the content hash"
+    );
+}
+
+#[test]
 fn git_backed_snapshot_preserves_tracked_internal_file_and_directory_links() {
     use std::os::unix::fs::symlink;
 

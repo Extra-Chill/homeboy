@@ -541,14 +541,50 @@ pub fn list() -> Result<Vec<Runner>> {
 }
 
 pub fn resolve_default_lab_runner() -> Result<Option<String>> {
+    Ok(lab_runner_readiness()?.selected_runner_id)
+}
+
+/// A generic, live inventory of Lab-capable runners. Consumers use this rather
+/// than reducing runner state to an optional default ID, which loses the reason
+/// a connected runner was not selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabRunnerReadiness {
+    pub state: LabRunnerReadinessState,
+    pub selected_runner_id: Option<String>,
+    pub available_runner_ids: Vec<String>,
+    pub reasons: Vec<String>,
+    pub remediation_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabRunnerReadinessState {
+    Absent,
+    ConnectedReady,
+    ConnectedIneligible,
+    Stale,
+    CapacityBlocked,
+    Disconnected,
+}
+
+impl LabRunnerReadinessState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::ConnectedReady => "connected_ready",
+            Self::ConnectedIneligible => "connected_ineligible",
+            Self::Stale => "stale",
+            Self::CapacityBlocked => "capacity_blocked",
+            Self::Disconnected => "disconnected",
+        }
+    }
+}
+
+pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
     let preferred = defaults::load_config().lab.preferred_runner;
-    let runners = list()?;
-    Ok(resolve_default_lab_runner_from_candidates(
-        preferred.as_deref(),
-        runners.into_iter().filter_map(|runner| {
-            if runner.kind != RunnerKind::Ssh {
-                return None;
-            }
+    let candidates: Vec<_> = list()?
+        .into_iter()
+        .filter(|runner| runner.kind == RunnerKind::Ssh)
+        .filter_map(|runner| {
             let status = status(&runner.id).ok()?;
             let mode = status
                 .session
@@ -564,8 +600,72 @@ pub fn resolve_default_lab_runner() -> Result<Option<String>> {
                 active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
                 capabilities_ready: true,
             })
-        }),
+        })
+        .collect();
+    Ok(lab_runner_readiness_from_candidates(
+        preferred.as_deref(),
+        candidates,
     ))
+}
+
+fn lab_runner_readiness_from_candidates(
+    preferred: Option<&str>,
+    candidates: Vec<DefaultLabRunnerCandidate>,
+) -> LabRunnerReadiness {
+    let selected_runner_id =
+        resolve_default_lab_runner_from_candidates(preferred, candidates.clone());
+    let availability: Vec<_> = candidates
+        .iter()
+        .map(DefaultLabRunnerCandidate::availability)
+        .collect();
+    let available_runner_ids: Vec<_> = availability
+        .iter()
+        .filter(|runner| runner.accepts_jobs)
+        .map(|runner| runner.runner_id.clone())
+        .collect();
+    let reasons: Vec<_> = availability
+        .iter()
+        .flat_map(|runner| runner.reasons.iter().cloned())
+        .collect();
+    let state = if candidates.is_empty() {
+        LabRunnerReadinessState::Absent
+    } else if !available_runner_ids.is_empty() {
+        LabRunnerReadinessState::ConnectedReady
+    } else if reasons.iter().any(|reason| reason == "stale_daemon") {
+        LabRunnerReadinessState::Stale
+    } else if reasons.iter().any(|reason| reason == "capacity_reached") {
+        LabRunnerReadinessState::CapacityBlocked
+    } else if candidates.iter().any(|candidate| candidate.connected) {
+        LabRunnerReadinessState::ConnectedIneligible
+    } else {
+        LabRunnerReadinessState::Disconnected
+    };
+    let remediation_commands = match state {
+        LabRunnerReadinessState::Absent => vec!["homeboy runner connect <runner-id>".to_string()],
+        LabRunnerReadinessState::ConnectedReady => Vec::new(),
+        LabRunnerReadinessState::ConnectedIneligible | LabRunnerReadinessState::CapacityBlocked => {
+            candidates
+                .iter()
+                .map(|candidate| format!("homeboy runner status {}", candidate.id))
+                .collect()
+        }
+        LabRunnerReadinessState::Stale => candidates
+            .iter()
+            .filter(|candidate| candidate.stale_daemon)
+            .map(|candidate| format!("homeboy runner doctor {} --scope lab-offload", candidate.id))
+            .collect(),
+        LabRunnerReadinessState::Disconnected => candidates
+            .iter()
+            .map(|candidate| format!("homeboy runner connect {}", candidate.id))
+            .collect(),
+    };
+    LabRunnerReadiness {
+        state,
+        selected_runner_id,
+        available_runner_ids,
+        reasons,
+        remediation_commands,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1054,6 +1154,53 @@ mod tests {
             active_jobs_available: true,
             capabilities_ready: true,
         }
+    }
+
+    #[test]
+    fn lab_runner_readiness_distinguishes_absent_ready_ineligible_stale_and_capacity() {
+        let absent = lab_runner_readiness_from_candidates(None, Vec::new());
+        assert_eq!(absent.state, LabRunnerReadinessState::Absent);
+
+        let ready = lab_runner_readiness_from_candidates(
+            None,
+            vec![default_lab_candidate(
+                "ready",
+                RunnerTunnelMode::DirectSsh,
+                true,
+            )],
+        );
+        assert_eq!(ready.state, LabRunnerReadinessState::ConnectedReady);
+        assert_eq!(ready.selected_runner_id.as_deref(), Some("ready"));
+        assert_eq!(ready.available_runner_ids, ["ready"]);
+
+        let mut ineligible = default_lab_candidate("ineligible", RunnerTunnelMode::DirectSsh, true);
+        ineligible.active_jobs = 1;
+        let ineligible = lab_runner_readiness_from_candidates(None, vec![ineligible]);
+        assert_eq!(
+            ineligible.state,
+            LabRunnerReadinessState::ConnectedIneligible
+        );
+        assert!(ineligible.reasons.contains(&"capacity_unknown".to_string()));
+        assert_eq!(
+            ineligible.remediation_commands,
+            ["homeboy runner status ineligible"]
+        );
+
+        let mut stale = default_lab_candidate("stale", RunnerTunnelMode::DirectSsh, true);
+        stale.stale_daemon = true;
+        let stale = lab_runner_readiness_from_candidates(None, vec![stale]);
+        assert_eq!(stale.state, LabRunnerReadinessState::Stale);
+        assert_eq!(
+            stale.remediation_commands,
+            ["homeboy runner doctor stale --scope lab-offload"]
+        );
+
+        let mut full = default_lab_candidate("full", RunnerTunnelMode::DirectSsh, true);
+        full.capacity = Some(1);
+        full.active_jobs = 1;
+        let full = lab_runner_readiness_from_candidates(None, vec![full]);
+        assert_eq!(full.state, LabRunnerReadinessState::CapacityBlocked);
+        assert!(full.reasons.contains(&"capacity_reached".to_string()));
     }
 
     fn create_ssh_runner(id: &str) {

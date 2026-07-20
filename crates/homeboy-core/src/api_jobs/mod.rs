@@ -10,6 +10,7 @@ mod summary;
 // resolving. The job store / persistence / remote-runner behavior stays here.
 use homeboy_api_jobs_contract::types;
 
+pub(crate) use persistence::timestamp_ms;
 pub use remote_runner::{
     JobArtifactMetadata, RemoteRunnerJobClaim, RemoteRunnerJobRequest, RemoteRunnerJobResult,
     RemoteRunnerSubmissionLookup, RunnerJobLifecycleMetadata, RunnerJobProjectionCancelRequest,

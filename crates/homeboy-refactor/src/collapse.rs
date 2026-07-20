@@ -34,8 +34,6 @@ use homeboy_core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use homeboy_core::Error;
 use homeboy_extension as extension;
 
-use crate::propagate::{extract_struct_source, find_struct_definition};
-
 // ============================================================================
 // Types
 // ============================================================================
@@ -82,58 +80,60 @@ pub fn collapse(config: &CollapseConfig) -> Result<CollapseResult, Error> {
     let root = config.root;
     let struct_name = config.struct_name;
 
-    // Step 1: Find the struct definition file.
-    let def_file = if let Some(f) = config.definition_file {
-        PathBuf::from(f)
-    } else {
-        find_struct_definition(struct_name, root)?
-    };
-    let def_path = if def_file.is_absolute() {
-        def_file.clone()
-    } else {
-        root.join(&def_file)
-    };
-    let def_content = std::fs::read_to_string(&def_path).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!(
-                "read struct definition from {}",
-                def_path.display()
-            )),
-        )
-    })?;
+    // Discover every refactor-capable extension. The collapse dispatch is
+    // language-generic: any language whose refactor extension implements
+    // `collapse_struct_defaults` (and `find_definition`) participates. Nothing
+    // here is Rust-specific — definition-finding and source-block extraction are
+    // delegated to the language extension, so no struct syntax is parsed here.
+    let refactor_exts = crate::definition::refactor_capable_extensions()?;
 
-    // Step 2: Extract the struct source block (field names/types/defaults).
-    let struct_source = extract_struct_source(struct_name, &def_content).ok_or_else(|| {
-        Error::invalid_argument_for(
-            "struct_name",
-            format!(
-                "Could not find struct `{}` in {}",
-                struct_name,
-                def_path.display()
-            ),
+    // Step 1 & 2: Locate the struct definition and extract its source block
+    // (field names/types/defaults) via the language extension. When
+    // `--definition` is supplied the file is known but the source-block
+    // extraction is still language-specific, so it goes through the extension too.
+    let (def_file, struct_source) = if let Some(f) = config.definition_file {
+        let def_file = PathBuf::from(f);
+        let def_path = if def_file.is_absolute() {
+            def_file.clone()
+        } else {
+            root.join(&def_file)
+        };
+        let def_content = std::fs::read_to_string(&def_path).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!(
+                    "read struct definition from {}",
+                    def_path.display()
+                )),
+            )
+        })?;
+        let relative = def_file
+            .strip_prefix(root)
+            .unwrap_or(&def_file)
+            .to_string_lossy()
+            .to_string();
+        let source = crate::definition::extract_definition_source(
             struct_name,
+            &def_content,
+            &relative,
+            &refactor_exts,
         )
-    })?;
-
-    // Step 3: Discover every refactor-capable extension and the file extensions
-    // it handles. The collapse dispatch is language-generic: any language whose
-    // refactor extension implements a `collapse_struct_defaults` command
-    // participates. The Rust extension is the first implementer, but nothing
-    // here is Rust-specific — a Go/Swift/PHP refactor extension that grows the
-    // same command is picked up automatically.
-    let refactor_exts: Vec<extension::ExtensionManifest> = extension::load_all_extensions()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|m| m.refactor_script().is_some() && !m.provided_file_extensions().is_empty())
-        .collect();
-
-    if refactor_exts.is_empty() {
-        return Err(Error::invalid_argument(
-            "extension",
-            "No extension with refactor capability found. Install a language refactor extension (e.g. the Rust extension).",
-        ));
-    }
+        .ok_or_else(|| {
+            Error::invalid_argument_for(
+                "struct_name",
+                format!(
+                    "Could not find struct `{}` in {}",
+                    struct_name,
+                    def_path.display()
+                ),
+                struct_name,
+            )
+        })?;
+        (def_file, source)
+    } else {
+        let located = crate::definition::find_definition(struct_name, root, &refactor_exts)?;
+        (located.file, located.source)
+    };
 
     let def_relative = def_file
         .strip_prefix(root)

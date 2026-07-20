@@ -36,9 +36,9 @@ pub use args::{
     AgentTaskFanoutSubmitBatchArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
     AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
     CompileLoopArgs, ContractArgs, ContractFormat, DiagnoseArgs, EvidenceArgs, FinalizePrArgs,
-    GateFeedbackArgs, LatestArgs, ListArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs,
-    ReconcileRecordsArgs, ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunPlanArgs,
-    RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, PromoteArgs, PromotionProviderArgs,
+    ProvidersArgs, ReconcileRecordsArgs, ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs,
+    RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 

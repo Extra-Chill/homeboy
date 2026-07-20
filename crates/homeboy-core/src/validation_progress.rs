@@ -8,6 +8,8 @@ use crate::engine::run_dir::{self, RunDir};
 use crate::error::{Error, Result};
 use crate::observation::{merge_metadata, ActiveObservation, RunRecord};
 
+const COMMAND_ARTIFACT_MAX_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ValidationProgressLedger {
     pub schema: String,
@@ -308,13 +310,35 @@ pub fn write_command_artifact(
             )
         })?;
     }
-    std::fs::write(&path, contents).map_err(|error| {
+    std::fs::write(
+        &path,
+        crate::redaction::redact_string(&bounded_command_artifact_contents(contents)),
+    )
+    .map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("write validation progress artifact".to_string()),
         )
     })?;
     Ok(Some(relative.to_string_lossy().to_string()))
+}
+
+fn bounded_command_artifact_contents(contents: &str) -> String {
+    if contents.len() <= COMMAND_ARTIFACT_MAX_BYTES {
+        return contents.to_string();
+    }
+
+    // Keep the end of a command stream: test runners conventionally emit the
+    // failing test names and compiler diagnostics after their normal output.
+    let mut start = contents.len() - COMMAND_ARTIFACT_MAX_BYTES;
+    while !contents.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "[homeboy: retained final {COMMAND_ARTIFACT_MAX_BYTES} bytes of {}]\n{}",
+        contents.len(),
+        &contents[start..]
+    )
 }
 
 #[cfg(test)]
@@ -392,5 +416,46 @@ mod tests {
             observation.finish(RunStatus::Pass, None);
             run_dir.cleanup();
         });
+    }
+
+    #[test]
+    fn command_artifacts_retain_a_bounded_tail() {
+        let run_dir = RunDir::create().expect("run dir");
+        let marker = "failing::test_name";
+        let contents = format!("{}\n{marker}", "x".repeat(COMMAND_ARTIFACT_MAX_BYTES));
+
+        let artifact = write_command_artifact(&run_dir, 0, "stdout", &contents)
+            .expect("write artifact")
+            .expect("artifact path");
+        let persisted =
+            std::fs::read_to_string(run_dir.path().join(artifact)).expect("read bounded artifact");
+
+        assert!(persisted.contains(marker));
+        assert!(persisted.starts_with("[homeboy: retained final"));
+        assert!(persisted.len() <= COMMAND_ARTIFACT_MAX_BYTES + 128);
+        run_dir.cleanup();
+    }
+
+    #[test]
+    fn command_artifacts_redact_secret_values_before_persistence() {
+        let run_dir = RunDir::create().expect("run dir");
+        let secrets = "TOKEN=top-secret\nAuthorization: Bearer bearer-secret\nconnecting to postgres://app:database-secret@db.example.test/app";
+
+        let artifact = write_command_artifact(&run_dir, 0, "stderr", secrets)
+            .expect("write artifact")
+            .expect("artifact path");
+        let persisted =
+            std::fs::read_to_string(run_dir.path().join(artifact)).expect("read redacted artifact");
+
+        for secret in ["top-secret", "bearer-secret", "database-secret"] {
+            assert!(
+                !persisted.contains(secret),
+                "persisted artifact leaked {secret}"
+            );
+        }
+        assert!(persisted.contains("TOKEN=[REDACTED]"));
+        assert!(persisted.contains("Bearer [REDACTED]"));
+        assert!(persisted.contains("postgres://[REDACTED]@db.example.test/app"));
+        run_dir.cleanup();
     }
 }

@@ -14,8 +14,8 @@ pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskControllerProofArgs, AgentTaskControllerRunFromSpecArgs,
 };
 pub(in crate::commands::agent_task) use super::super::args::{
-    AgentTaskCookArgs, CompileLoopArgs, DiagnoseArgs, EvidenceArgs, ReplayProviderBoundaryArgs,
-    ReviewArgs, RunArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    AgentTaskCookArgs, CompileLoopArgs, DiagnoseArgs, EvidenceArgs, LogsArgs,
+    ReplayProviderBoundaryArgs, ReviewArgs, RunArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 pub(in crate::commands::agent_task) use super::super::controller::{
     apply_controller_event, controller_from_spec, controller_materialize,
