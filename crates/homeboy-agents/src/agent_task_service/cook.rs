@@ -769,6 +769,13 @@ where
                 let mut dispatch_plan = plan.clone();
                 if let Some(baseline) = initial_baseline.as_ref() {
                     for task in &mut dispatch_plan.tasks {
+                        // The baseline is immutable evidence for this dispatch,
+                        // never the durable workspace a retry continues in.
+                        task.metadata["cook_continuation_workspace"] = serde_json::json!({
+                            "root": task.workspace.root.clone(),
+                            "kind": task.workspace.kind.clone(),
+                            "materialization": task.workspace.materialization.clone(),
+                        });
                         task.workspace.root = Some(baseline.path.display().to_string());
                         task.metadata["cook_initial_candidate_baseline"] = serde_json::json!({
                             "source_root": options.source_worktree_path,
@@ -1843,7 +1850,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_admission_failure_rebuilds_clean_initial_candidate_baseline() {
+    fn retry_after_admission_failure_restores_managed_workspace_after_baseline_cleanup() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("temp source root");
             let source = temp.path().join("source");
@@ -1876,6 +1883,13 @@ mod tests {
             options.source_worktree_path = Some(source.clone());
             options.provider_command = Some("fixture-provider".to_string());
             options.initial_plan.tasks[0].workspace.root = Some(source.display().to_string());
+            options.initial_plan.tasks[0].workspace.kind = Some("homeboy-worktree".to_string());
+            options.initial_plan.tasks[0].workspace.materialization = serde_json::json!({
+                "kind": "homeboy-worktree",
+                "id": "source@cook-admission-retry",
+                "root": source,
+                "branch": "fix/cook-admission-retry",
+            });
 
             run_cook(options, UnusedExecutor).expect("persist admission failure");
             let failed_plan = agent_task_lifecycle::load_plan(run_id).expect("failed plan");
@@ -1887,7 +1901,14 @@ mod tests {
                     .expect("baseline root"),
             );
             assert!(!transient_root.exists(), "initial baseline was cleaned up");
+            assert_eq!(
+                failed_plan.tasks[0].metadata["cook_continuation_workspace"]["root"],
+                serde_json::json!(source),
+                "the persisted dispatch plan retains the managed continuation workspace"
+            );
 
+            // Retry reloads the persisted plan after the original controller and
+            // its temporary baseline have gone away.
             let retry = agent_task_lifecycle::retry(run_id, Some("cook-admission-retry-2"))
                 .expect("retry rematerializes source workspace");
             let retry_plan = agent_task_lifecycle::load_plan(&retry.run_id).expect("retry plan");
@@ -1902,6 +1923,61 @@ mod tests {
             )
             .expect("retry reaches a real Git workspace");
             assert_eq!(result.exit_code, 0, "{:#?}", result.value);
+        });
+    }
+
+    #[test]
+    fn retry_reports_missing_managed_workspace_as_retryable_recovery() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("temp source root");
+            let source = temp.path().join("source");
+            std::fs::create_dir(&source).expect("create source");
+            let git = |args: &[&str]| {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("run git")
+                    .success());
+            };
+            git(&["init"]);
+            git(&["config", "user.email", "agent@example.test"]);
+            git(&["config", "user.name", "Agent"]);
+            std::fs::write(source.join("fixture.txt"), "base\n").expect("write base");
+            git(&["add", "fixture.txt"]);
+            git(&["commit", "-m", "base"]);
+            std::fs::write(source.join("fixture.txt"), "dirty candidate\n")
+                .expect("write dirty candidate");
+
+            let run_id = "cook-missing-worktree-attempt-1";
+            let mut options = batch_cook_options(
+                "cook-missing-worktree",
+                Arc::new(AdmissionFailingAttemptDispatcher {
+                    message: "controller generation is held by another cook",
+                }),
+            );
+            options.initial_run_id = run_id.to_string();
+            options.source_worktree_path = Some(source.clone());
+            options.provider_command = Some("fixture-provider".to_string());
+            options.initial_plan.tasks[0].workspace.root = Some(source.display().to_string());
+            options.initial_plan.tasks[0].workspace.kind = Some("homeboy-worktree".to_string());
+            options.initial_plan.tasks[0].workspace.materialization = serde_json::json!({
+                "kind": "homeboy-worktree",
+                "id": "source@cook-missing-worktree",
+                "root": source,
+            });
+
+            run_cook(options, UnusedExecutor).expect("persist admission failure");
+            std::fs::remove_dir_all(&source).expect("remove managed worktree");
+
+            let error = agent_task_lifecycle::retry(run_id, Some("cook-missing-worktree-retry"))
+                .expect_err("missing managed worktree requires recovery");
+
+            assert_eq!(error.retryable, Some(true));
+            assert!(error.message.contains("continuation workspace"));
+            assert!(error.hints.iter().any(|hint| hint
+                .message
+                .contains("Restore the recorded managed worktree")));
         });
     }
 
