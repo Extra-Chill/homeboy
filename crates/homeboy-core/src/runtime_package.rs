@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::{collections::BTreeSet, fs};
 
 use crate::agent_runtime_manifest::AgentRuntimeManifest;
 use crate::config;
@@ -77,6 +78,7 @@ pub fn refresh(
         return replace_symlinked_runtime_root(
             &runtime_root,
             &runtime_id,
+            &package_source,
             &staged,
             &temp_dir,
             source,
@@ -107,6 +109,7 @@ pub fn refresh(
     }
 
     remove_path_if_exists(&backup, "remove runtime package backup")?;
+    materialize_local_module_closure(&package_source, &target)?;
     remove_path_if_exists(&temp_dir, "clean runtime package refresh temp")?;
 
     Ok(RuntimePackageRefreshResult {
@@ -119,9 +122,191 @@ pub fn refresh(
     })
 }
 
+/// Copy local CommonJS dependencies from the runtime source tree.
+///
+/// Runtime packages are installed individually, but their executable wrappers
+/// may import a shared module outside their package directory. Preserve each
+/// resolved module's path beneath Homeboy's config root so Node resolves it
+/// exactly as it did in the source checkout.
+fn materialize_local_module_closure(package_source: &Path, installed_package: &Path) -> Result<()> {
+    let Some(container) = package_source.parent().filter(|path| {
+        path.file_name()
+            .is_some_and(|name| name == "agent-runtimes")
+    }) else {
+        return Ok(());
+    };
+    let source_root = fs::canonicalize(container.parent().expect("runtime container has parent"))
+        .map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("resolve runtime source root".to_string()),
+        )
+    })?;
+    let Some(installed_root) = installed_package.parent().and_then(Path::parent) else {
+        return Ok(());
+    };
+    let installed_root = fs::canonicalize(installed_root).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("resolve installed runtime root".to_string()),
+        )
+    })?;
+
+    let mut pending = BTreeSet::new();
+    collect_javascript_files(package_source, &mut pending)?;
+    let mut copied = BTreeSet::new();
+    while let Some(source) = pending.pop_first() {
+        let source = match fs::canonicalize(source) {
+            Ok(source) if source.starts_with(&source_root) => source,
+            _ => continue,
+        };
+        for dependency in local_commonjs_dependencies(&source)? {
+            let Some(resolved) = resolve_local_module(&source, &dependency) else {
+                continue;
+            };
+            if !resolved.starts_with(&source_root) || !copied.insert(resolved.clone()) {
+                continue;
+            }
+            let relative = resolved
+                .strip_prefix(&source_root)
+                .expect("checked source root");
+            let destination = safe_runtime_dependency_destination(&installed_root, relative)?;
+            fs::copy(&resolved, &destination).map_err(|e| {
+                Error::internal_io(e.to_string(), Some("copy runtime dependency".to_string()))
+            })?;
+            pending.insert(resolved);
+        }
+    }
+    Ok(())
+}
+
+fn safe_runtime_dependency_destination(installed_root: &Path, relative: &Path) -> Result<PathBuf> {
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(Error::validation_invalid_argument(
+            "runtime_dependency",
+            "runtime dependency path is not a safe relative path",
+            Some(relative.display().to_string()),
+            None,
+        ));
+    }
+
+    let destination = installed_root.join(relative);
+    let parent = destination.parent().expect("safe relative path has parent");
+    let mut current = installed_root.to_path_buf();
+    for component in relative.parent().into_iter().flat_map(Path::components) {
+        let std::path::Component::Normal(component) = component else {
+            unreachable!("safe relative path only has normal components");
+        };
+        current.push(component);
+        if fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(Error::validation_invalid_argument(
+                "runtime_dependency",
+                "runtime dependency destination traverses a symbolic link",
+                Some(current.display().to_string()),
+                None,
+            ));
+        }
+    }
+    fs::create_dir_all(parent).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("prepare runtime dependency".to_string()),
+        )
+    })?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("resolve runtime dependency destination".to_string()),
+        )
+    })?;
+    if !canonical_parent.starts_with(installed_root) {
+        return Err(Error::validation_invalid_argument(
+            "runtime_dependency",
+            "runtime dependency destination escapes installed runtime root",
+            Some(destination.display().to_string()),
+            None,
+        ));
+    }
+    if fs::symlink_metadata(&destination).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(Error::validation_invalid_argument(
+            "runtime_dependency",
+            "runtime dependency destination is a symbolic link",
+            Some(destination.display().to_string()),
+            None,
+        ));
+    }
+    Ok(destination)
+}
+
+fn collect_javascript_files(root: &Path, files: &mut BTreeSet<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(root)
+        .map_err(|e| Error::internal_io(e.to_string(), Some("read runtime package".to_string())))?
+    {
+        let path = entry
+            .map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some("read runtime package entry".to_string()),
+                )
+            })?
+            .path();
+        if path.is_dir() {
+            collect_javascript_files(&path, files)?;
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "js" || extension == "cjs")
+        {
+            files.insert(path);
+        }
+    }
+    Ok(())
+}
+
+fn local_commonjs_dependencies(source: &Path) -> Result<Vec<String>> {
+    let contents = fs::read_to_string(source)
+        .map_err(|e| Error::internal_io(e.to_string(), Some("read runtime module".to_string())))?;
+    Ok(contents
+        .split("require(")
+        .skip(1)
+        .filter_map(|suffix| {
+            let suffix = suffix.trim_start();
+            let quote = suffix.chars().next()?;
+            (quote == '\'' || quote == '"').then_some(())?;
+            let value = &suffix[1..];
+            value.find(quote).map(|end| value[..end].to_string())
+        })
+        .filter(|dependency| dependency.starts_with('.'))
+        .collect())
+}
+
+fn resolve_local_module(source: &Path, dependency: &str) -> Option<PathBuf> {
+    let base = source.parent()?.join(dependency);
+    [
+        base.clone(),
+        base.with_extension("js"),
+        base.with_extension("cjs"),
+        base.with_extension("json"),
+        base.join("index.js"),
+        base.join("index.json"),
+    ]
+    .into_iter()
+    .find_map(|candidate| {
+        candidate
+            .is_file()
+            .then(|| fs::canonicalize(candidate).ok())
+            .flatten()
+    })
+}
+
 fn replace_symlinked_runtime_root(
     runtime_root: &Path,
     runtime_id: &str,
+    package_source: &Path,
     staged: &Path,
     temp_dir: &Path,
     source: &str,
@@ -147,6 +332,7 @@ fn replace_symlinked_runtime_root(
         &target,
         "stage runtime package in materialized root",
     )?;
+    materialize_local_module_closure(package_source, &target)?;
 
     rename_path(
         runtime_root,
@@ -420,6 +606,127 @@ mod tests {
                 std::fs::read_to_string(result.path.join("marker.txt")).unwrap(),
                 "v2"
             );
+        });
+    }
+
+    #[test]
+    fn refresh_materializes_local_commonjs_dependency_closure() {
+        with_isolated_home(|_| {
+            let source = tempfile::TempDir::new().expect("source tempdir");
+            let package = source.path().join("agent-runtimes/neutral-runtime");
+            let entrypoint = package.join("scripts/agent/executor.cjs");
+            let shared = source
+                .path()
+                .join("agent-runtimes/lib/cli-agent-task-executor-bin.js");
+            let executor = source
+                .path()
+                .join("agent-runtimes/lib/cli-agent-task-executor.js");
+            let contract = source.path().join("agent-task-contracts/index.js");
+            let outcome = source.path().join("runtime-agent-ci/lib/outcome.json");
+            std::fs::create_dir_all(entrypoint.parent().expect("entrypoint parent"))
+                .expect("entrypoint directory");
+            std::fs::create_dir_all(shared.parent().expect("shared parent"))
+                .expect("shared directory");
+            std::fs::create_dir_all(contract.parent().expect("contract parent"))
+                .expect("contract directory");
+            std::fs::create_dir_all(outcome.parent().expect("outcome parent"))
+                .expect("outcome directory");
+            std::fs::write(
+                package.join("neutral-runtime.json"),
+                r#"{"schema":"homeboy/agent-runtime-manifest/v1","id":"neutral-runtime"}"#,
+            )
+            .expect("manifest");
+            std::fs::write(
+                &entrypoint,
+                "require('../../../lib/cli-agent-task-executor-bin').run();\n",
+            )
+            .expect("entrypoint");
+            std::fs::write(
+                &shared,
+                "exports.run = require('./cli-agent-task-executor').run;\n",
+            )
+            .expect("shared dependency");
+            std::fs::write(
+                &executor,
+                "const contract = require('../../agent-task-contracts');\nconst outcome = require('../../runtime-agent-ci/lib/outcome.json');\nexports.run = () => process.stdout.write(`${contract.status}:${outcome.status}\\n`);\n",
+            )
+            .expect("transitive executor dependency");
+            std::fs::write(&contract, "exports.status = 'ready';\n").expect("shared contract");
+            std::fs::write(&outcome, r#"{"status":"normalized"}"#).expect("shared outcome");
+
+            let result = refresh("neutral-runtime", &source.path().to_string_lossy(), None)
+                .expect("refresh runtime package");
+            let output = Command::new("node")
+                .arg(result.path.join("scripts/agent/executor.cjs"))
+                .output()
+                .expect("execute materialized entrypoint");
+
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "ready:normalized\n"
+            );
+            assert!(result
+                .path
+                .parent()
+                .expect("runtime root")
+                .join("lib/cli-agent-task-executor-bin.js")
+                .is_file());
+            assert!(result
+                .path
+                .parent()
+                .and_then(Path::parent)
+                .expect("config root")
+                .join("agent-task-contracts/index.js")
+                .is_file());
+            assert!(result
+                .path
+                .parent()
+                .and_then(Path::parent)
+                .expect("config root")
+                .join("runtime-agent-ci/lib/outcome.json")
+                .is_file());
+        });
+    }
+
+    #[test]
+    fn refresh_skips_local_dependencies_outside_the_runtime_source_root() {
+        with_isolated_home(|home| {
+            let source = tempfile::TempDir::new().expect("source tempdir");
+            let outside = source
+                .path()
+                .parent()
+                .expect("source parent")
+                .join("runtime-package-escape.js");
+            let package = source.path().join("agent-runtimes/neutral-runtime");
+            let entrypoint = package.join("scripts/agent/executor.cjs");
+            std::fs::create_dir_all(entrypoint.parent().expect("entrypoint parent"))
+                .expect("entrypoint directory");
+            std::fs::write(
+                package.join("neutral-runtime.json"),
+                r#"{"schema":"homeboy/agent-runtime-manifest/v1","id":"neutral-runtime"}"#,
+            )
+            .expect("manifest");
+            std::fs::write(
+                &entrypoint,
+                "require('../../../../../runtime-package-escape');\n",
+            )
+            .expect("entrypoint");
+            std::fs::write(&outside, "exports.run = () => {};\n").expect("outside dependency");
+
+            refresh("neutral-runtime", &source.path().to_string_lossy(), None)
+                .expect("refresh runtime package");
+
+            assert!(!home.path().join(".config/homeboy/escape.js").exists());
+            assert!(!home
+                .path()
+                .join(".config/homeboy/agent-runtimes/escape.js")
+                .exists());
+            std::fs::remove_file(outside).expect("remove outside dependency");
         });
     }
 
