@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.19] - 2026-07-20
+
+### Fixed
+- call reconcile at its real path 'homeboy runs findings reconcile'
+
 ## [2.8.18] - 2026-07-20
 
 ### Fixed
