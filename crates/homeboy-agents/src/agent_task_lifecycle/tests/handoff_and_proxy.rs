@@ -333,6 +333,66 @@ fn accepted_handoff_replays_idempotently_and_rejects_a_different_identity() {
 }
 
 #[test]
+fn runner_snapshot_binds_pending_lab_handoff_before_validation() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "snapshot-accepted-handoff",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("pending controller handoff");
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+        snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
+        snapshot.events.clear();
+
+        reconcile_transport_proxy_snapshot(&mut record, &snapshot)
+            .expect("accepted runner snapshot binds the pending handoff");
+
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(
+            record.runner_job_id(),
+            Some("00000000-0000-0000-0000-000000000123")
+        );
+        assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
+        assert_eq!(
+            status("snapshot-accepted-handoff")
+                .expect("durable handoff")
+                .runner_job_id(),
+            Some("00000000-0000-0000-0000-000000000123")
+        );
+    });
+}
+
+#[test]
+fn runner_snapshot_rejects_conflicting_bound_lab_job_identity() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "snapshot-conflicting-handoff",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000456",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("accepted controller handoff");
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+        snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
+        snapshot.events.clear();
+
+        let error = reconcile_transport_proxy_snapshot(&mut record, &snapshot)
+            .expect_err("different runner snapshot job is rejected");
+
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert!(error.message.contains("does not match controller job"));
+    });
+}
+
+#[test]
 fn pending_handoff_rejects_acceptance_from_a_different_runner_without_mutation() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
