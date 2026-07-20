@@ -19,7 +19,6 @@ pub(crate) struct ExactRefIdentity {
 pub(super) struct ExactRefCheckout {
     pub component: Component,
     pub identity: ExactRefIdentity,
-    source_root: PathBuf,
     worktree_path: PathBuf,
 }
 
@@ -56,12 +55,17 @@ impl ExactRefCheckout {
         git::run_git(
             &source_root,
             &[
-                "worktree",
-                "add",
-                "--detach",
+                "clone",
+                "--no-checkout",
+                "--local",
+                source_root.to_str().unwrap_or_default(),
                 &worktree_arg,
-                &identity.resolved_sha,
             ],
+            "clone exact deploy ref source",
+        )?;
+        git::run_git(
+            &worktree_path,
+            &["checkout", "--detach", &identity.resolved_sha],
             "materialize exact deploy ref",
         )?;
 
@@ -73,7 +77,6 @@ impl ExactRefCheckout {
             let mut checkout = Self {
                 component: component.clone(),
                 identity,
-                source_root,
                 worktree_path,
             };
             checkout.cleanup();
@@ -100,7 +103,6 @@ impl ExactRefCheckout {
         Ok(Self {
             component: materialized,
             identity,
-            source_root,
             worktree_path,
         })
     }
@@ -198,12 +200,6 @@ impl ExactRefCheckout {
     }
 
     fn cleanup(&mut self) {
-        let worktree = self.worktree_path.to_string_lossy().to_string();
-        let _ = git::run_git(
-            &self.source_root,
-            &["worktree", "remove", "--force", &worktree],
-            "remove exact deploy ref worktree",
-        );
         let _ = std::fs::remove_dir_all(&self.worktree_path);
     }
 }
@@ -240,7 +236,13 @@ fn ensure_resolved_commit_is_available(
     );
     git::run_git_with_env_timeout(
         source_root,
-        &["fetch", "--no-tags", &remote, &identity.requested_ref],
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            &remote,
+            &format!("+{}:", identity.resolved_sha),
+        ],
         "fetch preflighted exact deploy ref",
         &transport_env,
         REMOTE_REF_QUERY_TIMEOUT,
@@ -722,6 +724,7 @@ mod tests {
         let named_component = fixture_component(&named_checkout);
         let named_head = git_output(&named_checkout, &["rev-parse", "HEAD"]);
         let named_index = git_output(&named_checkout, &["write-tree"]);
+        let named_state = materialization_source_state(&named_checkout);
         let checkout = ExactRefCheckout::materialize(&named_component, "accepted")
             .expect("fetch and materialize named remote ref");
         assert_eq!(checkout.identity.resolved_sha, fixture.target_sha);
@@ -731,6 +734,7 @@ mod tests {
             named_head
         );
         assert_eq!(git_output(&named_checkout, &["write-tree"]), named_index);
+        assert_eq!(materialization_source_state(&named_checkout), named_state);
     }
 
     #[test]
@@ -1034,6 +1038,20 @@ mod tests {
         let fetch_head = git_output(path, &["rev-parse", "--git-path", "FETCH_HEAD"]);
         (
             git_output(path, &["status", "--porcelain=v1"]),
+            git_output(path, &["worktree", "list", "--porcelain"]),
+            std::fs::read(path.join(fetch_head)).ok(),
+        )
+    }
+
+    fn materialization_source_state(
+        path: &Path,
+    ) -> (String, String, String, String, String, Option<Vec<u8>>) {
+        let fetch_head = git_output(path, &["rev-parse", "--git-path", "FETCH_HEAD"]);
+        (
+            git_output(path, &["for-each-ref", "--format=%(refname) %(objectname)"]),
+            git_output(path, &["status", "--porcelain=v1"]),
+            git_output(path, &["rev-parse", "HEAD"]),
+            git_output(path, &["write-tree"]),
             git_output(path, &["worktree", "list", "--porcelain"]),
             std::fs::read(path.join(fetch_head)).ok(),
         )

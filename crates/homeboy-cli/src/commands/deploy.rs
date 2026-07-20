@@ -161,6 +161,15 @@ pub fn run(
     mut args: DeployArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<DeployCommandOutput> {
+    if args.release_set.is_some() && (args.projects.is_some() || args.fleet.is_some() || args.shared)
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "release_set",
+            "--release-set currently supports one --project deployment at a time; run each target as a separate deploy until aggregate multi-target preflight is available",
+            None,
+            None,
+        ));
+    }
     if args.release_set.is_some() && args.check {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "check",

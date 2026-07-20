@@ -141,6 +141,23 @@ fn release_set_rejects_conflicting_source_selectors() {
 }
 
 #[test]
+fn release_set_rejects_multi_target_modes() {
+    for target in [vec!["--projects", "project-a,project-b"], vec!["--fleet", "fleet-a"], vec!["--shared"]] {
+        let mut argv = vec!["homeboy", "deploy", "--release-set", "release-set.json"];
+        argv.extend(target.iter().copied());
+        let cli = Cli::try_parse_from(argv).expect("multi-target selector should parse for diagnostic");
+        let Commands::Deploy(args) = cli.command else {
+            panic!("expected deploy command");
+        };
+        let error = match run(args, &GlobalArgs {}) {
+            Ok(_) => panic!("release-set multi-target deploy must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("one --project deployment at a time"));
+    }
+}
+
+#[test]
 fn release_set_requires_apply_before_preflight() {
     let manifest = tempfile::NamedTempFile::new().expect("manifest file");
     std::fs::write(
