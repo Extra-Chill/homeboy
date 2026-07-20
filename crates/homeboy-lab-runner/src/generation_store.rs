@@ -90,7 +90,7 @@ pub(crate) fn write(
         &path(runner_id)?,
         &GenerationRegistry {
             runner_id: runner_id.to_string(),
-            generations,
+            generations: generations.clone(),
         },
     )
 }
