@@ -847,7 +847,7 @@ fn lease_bound_stop_recovers_only_the_exact_daemon_after_binary_rebuild() {
     let owner_token = "rebuilt-daemon-owner";
     let unrelated_token = "unrelated-daemon-owner";
     let owner = spawn_force_stop_test_process(Some(owner_token));
-    let unrelated = spawn_force_stop_test_process(Some(unrelated_token));
+    let mut unrelated = spawn_force_stop_test_process(Some(unrelated_token));
     let owner_pid = owner.id();
     let unrelated_pid = unrelated.id();
     let mut state = daemon_state_for_test(owner_pid, "127.0.0.1:1");
