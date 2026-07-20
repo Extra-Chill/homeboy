@@ -40,7 +40,17 @@ pub(super) fn harvest_uncommitted_patch(
     // Git's binary patch generation include tracked, staged, and untracked files.
     // Homeboy-owned runner metadata is excluded from the diff so it never lands
     // in a candidate patch as checkout drift. (#8534)
-    git_output(root, &["add", "--all"])?;
+    git_output(
+        root,
+        &[
+            "add",
+            "--all",
+            "--",
+            ".",
+            HARVEST_METADATA_EXCLUDE_PATHSPECS[0],
+            HARVEST_METADATA_EXCLUDE_PATHSPECS[1],
+        ],
+    )?;
     let mut uncommitted_patch_args = vec![
         "diff",
         "--cached",
