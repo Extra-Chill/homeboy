@@ -1013,38 +1013,20 @@ fn materialize_agent_task_retry_handoff(
         return Ok(None);
     }
 
-    let source_plan = agent_task_lifecycle::load_controller_plan(&retry.run_id)?;
-    let primary_workspace = retry_plan_primary_workspace(&source_plan)?;
     let record = agent_task_lifecycle::retry(&retry.run_id, retry.new_run_id.as_deref())?;
     let plan = agent_task_lifecycle::load_plan(&record.run_id)?;
-    let retry_workspace = retry_plan_primary_workspace(&plan).map_err(|error| {
-        Error::validation_invalid_argument(
-            "workspace",
-            "agent-task retry lost its git-backed task workspace while serializing the replacement plan",
-            Some(primary_workspace.display().to_string()),
-            Some(vec![
-                format!(
-                    "The original persisted plan uses {}; inspect the replacement plan for workspace serialization loss.",
-                    primary_workspace.display()
-                ),
-                error.message,
-            ]),
-        )
-    })?;
-    if retry_workspace != primary_workspace {
-        return Err(Error::validation_invalid_argument(
-            "workspace",
-            "agent-task retry changed its git-backed task workspace while serializing the replacement plan",
-            Some(format!(
-                "original: {}; replacement: {}",
-                primary_workspace.display(),
-                retry_workspace.display()
-            )),
-            Some(vec![
-                "Retry preserves the original task workspace; inspect the replacement plan serialization before retrying through Lab.".to_string(),
-            ]),
-        ));
-    }
+    let primary_workspace = match retry_plan_primary_workspace(&plan) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            agent_task_lifecycle::record_pre_execution_failure(
+                &record.run_id,
+                &plan,
+                "validate_retry_workspace",
+                &error,
+            )?;
+            return Err(error);
+        }
+    };
     let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
         Error::internal_json(
             error.to_string(),
