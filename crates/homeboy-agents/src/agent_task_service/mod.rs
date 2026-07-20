@@ -6,6 +6,7 @@
 //! `crate::agent_task_service::*` unchanged.
 
 mod cook;
+mod cook_budget;
 mod cook_recipe;
 mod discovery;
 mod execution;
@@ -13,6 +14,7 @@ mod reconcile;
 mod status_support;
 
 pub use cook::*;
+pub use cook_budget::*;
 pub use cook_recipe::*;
 pub use discovery::*;
 pub use execution::*;
