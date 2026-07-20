@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
 use crate::{build_identity, paths, Error, Result};
@@ -25,9 +25,12 @@ pub(crate) const TEST_CONTROLLER_RUNTIME_IDENTITY_ENV: &str =
 
 const ACTIVE_GENERATION_FILE: &str = "active.json";
 const ADMISSION_LOCK_DIR: &str = "admission.lock";
+const ADMISSION_QUEUE_FILE: &str = "admission-queue.json";
+const ADMISSION_QUEUE_LOCK_FILE: &str = "admission-queue.lock";
 const ADMISSION_OWNER_SCHEMA: &str = "homeboy/controller-admission-owner/v1";
-const ADMISSION_LOCK_ATTEMPTS: usize = 500;
-const ADMISSION_LOCK_RETRY: Duration = Duration::from_millis(10);
+const ADMISSION_QUEUE_SCHEMA: &str = "homeboy/controller-admission-queue/v1";
+const ADMISSION_QUEUE_POLL: Duration = Duration::from_millis(25);
+const ADMISSION_QUEUE_LEASE: Duration = Duration::from_secs(30);
 static ADMISSION_LOCK_PROCESS_GUARDS: OnceLock<Mutex<BTreeMap<PathBuf, &'static Mutex<()>>>> =
     OnceLock::new();
 #[cfg(all(unix, any(test, feature = "test-support")))]
@@ -429,6 +432,7 @@ pub struct RuntimeAdmission {
 struct AdmissionLock {
     path: PathBuf,
     token: String,
+    request_id: String,
     _process_guard: MutexGuard<'static, ()>,
     file: fs::File,
 }
@@ -441,6 +445,20 @@ impl Drop for AdmissionLock {
         if admission_owner_token(&self.path).as_deref() == Some(self.token.as_str()) {
             let _ = fs::write(&self.path, b"");
         }
+        let _ = update_admission_queue(&self.path, |queue| {
+            if queue["owner"]["request_id"].as_str() == Some(self.request_id.as_str()) {
+                queue["owner"] = Value::Null;
+                queue["requests"] = queue["requests"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|request| {
+                        request["request_id"].as_str() != Some(self.request_id.as_str())
+                    })
+                    .collect();
+            }
+        });
         let _ = self.file.unlock();
     }
 }
@@ -502,15 +520,69 @@ fn runtime_pin(identity: &str, executable: &Path, pinned_path: &Path, digest: &s
 /// retain the executable that created it, rather than inherit a previous
 /// controller's selection.
 pub fn admit_current() -> Result<RuntimeAdmission> {
+    admit_current_for(&format!("controller-{}", Uuid::new_v4()))
+}
+
+/// Admit a durable controller request in FIFO order. The request ID is normally
+/// the agent-task run ID, which lets another controller observe or cancel a
+/// waiting admission after the original process has exited.
+pub fn admit_current_for(request_id: &str) -> Result<RuntimeAdmission> {
     let root = runtime_root()?;
     let lock_path = root.join(ADMISSION_LOCK_DIR);
-    let lock = acquire_admission_lock(&lock_path)?;
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "controller_admission",
+            "controller admission request ID is required",
+            None,
+            None,
+        ));
+    }
+    enqueue_admission_request(&lock_path, request_id)?;
+    let lock = acquire_queued_admission_lock(&lock_path, request_id)?;
     let runtime = pin_current_unlocked()?;
     write_active_generation(&root.join(ACTIVE_GENERATION_FILE), &runtime)?;
     validate_pin(&runtime)?;
     Ok(RuntimeAdmission {
         _lock: lock,
         runtime,
+    })
+}
+
+/// Return the durable admission view used by lifecycle status output.
+pub fn admission_status(request_id: &str) -> Result<Value> {
+    let root = runtime_root()?;
+    let lock_path = root.join(ADMISSION_LOCK_DIR);
+    update_admission_queue(&lock_path, |_| {})?;
+    let queue = read_admission_queue(&lock_path)?;
+    let requests = queue["requests"].as_array().cloned().unwrap_or_default();
+    let position = requests
+        .iter()
+        .position(|request| request["request_id"].as_str() == Some(request_id));
+    Ok(json!({
+        "state": if queue["owner"]["request_id"].as_str() == Some(request_id) { "admitted" } else if position.is_some() { "waiting" } else { "none" },
+        "position": position.map(|index| index + 1),
+        "owner": queue["owner"],
+        "requested_at_ms": requests.get(position.unwrap_or(usize::MAX)).and_then(|request| request["requested_at_ms"].as_u64()),
+        "wait_duration_ms": requests.get(position.unwrap_or(usize::MAX)).and_then(|request| request["requested_at_ms"].as_u64()).map(|then| now_millis().saturating_sub(then)),
+    }))
+}
+
+/// Remove a waiting request. An owner is intentionally never force-released:
+/// the advisory lock remains the authority while a process is alive.
+pub fn cancel_admission(request_id: &str) -> Result<()> {
+    let root = runtime_root()?;
+    let lock_path = root.join(ADMISSION_LOCK_DIR);
+    update_admission_queue(&lock_path, |queue| {
+        if queue["owner"]["request_id"].as_str() != Some(request_id) {
+            queue["requests"] = queue["requests"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|request| request["request_id"].as_str() != Some(request_id))
+                .collect();
+        }
     })
 }
 
@@ -858,16 +930,11 @@ fn write_active_generation(path: &Path, runtime: &Value) -> Result<()> {
 }
 
 fn acquire_admission_lock(path: &Path) -> Result<AdmissionLock> {
-    acquire_admission_lock_with_retry(path, ADMISSION_LOCK_ATTEMPTS, ADMISSION_LOCK_RETRY)
+    acquire_admission_lock_for(path, &format!("controller-{}", Uuid::new_v4()))
 }
 
-fn acquire_admission_lock_with_retry(
-    path: &Path,
-    attempts: usize,
-    retry: Duration,
-) -> Result<AdmissionLock> {
+fn acquire_admission_lock_for(path: &Path, request_id: &str) -> Result<AdmissionLock> {
     reject_legacy_admission_lock(path)?;
-    let started = Instant::now();
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -880,55 +947,75 @@ fn acquire_admission_lock_with_retry(
             )
         })?;
 
-    for _ in 0..attempts {
-        let Some(process_guard) = try_acquire_admission_process_guard(path) else {
-            std::thread::sleep(retry);
-            continue;
-        };
-        let acquired = file.try_lock_exclusive().map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("acquire controller admission lock".to_string()),
-            )
-        })?;
-
-        if acquired {
-            let token = Uuid::new_v4().to_string();
-            let owner = admission_owner_record(&token);
-            file.set_len(0).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("clear controller admission owner record".to_string()),
-                )
-            })?;
-            file.write_all(&serde_json::to_vec(&owner).map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("serialize controller admission owner".to_string()),
-                )
-            })?)
-            .map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("write controller admission owner record".to_string()),
-                )
-            })?;
-            file.sync_data().map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("sync controller admission owner record".to_string()),
-                )
-            })?;
-            return Ok(AdmissionLock {
-                path: path.to_path_buf(),
-                token,
-                _process_guard: process_guard,
-                file,
-            });
-        }
-        std::thread::sleep(retry);
+    let Some(process_guard) = try_acquire_admission_process_guard(path) else {
+        return Err(admission_busy_error(path));
+    };
+    let acquired = file.try_lock_exclusive().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("acquire controller admission lock".to_string()),
+        )
+    })?;
+    if !acquired {
+        return Err(admission_busy_error(path));
     }
+    let token = Uuid::new_v4().to_string();
+    let owner = admission_owner_record(&token);
+    file.set_len(0).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("clear controller admission owner record".to_string()),
+        )
+    })?;
+    file.write_all(&serde_json::to_vec(&owner).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize controller admission owner".to_string()),
+        )
+    })?)
+    .map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("write controller admission owner record".to_string()),
+        )
+    })?;
+    file.sync_data().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("sync controller admission owner record".to_string()),
+        )
+    })?;
+    Ok(AdmissionLock {
+        path: path.to_path_buf(),
+        token,
+        request_id: request_id.to_string(),
+        _process_guard: process_guard,
+        file,
+    })
+}
 
+fn admission_busy_error(path: &Path) -> Error {
+    Error::internal_unexpected(format!(
+        "controller generation admission is currently owned by {}",
+        admission_owner_summary(path)
+    ))
+    .with_retryable(true)
+}
+
+#[cfg(test)]
+fn acquire_admission_lock_with_retry(
+    path: &Path,
+    attempts: usize,
+    retry: Duration,
+) -> Result<AdmissionLock> {
+    let started = std::time::Instant::now();
+    for _ in 0..attempts {
+        match acquire_admission_lock_for(path, "test-admission") {
+            Ok(lock) => return Ok(lock),
+            Err(error) if error.retryable == Some(true) => std::thread::sleep(retry),
+            Err(error) => return Err(error),
+        }
+    }
     Err(Error::validation_invalid_argument(
         "controller_admission",
         format!(
@@ -939,6 +1026,120 @@ fn acquire_admission_lock_with_retry(
         None,
         None,
     ))
+}
+
+fn acquire_queued_admission_lock(path: &Path, request_id: &str) -> Result<AdmissionLock> {
+    loop {
+        let status = admission_status(request_id)?;
+        if status["state"] == "none" {
+            return Err(Error::validation_invalid_argument(
+                "controller_admission",
+                "controller admission request was cancelled",
+                Some(request_id.to_string()),
+                None,
+            ));
+        }
+        if status["position"].as_u64() == Some(1) {
+            match acquire_admission_lock_for(path, request_id) {
+                Ok(lock) => {
+                    update_admission_queue(path, |queue| {
+                        queue["owner"] = json!({ "request_id": request_id, "pid": std::process::id(), "heartbeat_at_ms": now_millis(), "lease_expires_at_ms": now_millis() + ADMISSION_QUEUE_LEASE.as_millis() as u64 });
+                    })?;
+                    return Ok(lock);
+                }
+                Err(error) if error.retryable == Some(true) => (),
+                Err(error) => return Err(error),
+            }
+        }
+        std::thread::sleep(ADMISSION_QUEUE_POLL);
+    }
+}
+
+fn queue_path(lock_path: &Path) -> PathBuf {
+    lock_path.with_file_name(ADMISSION_QUEUE_FILE)
+}
+
+fn queue_lock_path(lock_path: &Path) -> PathBuf {
+    lock_path.with_file_name(ADMISSION_QUEUE_LOCK_FILE)
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn read_admission_queue(lock_path: &Path) -> Result<Value> {
+    let path = queue_path(lock_path);
+    Ok(fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(
+            || json!({ "schema": ADMISSION_QUEUE_SCHEMA, "requests": [], "owner": null }),
+        ))
+}
+
+fn update_admission_queue(lock_path: &Path, mutate: impl FnOnce(&mut Value)) -> Result<()> {
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(queue_lock_path(lock_path))
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("open controller admission queue lock".to_string()),
+            )
+        })?;
+    lock_file.lock_exclusive().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("lock controller admission queue".to_string()),
+        )
+    })?;
+    let mut queue = read_admission_queue(lock_path)?;
+    if queue["owner"]["lease_expires_at_ms"]
+        .as_u64()
+        .is_some_and(|expires| expires <= now_millis())
+    {
+        queue["owner"] = Value::Null;
+    }
+    mutate(&mut queue);
+    let temporary = queue_path(lock_path).with_extension("tmp");
+    fs::write(
+        &temporary,
+        serde_json::to_vec(&queue)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    )
+    .map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("write controller admission queue".to_string()),
+        )
+    })?;
+    fs::rename(temporary, queue_path(lock_path)).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("publish controller admission queue".to_string()),
+        )
+    })?;
+    let _ = lock_file.unlock();
+    Ok(())
+}
+
+fn enqueue_admission_request(lock_path: &Path, request_id: &str) -> Result<()> {
+    update_admission_queue(lock_path, |queue| {
+        let requests = queue["requests"]
+            .as_array_mut()
+            .expect("queue requests initialized");
+        if !requests
+            .iter()
+            .any(|request| request["request_id"].as_str() == Some(request_id))
+        {
+            requests.push(json!({ "request_id": request_id, "requested_at_ms": now_millis() }));
+        }
+    })
 }
 
 fn try_acquire_admission_process_guard(path: &Path) -> Option<MutexGuard<'static, ()>> {
@@ -1692,6 +1893,42 @@ mod tests {
         assert!(error.message.contains("waited"));
         assert!(error.message.contains("pid="));
         assert!(error.message.contains("token="));
+    }
+
+    #[test]
+    fn admission_queue_preserves_fifo_status_cancellation_and_stale_owner_recovery() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = runtime_root().expect("runtime root");
+            let lock = root.join(ADMISSION_LOCK_DIR);
+            enqueue_admission_request(&lock, "first").expect("enqueue first");
+            enqueue_admission_request(&lock, "second").expect("enqueue second");
+
+            assert_eq!(
+                admission_status("first").expect("first status")["position"],
+                1
+            );
+            assert_eq!(
+                admission_status("second").expect("second status")["position"],
+                2
+            );
+            cancel_admission("first").expect("cancel first");
+            assert_eq!(
+                admission_status("second").expect("second promoted")["position"],
+                1
+            );
+
+            update_admission_queue(&lock, |queue| {
+                queue["owner"] = json!({
+                    "request_id": "crashed-owner",
+                    "heartbeat_at_ms": 0,
+                    "lease_expires_at_ms": 0,
+                });
+            })
+            .expect("persist stale owner");
+            let status = admission_status("second").expect("reclaim stale owner");
+            assert!(status["owner"].is_null());
+            assert!(status["wait_duration_ms"].as_u64().is_some());
+        });
     }
 
     #[test]

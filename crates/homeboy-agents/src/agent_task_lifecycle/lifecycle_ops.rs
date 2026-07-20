@@ -302,11 +302,9 @@ pub fn submit_plan(
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
-    submit_plan_with_runtime_admission(
-        plan,
-        requested_run_id,
-        homeboy_core::controller_runtime::admit_current,
-    )
+    submit_plan_with_runtime_admission(plan, requested_run_id, |run_id| {
+        homeboy_core::controller_runtime::admit_current_for(run_id)
+    })
 }
 
 pub(crate) trait RuntimeAdmissionEvidence {
@@ -334,7 +332,7 @@ pub(crate) fn submit_plan_with_runtime_admission<F, A>(
     admit_runtime: F,
 ) -> Result<AgentTaskRunRecord>
 where
-    F: FnOnce() -> Result<A>,
+    F: FnOnce(&str) -> Result<A>,
     A: RuntimeAdmissionEvidence,
 {
     let run_id = requested_run_id
@@ -380,7 +378,14 @@ where
     };
     store::write_record(&record)?;
 
-    match admit_runtime() {
+    // The queue is durable independently of this foreground controller. Status
+    // and cancellation can therefore resolve a waiter after a restart.
+    if let Ok(admission) = homeboy_core::controller_runtime::admission_status(&run_id) {
+        record.metadata["controller_admission"] = admission;
+        store::write_record(&record)?;
+    }
+
+    match admit_runtime(&run_id) {
         Ok(admission) => {
             record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                 admission.runtime();
@@ -875,6 +880,10 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let resolved_run_id = resolve_run_id(run_id)?;
     let _ = reconcile_deferred_candidate(&resolved_run_id)?;
     let mut record = store::read_record(&resolved_run_id)?;
+    if let Ok(admission) = homeboy_core::controller_runtime::admission_status(&record.run_id) {
+        record.metadata["controller_admission"] = admission;
+        store::write_record(&record)?;
+    }
     if reconcile_candidate_adoption(&mut record) {
         store::write_record(&record)?;
     }
