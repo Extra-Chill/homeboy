@@ -518,6 +518,11 @@ fn operator_only_reference(value: &str) -> bool {
     {
         return true;
     }
+    // `Url::parse` accepts colon-bearing CLI arguments as custom URI schemes.
+    // Only hierarchical references are intended to be URLs in reviewer commands.
+    if !value.contains("://") {
+        return false;
+    }
     let Ok(url) = reqwest::Url::parse(value) else {
         return false;
     };
@@ -776,6 +781,26 @@ mod tests {
             url: Some("https://example.com/evidence?token=secret".into()),
         });
         assert!(value.validate(&default_profile()).is_err());
+    }
+
+    #[test]
+    fn reviewer_commands_allow_colon_bearing_tokens_but_reject_url_references() {
+        for value in [
+            "npm run test:browser-scenarios",
+            "mvn verify -DskipTests=false:test",
+            "cargo test feature:browser-scenarios",
+        ] {
+            assert!(reviewer_runnable_command(value), "rejected {value}");
+        }
+
+        for value in [
+            "curl http://example.com/evidence",
+            "curl https://localhost:8888/evidence",
+            "cargo test file:///private/repo",
+            "cargo test --token secret",
+        ] {
+            assert!(!reviewer_runnable_command(value), "accepted {value}");
+        }
     }
 
     #[test]
