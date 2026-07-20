@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.26.10] - 2026-07-20
+
+### Fixed
+- boot multisite runtime for network-only plugin PHPUnit
+
 ## [3.26.9] - 2026-07-19
 
 ### Changed
