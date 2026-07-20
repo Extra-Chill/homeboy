@@ -70,7 +70,7 @@ pub(super) fn remote_homeboy_identity(
 }
 
 pub(super) fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyIdentity> {
-    let body: Value = serde_json::from_str(output.trim()).ok()?;
+    let body: Value = parse_json_from_mixed_stdout(output).ok()?;
     let data = body.get("data").unwrap_or(&body);
     let version = data.get("version")?.as_str()?.trim();
     let display = data
