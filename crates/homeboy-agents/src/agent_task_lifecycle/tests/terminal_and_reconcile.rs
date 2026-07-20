@@ -422,6 +422,64 @@ fn controller_proxy_records_pre_execution_phase_progress() {
 }
 
 #[test]
+fn long_pre_submission_setup_survives_reconciliation_and_terminal_phase_writes_are_noops() {
+    with_isolated_home(|_| {
+        let run_id = "long-pre-submission-materialization";
+        let plan = test_plan();
+        let materializing = record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "materializing",
+            None,
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("persist pre-submission materialization");
+
+        // A setup phase may run longer than the handoff lease because no complete
+        // request has crossed the durable submission boundary yet.
+        assert!(materializing.lab_handoff.is_none());
+        assert!(materializing.metadata.get("handoff_acceptance").is_none());
+        assert_eq!(
+            reconcile_active_lab_runner_handoffs().expect("read-side reconciliation"),
+            0
+        );
+        let hydrating = record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "hydrating",
+            Some("/runner/workspace/homeboy"),
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("long setup remains controller-owned");
+        assert_eq!(hydrating.state, AgentTaskRunState::Queued);
+        assert_eq!(hydrating.metadata["phase"], "hydrating");
+
+        let cancelled = cancel_run(run_id, Some("controller cancelled during setup"))
+            .expect("terminalize setup record");
+        let after_terminal_phase = record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "provider_dispatch",
+            Some("/runner/workspace/homeboy"),
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("terminal phase write is a no-op");
+        assert_eq!(after_terminal_phase, cancelled);
+        assert!(after_terminal_phase.lab_handoff.is_none());
+        assert!(after_terminal_phase
+            .metadata
+            .get("handoff_acceptance")
+            .is_none());
+    });
+}
+
+#[test]
 fn terminal_lab_artifact_attachment_skips_missing_controller_plan_and_preserves_runner_identity() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];

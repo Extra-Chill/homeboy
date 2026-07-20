@@ -298,7 +298,7 @@ fn classify_liveness(
         return AgentTaskLiveness::Unreconciled;
     }
     if record.state != agent_task_lifecycle::AgentTaskRunState::Running {
-        if record.has_expired_pending_lab_handoff(now) {
+        if agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
             return AgentTaskLiveness::Unreconciled;
         }
         // Queued runs are genuinely pending work unless their controller-owned

@@ -220,13 +220,19 @@ fn bind_pending_lab_handoff_snapshot(
     if record.runner_job_id().is_some() {
         return Ok(());
     }
-    let Some(handoff) = record.lab_handoff.as_ref().filter(|handoff| {
-        handoff.state == AgentTaskLabHandoffState::Pending
-            && handoff.authority == AgentTaskLabHandoffAuthority::Controller
-    }) else {
+    let runner_id = record
+        .lab_handoff
+        .as_ref()
+        .filter(|handoff| {
+            handoff.state == AgentTaskLabHandoffState::Pending
+                && handoff.authority == AgentTaskLabHandoffAuthority::Controller
+        })
+        .map(|handoff| handoff.runner_id.clone())
+        .or_else(|| record.runner_id().map(str::to_string));
+    let Some(runner_id) = runner_id else {
         return Ok(());
     };
-    if snapshot.job.target_runner_id.as_deref() != Some(handoff.runner_id.as_str()) {
+    if snapshot.job.target_runner_id.as_deref() != Some(runner_id.as_str()) {
         return Ok(());
     }
     let remote_workspace = record
@@ -249,7 +255,7 @@ fn bind_pending_lab_handoff_snapshot(
         .unwrap_or_default();
     *record = record_detached_lab_run(DetachedLabRunRecord {
         run_id: &record.run_id,
-        runner_id: &handoff.runner_id,
+        runner_id: &runner_id,
         runner_job_id: &snapshot.job.id.to_string(),
         remote_workspace: &remote_workspace,
         remote_command: &remote_command,
