@@ -1,5 +1,6 @@
 use clap::Args;
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 use homeboy_release::deploy::{
     self, ComponentDeployResult, DeployConfig, DeploySummary, MultiDeploySummary,
@@ -82,7 +83,11 @@ pub struct DeployArgs {
     #[arg(long)]
     pub head: bool,
     /// Validate this versioned release-set manifest before any deploy action
-    #[arg(long, value_name = "PATH")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["head", "tagged", "requested_ref", "outdated", "behind_upstream"]
+    )]
     pub release_set: Option<String>,
     /// Deploy an exact Git ref resolved from the declared component repository
     #[arg(
@@ -97,6 +102,15 @@ pub struct DeployArgs {
     /// Resume a prior multi-project deploy run after exact identity validation
     #[arg(long, value_name = "RUN_ID")]
     pub resume: Option<String>,
+    // Populated only by a validated release-set manifest.
+    #[arg(skip)]
+    exact_refs: BTreeMap<String, String>,
+    #[arg(skip)]
+    resolved_refs: BTreeMap<String, String>,
+    #[arg(skip)]
+    preflighted_source_paths: BTreeMap<String, String>,
+    #[arg(skip)]
+    preflighted_component_identities: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -153,11 +167,30 @@ pub fn run(
     mut args: DeployArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<DeployCommandOutput> {
-    let release_set = args.release_set.as_deref().map(load_release_set).transpose()?;
-    if let Some(release_set) = release_set.as_ref() {
-        apply_release_set(release_set, &mut args)?;
+    if args.release_set.is_some() && (args.projects.is_some() || args.fleet.is_some() || args.shared)
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "release_set",
+            "--release-set currently supports one --project deployment at a time; run each target as a separate deploy until aggregate multi-target preflight is available",
+            None,
+            None,
+        ));
     }
+    if args.release_set.is_some() && args.check {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "check",
+            "--check cannot be combined with --release-set; use --dry-run to inspect every exact source ref without creating a worktree or installing dependencies",
+            None,
+            None,
+        ));
+    }
+    let release_set = args.release_set.as_deref().map(load_release_set).transpose()?;
     validate_apply_boundary(&args)?;
+    if let Some(release_set) = release_set.as_ref() {
+        let (project_id, _) = resolve_single_deploy_target(&args)?;
+        args.target_id = Some(project_id.clone());
+        apply_release_set(release_set, &project_id, &mut args)?;
+    }
 
     // Fleet deploy
     if let Some(ref fleet_id) = args.fleet {
@@ -238,7 +271,10 @@ fn validate_apply_boundary(args: &DeployArgs) -> homeboy::core::Result<()> {
     if args.apply
         || args.dry_run
         || args.check
-        || (!args.head && args.requested_ref.is_none() && !args.force)
+        || (!args.head
+            && args.requested_ref.is_none()
+            && args.release_set.is_none()
+            && !args.force)
     {
         return Ok(());
     }
@@ -246,6 +282,7 @@ fn validate_apply_boundary(args: &DeployArgs) -> homeboy::core::Result<()> {
     let dangerous_flags = [
         (args.head, "--head"),
         (args.requested_ref.is_some(), "--ref"),
+        (args.release_set.is_some(), "--release-set"),
         (args.force, "--force"),
     ]
     .into_iter()
@@ -282,17 +319,19 @@ fn load_release_set(path: &str) -> homeboy::core::Result<homeboy_core::release_s
 /// lifecycle creation, builds, transfers, or remote actions.
 fn apply_release_set(
     release_set: &homeboy_core::release_set::NormalizedReleaseSet,
+    project_id: &str,
     args: &mut DeployArgs,
 ) -> homeboy::core::Result<()> {
+    let project = homeboy::core::project::load(project_id)?;
     let mut active = Vec::new();
     for entry in &release_set.components {
-        match homeboy::core::component::load(&entry.id) {
+        match homeboy::core::project::resolve_project_component(&project, &entry.id) {
             Ok(component) => active.push((entry, component)),
             Err(_) if !entry.required => continue,
             Err(error) => {
                 return Err(homeboy::core::Error::validation_invalid_argument(
                     "release_set",
-                    format!("Required component '{}' is unavailable: {}", entry.id, error.message),
+                    format!("Required component '{}' is unavailable in project '{}': {}", entry.id, project_id, error.message),
                     None,
                     None,
                 ));
@@ -307,29 +346,15 @@ fn apply_release_set(
             None,
         ));
     }
-    let refs = active
-        .iter()
-        .map(|(entry, _)| entry.requested_ref.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    if refs.len() != 1 {
+    if args.requested_ref.is_some() {
         return Err(homeboy::core::Error::validation_invalid_argument(
-            "release_set",
-            "This deploy vertical requires one exact ref shared by every release-set component",
+            "ref",
+            "--ref cannot be combined with --release-set; the manifest owns each component ref",
             None,
             None,
         ));
     }
-    let requested_ref = refs.into_iter().next().expect("non-empty release set");
-    if let Some(ref supplied) = args.requested_ref {
-        if supplied != requested_ref {
-            return Err(homeboy::core::Error::validation_invalid_argument(
-                "ref",
-                "--ref must match the release-set component ref",
-                None,
-                None,
-            ));
-        }
-    }
+    let mut refs = Vec::with_capacity(active.len());
     for (entry, component) in &active {
         let root = homeboy::core::git::get_git_root(&component.local_path).map_err(|_| {
             homeboy::core::Error::validation_invalid_argument(
@@ -352,11 +377,31 @@ fn apply_release_set(
                 None,
             ));
         }
-        homeboy_release::deploy::preflight_exact_ref(component, &entry.requested_ref)?;
+        refs.push((component, entry.requested_ref.as_str()));
     }
+    let resolved_refs = homeboy_release::deploy::preflight_exact_refs(&refs)?;
     args.component = Some(active.iter().map(|(entry, _)| entry.id.clone()).collect());
     args.component_ids.clear();
-    args.requested_ref = Some(requested_ref.to_string());
+    args.exact_refs = active
+        .iter()
+        .map(|(entry, _)| (entry.id.clone(), entry.requested_ref.clone()))
+        .collect();
+    args.resolved_refs = resolved_refs;
+    args.preflighted_source_paths = active
+        .iter()
+        .map(|(entry, component)| (entry.id.clone(), component.local_path.clone()))
+        .collect();
+    args.preflighted_component_identities = active
+        .iter()
+        .map(|(entry, component)| {
+            serde_json::to_string(component)
+                .map(|identity| (entry.id.clone(), identity))
+                .map_err(|error| homeboy::core::Error::internal_io(
+                    format!("Failed to encode release-set component '{}': {error}", entry.id),
+                    None,
+                ))
+        })
+        .collect::<homeboy::core::Result<_>>()?;
     Ok(())
 }
 
@@ -484,6 +529,10 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         allow_downgrade: args.allow_downgrade,
         head: args.head,
         requested_ref: args.requested_ref.clone(),
+        requested_refs: args.exact_refs.clone(),
+        resolved_refs: args.resolved_refs.clone(),
+        preflighted_source_paths: args.preflighted_source_paths.clone(),
+        preflighted_component_identities: args.preflighted_component_identities.clone(),
         tagged: args.tagged,
         prepared_artifact: None,
         resume_run_id: args.resume.clone(),

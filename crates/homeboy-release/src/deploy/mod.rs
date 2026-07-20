@@ -44,6 +44,19 @@ pub fn preflight_exact_ref(
     Ok(orchestration_ref_checkout::resolve_exact_ref(component, requested_ref)?.resolved_sha)
 }
 
+/// Resolve every exact source identity before a caller crosses a mutation boundary.
+/// Remote inspection uses `ls-remote`, so this cannot update configured checkouts.
+pub fn preflight_exact_refs(
+    refs: &[(&component::Component, &str)],
+) -> Result<std::collections::BTreeMap<String, String>> {
+    refs.iter()
+        .map(|(component, requested_ref)| {
+            orchestration_ref_checkout::resolve_exact_ref(component, requested_ref)
+                .map(|identity| (component.id.clone(), identity.resolved_sha))
+        })
+        .collect()
+}
+
 use homeboy_core::component;
 use homeboy_core::context::{require_project_base_path, resolve_project_ssh_with_base_path};
 use homeboy_core::error::{Error, Result};
@@ -262,6 +275,10 @@ pub fn run_multi(
             allow_downgrade: config.allow_downgrade,
             head: config.head,
             requested_ref: config.requested_ref.clone(),
+            requested_refs: config.requested_refs.clone(),
+            resolved_refs: config.resolved_refs.clone(),
+            preflighted_source_paths: config.preflighted_source_paths.clone(),
+            preflighted_component_identities: config.preflighted_component_identities.clone(),
             tagged: config.tagged,
             prepared_artifact: config.prepared_artifact.clone(),
             resume_run_id: None,
@@ -421,15 +438,24 @@ fn lifecycle_identity(
     components.sort();
     let mut targets = project_ids.to_vec();
     targets.sort();
-    let source = config.requested_ref.clone().unwrap_or_else(|| {
-        if config.head {
-            "HEAD".to_string()
-        } else if let Some(artifact) = config.prepared_artifact.as_ref() {
-            format!("{}@{}", artifact.tag, artifact.source_commit)
-        } else {
-            "release-tag".to_string()
-        }
-    });
+    let source = if !config.requested_refs.is_empty() {
+        config
+            .requested_refs
+            .iter()
+            .map(|(component, reference)| format!("{component}@{reference}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    } else {
+        config.requested_ref.clone().unwrap_or_else(|| {
+            if config.head {
+                "HEAD".to_string()
+            } else if let Some(artifact) = config.prepared_artifact.as_ref() {
+                format!("{}@{}", artifact.tag, artifact.source_commit)
+            } else {
+                "release-tag".to_string()
+            }
+        })
+    };
     let artifact = config.prepared_artifact.as_ref().map_or_else(
         || {
             config
@@ -517,6 +543,10 @@ mod tests {
             allow_downgrade: false,
             head: false,
             requested_ref: None,
+            requested_refs: Default::default(),
+            resolved_refs: Default::default(),
+            preflighted_source_paths: Default::default(),
+            preflighted_component_identities: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

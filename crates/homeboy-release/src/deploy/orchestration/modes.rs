@@ -115,8 +115,17 @@ pub(super) fn run_dry_run_mode(
                     remote_versions.get(&c.id).cloned(),
                 )
                 .with_source_identity(c, config.head);
-            if let Some(requested_ref) = config.requested_ref.as_deref() {
-                let identity = resolve_exact_ref(c, requested_ref)?;
+            if let Some(requested_ref) = config.requested_ref_for(&c.id) {
+                let identity = if let Some(resolved_sha) = config.resolved_ref_for(&c.id) {
+                    super::super::orchestration_ref_checkout::ExactRefIdentity {
+                        requested_ref: requested_ref.to_string(),
+                        resolved_sha: resolved_sha.to_string(),
+                        source: c.local_path.clone(),
+                        resolution_mode: "release-set-preflight".to_string(),
+                    }
+                } else {
+                    resolve_exact_ref(c, requested_ref)?
+                };
                 if let Some(artifact) = config.prepared_artifact.as_ref() {
                     artifact.validate_exact_source(
                         &c.id,
@@ -208,7 +217,7 @@ fn planned_deploy_ref(component: &Component, config: &DeployConfig) -> Result<Op
     }
 
     let path = &component.local_path;
-    if let Some(requested_ref) = config.requested_ref.as_deref() {
+    if let Some(requested_ref) = config.requested_ref_for(&component.id) {
         resolve_exact_ref(component, requested_ref)?;
         return Ok(Some(requested_ref.to_string()));
     }
@@ -279,6 +288,7 @@ fn latest_deploy_tag(component: &Component, expected_version: Option<&str>) -> R
 mod tests {
     use super::*;
     use crate::deploy::PreparedDeployArtifact;
+    use std::collections::BTreeMap;
     use std::path::Path;
     use std::process::Command;
 
@@ -321,6 +331,10 @@ mod tests {
             allow_downgrade: false,
             head: false,
             requested_ref: Some("reviewed".to_string()),
+            requested_refs: Default::default(),
+            resolved_refs: Default::default(),
+            preflighted_source_paths: Default::default(),
+            preflighted_component_identities: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
@@ -358,6 +372,112 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn multi_ref_dry_run_resolves_each_component_ref_without_mutating_either_checkout() {
+        let first_repo = tempfile::tempdir().expect("first repo");
+        let second_repo = tempfile::tempdir().expect("second repo");
+        for (repo, branch) in [(&first_repo, "first-ref"), (&second_repo, "second-ref")] {
+            git(repo.path(), &["init", "-q"]);
+            git(repo.path(), &["config", "user.name", "Homeboy Test"]);
+            git(
+                repo.path(),
+                &["config", "user.email", "homeboy@example.test"],
+            );
+            std::fs::write(repo.path().join("payload.txt"), branch).expect("payload");
+            git(repo.path(), &["add", "payload.txt"]);
+            git(repo.path(), &["commit", "-q", "-m", branch]);
+            git(repo.path(), &["branch", branch]);
+        }
+        let components = vec![
+            Component {
+                id: "first".to_string(),
+                local_path: first_repo.path().to_string_lossy().to_string(),
+                remote_path: "components/first".to_string(),
+                build_artifact: Some("build/first.zip".to_string()),
+                ..Component::default()
+            },
+            Component {
+                id: "second".to_string(),
+                local_path: second_repo.path().to_string_lossy().to_string(),
+                remote_path: "components/second".to_string(),
+                build_artifact: Some("build/second.zip".to_string()),
+                ..Component::default()
+            },
+        ];
+        let config = DeployConfig {
+            component_ids: vec!["first".to_string(), "second".to_string()],
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: true,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            skip_deps_hydration: false,
+            expected_version: None,
+            no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
+            head: false,
+            requested_ref: None,
+            requested_refs: BTreeMap::from([
+                ("first".to_string(), "first-ref".to_string()),
+                ("second".to_string(), "second-ref".to_string()),
+            ]),
+            resolved_refs: Default::default(),
+            preflighted_source_paths: Default::default(),
+            preflighted_component_identities: Default::default(),
+            tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
+        };
+
+        let result = run_dry_run_mode(
+            &components,
+            &HashMap::new(),
+            &HashMap::new(),
+            &Project::default(),
+            "/srv/site",
+            &config,
+        )
+        .expect("multi-ref dry-run plan");
+
+        assert_eq!(
+            result.results[0].requested_ref.as_deref(),
+            Some("first-ref")
+        );
+        assert_eq!(
+            result.results[1].requested_ref.as_deref(),
+            Some("second-ref")
+        );
+
+        let mut invalid_config = config.clone();
+        invalid_config
+            .requested_refs
+            .insert("second".to_string(), "missing-ref".to_string());
+        let error = run_dry_run_mode(
+            &components,
+            &HashMap::new(),
+            &HashMap::new(),
+            &Project::default(),
+            "/srv/site",
+            &invalid_config,
+        )
+        .expect_err("an unresolved member ref must fail before any mutation");
+        assert!(error.message.contains("missing-ref"));
+
+        for repo in [&first_repo, &second_repo] {
+            assert_eq!(git_output(repo.path(), &["status", "--porcelain=v1"]), "");
+            assert_eq!(
+                git_output(repo.path(), &["worktree", "list", "--porcelain"])
+                    .matches("worktree ")
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]
@@ -399,6 +519,10 @@ mod tests {
             allow_downgrade: false,
             head: false,
             requested_ref: Some(sha.clone()),
+            requested_refs: Default::default(),
+            resolved_refs: Default::default(),
+            preflighted_source_paths: Default::default(),
+            preflighted_component_identities: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
@@ -462,6 +586,10 @@ mod tests {
             allow_downgrade: false,
             head: true,
             requested_ref: None,
+            requested_refs: Default::default(),
+            resolved_refs: Default::default(),
+            preflighted_source_paths: Default::default(),
+            preflighted_component_identities: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

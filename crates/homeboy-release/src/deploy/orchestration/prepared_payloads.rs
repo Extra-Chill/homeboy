@@ -45,7 +45,7 @@ pub(super) fn prepare_component_deployments(
     for component in components {
         let source_path = component.local_path.clone();
         let mut component = homeboy_core::project::apply_component_overrides(component, project);
-        if config.requested_ref.is_some() {
+        if config.requested_ref_for(&component.id).is_some() {
             component.local_path = source_path;
         }
         let effective_config = config.clone();
@@ -56,9 +56,11 @@ pub(super) fn prepare_component_deployments(
                 let mut preparation_config = effective_config.clone();
                 // The existing detached checkout is the authoritative exact-ref source.
                 preparation_config.requested_ref = None;
+                preparation_config.requested_refs.clear();
                 let mut request =
                     ComponentPayloadPreparationRequest::new(&component, &preparation_config);
-                request.config.exact_ref_materialized = config.requested_ref.is_some();
+                request.config.exact_ref_materialized =
+                    config.requested_ref_for(&component.id).is_some();
                 if let Some(lease) = release_artifacts.get(&component.id).cloned() {
                     if let Err(error) = payloads.insert(request.clone(), Some(lease)) {
                         failures.push(ComponentDeployResult::failed(

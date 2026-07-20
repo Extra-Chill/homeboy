@@ -42,6 +42,7 @@ pub(super) fn deploy_components(
     release_artifacts: &mut ReleaseArtifactStore,
 ) -> Result<DeployOrchestrationResult> {
     let loaded = load_project_components(project, &config.component_ids, config.check)?;
+    validate_preflighted_component_identities(&loaded.deployable, config)?;
     validate_supported_build_configs(&loaded.deployable)?;
 
     // In check mode, components whose required extensions are missing are skipped
@@ -138,11 +139,21 @@ pub(super) fn deploy_components(
 
     // Resolve first, then materialize immutable detached worktrees for real deploys.
     // Dry-run resolves in `run_dry_run_mode` and never creates a worktree.
-    let exact_ref_checkouts = if !config.dry_run {
-        if let Some(requested_ref) = config.requested_ref.as_deref() {
+    let exact_ref_checkouts = if !config.dry_run && !config.check {
+        if config.has_requested_refs() {
             components
                 .iter()
-                .map(|component| ExactRefCheckout::materialize(component, requested_ref))
+                .filter_map(|component| {
+                    config
+                        .requested_ref_for(&component.id)
+                        .map(|requested_ref| {
+                            ExactRefCheckout::materialize(
+                                component,
+                                requested_ref,
+                                config.resolved_ref_for(&component.id),
+                            )
+                        })
+                })
                 .collect::<Result<Vec<_>>>()?
         } else {
             Vec::new()
@@ -226,7 +237,7 @@ pub(super) fn deploy_components(
         .collect();
 
     // Sync: pull latest changes before deploying (unless --no-pull or --skip-build)
-    if config.requested_ref.is_none() && !config.no_pull && !config.skip_build {
+    if !config.has_requested_refs() && !config.no_pull && !config.skip_build {
         sync_components(&local_build_components)?;
     }
 
@@ -237,17 +248,17 @@ pub(super) fn deploy_components(
         warn_non_default_branch(&local_build_components, config)?;
     }
 
-    if config.requested_ref.is_none() && !config.force {
+    if !config.has_requested_refs() && !config.force {
         check_uncommitted_changes(&local_build_components)?;
     }
 
     // Check for HEAD-vs-tag gap before the tag checkout.
-    if config.requested_ref.is_none() && !config.head && !config.skip_build {
+    if !config.has_requested_refs() && !config.head && !config.skip_build {
         check_unreleased_commits(&local_build_components, config)?;
     }
 
     // Checkout the deploy tag for each component (unless --head or --skip-build).
-    let tag_checkouts = if config.requested_ref.is_none() && !config.head && !config.skip_build {
+    let tag_checkouts = if !config.has_requested_refs() && !config.head && !config.skip_build {
         checkout_deploy_tags(&local_build_components, config.expected_version.as_deref())?
     } else {
         Vec::new()
@@ -415,6 +426,52 @@ pub(super) fn deploy_components(
     })
 }
 
+fn validate_preflighted_component_identities(
+    components: &[Component],
+    config: &DeployConfig,
+) -> Result<()> {
+    for component in components {
+        let Some(expected_path) = config.preflighted_source_paths.get(&component.id) else {
+            continue;
+        };
+        let actual_identity = serde_json::to_string(component).map_err(|error| {
+            Error::internal_io(
+                format!(
+                    "Failed to encode effective component '{}': {error}",
+                    component.id
+                ),
+                None,
+            )
+        })?;
+        let expected_identity = config
+            .preflighted_component_identities
+            .get(&component.id)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "release_set",
+                    format!(
+                        "Release-set preflight identity is missing for component '{}'",
+                        component.id
+                    ),
+                    None,
+                    None,
+                )
+            })?;
+        if &component.local_path != expected_path || &actual_identity != expected_identity {
+            return Err(Error::validation_invalid_argument(
+                "release_set",
+                format!(
+                    "Project attachment for component '{}' changed after release-set preflight; expected source '{}'. Re-run the deploy so Homeboy can validate the current attachment.",
+                    component.id, expected_path
+                ),
+                None,
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_supported_build_configs(components: &[Component]) -> Result<()> {
     for component in components {
         component.validate_supported_build_config()?;
@@ -501,6 +558,10 @@ mod tests {
             allow_downgrade: false,
             head: false,
             requested_ref: None,
+            requested_refs: Default::default(),
+            resolved_refs: Default::default(),
+            preflighted_source_paths: Default::default(),
+            preflighted_component_identities: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
@@ -1319,7 +1380,7 @@ mod tests {
                 "fixture-packager".to_string(),
                 homeboy_core::component::ScopedExtensionConfig::default(),
             )]));
-            let checkout = ExactRefCheckout::materialize(&component, "requested")
+            let checkout = ExactRefCheckout::materialize(&component, "requested", None)
                 .expect("materialize requested ref");
             checkout.verify().expect("verify requested ref");
 
@@ -1430,8 +1491,8 @@ mod tests {
             }),
             ..Component::default()
         };
-        let checkout =
-            ExactRefCheckout::materialize(&component, "target").expect("materialize target ref");
+        let checkout = ExactRefCheckout::materialize(&component, "target", None)
+            .expect("materialize target ref");
         checkout.verify().expect("verify target ref");
         if let Some(barrier) = barrier {
             barrier.wait();

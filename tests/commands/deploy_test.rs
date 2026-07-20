@@ -2,6 +2,7 @@ use super::{resolve_multi_args, run, DeployArgs};
 use crate::cli_surface::{Cli, Commands};
 use crate::commands::GlobalArgs;
 use clap::Parser;
+use std::collections::BTreeMap;
 
 #[test]
 fn deploy_head_requires_apply_for_real_deploy() {
@@ -118,6 +119,78 @@ fn deploy_parser_accepts_release_set_manifest() {
         panic!("expected deploy command");
     };
     assert_eq!(args.release_set.as_deref(), Some("release-set.json"));
+}
+
+#[test]
+fn release_set_rejects_conflicting_source_selectors() {
+    for conflicting in [vec!["--head"], vec!["--tagged"], vec!["--outdated"]] {
+        let mut argv = vec![
+            "homeboy",
+            "deploy",
+            "--project",
+            "project-a",
+            "--release-set",
+            "release-set.json",
+        ];
+        argv.extend(conflicting.iter().copied());
+        assert!(
+            Cli::try_parse_from(argv).is_err(),
+            "--release-set should conflict with {conflicting:?}"
+        );
+    }
+}
+
+#[test]
+fn release_set_rejects_multi_target_modes() {
+    for target in [vec!["--projects", "project-a,project-b"], vec!["--fleet", "fleet-a"], vec!["--shared"]] {
+        let mut argv = vec!["homeboy", "deploy", "--release-set", "release-set.json"];
+        argv.extend(target.iter().copied());
+        let cli = Cli::try_parse_from(argv).expect("multi-target selector should parse for diagnostic");
+        let Commands::Deploy(args) = cli.command else {
+            panic!("expected deploy command");
+        };
+        let error = match run(args, &GlobalArgs {}) {
+            Ok(_) => panic!("release-set multi-target deploy must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("one --project deployment at a time"));
+    }
+}
+
+#[test]
+fn release_set_requires_apply_before_preflight() {
+    let manifest = tempfile::NamedTempFile::new().expect("manifest file");
+    std::fs::write(
+        manifest.path(),
+        r#"{"schema":"homeboy/release-set/v1","components":[{"id":"fixture","ref":"accepted"}]}"#,
+    )
+    .expect("manifest");
+    let args = deploy_args(|args| {
+        args.release_set = Some(manifest.path().display().to_string());
+    });
+
+    let error = match run(args, &GlobalArgs {}) {
+        Ok(_) => panic!("release set must require --apply"),
+        Err(error) => error,
+    };
+    assert!(error.message.contains("--release-set require explicit --apply"));
+}
+
+#[test]
+fn release_set_check_is_rejected_before_ref_resolution_or_materialization() {
+    let result = run(
+        deploy_args(|args| {
+            args.release_set = Some("not-read.json".to_string());
+            args.check = true;
+        }),
+        &GlobalArgs {},
+    );
+    let error = match result {
+        Ok(_) => panic!("release-set check must be rejected before it reads or mutates a source checkout"),
+        Err(error) => error,
+    };
+
+    assert!(error.message.contains("--check cannot be combined with --release-set"));
 }
 
 #[test]
@@ -336,6 +409,10 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         requested_ref: None,
         tagged: false,
         resume: None,
+        exact_refs: BTreeMap::new(),
+        resolved_refs: BTreeMap::new(),
+        preflighted_source_paths: BTreeMap::new(),
+        preflighted_component_identities: BTreeMap::new(),
     };
     customize(&mut args);
     args
