@@ -127,11 +127,9 @@ fn reconcile_authoritative_idle_stale_generations(
     runner_id: &str,
     generations: &[RunnerSession],
 ) -> Result<bool> {
-    let persisted_leases = generations
-        .iter()
-        .filter(|generation| generation.mode == RunnerTunnelMode::DirectSsh)
-        .filter_map(|generation| generation.remote_daemon_lease_id.clone())
-        .collect::<Vec<_>>();
+    let Some(persisted_leases) = eligible_stale_generation_leases(generations) else {
+        return Ok(false);
+    };
     if persisted_leases.is_empty() {
         return Ok(false);
     }
@@ -196,6 +194,24 @@ fn reconcile_authoritative_idle_stale_generations(
         }
     }
     Ok(true)
+}
+
+/// Clearing the ledger is safe only when every generation is represented by a
+/// lease-bearing direct SSH endpoint. Any other generation remains on the
+/// normal per-generation disconnect path.
+pub(in crate::connection) fn eligible_stale_generation_leases(
+    generations: &[RunnerSession],
+) -> Option<Vec<String>> {
+    generations
+        .iter()
+        .map(|generation| {
+            (generation.mode == RunnerTunnelMode::DirectSsh)
+                .then_some(generation.remote_daemon_lease_id.as_deref())
+                .flatten()
+                .filter(|lease_id| !lease_id.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 fn should_stop_remote_daemon(
