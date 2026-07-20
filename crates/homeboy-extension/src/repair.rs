@@ -74,7 +74,12 @@ fn replace_from_url(
     clean_replace_temp(&staged_dir)?;
     clean_replace_temp(&backup_dir)?;
 
-    if let Err(err) = git::clone_repo_at_ref(url, &clone_dir, revision) {
+    if let Err(err) = git::clone_repo_at_ref_with_timeout(
+        url,
+        &clone_dir,
+        revision,
+        super::lifecycle::EXTENSION_SOURCE_PREPARE_TIMEOUT,
+    ) {
         let _ = clean_replace_temp(&clone_dir);
         return Err(err.with_hint(format!(
             "Homeboy cloned into a fresh replace temp directory and removed it after failure. If git still reports corrupt tmp_pack files, inspect disk/git health and remove stale replace clone temps with: rm -rf {}",

@@ -3,8 +3,11 @@ use homeboy_core::git;
 use homeboy_core::paths;
 use homeboy_engine_primitives::identifier;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::load_extension;
+
+pub(crate) const EXTENSION_SOURCE_PREPARE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
 pub struct InstallResult {
@@ -138,12 +141,11 @@ pub struct RefreshResult {
     pub uninstalled_previous: bool,
 }
 
-/// Refresh a single extension from a source: uninstall any existing install,
-/// then reinstall from the given source/revision.
+/// Refresh a single extension from a source.
 ///
 /// This is the core-owned replacement for CI's hardcoded
-/// "uninstall (if present) then install" shell sequence. It is idempotent and
-/// safe to re-run: a missing prior install is not an error.
+/// "uninstall (if present) then install" shell sequence. Existing installs use
+/// the transactional replacement path so a failed preparation leaves them live.
 pub fn refresh(
     source: &str,
     id_override: Option<&str>,
@@ -163,15 +165,23 @@ pub fn refresh(
     let install_source = durable_refresh_source(source, &extension_id)?;
 
     let extension_dir = paths::extension(&extension_id)?;
-    let uninstalled_previous = if std::fs::symlink_metadata(&extension_dir).is_ok() {
-        uninstall(&extension_id)?;
-        true
+    let uninstalled_previous = std::fs::symlink_metadata(&extension_dir).is_ok();
+    let installed = if uninstalled_previous {
+        let replaced = crate::repair::replace_with_revision(
+            &install_source,
+            Some(&extension_id),
+            effective_revision,
+        )?;
+        InstallResult {
+            extension_id: replaced.extension_id,
+            url: replaced.source,
+            path: replaced.new_path,
+            manifest_path: replaced.manifest_path,
+            source_revision: replaced.source_revision,
+        }
     } else {
-        false
+        install_with_revision(&install_source, Some(&extension_id), effective_revision)?
     };
-
-    let installed =
-        install_with_revision(&install_source, Some(&extension_id), effective_revision)?;
 
     Ok(RefreshResult {
         extension_id: installed.extension_id,
@@ -787,6 +797,50 @@ exec '{}' "$@"
             assert_eq!(
                 load_extension("alpha").expect("reinstalled").version,
                 "2.0.0"
+            );
+        });
+    }
+
+    #[test]
+    fn refresh_preserves_existing_install_when_replacement_setup_fails() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let old_source = home.join("old-source");
+            let invalid_source = home.join("invalid-source");
+            write_extension_fixture_with_version(&old_source, "wordpress", "1.0.0");
+            fs::create_dir_all(invalid_source.join("wordpress")).expect("replacement source");
+            fs::write(
+                invalid_source.join("wordpress/wordpress.json"),
+                r#"{"name":"wordpress extension","version":"2.0.0","executable":{"runtime":{"setup_command":"false"}}}"#,
+            )
+            .expect("failing replacement manifest");
+
+            install(
+                &old_source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect("pre-install");
+
+            let err = refresh(&invalid_source.to_string_lossy(), Some("wordpress"), None)
+                .expect_err("refresh should reject the invalid replacement");
+
+            assert!(!err.message.is_empty());
+            let installed_path = home.join(".config/homeboy/extensions/wordpress");
+            assert_eq!(
+                fs::read_link(&installed_path).expect("preserved extension link"),
+                old_source.join("wordpress")
+            );
+            assert_eq!(
+                load_extension("wordpress")
+                    .expect("preserved extension")
+                    .version,
+                "1.0.0"
+            );
+            assert!(
+                !home
+                    .join(".config/homeboy/extensions/.replace-link-tmp-wordpress")
+                    .exists(),
+                "failed refresh should not leave a replacement link"
             );
         });
     }
