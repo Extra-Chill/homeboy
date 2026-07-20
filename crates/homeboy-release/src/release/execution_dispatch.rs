@@ -305,11 +305,7 @@ fn run_default_branch_preflight(
             id: step.id.clone(),
             step_type: step.kind.clone(),
             status: ReleaseStepStatus::Success,
-            missing: Vec::new(),
-            warnings: Vec::new(),
-            hints: Vec::new(),
-            data: None,
-            error: None,
+            ..Default::default()
         },
         Err(err) => failed_result(&step.id, &step.kind, err),
     }
@@ -324,11 +320,7 @@ fn run_working_tree_preflight(
             id: step.id.clone(),
             step_type: step.kind.clone(),
             status: ReleaseStepStatus::Success,
-            missing: Vec::new(),
-            warnings: Vec::new(),
-            hints: Vec::new(),
-            data: None,
-            error: None,
+            ..Default::default()
         },
         Err(err) => failed_result(&step.id, &step.kind, err),
     }
@@ -351,11 +343,7 @@ fn run_remote_sync_preflight(
             id: step.id.clone(),
             step_type: step.kind.clone(),
             status: ReleaseStepStatus::Success,
-            missing: Vec::new(),
-            warnings: Vec::new(),
-            hints: Vec::new(),
-            data: None,
-            error: None,
+            ..Default::default()
         },
         Err(err) => failed_result(&step.id, &step.kind, err),
     }
@@ -403,16 +391,13 @@ fn run_bump_policy_preflight(step: &PlanStep) -> ReleaseStepResult {
         id: step.id.clone(),
         step_type: step.kind.clone(),
         status: ReleaseStepStatus::Success,
-        missing: Vec::new(),
-        warnings: Vec::new(),
-        hints: Vec::new(),
         data: Some(serde_json::json!({
             "requested": requested,
             "recommended": recommended,
             "underbump": underbump,
             "force_lower_bump": force_lower_bump,
         })),
-        error: None,
+        ..Default::default()
     }
 }
 
@@ -516,11 +501,7 @@ fn run_changelog_bootstrap_preflight(
             id: step.id.clone(),
             step_type: step.kind.clone(),
             status: ReleaseStepStatus::Success,
-            missing: Vec::new(),
-            warnings: Vec::new(),
-            hints: Vec::new(),
-            data: None,
-            error: None,
+            ..Default::default()
         },
         Err(err) => failed_result(&step.id, &step.kind, err),
     }

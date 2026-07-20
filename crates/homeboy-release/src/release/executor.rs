@@ -52,11 +52,9 @@ pub(crate) fn step_success(
         id: id.to_string(),
         step_type: step_type.to_string(),
         status: ReleaseStepStatus::Success,
-        missing: Vec::new(),
-        warnings: Vec::new(),
         hints,
         data,
-        error: None,
+        ..Default::default()
     }
 }
 
@@ -72,11 +70,10 @@ pub(crate) fn step_failed(
         id: id.to_string(),
         step_type: step_type.to_string(),
         status: ReleaseStepStatus::Failed,
-        missing: Vec::new(),
-        warnings: Vec::new(),
         hints,
         data,
         error,
+        ..Default::default()
     }
 }
 
@@ -91,11 +88,9 @@ pub(crate) fn step_skipped(
         id: id.to_string(),
         step_type: step_type.to_string(),
         status: ReleaseStepStatus::Skipped,
-        missing: Vec::new(),
         warnings: vec![warning.into()],
-        hints: Vec::new(),
         data,
-        error: None,
+        ..Default::default()
     }
 }
 
