@@ -417,6 +417,37 @@ fn equal_version_build_identity_and_runtime_paths_are_current() {
 }
 
 #[test]
+fn observed_matching_daemon_identity_reconciles_stale_session_metadata() {
+    let mut session = direct_ssh_session("lease-live");
+    session.homeboy_version = "0.298.0".to_string();
+    session.homeboy_build_identity = Some("homeboy 0.298.0+old".to_string());
+    let configured = RemoteHomeboyIdentity {
+        version: "0.298.1".to_string(),
+        build_identity: Some("homeboy 0.298.1+7d7b8e656466".to_string()),
+    };
+
+    assert!(reconcile_session_metadata(
+        &mut session,
+        "0.298.1",
+        "homeboy 0.298.1+7d7b8e656466",
+        &configured,
+    ));
+    assert_eq!(session.homeboy_version, "0.298.1");
+    assert_eq!(
+        session.homeboy_build_identity.as_deref(),
+        Some("homeboy 0.298.1+7d7b8e656466")
+    );
+    assert!(daemon_runtime_is_current(
+        "0.298.1",
+        &session.homeboy_version,
+        &configured.version,
+        IdentityComparison::Match,
+        &[],
+        &[],
+    ));
+}
+
+#[test]
 fn equal_versions_with_different_build_identities_are_stale_and_name_both_builds() {
     let warning = RunnerStaleDaemonWarning::new(
         "homeboy-lab",
@@ -956,7 +987,11 @@ fn refresh_disconnect_accepts_local_tunnel_rotation_and_uses_the_current_tunnel(
         let error = disconnect_with_session("homeboy-lab", Some(&recorded), false)
             .expect_err("a local fixture cannot authorize the required SSH re-probe");
         server.join().expect("server");
-        assert!(error.message.contains("runner is not SSH-backed"));
+        assert!(error.message.contains("unresolved daemon generations"));
+        assert!(error
+            .details
+            .to_string()
+            .contains("runner is not SSH-backed"));
         assert!(read_session("homeboy-lab").expect("read session").is_some());
     });
 }

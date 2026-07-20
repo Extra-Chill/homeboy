@@ -1092,10 +1092,11 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     // A Cook handoff can cross controller identities after readiness accepted a
     // direct SSH tunnel. Reuse that still-live tunnel rather than treating the
     // controller-local record lookup as a daemon disconnect.
-    let session = read_session_or_live_peer(runner_id)?;
-    super::generation_store::reconcile(runner_id, session.as_ref())?;
+    let mut session = read_session_or_live_peer(runner_id)?;
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
+    reconcile_session_metadata_with_observed_daemon(&runner, &mut session, connected)?;
+    super::generation_store::reconcile(runner_id, session.as_ref())?;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
     let mut daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?
         .or_else(|| remote_daemon_recovery_freshness(runner_id, &runner));
@@ -2021,6 +2022,72 @@ fn stale_daemon_warning(
         )
         .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths),
     ))
+}
+
+/// A daemon endpoint and configured executable jointly provide stronger evidence
+/// than a session record written by a prior controller generation.
+fn reconcile_session_metadata_with_observed_daemon(
+    runner: &Runner,
+    session: &mut Option<RunnerSession>,
+    connected: bool,
+) -> Result<()> {
+    if !connected || runner.kind != RunnerKind::Ssh {
+        return Ok(());
+    }
+    let Some(current_session) = session.as_mut() else {
+        return Ok(());
+    };
+    if current_session.mode != RunnerTunnelMode::DirectSsh {
+        return Ok(());
+    }
+    let Some(local_url) = current_session.local_url.as_deref() else {
+        return Ok(());
+    };
+    let homeboy = remote_runner_homeboy_path(runner, "runner status metadata reconciliation")?;
+    let Some((_, _, client)) = resolve_ssh_runner(runner)? else {
+        return Ok(());
+    };
+    let Ok(configured) = remote_homeboy_identity(&client, homeboy) else {
+        return Ok(());
+    };
+    let Ok(observed_version) = daemon_http_version(local_url) else {
+        return Ok(());
+    };
+    let Ok(observed_identity) = daemon_http_identity(local_url) else {
+        return Ok(());
+    };
+    if !reconcile_session_metadata(
+        current_session,
+        &observed_version,
+        &observed_identity,
+        &configured,
+    ) {
+        return Ok(());
+    }
+    write_session(current_session)
+}
+
+fn reconcile_session_metadata(
+    session: &mut RunnerSession,
+    observed_version: &str,
+    observed_identity: &str,
+    configured: &RemoteHomeboyIdentity,
+) -> bool {
+    if !versions_match(observed_version, &configured.version)
+        || compare_identities(
+            Some(observed_identity),
+            configured.build_identity.as_deref(),
+        ) != IdentityComparison::Match
+    {
+        return false;
+    }
+    let version = normalize_homeboy_version_owned(observed_version);
+    let identity = observed_identity.trim();
+    let changed = session.homeboy_version != version
+        || session.homeboy_build_identity.as_deref() != Some(identity);
+    session.homeboy_version = version;
+    session.homeboy_build_identity = Some(identity.to_string());
+    changed
 }
 
 fn daemon_runtime_is_current(
