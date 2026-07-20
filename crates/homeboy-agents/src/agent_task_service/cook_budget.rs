@@ -9,7 +9,7 @@
 
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskState};
 
-use super::cook::provider_rotation_attempts;
+use super::cook_pre_execution::provider_rotation_attempts;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ExecutionBudgetUsage {
