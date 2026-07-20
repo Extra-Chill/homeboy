@@ -50,5 +50,6 @@ pub(crate) use repair::{
 };
 #[cfg(test)]
 pub(crate) use results::{
-    create_failed_result, not_created_result, upload_failed_result, upload_success_result,
+    create_failed_result, not_created_result, published_release_url, upload_failed_result,
+    upload_success_result,
 };

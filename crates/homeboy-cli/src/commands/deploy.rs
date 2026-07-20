@@ -394,7 +394,8 @@ fn apply_release_set(
     args.preflighted_component_identities = active
         .iter()
         .map(|(entry, component)| {
-            serde_json::to_string(component)
+            component
+                .canonical_identity()
                 .map(|identity| (entry.id.clone(), identity))
                 .map_err(|error| homeboy::core::Error::internal_io(
                     format!("Failed to encode release-set component '{}': {error}", entry.id),

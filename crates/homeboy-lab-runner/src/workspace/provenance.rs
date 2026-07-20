@@ -15,6 +15,11 @@ const LAB_SOURCE_SNAPSHOT_SYNC_MODE: &str = "lab_offload";
 const SYNTHETIC_SNAPSHOT_BASELINE_REF: &str = "refs/heads/homeboy-snapshot-baseline";
 const SYNTHETIC_SNAPSHOT_AUTHOR: &str = "Homeboy Snapshot <snapshot@homeboy.invalid> 0 +0000";
 const CONTENT_MANIFEST_DIFFERENCE_LIMIT: usize = 8;
+const SYNTHETIC_BASELINE_PATHS: &[&str] = &[
+    ".",
+    ":(exclude).homeboy/runner-workspace.json",
+    ":(exclude).homeboy/lab-at-files/**",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedLabWorkspaceProvenance {
@@ -75,7 +80,17 @@ pub(crate) fn materialize_verified_lab_snapshot_git_baseline(
             "--initial-branch=homeboy-snapshot-baseline",
         ],
     )?;
-    git(materialized_workspace_path, &["add", "--all"])?;
+    git(
+        materialized_workspace_path,
+        &[
+            "add",
+            "--all",
+            "--",
+            SYNTHETIC_BASELINE_PATHS[0],
+            SYNTHETIC_BASELINE_PATHS[1],
+            SYNTHETIC_BASELINE_PATHS[2],
+        ],
+    )?;
     let tree = git(materialized_workspace_path, &["write-tree"])?;
     let message = synthetic_snapshot_baseline_message(&provenance);
     let commit = git_with_env(
@@ -177,7 +192,15 @@ fn verify_materialized_snapshot_git_checkout(
     }
     if !git(
         workspace,
-        &["status", "--porcelain", "--untracked-files=all"],
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            SYNTHETIC_BASELINE_PATHS[0],
+            SYNTHETIC_BASELINE_PATHS[1],
+            SYNTHETIC_BASELINE_PATHS[2],
+        ],
     )?
     .is_empty()
     {
@@ -1236,6 +1259,121 @@ mod tests {
             .expect("candidate patch");
         assert!(uncommitted_patch.contains("-candidate"));
         assert!(uncommitted_patch.contains("+uncommitted candidate"));
+    }
+
+    #[test]
+    fn synthetic_baseline_captures_only_provider_delta_for_clean_and_dirty_snapshots() {
+        for dirty in [false, true] {
+            let workspace = tempfile::tempdir().expect("runner workspace");
+            let authoritative = tempfile::tempdir().expect("authoritative workspace");
+            let source_contents = if dirty {
+                "source dirty\n"
+            } else {
+                "baseline\n"
+            };
+            std::fs::write(workspace.path().join("file.txt"), source_contents)
+                .expect("snapshot source");
+            std::fs::create_dir_all(workspace.path().join(".homeboy"))
+                .expect("runner metadata directory");
+            std::fs::write(
+                workspace.path().join(".homeboy/runner-workspace.json"),
+                "runner-owned metadata\n",
+            )
+            .expect("runner metadata");
+            let mut snapshot = snapshot(workspace.path());
+            snapshot.dirty = dirty;
+            let mut lab = lab(workspace.path(), &snapshot);
+            lab["workspace_cleanliness"] = serde_json::json!({
+                "allow_dirty_lab_workspace": dirty,
+            });
+            let baseline = materialize_verified_lab_snapshot_git_baseline(
+                &workspace.path().display().to_string(),
+                workspace.path(),
+                snapshot.clone(),
+                lab,
+            )
+            .expect("synthetic baseline");
+
+            assert!(
+                !git(workspace.path(), &["ls-tree", "-r", "--name-only", "HEAD"])
+                    .expect("list baseline tree")
+                    .contains(".homeboy/runner-workspace.json"),
+                "runner metadata is never part of the synthetic baseline"
+            );
+            std::fs::write(
+                workspace.path().join("provider-edit.txt"),
+                "provider edit\n",
+            )
+            .expect("provider edit");
+            git(
+                workspace.path(),
+                &[
+                    "add",
+                    "--all",
+                    "--",
+                    SYNTHETIC_BASELINE_PATHS[0],
+                    SYNTHETIC_BASELINE_PATHS[1],
+                    SYNTHETIC_BASELINE_PATHS[2],
+                ],
+            )
+            .expect("stage provider delta");
+            let patch = git(
+                workspace.path(),
+                &[
+                    "diff",
+                    "--cached",
+                    "--binary",
+                    "--full-index",
+                    &baseline,
+                    "--",
+                    SYNTHETIC_BASELINE_PATHS[0],
+                    SYNTHETIC_BASELINE_PATHS[1],
+                    SYNTHETIC_BASELINE_PATHS[2],
+                ],
+            )
+            .expect("provider delta");
+            assert!(patch.contains("provider-edit.txt"));
+            assert!(!patch.contains("runner-workspace.json"));
+            assert!(!patch.contains("source dirty"));
+
+            std::fs::write(authoritative.path().join("file.txt"), "baseline\n")
+                .expect("authoritative baseline");
+            git(authoritative.path(), &["init", "--quiet", "-b", "main"])
+                .expect("initialize authoritative source");
+            git(authoritative.path(), &["add", "file.txt"]).expect("stage authoritative baseline");
+            git(
+                authoritative.path(),
+                &[
+                    "-c",
+                    "user.name=Homeboy Test",
+                    "-c",
+                    "user.email=test@homeboy.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "baseline",
+                ],
+            )
+            .expect("commit authoritative baseline");
+            std::fs::write(authoritative.path().join("file.txt"), source_contents)
+                .expect("authoritative source state");
+            let patch_path = authoritative.path().join("provider.patch");
+            std::fs::write(&patch_path, format!("{patch}\n")).expect("candidate patch");
+            git(
+                authoritative.path(),
+                &[
+                    "apply",
+                    "--whitespace=nowarn",
+                    patch_path.to_str().expect("patch path"),
+                ],
+            )
+            .expect("apply provider delta");
+            assert_eq!(
+                std::fs::read_to_string(authoritative.path().join("provider-edit.txt"))
+                    .expect("applied provider edit"),
+                "provider edit\n"
+            );
+        }
     }
 
     #[derive(Clone)]

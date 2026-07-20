@@ -103,7 +103,16 @@ pub fn daemon_api_post(runner_id: &str, path: &str) -> Result<Value> {
 pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> Result<Value> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;
-    let Some(session) = connected.session.filter(|_| connected.connected) else {
+    let job_id = path
+        .strip_prefix("/jobs/")
+        .and_then(|value| value.split('/').next());
+    let routed_session = job_id
+        .map(|job_id| super::super::generations::session_for_job(runner_id, job_id))
+        .transpose()?
+        .flatten();
+    let Some(session) =
+        routed_session.or_else(|| connected.session.filter(|_| connected.connected))
+    else {
         return Err(Error::validation_invalid_argument(
             "runner",
             "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` first",

@@ -14,8 +14,8 @@ use super::notes::{
 };
 use super::repair::{gh_auth_failure_message, github_release_repair_commands, log_repair_commands};
 use super::results::{
-    create_failed_result, not_created_result, skipped_result, upload_failed_result,
-    upload_success_result,
+    create_failed_result, not_created_result, published_release_url, skipped_result,
+    upload_failed_result, upload_success_result,
 };
 use super::{
     gh_failure_detail, gh_release_metadata, github_release_upload_timeout, run_gh_command,
@@ -391,7 +391,8 @@ pub(crate) fn run_github_release(
         ));
     }
 
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let draft_response = String::from_utf8_lossy(&output.stdout);
+    let url = published_release_url(&github, &tag, &draft_response, &publish_output.stdout);
     homeboy_core::log_status!("release", "Published verified GitHub Release: {}", url);
     Ok(step_success(
         "github.release",

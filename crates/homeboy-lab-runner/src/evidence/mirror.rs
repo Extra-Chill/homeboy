@@ -189,6 +189,12 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
     mirror_job_run(
         &store, &runner, cwd, &command, &job, &events, &result, None, None,
     )?;
+    if matches!(
+        job.status,
+        JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
+    ) {
+        super::super::generations::reconcile_terminal_job(&runner_id)?;
+    }
     Ok(Some(mirror_remote_observation_runs(
         &store, &runner, &job, &result, None,
     )?))

@@ -32,6 +32,17 @@ use crate::source_snapshot::SourceSnapshot;
 /// child identity. The child is normally spawned immediately after admission;
 /// a longer-lived record means no child was durably confirmed.
 const LOCAL_CHILD_RESERVATION_LEASE_MS: u64 = 60_000;
+/// Admissions protect the controller-to-daemon handoff window. A stopped
+/// controller must eventually stop consuming daemon replacement capacity.
+pub(crate) const ADMISSION_RESERVATION_LEASE_MS: u64 = 30_000;
+
+#[derive(Debug, Clone)]
+pub(crate) struct AdmissionReservation {
+    pub(crate) job: Job,
+    pub(crate) token: String,
+    pub(crate) expires_at_ms: u64,
+    pub(crate) created: bool,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct JobStore {
@@ -72,6 +83,8 @@ pub(super) struct StoredJob {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) admission_idempotency_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) admission_lease: Option<AdmissionLease>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) remote_runner: Option<remote_runner::StoredRemoteRunnerJob>,
     /// Typed execution identity for a daemon-local child submitted on behalf of
     /// a remote runner. This lets `/jobs` project the accepted runner job without
@@ -80,6 +93,14 @@ pub(super) struct StoredJob {
     pub(super) local_runner: Option<LocalRunnerJob>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) local_child: Option<LocalChildExecution>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct AdmissionLease {
+    token: String,
+    expires_at_ms: u64,
+    #[serde(default)]
+    renewals: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -455,9 +476,59 @@ impl JobStore {
         .0
     }
 
-    /// Reserve one daemon admission per caller-owned handoff identity. This is
-    /// separate from executable-job deduplication because an admission is a
-    /// short-lived pre-handoff guard, not the runner child itself.
+    /// Create or renew a caller-owned admission under one store lock. Replays
+    /// renew only the live reservation; terminal identities are never revived.
+    pub(crate) fn create_or_renew_admission_at(
+        &self,
+        metadata: Value,
+        idempotency_key: &str,
+        now: u64,
+    ) -> Result<AdmissionReservation> {
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        if let Some(stored) = inner
+            .jobs
+            .values_mut()
+            .filter(|stored| stored.admission_idempotency_key.as_deref() == Some(idempotency_key))
+            .min_by_key(|stored| (stored.job.created_at_ms, stored.job.id))
+        {
+            if stored.job.status.is_terminal() {
+                return Err(Error::validation_invalid_argument(
+                    "idempotency_key",
+                    "admission idempotency key belongs to a terminal reservation",
+                    Some(idempotency_key.to_string()),
+                    None,
+                ));
+            }
+            let lease = stored.admission_lease.as_mut().ok_or_else(|| {
+                Error::internal_unexpected("active admission reservation is missing its lease")
+            })?;
+            lease.expires_at_ms = now.saturating_add(ADMISSION_RESERVATION_LEASE_MS);
+            lease.renewals = lease.renewals.saturating_add(1);
+            stored.job.updated_at_ms = now;
+            let reservation = AdmissionReservation {
+                job: stored.job.clone(),
+                token: lease.token.clone(),
+                expires_at_ms: lease.expires_at_ms,
+                created: false,
+            };
+            drop(inner);
+            self.persist()?;
+            return Ok(reservation);
+        }
+        drop(inner);
+        self.create_admission_inner(metadata, Some(idempotency_key.to_string()), now)
+    }
+
+    pub(crate) fn create_admission_at(
+        &self,
+        metadata: Value,
+        now: u64,
+    ) -> Result<AdmissionReservation> {
+        self.create_admission_inner(metadata, None, now)
+    }
+
+    /// Legacy, tokenless admission used only by pre-lease protocol clients
+    /// during a rolling daemon upgrade.
     pub(crate) fn create_or_reuse_active_admission(
         &self,
         metadata: Value,
@@ -471,6 +542,165 @@ impl JobStore {
             None,
             Some(idempotency_key.to_string()),
         )
+    }
+
+    fn create_admission_inner(
+        &self,
+        metadata: Value,
+        idempotency_key: Option<String>,
+        now: u64,
+    ) -> Result<AdmissionReservation> {
+        let (job, created) = self.create_or_reuse_active_local_runner_job(
+            "runner.admission",
+            None,
+            Some(metadata),
+            None,
+            None,
+            idempotency_key.clone(),
+        );
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner.jobs.get_mut(&job.id).expect("admission exists");
+        if !created {
+            let (token, expires_at_ms) = {
+                let lease = stored.admission_lease.as_mut().ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "idempotency_key",
+                        "admission idempotency key belongs to a legacy reservation",
+                        idempotency_key.clone(),
+                        None,
+                    )
+                })?;
+                lease.expires_at_ms = now.saturating_add(ADMISSION_RESERVATION_LEASE_MS);
+                lease.renewals = lease.renewals.saturating_add(1);
+                (lease.token.clone(), lease.expires_at_ms)
+            };
+            stored.job.updated_at_ms = now;
+            let reservation = AdmissionReservation {
+                job: stored.job.clone(),
+                token,
+                expires_at_ms,
+                created: false,
+            };
+            drop(inner);
+            self.persist()?;
+            return Ok(reservation);
+        }
+        let lease = AdmissionLease {
+            token: Uuid::new_v4().to_string(),
+            expires_at_ms: now.saturating_add(ADMISSION_RESERVATION_LEASE_MS),
+            renewals: 0,
+        };
+        stored.admission_lease = Some(lease.clone());
+        drop(inner);
+        self.persist()?;
+        Ok(AdmissionReservation {
+            job,
+            token: lease.token,
+            expires_at_ms: lease.expires_at_ms,
+            created,
+        })
+    }
+
+    pub(crate) fn renew_admission_at(
+        &self,
+        job_id: Uuid,
+        token: &str,
+        now: u64,
+    ) -> Result<AdmissionReservation> {
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get_mut(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        let (token, expires_at_ms) = {
+            let lease = Self::admission_lease_for_live_job(stored, token, now)?;
+            lease.expires_at_ms = now.saturating_add(ADMISSION_RESERVATION_LEASE_MS);
+            lease.renewals = lease.renewals.saturating_add(1);
+            (lease.token.clone(), lease.expires_at_ms)
+        };
+        stored.job.updated_at_ms = now;
+        let reservation = AdmissionReservation {
+            job: stored.job.clone(),
+            token,
+            expires_at_ms,
+            created: false,
+        };
+        drop(inner);
+        self.persist()?;
+        Ok(reservation)
+    }
+
+    pub(crate) fn release_admission_at(&self, job_id: Uuid, token: &str, now: u64) -> Result<Job> {
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get_mut(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        let lease = stored.admission_lease.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "job_id",
+                "job is not an admission reservation",
+                Some(job_id.to_string()),
+                None,
+            )
+        })?;
+        if lease.token != token {
+            return Err(Error::validation_invalid_argument(
+                "admission_token",
+                "admission reservation token does not match",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        if !stored.job.status.is_terminal() {
+            stored.job.status = JobStatus::Cancelled;
+            stored.job.updated_at_ms = now;
+            stored.job.finished_at_ms = Some(now);
+            stored.job.stale_reason = Some("admission reservation released".to_string());
+        }
+        let job = stored.job.clone();
+        drop(inner);
+        self.persist()?;
+        Ok(job)
+    }
+
+    pub(crate) fn admission_is_leased(&self, job_id: Uuid) -> Result<bool> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = inner
+            .jobs
+            .get(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        Ok(stored.admission_lease.is_some())
+    }
+
+    pub(crate) fn reconcile_expired_admissions_at(&self, now: u64) -> Result<Vec<Uuid>> {
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let expired = inner
+            .jobs
+            .values_mut()
+            .filter_map(|stored| {
+                let lease = stored.admission_lease.as_ref()?;
+                if !stored.job.status.is_terminal() && lease.expires_at_ms <= now {
+                    stored.job.status = JobStatus::Failed;
+                    stored.job.updated_at_ms = now;
+                    stored.job.finished_at_ms = Some(now);
+                    stored.job.stale_reason =
+                        Some("admission reservation lease expired".to_string());
+                    Some(stored.job.id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        drop(inner);
+        if !expired.is_empty() {
+            self.persist()?;
+        }
+        Ok(expired)
+    }
+
+    pub(crate) fn reconcile_expired_admissions(&self) -> Result<Vec<Uuid>> {
+        self.reconcile_expired_admissions_at(timestamp_ms())
     }
 
     /// Insert a new queued local-runner job, or reuse the existing non-terminal
@@ -534,7 +764,8 @@ impl JobStore {
                     matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
                 })
                 .filter(|stored| {
-                    stored.admission_idempotency_key.as_deref() == Some(idempotency_key)
+                    (local_runner.is_none() || stored.job.operation != "runner.admission")
+                        && stored.admission_idempotency_key.as_deref() == Some(idempotency_key)
                 })
                 .min_by_key(|stored| (stored.job.created_at_ms, stored.job.id))
                 .map(|stored| stored.job.clone())
@@ -557,17 +788,35 @@ impl JobStore {
                 return (existing, false);
             }
         }
+        let consumes_admission = local_runner.is_some();
         inner.jobs.insert(
             job.id,
             StoredJob {
                 job: job.clone(),
                 events: Vec::new(),
-                admission_idempotency_key,
+                admission_idempotency_key: admission_idempotency_key.clone(),
+                admission_lease: None,
                 remote_runner: None,
                 local_runner,
                 local_child: None,
             },
         );
+        if let (Some(idempotency_key), true) =
+            (admission_idempotency_key.as_deref(), consumes_admission)
+        {
+            for stored in inner.jobs.values_mut() {
+                if stored.job.operation == "runner.admission"
+                    && matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                    && stored.admission_idempotency_key.as_deref() == Some(idempotency_key)
+                {
+                    stored.job.status = JobStatus::Cancelled;
+                    stored.job.updated_at_ms = now;
+                    stored.job.finished_at_ms = Some(now);
+                    stored.job.stale_reason =
+                        Some("admission reservation consumed by runner execution".to_string());
+                }
+            }
+        }
         drop(inner);
 
         if let Some(metadata) = metadata {
@@ -581,6 +830,38 @@ impl JobStore {
                 .expect("newly-created job must be readable after insert"),
             true,
         )
+    }
+
+    fn admission_lease_for_live_job<'a>(
+        stored: &'a mut StoredJob,
+        token: &str,
+        now: u64,
+    ) -> Result<&'a mut AdmissionLease> {
+        let lease = stored.admission_lease.as_mut().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "job_id",
+                "job is not an admission reservation",
+                Some(stored.job.id.to_string()),
+                None,
+            )
+        })?;
+        if lease.token != token {
+            return Err(Error::validation_invalid_argument(
+                "admission_token",
+                "admission reservation token does not match",
+                Some(stored.job.id.to_string()),
+                None,
+            ));
+        }
+        if stored.job.status.is_terminal() || lease.expires_at_ms <= now {
+            return Err(Error::validation_invalid_argument(
+                "job_id",
+                "admission reservation is terminal or expired",
+                Some(stored.job.id.to_string()),
+                None,
+            ));
+        }
+        Ok(lease)
     }
 
     pub fn get(&self, job_id: Uuid) -> Result<Job> {
@@ -1847,6 +2128,7 @@ impl JobStore {
         metadata: Option<Value>,
         path_materialization_plan: Option<PathMaterializationPlan>,
         local_runner: LocalRunnerJob,
+        admission_idempotency_key: Option<String>,
         capacity: usize,
         run: F,
     ) -> JobRunner
@@ -1860,7 +2142,7 @@ impl JobStore {
             metadata,
             path_materialization_plan,
             Some(local_runner.clone()),
-            None,
+            admission_idempotency_key,
         );
         let job_id = job.id;
         // An idempotent resubmission reused an already-enqueued job that already

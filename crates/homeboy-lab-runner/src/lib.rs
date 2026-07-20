@@ -41,6 +41,8 @@ mod daemon_http_get;
 mod evidence;
 mod execution;
 mod extension_materialization;
+mod generations;
+pub use generations::{inventory as runner_generation_inventory, RunnerDaemonGenerationStatus};
 mod git_dependency_materialization;
 mod homeboy_refresh;
 mod job_preparation;
@@ -650,12 +652,7 @@ fn lab_runner_readiness_from_candidates(
         LabRunnerReadinessState::Stale => candidates
             .iter()
             .filter(|candidate| candidate.stale_daemon)
-            .map(|candidate| {
-                format!(
-                    "homeboy runner doctor {} --scope lab-offload",
-                    candidate.id
-                )
-            })
+            .map(|candidate| format!("homeboy runner doctor {} --scope lab-offload", candidate.id))
             .collect(),
         LabRunnerReadinessState::Disconnected => candidates
             .iter()

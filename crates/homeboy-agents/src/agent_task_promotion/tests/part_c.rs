@@ -363,6 +363,7 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
                 verify: vec!["cargo test".to_string()],
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
             },
             provider_command: None,
             provider_invocation: None,
@@ -422,6 +423,7 @@ fn promote_no_op_outcome_without_committed_candidate_rejects_before_apply() {
                 verify: vec!["true".to_string()],
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
             },
             provider_command: None,
             provider_invocation: None,
@@ -564,6 +566,7 @@ fn promote_applies_patch_with_fake_workspace_provider() {
                 verify: vec!["cargo test --lib agent_task_promotion".to_string()],
                 private_verify: vec!["cargo test --lib hidden".to_string()],
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+                ..Default::default()
             },
             provider_command: None,
             provider_invocation: None,
@@ -719,6 +722,7 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
                     verify: vec!["true".to_string()],
                     private_verify: Vec::new(),
                     private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                    ..Default::default()
                 },
                 provider_command: None,
                 provider_invocation: None,

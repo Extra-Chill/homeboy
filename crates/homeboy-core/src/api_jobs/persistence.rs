@@ -458,7 +458,7 @@ pub(super) fn job_not_found(job_id: Uuid) -> Error {
     Error::validation_invalid_argument("job_id", "job not found", Some(job_id.to_string()), None)
 }
 
-pub(super) fn timestamp_ms() -> u64 {
+pub(crate) fn timestamp_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock must be after unix epoch")

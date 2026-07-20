@@ -231,6 +231,12 @@ impl AgentTaskReviewDossier {
                     "each test step needs a runnable command and expected result",
                 );
             }
+            if !reviewer_runnable_command(&step.command) {
+                return invalid(
+                    "how_to_test.command",
+                    "test commands must be reviewer-runnable and cannot contain operator-only references",
+                );
+            }
         }
         for evidence in &self.evidence {
             scalar("evidence.summary", &evidence.summary)?;
@@ -318,7 +324,22 @@ pub fn render_review_dossier(
         let section = match id {
         AgentTaskReviewSectionId::Summary if !dossier.summary.is_empty() => Some(("Summary", prose(&dossier.summary))),
         AgentTaskReviewSectionId::WhatChanged if !dossier.what_changed.is_empty() => Some(("What changed", bullets(&dossier.what_changed))),
-        AgentTaskReviewSectionId::HowToTest if !dossier.how_to_test.is_empty() => Some(("How to test", dossier.how_to_test.iter().enumerate().map(|(i, step)| format!("{}. Run `{}`; expect {}.", i + 1, code(&step.command), prose(&step.expected))).collect::<Vec<_>>().join("\n"))),
+        AgentTaskReviewSectionId::HowToTest => {
+            let steps = dossier
+                .how_to_test
+                .iter()
+                .filter(|step| reviewer_runnable_command(&step.command))
+                .collect::<Vec<_>>();
+            (!steps.is_empty()).then(|| (
+                "How to test",
+                steps
+                    .iter()
+                    .enumerate()
+                    .map(|(i, step)| format!("{}. Run `{}`; expect {}.", i + 1, code(&step.command), prose(&step.expected)))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ))
+        }
         AgentTaskReviewSectionId::Compatibility if !dossier.compatibility.is_empty() => Some(("Compatibility", prose(&dossier.compatibility))),
         AgentTaskReviewSectionId::Evidence if !dossier.evidence.is_empty() => Some(("Evidence", dossier.evidence.iter().map(|item| match &item.url { Some(url) => format!("- {}: {url}", prose(&item.summary)), None => format!("- {}", prose(&item.summary)) }).collect::<Vec<_>>().join("\n"))),
         AgentTaskReviewSectionId::AiAssistance => Some(("AI assistance", format!("- **AI assistance:** {}\n- **Tool(s):** {}\n- **Model:** {}\n- **Used for:** {}", if dossier.ai_assistance.used { "Yes" } else { "No" }, prose(&dossier.ai_assistance.tool), prose(&dossier.ai_assistance.model), prose(&dossier.ai_assistance.used_for)))),
@@ -373,7 +394,7 @@ fn scalar(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 fn prose(value: &str) -> String {
-    let mut rendered: String = value
+    let mut rendered: String = reviewer_text(value)
         .chars()
         .flat_map(|character| match character {
             '*' | '_' | '`' | '[' | ']' | '<' | '>' | '!' => {
@@ -394,7 +415,132 @@ fn prose(value: &str) -> String {
     rendered
 }
 fn code(value: &str) -> String {
-    value.replace('`', "'")
+    reviewer_text(value).replace('`', "'")
+}
+
+/// Reviewer-facing bodies must be independently resolvable. Omit operator-only
+/// references rather than publishing local paths or durable runtime identifiers.
+fn reviewer_text(value: &str) -> String {
+    if contains_operator_only_reference(value) {
+        "[operator-only reference omitted]".into()
+    } else {
+        value.into()
+    }
+}
+
+pub fn reviewer_runnable_command(value: &str) -> bool {
+    !value.trim().is_empty() && !contains_operator_only_reference(value)
+}
+
+fn contains_operator_only_reference(value: &str) -> bool {
+    for word in value.split_whitespace() {
+        let normalized = normalize_reviewer_token(word);
+        if reviewer_credential_flag(normalized) {
+            return true;
+        }
+        if operator_only_reference(normalized) {
+            return true;
+        }
+    }
+    false
+}
+
+fn normalize_reviewer_token(value: &str) -> &str {
+    value.trim_matches(|character: char| {
+        matches!(
+            character,
+            '(' | ')' | '[' | ']' | ',' | '.' | ':' | ';' | '\'' | '"'
+        )
+    })
+}
+
+fn reviewer_credential_flag(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "--token"
+            | "--api-key"
+            | "--api_key"
+            | "--apikey"
+            | "--secret"
+            | "--password"
+            | "--authorization"
+            | "--auth-token"
+            | "--access-token"
+            | "--github-token"
+    )
+}
+
+fn operator_only_reference(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if let Some((name, assigned_value)) = value.split_once('=') {
+        let name = name
+            .trim_start_matches('-')
+            .to_ascii_lowercase()
+            .replace('-', "_");
+        if [
+            "token",
+            "secret",
+            "password",
+            "apikey",
+            "api_key",
+            "authorization",
+            "auth_token",
+            "access_token",
+            "github_token",
+        ]
+        .contains(&name.as_str())
+            || operator_only_reference(normalize_reviewer_token(assigned_value))
+        {
+            return true;
+        }
+    }
+    if lower.contains("localhost")
+        || lower.starts_with("runner-artifact://")
+        || lower.starts_with("artifact://")
+        || lower.starts_with("homeboy://")
+        || lower.starts_with("file://")
+        || lower.starts_with('/')
+        || lower.starts_with("~/")
+        || lower.contains("/users/")
+        || lower.contains("=/")
+        || lower.contains("=~/")
+        || [
+            "token=",
+            "secret=",
+            "password=",
+            "apikey=",
+            "api_key=",
+            "authorization=",
+        ]
+        .iter()
+        .any(|secret| lower.contains(secret))
+        || is_internal_run_id(value)
+    {
+        return true;
+    }
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    let host = url.host_str().unwrap_or_default();
+    url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || host == "localhost"
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.ends_with(".test")
+        || host.parse::<std::net::IpAddr>().is_ok()
+}
+
+fn is_internal_run_id(value: &str) -> bool {
+    ["agent-task-", "cook-", "run-"].iter().any(|prefix| {
+        value.starts_with(prefix)
+            && value.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+            && value.chars().any(|character| character.is_ascii_digit())
+    })
 }
 fn relationship_reference(value: &str) -> String {
     if let Some(rest) = value.strip_prefix("https://github.com/") {
@@ -454,31 +600,17 @@ fn validate_issue_reference(value: &str) -> Result<()> {
     }
 }
 fn is_reviewer_url(value: &str) -> bool {
-    value.starts_with("https://")
+    value.starts_with("https://") && !operator_only_reference(value)
 }
 fn validate_reviewer_url(value: &str) -> Result<()> {
     let url = reqwest::Url::parse(value).map_err(|_| {
         Error::validation_invalid_argument("evidence.url", "evidence URL is invalid", None, None)
     })?;
     let host = url.host_str().unwrap_or_default();
-    if url.scheme() != "https"
-        || host == "localhost"
-        || host
-            .parse::<std::net::IpAddr>()
-            .map(is_non_public_ip)
-            .unwrap_or(false)
-    {
+    if operator_only_reference(value) || host.is_empty() {
         return invalid("evidence.url", "evidence URL must be a public HTTPS URL");
     }
     Ok(())
-}
-fn is_non_public_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(ip) => {
-            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
-        }
-        std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unspecified(),
-    }
 }
 fn invalid(field: &str, message: &str) -> Result<()> {
     Err(Error::validation_invalid_argument(
@@ -576,6 +708,72 @@ mod tests {
         value.evidence.push(AgentTaskReviewEvidence {
             summary: "local".into(),
             url: Some("https://localhost/a".into()),
+        });
+        assert!(value.validate(&default_profile()).is_err());
+    }
+
+    #[test]
+    fn renderer_omits_operator_only_references() {
+        let mut value = dossier();
+        value.summary = "Inspect http://localhost:8888 at /Users/chris/repo using runner-artifact://gate and agent-task-1234".into();
+        value.how_to_test[0].command =
+            "cargo test --manifest-path /tmp/repo/Cargo.toml file:///private/repo".into();
+        value.evidence.push(AgentTaskReviewEvidence {
+            summary:
+                "Durable evidence homeboy://agent-task/run/agent-task-1234 from cook-8058-attempt-1"
+                    .into(),
+            url: None,
+        });
+
+        let body = render_review_dossier(&value, &default_profile());
+
+        for forbidden in [
+            "localhost",
+            "/Users/chris/repo",
+            "runner-artifact://",
+            "homeboy://",
+            "agent-task-1234",
+            "cook-8058-attempt-1",
+            "/tmp/repo",
+            "file:///private/repo",
+        ] {
+            assert!(!body.contains(forbidden), "leaked {forbidden}: {body}");
+        }
+        assert!(!body.contains("## How to test"));
+    }
+
+    #[test]
+    fn reviewer_sanitization_rejects_assignment_values_and_space_delimited_credentials() {
+        for value in [
+            "root=/private/repo",
+            "path=~/workspace",
+            "BASE_URL=http://127.0.0.1:8080 cargo test",
+            "--source=file:///private/repo cargo test",
+            "API_URL=https://token@example.com/path cargo test",
+            "--token ghp_secret cargo test",
+            "https://token@example.com/evidence",
+            "https://example.com/evidence?token=secret",
+            "--report=https://example.com/evidence?api_key=secret cargo test",
+            "https://10.0.0.1/evidence",
+            "https://192.168.1.1/evidence",
+            "https://172.16.0.1/evidence",
+            "https://review.internal/evidence",
+            "https://review.local/evidence",
+            "https://review.test/evidence",
+            "API_KEY=secret cargo test",
+        ] {
+            assert!(!reviewer_runnable_command(value), "accepted {value}");
+            assert_eq!(
+                reviewer_text(value),
+                "[operator-only reference omitted]",
+                "rendered unsafe reviewer claim: {value}"
+            );
+        }
+
+        let mut value = dossier();
+        value.evidence.push(AgentTaskReviewEvidence {
+            summary: "private".into(),
+            url: Some("https://example.com/evidence?token=secret".into()),
         });
         assert!(value.validate(&default_profile()).is_err());
     }

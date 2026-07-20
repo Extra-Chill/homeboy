@@ -138,6 +138,7 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
                 private_verify: Vec::new(),
                 private_gate_reveal:
                     homeboy::agents::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
             },
             provider_command: Some(provider.display().to_string()),
             provider_invocation: None,

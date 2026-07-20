@@ -36,6 +36,13 @@ pub enum AuditFinding {
     CrossNameDuplicate,
     /// Function has identical structure but different identifiers/literals.
     NearDuplicate,
+    /// Two functions share an identical call/control-flow skeleton but differ
+    /// in their error/return tail — the same primitive reimplemented with a
+    /// different local error type or return wrapper. Coarser than
+    /// `NearDuplicate` (which requires matching expression *shape*), this
+    /// catches hand-rolled wrappers like per-module `git_output` helpers that
+    /// map failures onto different error enums.
+    SkeletonDuplicate,
     /// Function parameter is declared but never used in the function body.
     /// When call-site data is available, this means no callers pass a value
     /// for this position — truly dead, safe to remove.
@@ -215,6 +222,7 @@ impl AuditFinding {
             "duplicate_function",
             "cross_name_duplicate",
             "near_duplicate",
+            "skeleton_duplicate",
             "unused_parameter",
             "ignored_parameter",
             "dead_code_marker",

@@ -750,6 +750,35 @@ fn cook_retry_lab_source_is_the_derived_baseline_not_the_controller_workspace() 
 }
 
 #[test]
+fn lab_cook_attempt_preserves_authorized_dirty_baseline_in_the_run_plan() {
+    let mut plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        "cook-dirty-baseline",
+        vec![serde_json::from_value(serde_json::json!({
+            "task_id": "task",
+            "executor": { "backend": "fixture" },
+            "instructions": "continue",
+            "workspace": { "root": "/runner/workspace" }
+        }))
+        .expect("task")],
+    );
+    let baseline = serde_json::json!({
+        "source_run_id": "cook-dirty-baseline",
+        "source_task_id": "task",
+        "baseline_tree": "0123456789012345678901234567890123456789",
+        "preexisting_candidate": true,
+    });
+
+    super::attach_verified_cook_baseline(&mut plan, &baseline);
+    let serialized = serde_json::to_string(&plan).expect("serialize run plan");
+    let run_plan: serde_json::Value = serde_json::from_str(&serialized).expect("parse run plan");
+
+    assert_eq!(
+        run_plan["tasks"][0]["metadata"]["verified_cook_baseline"],
+        baseline
+    );
+}
+
+#[test]
 fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_failure() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1289,6 +1318,95 @@ fn retry_handoff_restores_distinct_cook_candidate_source_after_baseline_cleanup(
         assert_eq!(
             handoff.plan.tasks[0].metadata["cook_continuation_workspace"]["task_workspace"]["root"],
             serde_json::json!(managed.path())
+        );
+    });
+}
+
+#[test]
+fn retry_prefers_managed_worktree_over_cleaned_up_ephemeral_baseline() {
+    crate::test_support::with_isolated_home(|_| {
+        // The authoritative managed worktree the cook was anchored to. It
+        // outlives the attempt and stays a real git checkout.
+        let managed = tempfile::tempdir().expect("managed worktree");
+        git_init(managed.path());
+        homeboy::core::worktree::adopt(homeboy::core::worktree::WorktreeAdoptOptions {
+            handle: "fixture@cook".to_string(),
+            path: managed.path().display().to_string(),
+            kind: None,
+            provenance: None,
+        })
+        .expect("adopt managed worktree");
+
+        // The ephemeral initial-baseline directory the original plan recorded
+        // as workspace.root, then cleaned up before retry.
+        let ephemeral = tempfile::tempdir().expect("ephemeral baseline");
+        let ephemeral_root = ephemeral.path().to_path_buf();
+        git_init(&ephemeral_root);
+        drop(ephemeral); // simulate baseline cleanup: the path no longer exists.
+        assert!(!ephemeral_root.exists());
+
+        // The persisted task still carries both the dead ephemeral root and the
+        // durable managed worktree handle (its slug).
+        let task: homeboy::agents::agent_tasks::AgentTaskRequest =
+            serde_json::from_value(serde_json::json!({
+                "task_id": "cook-task",
+                "executor": { "backend": "fixture" },
+                "instructions": "retry",
+                "workspace": { "root": ephemeral_root, "slug": "fixture@cook" }
+            }))
+            .expect("task");
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            "cleaned-up-baseline",
+            vec![task],
+        );
+
+        let resolved = retry_plan_primary_workspace(&plan)
+            .expect("retry resolves the managed worktree despite the cleaned-up baseline");
+        let expected = homeboy::core::git::repo_root(managed.path()).expect("managed git root");
+        assert_eq!(
+            resolved, expected,
+            "retry must continue against the managed worktree, never the deleted ephemeral baseline"
+        );
+    });
+}
+
+#[test]
+fn retry_reports_recoverable_state_when_the_managed_worktree_is_gone() {
+    crate::test_support::with_isolated_home(|_| {
+        // A managed worktree was recorded, then its checkout removed from disk
+        // while the record still points at it.
+        let managed = tempfile::tempdir().expect("managed worktree");
+        let managed_path = managed.path().to_path_buf();
+        git_init(&managed_path);
+        homeboy::core::worktree::adopt(homeboy::core::worktree::WorktreeAdoptOptions {
+            handle: "fixture@gone".to_string(),
+            path: managed_path.display().to_string(),
+            kind: None,
+            provenance: None,
+        })
+        .expect("adopt managed worktree");
+        drop(managed);
+        assert!(!managed_path.exists());
+
+        let task: homeboy::agents::agent_tasks::AgentTaskRequest =
+            serde_json::from_value(serde_json::json!({
+                "task_id": "cook-task",
+                "executor": { "backend": "fixture" },
+                "instructions": "retry",
+                "workspace": { "slug": "fixture@gone" }
+            }))
+            .expect("task");
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            "missing-worktree",
+            vec![task],
+        );
+
+        let error = retry_plan_primary_workspace(&plan)
+            .expect_err("a missing managed worktree must return a precise recoverable state");
+        assert!(
+            error.message.contains("points at a missing checkout"),
+            "unexpected error: {}",
+            error.message
         );
     });
 }
