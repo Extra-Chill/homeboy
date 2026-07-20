@@ -63,6 +63,8 @@ pub struct ExtensionSetupResult {
     pub exit_code: i32,
 }
 
+const EXTENSION_SETUP_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Run a extension's setup command (if defined).
 pub fn run_setup(extension_id: &str) -> Result<ExtensionSetupResult> {
     let extension = load_extension(extension_id)?;
@@ -94,11 +96,24 @@ pub fn run_setup(extension_id: &str) -> Result<ExtensionSetupResult> {
     ];
 
     let command = template::render(setup_command, &vars);
-    let exit_code = execute_local_command_interactive(&command, Some(extension_path), None);
+    let output = execute_local_command_passthrough_with_timeout(
+        &command,
+        Some(extension_path),
+        None,
+        EXTENSION_SETUP_TIMEOUT,
+    );
+    let exit_code = output.exit_code;
 
     if exit_code != 0 {
         return Err(Error::internal_io(
-            format!("Setup command failed with exit code {}", exit_code),
+            if output.timed_out {
+                format!(
+                    "Setup command timed out after {}s",
+                    EXTENSION_SETUP_TIMEOUT.as_secs()
+                )
+            } else {
+                format!("Setup command failed with exit code {}", exit_code)
+            },
             Some("extension setup".to_string()),
         ));
     }

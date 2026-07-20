@@ -52,6 +52,35 @@ pub fn clone_repo_at_ref(url: &str, target_dir: &Path, revision: Option<&str>) -
     Ok(())
 }
 
+/// Clone a git repository and optionally check out a ref, enforcing one deadline
+/// across each remote Git stage.
+pub fn clone_repo_at_ref_with_timeout(
+    url: &str,
+    target_dir: &Path,
+    revision: Option<&str>,
+    timeout: Duration,
+) -> Result<()> {
+    run_git_with_env_timeout(
+        Path::new("."),
+        &["clone", url, &target_dir.to_string_lossy()],
+        "git clone",
+        &[],
+        timeout,
+    )?;
+
+    if let Some(revision) = revision {
+        run_git_with_env_timeout(
+            target_dir,
+            &["checkout", "--quiet", revision],
+            "git checkout",
+            &[],
+            timeout,
+        )?;
+    }
+
+    Ok(())
+}
+
 /// Pull latest changes in a git repository.
 pub fn pull_repo(repo_dir: &Path) -> Result<()> {
     run_git(repo_dir, &["pull"], "git pull")?;
