@@ -14,6 +14,8 @@ static SHARED_COMMITTED_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
 static EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static SHORT_EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+/// Runs the leaked-tempdir sweep exactly once per test process.
+static LEAKED_TEMPDIR_SWEEP: OnceLock<()> = OnceLock::new();
 
 /// An explicit executable selection for a hermetic test command.
 ///
@@ -350,6 +352,84 @@ fn dir_allows_exec(dir: &Path) -> bool {
     allowed
 }
 
+/// Age past which a leaked `hb-test-*` tempdir is considered abandoned and
+/// eligible for the startup sweep. Generous enough to never race a concurrently
+/// running test (individual tests finish in seconds/minutes), while still
+/// reclaiming disk from processes that were killed before `Drop` could run.
+#[cfg(unix)]
+const LEAKED_TEMPDIR_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Sweep stale `hb-test-*` tempdirs abandoned by killed test processes.
+///
+/// `TempDir`'s RAII cleanup is correct for graceful exits but **cannot** run
+/// when a process is `SIGKILL`ed — which on hardened / RAM-constrained hosts is
+/// routine (OOM killer, watchdog restarts, hard test timeouts). Each killed
+/// test leaks up to three `hb-test-*` directories; over many runs these fill
+/// the disk (observed: 130 dirs / ~18G taking a host to 100%, see #9173).
+///
+/// This is a best-effort safety net, gated to run **once per process** before
+/// the first tempdir is created. It only removes directories:
+/// - directly under a known tempdir root (never recurses into subdirs),
+/// - whose name starts with `hb-test-`,
+/// - whose mtime is older than [`LEAKED_TEMPDIR_MAX_AGE`] (so a concurrent
+///   run's live tempdir is never touched).
+///
+/// All errors are swallowed — a failed sweep must never break a test.
+#[cfg(unix)]
+fn sweep_leaked_test_tempdirs(roots: &[PathBuf]) {
+    let now = std::time::SystemTime::now();
+    let mut swept_roots: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        if swept_roots.contains(root) {
+            continue;
+        }
+        swept_roots.push(root.clone());
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.starts_with("hb-test-") {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_dir() {
+                continue;
+            }
+            let stale = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .map(|age| age >= LEAKED_TEMPDIR_MAX_AGE)
+                .unwrap_or(false);
+            if stale {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+    }
+}
+
+/// Run [`sweep_leaked_test_tempdirs`] at most once per process, across every
+/// candidate tempdir root, before the first tempdir of the run is created.
+#[cfg(unix)]
+fn sweep_leaked_test_tempdirs_once() {
+    LEAKED_TEMPDIR_SWEEP.get_or_init(|| {
+        let mut roots = exec_capable_tempdir_candidates();
+        for extra in short_tempdir_candidates() {
+            if !roots.contains(&extra) {
+                roots.push(extra);
+            }
+        }
+        sweep_leaked_test_tempdirs(&roots);
+    });
+}
+
 /// Reuse a validated base directory, but always create a new child tempdir.
 /// If a cached base disappears or becomes unavailable, retry the normal ordered
 /// probe and replace the cached base only after a successful execution probe.
@@ -360,6 +440,10 @@ fn tempdir_with_cached_exec_base(
     prefix: &str,
     probe: impl Fn(&Path) -> bool,
 ) -> TempDir {
+    // Best-effort reclaim of tempdirs leaked by killed test processes (#9173).
+    // Runs once per process before the first tempdir is created.
+    sweep_leaked_test_tempdirs_once();
+
     let cached = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1088,6 +1172,60 @@ mod tests {
         assert_ne!(first.path(), second.path());
         assert!(first.path().starts_with(base.path()));
         assert!(second.path().starts_with(base.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_removes_stale_hb_test_dirs_and_spares_fresh_and_foreign() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TempDir::new().expect("sweep root");
+
+        // Stale leaked tempdir: matching prefix, mtime well past the threshold.
+        let stale = root.path().join("hb-test-STALE");
+        fs::create_dir(&stale).expect("create stale dir");
+        fs::write(stale.join("leaked.txt"), b"leaked").expect("write into stale dir");
+        // Backdate mtime to just beyond LEAKED_TEMPDIR_MAX_AGE.
+        let past = std::time::SystemTime::now()
+            - (LEAKED_TEMPDIR_MAX_AGE + std::time::Duration::from_secs(60));
+        set_dir_mtime(&stale, past);
+
+        // Fresh tempdir from a concurrent run: matching prefix, current mtime.
+        let fresh = root.path().join("hb-test-FRESH");
+        fs::create_dir(&fresh).expect("create fresh dir");
+
+        // Foreign directory: old but does not match the hb-test- prefix.
+        let foreign = root.path().join("someones-important-data");
+        fs::create_dir(&foreign).expect("create foreign dir");
+        set_dir_mtime(&foreign, past);
+
+        // A matching-prefix *file* (not a dir) must be left alone.
+        let stray_file = root.path().join("hb-test-not-a-dir");
+        fs::write(&stray_file, b"file").expect("write stray file");
+        let _ = fs::set_permissions(&stray_file, fs::Permissions::from_mode(0o644));
+
+        sweep_leaked_test_tempdirs(std::slice::from_ref(&root.path().to_path_buf()));
+
+        assert!(!stale.exists(), "stale hb-test- dir should be swept");
+        assert!(fresh.exists(), "fresh hb-test- dir must be spared");
+        assert!(foreign.exists(), "non-hb-test- dir must never be touched");
+        assert!(stray_file.exists(), "matching-prefix file must be spared");
+    }
+
+    #[cfg(unix)]
+    fn set_dir_mtime(path: &Path, when: std::time::SystemTime) {
+        // Best-effort mtime backdating via `touch -d`. Skips silently if the
+        // platform `touch` is unavailable; the assertion on `stale` would then
+        // catch a real regression on hosts where the sweep must work.
+        let secs = when
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = Command::new("touch")
+            .arg("-d")
+            .arg(format!("@{secs}"))
+            .arg(path)
+            .status();
     }
 
     #[test]
