@@ -6,6 +6,7 @@
 //! `crate::agent_task_service::*` unchanged.
 
 mod cook;
+mod cook_adoption;
 mod cook_baseline;
 mod cook_budget;
 mod cook_promotion;
@@ -16,6 +17,7 @@ mod reconcile;
 mod status_support;
 
 pub use cook::*;
+pub use cook_adoption::*;
 pub use cook_baseline::*;
 pub use cook_budget::*;
 pub use cook_promotion::*;
