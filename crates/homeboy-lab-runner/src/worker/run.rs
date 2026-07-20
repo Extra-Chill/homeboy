@@ -411,7 +411,10 @@ fn materialize_snapshot_git_baseline(envelope: &RunnerExecutionEnvelope) -> Resu
             Some("parse reverse worker Lab offload metadata".to_string()),
         )
     })?;
-    if lab.get("sync_mode").and_then(serde_json::Value::as_str) != Some("snapshot") {
+    if !matches!(
+        lab.get("sync_mode").and_then(serde_json::Value::as_str),
+        Some("snapshot" | "filesystem_snapshot")
+    ) {
         return Ok(());
     }
     let cwd = dispatch.cwd.as_deref().ok_or_else(|| {
