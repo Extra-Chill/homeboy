@@ -393,3 +393,69 @@ fn passing_outputs_produce_no_groups() {
             .is_empty()
     );
 }
+
+#[test]
+fn normalized_audit_findings_dedup_by_fingerprint() {
+    // Three findings share one fingerprint (same file+kind+normalized message,
+    // line numbers normalized away) and one is distinct. The category should
+    // count 2 unique findings, not 4, and render each bullet once.
+    let output = json!({
+        "data": {
+            "passed": false,
+            "status": "failed",
+            "findings": [
+                {"tool": "audit", "rule": "constant_bypass_literal", "category": "constant_bypass_literal",
+                 "message": "Literal \"x\" duplicates constant X at line <line>",
+                 "fingerprint": "f.rs:constant_bypass_literal:conv:dup-x", "file": "f.rs"},
+                {"tool": "audit", "rule": "constant_bypass_literal", "category": "constant_bypass_literal",
+                 "message": "Literal \"x\" duplicates constant X at line <line>",
+                 "fingerprint": "f.rs:constant_bypass_literal:conv:dup-x", "file": "f.rs"},
+                {"tool": "audit", "rule": "constant_bypass_literal", "category": "constant_bypass_literal",
+                 "message": "Literal \"x\" duplicates constant X at line <line>",
+                 "fingerprint": "f.rs:constant_bypass_literal:conv:dup-x", "file": "f.rs"},
+                {"tool": "audit", "rule": "constant_bypass_literal", "category": "constant_bypass_literal",
+                 "message": "Literal \"y\" duplicates constant Y at line <line>",
+                 "fingerprint": "f.rs:constant_bypass_literal:conv:dup-y", "file": "f.rs"}
+            ]
+        }
+    });
+
+    let rendered =
+        build_findings_from_native_output("audit", output, &IssueRenderContext::default()).unwrap();
+    let group = rendered.groups.get("constant_bypass_literal").unwrap();
+
+    assert_eq!(
+        group.count, 2,
+        "identical fingerprints must collapse to one"
+    );
+    assert!(group.body.contains("2 audit finding(s) in this category."));
+    // The deduped literal appears exactly once as a bullet.
+    assert_eq!(group.body.matches("duplicates constant X").count(), 1);
+    assert_eq!(group.body.matches("duplicates constant Y").count(), 1);
+}
+
+#[test]
+fn normalized_audit_findings_render_fixability_tiers() {
+    // Fixability data keyed by audit kind must surface in the issue body.
+    let output = json!({
+        "data": {
+            "passed": false,
+            "status": "failed",
+            "fixability": {"by_kind": {"dead_code": {"total": 5, "automated": 3, "manual_only": 2}}},
+            "findings": [
+                {"tool": "audit", "rule": "dead_code", "category": "dead_code",
+                 "message": "Public function 'f' is not referenced by any other file",
+                 "fingerprint": "a.rs:dead_code:conv:f", "file": "a.rs"}
+            ]
+        }
+    });
+
+    let rendered =
+        build_findings_from_native_output("audit", output, &IssueRenderContext::default()).unwrap();
+    let group = rendered.groups.get("dead_code").unwrap();
+
+    assert!(group.body.contains("### Autofix status"));
+    assert!(group.body.contains("Total fixable: 5"));
+    assert!(group.body.contains("Automated: 3"));
+    assert!(group.body.contains("Manual-only: 2"));
+}
