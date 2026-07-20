@@ -772,7 +772,21 @@ fn collect_portable_config_paths_for_id(
 fn should_skip_portable_duplicate_scan_dir(path: &Path) -> bool {
     matches!(
         path.file_name().and_then(|name| name.to_str()),
-        Some(".git" | ".homeboy" | "target" | "node_modules" | "vendor")
+        // `.homeboy-build`/`.homeboy-bin` hold reconstructable Homeboy build
+        // artifacts, which can contain a *copy* of a component's `homeboy.json`
+        // (e.g. `.homeboy-build/<component>/homeboy.json`). Scanning them makes a
+        // single component appear declared by multiple manifests and fails
+        // discovery ("declared by multiple homeboy.json files"). They are not
+        // source declarations, so exclude them from the duplicate scan. (#8210)
+        Some(
+            ".git"
+                | ".homeboy"
+                | ".homeboy-build"
+                | ".homeboy-bin"
+                | "target"
+                | "node_modules"
+                | "vendor"
+        )
     )
 }
 
@@ -883,6 +897,20 @@ mod tests {
             .hints
             .iter()
             .any(|hint| hint.message.contains("--path <component-dir>")));
+    }
+
+    #[test]
+    fn generated_homeboy_build_manifest_does_not_trigger_duplicate_ids() {
+        // A component repo with a reconstructable `.homeboy-build/<component>/`
+        // copy of its `homeboy.json` must still resolve: the build artifact is
+        // not a second source declaration. (#8210)
+        let repo = tempfile::tempdir().expect("repo");
+        git(repo.path(), &["init"]);
+        write_portable(repo.path(), "fixture");
+        write_portable(&repo.path().join(".homeboy-build/fixture"), "fixture");
+
+        validate_duplicate_portable_component_ids("fixture", repo.path(), None)
+            .expect("a generated .homeboy-build manifest must not count as a duplicate");
     }
 
     #[test]
