@@ -278,7 +278,7 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
     std::fs::create_dir_all(source.join("src")).expect("root source directory");
     std::fs::write(
         source.join("src/main.rs"),
-        "fn main() { println!(\"{\\\"data\\\":{\\\"git_commit\\\":\\\"{}\\\",\\\"git_dirty\\\":{}}}\", homeboy_core::git_commit(), homeboy_core::git_dirty()); }\n",
+        "fn main() { println!(\"{{\\\"data\\\":{{\\\"git_commit\\\":\\\"{}\\\",\\\"git_dirty\\\":{}}}}}\", homeboy_core::git_commit(), homeboy_core::git_dirty()); }\n",
     )
     .expect("write root binary");
     std::fs::write(
@@ -286,14 +286,21 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
         "[package]\nname = \"homeboy-core\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n",
     )
     .expect("write core manifest");
-    std::fs::copy(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("build.rs"),
-        core.join("build.rs"),
-    )
-    .expect("copy core build identity script");
+    // The build-identity script lives in the product-identity crate at the
+    // workspace root. After lab-runner was extracted into `crates/homeboy-lab-runner`,
+    // CARGO_MANIFEST_DIR points at this crate (which has no build.rs), so resolve
+    // the real generator from the workspace root instead.
+    let build_identity_script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("crates/homeboy-product-identity/build.rs");
+    std::fs::copy(&build_identity_script, core.join("build.rs"))
+        .expect("copy core build identity script");
+    // The generator emits HOMEBOY_PRODUCT_GIT_* (renamed from HOMEBOY_BUILD_GIT_*),
+    // so the fixture's core crate consumes the current variable names.
     std::fs::write(
         core.join("src/lib.rs"),
-        "pub fn git_commit() -> &'static str { env!(\"HOMEBOY_BUILD_GIT_COMMIT\") }\npub fn git_dirty() -> bool { env!(\"HOMEBOY_BUILD_GIT_DIRTY\") == \"true\" }\n",
+        "pub fn git_commit() -> &'static str { env!(\"HOMEBOY_PRODUCT_GIT_COMMIT\") }\npub fn git_dirty() -> bool { env!(\"HOMEBOY_PRODUCT_GIT_DIRTY\") == \"true\" }\n",
     )
     .expect("write core build identity consumer");
 
@@ -310,6 +317,11 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
         assert!(status.success(), "source fixture setup succeeds");
     }
     std::fs::write(source.join("README.md"), "fixture\n").expect("write fixture");
+    // Keep the materialized build tree clean: `cargo build` writes `target/` and
+    // `Cargo.lock` into the clone, and the build-identity generator marks the
+    // build dirty if `git status --porcelain` reports anything. Ignore those
+    // build artifacts so the fixture's source-built binary reports a clean build.
+    std::fs::write(source.join(".gitignore"), "/target\n/Cargo.lock\n").expect("write gitignore");
     for args in [vec!["add", "."], vec!["commit", "-m", "fixture"]] {
         let status = Command::new("git")
             .args(args)

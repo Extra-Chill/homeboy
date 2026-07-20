@@ -994,7 +994,11 @@ fn git_backed_snapshot_uses_runner_exact_sha_without_controller_bundle_hydration
         let author = tempfile::tempdir().expect("author tempdir");
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        git(origin.path(), &["init", "--bare"]);
+        // Initialize the bare origin on `main` so its HEAD symref matches the
+        // branch the author pushes. Without an explicit `-b main`, git falls back
+        // to the host `init.defaultBranch` (often `master`), leaving the partial
+        // clone below with an unborn default branch and no HEAD to inspect.
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
         git(origin.path(), &["config", "uploadpack.allowFilter", "true"]);
         git(author.path(), &["init", "-b", "main"]);
         git(author.path(), &["config", "user.email", "test@example.com"]);

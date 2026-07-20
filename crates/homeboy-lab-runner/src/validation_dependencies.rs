@@ -493,6 +493,12 @@ mod tests {
     #[test]
     fn sync_workspace_runs_validation_dependency_lifecycle_before_materializing() {
         homeboy_core::test_support::with_isolated_home(|_| {
+            // The dependency lifecycle runs component deps/build scripts through the
+            // extension subsystem, which registers its runners at binary startup.
+            // Register them explicitly here so this test does not depend on a
+            // sibling test having populated the process-global runner slots.
+            homeboy_extension::component_script::register_component_script_runner();
+            homeboy_extension::build::register_component_build_runner();
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
             let source = workspace_parent.path().join("host-app");
             let dependency = workspace_parent.path().join("shared-runtime");
@@ -573,6 +579,10 @@ mod tests {
     #[test]
     fn sync_workspace_uses_manifest_id_for_absolute_validation_dependency() {
         homeboy_core::test_support::with_isolated_home(|_| {
+            // Register the extension runners this dependency lifecycle needs (see
+            // the sibling test above) rather than relying on cross-test global state.
+            homeboy_extension::component_script::register_component_script_runner();
+            homeboy_extension::build::register_component_build_runner();
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
             let source = workspace_parent.path().join("host-app");
             let dependency = workspace_parent.path().join("shared-runtime");
