@@ -5,7 +5,7 @@ use homeboy::core::api_jobs::{Job, JobEvent};
 use homeboy::core::EntityCrudOutput;
 use homeboy::runner::runners::{
     ReverseRunnerWorkerOutput, Runner, RunnerAvailability, RunnerConnectReport,
-    RunnerDisconnectReport, RunnerExecOutput, RunnerStatusReport,
+    RunnerDaemonGenerationStatus, RunnerDisconnectReport, RunnerExecOutput, RunnerStatusReport,
 };
 
 use std::collections::BTreeMap;
@@ -30,6 +30,8 @@ pub struct RunnerExtra {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<RunnerStatusReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub generation_inventory: Vec<RunnerDaemonGenerationStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub operator_hints: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub operator_commands: Vec<RunnerOperatorCommand>,
@@ -44,6 +46,7 @@ impl Default for RunnerExtra {
             managed_followups: Vec::new(),
             connection: None,
             sessions: Vec::new(),
+            generation_inventory: Vec::new(),
             operator_hints: Vec::new(),
             operator_commands: Vec::new(),
         }

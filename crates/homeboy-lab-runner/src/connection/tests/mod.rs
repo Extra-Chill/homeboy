@@ -75,6 +75,41 @@ pub(super) fn reverse_controller_session() -> RunnerSession {
     }
 }
 
+#[test]
+fn failed_generation_cleanup_kills_the_exact_daemon_and_tunnel() {
+    let session = direct_ssh_session("lease-b");
+    let mut remote_pids = Vec::new();
+    let mut tunnel_pids = Vec::new();
+    let result = cleanup_direct_generation_with(
+        &session,
+        Err(homeboy_core::Error::internal_unexpected(
+            "lifecycle endpoint unavailable",
+        )),
+        |pid| {
+            remote_pids.push(pid);
+            Ok(())
+        },
+        |pid| tunnel_pids.push(pid),
+    );
+    assert!(result.is_ok());
+    assert_eq!(
+        remote_pids,
+        vec![session.remote_daemon_pid.expect("daemon PID")]
+    );
+    assert_eq!(tunnel_pids, vec![session.tunnel_pid.expect("tunnel PID")]);
+}
+
+#[test]
+fn generation_data_root_preserves_home_scoped_config_and_auth() {
+    let command = super::remote_daemon::generation_daemon_ensure_command(
+        "/opt/homeboy",
+        "/work/runner/_homeboy_daemon_generations/b",
+    );
+    assert!(command.contains("XDG_DATA_HOME=/work/runner/_homeboy_daemon_generations/b/data"));
+    assert!(!command.contains(" HOME="));
+    assert!(command.contains("/opt/homeboy"));
+}
+
 fn direct_controller_session() -> RunnerSession {
     let mut session = reverse_controller_session();
     session.mode = RunnerTunnelMode::DirectSsh;
