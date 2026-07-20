@@ -190,12 +190,17 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
     // Cook's controller remains local, but its materialized provider attempt
     // can run on Lab. Resource policy must recommend that supported boundary,
     // rather than treating the whole coordinator as an unavailable offload.
-    if matches!(
-        command,
-        Commands::AgentTask(agent_task::AgentTaskArgs {
-            command: agent_task::AgentTaskCommand::Cook(_),
-        })
-    ) {
+    if let Commands::AgentTask(agent_task::AgentTaskArgs {
+        command: agent_task::AgentTaskCommand::Cook(cook),
+    }) = command
+    {
+        if !cook.gates.has_deterministic_gate() {
+            let contract = command.lab_contract()?;
+            let LabCommandPortability::LocalOnly(reason) = contract.portability else {
+                unreachable!("an unverified cook must retain its local-only portability contract");
+            };
+            return Some(HotCommand::local_only(contract.hot_label, Some(reason)));
+        }
         return Some(HotCommand {
             label: "agent-task cook/run-plan/retry --run",
             lab_offload_supported: true,
@@ -282,9 +287,9 @@ pub fn evaluate_with_runner_hint(
 }
 
 /// Cook keeps durable coordination, promotion, and gates on the controller,
-/// but its provider attempt can be pinned to Lab. A warm controller may admit
-/// that lightweight coordination only when its own CPU, memory, and process
-/// capacity are healthy and the explicitly requested runner can accept work.
+/// but its provider attempt can be pinned to Lab. An explicitly selected ready
+/// runner lets the controller admit that lightweight coordination under warm or
+/// hot CPU load, while memory and process pressure remain local safety gates.
 pub fn admits_warm_runner_coordination(
     command: HotCommand,
     resources: &DoctorOutput,
@@ -292,8 +297,10 @@ pub fn admits_warm_runner_coordination(
     lab_readiness: Option<&LabRunnerReadiness>,
 ) -> bool {
     command.allows_warm_runner_coordination
-        && resources.recommendation == ResourceRecommendation::Warm
-        && resources.load.recommendation == ResourceRecommendation::Ok
+        && matches!(
+            resources.recommendation,
+            ResourceRecommendation::Warm | ResourceRecommendation::Hot
+        )
         && resources
             .memory
             .as_ref()
@@ -315,7 +322,7 @@ pub fn non_interactive_preflight_error(
     local_override: bool,
     interactive: bool,
     local_hot_rerun_command: Option<String>,
-    selected_lab_runner: Option<&str>,
+    runner_offload_admitted: bool,
 ) -> Option<crate::core::Error> {
     // GitHub Actions runners are ephemeral, single-purpose, and always
     // non-interactive: the warm-machine refusal would fail otherwise-good PR
@@ -324,7 +331,7 @@ pub fn non_interactive_preflight_error(
     if local_override || interactive || is_runner_hosted_exec() || is_ci_execution() {
         return None;
     }
-    if selected_lab_runner.is_some() && warning.message.contains("--runner") {
+    if runner_offload_admitted {
         return None;
     }
 
@@ -334,7 +341,7 @@ pub fn non_interactive_preflight_error(
             "Refusing to start `{}` on a {} machine from a non-interactive shell. {} Use a safe Lab/offload path once this command supports it, or rerun later when `homeboy self doctor` reports ok.",
             warning.command,
             severity_str(warning.recommendation),
-            primary_action(warning, selected_lab_runner),
+            primary_action(warning, None),
         ),
         None,
         None,
@@ -551,9 +558,8 @@ mod tests {
         }
     }
 
-    fn warm_coordination_resources() -> DoctorOutput {
+    fn coordination_resources() -> DoctorOutput {
         let mut output = resources(ResourceRecommendation::Warm);
-        output.load.recommendation = ResourceRecommendation::Ok;
         output.rig_leases.active_count = 1;
         output.rig_leases.recommendation = ResourceRecommendation::Warm;
         output
@@ -759,9 +765,11 @@ mod tests {
     }
 
     #[test]
-    fn warm_cook_coordination_admits_only_an_explicit_ready_runner() {
+    fn runner_pinned_cook_coordination_admits_an_explicit_ready_runner_on_warm_or_hot_controller() {
         let cli = Cli::parse_from([
             "homeboy",
+            "--runner",
+            "homeboy-lab",
             "agent-task",
             "cook",
             "--prompt",
@@ -772,15 +780,22 @@ mod tests {
             "cargo test --locked",
         ]);
         let command = hot_command(&cli.command).expect("cook is resource managed");
-        let resources = warm_coordination_resources();
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         let ready = ready_lab();
 
-        assert!(admits_warm_runner_coordination(
-            command,
-            &resources,
-            Some("homeboy-lab"),
-            Some(&ready),
-        ));
+        for recommendation in [ResourceRecommendation::Warm, ResourceRecommendation::Hot] {
+            let mut resources = coordination_resources();
+            resources.recommendation = recommendation;
+            resources.load.recommendation = recommendation;
+            assert!(admits_warm_runner_coordination(
+                command,
+                &resources,
+                Some("homeboy-lab"),
+                Some(&ready),
+            ));
+        }
+
+        let resources = coordination_resources();
         assert!(!admits_warm_runner_coordination(
             command,
             &resources,
@@ -796,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn warm_cook_coordination_retains_controller_capacity_checks() {
+    fn runner_pinned_cook_coordination_rejects_memory_or_process_pressure() {
         let command = HotCommand {
             label: "agent-task cook/run-plan/retry --run",
             lab_offload_supported: true,
@@ -804,14 +819,54 @@ mod tests {
             allows_warm_runner_coordination: true,
         };
         let ready = ready_lab();
-        let mut resources = warm_coordination_resources();
-        resources.load.recommendation = ResourceRecommendation::Warm;
+        let mut resources = coordination_resources();
+        resources.memory = Some(MemorySummary {
+            total_mb: 32_000,
+            available_mb: 1_500,
+            used_percent: 95.3,
+            recommendation: ResourceRecommendation::Warm,
+        });
 
         assert!(!admits_warm_runner_coordination(
             command,
             &resources,
             Some("homeboy-lab"),
             Some(&ready),
+        ));
+
+        let mut resources = coordination_resources();
+        resources.processes.recommendation = ResourceRecommendation::Hot;
+        assert!(!admits_warm_runner_coordination(
+            command,
+            &resources,
+            Some("homeboy-lab"),
+            Some(&ready),
+        ));
+    }
+
+    #[test]
+    fn unverified_cook_remains_local_only_with_its_concrete_gate_requirement() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "homeboy@cook-routing",
+        ]);
+
+        let command = hot_command(&cli.command).expect("unverified cook is resource managed");
+        assert!(!command.lab_offload_supported);
+        assert_eq!(
+            command.lab_offload_unsupported_reason,
+            Some("agent-task cook requires at least one deterministic --verify or --private-verify gate")
+        );
+        assert!(!admits_warm_runner_coordination(
+            command,
+            &coordination_resources(),
+            Some("homeboy-lab"),
+            Some(&ready_lab()),
         ));
     }
 
@@ -852,7 +907,7 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        let error = non_interactive_preflight_error(&warning, false, false, None, None)
+        let error = non_interactive_preflight_error(&warning, false, false, None, false)
             .expect("non-interactive hot runs should fail fast");
 
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
@@ -875,10 +930,7 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        assert!(
-            non_interactive_preflight_error(&warning, false, false, None, Some("homeboy-lab"))
-                .is_none()
-        );
+        assert!(non_interactive_preflight_error(&warning, false, false, None, true).is_none());
     }
 
     #[test]
@@ -892,10 +944,7 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        assert!(
-            non_interactive_preflight_error(&warning, false, false, None, Some("homeboy-lab"))
-                .is_none()
-        );
+        assert!(non_interactive_preflight_error(&warning, false, false, None, true).is_none());
     }
 
     #[test]
@@ -920,7 +969,7 @@ mod tests {
             None,
         );
 
-        let error = non_interactive_preflight_error(&warning, false, false, rerun, None)
+        let error = non_interactive_preflight_error(&warning, false, false, rerun, false)
             .expect("non-interactive local-only hot runs should fail fast");
 
         assert_eq!(
@@ -1005,7 +1054,7 @@ mod tests {
             &["homeboy".to_string(), "audit".to_string()],
             None,
         );
-        let error = non_interactive_preflight_error(&warning, false, false, rerun, None)
+        let error = non_interactive_preflight_error(&warning, false, false, rerun, false)
             .expect("non-interactive hot runs should fail fast");
 
         assert_eq!(
@@ -1032,7 +1081,7 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        assert!(non_interactive_preflight_error(&warning, false, false, None, None).is_none());
+        assert!(non_interactive_preflight_error(&warning, false, false, None, false).is_none());
     }
 
     #[test]
@@ -1045,8 +1094,8 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        assert!(non_interactive_preflight_error(&warning, false, true, None, None).is_none());
-        assert!(non_interactive_preflight_error(&warning, true, false, None, None).is_none());
+        assert!(non_interactive_preflight_error(&warning, false, true, None, false).is_none());
+        assert!(non_interactive_preflight_error(&warning, true, false, None, false).is_none());
     }
 
     #[test]
@@ -1203,7 +1252,7 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        assert!(non_interactive_preflight_error(&warning, false, false, None, None).is_none());
+        assert!(non_interactive_preflight_error(&warning, false, false, None, false).is_none());
     }
 
     #[test]
@@ -1219,7 +1268,7 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        assert!(non_interactive_preflight_error(&warning, false, false, None, None).is_some());
+        assert!(non_interactive_preflight_error(&warning, false, false, None, false).is_some());
     }
 
     #[test]
