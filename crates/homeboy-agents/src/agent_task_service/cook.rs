@@ -736,6 +736,13 @@ where
             })
             .unwrap_or(true);
         if needs_execution {
+            // Claim the durable attempt before candidate baseline staging. That
+            // staging can take longer than the foreground controller's timeout;
+            // a restarted controller must find the same immutable plan rather
+            // than create an ownerless Lab admission.
+            if !agent_task_lifecycle::run_record_exists(&run_id)? {
+                agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
+            }
             let execution = (|| {
                 let initial_baseline = if attempt == 1 {
                     materialize_initial_candidate_baseline(
@@ -783,8 +790,23 @@ where
             })();
             if let Err(error) = execution {
                 let record = match agent_task_lifecycle::status(&run_id) {
-                    Ok(record) => Some(record),
-                    Err(_) => {
+                    Ok(record)
+                        if matches!(
+                            record.state,
+                            agent_task_lifecycle::AgentTaskRunState::Succeeded
+                                | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                                | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+                                | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+                                | agent_task_lifecycle::AgentTaskRunState::Failed
+                                | agent_task_lifecycle::AgentTaskRunState::Cancelled
+                        ) || record.lab_handoff.as_ref().is_some_and(|handoff| {
+                            handoff.state
+                                == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
+                        }) =>
+                    {
+                        Some(record)
+                    }
+                    Ok(_) | Err(_) => {
                         let phase = pre_execution_failure_phase(
                             &error,
                             options.attempt_dispatcher.as_deref(),
@@ -1906,6 +1928,119 @@ mod tests {
             assert_eq!(record.run_id, run_id);
             assert!(record.provider_handles.is_empty());
             assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            use std::os::unix::fs::PermissionsExt;
+
+            let temp = tempfile::tempdir().expect("temp source root");
+            let source = temp.path().join("source");
+            std::fs::create_dir(&source).expect("create source repository");
+            for args in [
+                vec!["init"],
+                vec!["config", "user.email", "agent@example.test"],
+                vec!["config", "user.name", "Agent"],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("run git")
+                    .success());
+            }
+            std::fs::write(source.join("lib.rs"), "base\n").expect("write base");
+            for args in [vec!["add", "lib.rs"], vec!["commit", "-m", "base"]] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("run git")
+                    .success());
+            }
+            std::fs::write(source.join("lib.rs"), "candidate\n").expect("dirty candidate");
+
+            let entered = temp.path().join("baseline-entered");
+            let release = temp.path().join("baseline-release");
+            let wrapper = temp.path().join("git");
+            std::fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\nif test \"$1\" = status; then touch \"{}\"; while ! test -f \"{}\"; do sleep 0.01; done; fi\nexec /usr/bin/git \"$@\"\n",
+                    entered.display(),
+                    release.display(),
+                ),
+            )
+            .expect("write slow git wrapper");
+            let mut permissions = std::fs::metadata(&wrapper)
+                .expect("wrapper metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
+            let previous_path = std::env::var_os("PATH");
+            std::env::set_var(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    temp.path().display(),
+                    previous_path
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                ),
+            );
+
+            let dispatches = Arc::new(AtomicUsize::new(0));
+            let mut options = batch_cook_options(
+                "cook-slow-baseline",
+                Arc::new(RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::clone(&dispatches),
+                }),
+            );
+            options.initial_run_id = "cook-slow-baseline-attempt-1".to_string();
+            options.provider_command = Some("fixture-provider".to_string());
+            options.source_worktree_path = Some(source);
+            let resume_options = options.clone();
+            let controller = std::thread::spawn(move || run_cook(options, UnusedExecutor));
+            let entered_staging = (0..500).any(|_| {
+                if entered.exists() {
+                    true
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    false
+                }
+            });
+            let durable = entered_staging.then(|| {
+                agent_task_lifecycle::status("cook-slow-baseline-attempt-1")
+                    .expect("staging attempt is durable before controller completion")
+            });
+            std::fs::write(&release, "release").expect("release baseline staging");
+            let result = controller
+                .join()
+                .expect("controller thread")
+                .expect("accepted detached attempt");
+            match previous_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+
+            assert!(entered_staging, "baseline materialization did not block");
+            let durable = durable.expect("durable record while staging was blocked");
+            assert_eq!(
+                durable.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+            assert!(agent_task_lifecycle::load_plan(&durable.run_id).is_ok());
+            assert_eq!(result.value.status, "in_flight");
+            assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+
+            let resumed =
+                run_cook(resume_options, UnusedExecutor).expect("resume accepted handoff");
+            assert_eq!(resumed.value.status, "in_flight");
+            assert_eq!(dispatches.load(Ordering::SeqCst), 1);
         });
     }
 
