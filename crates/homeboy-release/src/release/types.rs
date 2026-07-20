@@ -192,6 +192,27 @@ pub struct ReleaseStepResult {
     pub error: Option<String>,
 }
 
+impl Default for ReleaseStepResult {
+    /// A defaulted step has empty `id`/`step_type`, `Failed` status, and every
+    /// collection/optional field empty. `Failed` is the deliberate status
+    /// default: a not-yet-populated step must never read as `Success`. Construct
+    /// with `..Default::default()` and set the meaningful fields (`id`,
+    /// `step_type`, `status`, and whatever else applies) to drop the
+    /// `Vec::new()`/`None` boilerplate the step builders otherwise repeat.
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            step_type: String::new(),
+            status: ReleaseStepStatus::Failed,
+            missing: Vec::new(),
+            warnings: Vec::new(),
+            hints: Vec::new(),
+            data: None,
+            error: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReleaseStepStatus {
@@ -500,6 +521,39 @@ mod tests {
         let plan = ReleasePlan::new("demo", true, Vec::new(), None, Vec::new(), Vec::new());
 
         assert_eq!(plan.component_id(), Some("demo"));
+    }
+
+    #[test]
+    fn release_step_result_default_matches_the_fully_spelled_out_step() {
+        let via_default = ReleaseStepResult {
+            id: "build".to_string(),
+            step_type: "build".to_string(),
+            status: ReleaseStepStatus::Success,
+            ..Default::default()
+        };
+        let verbose = ReleaseStepResult {
+            id: "build".to_string(),
+            step_type: "build".to_string(),
+            status: ReleaseStepStatus::Success,
+            missing: Vec::new(),
+            warnings: Vec::new(),
+            hints: Vec::new(),
+            data: None,
+            error: None,
+        };
+        // ReleaseStepResult has no PartialEq; compare via canonical serialization.
+        assert_eq!(
+            serde_json::to_value(&via_default).unwrap(),
+            serde_json::to_value(&verbose).unwrap()
+        );
+    }
+
+    #[test]
+    fn release_step_result_default_status_is_failed_never_success() {
+        assert_eq!(
+            ReleaseStepResult::default().status,
+            ReleaseStepStatus::Failed
+        );
     }
 
     #[test]
