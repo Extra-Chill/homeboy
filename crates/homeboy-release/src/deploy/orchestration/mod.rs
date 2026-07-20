@@ -467,7 +467,7 @@ fn validate_preflighted_component_identities(
         let Some(expected_path) = config.preflighted_source_paths.get(&component.id) else {
             continue;
         };
-        let actual_identity = serde_json::to_string(component).map_err(|error| {
+        let actual_identity = component.canonical_identity().map_err(|error| {
             Error::internal_io(
                 format!(
                     "Failed to encode effective component '{}': {error}",
@@ -1354,6 +1354,115 @@ mod tests {
             result.results[0].deployed_ref.as_deref(),
             Some("feature/deploy (HEAD)")
         );
+    }
+
+    #[test]
+    fn release_set_dry_run_accepts_unchanged_managed_worktree_attachment() {
+        let source = TempDir::new().expect("source repo");
+        init_repo_with_tag_gap(source.path());
+        let worktree_root = TempDir::new().expect("worktree root");
+        let attachment = worktree_root.path().join("fixture");
+        run_git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                attachment.to_str().expect("attachment path"),
+                "v1.0.0",
+            ],
+        );
+
+        let mut preflighted = artifact_component(
+            "fixture",
+            attachment.to_str().expect("attachment path"),
+            "dist/fixture.zip",
+        );
+        let mut preflight_settings = HashMap::new();
+        preflight_settings.insert("first".to_string(), serde_json::json!(1));
+        preflight_settings.insert("second".to_string(), serde_json::json!(2));
+        preflighted.extensions = Some(HashMap::from([(
+            "fixture-packager".to_string(),
+            homeboy_core::component::ScopedExtensionConfig {
+                settings: preflight_settings,
+                ..Default::default()
+            },
+        )]));
+
+        // Loading the attachment again reconstructs map-backed config with a
+        // different insertion order while preserving the effective component.
+        let mut loaded = preflighted.clone();
+        let mut loaded_settings = HashMap::new();
+        loaded_settings.insert("second".to_string(), serde_json::json!(2));
+        loaded_settings.insert("first".to_string(), serde_json::json!(1));
+        loaded.extensions = Some(HashMap::from([(
+            "fixture-packager".to_string(),
+            homeboy_core::component::ScopedExtensionConfig {
+                settings: loaded_settings,
+                ..Default::default()
+            },
+        )]));
+
+        let mut config = base_deploy_config();
+        config.dry_run = true;
+        config.requested_refs =
+            std::collections::BTreeMap::from([("fixture".to_string(), "v1.0.0".to_string())]);
+        config.resolved_refs = std::collections::BTreeMap::from([(
+            "fixture".to_string(),
+            git_stdout(source.path(), &["rev-parse", "v1.0.0"]),
+        )]);
+        config.preflighted_source_paths = std::collections::BTreeMap::from([(
+            "fixture".to_string(),
+            preflighted.local_path.clone(),
+        )]);
+        config.preflighted_component_identities = std::collections::BTreeMap::from([(
+            "fixture".to_string(),
+            preflighted
+                .canonical_identity()
+                .expect("preflight identity"),
+        )]);
+
+        validate_preflighted_component_identities(&[loaded.clone()], &config)
+            .expect("unchanged attachment must pass the release-set guard");
+        let result = run_dry_run_mode(
+            &[loaded],
+            &HashMap::new(),
+            &HashMap::new(),
+            &Project::default(),
+            "",
+            &config,
+        )
+        .expect("unchanged attachment must reach exact-ref dry-run planning");
+
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].status, "planned");
+    }
+
+    #[test]
+    fn release_set_attachment_drift_fails_before_dry_run_materialization() {
+        let component = artifact_component("fixture", "/source/fixture", "dist/fixture.zip");
+        let mut config = base_deploy_config();
+        config.dry_run = true;
+        config.preflighted_source_paths = std::collections::BTreeMap::from([(
+            "fixture".to_string(),
+            component.local_path.clone(),
+        )]);
+        config.preflighted_component_identities = std::collections::BTreeMap::from([(
+            "fixture".to_string(),
+            component.canonical_identity().expect("preflight identity"),
+        )]);
+
+        let mut changed_path = component.clone();
+        changed_path.local_path = "/source/other-fixture".to_string();
+        let err = validate_preflighted_component_identities(&[changed_path], &config)
+            .expect_err("path drift must fail before dry-run planning");
+        assert!(err.message.contains("changed after release-set preflight"));
+
+        let mut changed_config = component;
+        changed_config.remote_path = "wp-content/plugins/changed".to_string();
+        let err = validate_preflighted_component_identities(&[changed_config], &config)
+            .expect_err("config drift must fail before dry-run planning");
+        assert!(err.message.contains("changed after release-set preflight"));
     }
 
     #[test]
