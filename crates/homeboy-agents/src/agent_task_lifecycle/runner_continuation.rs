@@ -19,6 +19,17 @@ use homeboy_core::api_jobs::{
 };
 use homeboy_core::error::{Error, Result};
 
+/// Result of reconciling a runner job across its known daemon generations.
+///
+/// An accepted handoff is terminal only when every authoritative generation
+/// confirms the job is absent. Transport failures remain deliberately
+/// unconfirmed so a transient daemon error cannot discard runner-owned work.
+pub enum RunnerJobReconciliation {
+    Snapshot(RunnerJobLogSnapshot),
+    ConfirmedAbsent { checked_generations: usize },
+    UnconfirmedAbsence,
+}
+
 /// Runner-side operations the agent-task lifecycle needs when reconciling or
 /// resuming a run that was handed off to a remote runner.
 pub trait RunnerContinuationProvider: Send + Sync {
@@ -28,6 +39,16 @@ pub trait RunnerContinuationProvider: Send + Sync {
         runner_id: &str,
         job_id: &str,
     ) -> Result<RunnerJobLogSnapshot>;
+
+    /// Reconcile a job against the daemon generation that owns it and, when
+    /// necessary, other known generations. Providers without generation
+    /// ownership support retain the conservative snapshot-only behavior.
+    fn reconcile_runner_job(&self, runner_id: &str, job_id: &str) -> RunnerJobReconciliation {
+        match self.runner_job_log_snapshot(runner_id, job_id) {
+            Ok(snapshot) => RunnerJobReconciliation::Snapshot(snapshot),
+            Err(_) => RunnerJobReconciliation::UnconfirmedAbsence,
+        }
+    }
 
     /// Whether the runner currently reports a live connection.
     fn is_runner_connected(&self, runner_id: &str) -> bool;

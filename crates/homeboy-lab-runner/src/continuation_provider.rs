@@ -5,7 +5,7 @@
 //! behavior directly. This adapter delegates to the runner connection,
 //! execution, and evidence functions.
 
-use homeboy_agents::agent_task_lifecycle::RunnerContinuationProvider;
+use homeboy_agents::agent_task_lifecycle::{RunnerContinuationProvider, RunnerJobReconciliation};
 use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
 use homeboy_core::error::Result;
 
@@ -19,6 +19,52 @@ impl RunnerContinuationProvider for RunnerContinuation {
         job_id: &str,
     ) -> Result<RunnerJobLogSnapshot> {
         super::evidence::runner_job_log_snapshot(runner_id, job_id)
+    }
+
+    fn reconcile_runner_job(&self, runner_id: &str, job_id: &str) -> RunnerJobReconciliation {
+        match self.runner_job_log_snapshot(runner_id, job_id) {
+            Ok(snapshot) => return RunnerJobReconciliation::Snapshot(snapshot),
+            Err(error) if !job_not_found(&error, job_id) => {
+                return RunnerJobReconciliation::UnconfirmedAbsence;
+            }
+            Err(_) => {}
+        }
+
+        let Ok(status) = super::connection::status(runner_id) else {
+            return RunnerJobReconciliation::UnconfirmedAbsence;
+        };
+        let Some(session) = status.session.filter(|_| status.connected) else {
+            return RunnerJobReconciliation::UnconfirmedAbsence;
+        };
+        let Ok(generations) = super::generation_store::live_sessions(runner_id, Some(&session))
+        else {
+            return RunnerJobReconciliation::UnconfirmedAbsence;
+        };
+        if generations.is_empty() {
+            return RunnerJobReconciliation::UnconfirmedAbsence;
+        }
+
+        let mut checked_generations = 0;
+        for generation in generations {
+            if generation.local_url.is_none() {
+                return RunnerJobReconciliation::UnconfirmedAbsence;
+            }
+            checked_generations += 1;
+            match super::evidence::runner_job_log_snapshot_for_session(&generation, job_id) {
+                Ok(snapshot) => {
+                    if super::generation_store::record_job(runner_id, &generation, job_id).is_err()
+                    {
+                        return RunnerJobReconciliation::UnconfirmedAbsence;
+                    }
+                    return RunnerJobReconciliation::Snapshot(snapshot);
+                }
+                Err(error) if job_not_found(&error, job_id) => continue,
+                Err(_) => return RunnerJobReconciliation::UnconfirmedAbsence,
+            }
+        }
+        RunnerJobReconciliation::ConfirmedAbsent {
+            checked_generations,
+        }
     }
 
     fn is_runner_connected(&self, runner_id: &str) -> bool {
@@ -69,6 +115,19 @@ impl RunnerContinuationProvider for RunnerContinuation {
     ) -> Result<homeboy_core::api_jobs::RemoteRunnerSubmissionLookup> {
         super::connection::lookup_reverse_broker_submission(runner_id, submission_key)
     }
+}
+
+fn job_not_found(error: &homeboy_core::error::Error, job_id: &str) -> bool {
+    error
+        .details
+        .get("http_status")
+        .and_then(serde_json::Value::as_u64)
+        == Some(404)
+        && error
+            .details
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            == Some(&format!("/jobs/{job_id}"))
 }
 
 /// Register the runner continuation provider with core. Called once at startup.
