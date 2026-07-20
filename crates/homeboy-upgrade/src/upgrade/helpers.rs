@@ -1,13 +1,15 @@
 use homeboy_core::defaults;
-use homeboy_core::engine::shell::quote_path;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::{build_identity, git};
 use homeboy_extension as extension;
+use semver::Version;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::constants::{GITHUB_RELEASES_API, VERSION};
-use super::execution::{execute_upgrade, resolve_source_workspace};
+use super::execution::{
+    execute_upgrade, prepare_source_workspace_for_upgrade, resolve_source_workspace,
+};
 use super::services;
 use super::types::*;
 use super::validation::check_for_updates;
@@ -175,10 +177,48 @@ pub fn run_upgrade_with_method(
     let source_upgrade_path = source_upgrade_path_for_method(install_method, source_path)?;
     let runner_method_override = runner_method_override_for_method(method_override, install_method);
 
-    // Check if update is available (unless forcing)
-    if !force {
+    // Source upgrades converge on the requested build, not merely the latest
+    // released semver. A distinct, verifiable source build at the same semver
+    // must therefore bypass the release-version no-op path.
+    let source_upgrade_decision =
+        (install_method == InstallMethod::Source && !force && source_path.is_some())
+            .then(|| {
+                let source_path = source_upgrade_path
+                    .as_deref()
+                    .expect("explicit source path");
+                // Validate before the release gate and any extension or runner
+                // work. A dirty source tree is never an acceptable controller.
+                prepare_source_workspace_for_upgrade(source_path)?;
+                Ok(source_upgrade_decision(
+                    &previous_version,
+                    &build_identity::current(),
+                    source_path,
+                ))
+            })
+            .transpose()?;
+
+    if let Some(decision) = source_upgrade_decision {
+        if !decision.upgrades() {
+            return Ok(source_upgrade_noop_result(
+                install_method,
+                previous_version,
+                previous_build_identity,
+                decision,
+            ));
+        }
+    }
+
+    // An approved explicit source build is the controller target, regardless of
+    // whether the latest published release has the same semantic version.
+    let replacement_approved =
+        controller_replacement_proceeds(force, source_upgrade_decision, false);
+
+    // Check if a release update is available unless an explicit source target
+    // has already been approved for controller replacement.
+    if !replacement_approved {
         let check = check_for_updates()?;
-        if !check.update_available {
+        if !controller_replacement_proceeds(force, source_upgrade_decision, check.update_available)
+        {
             // Even when no binary update is needed, still run extension updates.
             let (extensions_updated, extensions_skipped) = if skip_extensions {
                 (vec![], vec![])
@@ -200,18 +240,6 @@ pub fn run_upgrade_with_method(
                     )
                 })?
             };
-            let source_drift = same_version_source_checkout_drift(
-                previous_build_identity.as_deref(),
-                source_path,
-                skip_extensions,
-                skip_runners,
-                skip_services,
-            );
-            if let Some(drift) = &source_drift {
-                homeboy_core::log_status!("upgrade", "WARNING: {}", drift.detail);
-                homeboy_core::log_status!("upgrade", "  Run: {}", drift.recovery_command);
-            }
-
             return Ok(UpgradeResult {
                 command: "upgrade".to_string(),
                 install_method,
@@ -221,10 +249,7 @@ pub fn run_upgrade_with_method(
                 new_build_identity: None,
                 source_revision: None,
                 upgraded: false,
-                message: source_drift
-                    .as_ref()
-                    .map(|drift| drift.message.clone())
-                    .unwrap_or_else(|| "Already at latest version".to_string()),
+                message: "Already at latest version".to_string(),
                 restart_required: false,
                 extensions_unrefreshed: warn_unrefreshed_symlinked_extensions(&extensions_updated),
                 extensions_updated,
@@ -330,6 +355,45 @@ pub fn run_upgrade_with_method(
         services_restarted,
         services_pending_restart,
     })
+}
+
+fn source_upgrade_noop_result(
+    install_method: InstallMethod,
+    previous_version: String,
+    previous_build_identity: Option<String>,
+    decision: SourceUpgradeDecision,
+) -> UpgradeResult {
+    UpgradeResult {
+        command: "upgrade".to_string(),
+        install_method,
+        new_version: Some(previous_version.clone()),
+        previous_version,
+        previous_build_identity,
+        new_build_identity: None,
+        source_revision: None,
+        upgraded: false,
+        message: decision.no_op_message(),
+        restart_required: false,
+        extensions_updated: Vec::new(),
+        extensions_skipped: Vec::new(),
+        runners_updated: Vec::new(),
+        runners_skipped: Vec::new(),
+        extensions_unrefreshed: Vec::new(),
+        services_restarted: Vec::new(),
+        services_pending_restart: Vec::new(),
+    }
+}
+
+fn source_upgrade_bypasses_release_gate(decision: Option<SourceUpgradeDecision>) -> bool {
+    decision.is_some_and(SourceUpgradeDecision::upgrades)
+}
+
+fn controller_replacement_proceeds(
+    force: bool,
+    source_decision: Option<SourceUpgradeDecision>,
+    release_update_available: bool,
+) -> bool {
+    force || source_upgrade_bypasses_release_gate(source_decision) || release_update_available
 }
 
 /// Upgrade only explicitly selected runners without promoting the controller.
@@ -897,68 +961,175 @@ fn portable_extension_source_url(result: &homeboy_extension::UpdateResult) -> Op
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SourceCheckoutDriftWarning {
-    message: String,
-    detail: String,
-    recovery_command: String,
+/// Deterministic source-upgrade contract:
+/// - a newer source semver upgrades;
+/// - an equal source semver upgrades only when both builds expose a commit and
+///   dirty-state identity and those identities differ;
+/// - an identical, older, or unverifiable candidate is a safe no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceUpgradeDecision {
+    NewerVersion,
+    DifferentIdentity,
+    SameIdentity,
+    OlderVersion,
+    IdentityUnavailable,
 }
 
-fn same_version_source_checkout_drift(
-    active_build_identity: Option<&str>,
-    source_path: Option<&Path>,
-    skip_extensions: bool,
-    skip_runners: bool,
-    skip_services: bool,
-) -> Option<SourceCheckoutDriftWarning> {
-    let checkout = resolve_source_workspace(source_path).ok()?;
-    let source_identity =
-        super::with_runner_upgrade(|p| p.source_checkout_build_identity(&checkout))?;
-    if active_build_identity == Some(source_identity.as_str()) {
-        return None;
+impl SourceUpgradeDecision {
+    fn upgrades(self) -> bool {
+        matches!(self, Self::NewerVersion | Self::DifferentIdentity)
     }
 
-    let active = active_build_identity.unwrap_or("unknown active build identity");
-    let recovery_command =
-        source_drift_recovery_command(&checkout, skip_extensions, skip_runners, skip_services);
-    let detail = format!(
-        "active binary is {active}, but source checkout is {source_identity}; semver-only upgrade check skipped the local source build"
-    );
+    fn no_op_message(self) -> String {
+        match self {
+            Self::OlderVersion => "Source checkout is older than the active binary; skipping downgrade".to_string(),
+            Self::IdentityUnavailable => "Source checkout cannot be compared to the active build; skipping unverifiable replacement".to_string(),
+            Self::SameIdentity => "Source checkout matches the active build identity".to_string(),
+            Self::NewerVersion | Self::DifferentIdentity => "Source checkout requires upgrade".to_string(),
+        }
+    }
+}
 
-    Some(SourceCheckoutDriftWarning {
-        message: format!("Already at latest version; {detail}. Run: {recovery_command}"),
-        detail,
-        recovery_command,
+fn source_upgrade_decision(
+    active_version: &str,
+    active_identity: &build_identity::BuildIdentity,
+    source_path: &Path,
+) -> SourceUpgradeDecision {
+    let Some(source) = source_build_identity(source_path) else {
+        return SourceUpgradeDecision::IdentityUnavailable;
+    };
+    source_upgrade_decision_for_identity(active_version, active_identity, &source)
+}
+
+fn source_upgrade_decision_for_identity(
+    active_version: &str,
+    active_identity: &build_identity::BuildIdentity,
+    source: &SourceBuildIdentity,
+) -> SourceUpgradeDecision {
+    let Ok(active_version) = Version::parse(active_version.trim_start_matches('v')) else {
+        return SourceUpgradeDecision::IdentityUnavailable;
+    };
+    let Ok(source_version) = Version::parse(&source.version) else {
+        return SourceUpgradeDecision::IdentityUnavailable;
+    };
+
+    if source_version > active_version {
+        return SourceUpgradeDecision::NewerVersion;
+    }
+    if source_version < active_version {
+        return SourceUpgradeDecision::OlderVersion;
+    }
+
+    if source.is_snapshot {
+        return SourceUpgradeDecision::DifferentIdentity;
+    }
+
+    match (
+        active_identity.git_commit.as_deref(),
+        active_identity.git_dirty,
+        source.git_commit.as_deref(),
+        source.git_dirty,
+    ) {
+        (Some(active_commit), Some(active_dirty), Some(source_commit), Some(source_dirty)) => {
+            if active_commit == source_commit && active_dirty == source_dirty {
+                SourceUpgradeDecision::SameIdentity
+            } else {
+                SourceUpgradeDecision::DifferentIdentity
+            }
+        }
+        _ => SourceUpgradeDecision::IdentityUnavailable,
+    }
+}
+
+#[derive(Debug)]
+struct SourceBuildIdentity {
+    version: String,
+    git_commit: Option<String>,
+    git_dirty: Option<bool>,
+    is_snapshot: bool,
+}
+
+fn source_build_identity(source_path: &Path) -> Option<SourceBuildIdentity> {
+    let manifest = std::fs::read_to_string(source_path.join("Cargo.toml")).ok()?;
+    let package = manifest.split("[package]").nth(1)?;
+    let version = package
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("version = "))?
+        .trim_matches('"')
+        .to_string();
+    let is_git_checkout =
+        git::output_allow_empty(source_path, &["rev-parse", "--is-inside-work-tree"]).as_deref()
+            == Some("true");
+    let (git_commit, git_dirty) =
+        if let Some((commit, dirty)) = synthetic_snapshot_provenance(source_path) {
+            (Some(commit), Some(dirty))
+        } else {
+            (
+                git::output_allow_empty(source_path, &["rev-parse", "--short=12", "HEAD"])
+                    .filter(|commit| !commit.is_empty()),
+                git::output_allow_empty(source_path, &["status", "--porcelain"])
+                    .map(|status| !status.is_empty()),
+            )
+        };
+
+    Some(SourceBuildIdentity {
+        version,
+        git_commit,
+        git_dirty,
+        is_snapshot: !is_git_checkout,
     })
 }
 
-fn source_drift_recovery_command(
-    checkout: &Path,
-    skip_extensions: bool,
-    skip_runners: bool,
-    skip_services: bool,
-) -> String {
-    let mut parts = vec![
-        "homeboy".to_string(),
-        "upgrade".to_string(),
-        "--force".to_string(),
-        "--method".to_string(),
-        "source".to_string(),
-        "--source-path".to_string(),
-        quote_path(&checkout.display().to_string()),
-    ];
+/// Synthetic snapshots are one-commit repositories whose Git commit identifies
+/// the transport artifact. Their immutable controller identity is the recorded
+/// source head in the signed snapshot note, matching product build metadata.
+fn synthetic_snapshot_provenance(source_path: &Path) -> Option<(String, bool)> {
+    let head = git::output_allow_empty(source_path, &["rev-parse", "HEAD"])?;
+    let parents =
+        git::output_allow_empty(source_path, &["rev-list", "--parents", "-n", "1", "HEAD"])?;
+    let actors = git::output_allow_empty(
+        source_path,
+        &["show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD"],
+    )?;
+    let timestamps =
+        git::output_allow_empty(source_path, &["show", "-s", "--format=%at|%ct", "HEAD"])?;
+    if parents.split_whitespace().count() != 1
+        || actors != "Homeboy Snapshot <homeboy-snapshot@localhost>|Homeboy Snapshot <homeboy-snapshot@localhost>"
+        || timestamps != "0|0"
+    {
+        return None;
+    }
+    let message = git::output_allow_empty(source_path, &["log", "-1", "--format=%B"])?;
+    let snapshot = message.strip_prefix("Homeboy snapshot ")?;
+    if snapshot.len() != 25
+        || !snapshot.starts_with("snapshot:")
+        || !is_lowercase_hex(&snapshot[9..], 16)
+    {
+        return None;
+    }
+    let note = git::output_allow_empty(
+        source_path,
+        &["notes", "--ref=homeboy-snapshot", "show", &head],
+    )?;
+    let source_head = note.strip_prefix(&format!("snapshot_identity={snapshot}\nsource_head="))?;
+    let (source_head, dirty) = source_head.split_once("\nsource_dirty=")?;
+    if !is_lowercase_hex(source_head, 40) {
+        return None;
+    }
+    let dirty = match dirty {
+        "true" => true,
+        "false" => false,
+        _ => return None,
+    };
+    Some((source_head[..12].to_string(), dirty))
+}
 
-    if skip_extensions {
-        parts.push("--skip-extensions".to_string());
-    }
-    if skip_runners {
-        parts.push("--skip-runners".to_string());
-    }
-    if skip_services {
-        parts.push("--no-restart-services".to_string());
-    }
-
-    parts.join(" ")
+// Match homeboy-product-identity's build-time snapshot provenance contract.
+fn is_lowercase_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 #[cfg(test)]
@@ -1158,14 +1329,206 @@ version = "0.0.0"
     }
 
     #[test]
-    fn source_drift_recovery_command_preserves_skip_flags() {
-        let command =
-            source_drift_recovery_command(Path::new("/tmp/homeboy checkout"), true, false, true);
+    fn source_upgrade_identity_contract_is_deterministic() {
+        let active = build_identity::BuildIdentity {
+            version: "1.2.3".to_string(),
+            git_commit: Some("active-commit".to_string()),
+            git_dirty: Some(false),
+            display: "homeboy 1.2.3+active-commit".to_string(),
+        };
+        let source =
+            |version: &str, commit: Option<&str>, dirty: Option<bool>| SourceBuildIdentity {
+                version: version.to_string(),
+                git_commit: commit.map(str::to_string),
+                git_dirty: dirty,
+                is_snapshot: false,
+            };
 
         assert_eq!(
-            command,
-            "homeboy upgrade --force --method source --source-path '/tmp/homeboy checkout' --skip-extensions --no-restart-services"
+            source_upgrade_decision_for_identity(
+                "1.2.3",
+                &active,
+                &source("1.2.3", Some("active-commit"), Some(false)),
+            ),
+            SourceUpgradeDecision::SameIdentity
         );
+        assert_eq!(
+            source_upgrade_decision_for_identity(
+                "1.2.3",
+                &active,
+                &source("1.2.3", Some("new-commit"), Some(false)),
+            ),
+            SourceUpgradeDecision::DifferentIdentity
+        );
+        assert_eq!(
+            source_upgrade_decision_for_identity(
+                "1.2.3",
+                &active,
+                &source("1.2.4", Some("new-commit"), Some(false)),
+            ),
+            SourceUpgradeDecision::NewerVersion
+        );
+        assert_eq!(
+            source_upgrade_decision_for_identity(
+                "1.2.3",
+                &active,
+                &source("1.2.2", Some("new-commit"), Some(false)),
+            ),
+            SourceUpgradeDecision::OlderVersion
+        );
+        assert_eq!(
+            source_upgrade_decision_for_identity("1.2.3", &active, &source("1.2.3", None, None),),
+            SourceUpgradeDecision::IdentityUnavailable
+        );
+    }
+
+    fn write_source_manifest(path: &Path, version: &str) {
+        std::fs::write(
+            path.join("Cargo.toml"),
+            format!("[package]\nname = \"homeboy\"\nversion = \"{version}\"\n"),
+        )
+        .expect("source manifest");
+        std::fs::write(path.join("homeboy.json"), r#"{"id":"homeboy"}"#).expect("homeboy manifest");
+    }
+
+    fn init_git_source(path: &Path, version: &str) {
+        git(path, &["init"]);
+        write_source_manifest(path, version);
+        git(path, &["add", "."]);
+        git(
+            path,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "-m",
+                "source",
+            ],
+        );
+    }
+
+    fn active_identity(commit: &str) -> build_identity::BuildIdentity {
+        build_identity::BuildIdentity {
+            version: "1.2.3".to_string(),
+            git_commit: Some(commit.to_string()),
+            git_dirty: Some(false),
+            display: format!("homeboy 1.2.3+{commit}"),
+        }
+    }
+
+    #[test]
+    fn explicit_source_build_bypasses_release_gate_for_controller_replacement() {
+        let source = tempdir().expect("source");
+        init_git_source(source.path(), "1.2.3");
+        assert!(source_build_identity(source.path()).is_some());
+
+        let decision =
+            source_upgrade_decision("1.2.3", &active_identity("different-build"), source.path());
+
+        assert_eq!(decision, SourceUpgradeDecision::DifferentIdentity);
+        assert!(source_upgrade_bypasses_release_gate(Some(decision)));
+        assert!(controller_replacement_proceeds(
+            false,
+            Some(decision),
+            false
+        ));
+    }
+
+    #[test]
+    fn gitless_source_snapshot_is_an_executable_same_version_candidate() {
+        let source = tempdir().expect("source");
+        write_source_manifest(source.path(), "1.2.3");
+        assert!(source_build_identity(source.path()).is_some());
+
+        let decision =
+            source_upgrade_decision("1.2.3", &active_identity("active-build"), source.path());
+
+        assert_eq!(decision, SourceUpgradeDecision::DifferentIdentity);
+        assert!(source_upgrade_bypasses_release_gate(Some(decision)));
+    }
+
+    #[test]
+    fn dirty_explicit_source_is_rejected_before_controller_side_effects() {
+        let source = tempdir().expect("source");
+        init_git_source(source.path(), "1.2.3");
+        std::fs::write(source.path().join("dirty"), "uncommitted").expect("dirty source");
+
+        let error = prepare_source_workspace_for_upgrade(source.path())
+            .expect_err("dirty source must be rejected during preflight");
+
+        assert!(error.message.contains("uncommitted changes"));
+    }
+
+    #[test]
+    fn synthetic_snapshot_uses_recorded_source_identity_for_parity() {
+        let source = tempdir().expect("source");
+        git(source.path(), &["init"]);
+        write_source_manifest(source.path(), "1.2.3");
+        git(source.path(), &["add", "."]);
+        let commit = Command::new("git")
+            .arg("-C")
+            .arg(source.path())
+            .args([
+                "-c",
+                "user.name=Homeboy Snapshot",
+                "-c",
+                "user.email=homeboy-snapshot@localhost",
+                "commit",
+                "-m",
+                "Homeboy snapshot snapshot:0123456789abcdef",
+            ])
+            .env("GIT_AUTHOR_DATE", "1970-01-01T00:00:00 +0000")
+            .env("GIT_COMMITTER_DATE", "1970-01-01T00:00:00 +0000")
+            .output()
+            .expect("create synthetic snapshot");
+        assert!(
+            commit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        let source_head = "a".repeat(40);
+        git(
+            source.path(),
+            &[
+                "notes",
+                "--ref=homeboy-snapshot",
+                "add",
+                "-m",
+                &format!("snapshot_identity=snapshot:0123456789abcdef\nsource_head={source_head}\nsource_dirty=false"),
+            ],
+        );
+
+        let decision =
+            source_upgrade_decision("1.2.3", &active_identity(&source_head[..12]), source.path());
+
+        assert_eq!(decision, SourceUpgradeDecision::SameIdentity);
+        assert!(!source_upgrade_bypasses_release_gate(Some(decision)));
+
+        for invalid_source_head in ["A".repeat(40), "g".repeat(40)] {
+            git(
+                source.path(),
+                &[
+                    "notes",
+                    "--ref=homeboy-snapshot",
+                    "add",
+                    "-f",
+                    "-m",
+                    &format!("snapshot_identity=snapshot:0123456789abcdef\nsource_head={invalid_source_head}\nsource_dirty=false"),
+                ],
+            );
+
+            assert!(synthetic_snapshot_provenance(source.path()).is_none());
+            assert_ne!(
+                source_upgrade_decision(
+                    "1.2.3",
+                    &active_identity(&invalid_source_head[..12]),
+                    source.path(),
+                ),
+                SourceUpgradeDecision::SameIdentity
+            );
+        }
     }
 
     fn git(path: &Path, args: &[&str]) {
