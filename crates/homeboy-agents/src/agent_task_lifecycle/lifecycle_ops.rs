@@ -2023,6 +2023,7 @@ pub(crate) fn reconcile_transport_proxy_snapshot(
     record: &mut AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
+    bind_pending_lab_handoff_snapshot(record, snapshot)?;
     if record.state == AgentTaskRunState::Queued {
         set_run_state(record, AgentTaskRunState::Running);
         for task in &mut record.tasks {
@@ -2032,6 +2033,54 @@ pub(crate) fn reconcile_transport_proxy_snapshot(
         }
     }
     reconcile_runner_job_snapshot(record, snapshot)
+}
+
+/// A runner snapshot from the expected Lab is durable acceptance evidence when
+/// the controller has not yet recorded its child job ID. Bind that identity
+/// before validating the snapshot so the pre-acceptance handoff converges to
+/// the same state as an acknowledged daemon response.
+fn bind_pending_lab_handoff_snapshot(
+    record: &mut AgentTaskRunRecord,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) -> Result<()> {
+    if record.runner_job_id().is_some() {
+        return Ok(());
+    }
+    let Some(handoff) = record.lab_handoff.as_ref().filter(|handoff| {
+        handoff.state == AgentTaskLabHandoffState::Pending
+            && handoff.authority == AgentTaskLabHandoffAuthority::Controller
+    }) else {
+        return Ok(());
+    };
+    if snapshot.job.target_runner_id.as_deref() != Some(handoff.runner_id.as_str()) {
+        return Ok(());
+    }
+    let remote_workspace = record
+        .metadata
+        .get("remote_workspace")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let remote_command = record
+        .metadata
+        .get("remote_command")
+        .and_then(Value::as_array)
+        .map(|command| {
+            command
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    *record = record_detached_lab_run(DetachedLabRunRecord {
+        run_id: &record.run_id,
+        runner_id: &handoff.runner_id,
+        runner_job_id: &snapshot.job.id.to_string(),
+        remote_workspace: &remote_workspace,
+        remote_command: &remote_command,
+    })?;
+    Ok(())
 }
 
 fn is_transport_proxy(record: &AgentTaskRunRecord) -> bool {
