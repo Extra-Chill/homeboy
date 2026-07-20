@@ -110,7 +110,16 @@ pub(super) fn deploy_components(
         });
     }
 
-    validate_effective_remote_paths(&components, &project, base_path)?;
+    // Remote-path resolution is a pre-mutation guard: it fails closed so a real
+    // deploy never writes to an unresolved destination. Read-only modes
+    // (`--check`, `--dry-run`) return before touching any remote, and a project
+    // can legitimately include a component whose remote path is not resolvable
+    // on this host (e.g. a CLI binary with no `remote_path`). Validating it there
+    // aborts the whole status probe with "Path cannot be empty" before checking
+    // anything. Skip the guard for non-mutating modes. (#8190)
+    if !config.check && !config.dry_run {
+        validate_effective_remote_paths(&components, &project, base_path)?;
+    }
 
     // Release assets are immutable remote inputs. Resolve and verify them before
     // touching any configured checkout, then reuse the same run-scoped bytes for
@@ -751,6 +760,30 @@ mod tests {
 
         assert!(err.message.contains("unsupported legacy build_command"));
         assert_eq!(err.details["field"].as_str(), Some("build_command"));
+    }
+
+    #[test]
+    fn validate_effective_remote_paths_rejects_an_unresolvable_remote_path() {
+        // A component whose remote path cannot be resolved (empty, no root rule)
+        // makes the pre-mutation guard fail closed. Read-only modes gate this
+        // guard off so a project status probe is not aborted by it. (#8190)
+        let component = Component {
+            id: "cli-binary".to_string(),
+            remote_path: String::new(),
+            ..Default::default()
+        };
+        let project = Project {
+            id: "site".to_string(),
+            ..Default::default()
+        };
+
+        let err = validate_effective_remote_paths(&[component], &project, "/var/www/site")
+            .expect_err("an unresolvable remote path must fail the pre-mutation guard");
+        assert!(
+            err.message.contains("Path cannot be empty"),
+            "expected empty-path rejection, got: {}",
+            err.message
+        );
     }
 
     /// Write a component manifest that declares a (missing) required extension.
