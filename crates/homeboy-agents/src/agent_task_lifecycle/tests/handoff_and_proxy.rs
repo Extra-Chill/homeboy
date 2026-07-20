@@ -552,6 +552,44 @@ fn preacceptance_snapshot_binds_the_accepted_daemon_job_before_validation() {
 }
 
 #[test]
+fn preacceptance_snapshot_binds_a_pre_claim_job_without_a_target_runner() {
+    // A daemon job is created with `target_runner_id: None` and only gains a
+    // runner once claimed, so a snapshot polled before the claim legitimately
+    // has no target. The expected-Lab controller handoff is the binding
+    // authority: an absent target must still bind (regression for a strict
+    // `!=` check that silently skipped this pre-claim window).
+    with_isolated_home(|_| {
+        let run_id = "cook-preacceptance-no-target";
+        let plan = test_plan();
+        let mut record = record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "lab_handoff_preacceptance",
+            Some("/runner/workspace/homeboy"),
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("persist pending controller handoff");
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
+        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+        snapshot.job.target_runner_id = None;
+        snapshot.events.clear();
+
+        reconcile_transport_proxy_snapshot(&mut record, &snapshot)
+            .expect("pre-claim daemon snapshot binds before validation");
+
+        let accepted_job_id = snapshot.job.id.to_string();
+        assert_eq!(record.runner_job_id(), Some(accepted_job_id.as_str()));
+        assert_eq!(
+            record.lab_handoff.as_ref().expect("handoff").state,
+            AgentTaskLabHandoffState::Accepted
+        );
+        assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
+    });
+}
+
+#[test]
 fn preacceptance_snapshot_rejects_a_different_bound_daemon_job() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];

@@ -197,15 +197,8 @@ pub(crate) fn reconcile_transport_proxy_snapshot(
     record: &mut AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
-    bind_pending_lab_handoff_snapshot(record, snapshot)?;
-    if record.state == AgentTaskRunState::Queued {
-        set_run_state(record, AgentTaskRunState::Running);
-        for task in &mut record.tasks {
-            if task.state == AgentTaskState::Queued {
-                task.state = AgentTaskState::Running;
-            }
-        }
-    }
+    // Binding and the queued -> running transition now live at the top of
+    // `reconcile_runner_job_snapshot` so every reconcile path shares one owner.
     reconcile_runner_job_snapshot(record, snapshot)
 }
 
@@ -213,7 +206,16 @@ pub(crate) fn reconcile_transport_proxy_snapshot(
 /// the controller has not yet recorded its child job ID. Bind that identity
 /// before validating the snapshot so the pre-acceptance handoff converges to
 /// the same state as an acknowledged daemon response.
-fn bind_pending_lab_handoff_snapshot(
+///
+/// This is the single owner of pre-acceptance handoff binding: it runs at the
+/// top of `reconcile_runner_job_snapshot`, so every reconcile path converges on
+/// one binding decision instead of each caller binding independently.
+///
+/// A daemon job is created with `target_runner_id: None` and only gains a runner
+/// once claimed, so a snapshot polled before the claim legitimately has no
+/// target. Accept an absent target (the expected-Lab handoff is authority) and
+/// only reject a target that names a *different* runner.
+pub(crate) fn bind_pending_lab_handoff_snapshot(
     record: &mut AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
@@ -232,7 +234,12 @@ fn bind_pending_lab_handoff_snapshot(
     let Some(runner_id) = runner_id else {
         return Ok(());
     };
-    if snapshot.job.target_runner_id.as_deref() != Some(runner_id.as_str()) {
+    if snapshot
+        .job
+        .target_runner_id
+        .as_deref()
+        .is_some_and(|target| target != runner_id)
+    {
         return Ok(());
     }
     let remote_workspace = record
