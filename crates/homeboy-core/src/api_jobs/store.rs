@@ -70,6 +70,8 @@ pub(super) struct StoredJob {
     pub(super) job: Job,
     pub(super) events: Vec<JobEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) admission_idempotency_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) remote_runner: Option<remote_runner::StoredRemoteRunnerJob>,
     /// Typed execution identity for a daemon-local child submitted on behalf of
     /// a remote runner. This lets `/jobs` project the accepted runner job without
@@ -448,8 +450,27 @@ impl JobStore {
             metadata,
             path_materialization_plan,
             local_runner,
+            None,
         )
         .0
+    }
+
+    /// Reserve one daemon admission per caller-owned handoff identity. This is
+    /// separate from executable-job deduplication because an admission is a
+    /// short-lived pre-handoff guard, not the runner child itself.
+    pub(crate) fn create_or_reuse_active_admission(
+        &self,
+        metadata: Value,
+        idempotency_key: &str,
+    ) -> (Job, bool) {
+        self.create_or_reuse_active_local_runner_job(
+            "runner.admission",
+            None,
+            Some(metadata),
+            None,
+            None,
+            Some(idempotency_key.to_string()),
+        )
     }
 
     /// Insert a new queued local-runner job, or reuse the existing non-terminal
@@ -468,6 +489,7 @@ impl JobStore {
         metadata: Option<Value>,
         path_materialization_plan: Option<PathMaterializationPlan>,
         local_runner: Option<LocalRunnerJob>,
+        admission_idempotency_key: Option<String>,
     ) -> (Job, bool) {
         let now = timestamp_ms();
         let runner_job_projection = metadata
@@ -504,7 +526,22 @@ impl JobStore {
         };
 
         let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        if let Some(durable_run_id) = durable_run_id.as_deref() {
+        if let Some(idempotency_key) = admission_idempotency_key.as_deref() {
+            if let Some(existing) = inner
+                .jobs
+                .values()
+                .filter(|stored| {
+                    matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                })
+                .filter(|stored| {
+                    stored.admission_idempotency_key.as_deref() == Some(idempotency_key)
+                })
+                .min_by_key(|stored| (stored.job.created_at_ms, stored.job.id))
+                .map(|stored| stored.job.clone())
+            {
+                return (existing, false);
+            }
+        } else if let Some(durable_run_id) = durable_run_id.as_deref() {
             if let Some(existing) = inner
                 .jobs
                 .values()
@@ -525,6 +562,7 @@ impl JobStore {
             StoredJob {
                 job: job.clone(),
                 events: Vec::new(),
+                admission_idempotency_key,
                 remote_runner: None,
                 local_runner,
                 local_child: None,
@@ -1822,6 +1860,7 @@ impl JobStore {
             metadata,
             path_materialization_plan,
             Some(local_runner.clone()),
+            None,
         );
         let job_id = job.id;
         // An idempotent resubmission reused an already-enqueued job that already

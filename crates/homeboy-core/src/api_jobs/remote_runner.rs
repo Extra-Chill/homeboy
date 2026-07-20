@@ -582,6 +582,7 @@ impl JobStore {
             StoredJob {
                 job: job.clone(),
                 events: Vec::new(),
+                admission_idempotency_key: None,
                 remote_runner: Some(StoredRemoteRunnerJob {
                     // Durable broker state intentionally contains only the
                     // redacted request. The runner hydrates named references

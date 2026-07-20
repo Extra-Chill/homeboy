@@ -437,6 +437,7 @@ pub(crate) fn reserve_daemon_admission(
     local_url: &str,
     command: &str,
     expected_daemon_lease_id: &str,
+    idempotency_key: Option<&str>,
 ) -> Result<DaemonAdmissionReservation> {
     let client = Client::builder()
         .no_proxy()
@@ -453,6 +454,7 @@ pub(crate) fn reserve_daemon_admission(
             "runner_id": runner_id,
             "command": command,
             "expected_daemon_lease_id": expected_daemon_lease_id,
+            "idempotency_key": idempotency_key,
         }),
         DaemonPostOptions::default(),
     )?;
