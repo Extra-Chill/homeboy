@@ -323,9 +323,10 @@ fn artifact_is_review_only(artifact: &AgentTaskArtifact) -> bool {
 }
 
 fn artifact_has_patch_shape(artifact: &AgentTaskArtifact) -> bool {
-    artifact.kind == "patch"
-        || artifact.kind == "diff"
-        || artifact.mime.as_deref() == Some("text/x-patch")
+    matches!(
+        artifact.kind.trim().to_ascii_lowercase().as_str(),
+        "patch" | "diff" | "git-diff" | "git_diff" | "workspace_patch" | "workspace-patch"
+    ) || artifact.mime.as_deref() == Some("text/x-patch")
         || artifact.mime.as_deref() == Some("text/x-diff")
         || artifact.metadata.get("role").and_then(Value::as_str) == Some("patch")
 }

@@ -429,13 +429,53 @@ fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
 }
 
 #[test]
-fn promote_recoverable_candidate_rejects_multiple_actionable_patches() {
-    let (result, apply_calls) = promote_recoverable_patch_count(2);
-    assert!(result
-        .expect_err("ambiguous candidate rejected")
-        .message
-        .contains("exactly one actionable patch"));
-    assert_eq!(apply_calls, 0);
+fn promote_recoverable_candidate_collapses_duplicate_digest_aliases() {
+    let (result, apply_calls) = promote_recoverable_patch_count(3);
+    let report = result.expect("equivalent candidates are canonicalized");
+    assert_eq!(report.patch_artifact.id, "candidate-0");
+    assert_eq!(report.patch_artifact.kind, "patch");
+    assert_eq!(apply_calls, 1);
+}
+
+#[test]
+fn promote_recoverable_candidate_reports_distinct_patch_review_choices() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (source_path, source) = recoverable_patch_source(&temp, 2);
+    let distinct = VALID_PATCH.replace("+new", "+different");
+    std::fs::write(temp.path().join("candidate-1.patch"), &distinct).expect("write distinct patch");
+    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
+    source["artifacts"][1]["sha256"] = Value::String(sha256_hex(&distinct));
+    source["artifacts"][1]["size_bytes"] = Value::from(distinct.len());
+    let source = source.to_string();
+    std::fs::write(&source_path, &source).expect("rewrite source");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("target")),
+        ..Default::default()
+    };
+
+    let error = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("recoverable-run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "repo@recoverable".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect_err("distinct candidates require a choice");
+
+    assert_eq!(error.details["review_choices"].as_array().unwrap().len(), 2);
+    assert_eq!(provider.apply_calls.len(), 0);
 }
 
 #[test]

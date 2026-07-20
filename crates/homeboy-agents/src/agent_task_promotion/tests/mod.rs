@@ -273,14 +273,21 @@ pub(super) fn recoverable_patch_source(
     let artifacts = (0..patch_count)
         .map(|index| {
             let name = format!("candidate-{index}.patch");
-            std::fs::write(temp.path().join(&name), VALID_PATCH).expect("write candidate patch");
+            let patch = if index == 2 {
+                VALID_PATCH
+                    .replace("a/src/lib.rs", "a/workspace/repo@recoverable/src/lib.rs")
+                    .replace("b/src/lib.rs", "b/workspace/repo@recoverable/src/lib.rs")
+            } else {
+                VALID_PATCH.to_string()
+            };
+            std::fs::write(temp.path().join(&name), &patch).expect("write candidate patch");
             serde_json::json!({
                 "schema": AGENT_TASK_ARTIFACT_SCHEMA,
                 "id": format!("candidate-{index}"),
-                "kind": "patch",
+                "kind": if index == 0 { "patch" } else { "git-diff" },
                 "path": name,
-                "size_bytes": VALID_PATCH.len(),
-                "sha256": sha256_hex(VALID_PATCH),
+                "size_bytes": patch.len(),
+                "sha256": sha256_hex(&patch),
                 "metadata": {
                     "role": "patch",
                     "run_id": "recoverable-run",

@@ -103,11 +103,50 @@ fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_pending() {
 #[test]
 fn promote_recoverable_candidate_rejects_zero_actionable_patches() {
     let (result, apply_calls) = promote_recoverable_patch_count(0);
-    assert!(result
-        .expect_err("missing candidate rejected")
-        .message
-        .contains("exactly one actionable patch"));
+    let error = result.expect_err("missing candidate rejected");
+    assert!(error.message.contains("no readable actionable patch"));
+    assert!(error.details["next_action"]
+        .as_str()
+        .expect("recoverable next action")
+        .contains("agent-task review"));
     assert_eq!(apply_calls, 0);
+}
+
+#[test]
+fn promote_recoverable_candidate_reports_unreadable_patch_evidence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (source_path, source) = recoverable_patch_source(&temp, 1);
+    std::fs::remove_file(temp.path().join("candidate-0.patch")).expect("remove patch");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("target")),
+        ..Default::default()
+    };
+    let error = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("recoverable-run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "repo@recoverable".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect_err("unreadable artifact requires recovery");
+
+    assert_eq!(
+        error.details["unavailable_artifacts"][0]["id"],
+        "candidate-0"
+    );
+    assert_eq!(provider.apply_calls.len(), 0);
 }
 
 #[test]
