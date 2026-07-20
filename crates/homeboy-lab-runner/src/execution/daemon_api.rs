@@ -113,16 +113,7 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
             ]),
         ));
     };
-    let session = path
-        .strip_prefix("/jobs/")
-        .and_then(|suffix| suffix.split('/').next())
-        .filter(|job_id| !job_id.is_empty())
-        .map(|job_id| {
-            super::super::generation_store::job_session(runner_id, job_id, Some(&legacy_session))
-        })
-        .transpose()?
-        .flatten()
-        .unwrap_or(legacy_session);
+    let session = daemon_api_session_for_path(runner_id, path, legacy_session)?;
     let client = Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
@@ -174,6 +165,83 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
             "Use a direct daemon connection or a reverse runner session registered with a broker before querying runner jobs.".to_string(),
         ]),
     ))
+}
+
+fn daemon_api_session_for_path(
+    runner_id: &str,
+    path: &str,
+    legacy_session: RunnerSession,
+) -> Result<RunnerSession> {
+    Ok(path
+        .strip_prefix("/jobs/")
+        .and_then(|suffix| suffix.split('/').next())
+        .filter(|job_id| !job_id.is_empty())
+        .map(|job_id| {
+            super::super::generation_store::job_session(runner_id, job_id, Some(&legacy_session))
+        })
+        .transpose()?
+        .flatten()
+        .unwrap_or(legacy_session))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
+    use homeboy_core::test_support;
+
+    fn session(lease: &str, endpoint: &str) -> RunnerSession {
+        RunnerSession {
+            runner_id: "runner-a".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: RunnerSessionRole::Controller,
+            server_id: Some("server-a".to_string()),
+            controller_id: Some("controller-a".to_string()),
+            broker_url: None,
+            remote_daemon_address: Some(format!("{endpoint}:4000")),
+            local_port: Some(4000),
+            local_url: Some(format!("http://{endpoint}:4000")),
+            tunnel_pid: None,
+            remote_daemon_pid: Some(42),
+            remote_daemon_lease_id: Some(lease.to_string()),
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: Some(format!("homeboy test+{lease}")),
+            connected_at: "2026-07-20T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }
+    }
+
+    #[test]
+    fn daemon_api_routes_persisted_a_and_b_job_operations_to_their_generation() {
+        test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon-a");
+            let b = session("lease-b", "daemon-b");
+            crate::generation_store::record_job("runner-a", &a, "job-a").expect("record A job");
+            crate::generation_store::activate(
+                "runner-a",
+                &a,
+                "build-b".to_string(),
+                b.clone(),
+                &["job-a".to_string()],
+            )
+            .expect("activate B");
+            crate::generation_store::record_job("runner-a", &b, "job-b").expect("record B job");
+
+            assert_eq!(
+                daemon_api_session_for_path("runner-a", "/jobs/job-a/events", b.clone())
+                    .expect("route A operation"),
+                a
+            );
+            assert_eq!(
+                daemon_api_session_for_path("runner-a", "/jobs/job-b", b.clone())
+                    .expect("route B operation"),
+                b
+            );
+        });
+    }
 }
 
 pub(super) fn daemon_post(client: &Client, local_url: &str, path: &str) -> Result<Value> {
