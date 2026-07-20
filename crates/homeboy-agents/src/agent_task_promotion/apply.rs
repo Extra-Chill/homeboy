@@ -115,12 +115,47 @@ pub(crate) fn preflight_configured_workspace_provider_with_config(
     to_workspace: &str,
     config: &homeboy_core::defaults::HomeboyConfig,
 ) -> Result<()> {
+    if resolve_homeboy_workspace(to_workspace)?.is_some() {
+        return Ok(());
+    }
     worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
         to_workspace,
         config,
         None,
     )?;
     Ok(())
+}
+
+fn resolve_homeboy_workspace(to_workspace: &str) -> Result<Option<std::path::PathBuf>> {
+    let Some(record) = homeboy_core::worktree::resolve_workspace_ref_if_present(to_workspace)?
+    else {
+        return Ok(None);
+    };
+    if record.state() != &homeboy_core::worktree::TaskWorktreeState::Active {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "Homeboy workspace '{}' is no longer active",
+                record.handle()
+            ),
+            Some(to_workspace.to_string()),
+            None,
+        ));
+    }
+    let path = std::path::PathBuf::from(record.path());
+    if !path.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "Homeboy workspace '{}' points at a missing directory {}; recreate or remove the stale record",
+                record.handle(),
+                path.display()
+            ),
+            Some(to_workspace.to_string()),
+            None,
+        ));
+    }
+    Ok(Some(path))
 }
 
 /// Apply a promotion-provider request to an already materialized Git workspace.
@@ -419,21 +454,6 @@ impl ExternalPromotionWorkspaceProvider {
                 None,
             )
         })?;
-        let trusted_unpushed_destination = request
-            .trusted_unpushed_candidate_destination
-            .as_ref()
-            .map(
-                |trusted| homeboy_core::worktree_providers::TrustedUnpushedWorktree {
-                    path: trusted.path.clone(),
-                    head: trusted.head.clone(),
-                },
-            );
-        let resolution = worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
-            &request.to_workspace,
-            &configured_fallback.config,
-            request.gate_feedback_baseline.as_ref(),
-            trusted_unpushed_destination.as_ref(),
-        )?;
         let executable = configured_fallback
             .executable
             .clone()
@@ -448,22 +468,47 @@ impl ExternalPromotionWorkspaceProvider {
                     )
                 })
             })?;
-        let workspace = resolution.worktree.path;
+        let workspace = if let Some(path) = resolve_homeboy_workspace(&request.to_workspace)? {
+            self.provenance = Some(serde_json::json!({
+                "id": "homeboy",
+                "handle": request.to_workspace,
+                "path": path,
+            }));
+            path
+        } else {
+            let trusted_unpushed_destination = request
+                .trusted_unpushed_candidate_destination
+                .as_ref()
+                .map(
+                    |trusted| homeboy_core::worktree_providers::TrustedUnpushedWorktree {
+                        path: trusted.path.clone(),
+                        head: trusted.head.clone(),
+                    },
+                );
+            let resolution = worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+            &request.to_workspace,
+            &configured_fallback.config,
+            request.gate_feedback_baseline.as_ref(),
+            trusted_unpushed_destination.as_ref(),
+        )?;
+            let workspace = resolution.worktree.path;
+            self.provenance = Some(serde_json::json!({
+                "id": resolution.provider_id,
+                "handle": resolution.worktree.handle,
+                "path": workspace,
+            }));
+            std::path::PathBuf::from(workspace)
+        };
         self.invocation = Some(CommandInvocation {
             argv: vec![
                 executable.display().to_string(),
                 "agent-task".to_string(),
                 "promotion-provider".to_string(),
                 "--workspace".to_string(),
-                workspace.clone(),
+                workspace.display().to_string(),
             ],
             ..Default::default()
         });
-        self.provenance = Some(serde_json::json!({
-            "id": resolution.provider_id,
-            "handle": resolution.worktree.handle,
-            "path": workspace,
-        }));
         Ok(())
     }
 

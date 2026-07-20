@@ -53,10 +53,35 @@ pub fn resolve_if_present(id: &str) -> Result<Option<TaskWorktreeRecord>> {
 }
 
 pub fn resolve_workspace_ref(handle: &str) -> Result<WorkspaceRefRecord> {
-    if let Ok(record) = read_record(&metadata_dir()?, handle) {
-        return Ok(WorkspaceRefRecord::Task(record));
+    resolve_workspace_ref_if_present(handle)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_ref",
+            "Workspace handle does not match a Homeboy task worktree or adopted workspace",
+            Some(handle.to_string()),
+            None,
+        )
+    })
+}
+
+/// Returns `None` only when neither Homeboy workspace registry contains the
+/// handle. Corrupt records remain errors so callers never mask them with an
+/// external provider fallback.
+pub fn resolve_workspace_ref_if_present(handle: &str) -> Result<Option<WorkspaceRefRecord>> {
+    let task_path = record_path(&metadata_dir()?, handle);
+    if task_path.exists() {
+        return read_record_path(&task_path)
+            .map(WorkspaceRefRecord::Task)
+            .map(Some);
     }
-    read_adopted_record(&adopted_metadata_dir()?, handle).map(WorkspaceRefRecord::Adopted)
+
+    let adopted_path = record_path(&adopted_metadata_dir()?, handle);
+    if adopted_path.exists() {
+        return read_adopted_record_path(&adopted_path)
+            .map(WorkspaceRefRecord::Adopted)
+            .map(Some);
+    }
+
+    Ok(None)
 }
 
 pub fn remove(options: WorktreeRemoveOptions) -> Result<WorktreeRemoveOutput> {

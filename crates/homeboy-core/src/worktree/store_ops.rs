@@ -717,12 +717,8 @@ pub(super) fn read_record_path(path: &Path) -> Result<TaskWorktreeRecord> {
         .map_err(|err| Error::internal_json(err.to_string(), Some(path.display().to_string())))
 }
 
-pub(super) fn read_adopted_record(
-    store_dir: &Path,
-    handle: &str,
-) -> Result<AdoptedWorkspaceRecord> {
-    let path = record_path(store_dir, handle);
-    let raw = fs::read_to_string(&path)
+pub(super) fn read_adopted_record_path(path: &Path) -> Result<AdoptedWorkspaceRecord> {
+    let raw = fs::read_to_string(path)
         .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
     serde_json::from_str(&raw)
         .map_err(|err| Error::internal_json(err.to_string(), Some(path.display().to_string())))
