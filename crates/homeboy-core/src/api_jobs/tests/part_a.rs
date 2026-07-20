@@ -6,7 +6,9 @@ use std::fs;
 use serde_json::json;
 
 use super::persistence::recovered_terminal_from_result;
-use super::store::{LinkedDurableRunResolution, RecoveredTerminalJob};
+use super::store::{
+    LinkedDurableRunResolution, RecoveredTerminalJob, ADMISSION_RESERVATION_LEASE_MS,
+};
 use super::*;
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
@@ -87,6 +89,110 @@ fn expired_local_child_reservation_releases_capacity_and_persists_retryable_fail
                 data["reason"] == "local_child_reservation_expired" && data["retryable"] == true
             })
     }));
+}
+
+#[test]
+fn admission_leases_create_renew_expire_and_release_capacity_with_an_injected_clock() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("open store");
+    let now = 10_000;
+    let reservation = store
+        .create_admission_at(json!({ "admission": { "state": "reserved" } }), now)
+        .expect("create admission");
+    assert!(reservation.created);
+    assert_eq!(store.active_runner_jobs().len(), 1);
+
+    let renewed = store
+        .renew_admission_at(
+            reservation.job.id,
+            &reservation.token,
+            now + ADMISSION_RESERVATION_LEASE_MS - 1,
+        )
+        .expect("renew before first expiry");
+    assert!(renewed.expires_at_ms > now + ADMISSION_RESERVATION_LEASE_MS);
+    assert!(store
+        .reconcile_expired_admissions_at(now + ADMISSION_RESERVATION_LEASE_MS)
+        .expect("first interval remains live")
+        .is_empty());
+    assert_eq!(store.active_runner_jobs().len(), 1);
+
+    assert_eq!(
+        store
+            .reconcile_expired_admissions_at(renewed.expires_at_ms)
+            .expect("expire renewed admission"),
+        vec![reservation.job.id]
+    );
+    assert_eq!(store.active_runner_jobs().len(), 0);
+    assert_eq!(
+        store.get(reservation.job.id).expect("expired job").status,
+        JobStatus::Failed
+    );
+    assert_eq!(
+        JobStore::active_count_at_path(&path).expect("persisted active count"),
+        0
+    );
+}
+
+#[test]
+fn admission_lease_rejects_wrong_tokens_and_terminal_idempotency_replays() {
+    let store = JobStore::default();
+    let now = 10_000;
+    let reservation = store
+        .create_or_renew_admission_at(json!({}), "attempt-1", now)
+        .expect("create keyed admission");
+    let replay = store
+        .create_or_renew_admission_at(json!({}), "attempt-1", now + 1)
+        .expect("renew live idempotency replay");
+    assert_eq!(replay.job.id, reservation.job.id);
+    assert!(!replay.created);
+    assert!(store
+        .renew_admission_at(reservation.job.id, "wrong", now + 2)
+        .is_err());
+    let released = store
+        .release_admission_at(reservation.job.id, &reservation.token, now + 2)
+        .expect("release admission");
+    assert_eq!(released.status, JobStatus::Cancelled);
+    assert_eq!(
+        store
+            .release_admission_at(reservation.job.id, &reservation.token, now + 3)
+            .expect("idempotent release")
+            .status,
+        JobStatus::Cancelled
+    );
+    assert!(store
+        .create_or_renew_admission_at(json!({}), "attempt-1", now + 4)
+        .is_err());
+}
+
+#[test]
+fn admission_lease_races_have_one_terminal_outcome() {
+    let store = JobStore::default();
+    let now = 10_000;
+    let reservation = store
+        .create_admission_at(json!({}), now)
+        .expect("create admission");
+    let store_for_renew = store.clone();
+    let token = reservation.token.clone();
+    let job_id = reservation.job.id;
+    let renew = std::thread::spawn(move || {
+        store_for_renew.renew_admission_at(job_id, &token, now + ADMISSION_RESERVATION_LEASE_MS)
+    });
+    let store_for_release = store.clone();
+    let token = reservation.token.clone();
+    let release = std::thread::spawn(move || {
+        store_for_release.release_admission_at(job_id, &token, now + ADMISSION_RESERVATION_LEASE_MS)
+    });
+    let store_for_expiry = store.clone();
+    let expiry = std::thread::spawn(move || {
+        store_for_expiry.reconcile_expired_admissions_at(now + ADMISSION_RESERVATION_LEASE_MS)
+    });
+    let _ = renew.join().expect("renew thread");
+    let _ = release.join().expect("release thread");
+    let _ = expiry.join().expect("expiry thread");
+    let terminal = store.get(job_id).expect("job remains durable");
+    assert!(terminal.status.is_terminal());
+    assert!(store.active_runner_jobs().is_empty());
 }
 
 #[test]
