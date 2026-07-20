@@ -828,6 +828,28 @@ fn test_cancel() {
 }
 
 #[test]
+fn cancelling_a_cancelled_job_is_a_noop() {
+    let store = JobStore::default();
+    let job = store.create("bench");
+
+    let cancelled = store.cancel(job.id, "user requested").expect("job cancels");
+    let events_after_first_cancel = store.events(job.id).expect("events are readable");
+
+    let repeated = store
+        .cancel(job.id, "repeated request")
+        .expect("repeated cancellation succeeds");
+
+    assert_eq!(repeated.id, cancelled.id);
+    assert_eq!(repeated.status, JobStatus::Cancelled);
+    assert_eq!(repeated.finished_at_ms, cancelled.finished_at_ms);
+    assert_eq!(
+        store.events(job.id).expect("events are readable").len(),
+        events_after_first_cancel.len(),
+        "repeated cancellation must not add another status event"
+    );
+}
+
+#[test]
 fn test_job_id() {
     let store = JobStore::default();
     let runner = store.run_background("test", |job| Ok(job.job_id().to_string()));

@@ -1984,6 +1984,12 @@ impl JobStore {
                 .jobs
                 .get_mut(&job_id)
                 .ok_or_else(|| job_not_found(job_id))?;
+            // Cancellation may be retried after the daemon has already recorded it.
+            // It is a no-op so callers receive the authoritative terminal job without
+            // adding a duplicate cancellation event.
+            if stored.job.status == JobStatus::Cancelled && next_status == JobStatus::Cancelled {
+                return Ok(stored.job.clone());
+            }
             validate_transition(stored.job.status, next_status)?;
 
             let now = timestamp_ms();
