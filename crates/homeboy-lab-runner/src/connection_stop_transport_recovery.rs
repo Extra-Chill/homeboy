@@ -417,7 +417,7 @@ fn validate_remote_lease_bound_daemon_stop_output(
 
 pub(super) fn remote_lease_bound_daemon_stop_command(homeboy: &str, lease_id: &str) -> String {
     format!(
-        "{} daemon stop --lease-id {}",
+        "{} daemon stop --force --lease-id {}",
         shell::quote_arg(homeboy),
         shell::quote_arg(lease_id)
     )
@@ -671,6 +671,17 @@ mod tests {
                 .expect("the stopped lease is replaced on reconnect"),
             remote_daemon::RemoteDaemonConnectAction::Start,
             "refresh must start a replacement rather than reattach the stale lease"
+        );
+    }
+
+    #[test]
+    fn lease_bound_ssh_stop_uses_the_exact_stale_owner_primitive() {
+        assert_eq!(
+            remote_lease_bound_daemon_stop_command(
+                "/srv/homeboy builds/current/homeboy",
+                "lease with spaces",
+            ),
+            "'/srv/homeboy builds/current/homeboy' daemon stop --force --lease-id 'lease with spaces'"
         );
     }
 
