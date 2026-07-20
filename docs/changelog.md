@@ -4,6 +4,25 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.297.0] - 2026-07-20
+
+### Added
+- add 'collapse-defaults' subcommand — inverse of propagate (#9102)
+
+### Changed
+- extract execution-budget accounting from cook.rs into cook_budget
+- adopt AgentTaskWorkspace::default() at the last full-spelled sites
+- add ReleaseStepResult::default() and drop construction boilerplate
+- make language dispatch generic, not Rust-pinned
+
+### Fixed
+- repair latent homeboy-core symbol-graph, version, and daemon /exec tests
+- preserve explicit runner exec identity
+- durably accept the controller Lab handoff on a detached direct-daemon exec
+- stop changed-scope Lab bundle hydration from over-fetching unrelated history
+- snapshot partial clone worktrees
+- repair five more latent lab-runner tests at their root causes
+
 ## [0.296.3] - 2026-07-20
 
 ### Changed
