@@ -49,6 +49,33 @@ fn default_artifact_type() -> String {
     "file".to_string()
 }
 
+impl Default for ArtifactRecord {
+    /// A defaulted record has empty `id`/`run_id`/`kind`/`path`/`created_at`,
+    /// `artifact_type` = `"file"` (matching the serde default so a defaulted and
+    /// a deserialized-with-omitted-type record agree), and every optional field
+    /// `None`/empty/`Value::Null`. Construct with `..Default::default()` and set
+    /// the meaningful fields to drop the boilerplate every call site otherwise
+    /// repeats.
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            run_id: String::new(),
+            kind: String::new(),
+            artifact_type: default_artifact_type(),
+            path: String::new(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: None,
+            mime: None,
+            metadata_json: serde_json::Value::Null,
+            created_at: String::new(),
+        }
+    }
+}
+
 pub const ARTIFACT_CONTRACT_SCHEMA: &str = "homeboy/artifact-contract/v1";
 pub const EVIDENCE_CONTRACT_SCHEMA: &str = "homeboy/evidence-contract/v1";
 
@@ -288,5 +315,40 @@ mod tests {
         assert_eq!(evidence.label, "proof");
         assert_eq!(evidence.target, "https://example.test/proof");
         assert_eq!(evidence.artifact.expect("artifact").artifact_type, "file");
+    }
+
+    #[test]
+    fn artifact_record_default_matches_the_fully_spelled_out_empty_record() {
+        let via_default = ArtifactRecord {
+            id: "frontend_url".to_string(),
+            run_id: "run-1".to_string(),
+            kind: "frontend_url".to_string(),
+            artifact_type: "url".to_string(),
+            path: "https://example.test/".to_string(),
+            created_at: "2026-06-12T00:00:30Z".to_string(),
+            ..Default::default()
+        };
+        let verbose = ArtifactRecord {
+            id: "frontend_url".to_string(),
+            run_id: "run-1".to_string(),
+            kind: "frontend_url".to_string(),
+            artifact_type: "url".to_string(),
+            path: "https://example.test/".to_string(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: None,
+            mime: None,
+            metadata_json: serde_json::Value::Null,
+            created_at: "2026-06-12T00:00:30Z".to_string(),
+        };
+        assert_eq!(via_default, verbose);
+    }
+
+    #[test]
+    fn artifact_record_default_artifact_type_is_file() {
+        assert_eq!(ArtifactRecord::default().artifact_type, "file");
     }
 }
