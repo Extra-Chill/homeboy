@@ -80,3 +80,42 @@ fn re_export_const_line_is_not_flagged() {
         "a constant declaration line is not a bypass site"
     );
 }
+
+#[test]
+fn ignores_literals_inside_inline_cfg_test_blocks() {
+    let def = fp(
+        "src/a.rs",
+        r#"pub const NOTIFICATION_ROUTE_METADATA_KEY: &str = "notification_route_key";"#,
+    );
+    // The only reuse of the value is inside the file's inline test module —
+    // test data, not production drift.
+    let production_with_inline_tests = fp(
+        "src/route.rs",
+        "fn prod() {\n    do_something();\n}\n\n#[cfg(test)]\nmod tests {\n    fn setup() {\n        let key = \"notification_route_key\";\n    }\n}\n",
+    );
+    assert!(
+        detect_constant_bypass_literals(&[&def, &production_with_inline_tests]).is_empty(),
+        "literals inside inline #[cfg(test)] blocks are test data, not bypasses"
+    );
+}
+
+#[test]
+fn still_flags_production_literal_alongside_an_inline_test_block() {
+    let def = fp(
+        "src/a.rs",
+        r#"pub const NOTIFICATION_ROUTE_METADATA_KEY: &str = "notification_route_key";"#,
+    );
+    // Same file has a REAL production bypass plus a test-only reuse; only the
+    // production site is flagged.
+    let mixed = fp(
+        "src/route.rs",
+        "fn prod() {\n    let key = \"notification_route_key\";\n}\n\n#[cfg(test)]\nmod tests {\n    fn setup() {\n        let k = \"notification_route_key\";\n    }\n}\n",
+    );
+    let findings = detect_constant_bypass_literals(&[&def, &mixed]);
+    assert_eq!(
+        findings.len(),
+        1,
+        "the production literal is flagged, the inline-test one is not"
+    );
+    assert_eq!(findings[0].file, "src/route.rs");
+}

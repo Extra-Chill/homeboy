@@ -134,3 +134,56 @@ pub(crate) fn count_unclaimed_source_files(root: &Path) -> usize {
 
     codebase_scan::walk_files(root, &config).len()
 }
+
+/// Byte ranges `(start, end)` of inline `#[cfg(test)]` blocks in `content`.
+///
+/// `is_test_path` only classifies whole test *files*. Detectors that scan raw
+/// file content (constant-bypass, command-wrapper-bypass, …) also need to skip
+/// matches inside inline `#[cfg(test)] mod tests { … }` / `#[cfg(test)] fn … {}`
+/// blocks of production files, where literals and raw commands are test
+/// fixtures rather than production code.
+///
+/// Matches the `#[cfg(test)]` attribute, then brace-matches the block that
+/// follows it. Attribute-only items with no block (`#[cfg(test)] use …;`) are
+/// ignored. Ranges span attribute→closing brace.
+pub(crate) fn cfg_test_regions(content: &str) -> Vec<(usize, usize)> {
+    const ATTR: &str = "#[cfg(test)]";
+    let bytes = content.as_bytes();
+    let mut regions = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(rel) = content[search_from..].find(ATTR) {
+        let attr_start = search_from + rel;
+        // Advance past this attribute regardless of outcome (no infinite loop).
+        search_from = attr_start + ATTR.len();
+
+        let Some(brace_rel) = content[search_from..].find('{') else {
+            continue;
+        };
+        let open = search_from + brace_rel;
+        let mut depth = 0i32;
+        let mut close = None;
+        for (i, &b) in bytes[open..].iter().enumerate() {
+            if b == b'{' {
+                depth += 1;
+            } else if b == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+        }
+        if let Some(close) = close {
+            regions.push((attr_start, close));
+            search_from = close + 1;
+        }
+    }
+    regions
+}
+
+/// Whether `offset` falls within any `(start, end)` region.
+pub(crate) fn offset_in_cfg_test_region(offset: usize, regions: &[(usize, usize)]) -> bool {
+    regions
+        .iter()
+        .any(|(start, end)| offset >= *start && offset <= *end)
+}
