@@ -1,5 +1,6 @@
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -60,8 +61,20 @@ pub struct AgentTaskGateReport {
     pub stderr: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_evidence: Option<AgentTaskGateFailureEvidence>,
+    /// The same command's result against the immutable base when candidate
+    /// adoption needs to distinguish inherited failures from regressions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_comparison: Option<AgentTaskGateBaselineComparison>,
     #[serde(default, skip_serializing_if = "AgentTaskGateEnvironment::is_empty")]
     pub environment: AgentTaskGateEnvironment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateBaselineComparison {
+    pub base_ref: String,
+    pub exit_code: i32,
+    pub failure_fingerprint: String,
+    pub matches_candidate_failure: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -89,6 +102,9 @@ impl AgentTaskGateEnvironment {
 pub enum AgentTaskGateStatus {
     Succeeded,
     Failed,
+    /// The candidate command failed, but the identical failure was reproduced
+    /// against the controller-recorded immutable baseline.
+    AcceptedInheritedFailure,
 }
 
 /// Canonical bridge from the binary agent-task gate status to the shared
@@ -100,6 +116,7 @@ impl From<AgentTaskGateStatus> for HomeboyGateStatus {
         match status {
             AgentTaskGateStatus::Succeeded => HomeboyGateStatus::Passed,
             AgentTaskGateStatus::Failed => HomeboyGateStatus::Failed,
+            AgentTaskGateStatus::AcceptedInheritedFailure => HomeboyGateStatus::Passed,
         }
     }
 }
@@ -147,7 +164,9 @@ impl AgentTaskGateReport {
             id.clone(),
             "agent_task.gate",
             match status {
-                AgentTaskGateStatus::Succeeded => PlanStepStatus::Success,
+                AgentTaskGateStatus::Succeeded | AgentTaskGateStatus::AcceptedInheritedFailure => {
+                    PlanStepStatus::Success
+                }
                 AgentTaskGateStatus::Failed => PlanStepStatus::Failed,
             },
         )
@@ -168,8 +187,105 @@ impl AgentTaskGateReport {
             stdout: stdout.into(),
             stderr: stderr.into(),
             failure_evidence,
+            baseline_comparison: None,
             environment,
         }
+    }
+
+    pub(crate) fn accept_inherited_failure(&mut self) {
+        self.status = AgentTaskGateStatus::AcceptedInheritedFailure;
+        let gate_result = HomeboyGateResult::new(
+            self.id.clone(),
+            self.id.clone(),
+            HomeboyGateKind::Command,
+            HomeboyGateStatus::Passed,
+        )
+        .summary(
+            "candidate failure matches the immutable baseline; no candidate regression detected",
+        )
+        .visibility(self.visibility)
+        .reveal_policy(self.reveal_policy)
+        .retryable(false);
+        self.step = PlanStep::builder(self.id.clone(), "agent_task.gate", PlanStepStatus::Success)
+            .inputs(PlanValues::new().json("command", &self.command))
+            .output_value("exit_code", serde_json::json!(self.exit_code))
+            .output_value("accepted_inherited_failure", serde_json::json!(true))
+            .gate_result(gate_result)
+            .build();
+    }
+}
+
+/// Normalize only transport-noise that cannot identify a command failure. The
+/// comparison remains fail-closed: a changed substantive line is a regression.
+pub(crate) fn failure_fingerprint(stdout: &str, stderr: &str) -> String {
+    [stdout, stderr]
+        .into_iter()
+        .flat_map(str::lines)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod baseline_tests {
+    use super::{
+        failure_fingerprint, run_gate_command_with_timeout, AgentTaskGateRevealPolicy,
+        AgentTaskGateStatus, AgentTaskGateVisibility,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn matching_baseline_failure_is_distinct_from_a_new_failure() {
+        let baseline = failure_fingerprint("test alpha ... FAILED\n", "");
+        let matching_candidate = failure_fingerprint("test alpha ... FAILED\n", "");
+        let regressed_candidate =
+            failure_fingerprint("test alpha ... FAILED\ntest beta ... FAILED\n", "");
+
+        assert_eq!(baseline, matching_candidate);
+        assert_ne!(baseline, regressed_candidate);
+    }
+
+    #[test]
+    fn bounded_baseline_gate_is_cancelled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let report = run_gate_command_with_timeout(
+            temp.path(),
+            1,
+            "sleep 1",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            temp.path(),
+            Duration::from_millis(20),
+        )
+        .expect("bounded gate report");
+
+        assert_eq!(report.status, AgentTaskGateStatus::Failed);
+        assert_eq!(report.exit_code, 124);
+        assert!(report.stderr.contains("was cancelled"));
+    }
+
+    #[test]
+    fn bounded_baseline_gate_reaps_background_descendants_before_reader_join() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("descendant-survived");
+        let report = run_gate_command_with_timeout(
+            temp.path(),
+            1,
+            &format!(
+                "(sleep 0.2; touch '{}') & while :; do sleep 1; done",
+                marker.display()
+            ),
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            temp.path(),
+            Duration::from_millis(20),
+        )
+        .expect("bounded gate report");
+
+        assert_eq!(report.exit_code, 124);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!marker.exists(), "background descendant survived timeout");
     }
 }
 
@@ -237,6 +353,82 @@ pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir(
     let failure_evidence = (!output.status.success())
         .then(|| gate_failure_evidence(command, exit_code, &stdout, &stderr));
 
+    Ok(AgentTaskGateReport::new(
+        format!("gate-{index}"),
+        command_vec,
+        exit_code,
+        stdout,
+        stderr,
+        failure_evidence,
+        visibility,
+        reveal_policy,
+        environment,
+    ))
+}
+
+/// Run a comparison gate with a hard wall-clock limit. The bounded path keeps
+/// candidate adoption inspectable instead of allowing a known-red baseline to
+/// consume an unbounded second broad-suite run.
+pub(crate) fn run_gate_command_with_timeout(
+    cwd: &Path,
+    index: usize,
+    command: &str,
+    visibility: AgentTaskGateVisibility,
+    reveal_policy: AgentTaskGateRevealPolicy,
+    runtime_tmpdir: &Path,
+    timeout: Duration,
+) -> Result<AgentTaskGateReport> {
+    let command_vec = vec!["sh".to_string(), "-lc".to_string(), command.to_string()];
+    let environment = selected_gate_environment(command);
+    let mut process = Command::new("sh");
+    process
+        .args(["-lc", command])
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    process
+        .env("TMPDIR", runtime_tmpdir)
+        .env("TEMP", runtime_tmpdir)
+        .env("TMP", runtime_tmpdir);
+    for variable in &environment.sanitized {
+        process.env_remove(&variable.name);
+    }
+    homeboy_core::engine::command::isolate_process_tree(&mut process);
+    let mut child = process.spawn().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("run bounded deterministic gate {command}")),
+        )
+    })?;
+    let started = std::time::Instant::now();
+    let mut timed_out = false;
+    let output = homeboy_core::engine::command::wait_with_bounded_output_until_cancelled(
+        &mut child,
+        1024 * 1024,
+        || {
+            timed_out = started.elapsed() >= timeout;
+            timed_out
+        },
+    )
+    .map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("run bounded deterministic gate {command}")),
+        )
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = if timed_out {
+        stderr.push_str(&format!(
+            "\nbaseline gate exceeded {} ms and was cancelled",
+            timeout.as_millis()
+        ));
+        124
+    } else {
+        output.status.code().unwrap_or(1)
+    };
+    let failure_evidence =
+        (exit_code != 0).then(|| gate_failure_evidence(command, exit_code, &stdout, &stderr));
     Ok(AgentTaskGateReport::new(
         format!("gate-{index}"),
         command_vec,
@@ -462,6 +654,19 @@ mod tests {
         assert_eq!(report.exit_code, 0);
         assert_eq!(report.stdout, "ok");
         assert!(report.failure_evidence.is_none());
+    }
+
+    #[test]
+    fn accepted_inherited_failure_rebuilds_the_embedded_plan_step() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut report = run_gate_command(temp.path(), 1, "exit 1").expect("failed gate");
+
+        report.accept_inherited_failure();
+
+        assert_eq!(report.status, AgentTaskGateStatus::AcceptedInheritedFailure);
+        let step = serde_json::to_value(&report.step).expect("serialize step");
+        assert_eq!(step["status"], "success");
+        assert_eq!(step["outputs"]["accepted_inherited_failure"], true);
     }
 
     #[test]

@@ -248,6 +248,39 @@ fn signal_process_group(root_pid: u32, signal: libc::c_int) -> io::Result<()> {
 }
 
 #[cfg(unix)]
+fn descendant_pids(root_pid: u32) -> io::Result<Vec<u32>> {
+    let output = Command::new("ps").args(["-axo", "pid=,ppid="]).output()?;
+    let parents: Vec<(u32, u32)> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+        })
+        .collect();
+    let mut descendants = vec![root_pid];
+    let mut cursor = 0;
+    while cursor < descendants.len() {
+        let parent = descendants[cursor];
+        descendants.extend(
+            parents
+                .iter()
+                .filter_map(|(pid, ppid)| (*ppid == parent).then_some(*pid)),
+        );
+        cursor += 1;
+    }
+    Ok(descendants)
+}
+
+#[cfg(unix)]
+fn signal_pids(pids: &[u32], signal: libc::c_int) {
+    for pid in pids {
+        unsafe {
+            let _ = libc::kill(*pid as libc::pid_t, signal);
+        }
+    }
+}
+
+#[cfg(unix)]
 fn process_group_is_running(root_pid: u32) -> bool {
     unsafe { libc::kill(-(root_pid as libc::pid_t), 0) == 0 }
 }
@@ -279,10 +312,16 @@ pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStat
     #[cfg(unix)]
     {
         let root_pid = child.id();
+        // Shells can put background jobs in a distinct process group. Snapshot
+        // descendants before terminating the root so those jobs cannot retain
+        // output pipes and strand capture-reader joins.
+        let descendants = descendant_pids(root_pid)?;
         signal_process_group(root_pid, libc::SIGTERM)?;
+        signal_pids(&descendants, libc::SIGTERM);
         let mut status = child.try_wait()?;
         if !wait_for_process_group_exit(child, root_pid, PROCESS_TREE_TERM_GRACE, &mut status)? {
             signal_process_group(root_pid, libc::SIGKILL)?;
+            signal_pids(&descendants, libc::SIGKILL);
             if !wait_for_process_group_exit(child, root_pid, PROCESS_TREE_KILL_GRACE, &mut status)?
             {
                 if status.is_none() {
