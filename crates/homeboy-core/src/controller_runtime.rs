@@ -71,6 +71,8 @@ static ADMISSION_LOCK_PROCESS_GUARDS: OnceLock<Mutex<BTreeMap<PathBuf, &'static 
 #[cfg(test)]
 static TEST_ADMISSION_HEAD_BARRIER: OnceLock<Mutex<Option<std::sync::Arc<std::sync::Barrier>>>> =
     OnceLock::new();
+#[cfg(test)]
+static TEST_ADMISSION_OWNER_CAS_REPLACEMENT: OnceLock<Mutex<Option<Value>>> = OnceLock::new();
 #[cfg(all(unix, any(test, feature = "test-support")))]
 static TEST_CONTROLLER_FIXTURE_DIGESTS: OnceLock<
     Mutex<BTreeMap<TestExecutableFileIdentity, String>>,
@@ -1008,6 +1010,8 @@ fn acquire_admission_lock_for(path: &Path, request_id: &str) -> Result<Admission
     let Some(process_guard) = try_acquire_admission_process_guard(path) else {
         return Err(admission_busy_error(path));
     };
+    let observed_owner = read_admission_owner(path)?;
+    replace_admission_owner_after_snapshot_for_test(path)?;
     let acquired = file.try_lock_exclusive().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -1016,6 +1020,16 @@ fn acquire_admission_lock_for(path: &Path, request_id: &str) -> Result<Admission
     })?;
     if !acquired {
         return Err(admission_busy_error(path));
+    }
+    let current_owner = read_admission_owner(path)?;
+    if current_owner != observed_owner {
+        return Err(Error::internal_unexpected(
+            "controller admission owner changed while reclaiming stale ownership",
+        )
+        .with_retryable(true));
+    }
+    if let Some(owner) = current_owner.as_ref() {
+        ensure_admission_owner_is_recoverable(owner)?;
     }
     let token = Uuid::new_v4().to_string();
     let owner = admission_owner_record(&token);
@@ -1050,6 +1064,135 @@ fn acquire_admission_lock_for(path: &Path, request_id: &str) -> Result<Admission
         _process_guard: process_guard,
         file,
     })
+}
+
+fn read_admission_owner(path: &Path) -> Result<Option<Value>> {
+    let bytes = fs::read(path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read controller admission owner record".to_string()),
+        )
+    })?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let owner: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        Error::validation_invalid_json(
+            error,
+            Some("parse controller admission owner record".to_string()),
+            None,
+        )
+    })?;
+    if !owner.is_object() {
+        return Err(Error::validation_invalid_argument(
+            "controller_admission",
+            "controller admission owner record must be an object",
+            None,
+            None,
+        ));
+    }
+    Ok(Some(owner))
+}
+
+fn ensure_admission_owner_is_recoverable(owner: &Value) -> Result<()> {
+    ensure_admission_owner_is_recoverable_with(owner, crate::process::process_identity_state)
+}
+
+fn ensure_admission_owner_is_recoverable_with(
+    owner: &Value,
+    inspect_process: impl FnOnce(u32, Option<u64>) -> crate::process::ProcessIdentityState,
+) -> Result<()> {
+    if owner["schema"].as_str() != Some(ADMISSION_OWNER_SCHEMA)
+        || owner["token"].as_str().is_none_or(str::is_empty)
+    {
+        return Err(Error::validation_invalid_argument(
+            "controller_admission",
+            "controller admission owner record is malformed or uses an unsupported schema",
+            None,
+            None,
+        ));
+    }
+    let Some(pid) = owner["pid"].as_u64() else {
+        // Older durable records can name a fence without a local process. They
+        // cannot protect a live local owner, so the advisory-lock CAS may replace them.
+        return Ok(());
+    };
+    let pid = u32::try_from(pid).map_err(|_| {
+        Error::validation_invalid_argument(
+            "controller_admission",
+            "controller admission owner record has an invalid PID",
+            None,
+            None,
+        )
+    })?;
+    let starttime = match owner.get("linux_starttime_ticks") {
+        Some(Value::Null) => None,
+        Some(value) => match value.as_u64() {
+            Some(value) => Some(value),
+            None => {
+                return Err(Error::validation_invalid_argument(
+                    "controller_admission",
+                    "controller admission owner record has an invalid process identity",
+                    None,
+                    None,
+                ))
+            }
+        },
+        None => {
+            return Err(Error::validation_invalid_argument(
+                "controller_admission",
+                "controller admission owner record has an invalid process identity",
+                None,
+                None,
+            ));
+        }
+    };
+    match inspect_process(pid, starttime) {
+        crate::process::ProcessIdentityState::Dead => Ok(()),
+        crate::process::ProcessIdentityState::Live => Err(admission_owner_reclaim_error(
+            "controller admission owner process is still live",
+        )),
+        crate::process::ProcessIdentityState::IdentityMismatch => {
+            Err(admission_owner_reclaim_error(
+                "controller admission owner PID was reused by a different process",
+            ))
+        }
+        crate::process::ProcessIdentityState::Unverifiable => Err(admission_owner_reclaim_error(
+            "controller admission owner liveness cannot be verified",
+        )),
+    }
+}
+
+fn admission_owner_reclaim_error(message: &str) -> Error {
+    Error::internal_unexpected(message).with_retryable(true)
+}
+
+#[cfg(test)]
+fn replace_admission_owner_after_snapshot_for_test(path: &Path) -> Result<()> {
+    if let Some(owner) = TEST_ADMISSION_OWNER_CAS_REPLACEMENT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("admission owner test hook is not poisoned")
+        .take()
+    {
+        fs::write(
+            path,
+            serde_json::to_vec(&owner)
+                .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        )
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("replace controller admission owner record for test".to_string()),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn replace_admission_owner_after_snapshot_for_test(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn admission_busy_error(path: &Path) -> Error {
@@ -2121,6 +2264,132 @@ mod tests {
             .success());
         acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)
             .expect("kernel releases lock after holder exits");
+    }
+
+    fn stale_admission_owner(pid: Option<u32>, starttime: Option<u64>, token: &str) -> Value {
+        json!({
+            "schema": ADMISSION_OWNER_SCHEMA,
+            "token": token,
+            "pid": pid,
+            "linux_starttime_ticks": starttime,
+        })
+    }
+
+    fn write_admission_owner(path: &Path, owner: &Value) {
+        fs::write(
+            path,
+            serde_json::to_vec(owner).expect("serialize admission owner"),
+        )
+        .expect("write admission owner");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admission_reclaims_a_provably_dead_owner_with_a_new_fence() {
+        let temporary = tempfile::tempdir().expect("temporary runtime directory");
+        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn exiting process");
+        let pid = child.id();
+        child.wait().expect("wait for exiting process");
+        let starttime = cfg!(target_os = "linux").then_some(1);
+        write_admission_owner(&path, &stale_admission_owner(Some(pid), starttime, "dead"));
+
+        let admission = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)
+            .expect("reclaim dead owner");
+
+        assert_ne!(admission.token, "dead");
+        assert_eq!(admission_owner_token(&path), Some(admission.token.clone()));
+    }
+
+    #[test]
+    fn admission_refuses_a_live_owner() {
+        let temporary = tempfile::tempdir().expect("temporary runtime directory");
+        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let owner = stale_admission_owner(Some(42), Some(1), "live");
+        let error = ensure_admission_owner_is_recoverable_with(&owner, |_, _| {
+            crate::process::ProcessIdentityState::Live
+        })
+        .expect_err("live owner must remain protected");
+        assert!(error.message.contains("still live"));
+        write_admission_owner(&path, &stale_admission_owner(None, None, "live"));
+
+        let error = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)
+            .expect("PID-less legacy record is recoverable");
+
+        assert_ne!(error.token, "live");
+    }
+
+    #[test]
+    fn admission_refuses_an_unverifiable_owner() {
+        let owner = stale_admission_owner(Some(42), Some(1), "unknown");
+
+        let error = ensure_admission_owner_is_recoverable_with(&owner, |_, _| {
+            crate::process::ProcessIdentityState::Unverifiable
+        })
+        .expect_err("unverifiable owner must remain protected");
+
+        assert!(error.message.contains("cannot be verified"));
+    }
+
+    #[test]
+    fn admission_refuses_a_reused_pid_with_a_mismatched_identity() {
+        let owner = stale_admission_owner(Some(42), Some(1), "reused");
+        let error = ensure_admission_owner_is_recoverable_with(&owner, |_, _| {
+            crate::process::ProcessIdentityState::IdentityMismatch
+        })
+        .expect_err("PID reuse must fail closed");
+
+        assert!(error.message.contains("reused"));
+    }
+
+    #[test]
+    fn admission_refuses_a_changed_owner_during_reclaim_compare_and_swap() {
+        let temporary = tempfile::tempdir().expect("temporary runtime directory");
+        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        write_admission_owner(&path, &stale_admission_owner(None, None, "before"));
+        *TEST_ADMISSION_OWNER_CAS_REPLACEMENT
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("admission owner test hook is not poisoned") =
+            Some(stale_admission_owner(None, None, "after"));
+
+        let error = acquire_admission_lock_for(&path, "test-admission")
+            .expect_err("changed owner must fail closed");
+
+        assert!(error.message.contains("changed while reclaiming"));
+        assert_eq!(admission_owner_token(&path), Some("after".to_string()));
+    }
+
+    #[test]
+    fn admission_handles_legacy_pidless_and_malformed_owner_records_safely() {
+        let temporary = tempfile::tempdir().expect("temporary runtime directory");
+        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        write_admission_owner(&path, &stale_admission_owner(None, None, "pidless"));
+        let admission = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)
+            .expect("PID-less legacy record is recoverable");
+        drop(admission);
+
+        write_admission_owner(&path, &json!({ "token": "malformed" }));
+        let error = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)
+            .expect_err("malformed record must fail closed");
+        assert!(error.message.contains("malformed"));
+        assert_eq!(admission_owner_token(&path), Some("malformed".to_string()));
+    }
+
+    #[test]
+    fn admission_can_be_acquired_and_released_repeatedly() {
+        let temporary = tempfile::tempdir().expect("temporary runtime directory");
+        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+
+        for _ in 0..3 {
+            let admission = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)
+                .expect("acquire admission");
+            drop(admission);
+            assert!(fs::read(&path).expect("read released owner").is_empty());
+        }
     }
 
     #[test]
