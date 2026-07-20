@@ -127,7 +127,9 @@ pub fn sync_workspace(
                 WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
             )?;
             let git_backed_snapshot = git_output(&local_path, &["rev-parse", "HEAD"]).is_ok();
-            let synthetic_checkout = if git_backed_snapshot {
+            let synthetic_checkout = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit
+                && git_backed_snapshot
+            {
                 match materialize_git_snapshot_from_controller_bundle(
                     &runner,
                     &local_path,
@@ -195,11 +197,16 @@ pub fn sync_workspace(
                 });
                 None
             };
-            if git_backed_snapshot {
-                // Preserve snapshot transport semantics while recording that its
-                // successful result is an exact Git checkout plus overlay.
+            if options.mode == RunnerWorkspaceSyncMode::SnapshotGit && git_backed_snapshot {
+                // Snapshot-git deliberately retains Git metadata for callers
+                // that need a checkout baseline.
                 materialization_plan.actual_materialization_mode =
                     Some(RunnerWorkspaceSyncMode::SnapshotGit.label().to_string());
+            } else if options.mode == RunnerWorkspaceSyncMode::Snapshot {
+                // Plain snapshot mode is a readable filesystem transfer. It
+                // must not require a Git object closure from partial clones.
+                materialization_plan.actual_materialization_mode =
+                    Some("filesystem_snapshot".to_string());
             }
             let metadata = workspace_metadata(
                 &runner.id,
@@ -1093,6 +1100,7 @@ fn workspace_snapshot_entry(
         created_at: metadata.synced_at,
         source_ref: metadata.source_ref,
         source_commit: metadata.source_commit,
+        source_remote_url: metadata.source_remote_url,
         source_dirty: metadata.source_dirty,
         run_id: metadata.run_id,
         job_id: metadata.job_id,
@@ -1156,6 +1164,7 @@ fn workspace_metadata(
         synced_at: chrono::Utc::now().to_rfc3339(),
         source_ref: git_state.ref_name,
         source_commit: git_state.commit,
+        source_remote_url: git_state.remote_url,
         source_dirty: git_state.dirty,
         run_id: run_id.map(str::to_string),
         job_id: None,
@@ -1997,11 +2006,15 @@ fn local_git_state(local_path: &Path) -> LocalGitState {
     let dirty = git_output(local_path, &["status", "--porcelain=v1"])
         .ok()
         .map(|status| !status.trim().is_empty());
+    let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"])
+        .ok()
+        .filter(|value| !value.trim().is_empty());
 
     LocalGitState {
         commit,
         ref_name,
         dirty,
+        remote_url,
     }
 }
 

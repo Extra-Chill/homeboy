@@ -401,6 +401,8 @@ pub struct RunnerWorkspaceSnapshotEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_remote_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_dirty: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
@@ -432,6 +434,8 @@ pub(super) struct RunnerWorkspaceMetadata {
     pub source_ref: Option<String>,
     #[serde(default)]
     pub source_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_remote_url: Option<String>,
     #[serde(default)]
     pub source_dirty: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -465,6 +469,7 @@ pub(super) struct LocalGitState {
     pub(super) commit: Option<String>,
     pub(super) ref_name: Option<String>,
     pub(super) dirty: Option<bool>,
+    pub(super) remote_url: Option<String>,
 }
 
 pub(super) struct GitSnapshot {

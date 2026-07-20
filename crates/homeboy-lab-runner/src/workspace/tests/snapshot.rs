@@ -108,7 +108,7 @@ use homeboy_core::source_snapshot::SourceSnapshot;
 static PATH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
-fn git_backed_snapshot_reports_checkout_provenance_for_committed_harvest() {
+fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source workspace");
         let runner_root = tempfile::tempdir().expect("runner root");
@@ -152,7 +152,7 @@ fn git_backed_snapshot_reports_checkout_provenance_for_committed_harvest() {
             "lab-snapshot-harvest",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
-                mode: RunnerWorkspaceSyncMode::Snapshot,
+                mode: RunnerWorkspaceSyncMode::SnapshotGit,
                 controller_routed_git: false,
                 changed_since_base: None,
                 git_fetch_refs: Vec::new(),
@@ -163,7 +163,7 @@ fn git_backed_snapshot_reports_checkout_provenance_for_committed_harvest() {
         )
         .expect("materialize local-only committed source");
 
-        assert_eq!(synced.sync_mode, RunnerWorkspaceSyncMode::Snapshot);
+        assert_eq!(synced.sync_mode, RunnerWorkspaceSyncMode::SnapshotGit);
         assert_eq!(
             synced
                 .materialization_plan
@@ -891,7 +891,7 @@ fn workspace_list_reports_recent_lab_workspaces_with_exec_commands() {
 }
 
 #[test]
-fn git_backed_snapshot_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overlay() {
+fn snapshot_git_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overlay() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let source = super::dirty_git_repo();
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -920,7 +920,7 @@ fn git_backed_snapshot_sync_falls_back_for_unpublished_commit_and_preserves_dirt
             "lab-local-snapshot-git",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
-                mode: RunnerWorkspaceSyncMode::Snapshot,
+                mode: RunnerWorkspaceSyncMode::SnapshotGit,
                 controller_routed_git: false,
                 changed_since_base: None,
                 git_fetch_refs: Vec::new(),
@@ -933,13 +933,16 @@ fn git_backed_snapshot_sync_falls_back_for_unpublished_commit_and_preserves_dirt
 
         let remote = Path::new(&output.remote_path);
         assert_eq!(exit_code, 0);
-        assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Snapshot);
+        assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::SnapshotGit);
         assert_eq!(
             output.current_workspace.sync_mode,
-            RunnerWorkspaceSyncMode::Snapshot
+            RunnerWorkspaceSyncMode::SnapshotGit
         );
         assert_eq!(output.current_workspace.source_dirty, Some(true));
-        assert_eq!(output.workspace_cleanliness, "snapshot_unique_workspace");
+        assert_eq!(
+            output.workspace_cleanliness,
+            "snapshot_synthetic_git_unique_workspace"
+        );
         assert_eq!(
             fs::read_to_string(remote.join("file.txt")).unwrap(),
             "dirty\n"
@@ -988,7 +991,11 @@ fn git_backed_snapshot_sync_falls_back_for_unpublished_commit_and_preserves_dirt
 }
 
 #[test]
-fn git_backed_snapshot_uses_runner_exact_sha_without_controller_bundle_hydration() {
+fn filesystem_snapshot_of_dirty_partial_clone_avoids_git_bundle_closure() {
+    let _path_guard = PATH_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("PATH lock");
     homeboy_core::test_support::with_isolated_home(|_| {
         let origin = tempfile::tempdir().expect("origin tempdir");
         let author = tempfile::tempdir().expect("author tempdir");
@@ -1034,6 +1041,8 @@ fn git_backed_snapshot_uses_runner_exact_sha_without_controller_bundle_hydration
                 ".",
             ],
         );
+        let source_branch = git_output(source.path(), &["rev-parse", "--abbrev-ref", "HEAD"])
+            .expect("source branch");
         assert!(
             git_output(
                 source.path(),
@@ -1045,6 +1054,7 @@ fn git_backed_snapshot_uses_runner_exact_sha_without_controller_bundle_hydration
         );
         fs::write(source.path().join("file.txt"), "dirty\n").expect("tracked overlay");
         fs::write(source.path().join("untracked.txt"), "untracked\n").expect("untracked overlay");
+        fs::write(source.path().join(".env"), "secret\n").expect("excluded secret");
         crate::create(
             &format!(
                 r#"{{"id":"lab-local-partial-snapshot","kind":"local","workspace_root":"{}"}}"#,
@@ -1054,6 +1064,24 @@ fn git_backed_snapshot_uses_runner_exact_sha_without_controller_bundle_hydration
         )
         .expect("create runner");
 
+        let shim_root = tempfile::tempdir().expect("git shim root");
+        let shim = shim_root.path().join("git");
+        fs::write(
+            &shim,
+            "#!/bin/sh\nfor arg in \"$@\"; do [ \"$arg\" = \"rev-list\" ] && { echo 'git bundle closure enumeration invoked' >&2; exit 91; }; done\nexec /usr/bin/git \"$@\"\n",
+        )
+        .expect("write git shim");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))
+                .expect("make shim executable");
+        }
+        let original_path = std::env::var_os("PATH").expect("PATH");
+        let mut paths = vec![shim_root.path().to_path_buf()];
+        paths.extend(std::env::split_paths(&original_path));
+        std::env::set_var("PATH", std::env::join_paths(paths).expect("PATH value"));
+
         let (output, exit_code) = sync_workspace(
             "lab-local-partial-snapshot",
             RunnerWorkspaceSyncOptions {
@@ -1062,25 +1090,20 @@ fn git_backed_snapshot_uses_runner_exact_sha_without_controller_bundle_hydration
                 ..Default::default()
             },
         )
-        .expect("runner resolves published exact SHA");
+        .expect("filesystem snapshot must not enumerate a Git bundle closure");
+        std::env::set_var("PATH", original_path);
 
         let remote = Path::new(&output.remote_path);
         assert_eq!(exit_code, 0);
         assert!(output.materialization_plan.controller_git_bundle.is_none());
-        assert_eq!(git_output(remote, &["rev-parse", "HEAD"]).unwrap(), head);
-        assert!(
-            git_output(
-                remote,
-                &[
-                    "show-ref",
-                    "--verify",
-                    "--quiet",
-                    "refs/remotes/origin/unrelated"
-                ]
-            )
-            .is_err(),
-            "fresh exact-SHA materialization must not fetch every remote branch"
+        assert_eq!(
+            output
+                .materialization_plan
+                .actual_materialization_mode
+                .as_deref(),
+            Some("filesystem_snapshot")
         );
+        assert!(!remote.join(".git").exists());
         assert_eq!(
             fs::read_to_string(remote.join("file.txt")).unwrap(),
             "dirty\n"
@@ -1088,6 +1111,28 @@ fn git_backed_snapshot_uses_runner_exact_sha_without_controller_bundle_hydration
         assert_eq!(
             fs::read_to_string(remote.join("untracked.txt")).unwrap(),
             "untracked\n"
+        );
+        assert!(!remote.join(".env").exists(), "default exclusions apply");
+        assert_eq!(
+            output.current_workspace.source_commit.as_deref(),
+            Some(head.as_str())
+        );
+        assert_eq!(
+            output.current_workspace.source_ref.as_deref(),
+            Some(source_branch.as_str())
+        );
+        let metadata: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(remote.join(".homeboy/runner-workspace.json"))
+                .expect("read workspace metadata"),
+        )
+        .expect("parse workspace metadata");
+        assert_eq!(
+            metadata["actual_materialization_mode"],
+            "filesystem_snapshot"
+        );
+        assert_eq!(
+            metadata["source_remote_url"],
+            format!("file://{}", origin.path().display())
         );
         assert!(
             git_output(
@@ -1194,7 +1239,7 @@ fn git_backed_snapshot_preserves_tracked_internal_file_and_directory_links() {
             "lab-internal-links",
             RunnerWorkspaceSyncOptions {
                 path: source.display().to_string(),
-                mode: RunnerWorkspaceSyncMode::Snapshot,
+                mode: RunnerWorkspaceSyncMode::SnapshotGit,
                 ..Default::default()
             },
         )
