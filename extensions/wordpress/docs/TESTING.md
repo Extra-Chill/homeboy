@@ -608,10 +608,16 @@ if (result.status === 'process_exited') {
 - **WP version defaults to 6.9.** Override `wordpress_runtime_version` to pass
   a different WordPress version to WP Codebox. Mismatched versions produce
   missing-class errors.
-- **Multisite is opt-in.** Set `HOMEBOY_WORDPRESS_MULTISITE=1` or
-  `wp_codebox_multisite: true` in settings.
-  Plugin tests also auto-enable multisite when the plugin header declares
-  `Network: true`.
+- **Multisite runtime.** Plugin PHPUnit recipes provision a multisite runtime
+  when any of the following request it, in precedence order:
+  1. `HOMEBOY_WORDPRESS_MULTISITE=1` (env)
+  2. `wp_codebox_multisite: true` in settings (set `false` to force single-site
+     even for a network plugin)
+  3. the plugin's own `Network: true` header (auto-detected, zero config)
+
+  The selected runtime is reported to WP Codebox via the `multisite` recipe
+  argument (`0` single-site, `1` multisite), so network-only plugins that
+  `wp_die()` outside multisite boot correctly.
 - **Partial phpunit.xml consumption.** The runner reads `<testsuite>` and
   `<exclude>` entries from `phpunit.xml.dist` only; other elements are
   ignored.

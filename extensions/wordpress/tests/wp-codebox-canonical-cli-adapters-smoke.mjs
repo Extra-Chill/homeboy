@@ -74,6 +74,7 @@ try {
     '/wordpress/wp-content/plugins/db-touching-dependency',
   ]);
   assert.deepEqual(options[1].mounts, [{ source: path.join(extension, 'vendor'), target: '/wp-codebox-vendor', mode: 'readonly' }]);
+  assert.equal(options[1].multisite, false, 'phpunit recipe defaults to single-site when nothing requests multisite');
   assert.equal(options[0].workloads[0].id, 'canonical-workload');
   assert.equal(Object.hasOwn(options[0], 'wp_codebox_workloads'), false);
   assert.deepEqual(JSON.parse(await readFile(results, 'utf8')).scenarios, []);

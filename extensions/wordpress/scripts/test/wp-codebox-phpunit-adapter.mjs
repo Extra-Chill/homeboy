@@ -2,7 +2,7 @@
 /**
  * External dependencies
  */
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +16,8 @@ const harnessSource = path.join(extensionRoot, 'vendor');
 const slug = process.env.COMPONENT_ID || path.basename(componentPath);
 const root = settings.wp_codebox_source_root || componentPath;
 const subpath = settings.wp_codebox_source_subpath || undefined;
+const pluginSourceDirectory = subpath ? path.join(root, subpath) : root;
+const multisite = await resolveMultisite(settings, pluginSourceDirectory);
 const directory = await mkdtemp(path.join(tmpdir(), 'homeboy-wp-codebox-phpunit-'));
 const optionsPath = path.join(directory, 'options.json');
 const recipePath = path.join(directory, 'recipe.json');
@@ -42,6 +44,7 @@ const options = clean({
   wpConfigDefines: settings.wp_config_defines,
   bootstrapMode: settings.wp_codebox_phpunit_bootstrap_mode,
   projectBootstrap: settings.wp_codebox_phpunit_project_bootstrap,
+  multisite,
   preloadFiles: settings.wp_codebox_phpunit_preload_files,
   mounts: [...canonicalMounts(settings.wp_codebox_phpunit_mounts), { source: harnessSource, target: '/wp-codebox-vendor', mode: 'readonly' }],
 });
@@ -67,6 +70,50 @@ function run(args) {
   }
 }
 function required(value, name) { if (!value) { throw new Error(`${name} is required`); } return value; }
+async function resolveMultisite(configuration, pluginDirectory) {
+  const fromEnv = process.env.HOMEBOY_WORDPRESS_MULTISITE;
+  if (fromEnv !== undefined && fromEnv !== '') {
+    return truthy(fromEnv);
+  }
+  if (configuration.wp_codebox_multisite !== undefined) {
+    return truthy(configuration.wp_codebox_multisite);
+  }
+  return pluginRequiresNetwork(pluginDirectory);
+}
+async function pluginRequiresNetwork(pluginDirectory) {
+  if (typeof pluginDirectory !== 'string' || pluginDirectory === '') {
+    return false;
+  }
+  let entries;
+  try {
+    entries = await readdir(pluginDirectory, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  const candidates = entries
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.php'))
+    .map((entry) => entry.name);
+  for (const candidate of candidates) {
+    let header;
+    try {
+      header = await readFile(path.join(pluginDirectory, candidate), 'utf8');
+    } catch {
+      continue;
+    }
+    const block = header.slice(0, 8192);
+    if (!/^[\s*#\/]*Plugin Name\s*:/im.test(block)) {
+      continue;
+    }
+    return /^[\s*#\/]*Network\s*:\s*(true|1|yes|on)\b/im.test(block);
+  }
+  return false;
+}
+function truthy(value) {
+  if (typeof value === 'boolean') { return value; }
+  if (typeof value === 'number') { return value === 1; }
+  if (typeof value !== 'string') { return false; }
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
 function json(value, fallback) { try { return value ? JSON.parse(value) : fallback; } catch { return fallback; } }
 function clean(value) { return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined && entry !== '' && !(Array.isArray(entry) && entry.length === 0))); }
 function dependencyPaths(configuration) {
