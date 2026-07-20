@@ -146,9 +146,6 @@ mod tests {
                     id: "package".to_string(),
                     step_type: "release.package".to_string(),
                     status: ReleaseStepStatus::Success,
-                    missing: Vec::new(),
-                    warnings: Vec::new(),
-                    hints: Vec::new(),
                     data: Some(serde_json::json!([
                         {
                             "path": "artifacts/homeboy.tar.gz",
@@ -156,7 +153,7 @@ mod tests {
                             "platform": "darwin"
                         }
                     ])),
-                    error: None,
+                    ..Default::default()
                 }],
                 status: ReleaseStepStatus::Success,
                 warnings: vec!["signed artifact missing".to_string()],

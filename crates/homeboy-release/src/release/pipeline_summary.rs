@@ -214,11 +214,7 @@ mod tests {
             id: id.to_string(),
             step_type: id.to_string(),
             status,
-            missing: Vec::new(),
-            warnings: Vec::new(),
-            hints: Vec::new(),
-            data: None,
-            error: None,
+            ..Default::default()
         }
     }
 
@@ -282,11 +278,8 @@ mod tests {
             id: id.to_string(),
             step_type: id.to_string(),
             status,
-            missing: Vec::new(),
-            warnings: Vec::new(),
-            hints: Vec::new(),
             data: Some(data),
-            error: None,
+            ..Default::default()
         }
     }
 
@@ -362,14 +355,11 @@ mod tests {
                 id: "publish.package-runtime".to_string(),
                 step_type: "publish.package-runtime".to_string(),
                 status: ReleaseStepStatus::Skipped,
-                missing: Vec::new(),
                 warnings: vec![
                     "Publish to package-runtime via package-runtime requires authentication: npm authentication required (ENEEDAUTH)"
                         .to_string(),
                 ],
-                hints: Vec::new(),
-                data: None,
-                error: None,
+                ..Default::default()
             },
         ];
         let status = derive_overall_status(&results);
