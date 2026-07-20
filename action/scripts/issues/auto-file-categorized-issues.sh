@@ -2,12 +2,12 @@
 #
 # File categorized GitHub issues from audit, lint, and test findings.
 #
-# Thin orchestrator over `homeboy issues reconcile`. The decision logic and
-# native-output rendering live in Homeboy core with real types and tests. This
-# script's only job is:
+# Thin orchestrator over `homeboy runs findings reconcile`. The decision logic
+# and native-output rendering live in Homeboy core with real types and tests.
+# This script's only job is:
 #
 #   1. Locate each command's structured JSON output.
-#   2. Call `homeboy issues reconcile --from-output ... --apply`.
+#   2. Call `homeboy runs findings reconcile --from-output ... --apply`.
 #   3. Surface the reconcile plan and totals in the run log.
 #
 # See homeboy issue #1551 for the architectural framing. This replaces
@@ -36,7 +36,7 @@ RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
 # CI runners check out a single repo to GITHUB_WORKSPACE and don't have the
 # component registered in homeboy's global registry. Always pass --path so
-# `homeboy issues reconcile` discovers the component from its homeboy.json.
+# `homeboy runs findings reconcile` discovers the component from its homeboy.json.
 RECONCILE_PATH="${GITHUB_WORKSPACE:-$(pwd)}"
 
 # Track totals across all command types — populated from reconcile output.
@@ -49,7 +49,7 @@ RECONCILE_FAILURES=0
 # ─────────────────────────────────────────────────────────────────────────────
 # reconcile_command CMD_TYPE JSON_FILE COMP_ID
 #
-# Invoke `homeboy issues reconcile` with native command output and surface its
+# Invoke `homeboy runs findings reconcile` with native command output and surface its
 # plan in the run log. Core owns the command-specific rendering.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -67,13 +67,13 @@ reconcile_command() {
 
   local result_file
   result_file=$(mktemp)
-  if ! homeboy issues reconcile "${comp_id}" \
+  if ! homeboy runs findings reconcile "${comp_id}" \
     --from-output "${cmd_type}=${json_file}" \
     --run-url "${RUN_URL}" \
     --path "${RECONCILE_PATH}" \
     --apply \
     > "${result_file}" 2>&1; then
-    echo "::warning::homeboy issues reconcile failed for ${cmd_type} — see log above"
+    echo "::warning::homeboy runs findings reconcile failed for ${cmd_type} — see log above"
     cat "${result_file}"
     rm -f "${result_file}"
     return 1
