@@ -64,6 +64,147 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     connect_with_orphan_adoption(runner_id, None, &[], false, None, None, None)
 }
 
+/// Start and validate a second daemon without touching the recorded admission
+/// daemon. Its HOME is generation-scoped, which gives the existing daemon an
+/// independent lease and durable job store while keeping the runner protocol
+/// unchanged.
+pub(crate) fn rotate_daemon_generation(
+    runner_id: &str,
+    candidate_homeboy: &str,
+    candidate_identity: &str,
+    draining_job_ids: &[String],
+) -> Result<()> {
+    let current = read_session_or_live_peer(runner_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "runner has no connected daemon to rotate",
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
+    let runner = load(runner_id)?;
+    let Some((server_id, server, client)) = resolve_ssh_runner(&runner)? else {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "daemon generation rotation requires an SSH runner",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    };
+    let generation = candidate_identity
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(48)
+        .collect::<String>();
+    let generation = if generation.is_empty() {
+        "candidate".to_string()
+    } else {
+        generation
+    };
+    let runner_segment = homeboy_core::paths::sanitize_path_segment(runner_id);
+    let state_home = format!("$HOME/.homeboy-daemon-generations/{runner_segment}/{generation}");
+    let command = format!(
+        "HOME={} XDG_DATA_HOME={}/.local/share {} daemon ensure-running --addr 127.0.0.1:0",
+        format!("\"{state_home}\""),
+        format!("\"{state_home}\""),
+        shell::quote_arg(candidate_homeboy),
+    );
+    let output = client.execute(&command);
+    if !output.success {
+        return Err(Error::validation_invalid_argument(
+            "reconnect",
+            command_failure_message("candidate daemon startup failed", &output),
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    let envelope = parse_envelope(&output.stdout).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse candidate daemon startup".to_string()),
+        )
+    })?;
+    if !envelope.success {
+        return Err(Error::validation_invalid_argument(
+            "reconnect",
+            "candidate daemon startup returned an error envelope",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    let data = envelope
+        .data
+        .ok_or_else(|| Error::internal_unexpected("candidate daemon startup returned no data"))?;
+    let daemon = RemoteDaemon {
+        address: data
+            .get("address")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        pid: data
+            .get("pid")
+            .and_then(Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok()),
+        lease_id: data
+            .get("lease_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        version: None,
+        build_identity: Some(candidate_identity.to_string()),
+        inspected_freshness: None,
+    };
+    let session_path = session_path(runner_id)?;
+    let (local_port, tunnel_pid, local_url, daemon) = connect_remote_daemon(
+        &server,
+        &client,
+        candidate_homeboy,
+        daemon,
+        "",
+        candidate_identity,
+        runner_id,
+        &session_path,
+    )
+    .map_err(|(report, _)| {
+        Error::validation_invalid_argument(
+            "reconnect",
+            report
+                .failure_message
+                .unwrap_or_else(|| "candidate daemon tunnel validation failed".to_string()),
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
+    let candidate = RunnerSession {
+        runner_id: runner_id.to_string(),
+        mode: RunnerTunnelMode::DirectSsh,
+        role: RunnerSessionRole::Controller,
+        server_id: Some(server_id),
+        controller_id: Some(controller_id()),
+        broker_url: None,
+        remote_daemon_address: Some(daemon.address),
+        local_port: Some(local_port),
+        local_url: Some(local_url),
+        tunnel_pid,
+        remote_daemon_pid: daemon.pid,
+        remote_daemon_lease_id: daemon.lease_id,
+        homeboy_version: current.homeboy_version.clone(),
+        homeboy_build_identity: Some(candidate_identity.to_string()),
+        connected_at: Utc::now().to_rfc3339(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: None,
+        leaseless_recovery_evidence: None,
+    };
+    super::generation_store::activate(
+        runner_id,
+        &current,
+        generation,
+        candidate.clone(),
+        draining_job_ids,
+    )?;
+    write_session(&candidate)
+}
+
 /// Connect using an explicit dead-lease or missing-lease selector. A
 /// lease-less store is handled by its dedicated operator-confirmed path.
 pub fn connect_with_recovery(

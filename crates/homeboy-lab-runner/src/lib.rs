@@ -41,6 +41,7 @@ mod daemon_http_get;
 mod evidence;
 mod execution;
 mod extension_materialization;
+mod generation_store;
 mod git_dependency_materialization;
 mod homeboy_refresh;
 mod job_preparation;
@@ -67,6 +68,7 @@ mod origin_refs;
 mod progress;
 mod resource_metrics;
 mod rig_materialization;
+mod rolling_generation;
 mod runtime_materialization_status;
 mod runtime_overlay_freshness;
 mod session;
@@ -175,6 +177,9 @@ pub use offload_metadata::{
 pub(crate) use resource_metrics::RunnerCommandProgressSink;
 pub use resource_metrics::{
     RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
+};
+pub use rolling_generation::{
+    RollingDrainState, RollingGeneration, RollingGenerations, RollingStart,
 };
 pub use runtime_materialization_status::{RunnerBinarySource, RuntimeMaterializationStatus};
 pub use session::{

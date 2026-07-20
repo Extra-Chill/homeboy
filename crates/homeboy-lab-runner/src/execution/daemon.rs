@@ -155,6 +155,12 @@ pub(super) fn exec_via_daemon(
     let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
+    if let Some(session) = accepted_session.as_ref() {
+        // Persist the endpoint selected at admission before any controller-side
+        // wait or evidence work can fail. Follow-up operations route by this
+        // durable job identity while an older generation drains.
+        super::super::generation_store::record_job(&runner.id, session, &job.id.to_string())?;
+    }
     persist_runner_execution_transition(
         &RunnerExecutionRecord::in_flight(job.id.to_string(), runner.id.clone(), "daemon")
             .with_job_id(job.id.to_string())

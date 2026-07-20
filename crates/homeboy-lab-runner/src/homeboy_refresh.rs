@@ -13,7 +13,9 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::output::MergeOutput;
 
-use super::connection::{active_jobs_before_daemon_replacement, disconnect_with_session};
+use super::connection::{
+    active_jobs_before_daemon_replacement, disconnect_with_session, rotate_daemon_generation,
+};
 use super::execution::exec_with_status_snapshot;
 use super::{
     connect_with_orphan_adoption, exec, load, materialize_runner_extension_with_env, merge,
@@ -343,16 +345,10 @@ pub fn refresh_homeboy_binary(
     // A reconnect replaces the daemon control plane. Prove it is admissible
     // before selecting the new global binary: a deferred refresh must leave
     // the active daemon and its configured control binary untouched.
-    let deferred_active_jobs = if options.reconnect {
-        promotion_lease.assert_generation()?;
-        let active_jobs = active_jobs_before_daemon_replacement(&plan.runner_id)?;
-        match protect_active_jobs_before_reconnect(&plan.runner_id, &active_jobs, options.force) {
-            Ok(_) => None,
-            Err(_) => Some(active_jobs),
-        }
-    } else {
-        None
-    };
+    // Active jobs are now a rotation case, not a global reconnect barrier. The
+    // candidate is materialized and validated before it gets an independent
+    // daemon lease; the old lease remains the owner of its existing work.
+    let deferred_active_jobs: Option<Vec<homeboy_core::api_jobs::ActiveRunnerJobSummary>> = None;
     if let Some(active_jobs) = deferred_active_jobs {
         let active_job_ids = active_jobs
             .iter()
@@ -475,6 +471,52 @@ pub fn refresh_homeboy_binary(
     if options.reconnect {
         promotion_lease.assert_generation()?;
         let active_jobs = active_jobs_before_daemon_replacement(&plan.runner_id)?;
+        if !active_jobs.is_empty() && !options.force {
+            let candidate_identity = identity
+                .get("data")
+                .unwrap_or(&identity)
+                .get("display")
+                .and_then(Value::as_str)
+                .unwrap_or("candidate")
+                .to_string();
+            let draining_job_ids = active_jobs
+                .iter()
+                .map(|job| job.job_id.clone())
+                .collect::<Vec<_>>();
+            if let Err(error) = rotate_daemon_generation(
+                &plan.runner_id,
+                &plan.binary_path,
+                &candidate_identity,
+                &draining_job_ids,
+            ) {
+                restore_runner_homeboy_path_if_selected(
+                    &plan.runner_id,
+                    &plan.binary_path,
+                    previous_homeboy_path.as_deref(),
+                )?;
+                return Err(error);
+            }
+            return Ok((
+                HomeboyBinaryRefreshOutput {
+                    variant: "refresh_homeboy",
+                    command: "runner.refresh_homeboy",
+                    runner_id: plan.runner_id.clone(),
+                    dry_run: false,
+                    plan: plan.clone(),
+                    identity: Some(identity.clone()),
+                    updated_fields: updated_fields.clone(),
+                    daemon_refreshed: true,
+                    interrupted_job_ids: Vec::new(),
+                    selected_binary_path: plan.binary_path.clone(),
+                    reconnect_required: false,
+                    followup_commands: Vec::new(),
+                    reconnect_deferred: None,
+                    failure: None,
+                    bootstrap_provenance: None,
+                },
+                0,
+            ));
+        }
         interrupted_job_ids = match protect_active_jobs_before_reconnect(
             &plan.runner_id,
             &active_jobs,
