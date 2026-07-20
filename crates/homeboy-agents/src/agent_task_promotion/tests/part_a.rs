@@ -33,6 +33,7 @@ use homeboy_core::defaults::{
     WorktreeProviderListResultMapping,
 };
 use homeboy_core::lab_contract::AgentTaskDispatchIdentity;
+use homeboy_core::worktree::{self, WorktreeAdoptOptions};
 use homeboy_core::{Error, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -54,6 +55,121 @@ fn configured_promotion_preflight_rejects_missing_provider_before_dispatch() {
     assert!(error
         .message
         .contains("no worktree providers are configured"));
+}
+
+#[cfg(unix)]
+#[test]
+fn adopted_workspace_wins_over_a_rejecting_configured_provider() {
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("adopted workspace");
+        let marker = tempfile::NamedTempFile::new().expect("provider marker");
+        let marker_path = marker.into_temp_path();
+        std::fs::remove_file(&marker_path).expect("remove provider marker");
+        let provider = tempfile::NamedTempFile::new().expect("provider command");
+        std::fs::write(
+            provider.path(),
+            format!("#!/bin/sh\ntouch '{}'\nexit 23\n", marker_path.display()),
+        )
+        .expect("write rejecting provider");
+        let mut permissions = std::fs::metadata(provider.path())
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
+
+        worktree::adopt(WorktreeAdoptOptions {
+            handle: "fixture@adopted".to_string(),
+            path: workspace.path().display().to_string(),
+            kind: None,
+            provenance: None,
+        })
+        .expect("adopt workspace");
+
+        let mut config = HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "rejecting".to_string(),
+            WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        provider.path().display().to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(WorktreeProviderListResultMapping {
+                    items: "$.worktrees".to_string(),
+                    handle: "$.handle".to_string(),
+                    path: "$.path".to_string(),
+                    branch: "$.branch".to_string(),
+                    dirty: "$.safety.dirty".to_string(),
+                    unpushed: "$.safety.unpushed".to_string(),
+                    primary: "$.safety.primary".to_string(),
+                }),
+            },
+        );
+
+        preflight_configured_workspace_provider_with_config("fixture@adopted", &config)
+            .expect("Homeboy adopted workspace bypasses provider preflight");
+        assert!(!marker_path.exists(), "provider must not be invoked");
+        let canonical_workspace = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
+
+        let mut promotion =
+            ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
+                &promotion_options("fixture@adopted"),
+                &config,
+                Some(PathBuf::from("/fixture/homeboy")),
+                None,
+            );
+        let error = promotion
+            .apply_patch(AgentTaskPromotionApplyRequest {
+                schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+                to_workspace: "fixture@adopted".to_string(),
+                patch: Some(VALID_PATCH.to_string()),
+                patch_path: "changes.patch".to_string(),
+                changed_files: vec!["src/lib.rs".to_string()],
+                gate_feedback_baseline: None,
+                dry_run: false,
+                trusted_unpushed_candidate_destination: None,
+            })
+            .expect_err("fixture executable is not an adapter");
+
+        assert_eq!(
+            promotion
+                .invocation()
+                .expect("adopted workspace invocation")
+                .argv,
+            vec![
+                "/fixture/homeboy".to_string(),
+                "agent-task".to_string(),
+                "promotion-provider".to_string(),
+                "--workspace".to_string(),
+                canonical_workspace.display().to_string(),
+            ]
+        );
+        assert_eq!(promotion.provenance().expect("provenance")["id"], "homeboy");
+        assert_eq!(
+            error.details["worktree_provider"]["path"],
+            canonical_workspace.display().to_string()
+        );
+        assert!(!marker_path.exists(), "provider must not be invoked");
+
+        std::fs::remove_dir_all(workspace.path()).expect("remove adopted workspace");
+        let error = preflight_configured_workspace_provider_with_config("fixture@adopted", &config)
+            .expect_err("stale Homeboy workspace remains fail-closed");
+        assert!(error.message.contains("missing directory"));
+        assert!(
+            !marker_path.exists(),
+            "stale Homeboy record must not fall back"
+        );
+    });
 }
 
 #[test]

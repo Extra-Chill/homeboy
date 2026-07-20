@@ -420,21 +420,32 @@ fn resolve_dispatch_workspace(
         return Ok(Some(DispatchWorkspaceTarget::path(path, "workspace-path")));
     }
 
-    if let Some(record) = worktree::resolve_if_present(workspace)? {
-        let root = std::path::PathBuf::from(&record.worktree_path);
+    if let Some(record) = worktree::resolve_workspace_ref_if_present(workspace)? {
+        if record.state() != &worktree::TaskWorktreeState::Active {
+            return Err(Error::validation_invalid_argument(
+                "workspace",
+                format!(
+                    "Homeboy workspace '{}' is no longer active",
+                    record.handle()
+                ),
+                Some(workspace.clone()),
+                None,
+            ));
+        }
+        let root = std::path::PathBuf::from(record.path());
         if !root.is_dir() {
             return Err(Error::validation_invalid_argument(
                 "workspace",
                 format!(
-                    "Homeboy worktree '{}' points at a missing directory {}; recreate or remove the stale record",
-                    record.id,
+                    "Homeboy workspace '{}' points at a missing directory {}; recreate or remove the stale record",
+                    record.handle(),
                     root.display()
                 ),
                 Some(workspace.clone()),
                 None,
             ));
         }
-        return Ok(Some(DispatchWorkspaceTarget::record(record)));
+        return Ok(Some(DispatchWorkspaceTarget::workspace_ref(record)));
     }
 
     let resolution = worktree_providers::resolve_worktree_provider(workspace).map_err(|error| {
@@ -499,6 +510,30 @@ impl DispatchWorkspaceTarget {
                 "kind": kind,
                 "root": root.display().to_string(),
             }),
+        }
+    }
+
+    fn workspace_ref(record: worktree::WorkspaceRefRecord) -> Self {
+        match record {
+            worktree::WorkspaceRefRecord::Task(record) => Self::record(record),
+            worktree::WorkspaceRefRecord::Adopted(record) => {
+                let root = std::path::PathBuf::from(&record.path);
+                Self {
+                    root,
+                    slug: Some(record.handle.clone()),
+                    kind: Some("adopted-workspace".to_string()),
+                    component_id: None,
+                    branch: None,
+                    base_ref: None,
+                    metadata: serde_json::json!({
+                        "kind": "adopted-workspace",
+                        "handle": record.handle,
+                        "root": record.path,
+                        "workspace_kind": record.kind,
+                        "provenance": record.provenance,
+                    }),
+                }
+            }
         }
     }
 
