@@ -73,7 +73,7 @@ pub fn build_findings_from_native_output(
 fn render_audit(data: &Value, context: &IssueRenderContext) -> ReconcileFindingsInput {
     let normalized_findings = normalized_findings(data);
     if !normalized_findings.is_empty() {
-        return render_normalized_findings("audit", normalized_findings, context);
+        return render_normalized_findings("audit", normalized_findings, Some(data), context);
     }
 
     let mut by_kind: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
@@ -156,7 +156,7 @@ fn render_audit_body(
 fn render_lint(data: &Value, context: &IssueRenderContext) -> ReconcileFindingsInput {
     let normalized_findings = normalized_findings(data);
     if !normalized_findings.is_empty() {
-        return render_normalized_findings("lint", normalized_findings, context);
+        return render_normalized_findings("lint", normalized_findings, None, context);
     }
 
     let mut by_category: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
@@ -303,7 +303,7 @@ fn render_lint_body(
 fn render_test(data: &Value, context: &IssueRenderContext) -> ReconcileFindingsInput {
     let normalized_findings = normalized_findings(data);
     if !normalized_findings.is_empty() {
-        return render_normalized_findings("test", normalized_findings, context);
+        return render_normalized_findings("test", normalized_findings, None, context);
     }
 
     let mut groups = BTreeMap::new();
@@ -375,6 +375,7 @@ fn normalized_findings(data: &Value) -> Vec<HomeboyFinding> {
 fn render_normalized_findings(
     command: &str,
     findings: Vec<HomeboyFinding>,
+    data: Option<&Value>,
     context: &IssueRenderContext,
 ) -> ReconcileFindingsInput {
     let mut by_category: BTreeMap<String, Vec<HomeboyFinding>> = BTreeMap::new();
@@ -385,12 +386,28 @@ fn render_normalized_findings(
 
     let mut groups = BTreeMap::new();
     for (category, findings) in by_category {
+        // Dedup identical findings by fingerprint before counting or rendering.
+        // The audit fingerprint (file:kind:convention:normalized_description)
+        // normalizes line numbers away, so repeated occurrences of the same
+        // issue collapse to one entry — otherwise counts and bullet lists are
+        // inflated by pure duplicates.
+        let findings = dedup_findings_by_fingerprint(findings);
+
+        // Fixability is reported per audit kind. Look it up by the group's
+        // representative rule (kind), which is how the audit keys /by_kind.
+        let fixability = data.and_then(|data| {
+            let kind = findings.first().and_then(|f| f.rule.as_deref())?;
+            data.pointer(&format!("/fixability/by_kind/{}", kind))
+        });
+
         groups.insert(
             category.clone(),
             RenderedIssueGroup {
                 count: findings.len(),
                 label: labelize(&category),
-                body: render_normalized_findings_body(command, &category, &findings, context),
+                body: render_normalized_findings_body(
+                    command, &category, &findings, fixability, context,
+                ),
                 confidence: None,
             },
         );
@@ -400,6 +417,23 @@ fn render_normalized_findings(
         command: command.to_string(),
         groups,
     }
+}
+
+/// Deduplicate findings by fingerprint, preserving first-seen order. Findings
+/// without a fingerprint fall back to their full message so they are never
+/// silently merged.
+fn dedup_findings_by_fingerprint(findings: Vec<HomeboyFinding>) -> Vec<HomeboyFinding> {
+    let mut seen = std::collections::HashSet::new();
+    findings
+        .into_iter()
+        .filter(|finding| {
+            let key = finding
+                .fingerprint
+                .clone()
+                .unwrap_or_else(|| finding.message.clone());
+            seen.insert(key)
+        })
+        .collect()
 }
 
 fn finding_category(command: &str, finding: &HomeboyFinding) -> String {
@@ -414,6 +448,7 @@ fn render_normalized_findings_body(
     command: &str,
     category: &str,
     findings: &[HomeboyFinding],
+    fixability: Option<&Value>,
     context: &IssueRenderContext,
 ) -> String {
     let mut out = String::new();
@@ -428,6 +463,7 @@ fn render_normalized_findings_body(
     if let Some(url) = context.run_url.as_deref() {
         let _ = writeln!(out, "\nRun: {}", url);
     }
+    render_fixability(&mut out, fixability);
     let _ = writeln!(out, "\n### Findings");
     for finding in findings.iter().take(20) {
         render_normalized_finding_line(&mut out, finding);
