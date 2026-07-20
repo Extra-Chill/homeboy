@@ -231,6 +231,67 @@ pub(super) enum RemoteDaemonWorkEvidence {
     AuthoritativelyIdle,
 }
 
+/// Return the one live lease that may replace a ledger containing only stale
+/// leases. The remote daemon status and typed jobs endpoint are authoritative;
+/// a persisted lease is never used to stop a different daemon.
+pub(super) fn authoritative_idle_lease_for_stale_generations(
+    status: &RemoteDaemonStatus,
+    persisted_leases: &[String],
+) -> std::result::Result<Option<String>, String> {
+    if persisted_leases.is_empty() {
+        return Ok(None);
+    }
+    let daemon = status.daemon.as_ref().ok_or_else(|| {
+        "authoritative daemon reconciliation cannot prove a live daemon lease and PID".to_string()
+    })?;
+    let lease_id = daemon
+        .lease_id
+        .as_deref()
+        .filter(|lease| !lease.is_empty())
+        .ok_or_else(|| {
+            "authoritative daemon reconciliation cannot prove the live daemon lease".to_string()
+        })?;
+    if persisted_leases
+        .iter()
+        .any(|persisted| persisted == lease_id)
+    {
+        return Ok(None);
+    }
+    if daemon.pid.is_none()
+        || !status.reachable
+        || status.endpoint_probe_error.is_some()
+        || status.active_jobs != 0
+        || !status.work_evidence.is_authoritatively_idle()
+    {
+        return Err(
+            "authoritative daemon reconciliation requires a reachable lease/PID, successful endpoint probes, and zero typed active jobs"
+                .to_string(),
+        );
+    }
+    Ok(Some(lease_id.to_string()))
+}
+
+/// A stop is complete only when the remote state is absent or explicitly proves
+/// the exact stopped lease is dead. A new lease is a recovery race, not success.
+pub(super) fn authoritative_lease_stop_confirmed(
+    status: &RemoteDaemonStatus,
+    expected_lease_id: &str,
+) -> std::result::Result<(), String> {
+    match status.daemon.as_ref() {
+        None => Ok(()),
+        Some(daemon)
+            if daemon.lease_id.as_deref() == Some(expected_lease_id)
+                && status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead) =>
+        {
+            Ok(())
+        }
+        Some(daemon) => Err(format!(
+            "authoritative daemon ownership changed during reconciliation (expected lease `{expected_lease_id}`, observed lease `{}`); stale generations were retained",
+            daemon.lease_id.as_deref().unwrap_or("unavailable")
+        )),
+    }
+}
+
 impl RemoteDaemonWorkEvidence {
     fn from_unresolved_count(count: usize) -> Self {
         if count == 0 {
