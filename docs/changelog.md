@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.298.1] - 2026-07-20
+
+### Changed
+- extract candidate adoption from cook.rs
+- extract terminal-runner projection from lifecycle_ops
+- extract candidate-adoption lifecycle from lifecycle_ops
+- extract transport-proxy recovery from lifecycle_ops
+
+### Fixed
+- repoint audit source_policies at extracted homeboy-code-audit crate
+- admit warm runner-pinned cook coordination
+- fix(lab-runner): parse noisy runner identity output
+
 ## [0.298.0] - 2026-07-20
 
 ### Added
