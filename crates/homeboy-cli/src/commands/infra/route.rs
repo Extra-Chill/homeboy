@@ -1062,11 +1062,85 @@ fn retry_handoff_prefix(args: &[String]) -> Vec<String> {
     rewritten
 }
 
+/// Resolve the durable managed worktree a retry task should continue against.
+///
+/// Returns `Ok(Some(git_root))` when the task carries a Homeboy worktree handle
+/// (its recorded `workspace.slug`) that still resolves to an active checkout,
+/// `Ok(None)` when the task was never anchored to a managed worktree (so the
+/// caller falls back to the recorded `workspace.root`), and a precise
+/// recoverable error when the handle is recorded but no longer usable. This is
+/// what keeps a cleaned-up ephemeral initial-baseline directory from being
+/// mistaken for the canonical continuation workspace (#9195).
+fn retry_task_managed_worktree(
+    task: &homeboy::agents::agent_tasks::AgentTaskRequest,
+) -> homeboy::core::Result<Option<PathBuf>> {
+    let Some(handle) = task
+        .workspace
+        .slug
+        .as_deref()
+        .filter(|handle| !handle.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let Some(record) = homeboy::core::worktree::resolve_workspace_ref_if_present(handle)? else {
+        // No Homeboy record for this handle: the task was not anchored to a
+        // managed worktree, so leave resolution to the recorded root fallback.
+        return Ok(None);
+    };
+
+    if record.state() != &homeboy::core::worktree::TaskWorktreeState::Active {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            format!(
+                "agent-task retry task '{}' managed worktree '{}' is no longer active; its work is unavailable for continuation",
+                task.task_id,
+                record.handle()
+            ),
+            Some(handle.to_string()),
+            Some(vec![
+                "Recreate the worktree with `homeboy worktree add`, or retry against an explicit replacement workspace.".to_string(),
+            ]),
+        ));
+    }
+
+    let path = PathBuf::from(record.path());
+    let git_root = git::repo_root(&path).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace",
+            format!(
+                "agent-task retry task '{}' managed worktree '{}' points at a missing checkout {}",
+                task.task_id,
+                record.handle(),
+                path.display()
+            ),
+            Some(path.display().to_string()),
+            Some(vec![
+                "Recreate the worktree with `homeboy worktree add`, or remove the stale record and retry against an explicit replacement workspace.".to_string(),
+            ]),
+        )
+    })?;
+    Ok(Some(git_root))
+}
+
 fn retry_plan_primary_workspace(
     plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
 ) -> homeboy::core::Result<PathBuf> {
     let mut roots = BTreeSet::new();
     for task in &plan.tasks {
+        // The authoritative continuation workspace is the managed worktree the
+        // task was recorded against, not whichever `workspace.root` the original
+        // plan captured. A pre-provider or gate-failed cook may have run against
+        // an ephemeral initial-baseline directory that has since been cleaned
+        // up; trusting that path fails retry with "not inside a git checkout"
+        // even though the durable worktree record still resolves. Prefer the
+        // recorded worktree handle so baseline artifacts stay evidence, never
+        // the canonical continuation workspace (#9195).
+        if let Some(git_root) = retry_task_managed_worktree(task)? {
+            roots.insert(git_root);
+            continue;
+        }
+
         let root = task
             .workspace
             .root
@@ -1094,7 +1168,7 @@ fn retry_plan_primary_workspace(
                     ),
                     Some(path.display().to_string()),
                     Some(vec![
-                        "Retry the task from a plan with a git-backed workspace root.".to_string(),
+                        "Retry the task from a plan with a git-backed workspace root, or record its managed worktree handle so retry can resolve the durable checkout.".to_string(),
                     ]),
                 )
             })?;
