@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use super::harvest::{git_is_repository, git_output_raw};
+use super::harvest::{git_is_repository, git_output_raw, git_output_with_env};
 use super::*;
 
 /// Immutable provenance for one scheduler execution. Controller-local callers
@@ -331,9 +331,10 @@ fn verified_initial_cook_candidate_baseline(
         message: error.to_string(),
     })?;
     let index_path = index.path().display().to_string();
-    git_output_with_env(root, &["read-tree", "HEAD"], &index_path)?;
-    git_output_with_env(root, &["add", "--all"], &index_path)?;
-    let actual_tree = git_output_with_env(root, &["write-tree"], &index_path)?;
+    let index_env: &[(&str, &str)] = &[("GIT_INDEX_FILE", index_path.as_str())];
+    git_output_with_env(root, &["read-tree", "HEAD"], index_env)?;
+    git_output_with_env(root, &["add", "--all"], index_env)?;
+    let actual_tree = git_output_with_env(root, &["write-tree"], index_env)?;
     if actual_tree != expected_tree {
         return Err(HarvestError::CandidateBaselineMismatch {
             message: "initial Cook candidate workspace changed after admission failure".to_string(),
@@ -342,29 +343,6 @@ fn verified_initial_cook_candidate_baseline(
     Ok(Some(CandidateBaseline {
         patch: git_output_raw(root, &["diff", "--binary", "--full-index", "HEAD", commit])?,
     }))
-}
-
-fn git_output_with_env(
-    root: &Path,
-    args: &[&str],
-    index_path: &str,
-) -> Result<String, HarvestError> {
-    let output = Command::new("git")
-        .args(args)
-        .env("GIT_INDEX_FILE", index_path)
-        .current_dir(root)
-        .output()
-        .map_err(|error| HarvestError::Git {
-            command: format!("git {}", args.join(" ")),
-            message: error.to_string(),
-        })?;
-    if !output.status.success() {
-        return Err(HarvestError::Git {
-            command: format!("git {}", args.join(" ")),
-            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        });
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn verified_gate_feedback_baseline(
