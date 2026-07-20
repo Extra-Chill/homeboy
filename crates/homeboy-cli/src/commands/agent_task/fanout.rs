@@ -674,7 +674,12 @@ impl BatchCookSpec {
                 commit_message,
                 source_refs: self.task_url.clone().into_iter().collect(),
                 protected_branches: self.protected_branches.clone(),
-                ai_tool: self.ai_tool.clone(),
+                ai_tool: resolve_ai_tool_disclosure(
+                    &self.ai_tool,
+                    self.backend.as_deref(),
+                    self.selector.as_deref(),
+                    self.model.as_deref(),
+                ),
                 ai_model: self
                     .model
                     .clone()
@@ -1074,7 +1079,45 @@ fn default_ai_tool() -> String {
                 .flat_map(|provider| provider.cli.profiles.iter())
                 .find_map(|profile| profile.ai_disclosure.clone())
         })
-        .unwrap_or_else(|| "AI-assisted".to_string())
+        .unwrap_or_else(|| GENERIC_AI_DISCLOSURE.to_string())
+}
+
+/// Generic fallback disclosure used when no provider supplies one. Also the
+/// sentinel that marks `ai_tool` as "not explicitly overridden by the operator",
+/// so a `--model` selection can derive a concrete disclosure instead.
+const GENERIC_AI_DISCLOSURE: &str = "AI-assisted";
+
+/// Resolve the effective `ai_tool` disclosure for a cook.
+///
+/// When the operator explicitly supplied `--ai-tool`, that value is preserved.
+/// Otherwise (`ai_tool` is empty or the generic default) the disclosure is
+/// derived from the effective backend/selector/model via the provider catalog —
+/// the single typed disclosure source — so a `--model` override produces a
+/// correct AI-assistance statement rather than a stale hard-coded default.
+/// (#8404)
+pub(super) fn resolve_ai_tool_disclosure(
+    ai_tool: &str,
+    backend: Option<&str>,
+    selector: Option<&str>,
+    model: Option<&str>,
+) -> String {
+    let is_operator_override =
+        !ai_tool.trim().is_empty() && ai_tool.trim() != GENERIC_AI_DISCLOSURE;
+    if is_operator_override {
+        return ai_tool.to_string();
+    }
+
+    let backend = match backend {
+        Some(backend) if !backend.trim().is_empty() => backend.to_string(),
+        _ => match provider::default_backend().ok().flatten() {
+            Some(backend) => backend,
+            None => return ai_tool.to_string(),
+        },
+    };
+
+    AgentTaskProviderCatalog::discover()
+        .ai_disclosure_for(&backend, selector, model)
+        .unwrap_or_else(|| ai_tool.to_string())
 }
 
 fn default_ai_used_for() -> String {
@@ -1141,6 +1184,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn resolve_ai_tool_disclosure_preserves_an_explicit_operator_value() {
+        // An operator-supplied disclosure is preserved verbatim regardless of
+        // the selected model. (#8404)
+        let resolved = resolve_ai_tool_disclosure(
+            "Custom Tool (v2)",
+            Some("opencode"),
+            None,
+            Some("openai/gpt-5.6-terra"),
+        );
+        assert_eq!(resolved, "Custom Tool (v2)");
+    }
+
+    #[test]
+    fn resolve_ai_tool_disclosure_keeps_generic_default_for_an_unknown_backend() {
+        // With no explicit override and a backend the catalog cannot resolve,
+        // the generic default is preserved (nothing to derive from). Using an
+        // explicit unknown backend keeps this deterministic regardless of the
+        // providers installed in the test environment.
+        let resolved = resolve_ai_tool_disclosure(
+            GENERIC_AI_DISCLOSURE,
+            Some("no-such-backend-xyz"),
+            None,
+            Some("openai/gpt-5.6-terra"),
+        );
+        assert_eq!(resolved, GENERIC_AI_DISCLOSURE);
     }
 
     #[test]

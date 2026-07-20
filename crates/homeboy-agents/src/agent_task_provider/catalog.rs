@@ -73,6 +73,51 @@ impl AgentTaskProviderCatalog {
         provider_requires_cwd_git_checkout_with_providers(&self.providers, backend, selector)
     }
 
+    /// Resolve the AI-assistance disclosure string (`ai_tool`) for an effective
+    /// backend/selector/model selection.
+    ///
+    /// This is the single typed disclosure source consumed by direct cook,
+    /// fanout plan/run, and PR finalization so a `--model` override produces a
+    /// correct AI-assistance statement. Resolution order:
+    ///
+    /// 1. The matching provider's profile whose declared `model` equals the
+    ///    effective model — its `ai_disclosure`.
+    /// 2. The provider's `default_ai_disclosure`.
+    /// 3. `None` (callers fall back to their generic default).
+    ///
+    /// A profile without a declared `model` is treated as a wildcard so a
+    /// provider with a single unmodeled profile still supplies its disclosure.
+    pub fn ai_disclosure_for(
+        &self,
+        backend: &str,
+        selector: Option<&str>,
+        model: Option<&str>,
+    ) -> Option<String> {
+        let provider =
+            resolve_provider_for_backend(&self.providers, backend, selector).resolved()?;
+
+        if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+            if let Some(disclosure) = provider
+                .cli
+                .profiles
+                .iter()
+                .find(|profile| profile.model.as_deref() == Some(model))
+                .and_then(|profile| profile.ai_disclosure.clone())
+            {
+                return Some(disclosure);
+            }
+        }
+
+        provider.cli.default_ai_disclosure.clone().or_else(|| {
+            provider
+                .cli
+                .profiles
+                .iter()
+                .find(|profile| profile.model.is_none())
+                .and_then(|profile| profile.ai_disclosure.clone())
+        })
+    }
+
     pub fn apply_provider_runner_secret_env_contracts(&self, plan: &mut AgentTaskPlan) {
         apply_provider_runner_secret_env_contracts_with_providers(plan, &self.providers);
     }
@@ -136,6 +181,81 @@ mod tests {
 
         assert_ne!(empty, changed);
         assert!(empty.starts_with("resolved:"));
+    }
+
+    fn disclosure_provider() -> AgentTaskExecutorProvider {
+        // Deserialize from JSON so schema-string and other required defaults are
+        // populated the same way discovery populates them.
+        serde_json::from_value(serde_json::json!({
+            "id": "test.opencode",
+            "backend": "opencode",
+            "cli": {
+                "default_ai_disclosure": "OpenCode (GPT-5.5)",
+                "profiles": [
+                    {
+                        "name": "terra",
+                        "model": "openai/gpt-5.6-terra",
+                        "ai_disclosure": "OpenCode (GPT-5.6 Terra)"
+                    },
+                    {
+                        "name": "sol",
+                        "model": "openai/gpt-5.6-sol",
+                        "ai_disclosure": "OpenCode (GPT-5.6 Sol)"
+                    }
+                ]
+            }
+        }))
+        .expect("valid provider fixture")
+    }
+
+    fn disclosure_catalog() -> AgentTaskProviderCatalog {
+        AgentTaskProviderCatalog {
+            providers: vec![disclosure_provider()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ai_disclosure_for_uses_the_model_matching_profile() {
+        let catalog = disclosure_catalog();
+        assert_eq!(
+            catalog
+                .ai_disclosure_for("opencode", None, Some("openai/gpt-5.6-terra"))
+                .as_deref(),
+            Some("OpenCode (GPT-5.6 Terra)"),
+            "a model override must derive its matching profile disclosure"
+        );
+        assert_eq!(
+            catalog
+                .ai_disclosure_for("opencode", None, Some("openai/gpt-5.6-sol"))
+                .as_deref(),
+            Some("OpenCode (GPT-5.6 Sol)")
+        );
+    }
+
+    #[test]
+    fn ai_disclosure_for_falls_back_to_provider_default() {
+        let catalog = disclosure_catalog();
+        // No model and an unknown model both fall back to the provider default.
+        assert_eq!(
+            catalog.ai_disclosure_for("opencode", None, None).as_deref(),
+            Some("OpenCode (GPT-5.5)")
+        );
+        assert_eq!(
+            catalog
+                .ai_disclosure_for("opencode", None, Some("openai/unknown-model"))
+                .as_deref(),
+            Some("OpenCode (GPT-5.5)")
+        );
+    }
+
+    #[test]
+    fn ai_disclosure_for_unknown_backend_is_none() {
+        let catalog = disclosure_catalog();
+        assert_eq!(
+            catalog.ai_disclosure_for("no-such-backend", None, Some("m")),
+            None
+        );
     }
 }
 

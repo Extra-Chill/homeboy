@@ -213,7 +213,12 @@ where
             commit_message,
             source_refs: args.dispatch.task_url.into_iter().collect(),
             protected_branches: args.protected_branches,
-            ai_tool: args.ai_tool.clone(),
+            ai_tool: super::fanout::resolve_ai_tool_disclosure(
+                &args.ai_tool,
+                args.dispatch.backend.as_deref(),
+                args.dispatch.selector.as_deref(),
+                args.dispatch.model.as_deref(),
+            ),
             ai_model: args
                 .dispatch
                 .model
