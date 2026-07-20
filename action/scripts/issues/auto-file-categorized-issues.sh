@@ -106,21 +106,30 @@ IFS=',' read -ra CMD_ARRAY <<< "${COMMANDS:-}"
 for CMD in "${CMD_ARRAY[@]}"; do
   CMD=$(echo "${CMD}" | xargs)
 
-  # Only process command types we know how to normalize
+  # Normalize the invoked command to its base quality type. The action pipeline
+  # passes review-backed commands ("review audit", "review lint", "review test")
+  # as well as bare forms ("audit", "lint", "test"); both must categorize.
+  # Mirrors quality_base_command() in scripts/core/lib.sh.
   case "${CMD}" in
-    audit|lint|test) ;;
+    "review audit"*|audit|audit\ *) BASE_CMD="audit" ;;
+    "review lint"*|lint|lint\ *)    BASE_CMD="lint" ;;
+    "review test"*|test|test\ *)    BASE_CMD="test" ;;
     *) continue ;;
   esac
 
-  JSON_FILE="${OUTPUT_DIR}/${CMD}.json"
+  # Resolve the structured-output file. run-homeboy-commands.sh writes to a
+  # sanitized stem (command_output_stem() in lib.sh), so "review audit" lands in
+  # review-audit.json, not "review audit.json". Sanitize the same way here.
+  CMD_STEM="$(printf '%s' "${CMD}" | sed -E 's/[^[:alnum:]._-]+/-/g; s/^-+//; s/-+$//')"
+  JSON_FILE="${OUTPUT_DIR}/${CMD_STEM}.json"
 
   if [ ! -f "${JSON_FILE}" ] || [ ! -s "${JSON_FILE}" ]; then
-    echo "No structured ${CMD}.json found — skipping categorized issues for ${CMD}"
+    echo "No structured ${CMD_STEM}.json found — skipping categorized issues for ${CMD}"
     continue
   fi
 
   if ! jq empty "${JSON_FILE}" >/dev/null 2>&1; then
-    echo "::warning::Structured ${CMD}.json is malformed — skipping categorized issues for ${CMD}"
+    echo "::warning::Structured ${CMD_STEM}.json is malformed — skipping categorized issues for ${CMD}"
     RECONCILE_FAILURES=$((RECONCILE_FAILURES + 1))
     continue
   fi
@@ -132,8 +141,10 @@ for CMD in "${CMD_ARRAY[@]}"; do
     local_comp_id="${COMPONENT_FROM_JSON}"
   fi
 
-  # Reconcile this command's findings against the tracker
-  if reconcile_command "${CMD}" "${JSON_FILE}" "${local_comp_id}"; then
+  # Reconcile this command's findings against the tracker. Pass the normalized
+  # base type (audit/lint/test), not the raw "review …" form, so downstream
+  # grouping and issue labels use the canonical command type.
+  if reconcile_command "${BASE_CMD}" "${JSON_FILE}" "${local_comp_id}"; then
     COMMANDS_PROCESSED=$((COMMANDS_PROCESSED + 1))
   else
     RECONCILE_FAILURES=$((RECONCILE_FAILURES + 1))
