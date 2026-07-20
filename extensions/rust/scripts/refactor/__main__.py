@@ -13,7 +13,7 @@ from .tests import find_related_tests
 from .imports import resolve_imports
 from .visibility import adjust_visibility
 from .rewrite import rewrite_caller_imports
-from .struct_fields import propagate_struct_fields
+from .struct_fields import collapse_struct_defaults, propagate_struct_fields
 from .module_index import generate_module_index
 
 
@@ -60,6 +60,10 @@ def handle_propagate_struct_fields(data: dict) -> dict:
     return propagate_struct_fields(data)
 
 
+def handle_collapse_struct_defaults(data: dict) -> dict:
+    return collapse_struct_defaults(data)
+
+
 def handle_generate_module_index(data: dict) -> dict:
     return generate_module_index(
         data.get("submodules", []),
@@ -74,6 +78,7 @@ COMMANDS = {
     "adjust_visibility": handle_adjust_visibility,
     "rewrite_caller_imports": handle_rewrite_caller_imports,
     "propagate_struct_fields": handle_propagate_struct_fields,
+    "collapse_struct_defaults": handle_collapse_struct_defaults,
     "generate_module_index": handle_generate_module_index,
 }
 

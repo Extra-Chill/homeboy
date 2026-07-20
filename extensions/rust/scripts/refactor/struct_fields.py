@@ -238,3 +238,267 @@ def propagate_struct_fields(data: dict) -> dict:
                                             if any(f['name'] not in i['fields_present']
                                                    for f in struct_fields)]),
     }
+
+
+# ============================================================================
+# collapse_struct_defaults — the inverse of propagate_struct_fields.
+#
+# Given a struct definition and a file, find each struct instantiation and
+# collapse fields whose value equals the type's default into a single trailing
+# `..Default::default()`. Reuses parse_struct_fields (field defaults) and the
+# brace-aware literal-finding approach. Conservative by construction: it only
+# removes a field when its literal value textually matches a known default
+# expression for that field's type, never touches a literal that already
+# contains `..`, and leaves the whole literal untouched if no field is
+# removable.
+# ============================================================================
+
+# Per-type set of literal expressions that are semantically the default value.
+# The comparison is intentionally textual (no eval) and matches the forms that
+# actually appear in hand-written Rust. `_default_exprs_for_type` returns the
+# accepted spellings for a field's declared type.
+def _normalize_expr(expr: str) -> str:
+    """Collapse whitespace so multi-line/oddly-spaced values compare cleanly."""
+    return ' '.join(expr.split()).strip().rstrip(',').strip()
+
+
+def _default_exprs_for_type(rust_type: str) -> set:
+    """Return the set of literal expressions that equal the default for a type.
+
+    Only returns spellings we can prove are the default. Types we can't reason
+    about return an empty set, so their fields are never collapsed.
+    """
+    t = rust_type.strip()
+
+    if t.startswith('Option<'):
+        return {'None'}
+
+    if t.startswith('Vec<') or t == 'Vec':
+        return {'Vec::new()', 'vec![]', 'Vec::default()', 'Default::default()'}
+
+    if 'HashMap' in t:
+        return {'HashMap::new()', 'std::collections::HashMap::new()',
+                'HashMap::default()', 'Default::default()'}
+    if 'BTreeMap' in t:
+        return {'BTreeMap::new()', 'std::collections::BTreeMap::new()',
+                'BTreeMap::default()', 'Default::default()'}
+    if 'HashSet' in t:
+        return {'HashSet::new()', 'std::collections::HashSet::new()',
+                'HashSet::default()', 'Default::default()'}
+    if 'BTreeSet' in t:
+        return {'BTreeSet::new()', 'std::collections::BTreeSet::new()',
+                'BTreeSet::default()', 'Default::default()'}
+
+    if t == 'String':
+        return {'String::new()', 'String::default()', '"".to_string()',
+                '"".to_owned()', 'String::from("")', 'Default::default()'}
+
+    if t == 'bool':
+        return {'false', 'bool::default()', 'Default::default()'}
+
+    if t in ('u8', 'u16', 'u32', 'u64', 'u128', 'usize',
+             'i8', 'i16', 'i32', 'i64', 'i128', 'isize'):
+        return {'0', f'{t}::default()', 'Default::default()'}
+    if t in ('f32', 'f64'):
+        return {'0.0', '0.', f'{t}::default()', 'Default::default()'}
+
+    if t == 'serde_json::Value' or t == 'Value':
+        return {'serde_json::Value::Null', 'Value::Null', 'Default::default()'}
+
+    # Unknown type: no provable default spelling.
+    return set()
+
+
+def _split_top_level_fields(inner_lines: list, start_index: int) -> list:
+    """Split a struct literal body into top-level `name: value` field entries.
+
+    `inner_lines` are the raw source lines strictly between the opening and
+    closing brace of the literal. Returns a list of dicts:
+      {name, value, first_line, last_line, is_spread, is_shorthand}
+    where line numbers are ABSOLUTE (1-indexed), offset by start_index (the
+    0-indexed line number of the first inner line).
+
+    Brace/paren/bracket depth is tracked so multi-line values (e.g.
+    `metadata: json!({ ... })`) are captured as a single field. Returns None
+    if the body cannot be cleanly parsed (bail — never guess).
+    """
+    fields = []
+    depth = 0
+    buf = []
+    buf_first = None
+
+    for offset, raw in enumerate(inner_lines):
+        abs_line = start_index + offset + 1  # 1-indexed absolute
+        if buf_first is None and raw.strip():
+            buf_first = abs_line
+        buf.append((abs_line, raw))
+
+        for ch in raw:
+            if ch in '([{':
+                depth += 1
+            elif ch in ')]}':
+                depth -= 1
+
+        # A field entry terminates at a top-level trailing comma.
+        stripped = raw.rstrip()
+        if depth == 0 and stripped.endswith(','):
+            entry = _classify_field_entry(buf, buf_first, abs_line)
+            if entry is None:
+                return None
+            fields.append(entry)
+            buf = []
+            buf_first = None
+
+    # Trailing entry without a comma (last field before closing brace).
+    if any(raw.strip() for _, raw in buf):
+        if depth != 0:
+            return None
+        entry = _classify_field_entry(buf, buf_first, buf[-1][0])
+        if entry is None:
+            return None
+        fields.append(entry)
+
+    return fields
+
+
+def _classify_field_entry(buf, first_line, last_line) -> dict:
+    """Turn a buffered set of (line, text) tuples into a field entry dict."""
+    text = '\n'.join(t for _, t in buf).strip()
+    if not text:
+        return None
+
+    # Skip comment-only buffers by ignoring leading comment lines.
+    non_comment = [t for _, t in buf if t.strip() and not t.strip().startswith('//')]
+    if not non_comment:
+        # Comment-only region between fields — represent as a passthrough.
+        return {'name': None, 'value': None, 'first_line': first_line,
+                'last_line': last_line, 'is_spread': False, 'is_shorthand': False,
+                'passthrough': True}
+
+    joined = _normalize_expr(text)
+
+    # Spread base: `..expr`
+    if joined.startswith('..'):
+        return {'name': None, 'value': joined, 'first_line': first_line,
+                'last_line': last_line, 'is_spread': True, 'is_shorthand': False,
+                'passthrough': False}
+
+    # `name: value`
+    m = re.match(r'^(\w+)\s*:\s*(.*)$', joined, re.DOTALL)
+    if m:
+        return {'name': m.group(1), 'value': _normalize_expr(m.group(2)),
+                'first_line': first_line, 'last_line': last_line,
+                'is_spread': False, 'is_shorthand': False, 'passthrough': False}
+
+    # Shorthand: bare `name`
+    m = re.match(r'^(\w+)$', joined)
+    if m:
+        return {'name': m.group(1), 'value': m.group(1),
+                'first_line': first_line, 'last_line': last_line,
+                'is_spread': False, 'is_shorthand': True, 'passthrough': False}
+
+    # Anything else we don't understand — bail.
+    return None
+
+
+def collapse_struct_defaults(data: dict) -> dict:
+    """Collapse default-valued fields in struct instantiations into
+    `..Default::default()`.
+
+    Input:
+      struct_name: str
+      struct_source: str — the struct definition block (for field types/defaults)
+      file_content: str
+      file_path: str
+
+    Output:
+      edits: list[{file, start_line, end_line, replacement, description}]
+        (replace-range edits: lines [start_line, end_line] inclusive, 1-indexed,
+         become `replacement`)
+      instantiations_found, instantiations_collapsed
+    """
+    struct_name = data['struct_name']
+    file_content = data['file_content']
+    file_path = data.get('file_path', '')
+    struct_fields = data.get('struct_fields', [])
+    if not struct_fields and 'struct_source' in data:
+        struct_fields = parse_struct_fields(data['struct_source'])
+
+    field_types = {f['name']: f['type'] for f in struct_fields}
+
+    lines = file_content.split('\n')
+    instantiations = find_struct_instantiations(file_content, struct_name)
+
+    edits = []
+    collapsed = 0
+
+    for inst in instantiations:
+        open_line = inst['start_line'] - 1        # 0-indexed line with `Struct {`
+        close_line = inst['closing_brace_line'] - 1  # 0-indexed line with `}`
+
+        # Single-line literals are left alone (rare, low value, higher risk).
+        if close_line <= open_line:
+            continue
+
+        inner = lines[open_line + 1:close_line]
+        parsed = _split_top_level_fields(inner, open_line + 1)
+        if parsed is None:
+            continue
+
+        # Never touch a literal that already spreads (`..base`).
+        if any(f['is_spread'] for f in parsed):
+            continue
+
+        removable = []   # field entries safe to drop
+        for f in parsed:
+            if f.get('passthrough'):
+                # A comment between fields blocks a clean collapse — bail on
+                # this literal to avoid orphaning comments.
+                removable = []
+                break
+            if f['is_shorthand']:
+                continue
+            ftype = field_types.get(f['name'])
+            if ftype is None:
+                continue
+            accepted = _default_exprs_for_type(ftype)
+            if f['value'] in accepted:
+                removable.append(f)
+
+        if not removable:
+            continue
+
+        # Keep the fields that are NOT removable, in original order, then append
+        # `..Default::default()`. Rebuild the whole literal body deterministically.
+        kept = [f for f in parsed if f not in removable and not f.get('passthrough')]
+
+        # Indentation from the first inner field line.
+        indent = inst['indent']
+
+        new_body_lines = []
+        for f in kept:
+            # Re-emit the field's ORIGINAL source lines verbatim to preserve
+            # exact formatting/values (multi-line json!, etc.).
+            for ln in range(f['first_line'] - 1, f['last_line']):
+                new_body_lines.append(lines[ln])
+        new_body_lines.append(f"{indent}..Default::default()")
+
+        # Replace the inner region (between braces) with the rebuilt body.
+        # start/end are 1-indexed inclusive lines to replace.
+        edits.append({
+            'file': file_path,
+            'start_line': open_line + 2,   # first inner line (1-indexed)
+            'end_line': close_line,        # last inner line (1-indexed)
+            'replacement': '\n'.join(new_body_lines),
+            'description': (
+                f"Collapse {len(removable)} default-valued field(s) "
+                f"into ..Default::default() in {struct_name} instantiation"
+            ),
+        })
+        collapsed += 1
+
+    return {
+        'edits': edits,
+        'instantiations_found': len(instantiations),
+        'instantiations_collapsed': collapsed,
+    }
