@@ -118,6 +118,7 @@
     "test:wp-codebox-recipe-helper": "node tests/wp-codebox-recipe-helper-smoke.js",
     "test:wp-codebox-fuzz-plan-recipe-builder": "node tests/wp-codebox-fuzz-plan-recipe-builder-smoke.js",
     "test:wp-codebox-canonical-cli-adapters": "node tests/wp-codebox-canonical-cli-adapters-smoke.mjs",
+    "test:wp-codebox-doctor": "bash scripts/test/wp-codebox-doctor-smoke.sh",
     "test:wordpress-multisite-e2e-rig": "node rigs/wordpress-multisite-e2e/tests/contract.test.mjs",
     "test:wordpress-multisite-e2e-rig-integration": "node tests/wp-codebox-multisite-network-rig-integration.mjs",
     "test:wp-codebox-artifacts": "node tests/wp-codebox-artifacts-smoke.js",

@@ -155,4 +155,30 @@ if [[ "$runtime_output" != *"runtime wp-codebox doctor"* ]]; then
     exit 1
 fi
 
+MINIMAL_BIN="${TMPDIR}/minimal-bin"
+mkdir -p "$MINIMAL_BIN"
+ln -s "$(command -v dirname)" "${MINIMAL_BIN}/dirname"
+
+set +e
+missing_output=$(HOME="${TMPDIR}/missing-home" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/missing-install" \
+    HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/missing-wp-codebox" \
+    HOMEBOY_SETTINGS_JSON='{}' \
+    PATH="$MINIMAL_BIN" \
+    /bin/bash "$DOCTOR" doctor 2>&1)
+missing_status=$?
+set -e
+
+if [ "$missing_status" -eq 0 ]; then
+    echo "Expected doctor to fail when WP Codebox is unavailable" >&2
+    echo "$missing_output" >&2
+    exit 1
+fi
+
+if [[ "$missing_output" != *"wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN, settings wp_codebox_bin, or install wp-codebox"* ]]; then
+    echo "Expected actionable missing WP Codebox guidance" >&2
+    echo "$missing_output" >&2
+    exit 1
+fi
+
 echo "WP Codebox doctor wrapper smoke passed"

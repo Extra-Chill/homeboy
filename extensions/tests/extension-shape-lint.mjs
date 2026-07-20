@@ -247,7 +247,7 @@ function validateExtension(extensionId) {
       assertRelativeFile(extensionId, value, keyPath.join('.'));
     }
 
-    if ((key === 'setup_command' || key === 'run_command' || key === 'command') && typeof value === 'string') {
+    if ((key === 'setup_command' || key === 'ready_check' || key === 'run_command' || key === 'command') && typeof value === 'string') {
       for (const relativePath of extractExtensionPathCommands(value)) {
         assertRelativeFile(extensionId, relativePath, keyPath.join('.'));
       }

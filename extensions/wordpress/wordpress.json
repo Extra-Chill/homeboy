@@ -939,7 +939,7 @@
   "executable": {
     "runtime": {
       "setup_command": "bash {{extension_path}}/scripts/build/setup.sh",
-      "ready_check": "node {{extension_path}}/scripts/build/check-wp-codebox-runtime-core.mjs",
+      "ready_check": "bash {{extension_path}}/scripts/doctor/wp-codebox-doctor.sh doctor",
       "run_command": "bash {{extension_path}}/scripts/test/test-runner.sh"
     }
   },
