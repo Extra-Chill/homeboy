@@ -626,6 +626,11 @@ fn cancelled_or_expired_pending_handoff_never_submits_new_runner_work() {
 
         cancel_run("cancel-before-admission", Some("operator cancelled"))
             .expect("cancel before daemon acceptance");
+        record_lab_offload_submission_request(
+            "expire-before-admission",
+            &replay_request("expire-before-admission", &command),
+        )
+        .expect("persist complete pending request");
         rewrite_record_for_test("expire-before-admission", |record| {
             record
                 .lab_handoff

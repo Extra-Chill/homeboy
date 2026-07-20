@@ -256,7 +256,8 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
         assert_eq!(planned.state, AgentTaskRunState::Queued);
         assert!(planned.metadata.get("runner_job_id").is_none());
         assert_eq!(planned.metadata["lifecycle_store_owner"], "controller");
-        assert_eq!(planned.metadata["handoff_acceptance"]["state"], "pending");
+        assert!(planned.lab_handoff.is_none());
+        assert!(planned.metadata.get("handoff_acceptance").is_none());
         assert!(load_plan("agent-task-controller-proxy")
             .expect("proxy plan")
             .tasks[0]

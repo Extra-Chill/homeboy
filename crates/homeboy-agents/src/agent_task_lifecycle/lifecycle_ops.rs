@@ -960,15 +960,23 @@ pub fn record_lab_offload_submission_request(
     let run_id = sanitize_run_id(run_id);
     let _lock = LabHandoffLock::lock(&run_id)?;
     let mut record = store::read_record(&run_id)?;
+    if record.state.is_terminal() {
+        return Ok(record);
+    }
     let submission_key = request.submission_key().ok_or_else(|| {
         Error::internal_unexpected("Lab runner submission request has no stable submission key")
     })?;
     let replay_request = request.redacted_for_durable_replay();
     let payload_fingerprint = replay_request.submission_payload_fingerprint()?;
-    if let Some(handoff) = record.lab_handoff.as_mut() {
-        handoff.submission_key = Some(submission_key.to_string());
-        handoff.payload_fingerprint = Some(payload_fingerprint.clone());
-    }
+    let now = chrono::Utc::now();
+    let mut handoff = AgentTaskLabHandoff::pending(
+        &replay_request.runner_id,
+        now.to_rfc3339(),
+        (now + chrono::Duration::seconds(lab_handoff_acceptance_timeout_seconds())).to_rfc3339(),
+    );
+    handoff.submission_key = Some(submission_key.to_string());
+    handoff.payload_fingerprint = Some(payload_fingerprint.clone());
+    record.lab_handoff = Some(handoff.clone());
     let metadata = record.ensure_metadata_object();
     metadata.insert(
         "runner_submission_intent".to_string(),
@@ -978,6 +986,14 @@ pub fn record_lab_offload_submission_request(
             "payload_fingerprint": payload_fingerprint,
             "runner_id": replay_request.runner_id,
             "replay_request": replay_request,
+        }),
+    );
+    metadata.insert(
+        "handoff_acceptance".to_string(),
+        json!({
+            "state": "pending",
+            "started_at": handoff.submitted_at,
+            "deadline_at": handoff.acceptance_deadline_at,
         }),
     );
     store::write_record(&record)?;
@@ -999,7 +1015,7 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     if reconcile_pending_runner_submission_intent(&resolved_run_id)? {
         record = store::read_record(&resolved_run_id)?;
     }
-    if record.has_expired_pending_lab_handoff(chrono::Utc::now()) {
+    if has_expired_pending_runner_submission_intent(&record, chrono::Utc::now()) {
         let _ = expire_unaccepted_lab_handoff(&resolved_run_id)?;
         record = store::read_record(&resolved_run_id)?;
     }
@@ -1153,7 +1169,7 @@ pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
             accepted_run_ids.push(record.run_id);
         } else if has_pending_runner_submission_intent(&record) {
             pending_intent_run_ids.push(record.run_id);
-        } else if record.has_expired_pending_lab_handoff(now) {
+        } else if has_expired_pending_runner_submission_intent(&record, now) {
             expired_run_ids.push(record.run_id);
         }
     }
@@ -1181,24 +1197,64 @@ pub fn reconcile_active_lab_runner_handoffs() -> Result<usize> {
 }
 
 fn has_pending_runner_submission_intent(record: &AgentTaskRunRecord) -> bool {
-    record.state == AgentTaskRunState::Queued
-        && record.runner_job_id().is_none()
-        && record.lab_handoff.as_ref().is_some_and(|handoff| {
-            handoff.state == AgentTaskLabHandoffState::Pending
-                && handoff.authority == AgentTaskLabHandoffAuthority::Controller
-                && handoff
-                    .acceptance_deadline_at
-                    .as_deref()
-                    .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
-                    .is_some_and(|deadline| {
-                        deadline.with_timezone(&chrono::Utc) > chrono::Utc::now()
-                    })
-        })
+    has_complete_pending_runner_submission_intent(record)
         && record
-            .metadata
-            .pointer("/runner_submission_intent/state")
-            .and_then(Value::as_str)
-            == Some("pending")
+            .lab_handoff
+            .as_ref()
+            .and_then(|handoff| handoff.acceptance_deadline_at.as_deref())
+            .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+            .is_some_and(|deadline| deadline.with_timezone(&chrono::Utc) > chrono::Utc::now())
+}
+
+pub(crate) fn has_expired_pending_runner_submission_intent(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    has_complete_pending_runner_submission_intent(record)
+        && record.has_expired_pending_lab_handoff(now)
+}
+
+fn has_complete_pending_runner_submission_intent(record: &AgentTaskRunRecord) -> bool {
+    if record.state != AgentTaskRunState::Queued || record.runner_job_id().is_some() {
+        return false;
+    }
+    let Some(handoff) = record.lab_handoff.as_ref().filter(|handoff| {
+        handoff.state == AgentTaskLabHandoffState::Pending
+            && handoff.authority == AgentTaskLabHandoffAuthority::Controller
+    }) else {
+        return false;
+    };
+    let Some(intent) = record
+        .metadata
+        .get("runner_submission_intent")
+        .and_then(Value::as_object)
+        .filter(|intent| intent.get("state").and_then(Value::as_str) == Some("pending"))
+    else {
+        return false;
+    };
+    let Some(submission_key) = intent
+        .get("submission_key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return false;
+    };
+    let Some(runner_id) = intent
+        .get("runner_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return false;
+    };
+    let Ok(request) = serde_json::from_value::<RemoteRunnerJobRequest>(
+        intent.get("replay_request").cloned().unwrap_or(Value::Null),
+    ) else {
+        return false;
+    };
+    request.runner_id == runner_id
+        && request.submission_key() == Some(submission_key)
+        && handoff.runner_id == runner_id
+        && handoff.submission_key.as_deref() == Some(submission_key)
 }
 
 /// Replay an unacknowledged durable handoff. A broker that already accepted the
@@ -1398,7 +1454,7 @@ fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
     // Re-read while holding the handoff lock: an accepted job is runner-owned
     // and must never be terminalized by controller deadline recovery.
     let record = store::read_record(run_id)?;
-    if !record.has_expired_pending_lab_handoff(chrono::Utc::now()) {
+    if !has_expired_pending_runner_submission_intent(&record, chrono::Utc::now()) {
         return Ok(false);
     }
 
@@ -1737,6 +1793,9 @@ pub fn record_lab_offload_phase(
         &[],
         durable_plan,
     )?;
+    if record.state.is_terminal() {
+        return Ok(record);
+    }
     record.updated_at = Some(now_timestamp());
     let phase_started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
     let metadata = record.ensure_metadata_object();
@@ -1764,6 +1823,9 @@ pub fn record_lab_offload_phase_executions(
     execution_ids: impl IntoIterator<Item = String>,
 ) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if record.state.is_terminal() {
+        return Ok(record);
+    }
     let execution_ids: Vec<String> = execution_ids
         .into_iter()
         .filter(|id| !id.trim().is_empty())
@@ -1863,6 +1925,19 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
                 record.run_id,
                 accepted.runner_id,
                 accepted.runner_job_id.as_deref().unwrap_or_default(),
+            ),
+            Some(record.run_id.clone()),
+            None,
+        ));
+    }
+    if record.lab_handoff.is_none() && record.runner_id().is_some_and(|id| id != input.runner_id) {
+        return Err(Error::validation_invalid_argument(
+            "runner_id",
+            format!(
+                "Lab handoff for run '{}' is assigned to runner '{}'; refusing acceptance from '{}'",
+                record.run_id,
+                record.runner_id().unwrap_or_default(),
+                input.runner_id,
             ),
             Some(record.run_id.clone()),
             None,
@@ -2097,17 +2172,8 @@ fn record_lab_offload_proxy(
         }
     }
     record.plan_path = store::controller_plan_path(&run_id)?.display().to_string();
-    let pending_handoff = (!record.has_accepted_lab_handoff()).then(|| {
-        let now = chrono::Utc::now();
-        AgentTaskLabHandoff::pending(
-            runner_id,
-            now.to_rfc3339(),
-            (now + chrono::Duration::seconds(lab_handoff_acceptance_timeout_seconds()))
-                .to_rfc3339(),
-        )
-    });
-    if let Some(handoff) = pending_handoff.as_ref() {
-        record.lab_handoff = Some(handoff.clone());
+    if record.state.is_terminal() {
+        return Ok(record);
     }
     let metadata = record.ensure_metadata_object();
     metadata.insert("kind".to_string(), json!("lab_offload_controller_proxy"));
@@ -2115,16 +2181,6 @@ fn record_lab_offload_proxy(
     // It remains controller-owned until a runner-local record is independently
     // discovered, so controller-generated commands must keep resolving here.
     metadata.insert("lifecycle_store_owner".to_string(), json!("controller"));
-    if let Some(handoff) = pending_handoff {
-        metadata.insert(
-            "handoff_acceptance".to_string(),
-            json!({
-                "state": "pending",
-                "started_at": handoff.submitted_at,
-                "deadline_at": handoff.acceptance_deadline_at,
-            }),
-        );
-    }
     metadata.insert("runner_id".to_string(), json!(runner_id));
     if remote_workspace != "pending" {
         metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
