@@ -13,6 +13,21 @@ pub(crate) fn reconcile_runner_job_snapshot(
     record: &mut AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
+    // Single owner of pre-acceptance binding: bind a still-pending controller
+    // handoff to this snapshot's daemon job before any validation or projection,
+    // then advance a freshly-bound queued proxy to running. Every reconcile path
+    // (transport-proxy, runner-job-state, terminal-evidence recovery) flows
+    // through here, so binding cannot diverge across callers. Both steps no-op
+    // once the run is already bound / no longer queued.
+    bind_pending_lab_handoff_snapshot(record, snapshot)?;
+    if record.state == AgentTaskRunState::Queued {
+        set_run_state(record, AgentTaskRunState::Running);
+        for task in &mut record.tasks {
+            if task.state == AgentTaskState::Queued {
+                task.state = AgentTaskState::Running;
+            }
+        }
+    }
     if record.state.is_terminal() {
         // A transport-only terminal result can arrive before the daemon has
         // published the inner agent-task aggregate. Adopt that later evidence
