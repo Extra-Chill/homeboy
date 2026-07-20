@@ -36,6 +36,29 @@ fn forced_reconnect_reports_the_jobs_it_will_interrupt() {
     );
 }
 
+#[test]
+fn deferred_reconnect_reports_selected_binary_and_exact_active_job_followups() {
+    let job_id = "0b77251a-b6a7-42a6-91a3-e49ff5f57c16".to_string();
+    let followups = active_job_followups("homeboy-lab", std::slice::from_ref(&job_id));
+
+    let deferred = HomeboyReconnectDeferred {
+        reason: "active_daemon_jobs",
+        active_job_ids: vec![job_id.clone()],
+        selected_binary_path: "/runner/homeboy".to_string(),
+        followup_commands: followups.clone(),
+    };
+
+    assert_eq!(deferred.active_job_ids, vec![job_id]);
+    assert_eq!(deferred.selected_binary_path, "/runner/homeboy");
+    assert_eq!(
+        followups,
+        vec![
+            "homeboy runner job logs homeboy-lab 0b77251a-b6a7-42a6-91a3-e49ff5f57c16 --follow",
+            "homeboy runner refresh-homeboy homeboy-lab --reconnect",
+        ]
+    );
+}
+
 fn active_admission(job_id: &str) -> homeboy_core::api_jobs::ActiveRunnerJobSummary {
     homeboy_core::api_jobs::ActiveRunnerJobSummary {
         runner_id: "homeboy-lab".to_string(),

@@ -81,9 +81,19 @@ pub struct HomeboyBinaryRefreshOutput {
     pub reconnect_required: bool,
     pub followup_commands: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconnect_deferred: Option<HomeboyReconnectDeferred>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<HomeboyBinaryRefreshFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bootstrap_provenance: Option<HomeboyBootstrapProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HomeboyReconnectDeferred {
+    pub reason: &'static str,
+    pub active_job_ids: Vec<String>,
+    pub selected_binary_path: String,
+    pub followup_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +291,7 @@ pub fn refresh_homeboy_binary(
                 selected_binary_path: plan.binary_path.clone(),
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
+                reconnect_deferred: None,
                 failure: None,
                 bootstrap_provenance: None,
                 plan,
@@ -318,6 +329,7 @@ pub fn refresh_homeboy_binary(
                 selected_binary_path: plan.binary_path.clone(),
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
+                reconnect_deferred: None,
                 failure: Some(refresh_failure(&plan, exec_output, exit_code)),
                 bootstrap_provenance: None,
                 plan,
@@ -381,6 +393,7 @@ pub fn refresh_homeboy_binary(
                     selected_binary_path: plan.binary_path.clone(),
                     reconnect_required: !plan.reconnect,
                     followup_commands: plan.followup_commands.clone(),
+                    reconnect_deferred: None,
                     failure: Some(refresh_verification_failure(
                         &plan,
                         exec_output,
@@ -401,8 +414,63 @@ pub fn refresh_homeboy_binary(
     if options.reconnect {
         promotion_lease.assert_generation()?;
         let active_jobs = active_jobs_before_daemon_replacement(&plan.runner_id)?;
-        interrupted_job_ids =
-            protect_active_jobs_before_reconnect(&plan.runner_id, &active_jobs, options.force)?;
+        interrupted_job_ids = match protect_active_jobs_before_reconnect(
+            &plan.runner_id,
+            &active_jobs,
+            options.force,
+        ) {
+            Ok(job_ids) => job_ids,
+            Err(_) => {
+                let active_job_ids = active_jobs
+                    .iter()
+                    .map(|job| job.job_id.clone())
+                    .collect::<Vec<_>>();
+                let followup_commands = active_job_followups(&plan.runner_id, &active_job_ids);
+                return Ok((
+                    HomeboyBinaryRefreshOutput {
+                        variant: "refresh_homeboy",
+                        command: "runner.refresh_homeboy",
+                        runner_id: plan.runner_id.clone(),
+                        dry_run: false,
+                        plan: plan.clone(),
+                        identity: Some(identity.clone()),
+                        updated_fields: updated_fields.clone(),
+                        daemon_refreshed: false,
+                        interrupted_job_ids: Vec::new(),
+                        selected_binary_path: plan.binary_path.clone(),
+                        reconnect_required: true,
+                        followup_commands: followup_commands.clone(),
+                        reconnect_deferred: Some(HomeboyReconnectDeferred {
+                            reason: "active_daemon_jobs",
+                            active_job_ids,
+                            selected_binary_path: plan.binary_path.clone(),
+                            followup_commands,
+                        }),
+                        failure: None,
+                        bootstrap_provenance: Some(HomeboyBootstrapProvenance {
+                            transport: if disconnected_ssh {
+                                "ssh_bootstrap"
+                            } else {
+                                "daemon"
+                            },
+                            requested_ref: plan.git_ref.clone(),
+                            resolved_source_sha: bootstrap.source_sha,
+                            binary_commit: identity
+                                .get("data")
+                                .unwrap_or(&identity)
+                                .get("git_commit")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            binary_identity: identity,
+                            timeout_ms: disconnected_ssh
+                                .then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT.as_millis()),
+                            config_fields_changed: updated_fields,
+                        }),
+                    },
+                    1,
+                ));
+            }
+        };
         if let Err(error) =
             disconnect_with_session(&plan.runner_id, refresh_session.as_ref(), options.force)
         {
@@ -462,6 +530,7 @@ pub fn refresh_homeboy_binary(
                     selected_binary_path: plan.binary_path.clone(),
                     reconnect_required: true,
                     followup_commands: plan.followup_commands.clone(),
+                    reconnect_deferred: None,
                     failure: Some(refresh_reconnect_failure(
                         &plan,
                         &exec_output,
@@ -491,6 +560,7 @@ pub fn refresh_homeboy_binary(
             selected_binary_path: plan.binary_path.clone(),
             reconnect_required: !daemon_refreshed,
             followup_commands: plan.followup_commands,
+            reconnect_deferred: None,
             failure: None,
             bootstrap_provenance: Some(HomeboyBootstrapProvenance {
                 transport: if disconnected_ssh {
@@ -1545,6 +1615,23 @@ fn protect_active_jobs_before_reconnect(
         return Err(active_job_reconnect_error(runner_id, &job_ids));
     }
     Ok(job_ids)
+}
+
+fn active_job_followups(runner_id: &str, job_ids: &[String]) -> Vec<String> {
+    job_ids
+        .iter()
+        .map(|job_id| {
+            format!(
+                "homeboy runner job logs {} {} --follow",
+                shell_arg(runner_id),
+                shell_arg(job_id)
+            )
+        })
+        .chain(std::iter::once(format!(
+            "homeboy runner refresh-homeboy {} --reconnect",
+            shell_arg(runner_id)
+        )))
+        .collect()
 }
 
 fn non_empty<'a>(name: &str, value: &'a str) -> Result<&'a str> {

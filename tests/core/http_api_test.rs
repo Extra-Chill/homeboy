@@ -571,6 +571,85 @@ fn runs_list_includes_active_runner_jobs() {
 }
 
 #[test]
+fn active_runner_job_run_lookup_preserves_daemon_identity_when_hydration_is_partial() {
+    with_isolated_home(|_| {
+        let _xdg = XdgGuard::unset();
+        let observations = ObservationStore::open_initialized().expect("store");
+
+        for (run_id, persisted) in [
+            ("present-run", Some(("running", serde_json::json!({})))),
+            ("missing-run", None),
+            ("stale-run", Some(("stale", serde_json::json!({})))),
+            (
+                "foreign-run",
+                Some((
+                    "running",
+                    serde_json::json!({ "lab": { "remote_job": { "id": "other-job" } } }),
+                )),
+            ),
+        ] {
+            if let Some((status, metadata_json)) = persisted {
+                observations
+                    .import_run(&RunRecord {
+                        id: run_id.to_string(),
+                        kind: "agent-task".to_string(),
+                        started_at: "2030-01-01T00:00:00Z".to_string(),
+                        finished_at: None,
+                        status: status.to_string(),
+                        command: None,
+                        cwd: None,
+                        component_id: None,
+                        homeboy_version: None,
+                        git_sha: None,
+                        rig_id: None,
+                        metadata_json,
+                    })
+                    .expect("persist run fixture");
+            }
+
+            let jobs = JobStore::default();
+            let job = queued_local_runner_job(&jobs, Some(run_id));
+            let response = http_api::handle_with_jobs(
+                HttpApiRequest {
+                    method: HttpMethod::Get,
+                    path: format!("/runs/{run_id}"),
+                    body: None,
+                },
+                &jobs,
+            )
+            .expect("active daemon job projection remains readable");
+
+            assert_eq!(response.body["run"]["id"], run_id);
+            match run_id {
+                "present-run" => {
+                    assert!(response.body["run"]["runner_job_projection"].is_null());
+                    assert_eq!(response.body["run"]["metadata"], serde_json::json!({}));
+                }
+                "missing-run" => assert_eq!(
+                    response.body["run"]["metadata"]["runner_job_projection"]["state"],
+                    "missing_durable_run_record"
+                ),
+                "stale-run" => assert_eq!(
+                    response.body["run"]["metadata"]["runner_job_projection"]["state"],
+                    "stale_durable_run_record"
+                ),
+                "foreign-run" => assert_eq!(
+                    response.body["run"]["metadata"]["runner_job_projection"]["state"],
+                    "foreign_durable_run_record"
+                ),
+                _ => unreachable!(),
+            }
+            if run_id != "present-run" {
+                assert_eq!(
+                    response.body["run"]["metadata"]["runner_job_projection"]["job_id"],
+                    job.id.to_string()
+                );
+            }
+        }
+    });
+}
+
+#[test]
 fn test_handle() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
