@@ -2,8 +2,19 @@
 //! a struct definition changes.
 //!
 //! Scans the codebase for instantiations of a named struct, detects which fields
-//! are missing, and inserts them with sensible defaults. Uses the Rust extension's
-//! `propagate_struct_fields` refactor script to do the actual analysis.
+//! are missing, and inserts them with sensible defaults.
+//!
+//! # Language dispatch
+//!
+//! The dispatch is **language-generic**: this module enumerates every installed
+//! extension that advertises a `refactor` script and, for each, scans the file
+//! extensions it handles and sends candidate files to that extension's
+//! `propagate_struct_fields` command. Any language whose refactor extension
+//! implements that command participates automatically — nothing in the scan
+//! loop is Rust-specific. Today only the Rust extension implements it;
+//! `find_struct_definition`/`extract_struct_source` parse Rust struct syntax, so
+//! a non-Rust implementation would supply its own definition source via
+//! `--definition`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -105,23 +116,28 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
         )
     })?;
 
-    // Step 3: Find the extension for .rs files
-    let ext_manifest = extension::find_extension_for_file_ext("rs", "refactor").ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "extension",
-            "No extension with refactor capability found for .rs files. Install the Rust extension.",
-            None,
-            None,
-        )
-    })?;
+    // Step 3: Discover every refactor-capable extension and the file extensions
+    // it handles. Propagation is language-generic: any language whose refactor
+    // extension implements the `propagate_struct_fields` command participates.
+    // The Rust extension is the first implementer, but nothing in the loop below
+    // is Rust-specific — a Go/Swift/PHP refactor extension that grows the same
+    // command is picked up automatically. (`find_struct_definition`/
+    // `extract_struct_source` currently parse Rust struct syntax; a non-Rust
+    // implementation would supply its own definition source via `--definition`.)
+    let refactor_exts: Vec<extension::ExtensionManifest> = extension::load_all_extensions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.refactor_script().is_some() && !m.provided_file_extensions().is_empty())
+        .collect();
 
-    // Step 4: Walk all .rs files using canonical scanner
-    let scan_config = ScanConfig {
-        extensions: ExtensionFilter::Only(vec!["rs".to_string()]),
-        skip_hidden: true,
-        ..Default::default()
-    };
-    let rs_files = codebase_scan::walk_files(root, &scan_config);
+    if refactor_exts.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "extension",
+            "No extension with refactor capability found. Install a language refactor extension (e.g. the Rust extension).",
+            None,
+            None,
+        ));
+    }
 
     let def_relative = def_file
         .strip_prefix(root)
@@ -134,79 +150,97 @@ pub fn propagate(config: &PropagateConfig) -> Result<PropagateResult, Error> {
     let mut total_needing_fix = 0usize;
     let mut files_scanned = 0usize;
 
-    homeboy_core::log_status!(
-        "propagate",
-        "Scanning {} .rs files for {} instantiations",
-        rs_files.len(),
-        struct_name
-    );
+    // Step 4: For each refactor extension, scan the files it handles and send
+    // them to that extension's refactor script.
+    for ext_manifest in &refactor_exts {
+        let handled_exts: Vec<String> = ext_manifest.provided_file_extensions().to_vec();
 
-    for file_path in &rs_files {
-        let relative = file_path
-            .strip_prefix(root)
-            .unwrap_or(file_path)
-            .to_string_lossy()
-            .to_string();
-
-        let Ok(file_content) = std::fs::read_to_string(file_path) else {
-            continue;
+        let scan_config = ScanConfig {
+            extensions: ExtensionFilter::Only(handled_exts.clone()),
+            skip_hidden: true,
+            ..Default::default()
         };
+        let files = codebase_scan::walk_files(root, &scan_config);
 
-        // Quick check: skip files that don't mention the struct name
-        if !file_content.contains(struct_name) {
-            continue;
-        }
+        homeboy_core::log_status!(
+            "propagate",
+            "Scanning {} {} file(s) for {} instantiations",
+            files.len(),
+            handled_exts.join("/"),
+            struct_name
+        );
 
-        files_scanned += 1;
+        for file_path in &files {
+            let relative = file_path
+                .strip_prefix(root)
+                .unwrap_or(file_path)
+                .to_string_lossy()
+                .to_string();
 
-        let cmd = serde_json::json!({
-            "command": "propagate_struct_fields",
-            "struct_name": struct_name,
-            "struct_source": struct_source,
-            "file_content": file_content,
-            "file_path": relative,
-        });
+            let Ok(file_content) = std::fs::read_to_string(file_path) else {
+                continue;
+            };
 
-        let Some(result) = extension::run_refactor_script(&ext_manifest, &cmd) else {
-            homeboy_core::log_status!("warning", "Extension returned no result for {}", relative);
-            continue;
-        };
+            // Quick check: skip files that don't mention the struct name
+            if !file_content.contains(struct_name) {
+                continue;
+            }
 
-        if let Some(found) = result.get("instantiations_found").and_then(|v| v.as_u64()) {
-            total_instantiations += found as usize;
-        }
-        if let Some(needing) = result
-            .get("instantiations_needing_fix")
-            .and_then(|v| v.as_u64())
-        {
-            total_needing_fix += needing as usize;
-        }
+            files_scanned += 1;
 
-        if let Some(edits) = result.get("edits").and_then(|v| v.as_array()) {
-            for edit in edits {
-                let file = edit
-                    .get("file")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&relative)
-                    .to_string();
-                let line = edit.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let insert_text = edit
-                    .get("insert_text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let description = edit
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+            let cmd = serde_json::json!({
+                "command": "propagate_struct_fields",
+                "struct_name": struct_name,
+                "struct_source": struct_source,
+                "file_content": file_content,
+                "file_path": relative,
+            });
 
-                all_edits.push(PropagateEdit {
-                    file,
-                    line,
-                    insert_text,
-                    description,
-                });
+            let Some(result) = extension::run_refactor_script(ext_manifest, &cmd) else {
+                homeboy_core::log_status!(
+                    "warning",
+                    "Extension returned no result for {}",
+                    relative
+                );
+                continue;
+            };
+
+            if let Some(found) = result.get("instantiations_found").and_then(|v| v.as_u64()) {
+                total_instantiations += found as usize;
+            }
+            if let Some(needing) = result
+                .get("instantiations_needing_fix")
+                .and_then(|v| v.as_u64())
+            {
+                total_needing_fix += needing as usize;
+            }
+
+            if let Some(edits) = result.get("edits").and_then(|v| v.as_array()) {
+                for edit in edits {
+                    let file = edit
+                        .get("file")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&relative)
+                        .to_string();
+                    let line = edit.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let insert_text = edit
+                        .get("insert_text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let description = edit
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    all_edits.push(PropagateEdit {
+                        file,
+                        line,
+                        insert_text,
+                        description,
+                    });
+                }
             }
         }
     }
