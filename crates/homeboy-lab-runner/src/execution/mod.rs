@@ -9,12 +9,12 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use homeboy_core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
 use homeboy_core::engine::command::CommandCaptureMetadata;
 use homeboy_core::env_materialization_plan::EnvMaterializationPlan;
-use homeboy_core::error::{Error, Result};
+use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
 use homeboy_core::runner_execution_envelope::{
@@ -964,13 +964,38 @@ fn refuses_stale_daemon_execution(
 ) -> bool {
     status.connected
         && status.stale_daemon.is_some()
-        // The live daemon probe is authoritative over a controller-scoped
-        // session projection. Missing or stale evidence remains fail-closed.
-        && !status
-            .daemon_freshness
-            .as_ref()
-            .is_some_and(|freshness| freshness.fresh)
         && !allows_idle_stale_daemon_refresh(options, status)
+}
+
+fn validate_generic_exec_mirror_run_id(
+    run_id_owns_generic_exec: bool,
+    requested_run_id: Option<&str>,
+    persisted_run_id: Option<&str>,
+) -> Result<()> {
+    let (true, Some(requested_run_id), Some(persisted_run_id)) =
+        (run_id_owns_generic_exec, requested_run_id, persisted_run_id)
+    else {
+        return Ok(());
+    };
+    if requested_run_id == persisted_run_id {
+        return Ok(());
+    }
+
+    Err(Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        format!(
+            "runner exec persisted run identity mismatch: requested `{requested_run_id}`, received `{persisted_run_id}`"
+        ),
+        json!({
+            "requested_run_id": requested_run_id,
+            "persisted_run_id": persisted_run_id,
+            "run_id_owns_generic_exec": true,
+        }),
+    )
+    .with_hint(
+        "Treat the explicit runner exec run ID as authoritative; inspect the runner daemon identity before retrying."
+            .to_string(),
+    ))
 }
 
 fn apply_explicit_runner_exec_run_id_env(

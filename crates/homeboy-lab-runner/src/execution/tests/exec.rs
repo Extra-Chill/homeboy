@@ -142,7 +142,7 @@ fn explicit_refresh_keeps_active_or_uncertain_stale_daemons_protected() {
 }
 
 #[test]
-fn runner_exec_accepts_a_fresh_daemon_when_a_scoped_session_projection_is_stale() {
+fn runner_exec_rejects_a_live_daemon_with_an_incompatible_build_identity() {
     let mut status = stale_direct_daemon_status();
     status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
         fresh: true,
@@ -150,7 +150,7 @@ fn runner_exec_accepts_a_fresh_daemon_when_a_scoped_session_projection_is_stale(
         ..authoritative_drained_freshness()
     });
 
-    assert!(!refuses_stale_daemon_execution(
+    assert!(refuses_stale_daemon_execution(
         &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
         &status,
     ));
@@ -162,6 +162,28 @@ fn runner_exec_keeps_stale_session_projections_fail_closed_without_fresh_daemon_
         &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
         &stale_direct_daemon_status(),
     ));
+}
+
+#[test]
+fn generic_runner_exec_rejects_a_mismatched_persisted_run_identity() {
+    let error = validate_generic_exec_mirror_run_id(
+        true,
+        Some("requested-run"),
+        Some("unrelated-active-run"),
+    )
+    .expect_err("explicit generic runner exec identity must fail closed");
+
+    assert_eq!(error.code, ErrorCode::RunnerLabTransportFailure);
+    assert_eq!(error.details["requested_run_id"], "requested-run");
+    assert_eq!(error.details["persisted_run_id"], "unrelated-active-run");
+}
+
+#[test]
+fn generic_runner_exec_accepts_its_explicit_persisted_run_identity() {
+    validate_generic_exec_mirror_run_id(true, Some("requested-run"), Some("requested-run"))
+        .expect("matching identity remains valid");
+    validate_generic_exec_mirror_run_id(false, Some("agent-task-run"), Some("mirrored-run"))
+        .expect("non-generic workflows retain their existing mirror ownership");
 }
 
 #[test]

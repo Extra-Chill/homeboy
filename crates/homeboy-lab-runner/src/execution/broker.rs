@@ -187,6 +187,11 @@ pub(super) fn exec_via_reverse_broker(
     let persisted_run_id = mirror_evidence
         .then(|| persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref()))
         .flatten();
+    validate_generic_exec_mirror_run_id(
+        run_id_owns_generic_exec,
+        run_id.as_deref(),
+        persisted_run_id.as_deref(),
+    )?;
     if detach_after_handoff {
         return Ok(detached_handoff_output(
             runner,
@@ -280,6 +285,11 @@ pub(super) fn exec_via_reverse_broker(
     };
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
     let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.clone());
+    validate_generic_exec_mirror_run_id(
+        run_id_owns_generic_exec,
+        run_id.as_deref(),
+        mirror_run_id.as_deref(),
+    )?;
     let artifacts = job.artifacts.clone();
     let mutation_artifacts = mutation_artifacts_from_job(&job, &result);
 
