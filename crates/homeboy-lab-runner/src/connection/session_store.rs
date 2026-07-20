@@ -304,6 +304,14 @@ pub(super) fn remove_ownership(runner_id: &str) -> Result<()> {
 
 pub(super) fn has_live_peer_session(session: &RunnerSession) -> Result<bool> {
     let directory = paths::runner_sessions_dir()?.join(&session.runner_id);
+    has_live_peer_session_in(&directory, session, session_is_live)
+}
+
+fn has_live_peer_session_in(
+    directory: &PathBuf,
+    session: &RunnerSession,
+    is_live: impl Fn(&RunnerSession) -> bool,
+) -> Result<bool> {
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -321,12 +329,15 @@ pub(super) fn has_live_peer_session(session: &RunnerSession) -> Result<bool> {
                 Some("read runner controller session".to_string()),
             )
         })?;
+        if !is_controller_session_file(&entry.path()) {
+            continue;
+        }
         let Some(peer) = read_session_at(&entry.path())? else {
             continue;
         };
         if peer.controller_id != session.controller_id
             && peer.remote_daemon_lease_id == session.remote_daemon_lease_id
-            && session_is_live(&peer)
+            && is_live(&peer)
         {
             return Ok(true);
         }
@@ -357,6 +368,9 @@ fn live_peer_session_in(
                 Some("read runner controller session".to_string()),
             )
         })?;
+        if !is_controller_session_file(&entry.path()) {
+            continue;
+        }
         let Some(peer) = read_session_at(&entry.path())? else {
             continue;
         };
@@ -381,6 +395,21 @@ fn live_peer_session_in(
         }
     }
     Ok(live_peer)
+}
+
+/// Only controller session records participate in peer scans. Other state in a
+/// runner directory has its own schema and must not be parsed as a session.
+fn is_controller_session_file(path: &std::path::Path) -> bool {
+    const RESERVED_SIDECARS: &[&str] = &["generations.json"];
+
+    path.is_file()
+        && path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| !RESERVED_SIDECARS.contains(&name))
 }
 
 #[cfg(test)]
@@ -610,6 +639,56 @@ mod tests {
         assert_eq!(adopted.controller_id.as_deref(), Some("cook-readiness"));
         assert!(root.path().join("cook-readiness.json").exists());
         assert!(!root.path().join("cook-handoff.json").exists());
+    }
+
+    #[test]
+    fn peer_scans_ignore_reserved_generation_sidecars() {
+        let root = TempDir::new().expect("session directory");
+        let owner = session("controller-owner", "lease-live");
+        let peer = session("controller-peer", "lease-live");
+        write_session_at(&root.path().join("controller-owner.json"), &owner)
+            .expect("write owner session");
+        write_session_at(&root.path().join("controller-peer.json"), &peer)
+            .expect("write peer session");
+        std::fs::write(root.path().join("generations.json"), "{}")
+            .expect("write generation sidecar");
+
+        let live_peer = live_peer_session_in(
+            &root.path().to_path_buf(),
+            owner.controller_id.as_deref(),
+            |_| true,
+        )
+        .expect("resolve live peer")
+        .expect("live peer");
+        assert_eq!(live_peer, peer);
+        assert!(
+            !has_live_peer_session_in(&root.path().to_path_buf(), &owner, |_| false)
+                .expect("scan reserved sidecar without a live peer")
+        );
+        assert!(
+            has_live_peer_session_in(&root.path().to_path_buf(), &owner, |_| true)
+                .expect("check live peer")
+        );
+    }
+
+    #[test]
+    fn peer_scans_fail_closed_for_malformed_controller_sessions() {
+        let root = TempDir::new().expect("session directory");
+        std::fs::write(root.path().join("controller-peer.json"), "{}")
+            .expect("write malformed controller session");
+
+        assert!(
+            live_peer_session_in(&root.path().to_path_buf(), Some("controller-owner"), |_| {
+                true
+            })
+            .is_err()
+        );
+        assert!(has_live_peer_session_in(
+            &root.path().to_path_buf(),
+            &session("controller-owner", "lease-live"),
+            |_| true,
+        )
+        .is_err());
     }
 
     #[test]
