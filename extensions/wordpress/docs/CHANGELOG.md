@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.27.1] - 2026-07-20
+
+### Fixed
+- restore extension readiness check
+
 ## [3.27.0] - 2026-07-20
 
 ### Added
