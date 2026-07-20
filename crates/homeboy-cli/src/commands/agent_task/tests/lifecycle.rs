@@ -1,7 +1,143 @@
 //! Agent-task command run submission, status, run-next, cancel, retry, and resume tests.
 
 use super::support::*;
+use clap::Parser;
+use homeboy::agents::agent_task_service::{
+    AgentTaskCookAttemptDispatcher, DerivedCookBaselineCapability,
+};
+use homeboy::core::{Error, Result};
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::cli_surface::{Cli, Commands};
+
+use super::super::AgentTaskCommand;
+
+#[derive(Debug)]
+struct RecoverableRunnerDispatcher {
+    unavailable: AtomicBool,
+}
+
+impl AgentTaskCookAttemptDispatcher for RecoverableRunnerDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(json!({ "kind": "test-recoverable-runner" }))
+    }
+
+    fn prepare_for_cook(&self) -> Result<()> {
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(
+                Error::internal_unexpected("fixture runner is unavailable").with_retryable(true)
+            );
+        }
+        Ok(())
+    }
+
+    fn dispatch_attempt(
+        &self,
+        _plan: AgentTaskPlan,
+        run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        agent_task_lifecycle::record_detached_lab_run(
+            agent_task_lifecycle::DetachedLabRunRecord {
+                run_id,
+                runner_id: "fixture-lab",
+                runner_job_id: "fixture-job",
+                remote_workspace: "/runner/workspace",
+                remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+            },
+        )?;
+        Ok(())
+    }
+}
+
+fn recoverable_runner_cook_args(
+    source: &std::path::Path,
+    title: Option<&str>,
+) -> AgentTaskCookArgs {
+    let mut args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--prompt".to_string(),
+        "exercise durable runner recovery".to_string(),
+        "--cwd".to_string(),
+        source.display().to_string(),
+        "--to-worktree".to_string(),
+        source.display().to_string(),
+        "--backend".to_string(),
+        "fixture".to_string(),
+        "--run-id".to_string(),
+        "cook-cli-preflight-recovery".to_string(),
+        "--verify".to_string(),
+        "true".to_string(),
+        "--no-finalize".to_string(),
+    ];
+    if let Some(title) = title {
+        args.extend(["--title".to_string(), title.to_string()]);
+    }
+    let cli = Cli::parse_from(args);
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("agent-task command");
+    };
+    let AgentTaskCommand::Cook(cook) = agent_task.command else {
+        panic!("cook command");
+    };
+    cook
+}
+
+#[test]
+fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_commands() {
+    with_temp_home(|| {
+        let source = tempfile::tempdir().expect("source checkout");
+        init_runtime_component_checkout(source.path());
+        let dispatcher = Arc::new(RecoverableRunnerDispatcher {
+            unavailable: AtomicBool::new(true),
+        });
+
+        let error = run_cook_with_executor_and_dispatcher(
+            recoverable_runner_cook_args(source.path(), None),
+            CapturingExecutor::default(),
+            Some(dispatcher.clone()),
+        )
+        .expect_err("runner preflight failure");
+        assert!(error.message.contains("fixture runner is unavailable"));
+
+        let (status_value, status_exit) = status(StatusArgs {
+            run_id: "cook-cli-preflight-recovery".to_string(),
+            bridge: false,
+            since_cursor: None,
+            full: true,
+        })
+        .expect("cook status resolves through its public alias");
+        assert_eq!(status_exit, 0);
+        assert_eq!(status_value["state"], "failed");
+        assert_eq!(
+            status_value["metadata"]["pre_execution_failure"]["retryable"],
+            true
+        );
+
+        dispatcher.unavailable.store(false, Ordering::SeqCst);
+        let (resumed, exit_code) = run_cook_with_executor_and_dispatcher(
+            recoverable_runner_cook_args(source.path(), None),
+            CapturingExecutor::default(),
+            Some(dispatcher.clone()),
+        )
+        .expect("same immutable cook resumes after runner repair");
+        assert_eq!(exit_code, 0);
+        assert_eq!(resumed["status"], "in_flight");
+
+        let error = run_cook_with_executor_and_dispatcher(
+            recoverable_runner_cook_args(source.path(), Some("changed immutable title")),
+            CapturingExecutor::default(),
+            Some(dispatcher),
+        )
+        .expect_err("changed immutable cook inputs remain rejected");
+        assert!(error
+            .message
+            .contains("durable cook recipe already exists with different execution inputs"));
+    });
+}
 
 #[test]
 fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
