@@ -33,8 +33,14 @@ pub fn register() {
 /// by its durable promotion artifact, without mutating its real Git index.
 pub(crate) fn validate_gate_feedback_candidate_baseline(
     root: &Path,
-    cook_loop: &Value,
+    baseline: &Value,
 ) -> Result<String> {
+    if baseline.get("schema").and_then(Value::as_str)
+        == Some("homeboy/agent-task-promotion-chain-baseline/v1")
+    {
+        return validate_promotion_chain_baseline(root, baseline);
+    }
+    let cook_loop = baseline;
     let artifact = cook_loop
         .get("patch_artifact")
         .and_then(Value::as_object)
@@ -71,6 +77,37 @@ pub(crate) fn validate_gate_feedback_candidate_baseline(
         ));
     }
     Ok(current_diff)
+}
+
+/// A follow-up candidate is allowed to reuse a dirty destination only when its
+/// complete tree is the controller-verified source tree used to cook that
+/// candidate. This works for materialized snapshots whose HEAD is synthetic.
+fn validate_promotion_chain_baseline(root: &Path, baseline: &Value) -> Result<String> {
+    let expected_tree = baseline
+        .get("source_tree")
+        .and_then(Value::as_str)
+        .filter(|tree| valid_git_object_id(tree))
+        .ok_or_else(|| invalid("promotion-chain baseline has no valid source tree"))?;
+    let prior_artifact = baseline
+        .pointer("/prior_patch_artifact/sha256")
+        .and_then(Value::as_str)
+        .filter(|sha256| valid_sha256(sha256))
+        .ok_or_else(|| invalid("promotion-chain baseline has no valid prior patch artifact"))?;
+    let actual_tree = workspace_tree(root)?;
+    if actual_tree != expected_tree {
+        return Err(invalid(
+            "promotion-chain destination differs from the follow-up source snapshot",
+        ));
+    }
+    Ok(format!("promotion-chain:{prior_artifact}:{actual_tree}"))
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn verify_patch_is_present(root: &Path, patch: &str) -> Result<()> {
@@ -188,6 +225,44 @@ mod tests {
                 .expect("layered candidate baseline"),
             current_diff
         );
+    }
+
+    #[test]
+    fn promotion_chain_accepts_only_the_exact_source_tree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        git(temp.path(), &["init", "-b", "main"]);
+        git(temp.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        std::fs::write(temp.path().join("tracked.txt"), "base\n").expect("base file");
+        git(temp.path(), &["add", "tracked.txt"]);
+        git(temp.path(), &["commit", "-m", "base"]);
+        std::fs::write(temp.path().join("tracked.txt"), "v1\n").expect("v1 file");
+        let source_tree = workspace_tree(temp.path()).expect("v1 tree");
+        let baseline = serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-chain-baseline/v1",
+            "source_tree": source_tree,
+            "prior_patch_artifact": { "sha256": "a".repeat(64) }
+        });
+
+        assert!(validate_gate_feedback_candidate_baseline(temp.path(), &baseline).is_ok());
+
+        std::fs::write(temp.path().join("tracked.txt"), "base\n").expect("clean base file");
+        let error = validate_gate_feedback_candidate_baseline(temp.path(), &baseline)
+            .expect_err("clean base cannot accept a delta requiring v1");
+        assert!(error
+            .message
+            .contains("differs from the follow-up source snapshot"));
+
+        std::fs::write(temp.path().join("tracked.txt"), "v1\n").expect("restore v1 file");
+        std::fs::write(temp.path().join("unrelated.txt"), "drift\n").expect("drift file");
+        let error = validate_gate_feedback_candidate_baseline(temp.path(), &baseline)
+            .expect_err("unrelated dirty content rejected");
+        assert!(error
+            .message
+            .contains("differs from the follow-up source snapshot"));
     }
 
     fn git(root: &Path, args: &[&str]) -> String {

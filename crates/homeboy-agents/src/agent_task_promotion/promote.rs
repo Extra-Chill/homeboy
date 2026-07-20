@@ -104,7 +104,7 @@ pub fn resume_promoted_patch(
     let gates = run_promotion_gates(&options, &mut provider, target_path)?;
     let target =
         AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), Some(target_path));
-    let candidate = if gates.status == AgentTaskPromotionStatus::Applied {
+    let candidate = if gates.status.patch_promoted() {
         Some(crate::agent_task_promotion::candidate_fingerprint(
             &target_path.display().to_string(),
         )?)
@@ -482,6 +482,12 @@ pub(super) fn promote_with_provider_and_checkpoint(
     }
     let gate_feedback_baseline =
         gate_feedback_baseline_for_artifact(&source_for_provenance, &outcome, &artifact)?;
+    let promotion_chain_baseline =
+        promotion_chain_baseline_for_artifact(&source_for_provenance, &outcome, &artifact)?;
+    let destination_baseline = promotion_chain_baseline
+        .as_ref()
+        .or(gate_feedback_baseline.as_ref())
+        .cloned();
     let patch_path = resolve_artifact_path(
         &artifact,
         &outcome.task_id,
@@ -575,7 +581,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
             patch: Some(normalized_patch.content.clone()),
             patch_path: provider_patch_path,
             changed_files: changed_files.clone(),
-            gate_feedback_baseline,
+            gate_feedback_baseline: destination_baseline,
             dry_run: options.dry_run,
             trusted_unpushed_candidate_destination: None,
         })?;
@@ -619,7 +625,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
     };
     let (gates, verified_base) = verified_base;
     let operator_notification = promotion_notification(gates.status, &target);
-    let candidate = if gates.status == AgentTaskPromotionStatus::Applied {
+    let candidate = if gates.status.patch_promoted() {
         applied_worktree_path
             .as_deref()
             .map(|path| {
@@ -653,9 +659,92 @@ pub(super) fn promote_with_provider_and_checkpoint(
             "worktree_path": applied_worktree_path,
             "dependencies_materialized": gates.dependencies_materialized,
             "candidate": candidate,
+            "destination_baseline": candidate,
+            "prior_baseline": promotion_chain_baseline,
         }),
         operator_notification,
     })
+}
+
+fn promotion_chain_baseline_for_artifact(
+    source: &Value,
+    outcome: &AgentTaskOutcome,
+    selected: &AgentTaskArtifact,
+) -> Result<Option<Value>> {
+    let canonical = outcome
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == selected.id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                "selected patch artifact is missing from canonical outcome artifacts",
+                None,
+                None,
+            )
+        })?;
+    let source_provenance = source_canonical_artifact(source, &outcome.task_id, &canonical.id)?
+        .and_then(|artifact| {
+            artifact.pointer("/metadata/source_provenance/verified_cook_baseline")
+        });
+    let provenance = source_provenance.or_else(|| {
+        canonical
+            .metadata
+            .pointer("/source_provenance/verified_cook_baseline")
+    });
+    let Some(provenance) = provenance else {
+        return Ok(None);
+    };
+    if source_provenance.is_some()
+        && canonical
+            .metadata
+            .pointer("/source_provenance/verified_cook_baseline")
+            != source_provenance
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            "canonical patch artifact source baseline provenance changed during source deserialization",
+            Some(canonical.id.clone()),
+            None,
+        ));
+    }
+    let source_tree = provenance
+        .get("baseline_tree")
+        .and_then(Value::as_str)
+        .filter(|tree| valid_git_object_id(tree))
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                "follow-up patch artifact has no valid verified source tree",
+                Some(canonical.id.clone()),
+                None,
+            )
+        })?;
+    let prior_sha256 = provenance
+        .get("promoted_patch_artifact_sha256")
+        .and_then(Value::as_str)
+        .filter(|sha256| valid_sha256(sha256))
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                "follow-up patch artifact has no valid prior promoted artifact identity",
+                Some(canonical.id.clone()),
+                None,
+            )
+        })?;
+    Ok(Some(json!({
+        "schema": "homeboy/agent-task-promotion-chain-baseline/v1",
+        "source_tree": source_tree,
+        "prior_patch_artifact": {
+            "sha256": prior_sha256,
+            "source_run_id": provenance.get("source_run_id"),
+            "source_task_id": provenance.get("source_task_id"),
+        },
+    })))
+}
+
+fn valid_git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn has_pre_provider_transport_recovery_eligibility(outcome: &AgentTaskOutcome) -> bool {
@@ -986,6 +1075,7 @@ fn promote_committed_changes(
             "commit_range": committed_patch.commit_range,
             "commits": committed_patch.commits,
             "candidate": candidate,
+            "destination_baseline": candidate,
         }),
         operator_notification,
     })
@@ -1309,6 +1399,7 @@ fn post_apply_report(
             "dependencies_materialized": false,
             "post_apply": true,
             "candidate": candidate,
+            "destination_baseline": candidate,
             "resume_inputs": {
                 "base_ref": options.base_ref,
                 "task_base_sha": options.task_base_sha,
