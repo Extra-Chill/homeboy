@@ -4,6 +4,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
@@ -12,7 +13,9 @@ use crate::agent_task_gate::{
     AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AGENT_TASK_AGGREGATE_SCHEMA};
-use crate::agent_task_timeout_artifacts::{is_actionable_patch_artifact, is_empty_patch_artifact};
+use crate::agent_task_timeout_artifacts::{
+    is_actionable_patch_artifact, is_empty_patch_artifact, is_patch_artifact_kind,
+};
 use homeboy_core::gate::HomeboyGateResult;
 use homeboy_core::{Error, Result};
 
@@ -414,23 +417,6 @@ pub(super) fn promote_with_provider_and_checkpoint(
         ));
     }
 
-    if options.candidate_ref.is_none()
-        && outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
-        && outcome
-            .artifacts
-            .iter()
-            .filter(|artifact| is_actionable_patch_artifact(artifact))
-            .count()
-            != 1
-    {
-        return Err(Error::validation_invalid_argument(
-            "artifact_id",
-            "recoverable-candidate promotion requires exactly one actionable patch artifact",
-            None,
-            None,
-        ));
-    }
-
     if outcome.status == AgentTaskOutcomeStatus::NoOp {
         let committed_patch = committed_changes_patch(&options)?.ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -474,7 +460,11 @@ pub(super) fn promote_with_provider_and_checkpoint(
         );
     }
 
-    let artifact = match select_patch_artifact(&outcome, options.artifact_id.as_deref()) {
+    let artifact = match if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable {
+        select_recoverable_patch_artifact(&outcome, &options)
+    } else {
+        select_patch_artifact(&outcome, options.artifact_id.as_deref())
+    } {
         Ok(artifact) => artifact,
         Err(error) if options.artifact_id.is_none() && !outcome_has_patch_artifacts(&outcome) => {
             if let Some(committed_patch) = committed_changes_patch(&options)? {
@@ -881,7 +871,7 @@ fn has_recoverable_candidate_provenance(
     outcome: &AgentTaskOutcome,
     artifact: &AgentTaskArtifact,
 ) -> bool {
-    artifact.kind == "patch"
+    canonical_patch_kind(&artifact.kind).is_some()
         && artifact.size_bytes.is_some_and(|size| size > 0)
         && artifact.sha256.as_deref().is_some_and(valid_sha256)
         && artifact.metadata.get("task_id").and_then(Value::as_str) == Some(&outcome.task_id)
@@ -1563,6 +1553,162 @@ pub(crate) fn select_patch_artifact(
             None,
         )),
     }
+}
+
+/// Select one recoverable patch after collapsing provider aliases and duplicate
+/// representations. Content is normalized before hashing so sandbox wrappers do
+/// not turn one patch into a false review choice.
+fn select_recoverable_patch_artifact(
+    outcome: &AgentTaskOutcome,
+    options: &AgentTaskPromotionOptions,
+) -> Result<AgentTaskArtifact> {
+    let canonical = canonical_recoverable_patch_artifacts(outcome, options)?;
+    match canonical.artifacts.len() {
+        1 => Ok(canonical.artifacts.into_iter().next().expect("one canonical patch")),
+        0 => Err(Error::new(
+            homeboy_core::ErrorCode::ValidationInvalidArgument,
+            "recoverable-candidate promotion found no readable actionable patch; reconcile or hydrate the run artifacts before retrying",
+            json!({
+                "field": "artifact_id",
+                "next_action": "homeboy agent-task review <run-id> --to-worktree <managed-worktree>",
+                "unavailable_artifacts": canonical.unavailable,
+            }),
+        )),
+        _ => Err(Error::new(
+            homeboy_core::ErrorCode::ValidationInvalidArgument,
+            "recoverable-candidate promotion found distinct actionable patches; select one with --artifact-id",
+            json!({
+                "field": "artifact_id",
+                "review_choices": canonical.artifacts.into_iter().map(|artifact| json!({
+                    "id": artifact.id,
+                    "kind": artifact.kind,
+                    "sha256": artifact.sha256,
+                    "canonical_identity": canonical_patch_identity(&artifact),
+                })).collect::<Vec<_>>(),
+            }),
+        )),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CanonicalRecoverablePatchArtifacts {
+    pub artifacts: Vec<AgentTaskArtifact>,
+    pub unavailable: Vec<Value>,
+}
+
+/// Resolve and normalize recoverable provider artifacts into deterministic patch
+/// choices. Both review and promotion use this contract after lifecycle
+/// materialization, including controller projections and hydrated runner bytes.
+pub fn canonical_recoverable_patch_artifacts(
+    outcome: &AgentTaskOutcome,
+    options: &AgentTaskPromotionOptions,
+) -> Result<CanonicalRecoverablePatchArtifacts> {
+    let mut candidates = outcome
+        .artifacts
+        .iter()
+        .filter(|artifact| {
+            options
+                .artifact_id
+                .as_deref()
+                .is_none_or(|id| artifact.id == id)
+        })
+        .filter(|artifact| is_actionable_patch_artifact(artifact))
+        .cloned()
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let mut canonical = Vec::<(String, AgentTaskArtifact)>::new();
+    let mut unavailable = Vec::new();
+    for mut artifact in candidates {
+        let Some(kind) = canonical_patch_kind(&artifact.kind) else {
+            continue;
+        };
+        artifact.kind = kind.to_string();
+        let path = match resolve_artifact_path(
+            &artifact,
+            &outcome.task_id,
+            options.source_run_id.as_deref(),
+            options.source_path.as_deref(),
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                unavailable.push(json!({ "id": artifact.id, "reason": error.message }));
+                continue;
+            }
+        };
+        let patch = match std::fs::read_to_string(&path) {
+            Ok(patch) => patch,
+            Err(error) => {
+                unavailable
+                    .push(json!({ "id": artifact.id, "path": path, "reason": error.to_string() }));
+                continue;
+            }
+        };
+        if let Err(error) = validate_artifact_content(&artifact, &patch) {
+            unavailable.push(json!({ "id": artifact.id, "path": path, "reason": error.message }));
+            continue;
+        }
+        let normalized = match normalize_promotion_patch(&patch, &options.to_worktree) {
+            Ok(patch) => patch,
+            Err(error) => {
+                unavailable
+                    .push(json!({ "id": artifact.id, "path": path, "reason": error.message }));
+                continue;
+            }
+        };
+        let digest = format!("{:x}", Sha256::digest(normalized.content.as_bytes()));
+        let identity = canonical_patch_identity_with_digest(&artifact, &digest);
+        if !canonical.iter().any(|(existing, _)| existing == &identity) {
+            canonical.push((identity, artifact));
+        }
+    }
+
+    Ok(CanonicalRecoverablePatchArtifacts {
+        artifacts: canonical
+            .into_iter()
+            .map(|(_, artifact)| artifact)
+            .collect(),
+        unavailable,
+    })
+}
+
+fn canonical_patch_identity(artifact: &AgentTaskArtifact) -> String {
+    format!(
+        "{}|{}",
+        artifact.sha256.as_deref().unwrap_or("unavailable"),
+        canonical_patch_provenance(artifact)
+    )
+}
+
+fn canonical_patch_identity_with_digest(artifact: &AgentTaskArtifact, digest: &str) -> String {
+    format!("{digest}|{}", canonical_patch_provenance(artifact))
+}
+
+fn canonical_patch_provenance(artifact: &AgentTaskArtifact) -> String {
+    [
+        "run_id",
+        "task_id",
+        "producer_attempt",
+        "base_ref",
+        "provider_backend",
+        "repository_identity",
+        "workspace_identity",
+    ]
+    .iter()
+    .map(|key| {
+        artifact
+            .metadata
+            .get(*key)
+            .cloned()
+            .unwrap_or(Value::Null)
+            .to_string()
+    })
+    .collect::<Vec<_>>()
+    .join("|")
+}
+
+fn canonical_patch_kind(kind: &str) -> Option<&'static str> {
+    is_patch_artifact_kind(kind).then_some("patch")
 }
 
 fn resolve_artifact_path(

@@ -304,10 +304,11 @@ pub mod loop_definition {
 /// Promotion reports and entry point.
 pub mod promotion {
     pub use super::super::agent_task_promotion::{
-        promote, promote_with_checkpoint, resume_promoted_patch, AgentTaskPromotionArtifactRef,
-        AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
-        AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-        AgentTaskPromotionTarget, AgentTaskPromotionVerifiedBase,
+        canonical_recoverable_patch_artifacts, promote, promote_with_checkpoint,
+        resume_promoted_patch, AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
+        AgentTaskPromotionNotification, AgentTaskPromotionOptions, AgentTaskPromotionReport,
+        AgentTaskPromotionSource, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
+        AgentTaskPromotionVerifiedBase, CanonicalRecoverablePatchArtifacts,
         AGENT_TASK_PROMOTION_REPORT_SCHEMA,
     };
 }

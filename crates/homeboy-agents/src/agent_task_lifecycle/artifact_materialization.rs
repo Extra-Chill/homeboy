@@ -5,6 +5,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::agent_task::AgentTaskArtifact;
+use crate::agent_task_timeout_artifacts::is_patch_artifact_kind;
 use homeboy_core::{Error, Result};
 
 use super::{
@@ -35,7 +36,7 @@ pub fn materialize_recovered_patch_artifact(
             if artifact_id
                 .as_deref()
                 .is_some_and(|expected| expected != artifact.id)
-                || !matches!(artifact.kind.as_str(), "patch" | "diff" | "workspace_patch")
+                || !is_patch_artifact_kind(&artifact.kind)
                 || !is_recovered_artifact(artifact, record.runner_id().zip(record.runner_job_id()))
             {
                 continue;
@@ -77,7 +78,7 @@ pub fn resolve_promotion_patch_artifact_id(
     let mut logical_ids = store
         .list_artifacts(run_id)?
         .into_iter()
-        .filter(|artifact| matches!(artifact.kind.as_str(), "patch" | "diff" | "workspace_patch"))
+        .filter(|artifact| is_patch_artifact_kind(&artifact.kind))
         .filter(|artifact| {
             task_id.is_none_or(|task_id| {
                 artifact
