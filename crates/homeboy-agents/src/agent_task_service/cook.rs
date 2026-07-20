@@ -30,11 +30,14 @@ use crate::agent_task_review_dossier::{
     AgentTaskReviewTestStep,
 };
 use crate::agent_task_scheduler::{
-    AgentTaskExecutionBudget, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskState,
+    AgentTaskExecutionBudget, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::{config, Error, ErrorCode, Result};
 
+use super::cook_budget::{
+    budget_remaining, execution_budget_usage, reserve_remediation_budget, ExecutionBudgetUsage,
+};
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
 
@@ -1548,101 +1551,6 @@ fn git_output_with_env(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct ExecutionBudgetUsage {
-    pub(crate) executions: u32,
-    pub(crate) same_provider_retries: u32,
-    pub(crate) provider_rotations: u32,
-}
-
-impl ExecutionBudgetUsage {
-    fn add(&mut self, other: Self) {
-        self.executions = self.executions.saturating_add(other.executions);
-        self.same_provider_retries = self
-            .same_provider_retries
-            .saturating_add(other.same_provider_retries);
-        self.provider_rotations = self
-            .provider_rotations
-            .saturating_add(other.provider_rotations);
-    }
-}
-
-pub(crate) fn execution_budget_usage(
-    aggregate: &crate::agent_task_scheduler::AgentTaskAggregate,
-) -> ExecutionBudgetUsage {
-    let executions = aggregate
-        .events
-        .iter()
-        .filter(|event| event.state == AgentTaskState::Running)
-        .count()
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let same_provider_retries = aggregate
-        .outcomes
-        .iter()
-        .flat_map(|outcome| &outcome.diagnostics)
-        .filter(|diagnostic| diagnostic.class == "agent_task.retry_attempt")
-        .count()
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let provider_rotations = aggregate
-        .outcomes
-        .iter()
-        .filter_map(provider_rotation_attempts)
-        .map(|attempts| attempts.len().saturating_sub(1) as u32)
-        .fold(0, u32::saturating_add);
-    ExecutionBudgetUsage {
-        executions,
-        same_provider_retries,
-        provider_rotations,
-    }
-}
-
-pub(crate) fn budget_remaining(
-    budget: &AgentTaskExecutionBudget,
-    usage: ExecutionBudgetUsage,
-) -> Option<AgentTaskExecutionBudget> {
-    let max_provider_executions = budget
-        .max_provider_executions
-        .saturating_sub(usage.executions);
-    (max_provider_executions > 0).then(|| {
-        AgentTaskExecutionBudget::new(
-            max_provider_executions,
-            budget
-                .max_same_provider_retries
-                .saturating_sub(usage.same_provider_retries),
-            budget
-                .max_provider_rotations
-                .saturating_sub(usage.provider_rotations),
-        )
-    })
-}
-
-pub(crate) fn reserve_remediation_budget(
-    budget: &AgentTaskExecutionBudget,
-    same_provider: bool,
-) -> std::result::Result<ExecutionBudgetUsage, &'static str> {
-    if budget.max_provider_executions == 0 {
-        return Err("max_provider_executions");
-    }
-    if same_provider {
-        if budget.max_same_provider_retries == 0 {
-            return Err("max_same_provider_retries");
-        }
-        return Ok(ExecutionBudgetUsage {
-            same_provider_retries: 1,
-            ..Default::default()
-        });
-    }
-    if budget.max_provider_rotations == 0 {
-        return Err("max_provider_rotations");
-    }
-    Ok(ExecutionBudgetUsage {
-        provider_rotations: 1,
-        ..Default::default()
-    })
-}
-
 fn terminal_executor_matches(
     aggregate: &crate::agent_task_scheduler::AgentTaskAggregate,
     follow_up: &AgentTaskExecutor,
@@ -1656,7 +1564,7 @@ fn terminal_executor_matches(
     )
 }
 
-fn provider_rotation_attempts(
+pub(crate) fn provider_rotation_attempts(
     outcome: &crate::agent_task::AgentTaskOutcome,
 ) -> Option<Vec<crate::agent_task_scheduler::AgentTaskProviderRotationAttempt>> {
     serde_json::from_value(
@@ -2052,6 +1960,7 @@ mod tests {
     use crate::agent_task_finalization::{
         AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend, AgentTaskPrRef,
     };
+    use crate::agent_task_scheduler::AgentTaskState;
     use homeboy_core::run_lifecycle_record::{
         ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
         RunLifecycleRecord,
