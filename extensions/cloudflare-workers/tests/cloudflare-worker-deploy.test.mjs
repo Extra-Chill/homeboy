@@ -10,7 +10,7 @@ import { join, resolve } from 'node:path';
 const extension = resolve(import.meta.dirname, '..');
 const script = join(extension, 'scripts/cloudflare-worker-deploy.mjs');
 const root = mkdtempSync(join(os.tmpdir(), 'homeboy-cloudflare-test-')); const worker = join(root, 'worker'); const bin = join(root, 'bin'); mkdirSync(worker); mkdirSync(bin);
-writeFileSync(join(worker, 'wrangler.toml'), 'name = "example-worker"\n[[kv_namespaces]]\nbinding = "CACHE"\n');
+writeFileSync(join(worker, 'wrangler.jsonc'), '{\n  // Real Wrangler JSONC uses `binding` for R2 and `name` for Durable Objects.\n  "name": "example-worker",\n  "r2_buckets": [{"binding": "CACHE", "bucket_name": "cache"}],\n  "durable_objects": {"bindings": [{"name": "STATE", "class_name": "State"}]},\n}\n');
 writeFileSync(join(bin, 'wrangler'), `#!/usr/bin/env node
 const fs=require('fs'); const a=process.argv.slice(2); fs.appendFileSync(process.env.CALLS,JSON.stringify(a)+'\\n');
 if(a[0]==='whoami') process.stdout.write(JSON.stringify({accounts:[{id:'account-example'}]}));
@@ -19,7 +19,7 @@ else if(a[0]==='secret'){let v='';process.stdin.on('data',c=>v+=c);process.stdin
 `); chmodSync(join(bin, 'wrangler'), 0o755);
 for (const command of [['init','-q'],['config','user.email','test@example.test'],['config','user.name','Test'],['add','.'],['commit','-qm','fixture']]) spawnSync('git', command, { cwd: worker });
 const revision = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worker, encoding: 'utf8' }).stdout.trim(); const calls = join(root, 'calls'); const state = join(root, 'state');
-const base = { schema:'homeboy/cloudflare-worker-deploy-contract/v1', repository:{worktree:worker,revision,ref:'fixture'}, wrangler:{binary:join(bin,'wrangler'),config:'wrangler.toml',config_ref:'wrangler.toml'}, target:{worker:'example-worker',account_id:'account-example'}, expected_bindings:['CACHE'], secrets:[{name:'API_TOKEN',env:'TEST_SECRET'}], gates:[], durability:{redeploy_same_revision:true}, timeout_ms:5000 };
+const base = { schema:'homeboy/cloudflare-worker-deploy-contract/v1', repository:{worktree:worker,revision,ref:'fixture'}, wrangler:{binary:join(bin,'wrangler'),config:'wrangler.jsonc',config_ref:'wrangler.jsonc'}, target:{worker:'example-worker',account_id:'account-example'}, expected_bindings:['CACHE','STATE'], secrets:[{name:'API_TOKEN',env:'TEST_SECRET'}], gates:[], durability:{redeploy_same_revision:true}, timeout_ms:5000 };
 
 const success = await run(base); assert.equal(success.status, 0, `${success.stdout}\n${success.stderr}`);
 if (process.env.HOMEBOY_EXTENSION_RUN === '1') { assert.match(readFileSync(calls,'utf8'), /"secret","put","API_TOKEN"/); rmSync(root,{recursive:true,force:true}); } else {
@@ -33,7 +33,7 @@ const failedSecret=await run({...base,durability:{redeploy_same_revision:false}}
 
 const invalidSecret=await run({...base,secrets:[{name:'../escape',env:'TEST_SECRET'}]}); assert.equal(invalidSecret.status,1); assert.equal(JSON.parse(invalidSecret.stderr).code,'invalid_contract');
 
-writeFileSync(join(worker,'wrangler.toml'),'name = "example-worker"\naccount_id = "another-account"\n[[kv_namespaces]]\nbinding = "CACHE"\n'); spawnSync('git',['add','wrangler.toml'],{cwd:worker}); spawnSync('git',['commit','-qm','declare conflicting account'],{cwd:worker}); const conflictingRevision=spawnSync('git',['rev-parse','HEAD'],{cwd:worker,encoding:'utf8'}).stdout.trim(); const mismatch=await run({...base,repository:{...base.repository,revision:conflictingRevision}}); assert.equal(mismatch.status,1); assert.equal(outputResult(mismatch.stdout).failure.code,'account_target_mismatch');
+writeFileSync(join(worker,'wrangler.jsonc'),'{"name":"example-worker","account_id":"another-account","r2_buckets":[{"binding":"CACHE"}],"durable_objects":{"bindings":[{"name":"STATE"}]}}'); spawnSync('git',['add','wrangler.jsonc'],{cwd:worker}); spawnSync('git',['commit','-qm','declare conflicting account'],{cwd:worker}); const conflictingRevision=spawnSync('git',['rev-parse','HEAD'],{cwd:worker,encoding:'utf8'}).stdout.trim(); const mismatch=await run({...base,repository:{...base.repository,revision:conflictingRevision}}); assert.equal(mismatch.status,1); assert.equal(outputResult(mismatch.stdout).failure.code,'account_target_mismatch');
 
 rmSync(root,{recursive:true,force:true}); }
 async function run(contract, environment={}) { writeFileSync(calls,'');writeFileSync(state,'0');const path=join(root,'contract.json');writeFileSync(path,JSON.stringify(contract));const throughHomeboy=process.env.HOMEBOY_EXTENSION_RUN==='1';const command=throughHomeboy?'homeboy':process.execPath;const args=throughHomeboy?['extension','run','cloudflare-workers','--','--contract',path]:[script,'--contract',path];return new Promise((resolveRun,reject)=>{const child=spawn(command,args,{env:{...process.env,CALLS:calls,STATE:state,TEST_SECRET:'never-log-this-value',SECRET_VALUE:'never-log-this-value',...environment},stdio:['ignore','pipe','pipe']});let stdout='';let stderr='';child.stdout.on('data',c=>stdout+=c);child.stderr.on('data',c=>stderr+=c);child.once('error',reject);child.once('close',status=>resolveRun({status,stdout,stderr}));}); }
