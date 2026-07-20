@@ -115,6 +115,102 @@ fn replaces_idle_stale_daemon_when_typed_jobs_are_zero_without_lease_recovery_ev
 }
 
 #[test]
+fn reconciles_multiple_stale_generation_leases_to_one_authoritative_idle_lease() {
+    let status = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
+
+    assert_eq!(
+        authoritative_idle_lease_for_stale_generations(
+            &status,
+            &[
+                "lease-a".to_string(),
+                "lease-b".to_string(),
+                "lease-c".to_string()
+            ],
+        )
+        .expect("authoritative idle lease is bounded"),
+        Some("lease-stale".to_string())
+    );
+}
+
+#[test]
+fn stale_generation_reconciliation_requires_every_ledger_entry_to_be_direct_and_leased() {
+    let first = direct_ssh_session("lease-a");
+    let second = direct_ssh_session("lease-b");
+    let mut mixed = direct_ssh_session("lease-b");
+    mixed.mode = RunnerTunnelMode::Reverse;
+    let mut missing = direct_ssh_session("lease-b");
+    missing.remote_daemon_lease_id = None;
+    let mut empty = direct_ssh_session("lease-b");
+    empty.remote_daemon_lease_id = Some(String::new());
+
+    assert_eq!(
+        super::super::stop_transport_recovery::eligible_stale_generation_leases(&[first, second]),
+        Some(vec!["lease-a".to_string(), "lease-b".to_string()])
+    );
+    assert_eq!(
+        super::super::stop_transport_recovery::eligible_stale_generation_leases(&[
+            direct_ssh_session("lease-a"),
+            mixed,
+        ]),
+        None
+    );
+    assert_eq!(
+        super::super::stop_transport_recovery::eligible_stale_generation_leases(&[
+            direct_ssh_session("lease-a"),
+            missing,
+        ]),
+        None
+    );
+    assert_eq!(
+        super::super::stop_transport_recovery::eligible_stale_generation_leases(&[
+            direct_ssh_session("lease-a"),
+            empty,
+        ]),
+        None
+    );
+}
+
+#[test]
+fn stale_generation_reconciliation_refuses_active_jobs_changed_lease_or_unproven_owner() {
+    let mut active = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
+    active.active_jobs = 1;
+    let changed = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
+    let mut unproven = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
+    unproven.endpoint_probe_error = Some("identity unavailable".to_string());
+
+    assert!(
+        authoritative_idle_lease_for_stale_generations(&active, &["lease-a".to_string()]).is_err()
+    );
+    assert_eq!(
+        authoritative_idle_lease_for_stale_generations(&changed, &["lease-stale".to_string()])
+            .expect("matching lease remains under normal fencing"),
+        None
+    );
+    assert!(
+        authoritative_idle_lease_for_stale_generations(&unproven, &["lease-a".to_string()])
+            .is_err()
+    );
+}
+
+#[test]
+fn stale_generation_reconciliation_refuses_a_lease_change_after_stop() {
+    let stopped = remote_daemon_status_for_test_with_reason(
+        false,
+        false,
+        0,
+        "lease-stale",
+        4444,
+        Some(DaemonStaleReasonCode::PidDead),
+    );
+    let changed = remote_daemon_status_for_test(true, true, 0, "lease-raced", 5555);
+
+    assert!(authoritative_lease_stop_confirmed(&stopped, "lease-stale").is_ok());
+    assert!(authoritative_lease_stop_confirmed(&changed, "lease-stale")
+        .expect_err("a new lease during recovery is not the stopped lease")
+        .contains("ownership changed"));
+}
+
+#[test]
 fn idle_stale_replacement_fails_closed_for_active_or_inconsistent_typed_jobs() {
     let configured = "homeboy 0.289.0+configured";
     let mut freshness_active = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
