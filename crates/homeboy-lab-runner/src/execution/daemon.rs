@@ -191,13 +191,13 @@ pub(super) fn exec_via_daemon(
         // The daemon has durably accepted this child. Bind it before waiting so
         // a lost controller still leaves cancellation and reconciliation with a
         // concrete runner job identity.
-        if detach_after_handoff {
-            // A detached handoff must durably transition the controller's pending
-            // Lab handoff to accepted before the response can be lost, exactly as
-            // the reverse-broker path does. Binding only the metadata runner job
-            // id (below) leaves the typed handoff pending, so `runner_job_id()`
-            // — which reads the accepted handoff first — reports no bound job and
-            // the controller can expire or re-dispatch an already-accepted run.
+        if !run_id_owns_generic_exec {
+            // Every portable agent-task run is a controller-owned Lab handoff,
+            // including foreground cook and retry attempts. Persist the daemon
+            // acceptance before either runner-result preacceptance path can read
+            // the controller record. Metadata-only binding leaves the typed
+            // handoff pending and can expose a valid snapshot to validation with
+            // no accepted controller job identity (#9240).
             homeboy_agents::agent_task_lifecycle::record_detached_lab_run(
                 homeboy_agents::agent_task_lifecycle::DetachedLabRunRecord {
                     run_id,
@@ -207,19 +207,13 @@ pub(super) fn exec_via_daemon(
                     remote_command: &command,
                 },
             )?;
-        } else if run_id_owns_generic_exec {
+        } else {
             homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
                 run_id,
                 &runner.id,
                 &job.id.to_string(),
                 &cwd,
                 &command,
-            )?;
-        } else {
-            homeboy_agents::agent_task_lifecycle::record_runner_job_identity(
-                run_id,
-                &runner.id,
-                &job.id.to_string(),
             )?;
         }
     }
