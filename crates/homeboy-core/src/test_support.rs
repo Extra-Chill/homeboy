@@ -122,6 +122,26 @@ impl HermeticTestContext {
             .env("HOMEBOY_NO_UPDATE_CHECK", "1");
         command
     }
+
+    /// Build an isolated command with the deterministic controller-runtime
+    /// fixture required by tests that submit or resume agent-task work.
+    pub fn controller_runtime_command(&self, binary: TestBinary) -> Command {
+        let mut command = self.command(binary);
+        command
+            .env(
+                crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
+                TEST_DAEMON_BINARY_SHA,
+            )
+            .env(
+                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
+                test_controller_fixture(),
+            )
+            .env(
+                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
+                crate::build_identity::current().display,
+            );
+        command
+    }
 }
 
 impl Default for HermeticTestContext {

@@ -48,32 +48,56 @@ fn daemon_submission_recovers_a_lost_tunnel_before_resending_to_the_same_lease()
 }
 
 #[test]
-fn daemon_submission_refuses_recovery_when_the_lease_changes() {
+fn daemon_submission_retries_once_against_a_fresh_admission_generation() {
     let accepted = direct_daemon_session("lease-old", "http://127.0.0.1:1");
-    let submissions = std::cell::Cell::new(0);
-    let result = submit_daemon_exec_with_session_recovery(
+    let submitted = std::cell::RefCell::new(Vec::new());
+    let response = submit_daemon_exec_with_session_recovery(
         "http://127.0.0.1:1",
         Some(&accepted),
-        |_| {
-            submissions.set(submissions.get() + 1);
-            Err(connect_error())
+        |endpoint| {
+            submitted.borrow_mut().push(endpoint.to_string());
+            if submitted.borrow().len() == 1 {
+                Err(connect_error())
+            } else {
+                Ok(DaemonHttpTextResponse {
+                    status_code: 200,
+                    body: "{}".to_string(),
+                })
+            }
         },
         |session| {
             assert_eq!(session.remote_daemon_lease_id.as_deref(), Some("lease-old"));
-            Err(Error::new(
-                homeboy_core::error::ErrorCode::InternalUnexpected,
-                "runner `lab` recovered a different daemon lease; refusing to submit a request proven for lease `lease-old`",
-                json!({}),
-            ))
+            Ok("http://127.0.0.1:2".to_string())
         },
+    )
+    .expect("an unaccepted request can retry once through the current generation");
+
+    assert_eq!(response.status_code, 200);
+    assert_eq!(
+        submitted.into_inner(),
+        ["http://127.0.0.1:1", "http://127.0.0.1:2"]
     );
-    let error = match result {
+}
+
+#[test]
+fn replacement_admission_transport_loss_remains_retryable() {
+    let accepted = direct_daemon_session("lease-old", "http://127.0.0.1:1");
+    let result = match submit_daemon_exec_with_session_recovery(
+        "http://127.0.0.1:1",
+        Some(&accepted),
+        |_| Err(connect_error()),
+        |_| Ok("http://127.0.0.1:2".to_string()),
+    ) {
         Err(error) => error,
-        Ok(_) => panic!("a replacement daemon cannot receive the old session's submission"),
+        Ok(_) => panic!("the second tunnel loss must remain a transport failure"),
     };
 
-    assert_eq!(submissions.get(), 1);
-    assert!(error.message.contains("different daemon lease"));
+    assert_eq!(
+        result.code,
+        homeboy_core::error::ErrorCode::RunnerLabTransportFailure
+    );
+    assert_eq!(result.retryable, Some(true));
+    assert_eq!(result.details["phase"], "lab_handoff");
 }
 
 fn direct_daemon_session(lease: &str, local_url: &str) -> RunnerSession {
@@ -179,6 +203,18 @@ fn generic_runner_exec_rejects_a_mismatched_persisted_run_identity() {
 }
 
 #[test]
+fn unavailable_direct_admission_fails_closed_as_retryable_transport() {
+    let error = unavailable_daemon_admission_error("homeboy-lab");
+
+    assert_eq!(error.code, ErrorCode::RunnerLabTransportFailure);
+    assert_eq!(error.retryable, Some(true));
+    assert_eq!(error.details["phase"], "lab_handoff");
+    assert!(error
+        .message
+        .contains("no healthy daemon admission session"));
+}
+
+#[test]
 fn generic_runner_exec_accepts_its_explicit_persisted_run_identity() {
     validate_generic_exec_mirror_run_id(true, Some("requested-run"), Some("requested-run"))
         .expect("matching identity remains valid");
@@ -210,7 +246,7 @@ fn refresh_execution_uses_the_connected_preflight_session_without_a_second_looku
         last_seen_at: None,
         leaseless_recovery_evidence: None,
     });
-    let resolved = execution_status("unresolvable-runner", Some(status.clone()))
+    let resolved = execution_status("unresolvable-runner", Some(status.clone()), false)
         .expect("the refresh transaction keeps its authoritative preflight session");
 
     assert_eq!(resolved.runner_id, "homeboy-lab");

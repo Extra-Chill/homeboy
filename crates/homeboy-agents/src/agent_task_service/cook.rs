@@ -290,6 +290,8 @@ pub fn run_cook<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    let _runtime_generation =
+        homeboy_core::runtime_promotion::pin_cook_generation(&options.cook_id)?;
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior.
@@ -1127,7 +1129,12 @@ mod tests {
             _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
         ) -> Result<()> {
             self.dispatches.fetch_add(1, Ordering::SeqCst);
-            Err(Error::internal_unexpected("fixture transport disconnected").with_retryable(true))
+            Err(Error::new(
+                homeboy_core::error::ErrorCode::RunnerLabTransportFailure,
+                "fixture transport disconnected",
+                serde_json::json!({ "phase": "lab_handoff" }),
+            )
+            .with_retryable(true))
         }
     }
 
@@ -1796,68 +1803,82 @@ mod tests {
 
     #[test]
     fn cook_batch_preserves_order_concurrency_and_failure_isolation() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let barrier = Arc::new(Barrier::new(2));
-            let entered = Arc::new(AtomicUsize::new(0));
-            let first = batch_cook_options(
-                "first",
-                Arc::new(BatchAttemptDispatcher {
-                    barrier: Arc::clone(&barrier),
-                    entered: Arc::clone(&entered),
-                    fail: true,
-                }),
-            );
-            let second = batch_cook_options(
-                "second",
-                Arc::new(BatchAttemptDispatcher {
-                    barrier,
-                    entered: Arc::clone(&entered),
-                    fail: false,
-                }),
-            );
-            // The batch owns concurrent dispatch, not concurrent controller
-            // admission; materialize both durable run identities first.
-            agent_task_lifecycle::submit_plan(&first.initial_plan, Some(&first.initial_run_id))
-                .expect("submit first attempt");
-            agent_task_lifecycle::submit_plan(&second.initial_plan, Some(&second.initial_run_id))
-                .expect("submit second attempt");
-            let result = run_cook_batch(
-                AgentTaskCookBatchOptions {
-                    batch_id: "fixture-batch".to_string(),
-                    cooks: vec![first, second],
-                    max_concurrency: 2,
-                },
-                UnusedExecutor,
-            )
-            .expect("batch completes despite an individual cook failure");
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let status = context
+            .controller_runtime_command(homeboy_core::test_support::TestBinary::CurrentTest)
+            .args([
+                "--ignored",
+                "--exact",
+                "agent_task_service::cook::tests::cook_batch_preserves_order_concurrency_and_failure_isolation_process",
+            ])
+            .status()
+            .expect("run process-isolated cook batch");
+        assert!(status.success());
+    }
 
-            assert_eq!(entered.load(Ordering::SeqCst), 2);
-            assert_eq!(result.exit_code, 1);
-            assert_eq!(result.value.status, "failed");
-            assert_eq!(result.value.total, 2);
-            assert_eq!(result.value.succeeded, 1);
-            assert_eq!(result.value.failed, 1);
-            assert_eq!(result.value.cooks[0].cook_id, "first");
-            assert_eq!(result.value.cooks[0].exit_code, 1);
-            assert_eq!(
-                result.value.cooks[0]
-                    .result
-                    .as_ref()
-                    .expect("failed cook report")
-                    .status,
-                "pre_execution_failure"
-            );
-            assert_eq!(result.value.cooks[1].cook_id, "second");
-            assert_eq!(result.value.cooks[1].exit_code, 0);
-            assert_eq!(
-                result.value.cooks[1]
-                    .result
-                    .as_ref()
-                    .expect("successful cook report")
-                    .status,
-                "in_flight"
-            );
-        });
+    #[test]
+    #[ignore = "invoked by cook_batch_preserves_order_concurrency_and_failure_isolation"]
+    fn cook_batch_preserves_order_concurrency_and_failure_isolation_process() {
+        let barrier = Arc::new(Barrier::new(2));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let first = batch_cook_options(
+            "first",
+            Arc::new(BatchAttemptDispatcher {
+                barrier: Arc::clone(&barrier),
+                entered: Arc::clone(&entered),
+                fail: true,
+            }),
+        );
+        let second = batch_cook_options(
+            "second",
+            Arc::new(BatchAttemptDispatcher {
+                barrier,
+                entered: Arc::clone(&entered),
+                fail: false,
+            }),
+        );
+        // The batch owns concurrent dispatch, not concurrent controller
+        // admission; materialize both durable run identities first.
+        agent_task_lifecycle::submit_plan(&first.initial_plan, Some(&first.initial_run_id))
+            .expect("submit first attempt");
+        agent_task_lifecycle::submit_plan(&second.initial_plan, Some(&second.initial_run_id))
+            .expect("submit second attempt");
+        let result = run_cook_batch(
+            AgentTaskCookBatchOptions {
+                batch_id: "fixture-batch".to_string(),
+                cooks: vec![first, second],
+                max_concurrency: 2,
+            },
+            UnusedExecutor,
+        )
+        .expect("batch completes despite an individual cook failure");
+
+        assert_eq!(entered.load(Ordering::SeqCst), 2);
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.status, "failed");
+        assert_eq!(result.value.total, 2);
+        assert_eq!(result.value.succeeded, 1);
+        assert_eq!(result.value.failed, 1);
+        assert_eq!(result.value.cooks[0].cook_id, "first");
+        assert_eq!(result.value.cooks[0].exit_code, 1);
+        assert_eq!(
+            result.value.cooks[0]
+                .result
+                .as_ref()
+                .expect("failed cook report")
+                .status,
+            "pre_execution_failure"
+        );
+        assert_eq!(result.value.cooks[1].cook_id, "second");
+        assert_eq!(result.value.cooks[1].exit_code, 0);
+        assert_eq!(
+            result.value.cooks[1]
+                .result
+                .as_ref()
+                .expect("successful cook report")
+                .status,
+            "in_flight"
+        );
     }
 
     #[test]
