@@ -239,10 +239,32 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
 
         let changed_files = committed_changed_files(path, base_ref)?;
         let local_head = git_output(path, &["rev-parse", "HEAD"])?;
+        let local_head = local_head.trim();
         let remote_head = remote_branch_head(path, head)?;
+
+        // A live remote head that Homeboy's candidate does not contain means the
+        // branch was advanced out of contract — e.g. an executor pushed from its
+        // attempt checkout before finalization. Homeboy exclusively owns the
+        // remote branch; force-pushing over the divergence would clobber those
+        // commits, and a plain push fails with an opaque rejection classified as
+        // a generic policy failure. Refuse with a specific diagnostic so the
+        // out-of-sync state is legible rather than reported as a failed push.
+        // (#8486)
+        if let Some(remote_head) = remote_head.as_deref() {
+            if remote_head != local_head
+                && !remote_head_is_ancestor_of_candidate(path, remote_head, local_head)
+            {
+                return Ok(AgentTaskPrCandidateState::Invalid {
+                    diagnostic: format!(
+                        "remote branch `{head}` advanced to `{remote_head}`, which is not contained in the finalization candidate `{local_head}`; the branch was modified outside Homeboy's finalization (an executor may have pushed from its attempt checkout). Refusing to finalize to avoid clobbering unverified remote commits; reconcile the branch manually before retrying."
+                    ),
+                });
+            }
+        }
+
         Ok(AgentTaskPrCandidateState::Committed {
             changed_files,
-            push_required: remote_head.as_deref() != Some(local_head.trim()),
+            push_required: remote_head.as_deref() != Some(local_head),
         })
     }
 
@@ -388,6 +410,30 @@ fn remote_branch_head(path: &str, head: &str) -> Result<Option<String>> {
         .map(str::to_string))
 }
 
+/// Returns `true` when `remote_head` is contained in the finalization candidate
+/// (`local_head`), i.e. the candidate is a fast-forward over the live remote and
+/// Homeboy's push would not clobber any remote-only commits.
+///
+/// The remote commit may be absent from the local object database (an executor
+/// pushed it directly), so fetch it best-effort first. If it still cannot be
+/// resolved, the divergence cannot be proven safe — treat it as non-ancestor so
+/// finalization fails closed with the out-of-contract diagnostic.
+fn remote_head_is_ancestor_of_candidate(path: &str, remote_head: &str, local_head: &str) -> bool {
+    // Best-effort: bring the remote-only commit into the local object database
+    // so ancestry can be evaluated. Ignore failure; the ancestry check below
+    // fails closed when the object is unavailable.
+    let _ = std::process::Command::new("git")
+        .args(["fetch", "--no-tags", "origin", remote_head])
+        .current_dir(path)
+        .output();
+    std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", remote_head, local_head])
+        .current_dir(path)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn git_output(path: &str, args: &[&str]) -> Result<String> {
     let output = std::process::Command::new("git")
         .args(args)
@@ -525,6 +571,60 @@ mod remote_base_tests {
                 push_required: true,
             }
         );
+    }
+
+    #[test]
+    fn out_of_contract_remote_advance_is_rejected_not_reported_as_committed() {
+        // Homeboy's candidate branch, pushed to origin, then advanced on the
+        // remote out-of-band (an executor pushed a commit not in the candidate).
+        // Finalization must refuse with a specific diagnostic rather than
+        // attempt a push that fails as a generic policy failure. (#8486)
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        let repo = repo();
+        git(
+            repo.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        git(repo.path(), &["push", "origin", "main"]);
+        git(repo.path(), &["checkout", "-b", "feature"]);
+        std::fs::write(repo.path().join("candidate.txt"), "candidate").unwrap();
+        git(repo.path(), &["add", "candidate.txt"]);
+        git(repo.path(), &["commit", "-m", "homeboy candidate"]);
+        git(repo.path(), &["push", "origin", "feature"]);
+
+        // A second checkout advances the remote feature branch out-of-band.
+        let other = tempfile::tempdir().unwrap();
+        git(
+            other.path(),
+            &["clone", origin.path().to_str().unwrap(), "."],
+        );
+        git(other.path(), &["config", "user.email", "evil@example.com"]);
+        git(other.path(), &["config", "user.name", "Executor"]);
+        git(other.path(), &["checkout", "feature"]);
+        std::fs::write(other.path().join("out-of-band.txt"), "executor").unwrap();
+        git(other.path(), &["add", "out-of-band.txt"]);
+        git(other.path(), &["commit", "-m", "executor out-of-band push"]);
+        git(other.path(), &["push", "origin", "feature"]);
+
+        let state = RealAgentTaskPrFinalizationBackend
+            .candidate_state(
+                repo.path().to_str().unwrap(),
+                &base("main", "base"),
+                "feature",
+            )
+            .expect("candidate state");
+
+        match state {
+            AgentTaskPrCandidateState::Invalid { diagnostic } => {
+                assert!(
+                    diagnostic.contains("advanced")
+                        && diagnostic.contains("outside Homeboy's finalization"),
+                    "diagnostic must name the out-of-contract remote advance: {diagnostic}"
+                );
+            }
+            other => panic!("expected Invalid for a diverged remote, got {other:?}"),
+        }
     }
 
     #[test]
