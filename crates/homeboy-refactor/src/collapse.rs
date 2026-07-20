@@ -2,14 +2,29 @@
 //!
 //! Scans the codebase for instantiations of a named struct and collapses fields
 //! whose value equals the type's default into a single trailing
-//! `..Default::default()`. Uses the Rust extension's `collapse_struct_defaults`
-//! refactor script to do the analysis; the Rust side handles discovery, applies
-//! the returned replace-range edits, and reports results.
+//! `..Default::default()`.
 //!
-//! Dry-run by default: without `write`, it reports what *would* change and
-//! renders a unified-style preview, but touches no files. This lets the
-//! generated diffs be validated against known-good hand migrations before
-//! `--write` is trusted.
+//! # Language dispatch
+//!
+//! The dispatch is **language-generic**: this module enumerates every installed
+//! extension that advertises a `refactor` script, and for each one scans the
+//! file extensions it handles and sends candidate files to that extension's
+//! `collapse_struct_defaults` command. Any language whose refactor extension
+//! implements that command participates automatically — nothing in the loop is
+//! Rust-specific.
+//!
+//! The *analysis* (which values count as a type's default, how a literal is
+//! collapsed) lives in the language extension's script, not here. Today only the
+//! Rust extension implements `collapse_struct_defaults`, and
+//! `..Default::default()` is a Rust idiom — but a Go/Swift/PHP refactor
+//! extension that grows the same command is picked up with no change to this
+//! file. (`find_struct_definition`/`extract_struct_source` currently parse Rust
+//! struct syntax; a non-Rust implementation would supply its own definition
+//! source, e.g. via `--definition`.)
+//!
+//! Dry-run by default: without `write`, it reports what *would* change but
+//! touches no files. This lets the generated diffs be validated against
+//! known-good hand migrations before `--write` is trusted.
 
 use std::path::{Path, PathBuf};
 
@@ -101,21 +116,24 @@ pub fn collapse(config: &CollapseConfig) -> Result<CollapseResult, Error> {
         )
     })?;
 
-    // Step 3: Find the Rust extension for .rs refactor scripts.
-    let ext_manifest = extension::find_extension_for_file_ext("rs", "refactor").ok_or_else(|| {
-        Error::invalid_argument(
-            "extension",
-            "No extension with refactor capability found for .rs files. Install the Rust extension.",
-        )
-    })?;
+    // Step 3: Discover every refactor-capable extension and the file extensions
+    // it handles. The collapse dispatch is language-generic: any language whose
+    // refactor extension implements a `collapse_struct_defaults` command
+    // participates. The Rust extension is the first implementer, but nothing
+    // here is Rust-specific — a Go/Swift/PHP refactor extension that grows the
+    // same command is picked up automatically.
+    let refactor_exts: Vec<extension::ExtensionManifest> = extension::load_all_extensions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.refactor_script().is_some() && !m.provided_file_extensions().is_empty())
+        .collect();
 
-    // Step 4: Walk all .rs files using the canonical scanner.
-    let scan_config = ScanConfig {
-        extensions: ExtensionFilter::Only(vec!["rs".to_string()]),
-        skip_hidden: true,
-        ..Default::default()
-    };
-    let rs_files = codebase_scan::walk_files(root, &scan_config);
+    if refactor_exts.is_empty() {
+        return Err(Error::invalid_argument(
+            "extension",
+            "No extension with refactor capability found. Install a language refactor extension (e.g. the Rust extension).",
+        ));
+    }
 
     let def_relative = def_file
         .strip_prefix(root)
@@ -128,85 +146,104 @@ pub fn collapse(config: &CollapseConfig) -> Result<CollapseResult, Error> {
     let mut total_collapsed = 0usize;
     let mut files_scanned = 0usize;
 
-    homeboy_core::log_status!(
-        "collapse",
-        "Scanning {} .rs files for {} instantiations",
-        rs_files.len(),
-        struct_name
-    );
+    // Step 4: For each refactor extension, scan the files it handles and send
+    // them to that extension's refactor script.
+    for ext_manifest in &refactor_exts {
+        let handled_exts: Vec<String> = ext_manifest.provided_file_extensions().to_vec();
 
-    for file_path in &rs_files {
-        let relative = file_path
-            .strip_prefix(root)
-            .unwrap_or(file_path)
-            .to_string_lossy()
-            .to_string();
-
-        let Ok(file_content) = std::fs::read_to_string(file_path) else {
-            continue;
+        let scan_config = ScanConfig {
+            extensions: ExtensionFilter::Only(handled_exts.clone()),
+            skip_hidden: true,
+            ..Default::default()
         };
+        let files = codebase_scan::walk_files(root, &scan_config);
 
-        // Quick check: skip files that don't mention the struct name.
-        if !file_content.contains(struct_name) {
-            continue;
-        }
-        files_scanned += 1;
+        homeboy_core::log_status!(
+            "collapse",
+            "Scanning {} {} file(s) for {} instantiations",
+            files.len(),
+            handled_exts.join("/"),
+            struct_name
+        );
 
-        let cmd = serde_json::json!({
-            "command": "collapse_struct_defaults",
-            "struct_name": struct_name,
-            "struct_source": struct_source,
-            "file_content": file_content,
-            "file_path": relative,
-        });
+        for file_path in &files {
+            let relative = file_path
+                .strip_prefix(root)
+                .unwrap_or(file_path)
+                .to_string_lossy()
+                .to_string();
 
-        let Some(result) = extension::run_refactor_script(&ext_manifest, &cmd) else {
-            homeboy_core::log_status!("warning", "Extension returned no result for {}", relative);
-            continue;
-        };
+            let Ok(file_content) = std::fs::read_to_string(file_path) else {
+                continue;
+            };
 
-        if let Some(found) = result.get("instantiations_found").and_then(|v| v.as_u64()) {
-            total_instantiations += found as usize;
-        }
-        if let Some(collapsed) = result
-            .get("instantiations_collapsed")
-            .and_then(|v| v.as_u64())
-        {
-            total_collapsed += collapsed as usize;
-        }
+            // Quick check: skip files that don't mention the struct name.
+            if !file_content.contains(struct_name) {
+                continue;
+            }
+            files_scanned += 1;
 
-        if let Some(edits) = result.get("edits").and_then(|v| v.as_array()) {
-            for edit in edits {
-                let file = edit
-                    .get("file")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&relative)
-                    .to_string();
-                let start_line =
-                    edit.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let end_line = edit.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let replacement = edit
-                    .get("replacement")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let description = edit
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+            let cmd = serde_json::json!({
+                "command": "collapse_struct_defaults",
+                "struct_name": struct_name,
+                "struct_source": struct_source,
+                "file_content": file_content,
+                "file_path": relative,
+            });
 
-                if start_line == 0 || end_line < start_line {
-                    continue;
+            let Some(result) = extension::run_refactor_script(ext_manifest, &cmd) else {
+                homeboy_core::log_status!(
+                    "warning",
+                    "Extension returned no result for {}",
+                    relative
+                );
+                continue;
+            };
+
+            if let Some(found) = result.get("instantiations_found").and_then(|v| v.as_u64()) {
+                total_instantiations += found as usize;
+            }
+            if let Some(collapsed) = result
+                .get("instantiations_collapsed")
+                .and_then(|v| v.as_u64())
+            {
+                total_collapsed += collapsed as usize;
+            }
+
+            if let Some(edits) = result.get("edits").and_then(|v| v.as_array()) {
+                for edit in edits {
+                    let file = edit
+                        .get("file")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&relative)
+                        .to_string();
+                    let start_line =
+                        edit.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let end_line =
+                        edit.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let replacement = edit
+                        .get("replacement")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let description = edit
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    if start_line == 0 || end_line < start_line {
+                        continue;
+                    }
+
+                    all_edits.push(CollapseEdit {
+                        file,
+                        start_line,
+                        end_line,
+                        replacement,
+                        description,
+                    });
                 }
-
-                all_edits.push(CollapseEdit {
-                    file,
-                    start_line,
-                    end_line,
-                    replacement,
-                    description,
-                });
             }
         }
     }
