@@ -122,17 +122,20 @@ fn workspace_materializer_fetches_only_the_exact_sha_for_a_fresh_checkout() {
         })
         .command();
 
-    assert!(command.contains("git init \"$dest\""));
+    // A fresh checkout is built in the staging path `$tmp` and only atomically
+    // renamed into `$dest` once HEAD is valid, so a cancelled clone never leaves
+    // a partial `$dest` (#8886). The reuse branch (existing `.git`) still
+    // operates in place.
+    assert!(command.contains("git init \"$tmp\""));
     assert!(command.contains("remote add origin https://github.com/Extra-Chill/homeboy.git"));
     assert!(command.contains("fetch --filter=blob:none origin abc123"));
     assert!(command.contains("checkout --detach abc123"));
+    // The fresh clone validates HEAD, then atomically publishes tmp -> dest.
+    assert!(command.contains("git -C \"$tmp\" rev-parse --verify -q HEAD"));
+    assert!(command.contains("mv \"$tmp\" \"$dest\""));
+    // The reuse branch still resets an existing valid checkout in place.
+    assert!(command.contains("git -C \"$dest\" reset --hard"));
     assert!(!command.contains("git clone"));
-    assert_eq!(
-        command
-            .matches("'+refs/heads/*:refs/remotes/origin/*'")
-            .count(),
-        1
-    );
 }
 
 #[test]

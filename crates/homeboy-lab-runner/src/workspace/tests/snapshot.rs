@@ -890,6 +890,82 @@ fn workspace_list_reports_recent_lab_workspaces_with_exec_commands() {
     });
 }
 
+/// Regression for #8886: a cancelled/timed-out git materialization can leave a
+/// checkout with no valid `HEAD`. `workspace list` must not advertise such a
+/// partial checkout as reusable, because exec-ing against it fails with
+/// "ambiguous argument 'HEAD'". Valid git checkouts and non-git snapshot
+/// directories remain listed.
+#[test]
+fn workspace_list_omits_partial_git_checkouts_without_a_valid_head() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-partial-list","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let lab_root = runner_root.path().join("_lab_workspaces");
+        fs::create_dir_all(&lab_root).expect("lab workspaces root");
+
+        // (a) A valid git checkout with a resolvable HEAD — must be listed.
+        let valid = lab_root.join("valid-checkout");
+        fs::create_dir_all(&valid).expect("valid dir");
+        git(&valid, &["init", "-q"]);
+        git(&valid, &["config", "user.email", "t@t"]);
+        git(&valid, &["config", "user.name", "t"]);
+        fs::write(valid.join("file.txt"), "hi\n").expect("file");
+        git(&valid, &["add", "-A"]);
+        git(&valid, &["commit", "-qm", "init"]);
+        assert!(
+            git_output(&valid, &["rev-parse", "--verify", "HEAD"]).is_ok(),
+            "valid checkout must have a resolvable HEAD",
+        );
+
+        // (b) A partial checkout: a `.git` with no commit, so HEAD does not
+        // resolve (exactly what a cancelled clone leaves) — must be omitted.
+        let partial = lab_root.join("partial-checkout");
+        fs::create_dir_all(&partial).expect("partial dir");
+        git(&partial, &["init", "-q"]);
+        assert!(
+            git_output(&partial, &["rev-parse", "--verify", "HEAD"]).is_err(),
+            "partial checkout must have no resolvable HEAD",
+        );
+
+        // (c) A non-git snapshot directory — must be listed.
+        let snapshot_dir = lab_root.join("snapshot-workspace");
+        fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
+        fs::write(snapshot_dir.join("Cargo.toml"), "[package]\n").expect("snapshot file");
+
+        let (list, exit_code) = list_workspaces("lab-partial-list", 10).expect("list workspaces");
+        assert_eq!(exit_code, 0);
+
+        let listed: Vec<&str> = list
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.remote_path.as_str())
+            .collect();
+
+        assert!(
+            listed.iter().any(|path| path.ends_with("valid-checkout")),
+            "valid git checkout must be listed as reusable: {listed:?}",
+        );
+        assert!(
+            listed
+                .iter()
+                .any(|path| path.ends_with("snapshot-workspace")),
+            "non-git snapshot workspace must be listed as reusable: {listed:?}",
+        );
+        assert!(
+            !listed.iter().any(|path| path.ends_with("partial-checkout")),
+            "partial git checkout without a valid HEAD must NOT be advertised as reusable: {listed:?}",
+        );
+    });
+}
+
 #[test]
 fn snapshot_git_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overlay() {
     homeboy_core::test_support::with_isolated_home(|_| {

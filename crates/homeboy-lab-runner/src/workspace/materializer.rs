@@ -386,7 +386,9 @@ fn fresh_exact_git_checkout_command(
     branch: Option<&str>,
     allow_dirty: bool,
 ) -> String {
-    let checkout = branch.map_or_else(
+    // Re-use branch: an existing `.git` at `$dest` is already a valid checkout,
+    // so resetting/cleaning it in place is safe and cheap.
+    let reuse_checkout = branch.map_or_else(
         || {
             format!(
                 "git -C \"$dest\" checkout --detach {head}",
@@ -401,11 +403,36 @@ fn fresh_exact_git_checkout_command(
             )
         },
     );
-    format!(
-        "if [ -d \"$dest\"/.git ]; then {dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git init \"$dest\" && git -C \"$dest\" remote add origin {remote_url} && git -C \"$dest\" fetch --filter=blob:none origin {head}; fi && {checkout} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx",
+    // Fresh-clone branch: build the whole checkout in the staging path `$tmp`
+    // and only atomically rename it into `$dest` once HEAD is valid. A cancelled
+    // or timed-out fresh clone leaves at most a partial `$tmp`, never a partial
+    // `$dest` that `workspace list` would advertise as reusable (#8886).
+    let tmp_checkout = branch.map_or_else(
+        || {
+            format!(
+                "git -C \"$tmp\" checkout --detach {head}",
+                head = shell::quote_arg(head)
+            )
+        },
+        |branch| {
+            format!(
+                "git -C \"$tmp\" checkout -B {branch} {head}",
+                branch = shell::quote_arg(branch),
+                head = shell::quote_arg(head),
+            )
+        },
+    );
+    let reuse = format!(
+        "{dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*' && {reuse_checkout} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx",
         dirty_guard = dirty_git_workspace_guard("$dest", allow_dirty),
+        reuse_checkout = reuse_checkout,
+        head = shell::quote_arg(head),
+    );
+    let fresh = format!(
+        "rm -rf \"$tmp\" && git init \"$tmp\" && git -C \"$tmp\" remote add origin {remote_url} && git -C \"$tmp\" fetch --filter=blob:none origin {head} && {tmp_checkout} && git -C \"$tmp\" reset --hard {head} && git -C \"$tmp\" clean -ffdqx && git -C \"$tmp\" rev-parse --verify -q HEAD >/dev/null && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\"",
         remote_url = shell::quote_arg(remote_url),
         head = shell::quote_arg(head),
-        checkout = checkout,
-    )
+        tmp_checkout = tmp_checkout,
+    );
+    format!("if [ -d \"$dest\"/.git ]; then {reuse}; else {fresh}; fi")
 }

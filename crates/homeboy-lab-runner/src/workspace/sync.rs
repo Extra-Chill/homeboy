@@ -884,6 +884,24 @@ pub fn workspace_snapshots(
     ))
 }
 
+/// A local runner workspace directory is reusable unless it is a partial git
+/// checkout — a `.git` directory whose `HEAD` does not resolve. A cancelled or
+/// timed-out git materialization can leave exactly that (see #8886), and a
+/// staging `.tmp.$$` directory that survived a crash mid-clone is caught the
+/// same way. Non-git directories (e.g. snapshot workspaces) remain reusable.
+fn local_workspace_is_reusable(path: &Path) -> bool {
+    if !path.join(".git").exists() {
+        return true;
+    }
+    std::process::Command::new("git")
+        .args(["-C"])
+        .arg(path)
+        .args(["rev-parse", "--verify", "-q", "HEAD"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn list_local_lab_workspaces(root: &Path, limit: usize) -> Result<Vec<String>> {
     if !root.is_dir() {
         return Ok(Vec::new());
@@ -898,11 +916,21 @@ fn list_local_lab_workspaces(root: &Path, limit: usize) -> Result<Vec<String>> {
             if !file_type.is_dir() {
                 return None;
             }
+            // Never advertise a partial checkout as reusable. A cancelled or
+            // timed-out git materialization can leave a directory (or a leftover
+            // `.tmp.$$` staging path) that has no valid HEAD; exec-ing against it
+            // fails with "ambiguous argument 'HEAD'" (#8886). A directory is
+            // only reusable if it is not a git checkout at all, or is one whose
+            // HEAD resolves.
+            let path = entry.path();
+            if !local_workspace_is_reusable(&path) {
+                return None;
+            }
             let modified = entry
                 .metadata()
                 .ok()
                 .and_then(|metadata| metadata.modified().ok());
-            Some((entry.path(), modified))
+            Some((path, modified))
         })
         .collect::<Vec<(PathBuf, Option<std::time::SystemTime>)>>();
     entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -929,8 +957,12 @@ fn list_ssh_lab_workspaces(
     let server = server::load(server_id)?;
     let mut client = SshClient::from_server(&server, server_id)?;
     client.env.extend(runner.env.clone());
+    // Mirror the local reusability rule (#8886): advertise a directory only if
+    // it is not a git checkout, or is one whose HEAD resolves. A cancelled/
+    // timed-out clone (or leftover `.tmp.$$` staging dir) with an unresolved
+    // HEAD must not be listed as reusable.
     let command = format!(
-        "root={}; if [ -d \"$root\" ]; then ls -1td \"$root\"/*/ 2>/dev/null | sed 's#/$##'; fi",
+        "root={}; if [ -d \"$root\" ]; then ls -1td \"$root\"/*/ 2>/dev/null | sed 's#/$##' | while IFS= read -r ws; do if [ ! -d \"$ws/.git\" ] || git -C \"$ws\" rev-parse --verify -q HEAD >/dev/null 2>&1; then printf '%s\\n' \"$ws\"; fi; done; fi",
         shell::quote_arg(lab_workspaces_root)
     );
     let output = client.execute(&command);
