@@ -8,8 +8,8 @@ use homeboy::agents::agent_tasks::finalization::{
 };
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::promotion::{
-    promote_with_checkpoint, resume_promoted_patch, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    canonical_recoverable_patch_artifacts, promote_with_checkpoint, resume_promoted_patch,
+    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use homeboy::agents::agent_tasks::provider::{
     AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
@@ -165,13 +165,20 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
     let promotion_candidates = aggregate_review
         .as_ref()
         .map(|review| {
-            promotion_candidates(
-                &record.run_id,
-                args.to_worktree.as_deref(),
-                args.provider_command.as_deref(),
-                &args.provider_argv,
-                review,
-            )
+            aggregate
+                .map(|aggregate| {
+                    promotion_candidates(
+                        &record.run_id,
+                        Some(&record.run_id),
+                        aggregate_source.as_ref().map(|(_, path)| path.as_str()),
+                        args.to_worktree.as_deref(),
+                        args.provider_command.as_deref(),
+                        &args.provider_argv,
+                        aggregate,
+                        review,
+                    )
+                })
+                .unwrap_or_default()
         })
         .unwrap_or_default();
     let next_actions = review_next_actions(
@@ -711,16 +718,52 @@ fn completed_run_aggregate_source(
 
 fn promotion_candidates(
     source: &str,
+    source_run_id: Option<&str>,
+    aggregate_path: Option<&str>,
     to_worktree: Option<&str>,
     provider_command: Option<&str>,
     provider_argv: &[String],
+    aggregate: &AgentTaskAggregate,
     review: &AgentTaskAggregateReport,
 ) -> Vec<Value> {
     review
         .apply_candidates
         .iter()
         .flat_map(|candidate| {
-            candidate.artifact_ids.iter().map(move |artifact_id| {
+            let artifact_ids = aggregate
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.task_id == candidate.task_id)
+                .filter(|outcome| {
+                    outcome.status
+                        == homeboy::agents::agent_tasks::AgentTaskOutcomeStatus::CandidateRecoverable
+                })
+                .map(|outcome| {
+                    canonical_recoverable_patch_artifacts(
+                        outcome,
+                        &AgentTaskPromotionOptions {
+                            source: "{}".to_string(),
+                            source_run_id: source_run_id.map(str::to_string),
+                            source_path: aggregate_path.map(std::path::PathBuf::from),
+                            source_worktree_path: None,
+                            base_ref: None,
+                            task_base_sha: None,
+                            candidate_ref: None,
+                            to_worktree: to_worktree.unwrap_or("<managed-worktree>").to_string(),
+                            task_id: Some(candidate.task_id.clone()),
+                            artifact_id: None,
+                            dry_run: true,
+                            gates: Default::default(),
+                            provider_command: None,
+                            provider_invocation: None,
+                        },
+                    )
+                    .map(|canonical| canonical.artifacts.into_iter().map(|artifact| artifact.id).collect())
+                    .unwrap_or_default()
+                })
+                .unwrap_or_else(|| candidate.artifact_ids.clone());
+            let selection_required = artifact_ids.len() > 1;
+            artifact_ids.into_iter().map(move |artifact_id| {
                 let mut command = vec![
                     "homeboy".to_string(),
                     "agent-task".to_string(),
@@ -750,7 +793,8 @@ fn promotion_candidates(
                     "artifact_id": artifact_id,
                     "reason": candidate.reason,
                     "command": command,
-                    "ready": to_worktree.is_some()
+                    "ready": to_worktree.is_some(),
+                    "selection_required": selection_required,
                 })
             })
         })
@@ -915,8 +959,78 @@ mod tests {
         AgentTaskPromotionNotification, AgentTaskPromotionSource, AgentTaskPromotionTarget,
     };
     use homeboy::agents::agent_tasks::{
-        AgentTaskAggregateSummary, AgentTaskDecisionRef, AgentTaskReconciliationDecision,
+        AgentTaskAggregateSummary, AgentTaskArtifact, AgentTaskDecisionRef, AgentTaskOutcome,
+        AgentTaskOutcomeStatus, AgentTaskReconciliationDecision, AGENT_TASK_ARTIFACT_SCHEMA,
     };
+    use sha2::{Digest, Sha256};
+
+    fn recoverable_review_aggregate(
+        temp: &tempfile::TempDir,
+        producer_attempts: &[u64],
+    ) -> AgentTaskAggregate {
+        let patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let sha256 = format!("{:x}", Sha256::digest(patch.as_bytes()));
+        let artifacts = producer_attempts
+            .iter()
+            .enumerate()
+            .map(|(index, attempt)| {
+                let path = temp.path().join(format!("candidate-{index}.patch"));
+                std::fs::write(&path, patch).expect("write patch");
+                AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: format!("candidate-{index}"),
+                    kind: if index == 0 { "patch" } else { "git-diff" }.to_string(),
+                    path: Some(path.display().to_string()),
+                    size_bytes: Some(patch.len() as u64),
+                    sha256: Some(sha256.clone()),
+                    metadata: serde_json::json!({
+                        "role": "patch",
+                        "run_id": "review-run",
+                        "task_id": "task-1",
+                        "producer_attempt": attempt,
+                        "base_ref": "base",
+                        "provider_backend": "provider",
+                        "repository_identity": "repo",
+                        "workspace_identity": "workspace",
+                    }),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let mut aggregate: AgentTaskAggregate = serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": "test",
+            "status": "candidate_recoverable",
+            "totals": { "skipped": 0 },
+        }))
+        .expect("aggregate");
+        aggregate.outcomes = vec![AgentTaskOutcome {
+            task_id: "task-1".to_string(),
+            status: AgentTaskOutcomeStatus::CandidateRecoverable,
+            artifacts,
+            ..Default::default()
+        }];
+        aggregate
+    }
+
+    fn recoverable_review_report() -> AgentTaskAggregateReport {
+        AgentTaskAggregateReport {
+            schema: "homeboy/agent-task-aggregate-report/v1".to_string(),
+            summary: AgentTaskAggregateSummary::default(),
+            tasks: Vec::new(),
+            artifact_inventory: Vec::new(),
+            apply_candidates: vec![AgentTaskDecisionRef {
+                task_id: "task-1".to_string(),
+                decision: AgentTaskReconciliationDecision::ApplyCandidate,
+                reason: "recoverable patch".to_string(),
+                artifact_ids: vec!["candidate-0".to_string(), "candidate-1".to_string()],
+            }],
+            issue_report_candidates: Vec::new(),
+            retry_plan: Vec::new(),
+            review_candidates: Vec::new(),
+            matrix: Vec::new(),
+        }
+    }
 
     #[test]
     fn promotion_candidates_preserve_provider_argv() {
@@ -936,9 +1050,18 @@ mod tests {
             review_candidates: Vec::new(),
             matrix: Vec::new(),
         };
+        let aggregate: AgentTaskAggregate = serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": "test",
+            "status": "succeeded",
+            "totals": { "skipped": 0 },
+        }))
+        .expect("aggregate");
 
         let candidates = promotion_candidates(
             "aggregate.json",
+            None,
+            None,
             Some("fixture@target"),
             None,
             &[
@@ -947,6 +1070,7 @@ mod tests {
                 "promotion-provider".to_string(),
                 "--workspace=/tmp/target".to_string(),
             ],
+            &aggregate,
             &review,
         );
 
@@ -969,6 +1093,41 @@ mod tests {
                 "--provider-argv=--workspace=/tmp/target",
             ])
         );
+    }
+
+    #[test]
+    fn promotion_candidates_canonicalize_aliases_and_preserve_attempt_choices() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let review = recoverable_review_report();
+        let equivalent = promotion_candidates(
+            "review-run",
+            None,
+            None,
+            Some("fixture@target"),
+            None,
+            &[],
+            &recoverable_review_aggregate(&temp, &[1, 1]),
+            &review,
+        );
+        assert_eq!(equivalent.len(), 1);
+        assert_eq!(equivalent[0]["artifact_id"], "candidate-0");
+        assert_eq!(equivalent[0]["selection_required"], false);
+        assert_eq!(equivalent[0]["command"][9], "fixture@target");
+
+        let distinct = promotion_candidates(
+            "review-run",
+            None,
+            None,
+            Some("fixture@target"),
+            None,
+            &[],
+            &recoverable_review_aggregate(&temp, &[1, 2]),
+            &review,
+        );
+        assert_eq!(distinct.len(), 2);
+        assert!(distinct
+            .iter()
+            .all(|candidate| candidate["selection_required"] == true));
     }
 
     #[test]

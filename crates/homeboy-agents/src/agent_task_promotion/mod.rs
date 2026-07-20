@@ -26,6 +26,7 @@ pub(crate) use patch::{normalize_promotion_patch, validate_artifact_content};
 pub use promote::promote;
 pub use promote::promote_with_checkpoint;
 pub use promote::resume_promoted_patch;
+pub use promote::{canonical_recoverable_patch_artifacts, CanonicalRecoverablePatchArtifacts};
 pub use run_plan_projection::mirror_agent_task_run_plan_aggregate;
 pub use types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,

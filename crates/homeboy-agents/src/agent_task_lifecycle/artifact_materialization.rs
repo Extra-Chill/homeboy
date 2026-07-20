@@ -5,6 +5,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::agent_task::AgentTaskArtifact;
+use crate::agent_task_timeout_artifacts::is_patch_artifact_kind;
 use homeboy_core::{Error, Result};
 
 use super::{
@@ -111,13 +112,6 @@ pub fn resolve_promotion_patch_artifact_id(
             None,
         )),
     }
-}
-
-fn is_patch_artifact_kind(kind: &str) -> bool {
-    matches!(
-        kind.trim().to_ascii_lowercase().as_str(),
-        "patch" | "diff" | "git-diff" | "git_diff" | "workspace_patch" | "workspace-patch"
-    )
 }
 
 fn is_recovered_artifact(

@@ -479,6 +479,44 @@ fn promote_recoverable_candidate_reports_distinct_patch_review_choices() {
 }
 
 #[test]
+fn promote_recoverable_candidate_keeps_same_patch_from_distinct_attempts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (source_path, source) = recoverable_patch_source(&temp, 2);
+    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
+    source["artifacts"][1]["metadata"]["producer_attempt"] = Value::from(2);
+    let source = source.to_string();
+    std::fs::write(&source_path, &source).expect("rewrite source");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("target")),
+        ..Default::default()
+    };
+
+    let error = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("recoverable-run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "repo@recoverable".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect_err("different attempts remain review choices");
+
+    assert_eq!(error.details["review_choices"].as_array().unwrap().len(), 2);
+    assert_eq!(provider.apply_calls.len(), 0);
+}
+
+#[test]
 fn materialized_workspace_promotion_adapter_applies_inline_patch_when_artifact_is_remote() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");

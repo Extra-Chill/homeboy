@@ -7,6 +7,7 @@ use super::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
     AgentTaskFollowUp, AgentTaskOutcome, AgentTaskOutcomeStatus,
 };
+use crate::agent_task_timeout_artifacts::is_patch_artifact_kind;
 use homeboy_core::markdown::escape_markdown_table_cell;
 
 pub const AGENT_TASK_AGGREGATE_SCHEMA: &str = "homeboy/agent-task-aggregate/v1";
@@ -404,7 +405,6 @@ fn reconcile_outcome(
 /// Promotion repeats the content validation before applying the patch.
 fn is_verified_recoverable_patch(outcome: &AgentTaskOutcome, artifact: &AgentTaskArtifact) -> bool {
     if !is_apply_artifact(artifact)
-        || artifact.kind != "patch"
         || outcome.failure_classification != Some(AgentTaskFailureClassification::Timeout)
         || artifact.metadata.get("task_id").and_then(Value::as_str) != Some(&outcome.task_id)
         || !non_empty_metadata_string(artifact, "run_id")
@@ -488,10 +488,9 @@ fn is_apply_artifact(artifact: &AgentTaskArtifact) -> bool {
 }
 
 fn is_apply_kind_artifact(artifact: &AgentTaskArtifact) -> bool {
-    matches!(
-        artifact.kind.as_str(),
-        "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
-    ) || artifact_flag(artifact, "approved")
+    is_patch_artifact_kind(&artifact.kind)
+        || matches!(artifact.kind.as_str(), "change_artifact" | "artifact")
+        || artifact_flag(artifact, "approved")
 }
 
 fn artifact_has_nonzero_size(artifact: &AgentTaskArtifact) -> bool {

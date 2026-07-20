@@ -11,7 +11,9 @@ use crate::agent_task_gate::{
     AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AGENT_TASK_AGGREGATE_SCHEMA};
-use crate::agent_task_timeout_artifacts::{is_actionable_patch_artifact, is_empty_patch_artifact};
+use crate::agent_task_timeout_artifacts::{
+    is_actionable_patch_artifact, is_empty_patch_artifact, is_patch_artifact_kind,
+};
 use homeboy_core::gate::HomeboyGateResult;
 use homeboy_core::{Error, Result};
 
@@ -1525,6 +1527,47 @@ fn select_recoverable_patch_artifact(
     outcome: &AgentTaskOutcome,
     options: &AgentTaskPromotionOptions,
 ) -> Result<AgentTaskArtifact> {
+    let canonical = canonical_recoverable_patch_artifacts(outcome, options)?;
+    match canonical.artifacts.len() {
+        1 => Ok(canonical.artifacts.into_iter().next().expect("one canonical patch")),
+        0 => Err(Error::new(
+            homeboy_core::ErrorCode::ValidationInvalidArgument,
+            "recoverable-candidate promotion found no readable actionable patch; reconcile or hydrate the run artifacts before retrying",
+            json!({
+                "field": "artifact_id",
+                "next_action": "homeboy agent-task review <run-id> --to-worktree <managed-worktree>",
+                "unavailable_artifacts": canonical.unavailable,
+            }),
+        )),
+        _ => Err(Error::new(
+            homeboy_core::ErrorCode::ValidationInvalidArgument,
+            "recoverable-candidate promotion found distinct actionable patches; select one with --artifact-id",
+            json!({
+                "field": "artifact_id",
+                "review_choices": canonical.artifacts.into_iter().map(|artifact| json!({
+                    "id": artifact.id,
+                    "kind": artifact.kind,
+                    "sha256": artifact.sha256,
+                    "canonical_identity": canonical_patch_identity(&artifact),
+                })).collect::<Vec<_>>(),
+            }),
+        )),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CanonicalRecoverablePatchArtifacts {
+    pub artifacts: Vec<AgentTaskArtifact>,
+    pub unavailable: Vec<Value>,
+}
+
+/// Resolve and normalize recoverable provider artifacts into deterministic patch
+/// choices. Both review and promotion use this contract after lifecycle
+/// materialization, including controller projections and hydrated runner bytes.
+pub fn canonical_recoverable_patch_artifacts(
+    outcome: &AgentTaskOutcome,
+    options: &AgentTaskPromotionOptions,
+) -> Result<CanonicalRecoverablePatchArtifacts> {
     let mut candidates = outcome
         .artifacts
         .iter()
@@ -1579,64 +1622,58 @@ fn select_recoverable_patch_artifact(
             }
         };
         let digest = format!("{:x}", Sha256::digest(normalized.content.as_bytes()));
-        let provenance = [
-            "run_id",
-            "task_id",
-            "base_ref",
-            "provider_backend",
-            "repository_identity",
-            "workspace_identity",
-        ]
-        .iter()
-        .map(|key| {
-            artifact
-                .metadata
-                .get(*key)
-                .cloned()
-                .unwrap_or(Value::Null)
-                .to_string()
-        })
-        .collect::<Vec<_>>()
-        .join("|");
-        let identity = format!("{digest}|{provenance}");
+        let identity = canonical_patch_identity_with_digest(&artifact, &digest);
         if !canonical.iter().any(|(existing, _)| existing == &identity) {
             canonical.push((identity, artifact));
         }
     }
 
-    match canonical.len() {
-        1 => Ok(canonical.pop().expect("one canonical patch").1),
-        0 => Err(Error::new(
-            homeboy_core::ErrorCode::ValidationInvalidArgument,
-            "recoverable-candidate promotion found no readable actionable patch; reconcile or hydrate the run artifacts before retrying",
-            json!({
-                "field": "artifact_id",
-                "next_action": "homeboy agent-task review <run-id> --to-worktree <managed-worktree>",
-                "unavailable_artifacts": unavailable,
-            }),
-        )),
-        _ => Err(Error::new(
-            homeboy_core::ErrorCode::ValidationInvalidArgument,
-            "recoverable-candidate promotion found distinct actionable patches; select one with --artifact-id",
-            json!({
-                "field": "artifact_id",
-                "review_choices": canonical.into_iter().map(|(identity, artifact)| json!({
-                    "id": artifact.id,
-                    "kind": artifact.kind,
-                    "sha256": artifact.sha256,
-                    "canonical_identity": identity,
-                })).collect::<Vec<_>>(),
-            }),
-        )),
-    }
+    Ok(CanonicalRecoverablePatchArtifacts {
+        artifacts: canonical
+            .into_iter()
+            .map(|(_, artifact)| artifact)
+            .collect(),
+        unavailable,
+    })
+}
+
+fn canonical_patch_identity(artifact: &AgentTaskArtifact) -> String {
+    format!(
+        "{}|{}",
+        artifact.sha256.as_deref().unwrap_or("unavailable"),
+        canonical_patch_provenance(artifact)
+    )
+}
+
+fn canonical_patch_identity_with_digest(artifact: &AgentTaskArtifact, digest: &str) -> String {
+    format!("{digest}|{}", canonical_patch_provenance(artifact))
+}
+
+fn canonical_patch_provenance(artifact: &AgentTaskArtifact) -> String {
+    [
+        "run_id",
+        "task_id",
+        "producer_attempt",
+        "base_ref",
+        "provider_backend",
+        "repository_identity",
+        "workspace_identity",
+    ]
+    .iter()
+    .map(|key| {
+        artifact
+            .metadata
+            .get(*key)
+            .cloned()
+            .unwrap_or(Value::Null)
+            .to_string()
+    })
+    .collect::<Vec<_>>()
+    .join("|")
 }
 
 fn canonical_patch_kind(kind: &str) -> Option<&'static str> {
-    matches!(
-        kind.trim().to_ascii_lowercase().as_str(),
-        "patch" | "diff" | "git-diff" | "git_diff" | "workspace_patch" | "workspace-patch"
-    )
-    .then_some("patch")
+    is_patch_artifact_kind(kind).then_some("patch")
 }
 
 fn resolve_artifact_path(
