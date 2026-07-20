@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use super::harvest::git_is_repository;
+use super::harvest::{git_is_repository, git_output_raw};
 use super::*;
 
 /// Immutable provenance for one scheduler execution. Controller-local callers
@@ -275,6 +275,8 @@ pub(super) fn prepare_committed_harvest(
     let status = git_output(root, &["status", "--porcelain", "--untracked-files=all"])?;
     let candidate_baseline = if status.trim().is_empty() {
         None
+    } else if let Some(baseline) = verified_initial_cook_candidate_baseline(root, request)? {
+        Some(baseline)
     } else {
         Some(verified_gate_feedback_baseline(root, request, &status)?)
     };
@@ -283,6 +285,86 @@ pub(super) fn prepare_committed_harvest(
         source_provenance,
         candidate_baseline,
     })
+}
+
+fn verified_initial_cook_candidate_baseline(
+    root: &Path,
+    request: &AgentTaskRequest,
+) -> Result<Option<CandidateBaseline>, HarvestError> {
+    let Some(baseline) = request.metadata.get("cook_initial_candidate_baseline") else {
+        return Ok(None);
+    };
+    let commit = baseline
+        .get("commit")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| HarvestError::CandidateBaselineMismatch {
+            message: "initial Cook candidate baseline has no commit".to_string(),
+        })?;
+    let expected_tree = baseline
+        .get("tree")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| HarvestError::CandidateBaselineMismatch {
+            message: "initial Cook candidate baseline has no tree".to_string(),
+        })?;
+    let source_root = baseline
+        .get("source_root")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| HarvestError::CandidateBaselineMismatch {
+            message: "initial Cook candidate baseline has no source workspace".to_string(),
+        })?;
+    if root != Path::new(source_root) {
+        return Err(HarvestError::CandidateBaselineMismatch {
+            message: "initial Cook candidate retry did not restore its recorded source workspace"
+                .to_string(),
+        });
+    }
+    let parent = git_output(root, &["rev-parse", &format!("{commit}^")])?;
+    if git_output(root, &["rev-parse", "HEAD^{tree}"])?
+        != git_output(root, &["rev-parse", &format!("{parent}^{{tree}}")])?
+    {
+        return Err(HarvestError::CandidateBaselineMismatch {
+            message: "initial Cook candidate source HEAD changed before retry".to_string(),
+        });
+    }
+    let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
+        command: "create initial Cook candidate verification index".to_string(),
+        message: error.to_string(),
+    })?;
+    let index_path = index.path().display().to_string();
+    git_output_with_env(root, &["read-tree", "HEAD"], &index_path)?;
+    git_output_with_env(root, &["add", "--all"], &index_path)?;
+    let actual_tree = git_output_with_env(root, &["write-tree"], &index_path)?;
+    if actual_tree != expected_tree {
+        return Err(HarvestError::CandidateBaselineMismatch {
+            message: "initial Cook candidate workspace changed after admission failure".to_string(),
+        });
+    }
+    Ok(Some(CandidateBaseline {
+        patch: git_output_raw(root, &["diff", "--binary", "--full-index", "HEAD", commit])?,
+    }))
+}
+
+fn git_output_with_env(
+    root: &Path,
+    args: &[&str],
+    index_path: &str,
+) -> Result<String, HarvestError> {
+    let output = Command::new("git")
+        .args(args)
+        .env("GIT_INDEX_FILE", index_path)
+        .current_dir(root)
+        .output()
+        .map_err(|error| HarvestError::Git {
+            command: format!("git {}", args.join(" ")),
+            message: error.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(HarvestError::Git {
+            command: format!("git {}", args.join(" ")),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn verified_gate_feedback_baseline(

@@ -753,6 +753,11 @@ where
                 if let Some(baseline) = initial_baseline.as_ref() {
                     for task in &mut dispatch_plan.tasks {
                         task.workspace.root = Some(baseline.path.display().to_string());
+                        task.metadata["cook_initial_candidate_baseline"] = serde_json::json!({
+                            "source_root": options.source_worktree_path,
+                            "commit": baseline.capability.commit(),
+                            "tree": baseline.capability.tree(),
+                        });
                     }
                 }
                 if let Some(dispatcher) = &options.attempt_dispatcher {
@@ -1420,6 +1425,60 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct SucceedingExecutor;
+
+    impl AgentTaskExecutorAdapter for SucceedingExecutor {
+        fn execute(
+            &self,
+            request: crate::agent_task::AgentTaskRequest,
+            _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+        ) -> crate::agent_task::AgentTaskOutcome {
+            let root = std::path::PathBuf::from(
+                request
+                    .workspace
+                    .root
+                    .as_deref()
+                    .expect("provider receives attempt workspace"),
+            );
+            std::fs::write(root.join("provider.txt"), "completed\n")
+                .expect("write provider change");
+            let git = |args: &[&str]| {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&root)
+                    .status()
+                    .expect("run provider git")
+                    .success());
+            };
+            git(&["add", "provider.txt"]);
+            git(&[
+                "-c",
+                "user.name=Homeboy",
+                "-c",
+                "user.email=homeboy@localhost",
+                "commit",
+                "-m",
+                "provider change",
+            ]);
+            crate::agent_task::AgentTaskOutcome {
+                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("fixture provider succeeded".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }
+        }
+    }
+
     #[derive(Debug)]
     struct BatchAttemptDispatcher {
         barrier: Arc<Barrier>,
@@ -1722,6 +1781,69 @@ mod tests {
                 retry.metadata["retry_origin"]["pre_execution_failure"]["phase"],
                 "controller_admission"
             );
+        });
+    }
+
+    #[test]
+    fn retry_after_admission_failure_rebuilds_clean_initial_candidate_baseline() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("temp source root");
+            let source = temp.path().join("source");
+            std::fs::create_dir(&source).expect("create source");
+            let git = |args: &[&str]| {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("run git")
+                    .success());
+            };
+            git(&["init"]);
+            git(&["config", "user.email", "agent@example.test"]);
+            git(&["config", "user.name", "Agent"]);
+            std::fs::write(source.join("fixture.txt"), "base\n").expect("write base");
+            git(&["add", "fixture.txt"]);
+            git(&["commit", "-m", "base"]);
+            std::fs::write(source.join("fixture.txt"), "dirty candidate\n")
+                .expect("write dirty candidate");
+
+            let run_id = "cook-admission-retry-attempt-1";
+            let mut options = batch_cook_options(
+                "cook-admission-retry",
+                Arc::new(AdmissionFailingAttemptDispatcher {
+                    message: "controller generation is held by another cook",
+                }),
+            );
+            options.initial_run_id = run_id.to_string();
+            options.source_worktree_path = Some(source.clone());
+            options.provider_command = Some("fixture-provider".to_string());
+            options.initial_plan.tasks[0].workspace.root = Some(source.display().to_string());
+
+            run_cook(options, UnusedExecutor).expect("persist admission failure");
+            let failed_plan = agent_task_lifecycle::load_plan(run_id).expect("failed plan");
+            let transient_root = std::path::PathBuf::from(
+                failed_plan.tasks[0]
+                    .workspace
+                    .root
+                    .as_deref()
+                    .expect("baseline root"),
+            );
+            assert!(!transient_root.exists(), "initial baseline was cleaned up");
+
+            let retry = agent_task_lifecycle::retry(run_id, Some("cook-admission-retry-2"))
+                .expect("retry rematerializes source workspace");
+            let retry_plan = agent_task_lifecycle::load_plan(&retry.run_id).expect("retry plan");
+            assert_eq!(
+                retry_plan.tasks[0].workspace.root.as_deref(),
+                Some(source.to_str().expect("UTF-8 source path"))
+            );
+
+            let result = crate::agent_task_service::execution::run_submitted(
+                retry.run_id,
+                SucceedingExecutor,
+            )
+            .expect("retry reaches a real Git workspace");
+            assert_eq!(result.exit_code, 0, "{:#?}", result.value);
         });
     }
 
