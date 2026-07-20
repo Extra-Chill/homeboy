@@ -29,8 +29,43 @@ const ADMISSION_QUEUE_FILE: &str = "admission-queue.json";
 const ADMISSION_QUEUE_LOCK_FILE: &str = "admission-queue.lock";
 const ADMISSION_OWNER_SCHEMA: &str = "homeboy/controller-admission-owner/v1";
 const ADMISSION_QUEUE_SCHEMA: &str = "homeboy/controller-admission-queue/v1";
-const ADMISSION_QUEUE_POLL: Duration = Duration::from_millis(25);
+const ADMISSION_QUEUE_POLL: Duration = Duration::from_millis(250);
 const ADMISSION_QUEUE_LEASE: Duration = Duration::from_secs(30);
+const ADMISSION_QUEUE_HEARTBEAT: Duration = Duration::from_secs(5);
+const ADMISSION_QUEUE_WAIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+fn admission_queue_lease() -> Duration {
+    test_admission_duration(
+        "HOMEBOY_TEST_CONTROLLER_ADMISSION_LEASE_MS",
+        ADMISSION_QUEUE_LEASE,
+    )
+}
+
+fn admission_queue_heartbeat() -> Duration {
+    test_admission_duration(
+        "HOMEBOY_TEST_CONTROLLER_ADMISSION_HEARTBEAT_MS",
+        ADMISSION_QUEUE_HEARTBEAT,
+    )
+}
+
+fn admission_queue_wait_timeout() -> Duration {
+    test_admission_duration(
+        "HOMEBOY_TEST_CONTROLLER_ADMISSION_WAIT_TIMEOUT_MS",
+        ADMISSION_QUEUE_WAIT_TIMEOUT,
+    )
+}
+
+fn test_admission_duration(_name: &str, default: Duration) -> Duration {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(duration) = std::env::var(_name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+    {
+        return duration;
+    }
+    default
+}
 static ADMISSION_LOCK_PROCESS_GUARDS: OnceLock<Mutex<BTreeMap<PathBuf, &'static Mutex<()>>>> =
     OnceLock::new();
 #[cfg(all(unix, any(test, feature = "test-support")))]
@@ -539,10 +574,19 @@ pub fn admit_current_for(request_id: &str) -> Result<RuntimeAdmission> {
         ));
     }
     enqueue_admission_request(&lock_path, request_id)?;
-    let lock = acquire_queued_admission_lock(&lock_path, request_id)?;
+    let lock = match acquire_queued_admission_lock(&lock_path, request_id) {
+        Ok(lock) => lock,
+        Err(error) => {
+            // A failed foreground admission must not leave a live-looking head
+            // behind. Cancellation may already have removed the request.
+            let _ = remove_admission_request(&lock_path, request_id);
+            return Err(error);
+        }
+    };
     let runtime = pin_current_unlocked()?;
     write_active_generation(&root.join(ACTIVE_GENERATION_FILE), &runtime)?;
     validate_pin(&runtime)?;
+    heartbeat_admission_owner(&lock_path, request_id, Some(&runtime))?;
     Ok(RuntimeAdmission {
         _lock: lock,
         runtime,
@@ -553,8 +597,10 @@ pub fn admit_current_for(request_id: &str) -> Result<RuntimeAdmission> {
 pub fn admission_status(request_id: &str) -> Result<Value> {
     let root = runtime_root()?;
     let lock_path = root.join(ADMISSION_LOCK_DIR);
-    update_admission_queue(&lock_path, |_| {})?;
-    let queue = read_admission_queue(&lock_path)?;
+    let mut queue = read_admission_queue(&lock_path)?;
+    // Status reads never rewrite the durable queue. They still hide expired
+    // waiters immediately; the next writer compacts them atomically.
+    reclaim_stale_admission_entries(&lock_path, &mut queue);
     let requests = queue["requests"].as_array().cloned().unwrap_or_default();
     let position = requests
         .iter()
@@ -574,15 +620,13 @@ pub fn cancel_admission(request_id: &str) -> Result<()> {
     let root = runtime_root()?;
     let lock_path = root.join(ADMISSION_LOCK_DIR);
     update_admission_queue(&lock_path, |queue| {
-        if queue["owner"]["request_id"].as_str() != Some(request_id) {
-            queue["requests"] = queue["requests"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|request| request["request_id"].as_str() != Some(request_id))
-                .collect();
-        }
+        queue["requests"] = queue["requests"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request["request_id"].as_str() != Some(request_id))
+            .collect();
     })
 }
 
@@ -1029,21 +1073,50 @@ fn acquire_admission_lock_with_retry(
 }
 
 fn acquire_queued_admission_lock(path: &Path, request_id: &str) -> Result<AdmissionLock> {
+    acquire_queued_admission_lock_with_timeout(path, request_id, admission_queue_wait_timeout())
+}
+
+fn acquire_queued_admission_lock_with_timeout(
+    path: &Path,
+    request_id: &str,
+    wait_timeout: Duration,
+) -> Result<AdmissionLock> {
+    let started = std::time::Instant::now();
+    let mut last_heartbeat = std::time::Instant::now();
     loop {
         let status = admission_status(request_id)?;
         if status["state"] == "none" {
-            return Err(Error::validation_invalid_argument(
-                "controller_admission",
-                "controller admission request was cancelled",
-                Some(request_id.to_string()),
-                None,
-            ));
+            return Err(
+                Error::internal_unexpected("controller admission request was cancelled")
+                    .with_retryable(true),
+            );
+        }
+        if started.elapsed() >= wait_timeout {
+            remove_admission_request(path, request_id)?;
+            return Err(Error::internal_unexpected(format!(
+                "controller generation admission queue wait exceeded {}ms",
+                wait_timeout.as_millis()
+            ))
+            .with_retryable(true));
+        }
+        if last_heartbeat.elapsed() >= admission_queue_heartbeat() {
+            heartbeat_admission_waiter(path, request_id)?;
+            last_heartbeat = std::time::Instant::now();
         }
         if status["position"].as_u64() == Some(1) {
             match acquire_admission_lock_for(path, request_id) {
                 Ok(lock) => {
                     update_admission_queue(path, |queue| {
-                        queue["owner"] = json!({ "request_id": request_id, "pid": std::process::id(), "heartbeat_at_ms": now_millis(), "lease_expires_at_ms": now_millis() + ADMISSION_QUEUE_LEASE.as_millis() as u64 });
+                        let now = now_millis();
+                        let owner = admission_owner_record(&lock.token);
+                        queue["owner"] = json!({
+                            "request_id": request_id,
+                            "pid": owner["pid"],
+                            "linux_starttime_ticks": owner["linux_starttime_ticks"],
+                            "heartbeat_at_ms": now,
+                            "lease_expires_at_ms": now + admission_queue_lease().as_millis() as u64,
+                            "advisory_lock": true,
+                        });
                     })?;
                     return Ok(lock);
                 }
@@ -1099,12 +1172,7 @@ fn update_admission_queue(lock_path: &Path, mutate: impl FnOnce(&mut Value)) -> 
         )
     })?;
     let mut queue = read_admission_queue(lock_path)?;
-    if queue["owner"]["lease_expires_at_ms"]
-        .as_u64()
-        .is_some_and(|expires| expires <= now_millis())
-    {
-        queue["owner"] = Value::Null;
-    }
+    reclaim_stale_admission_entries(lock_path, &mut queue);
     mutate(&mut queue);
     let temporary = queue_path(lock_path).with_extension("tmp");
     fs::write(
@@ -1137,7 +1205,102 @@ fn enqueue_admission_request(lock_path: &Path, request_id: &str) -> Result<()> {
             .iter()
             .any(|request| request["request_id"].as_str() == Some(request_id))
         {
-            requests.push(json!({ "request_id": request_id, "requested_at_ms": now_millis() }));
+            let now = now_millis();
+            requests.push(json!({ "request_id": request_id, "state": "waiting", "requested_at_ms": now, "heartbeat_at_ms": now, "lease_expires_at_ms": now + admission_queue_lease().as_millis() as u64 }));
+        }
+    })
+}
+
+fn remove_admission_request(lock_path: &Path, request_id: &str) -> Result<()> {
+    update_admission_queue(lock_path, |queue| {
+        queue["requests"] = queue["requests"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request["request_id"].as_str() != Some(request_id))
+            .collect();
+    })
+}
+
+fn reclaim_stale_admission_entries(lock_path: &Path, queue: &mut Value) {
+    reclaim_stale_admission_waiters(queue);
+    let Some(owner) = queue["owner"].as_object() else {
+        return;
+    };
+    let expired = owner["lease_expires_at_ms"]
+        .as_u64()
+        .is_some_and(|expires| expires <= now_millis());
+    let owner_is_alive = owner["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .is_some_and(crate::process::pid_is_running);
+    // The kernel advisory lock is authoritative while a controller is alive;
+    // the lease merely makes a crashed owner observable and reclaimable.
+    if expired && !owner_is_alive && !admission_lock_is_held(lock_path) {
+        queue["owner"] = Value::Null;
+    }
+}
+
+fn reclaim_stale_admission_waiters(queue: &mut Value) {
+    let now = now_millis();
+    if let Some(requests) = queue["requests"].as_array_mut() {
+        requests.retain(|request| {
+            request["state"] == "cancelled"
+                || request["lease_expires_at_ms"]
+                    .as_u64()
+                    .is_none_or(|expires| expires > now)
+        });
+    }
+}
+
+fn admission_lock_is_held(path: &Path) -> bool {
+    let Ok(file) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)
+    else {
+        return true;
+    };
+    match file.try_lock_exclusive() {
+        Ok(true) => {
+            let _ = file.unlock();
+            false
+        }
+        Ok(false) | Err(_) => true,
+    }
+}
+
+fn heartbeat_admission_waiter(path: &Path, request_id: &str) -> Result<()> {
+    update_admission_queue(path, |queue| {
+        if let Some(request) = queue["requests"].as_array_mut().and_then(|requests| {
+            requests
+                .iter_mut()
+                .find(|request| request["request_id"].as_str() == Some(request_id))
+        }) {
+            let now = now_millis();
+            request["heartbeat_at_ms"] = json!(now);
+            request["lease_expires_at_ms"] =
+                json!(now + admission_queue_lease().as_millis() as u64);
+        }
+    })
+}
+
+fn heartbeat_admission_owner(path: &Path, request_id: &str, runtime: Option<&Value>) -> Result<()> {
+    update_admission_queue(path, |queue| {
+        if queue["owner"]["request_id"].as_str() == Some(request_id) {
+            let now = now_millis();
+            queue["owner"]["heartbeat_at_ms"] = json!(now);
+            queue["owner"]["lease_expires_at_ms"] =
+                json!(now + admission_queue_lease().as_millis() as u64);
+            if let Some(runtime) = runtime {
+                queue["owner"]["runtime"] = runtime.clone();
+                queue["owner"]["runtime_identity"] =
+                    runtime["originating"]["build_identity"].clone();
+                queue["owner"]["controller_generation"] =
+                    runtime["originating"]["build_identity"].clone();
+            }
         }
     })
 }
@@ -1955,16 +2118,98 @@ mod tests {
 
             enqueue_admission_request(&lock, "stale-waiter").expect("enqueue stale waiter");
             update_admission_queue(&lock, |queue| {
-                queue["owner"] = json!({
-                    "request_id": "crashed-owner",
-                    "heartbeat_at_ms": 0,
+                queue["requests"] = json!([{
+                    "request_id": "stale-waiter",
+                    "state": "waiting",
                     "lease_expires_at_ms": 0,
-                });
+                }]);
             })
-            .expect("persist stale owner");
-            let status = admission_status("stale-waiter").expect("reclaim stale owner");
-            assert!(status["owner"].is_null());
-            assert!(status["wait_duration_ms"].as_u64().is_some());
+            .expect("persist stale waiter");
+            assert_eq!(
+                admission_status("stale-waiter").expect("reclaim stale waiter")["state"],
+                "none"
+            );
+        });
+    }
+
+    #[test]
+    fn admission_status_retains_a_live_owner_after_its_lease_expires() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = runtime_root().expect("runtime root");
+            let lock = root.join(ADMISSION_LOCK_DIR);
+            let admission = admit_current_for("long-owner").expect("admit owner");
+
+            update_admission_queue(&lock, |queue| {
+                queue["owner"]["lease_expires_at_ms"] = json!(0);
+            })
+            .expect("expire diagnostic lease");
+            let status = admission_status("long-owner").expect("read live owner status");
+
+            assert_eq!(status["state"], "admitted");
+            assert_eq!(status["owner"]["request_id"], "long-owner");
+            assert_eq!(
+                status["owner"]["controller_generation"],
+                build_identity::current().display
+            );
+            assert!(status["owner"]["runtime"].is_object());
+            drop(admission);
+        });
+    }
+
+    #[test]
+    fn expired_head_waiter_is_reclaimed_without_blocking_later_admission() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = runtime_root().expect("runtime root");
+            let lock = root.join(ADMISSION_LOCK_DIR);
+            update_admission_queue(&lock, |queue| {
+                queue["requests"] = json!([
+                    {
+                        "request_id": "crashed-head",
+                        "state": "waiting",
+                        "requested_at_ms": 1,
+                        "heartbeat_at_ms": 1,
+                        "lease_expires_at_ms": 0,
+                    },
+                    {
+                        "request_id": "later",
+                        "state": "waiting",
+                        "requested_at_ms": 2,
+                        "heartbeat_at_ms": 2,
+                        "lease_expires_at_ms": now_millis() + admission_queue_lease().as_millis() as u64,
+                    }
+                ]);
+            })
+            .expect("persist crashed queue head");
+
+            assert_eq!(
+                admission_status("later").expect("reclaim crashed head")["position"],
+                1
+            );
+            let admission = acquire_queued_admission_lock(&lock, "later")
+                .expect("later waiter acquires after reclamation");
+            drop(admission);
+        });
+    }
+
+    #[test]
+    fn bounded_queue_timeout_is_retryable_and_removes_its_waiter() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = runtime_root().expect("runtime root");
+            let lock = root.join(ADMISSION_LOCK_DIR);
+            let first = admit_current_for("first").expect("admit first owner");
+            enqueue_admission_request(&lock, "timed-out").expect("enqueue waiting request");
+
+            let error =
+                acquire_queued_admission_lock_with_timeout(&lock, "timed-out", Duration::ZERO)
+                    .expect_err("zero timeout expires deterministically");
+
+            assert_eq!(error.retryable, Some(true));
+            assert!(error.message.contains("queue wait exceeded 0ms"));
+            assert_eq!(
+                admission_status("timed-out").expect("timed-out request removed")["state"],
+                "none"
+            );
+            drop(first);
         });
     }
 

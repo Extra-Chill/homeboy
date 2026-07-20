@@ -364,11 +364,14 @@ impl AgentTaskRunRecord {
 
     pub fn runner_job_id(&self) -> Option<&str> {
         if let Some(handoff) = self.lab_handoff.as_ref() {
-            return handoff
+            if let Some(job_id) = handoff
                 .is_valid()
                 .then_some(handoff)
                 .filter(|handoff| handoff.state == AgentTaskLabHandoffState::Accepted)
-                .and_then(|handoff| handoff.runner_job_id.as_deref());
+                .and_then(|handoff| handoff.runner_job_id.as_deref())
+            {
+                return Some(job_id);
+            }
         }
         self.metadata
             .get("runner_job_id")
@@ -379,7 +382,9 @@ impl AgentTaskRunRecord {
 
     pub fn runner_id(&self) -> Option<&str> {
         if let Some(handoff) = self.lab_handoff.as_ref() {
-            return handoff.is_valid().then_some(handoff.runner_id.as_str());
+            if handoff.is_valid() {
+                return Some(handoff.runner_id.as_str());
+            }
         }
         self.metadata
             .get("runner_id")

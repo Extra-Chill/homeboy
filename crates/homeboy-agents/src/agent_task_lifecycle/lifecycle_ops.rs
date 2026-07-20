@@ -392,6 +392,16 @@ where
             store::write_record(&record)?;
         }
         Err(error) => {
+            // Cancellation is persisted before removing a queue entry. Do not
+            // overwrite that terminal lifecycle state with a synthetic
+            // pre-execution admission failure when the waiter wakes up.
+            if let Ok(cancelled) = store::read_record(&run_id) {
+                if cancelled.state == AgentTaskRunState::Cancelled
+                    || cancelled.metadata["controller_admission_cancellation_requested"] == true
+                {
+                    return Ok(cancelled);
+                }
+            }
             record_pre_execution_failure(&run_id, plan, "controller_admission", &error)?;
             return Err(error);
         }

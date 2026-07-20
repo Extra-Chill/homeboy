@@ -650,12 +650,7 @@ fn lab_runner_readiness_from_candidates(
         LabRunnerReadinessState::Stale => candidates
             .iter()
             .filter(|candidate| candidate.stale_daemon)
-            .map(|candidate| {
-                format!(
-                    "homeboy runner doctor {} --scope lab-offload",
-                    candidate.id
-                )
-            })
+            .map(|candidate| format!("homeboy runner doctor {} --scope lab-offload", candidate.id))
             .collect(),
         LabRunnerReadinessState::Disconnected => candidates
             .iter()
