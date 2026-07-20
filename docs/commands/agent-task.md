@@ -30,7 +30,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `list [--limit <n>]` | List durable runs, newest first. |
 | `active [--limit <n>] [--reconcile [--dry-run]]` | List queued and running durable runs, newest first, or reconcile stale active records. |
 | `latest [--limit <n>]` | Show the latest durable run. |
-| `logs <run-id>` | Read durable run scheduler events. |
+| `logs <run-id> [--raw]` | Read the canonical durable event stream; `--raw` adds transport frames for diagnostics. |
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
 | `replay-provider-boundary <run-id> [--task <task-id>]` | Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider. |
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |

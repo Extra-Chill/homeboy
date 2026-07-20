@@ -729,7 +729,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             )
         });
         assert_eq!(status_record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(log.events[0].state, AgentTaskState::Succeeded);
+        assert_eq!(log.events[0].status, AgentTaskState::Succeeded);
         assert!(artifacts.artifacts.is_empty());
 
         reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent retry");
@@ -1069,8 +1069,8 @@ fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
         assert_eq!(loaded.state, AgentTaskRunState::Failed);
         assert_eq!(loaded.tasks[0].state, AgentTaskState::Failed);
         assert!(loaded.provider_handles.is_empty());
-        assert_eq!(log.events[1].state, AgentTaskState::Failed);
-        assert_eq!(mirrored_log.events[1].state, AgentTaskState::Failed);
+        assert_eq!(log.events[1].status, AgentTaskState::Failed);
+        assert_eq!(mirrored_log.events[1].status, AgentTaskState::Failed);
         assert_eq!(loaded.metadata["provider_run_ids"], serde_json::json!([]));
         assert_eq!(
             loaded.artifact_refs[0].kind,
@@ -1155,7 +1155,7 @@ fn record_completed_run_exposes_logs_and_artifacts() {
         let artifacts = artifacts(&record.run_id).expect("artifacts");
 
         assert_eq!(record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(log.events[0].state, AgentTaskState::Succeeded);
+        assert_eq!(log.events[0].status, AgentTaskState::Succeeded);
         assert_eq!(artifacts.artifacts[0].id, "patch");
         assert_eq!(artifacts.evidence_refs[0].kind, "transcript");
     });

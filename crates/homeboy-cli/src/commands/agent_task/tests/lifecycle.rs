@@ -29,11 +29,9 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
             full: true,
         })
         .expect("controller status resolves");
-        let (logs_value, logs_exit) = logs(StatusArgs {
+        let (logs_value, logs_exit) = logs(LogsArgs {
             run_id: "run-cli-controller-proxy".to_string(),
-            bridge: false,
-            since_cursor: None,
-            full: false,
+            raw: false,
         })
         .expect("controller logs resolve");
 
@@ -313,11 +311,9 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
             full: false,
         })
         .expect("status loaded");
-        let (logs_value, _) = logs(StatusArgs {
+        let (logs_value, _) = logs(LogsArgs {
             run_id: run_id.to_string(),
-            bridge: false,
-            since_cursor: None,
-            full: false,
+            raw: false,
         })
         .expect("logs loaded");
         let (review_value, _) = review::review(ReviewArgs {
