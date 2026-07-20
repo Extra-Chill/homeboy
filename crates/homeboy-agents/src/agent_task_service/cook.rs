@@ -17,6 +17,7 @@ use crate::agent_task_finalization::{
 };
 use crate::agent_task_gate::VerifyGateOptions;
 use crate::agent_task_lifecycle;
+use crate::agent_task_promotion::resolve_candidate_revision;
 use crate::agent_task_promotion::{
     promote_with_checkpoint, AgentTaskPromotionOptions, AgentTaskPromotionReport,
 };
@@ -212,7 +213,36 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
         ));
     }
     let (source, source_path, recovery) = candidate_adoption_source(&record, &source_request)?;
-    let mut promotion = promote_with_checkpoint(
+    let (adoption_ai_model, ai_model_source) = match adoption.ai_model {
+        Some(model) => (concrete_adoption_ai_model(&model)?, "candidate_input"),
+        None => (
+            concrete_adoption_ai_model(options.ai_model.as_deref().unwrap_or_default())?,
+            "recipe_finalization",
+        ),
+    };
+    let source_worktree = options.source_worktree_path.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "candidate_ref",
+            "candidate adoption requires the recorded source worktree",
+            None,
+            None,
+        )
+    })?;
+    // Resolve the caller input to the commit object before durable ownership is
+    // claimed, then use that immutable SHA for every subsequent operation.
+    let candidate_sha = resolve_candidate_revision(source_worktree, candidate_ref)?;
+    let gate_identity = if options.gates.verify.is_empty() {
+        "promotion verification".to_string()
+    } else {
+        options.gates.verify.join(" && ")
+    };
+    agent_task_lifecycle::start_candidate_adoption(
+        &record.run_id,
+        &candidate_sha,
+        &adoption_ai_model,
+        &gate_identity,
+    )?;
+    let promotion = promote_with_checkpoint(
         AgentTaskPromotionOptions {
             source,
             source_run_id: Some(record.run_id.clone()),
@@ -220,7 +250,7 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
             source_worktree_path: options.source_worktree_path.clone(),
             base_ref: Some(options.base.clone()),
             task_base_sha: options.task_base_sha.clone(),
-            candidate_ref: Some(candidate_ref.to_string()),
+            candidate_ref: Some(candidate_sha.clone()),
             to_worktree: options.to_worktree.clone(),
             task_id: None,
             artifact_id: None,
@@ -236,15 +266,23 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
                     Some("serialize adopted candidate checkpoint".to_string()),
                 )
             })?;
+            agent_task_lifecycle::checkpoint_candidate_adoption(
+                &record.run_id,
+                "post_apply_verification",
+                &gate_identity,
+            )?;
             agent_task_lifecycle::record_promotion(&record.run_id, checkpoint).map(|_| ())
         },
-    )?;
-    let (adoption_ai_model, ai_model_source) = match adoption.ai_model {
-        Some(model) => (concrete_adoption_ai_model(&model)?, "candidate_input"),
-        None => (
-            concrete_adoption_ai_model(options.ai_model.as_deref().unwrap_or_default())?,
-            "recipe_finalization",
-        ),
+    );
+    let mut promotion = match promotion {
+        Ok(promotion) => promotion,
+        Err(error) => {
+            agent_task_lifecycle::finish_candidate_adoption(
+                &record.run_id,
+                Some(error.message.clone()),
+            )?;
+            return Err(error);
+        }
     };
     // The adopted candidate did not run through this cook's provider lifecycle.
     // Bind its declared model to the authenticated promotion instead of inferring
@@ -252,7 +290,7 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
     options.ai_model = Some(adoption_ai_model.clone());
     promotion.provenance["adoption"] = serde_json::json!({
         "source_run_id": record.run_id,
-        "candidate_ref": candidate_ref,
+        "candidate_ref": candidate_sha,
         "source_worktree_path": options.source_worktree_path,
         "recorded_task_base": options.task_base_sha,
         "recovery": recovery,
@@ -280,6 +318,10 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
         feedback: Some(feedback.clone()),
     };
     if feedback.status != AgentTaskCookLoopStatus::GreenCompleted {
+        agent_task_lifecycle::finish_candidate_adoption(
+            &record.run_id,
+            Some("adopted candidate did not pass the original deterministic gates".to_string()),
+        )?;
         return Ok(cook_report(
             cook_id.to_string(),
             "gate_failed",
@@ -290,6 +332,7 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
         ));
     }
     if options.no_finalize {
+        agent_task_lifecycle::finish_candidate_adoption(&record.run_id, None)?;
         return Ok(cook_report(
             cook_id.to_string(),
             "green_no_finalize",
@@ -302,8 +345,27 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
             0,
         ));
     }
-    let finalization =
-        finalize_or_load_cook_pr_with_backend(&options, &record.run_id, &promotion, backend)?;
+    agent_task_lifecycle::checkpoint_candidate_adoption(
+        &record.run_id,
+        "finalization",
+        "finalize pull request",
+    )?;
+    let finalization = match finalize_or_load_cook_pr_with_backend(
+        &options,
+        &record.run_id,
+        &promotion,
+        backend,
+    ) {
+        Ok(finalization) => finalization,
+        Err(error) => {
+            agent_task_lifecycle::finish_candidate_adoption(
+                &record.run_id,
+                Some(error.message.clone()),
+            )?;
+            return Err(error);
+        }
+    };
+    agent_task_lifecycle::finish_candidate_adoption(&record.run_id, None)?;
     let status = finalization["status"]
         .as_str()
         .unwrap_or("unknown")
@@ -2178,11 +2240,15 @@ mod tests {
             git(&source, &["commit", "-am", "candidate"]);
             let candidate = git_output(&source, &["rev-parse", "HEAD"]);
             let provider = temp.path().join("promotion-provider.sh");
+            let provider_started = temp.path().join("provider-started");
+            let provider_release = temp.path().join("provider-release");
             std::fs::write(
                 &provider,
                 format!(
-                    "#!/bin/sh\ncat >/dev/null\ngit -C {target} fetch origin {candidate}\ngit -C {target} checkout --detach FETCH_HEAD\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
+                    "#!/bin/sh\ncat >/dev/null\ntouch {provider_started}\nwhile ! test -f {provider_release}; do sleep 0.01; done\ngit -C {target} fetch origin {candidate}\ngit -C {target} checkout --detach FETCH_HEAD\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
                     target = target.display(),
+                    provider_started = provider_started.display(),
+                    provider_release = provider_release.display(),
                 ),
             )
             .expect("write promotion provider");
@@ -2261,20 +2327,51 @@ mod tests {
                 .message
                 .contains("candidate revision must equal the recorded source worktree HEAD"));
 
-            let mut backend = CaptureBackend {
-                hydrate_run_id: Some(run_id.to_string()),
-                ..Default::default()
-            };
-            let result = adopt_cook_candidate_with_dispatcher_and_backend(
-                cook_id,
-                &candidate,
-                AgentTaskCandidateAdoptionOptions {
-                    ai_model: Some("openai/gpt-5.6-sol".to_string()),
-                },
-                |_| Ok(None),
-                &mut backend,
-            )
-            .expect("historical recipe adoption succeeds");
+            let candidate_for_thread = candidate.clone();
+            let adoption = std::thread::spawn(move || {
+                let mut backend = CaptureBackend {
+                    hydrate_run_id: Some(run_id.to_string()),
+                    ..Default::default()
+                };
+                let result = adopt_cook_candidate_with_dispatcher_and_backend(
+                    cook_id,
+                    &candidate_for_thread,
+                    AgentTaskCandidateAdoptionOptions {
+                        ai_model: Some("openai/gpt-5.6-sol".to_string()),
+                    },
+                    |_| Ok(None),
+                    &mut backend,
+                );
+                (result, backend)
+            });
+            let provider_started_in_time = (0..500).any(|_| {
+                if provider_started.exists() {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            });
+            let running = provider_started_in_time
+                .then(|| agent_task_lifecycle::status(run_id))
+                .transpose();
+            // Always release and join before asserting so a regression cannot
+            // strand the fake provider and hang the test process.
+            std::fs::write(&provider_release, "release").expect("release provider");
+            let adoption_result = adoption.join();
+            assert!(provider_started_in_time, "promotion provider did not start");
+            let running = running
+                .expect("blocked adoption status")
+                .expect("provider started before status capture");
+            let active = running.candidate_adoption.expect("active adoption attempt");
+            assert_eq!(active.state, "verification_running");
+            assert_eq!(active.phase, "verification");
+            assert_eq!(active.active_gate, "test \"$(cat lib.rs)\" = candidate");
+            assert_eq!(active.candidate_sha, candidate);
+            assert_eq!(active.ai_model, "openai/gpt-5.6-sol");
+            assert_eq!(active.owner_pid, std::process::id());
+            assert!(!active.heartbeat_at.is_empty());
+            let (result, backend) = adoption_result.expect("adoption thread completes");
+            let result = result.expect("historical recipe adoption succeeds");
 
             assert_eq!(result.exit_code, 0);
             assert_eq!(result.value.status, "review_ready");
@@ -2310,6 +2407,12 @@ mod tests {
                 promoted.metadata["latest_promotion"]["provenance"]["adoption"]["ai_model_source"],
                 "candidate_input"
             );
+            let adoption = promoted
+                .candidate_adoption
+                .expect("terminal adoption status");
+            assert_eq!(adoption.state, "completed");
+            assert_eq!(adoption.candidate_sha, candidate);
+            assert_eq!(adoption.ai_model, "openai/gpt-5.6-sol");
             assert!(backend.body.contains("- **Tool(s):** test"));
             assert!(backend.body.contains("- **Model:** openai/gpt-5.6-sol"));
             assert!(backend.committed && backend.pushed && backend.created);
