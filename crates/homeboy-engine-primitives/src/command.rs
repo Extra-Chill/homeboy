@@ -3,6 +3,7 @@
 use std::io::{self, Read};
 use std::process::{Child, Command, ExitStatus, Output};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
@@ -137,6 +138,19 @@ pub struct BoundedCommandOutput {
     pub capture: CommandCaptureMetadata,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupervisedCommandTermination {
+    Completed,
+    Cancelled,
+    TimedOut,
+}
+
+#[derive(Debug)]
+pub struct SupervisedCommandOutput {
+    pub output: BoundedCommandOutput,
+    pub termination: SupervisedCommandTermination,
+}
+
 impl BoundedCommandOutput {
     pub fn into_output(self) -> Output {
         Output {
@@ -204,6 +218,138 @@ pub fn wait_with_bounded_output_until_cancelled_with_stdout_observer(
             stderr: stderr.metadata,
         },
     })
+}
+
+/// Wait for an isolated child while retaining bounded output and reporting
+/// liveness at a caller-selected cadence. The caller owns durable state; this
+/// primitive owns only child supervision and process-tree termination.
+pub fn wait_with_bounded_output_supervised(
+    child: &mut Child,
+    byte_limit: usize,
+    timeout: Duration,
+    heartbeat_interval: Duration,
+    mut is_cancelled: impl FnMut() -> bool,
+    mut on_heartbeat: impl FnMut(Duration, &str) -> io::Result<()>,
+) -> io::Result<SupervisedCommandOutput> {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let live_output = Arc::new(Mutex::new(LiveOutputTail::new(byte_limit)));
+    let stdout_handle = stdout.map({
+        let live_output = Arc::clone(&live_output);
+        move |stream| {
+            thread::spawn(move || {
+                capture_tail_with_live_snapshot(stream, byte_limit, true, live_output)
+            })
+        }
+    });
+    let stderr_handle = stderr.map({
+        let live_output = Arc::clone(&live_output);
+        move |stream| {
+            thread::spawn(move || {
+                capture_tail_with_live_snapshot(stream, byte_limit, false, live_output)
+            })
+        }
+    });
+    let started = std::time::Instant::now();
+    let mut last_heartbeat = started;
+    let (status, termination) = loop {
+        if let Some(status) = child.try_wait()? {
+            break (status, SupervisedCommandTermination::Completed);
+        }
+        if is_cancelled() {
+            break (
+                terminate_process_tree_and_reap(child)?,
+                SupervisedCommandTermination::Cancelled,
+            );
+        }
+        if started.elapsed() >= timeout {
+            break (
+                terminate_process_tree_and_reap(child)?,
+                SupervisedCommandTermination::TimedOut,
+            );
+        }
+        if last_heartbeat.elapsed() >= heartbeat_interval {
+            let tail = live_output
+                .lock()
+                .map(|tail| tail.render())
+                .unwrap_or_default();
+            if let Err(error) = on_heartbeat(started.elapsed(), &tail) {
+                return match terminate_process_tree_and_reap(child) {
+                    Ok(_) => Err(error),
+                    Err(cleanup_error) => Err(io::Error::other(format!(
+                        "{error}; failed to terminate and reap supervised child after heartbeat failure: {cleanup_error}"
+                    ))),
+                };
+            }
+            last_heartbeat = std::time::Instant::now();
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let stdout = join_capture(stdout_handle)?;
+    let stderr = join_capture(stderr_handle)?;
+    Ok(SupervisedCommandOutput {
+        output: BoundedCommandOutput {
+            status,
+            stdout: stdout.bytes,
+            stderr: stderr.bytes,
+            capture: CommandCaptureMetadata {
+                stdout: stdout.metadata,
+                stderr: stderr.metadata,
+            },
+        },
+        termination,
+    })
+}
+
+struct LiveOutputTail {
+    stdout: TailCapture,
+    stderr: TailCapture,
+}
+
+impl LiveOutputTail {
+    fn new(byte_limit: usize) -> Self {
+        Self {
+            stdout: TailCapture::new(byte_limit),
+            stderr: TailCapture::new(byte_limit),
+        }
+    }
+
+    fn render(&self) -> String {
+        let stdout = String::from_utf8_lossy(&self.stdout.bytes);
+        let stderr = String::from_utf8_lossy(&self.stderr.bytes);
+        match (stdout.trim(), stderr.trim()) {
+            ("", "") => String::new(),
+            (stdout, "") => format!("stdout:\n{stdout}"),
+            ("", stderr) => format!("stderr:\n{stderr}"),
+            (stdout, stderr) => format!("stdout:\n{stdout}\nstderr:\n{stderr}"),
+        }
+    }
+}
+
+fn capture_tail_with_live_snapshot(
+    mut reader: impl Read,
+    byte_limit: usize,
+    stdout: bool,
+    live_output: Arc<Mutex<LiveOutputTail>>,
+) -> io::Result<BoundedStreamCapture> {
+    let mut capture = TailCapture::new(byte_limit);
+    let mut buffer = [0_u8; 8_192];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        capture.push(&buffer[..count]);
+        if let Ok(mut live) = live_output.lock() {
+            let destination = if stdout {
+                &mut live.stdout
+            } else {
+                &mut live.stderr
+            };
+            destination.push(&buffer[..count]);
+        }
+    }
+    Ok(capture.finish())
 }
 
 pub fn isolate_process_tree(command: &mut Command) {
@@ -426,6 +572,12 @@ struct TailCapture {
     byte_limit: usize,
 }
 
+impl Default for TailCapture {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
 impl TailCapture {
     fn new(byte_limit: usize) -> Self {
         Self {
@@ -491,6 +643,7 @@ impl CapturedOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn tail_capture_retains_last_bytes_and_marks_truncated() {
@@ -505,6 +658,56 @@ mod tests {
         assert_eq!(captured.metadata.bytes_retained, 5);
         assert_eq!(captured.metadata.byte_limit, 5);
         assert!(captured.metadata.truncated);
+    }
+
+    #[test]
+    fn supervised_wait_heartbeats_and_times_out_an_isolated_child() {
+        let mut command = Command::new("sh");
+        command.args(["-lc", "printf gate-output; sleep 30"]);
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        isolate_process_tree(&mut command);
+        let mut child = command.spawn().expect("spawn controlled gate");
+        let heartbeats = AtomicUsize::new(0);
+        let result = wait_with_bounded_output_supervised(
+            &mut child,
+            64,
+            Duration::from_millis(150),
+            Duration::from_millis(25),
+            || false,
+            |_, _| {
+                heartbeats.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect("supervise controlled gate");
+        assert_eq!(result.termination, SupervisedCommandTermination::TimedOut);
+        assert!(heartbeats.load(Ordering::SeqCst) > 0);
+        assert_eq!(result.output.capture.stdout.byte_limit, 64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn heartbeat_failure_terminates_and_reaps_the_supervised_child() {
+        let mut command = Command::new("sh");
+        command.args(["-lc", "sleep 30"]);
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
+        isolate_process_tree(&mut command);
+        let mut child = command.spawn().expect("spawn controlled gate");
+        let pid = child.id();
+        let error = wait_with_bounded_output_supervised(
+            &mut child,
+            64,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            || false,
+            |_, _| Err(io::Error::other("durable heartbeat write failed")),
+        )
+        .expect_err("heartbeat persistence failure stops gate");
+        assert!(error.to_string().contains("durable heartbeat write failed"));
+        assert_ne!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
     }
 
     #[test]
