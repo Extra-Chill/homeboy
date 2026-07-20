@@ -886,28 +886,37 @@ fn materialize_agent_task_run_handoff(
     }))
 }
 
+/// The single place that reads a task's declared source root, in priority
+/// order: `workspace.root`, then `executor.config.workspace_root`, then
+/// `metadata.workspace.root`. Both the run and retry handoff paths resolve the
+/// primary checkout from this one chain so they never drift apart.
+fn task_declared_source_root(
+    task: &homeboy::agents::agent_tasks::AgentTaskRequest,
+) -> Option<&str> {
+    task.workspace
+        .root
+        .as_deref()
+        .or_else(|| {
+            task.executor
+                .config
+                .get("workspace_root")
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            task.metadata
+                .get("workspace")
+                .and_then(|workspace| workspace.get("root"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .filter(|root| !root.trim().is_empty())
+}
+
 fn plan_primary_workspace(
     plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
 ) -> homeboy::core::Result<PathBuf> {
     let mut roots = BTreeSet::new();
     for task in &plan.tasks {
-        let root = task
-            .workspace
-            .root
-            .as_deref()
-            .or_else(|| {
-                task.executor
-                    .config
-                    .get("workspace_root")
-                    .and_then(serde_json::Value::as_str)
-            })
-            .or_else(|| {
-                task.metadata
-                    .get("workspace")
-                    .and_then(|workspace| workspace.get("root"))
-                    .and_then(serde_json::Value::as_str)
-            });
-        if let Some(root) = root.filter(|root| !root.trim().is_empty()) {
+        if let Some(root) = task_declared_source_root(task) {
             roots.insert(PathBuf::from(root));
         }
     }
@@ -1141,23 +1150,7 @@ fn retry_plan_primary_workspace(
             continue;
         }
 
-        let root = task
-            .workspace
-            .root
-            .as_deref()
-            .or_else(|| {
-                task.executor
-                    .config
-                    .get("workspace_root")
-                    .and_then(serde_json::Value::as_str)
-            })
-            .or_else(|| {
-                task.metadata
-                    .get("workspace")
-                    .and_then(|workspace| workspace.get("root"))
-                    .and_then(serde_json::Value::as_str)
-            });
-        if let Some(root) = root.filter(|root| !root.trim().is_empty()) {
+        if let Some(root) = task_declared_source_root(task) {
             let path = PathBuf::from(root);
             let git_root = git::repo_root(&path).ok_or_else(|| {
                 Error::validation_invalid_argument(
