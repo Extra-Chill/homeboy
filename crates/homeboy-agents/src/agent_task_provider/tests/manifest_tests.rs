@@ -715,3 +715,33 @@ fn provider_command_env_exposes_generic_agent_tool_contracts() {
         AgentToolExecutionLocation::Disabled
     );
 }
+
+#[test]
+fn provider_command_env_strips_git_push_credentials() {
+    // The provider environment must deny git push credentials so an executor
+    // cannot push a candidate to a real remote before verification. (#8486)
+    let (request, provider) = request("task-1", "minimal-provider".to_string());
+    let env = provider_command_env(&request, &provider).expect("provider env");
+    let env: BTreeMap<String, String> = env.into_iter().collect();
+
+    assert_eq!(
+        env.get("GIT_ASKPASS").map(String::as_str),
+        Some("/bin/false")
+    );
+    assert_eq!(
+        env.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+        Some("0")
+    );
+    assert_eq!(
+        env.get("GIT_CONFIG_NOSYSTEM").map(String::as_str),
+        Some("1")
+    );
+    // An empty `credential.helper` via git's environment config resets any
+    // inherited helper list, so a cached-credential helper cannot supply a token.
+    assert_eq!(env.get("GIT_CONFIG_COUNT").map(String::as_str), Some("1"));
+    assert_eq!(
+        env.get("GIT_CONFIG_KEY_0").map(String::as_str),
+        Some("credential.helper")
+    );
+    assert_eq!(env.get("GIT_CONFIG_VALUE_0").map(String::as_str), Some(""));
+}
