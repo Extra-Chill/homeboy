@@ -111,6 +111,17 @@ pub(crate) fn agent_task_run_plan_lifecycle_event_from_persisted_job_events(
         return Ok(Some(event));
     }
 
+    let declares_run_plan_lifecycle = workload
+        .as_ref()
+        .and_then(|workload| workload.agent_task.as_ref())
+        .is_some_and(|agent_task| {
+            agent_task.lifecycle_mirror_policy
+                == LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate
+        });
+    if !declares_run_plan_lifecycle {
+        return Ok(None);
+    }
+
     let Some(stdout) = result.get("stdout").and_then(serde_json::Value::as_str) else {
         return Ok(None);
     };
@@ -240,6 +251,7 @@ fn agent_task_aggregate_from_value(value: &serde_json::Value) -> Option<AgentTas
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::api_jobs::{JobEvent, JobEventKind};
     use homeboy_core::lab_contract::{
         LabRunnerWorkload, LabRunnerWorkloadAgentTask, LabRunnerWorkloadAgentTaskDispatchKind,
         LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy,
@@ -351,6 +363,64 @@ mod tests {
         assert_eq!(
             error.details["context"],
             "hydrate nested Lab terminal agent-task aggregate"
+        );
+    }
+
+    #[test]
+    fn ignores_generic_terminal_stdout_without_a_declared_agent_task_lifecycle() {
+        for stdout in ["", "generic command output"] {
+            let events = vec![JobEvent {
+                sequence: 1,
+                job_id: uuid::Uuid::nil(),
+                kind: JobEventKind::Result,
+                timestamp_ms: 1,
+                message: None,
+                data: Some(serde_json::json!({
+                    "exit_code": 0,
+                    "stdout": stdout,
+                })),
+            }];
+
+            assert!(
+                agent_task_run_plan_lifecycle_event_from_persisted_job_events(
+                    &events,
+                    "homeboy-lab",
+                    "runner-job-1",
+                    "controller-run",
+                )
+                .expect("generic terminal output is not an agent-task payload")
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_stdout_for_a_declared_agent_task_lifecycle() {
+        let events = vec![JobEvent {
+            sequence: 1,
+            job_id: uuid::Uuid::nil(),
+            kind: JobEventKind::Result,
+            timestamp_ms: 1,
+            message: None,
+            data: Some(serde_json::json!({
+                "exit_code": 0,
+                "stdout": "not an agent-task result",
+                "runner_workload": workload(),
+            })),
+        }];
+
+        let error = agent_task_run_plan_lifecycle_event_from_persisted_job_events(
+            &events,
+            "homeboy-lab",
+            "runner-job-1",
+            "controller-run",
+        )
+        .expect_err("declared agent-task lifecycle output must remain strict");
+
+        assert_eq!(error.code, homeboy_core::ErrorCode::InternalJsonError);
+        assert_eq!(
+            error.details["context"],
+            "parse offloaded agent-task run-plan output"
         );
     }
 }

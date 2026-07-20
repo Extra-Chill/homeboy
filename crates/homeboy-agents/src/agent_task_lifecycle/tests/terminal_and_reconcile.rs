@@ -625,13 +625,21 @@ fn transport_only_reconciliation_stays_pending_until_foreground_projection_or_in
 }
 
 #[test]
-fn foreground_terminal_daemon_projection_finishes_success_and_failure_runs_once() {
+fn foreground_terminal_daemon_projection_finishes_generic_empty_or_text_stdout_runs_once() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-        for (run_id, daemon_status, expected_run, expected_task, expected_execution_status) in [
+        for (
+            run_id,
+            daemon_status,
+            stdout,
+            expected_run,
+            expected_task,
+            expected_execution_status,
+        ) in [
             (
                 "foreground-daemon-success",
                 homeboy_core::api_jobs::JobStatus::Succeeded,
+                "",
                 AgentTaskRunState::Succeeded,
                 AgentTaskState::Succeeded,
                 "succeeded",
@@ -639,6 +647,7 @@ fn foreground_terminal_daemon_projection_finishes_success_and_failure_runs_once(
             (
                 "foreground-daemon-failure",
                 homeboy_core::api_jobs::JobStatus::Failed,
+                "generic command output",
                 AgentTaskRunState::Failed,
                 AgentTaskState::Failed,
                 "failed",
@@ -654,7 +663,17 @@ fn foreground_terminal_daemon_projection_finishes_success_and_failure_runs_once(
             .expect("accepted detached handoff");
             let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
             snapshot.job.status = daemon_status;
-            snapshot.events.clear();
+            snapshot.events = vec![JobEvent {
+                sequence: 1,
+                job_id: snapshot.job.id,
+                kind: JobEventKind::Result,
+                timestamp_ms: 2,
+                message: Some("generic runner command result".to_string()),
+                data: Some(json!({
+                    "exit_code": if daemon_status == homeboy_core::api_jobs::JobStatus::Succeeded { 0 } else { 1 },
+                    "stdout": stdout,
+                })),
+            }];
 
             assert!(project_terminal_runner_result(run_id, &snapshot)
                 .expect("foreground daemon result is projected"));
