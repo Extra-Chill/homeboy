@@ -68,6 +68,9 @@ fn test_admission_duration(_name: &str, default: Duration) -> Duration {
 }
 static ADMISSION_LOCK_PROCESS_GUARDS: OnceLock<Mutex<BTreeMap<PathBuf, &'static Mutex<()>>>> =
     OnceLock::new();
+#[cfg(test)]
+static TEST_ADMISSION_HEAD_BARRIER: OnceLock<Mutex<Option<std::sync::Arc<std::sync::Barrier>>>> =
+    OnceLock::new();
 #[cfg(all(unix, any(test, feature = "test-support")))]
 static TEST_CONTROLLER_FIXTURE_DIGESTS: OnceLock<
     Mutex<BTreeMap<TestExecutableFileIdentity, String>>,
@@ -562,6 +565,16 @@ pub fn admit_current() -> Result<RuntimeAdmission> {
 /// the agent-task run ID, which lets another controller observe or cancel a
 /// waiting admission after the original process has exited.
 pub fn admit_current_for(request_id: &str) -> Result<RuntimeAdmission> {
+    admit_current_for_with_cancellation_check(request_id, || Ok(false))
+}
+
+/// Admit a request while checking the caller's durable lifecycle state at the
+/// queue claim boundary. The check runs under the queue lock, after the
+/// advisory lock is acquired and before ownership can be published.
+pub fn admit_current_for_with_cancellation_check(
+    request_id: &str,
+    cancellation_requested: impl Fn() -> Result<bool>,
+) -> Result<RuntimeAdmission> {
     let root = runtime_root()?;
     let lock_path = root.join(ADMISSION_LOCK_DIR);
     let request_id = request_id.trim();
@@ -574,7 +587,8 @@ pub fn admit_current_for(request_id: &str) -> Result<RuntimeAdmission> {
         ));
     }
     enqueue_admission_request(&lock_path, request_id)?;
-    let lock = match acquire_queued_admission_lock(&lock_path, request_id) {
+    let lock = match acquire_queued_admission_lock(&lock_path, request_id, &cancellation_requested)
+    {
         Ok(lock) => lock,
         Err(error) => {
             // A failed foreground admission must not leave a live-looking head
@@ -1072,14 +1086,24 @@ fn acquire_admission_lock_with_retry(
     ))
 }
 
-fn acquire_queued_admission_lock(path: &Path, request_id: &str) -> Result<AdmissionLock> {
-    acquire_queued_admission_lock_with_timeout(path, request_id, admission_queue_wait_timeout())
+fn acquire_queued_admission_lock(
+    path: &Path,
+    request_id: &str,
+    cancellation_requested: &impl Fn() -> Result<bool>,
+) -> Result<AdmissionLock> {
+    acquire_queued_admission_lock_with_timeout(
+        path,
+        request_id,
+        admission_queue_wait_timeout(),
+        cancellation_requested,
+    )
 }
 
 fn acquire_queued_admission_lock_with_timeout(
     path: &Path,
     request_id: &str,
     wait_timeout: Duration,
+    cancellation_requested: &impl Fn() -> Result<bool>,
 ) -> Result<AdmissionLock> {
     let started = std::time::Instant::now();
     let mut last_heartbeat = std::time::Instant::now();
@@ -1104,21 +1128,15 @@ fn acquire_queued_admission_lock_with_timeout(
             last_heartbeat = std::time::Instant::now();
         }
         if status["position"].as_u64() == Some(1) {
+            wait_at_admission_head();
             match acquire_admission_lock_for(path, request_id) {
                 Ok(lock) => {
-                    update_admission_queue(path, |queue| {
-                        let now = now_millis();
-                        let owner = admission_owner_record(&lock.token);
-                        queue["owner"] = json!({
-                            "request_id": request_id,
-                            "pid": owner["pid"],
-                            "linux_starttime_ticks": owner["linux_starttime_ticks"],
-                            "heartbeat_at_ms": now,
-                            "lease_expires_at_ms": now + admission_queue_lease().as_millis() as u64,
-                            "advisory_lock": true,
-                        });
-                    })?;
-                    return Ok(lock);
+                    if claim_admission_owner(path, request_id, &lock.token, cancellation_requested)?
+                    {
+                        return Ok(lock);
+                    }
+                    drop(lock);
+                    return Err(admission_cancelled_error(request_id));
                 }
                 Err(error) if error.retryable == Some(true) => (),
                 Err(error) => return Err(error),
@@ -1126,6 +1144,77 @@ fn acquire_queued_admission_lock_with_timeout(
         }
         std::thread::sleep(ADMISSION_QUEUE_POLL);
     }
+}
+
+fn admission_cancelled_error(request_id: &str) -> Error {
+    let mut error = Error::internal_unexpected("controller admission request was cancelled")
+        .with_retryable(true);
+    error.details = json!({ "request_id": request_id, "outcome": "cancelled" });
+    error
+}
+
+fn wait_at_admission_head() {
+    #[cfg(test)]
+    if let Some(barrier) = TEST_ADMISSION_HEAD_BARRIER
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("admission test hook is not poisoned")
+        .clone()
+    {
+        barrier.wait();
+        barrier.wait();
+    }
+}
+
+fn claim_admission_owner(
+    lock_path: &Path,
+    request_id: &str,
+    token: &str,
+    cancellation_requested: &impl Fn() -> Result<bool>,
+) -> Result<bool> {
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(queue_lock_path(lock_path))
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("open controller admission queue lock".to_string()),
+            )
+        })?;
+    lock_file.lock_exclusive().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("lock controller admission queue".to_string()),
+        )
+    })?;
+    let mut queue = read_admission_queue(lock_path)?;
+    reclaim_stale_admission_entries(lock_path, &mut queue);
+    let is_head = queue["requests"]
+        .as_array()
+        .and_then(|requests| requests.first())
+        .is_some_and(|request| {
+            request["request_id"].as_str() == Some(request_id)
+                && request["state"].as_str() == Some("waiting")
+        });
+    if !is_head || cancellation_requested()? {
+        let _ = lock_file.unlock();
+        return Ok(false);
+    }
+    let now = now_millis();
+    let owner = admission_owner_record(token);
+    queue["owner"] = json!({
+        "request_id": request_id,
+        "pid": owner["pid"],
+        "linux_starttime_ticks": owner["linux_starttime_ticks"],
+        "heartbeat_at_ms": now,
+        "lease_expires_at_ms": now + admission_queue_lease().as_millis() as u64,
+        "advisory_lock": true,
+    });
+    write_admission_queue(lock_path, &queue)?;
+    let _ = lock_file.unlock();
+    Ok(true)
 }
 
 fn queue_path(lock_path: &Path) -> PathBuf {
@@ -1174,6 +1263,12 @@ fn update_admission_queue(lock_path: &Path, mutate: impl FnOnce(&mut Value)) -> 
     let mut queue = read_admission_queue(lock_path)?;
     reclaim_stale_admission_entries(lock_path, &mut queue);
     mutate(&mut queue);
+    write_admission_queue(lock_path, &queue)?;
+    let _ = lock_file.unlock();
+    Ok(())
+}
+
+fn write_admission_queue(lock_path: &Path, queue: &Value) -> Result<()> {
     let temporary = queue_path(lock_path).with_extension("tmp");
     fs::write(
         &temporary,
@@ -1192,7 +1287,6 @@ fn update_admission_queue(lock_path: &Path, mutate: impl FnOnce(&mut Value)) -> 
             Some("publish controller admission queue".to_string()),
         )
     })?;
-    let _ = lock_file.unlock();
     Ok(())
 }
 
@@ -2185,7 +2279,7 @@ mod tests {
                 admission_status("later").expect("reclaim crashed head")["position"],
                 1
             );
-            let admission = acquire_queued_admission_lock(&lock, "later")
+            let admission = acquire_queued_admission_lock(&lock, "later", &|| Ok(false))
                 .expect("later waiter acquires after reclamation");
             drop(admission);
         });
@@ -2199,9 +2293,13 @@ mod tests {
             let first = admit_current_for("first").expect("admit first owner");
             enqueue_admission_request(&lock, "timed-out").expect("enqueue waiting request");
 
-            let error =
-                acquire_queued_admission_lock_with_timeout(&lock, "timed-out", Duration::ZERO)
-                    .expect_err("zero timeout expires deterministically");
+            let error = acquire_queued_admission_lock_with_timeout(
+                &lock,
+                "timed-out",
+                Duration::ZERO,
+                &|| Ok(false),
+            )
+            .expect_err("zero timeout expires deterministically");
 
             assert_eq!(error.retryable, Some(true));
             assert!(error.message.contains("queue wait exceeded 0ms"));
@@ -2210,6 +2308,61 @@ mod tests {
                 "none"
             );
             drop(first);
+        });
+    }
+
+    #[test]
+    fn cancellation_between_head_observation_and_claim_never_publishes_owner() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = runtime_root().expect("runtime root");
+            let lock = root.join(ADMISSION_LOCK_DIR);
+            let first = admit_current_for("first").expect("admit first owner");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            *TEST_ADMISSION_HEAD_BARRIER
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .expect("install head hook") = Some(barrier.clone());
+            let waiter =
+                std::thread::spawn(|| admit_current_for("racing").map(|admission| drop(admission)));
+
+            drop(first);
+            barrier.wait();
+            cancel_admission("racing").expect("remove cancelled waiter");
+            barrier.wait();
+
+            let error = match waiter.join().expect("waiter exits") {
+                Err(error) => error,
+                Ok(()) => panic!("cancelled waiter cannot acquire admission"),
+            };
+            assert_eq!(error.details["outcome"], "cancelled");
+            assert_eq!(
+                admission_status("racing").expect("cancelled request is absent")["state"],
+                "none"
+            );
+            assert!(
+                admission_status("racing").expect("cancelled request has no owner")["owner"]
+                    .is_null()
+            );
+            *TEST_ADMISSION_HEAD_BARRIER
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .expect("remove head hook") = None;
+            let next = admit_current_for("next").expect("queue remains usable after cancellation");
+            drop(next);
+            let _ = lock;
+        });
+    }
+
+    #[test]
+    fn cancellation_after_owner_publication_does_not_steal_live_lock() {
+        crate::test_support::with_isolated_home(|_| {
+            let admission = admit_current_for("owner").expect("admit owner");
+            cancel_admission("owner").expect("cancel admitted request");
+
+            let status = admission_status("owner").expect("owner remains observable");
+            assert_eq!(status["state"], "admitted");
+            assert_eq!(status["owner"]["request_id"], "owner");
+            drop(admission);
         });
     }
 

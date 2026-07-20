@@ -303,7 +303,9 @@ pub fn submit_plan(
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
     submit_plan_with_runtime_admission(plan, requested_run_id, |run_id| {
-        homeboy_core::controller_runtime::admit_current_for(run_id)
+        homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(run_id, || {
+            Ok(store::read_record(run_id)?.state.is_terminal())
+        })
     })
 }
 
@@ -387,6 +389,14 @@ where
 
     match admit_runtime(&run_id) {
         Ok(admission) => {
+            // The admission claim checks this state under the queue lock. Read
+            // it once more before recording runtime provenance or dispatching
+            // any provider work in case cancellation won immediately after.
+            if let Ok(cancelled) = store::read_record(&run_id) {
+                if cancelled.state.is_terminal() {
+                    return Ok(cancelled);
+                }
+            }
             record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                 admission.runtime();
             store::write_record(&record)?;
