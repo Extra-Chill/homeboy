@@ -159,7 +159,18 @@ pub fn persist_initial_recipe(
         // Harvest transport belongs to the original controller execution. A
         // replay must use that persisted context rather than ambient state.
         expected.harvest_context = existing.harvest_context.clone();
-        if existing != expected || existing.attempts.first() != recipe.attempts.first() {
+        if !recipes_match(&existing, &expected)
+            || !initial_attempt_inputs_match(
+                existing
+                    .attempts
+                    .first()
+                    .expect("validated recipe has attempt"),
+                recipe
+                    .attempts
+                    .first()
+                    .expect("validated recipe has attempt"),
+            )
+        {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe",
                 "durable cook recipe already exists with different execution inputs",
@@ -171,6 +182,55 @@ pub fn persist_initial_recipe(
     }
     write_recipe(&recipe)?;
     Ok(recipe)
+}
+
+/// `homeboy_plan` is a derived execution projection rebuilt by each controller
+/// compile. Compare its typed source inputs, not transient projection details,
+/// when deciding whether a persisted recipe may resume.
+fn recipes_match(left: &AgentTaskCookRecipe, right: &AgentTaskCookRecipe) -> bool {
+    if left.schema != right.schema
+        || left.cook_id != right.cook_id
+        || left.promotion_transport != right.promotion_transport
+        || left.gate_policy != right.gate_policy
+        || left.retry_budget != right.retry_budget
+        || left.finalization != right.finalization
+        || left.source_refs != right.source_refs
+        || left.runtime_generation != right.runtime_generation
+        || left.sensitive_mappings != right.sensitive_mappings
+        || left.harvest_context != right.harvest_context
+        || left.attempts.len() != right.attempts.len()
+    {
+        return false;
+    }
+    left.attempts
+        .iter()
+        .zip(&right.attempts)
+        .all(|(left, right)| attempt_inputs_match(left, right))
+}
+
+fn attempt_inputs_match(
+    left: &AgentTaskCookRecipeAttempt,
+    right: &AgentTaskCookRecipeAttempt,
+) -> bool {
+    left == right
+}
+
+fn initial_attempt_inputs_match(
+    left: &AgentTaskCookRecipeAttempt,
+    right: &AgentTaskCookRecipeAttempt,
+) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    // A CLI retry compiles fresh random run and plan identifiers. The persisted
+    // recipe remains authoritative for those identities; user-supplied plan
+    // inputs stay subject to the strict comparison below.
+    left.run_id.clear();
+    right.run_id.clear();
+    left.plan.plan_id.clear();
+    right.plan.plan_id.clear();
+    left.plan.rebuild_homeboy_plan();
+    right.plan.rebuild_homeboy_plan();
+    attempt_inputs_match(&left, &right)
 }
 
 pub fn record_recipe_attempt(
