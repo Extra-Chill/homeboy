@@ -109,7 +109,7 @@ pub fn refresh(
     }
 
     remove_path_if_exists(&backup, "remove runtime package backup")?;
-    materialize_local_module_closure(&package_source, &target)?;
+    materialize_local_module_closure(&package_source, runtime_parent, &runtime_root)?;
     remove_path_if_exists(&temp_dir, "clean runtime package refresh temp")?;
 
     Ok(RuntimePackageRefreshResult {
@@ -128,7 +128,11 @@ pub fn refresh(
 /// may import a shared module outside their package directory. Preserve each
 /// resolved module's path beneath Homeboy's config root so Node resolves it
 /// exactly as it did in the source checkout.
-fn materialize_local_module_closure(package_source: &Path, installed_package: &Path) -> Result<()> {
+fn materialize_local_module_closure(
+    package_source: &Path,
+    installed_config_root: &Path,
+    installed_runtime_root: &Path,
+) -> Result<()> {
     let Some(container) = package_source.parent().filter(|path| {
         path.file_name()
             .is_some_and(|name| name == "agent-runtimes")
@@ -142,10 +146,13 @@ fn materialize_local_module_closure(package_source: &Path, installed_package: &P
             Some("resolve runtime source root".to_string()),
         )
     })?;
-    let Some(installed_root) = installed_package.parent().and_then(Path::parent) else {
-        return Ok(());
-    };
-    let installed_root = fs::canonicalize(installed_root).map_err(|e| {
+    let installed_config_root = fs::canonicalize(installed_config_root).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("resolve installed runtime root".to_string()),
+        )
+    })?;
+    let installed_runtime_root = fs::canonicalize(installed_runtime_root).map_err(|e| {
         Error::internal_io(
             e.to_string(),
             Some("resolve installed runtime root".to_string()),
@@ -170,7 +177,11 @@ fn materialize_local_module_closure(package_source: &Path, installed_package: &P
             let relative = resolved
                 .strip_prefix(&source_root)
                 .expect("checked source root");
-            let destination = safe_runtime_dependency_destination(&installed_root, relative)?;
+            let (destination_root, relative) = relative
+                .strip_prefix("agent-runtimes")
+                .map(|relative| (&installed_runtime_root, relative))
+                .unwrap_or((&installed_config_root, relative));
+            let destination = safe_runtime_dependency_destination(destination_root, relative)?;
             fs::copy(&resolved, &destination).map_err(|e| {
                 Error::internal_io(e.to_string(), Some("copy runtime dependency".to_string()))
             })?;
@@ -332,7 +343,7 @@ fn replace_symlinked_runtime_root(
         &target,
         "stage runtime package in materialized root",
     )?;
-    materialize_local_module_closure(package_source, &target)?;
+    materialize_local_module_closure(package_source, runtime_parent, &materialized)?;
 
     rename_path(
         runtime_root,
@@ -737,7 +748,46 @@ mod tests {
 
         with_isolated_home(|home| {
             let source = tempfile::TempDir::new().expect("source tempdir");
-            write_runtime_package(source.path(), "neutral-runtime", "new");
+            let package = source.path().join("agent-runtimes/neutral-runtime");
+            let entrypoint = package.join("scripts/agent/executor.cjs");
+            let shared = source
+                .path()
+                .join("agent-runtimes/lib/cli-agent-task-executor-bin.js");
+            let executor = source
+                .path()
+                .join("agent-runtimes/lib/cli-agent-task-executor.js");
+            let contract = source.path().join("agent-task-contracts/index.js");
+            let outcome = source.path().join("runtime-agent-ci/lib/outcome.json");
+            std::fs::create_dir_all(entrypoint.parent().expect("entrypoint parent"))
+                .expect("entrypoint directory");
+            std::fs::create_dir_all(shared.parent().expect("shared parent"))
+                .expect("shared directory");
+            std::fs::create_dir_all(contract.parent().expect("contract parent"))
+                .expect("contract directory");
+            std::fs::create_dir_all(outcome.parent().expect("outcome parent"))
+                .expect("outcome directory");
+            std::fs::write(
+                package.join("neutral-runtime.json"),
+                r#"{"schema":"homeboy/agent-runtime-manifest/v1","id":"neutral-runtime"}"#,
+            )
+            .expect("manifest");
+            std::fs::write(
+                &entrypoint,
+                "require('../../../lib/cli-agent-task-executor-bin').run();\n",
+            )
+            .expect("entrypoint");
+            std::fs::write(
+                &shared,
+                "exports.run = require('./cli-agent-task-executor').run;\n",
+            )
+            .expect("shared dependency");
+            std::fs::write(
+                &executor,
+                "const contract = require('../../agent-task-contracts');\nconst outcome = require('../../runtime-agent-ci/lib/outcome.json');\nexports.run = () => process.stdout.write(`${contract.status}:${outcome.status}\\n`);\n",
+            )
+            .expect("transitive executor dependency");
+            std::fs::write(&contract, "exports.status = 'ready';\n").expect("shared contract");
+            std::fs::write(&outcome, r#"{"status":"normalized"}"#).expect("shared outcome");
             write_runtime_package(source.path(), "sibling-runtime", "sibling");
             commit_source(source.path());
             let source_before = tree_bytes(source.path());
@@ -767,6 +817,19 @@ mod tests {
                 std::fs::read_to_string(result.path.join(".source-revision"))
                     .expect("installed revision metadata"),
                 source_revision
+            );
+            let output = Command::new("node")
+                .arg(result.path.join("scripts/agent/executor.cjs"))
+                .output()
+                .expect("execute materialized entrypoint");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "ready:normalized\n"
             );
 
             let manifest = crate::agent_runtime_manifest::discover_agent_runtime_catalog()
