@@ -927,19 +927,15 @@ pub(super) fn remote_daemon_ensure_running(
     })
 }
 
-/// Start an independent daemon store for a runner generation. A generation's
-/// HOME is immutable after admission, so its lease, job store, and artifacts
-/// cannot be overwritten by a later binary promotion.
+/// Start an independent daemon store for a runner generation. Keep HOME intact:
+/// runner configuration, auth, and extensions are HOME-scoped. Only daemon
+/// runtime data is generation-scoped.
 pub(super) fn remote_daemon_ensure_running_in_home(
     client: &SshClient,
     homeboy: &str,
     home: &str,
 ) -> std::result::Result<RemoteDaemon, String> {
-    let command = format!(
-        "mkdir -p {home} {home}/.local/share && HOME={home} XDG_DATA_HOME={home}/.local/share {} daemon ensure-running --addr 127.0.0.1:0",
-        shell::quote_arg(homeboy),
-        home = shell::quote_arg(home),
-    );
+    let command = generation_daemon_ensure_command(homeboy, home);
     let output = client.execute(&command);
     if !output.success {
         return Err(command_failure_message(
@@ -978,6 +974,14 @@ pub(super) fn remote_daemon_ensure_running_in_home(
     })
 }
 
+pub(in crate::connection) fn generation_daemon_ensure_command(homeboy: &str, home: &str) -> String {
+    format!(
+        "mkdir -p {home}/data && XDG_DATA_HOME={home}/data {} daemon ensure-running --addr 127.0.0.1:0",
+        shell::quote_arg(homeboy),
+        home = shell::quote_arg(home),
+    )
+}
+
 pub(super) fn remote_daemon_force_stop(
     client: &SshClient,
     homeboy: &str,
@@ -1014,6 +1018,45 @@ pub(super) fn remote_daemon_force_stop(
             "remote bounded stale-daemon replacement stop returned an unexpected response"
                 .to_string(),
         );
+    }
+    Ok(())
+}
+
+pub(super) fn remote_daemon_force_stop_in_home(
+    client: &SshClient,
+    homeboy: &str,
+    home: &str,
+    lease_id: &str,
+) -> std::result::Result<(), String> {
+    let command = format!(
+        "XDG_DATA_HOME={home}/data {} daemon stop --force --lease-id {}",
+        shell::quote_arg(homeboy),
+        shell::quote_arg(lease_id),
+        home = shell::quote_arg(home),
+    );
+    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+    if !output.success {
+        return Err(command_failure_message(
+            "remote generation daemon stop failed",
+            &output,
+        ));
+    }
+    Ok(())
+}
+
+/// Last-resort cleanup for a generation whose lifecycle endpoint is no longer
+/// reachable. The PID came from that generation's lease-bearing startup result.
+pub(super) fn remote_daemon_kill_pid(
+    client: &SshClient,
+    pid: u32,
+) -> std::result::Result<(), String> {
+    let command = format!("kill -TERM {}", shell::quote_arg(&pid.to_string()));
+    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+    if !output.success {
+        return Err(command_failure_message(
+            "remote generation daemon PID cleanup failed",
+            &output,
+        ));
     }
     Ok(())
 }

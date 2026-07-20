@@ -42,6 +42,7 @@ mod evidence;
 mod execution;
 mod extension_materialization;
 mod generations;
+pub use generations::{inventory as runner_generation_inventory, RunnerDaemonGenerationStatus};
 mod git_dependency_materialization;
 mod homeboy_refresh;
 mod job_preparation;

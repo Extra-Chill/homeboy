@@ -413,7 +413,7 @@ pub fn refresh_homeboy_binary(
                 None,
             )
         })?;
-        let updated_fields = if promote_daemon_binary {
+        let updated_fields = if promote_daemon_binary && !options.reconnect {
             homeboy_core::config::with_config_lock(|| {
                 let patch = refreshed_runner_patch(&plan.runner_id, &plan.binary_path)?;
                 match merge(Some(&plan.runner_id), &patch.to_string(), &[])? {
@@ -461,7 +461,7 @@ pub fn refresh_homeboy_binary(
         }
     };
     let identity = bootstrap.identity;
-    let updated_fields = bootstrap.updated_fields;
+    let mut updated_fields = bootstrap.updated_fields;
 
     let mut daemon_refreshed = false;
     let interrupted_job_ids;
@@ -504,10 +504,38 @@ pub fn refresh_homeboy_binary(
         for job in super::status(&plan.runner_id)?.active_jobs {
             super::generations::record_job(&plan.runner_id, &job.job_id, &previous)?;
         }
-        super::generations::activate(&plan.runner_id, previous, next.clone())?;
+        super::generations::activate(&plan.runner_id, previous.clone(), next.clone())?;
+        // The router is durable before the admission switch. If selecting B or
+        // publishing B fails, restore both durable records and stop B; A was
+        // never disconnected and remains the accepting session.
+        let promoted = homeboy_core::config::with_config_lock(|| {
+            let patch = refreshed_runner_patch(&plan.runner_id, &plan.binary_path)?;
+            match merge(Some(&plan.runner_id), &patch.to_string(), &[])? {
+                MergeOutput::Single(result) => Ok(result.updated_fields),
+                MergeOutput::Bulk(_) => Ok(Vec::new()),
+            }
+        });
+        let promoted = match promoted {
+            Ok(fields) => fields,
+            Err(error) => {
+                let _ = super::generations::rollback_activation(&plan.runner_id, &previous, &next);
+                let _ = super::connection::retire_direct_generation(&next);
+                return Err(error);
+            }
+        };
+        if let Err(error) = super::connection::publish_direct_generation(&next) {
+            let _ = restore_runner_homeboy_path_if_selected(
+                &plan.runner_id,
+                &plan.binary_path,
+                previous_homeboy_path.as_deref(),
+            );
+            let _ = super::generations::rollback_activation(&plan.runner_id, &previous, &next);
+            let _ = super::connection::retire_direct_generation(&next);
+            return Err(error);
+        }
+        updated_fields = promoted;
         // Publishing the new controller session is the admission switch. Startup
         // or tunnel failure above leaves the old session untouched and accepting.
-        super::connection::publish_direct_generation(&next)?;
         daemon_refreshed = true;
         interrupted_job_ids = Vec::new();
     } else {

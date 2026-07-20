@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::paths;
 
-use crate::RunnerSession;
+use crate::{connection, RunnerSession};
 
 const SCHEMA: &str = "homeboy/runner-daemon-generations/v1";
 
@@ -18,6 +18,14 @@ pub(crate) struct RunnerDaemonGenerations {
     generations: BTreeMap<String, RunnerSession>,
     #[serde(default)]
     job_leases: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunnerDaemonGenerationStatus {
+    pub lease_id: String,
+    pub state: &'static str,
+    pub active_jobs: Option<usize>,
+    pub session: RunnerSession,
 }
 
 fn path(runner_id: &str) -> Result<std::path::PathBuf> {
@@ -75,6 +83,28 @@ pub(crate) fn activate(
     save(&generations, runner_id)
 }
 
+/// Restore the previous persisted router when a later cutover step fails.
+pub(crate) fn rollback_activation(
+    runner_id: &str,
+    previous: &RunnerSession,
+    next: &RunnerSession,
+) -> Result<()> {
+    let Some(mut generations) = load(runner_id)? else {
+        return Ok(());
+    };
+    let previous_lease = lease(previous)?.to_string();
+    let next_lease = lease(next)?.to_string();
+    generations.generations.remove(&next_lease);
+    generations
+        .generations
+        .insert(previous_lease.clone(), previous.clone());
+    generations.active_lease_id = previous_lease;
+    generations
+        .job_leases
+        .retain(|_, lease| lease != &next_lease);
+    save(&generations, runner_id)
+}
+
 pub(crate) fn record_job(runner_id: &str, job_id: &str, session: &RunnerSession) -> Result<()> {
     let Some(mut generations) = load(runner_id)? else {
         return Ok(());
@@ -102,6 +132,70 @@ pub(crate) fn sessions(runner_id: &str) -> Result<Vec<RunnerSession>> {
     Ok(load(runner_id)?
         .map(|router| router.generations.into_values().collect())
         .unwrap_or_default())
+}
+
+/// Inspect every persisted generation. This is intentionally observational:
+/// status polling must never own a generation's retirement.
+pub fn inventory(runner_id: &str) -> Result<Vec<RunnerDaemonGenerationStatus>> {
+    let Some(generations) = load(runner_id)? else {
+        return Ok(Vec::new());
+    };
+    Ok(generations
+        .generations
+        .iter()
+        .map(|(lease_id, session)| RunnerDaemonGenerationStatus {
+            lease_id: lease_id.clone(),
+            state: if lease_id == &generations.active_lease_id {
+                "accepting"
+            } else {
+                "draining"
+            },
+            active_jobs: connection::generation_active_jobs(session).ok(),
+            session: session.clone(),
+        })
+        .collect())
+}
+
+/// Reconcile draining generations after a durable terminal-job transition.
+/// The daemon's active-job count is authoritative; controller routing records
+/// only decide which generations are eligible to be retired.
+pub(crate) fn reconcile_terminal_job(runner_id: &str) -> Result<()> {
+    reconcile_draining_generations_with(
+        runner_id,
+        connection::generation_active_jobs,
+        connection::retire_direct_generation,
+    )
+}
+
+fn reconcile_draining_generations_with<Count, Retire>(
+    runner_id: &str,
+    mut active_jobs: Count,
+    mut retire: Retire,
+) -> Result<()>
+where
+    Count: FnMut(&RunnerSession) -> Result<usize>,
+    Retire: FnMut(&RunnerSession) -> Result<()>,
+{
+    let Some(mut generations) = load(runner_id)? else {
+        return Ok(());
+    };
+    let draining = generations
+        .generations
+        .iter()
+        .filter(|(lease_id, _)| *lease_id != &generations.active_lease_id)
+        .map(|(lease_id, session)| (lease_id.clone(), session.clone()))
+        .collect::<Vec<_>>();
+    for (lease_id, session) in draining {
+        if active_jobs(&session)? != 0 {
+            continue;
+        }
+        retire(&session)?;
+        generations.generations.remove(&lease_id);
+        generations
+            .job_leases
+            .retain(|_, assigned| assigned != &lease_id);
+    }
+    save(&generations, runner_id)
 }
 
 #[cfg(test)]
@@ -143,6 +237,90 @@ mod tests {
             record_job("lab", "job-b", &b).expect("bind B job");
             assert_eq!(session_for_job("lab", "job-a").unwrap(), Some(a));
             assert_eq!(session_for_job("lab", "job-b").unwrap(), Some(b));
+        });
+    }
+
+    #[test]
+    fn failed_cutover_restores_a_and_removes_b_routes() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let a = session("lease-a");
+            let b = session("lease-b");
+            activate("lab", a.clone(), b.clone()).expect("activate B");
+            record_job("lab", "job-b", &b).expect("bind B job");
+            rollback_activation("lab", &a, &b).expect("rollback B");
+            assert_eq!(session_for_job("lab", "job-b").unwrap(), None);
+            assert_eq!(sessions("lab").unwrap(), vec![a]);
+        });
+    }
+
+    #[test]
+    fn terminal_reconciliation_retires_only_authoritative_zero_draining_generation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let a = session("lease-a");
+            let b = session("lease-b");
+            activate("lab", a.clone(), b.clone()).expect("activate B");
+            let mut retired = Vec::new();
+            reconcile_draining_generations_with(
+                "lab",
+                |session| {
+                    Ok(
+                        if session.remote_daemon_lease_id.as_deref() == Some("lease-a") {
+                            1
+                        } else {
+                            0
+                        },
+                    )
+                },
+                |session| {
+                    retired.push(session.remote_daemon_lease_id.clone().expect("lease"));
+                    Ok(())
+                },
+            )
+            .expect("reconcile active A");
+            assert!(retired.is_empty());
+            assert_eq!(session_for_job("lab", "job-a").unwrap(), None);
+            reconcile_draining_generations_with(
+                "lab",
+                |_| Ok(0),
+                |session| {
+                    retired.push(session.remote_daemon_lease_id.clone().expect("lease"));
+                    Ok(())
+                },
+            )
+            .expect("reconcile terminal A");
+            assert_eq!(retired, vec!["lease-a"]);
+            assert_eq!(sessions("lab").unwrap(), vec![b]);
+        });
+    }
+
+    #[test]
+    fn durable_router_survives_controller_reload_and_admits_b() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let a = session("lease-a");
+            let b = session("lease-b");
+            activate("lab", a.clone(), b.clone()).expect("activate B");
+            record_job("lab", "job-a", &a).expect("bind A job");
+            record_job("lab", "job-b", &b).expect("bind B job");
+            let raw =
+                std::fs::read_to_string(path("lab").expect("router path")).expect("router exists");
+            let reloaded: RunnerDaemonGenerations =
+                serde_json::from_str(&raw).expect("reload router");
+            assert_eq!(reloaded.active_lease_id, "lease-b");
+            assert_eq!(session_for_job("lab", "job-a").unwrap(), Some(a));
+            assert_eq!(session_for_job("lab", "job-b").unwrap(), Some(b));
+        });
+    }
+
+    #[test]
+    fn inventory_labels_b_accepting_and_a_draining_without_retiring_on_poll() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let a = session("lease-a");
+            let b = session("lease-b");
+            activate("lab", a.clone(), b.clone()).expect("activate B");
+            let inventory = inventory("lab").expect("status inventory");
+            assert_eq!(inventory[0].state, "draining");
+            assert_eq!(inventory[1].state, "accepting");
+            assert_eq!(sessions("lab").unwrap(), vec![a, b]);
         });
     }
 }

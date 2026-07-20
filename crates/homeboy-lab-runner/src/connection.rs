@@ -93,8 +93,9 @@ pub(crate) fn start_direct_generation(
     let daemon =
         remote_daemon::remote_daemon_ensure_running_in_home(&client, homeboy, generation_home)
             .map_err(Error::internal_unexpected)?;
+    let daemon_lease_id = daemon.lease_id.clone();
     let session_path = session_path(runner_id)?;
-    let (local_port, tunnel_pid, local_url, daemon) = connect_remote_daemon(
+    let (local_port, tunnel_pid, local_url, daemon) = match connect_remote_daemon(
         &server,
         &client,
         homeboy,
@@ -103,14 +104,24 @@ pub(crate) fn start_direct_generation(
         &expected_identity,
         runner_id,
         &session_path,
-    )
-    .map_err(|(report, _)| {
-        Error::internal_unexpected(
-            report
-                .failure_message
-                .unwrap_or_else(|| "generation tunnel failed".to_string()),
-        )
-    })?;
+    ) {
+        Ok(connection) => connection,
+        Err((report, _)) => {
+            // The tunnel helper cleans up its local PID. The remote daemon has
+            // no published session yet, so tear it down by its exact lease.
+            let _ = remote_daemon::remote_daemon_force_stop_in_home(
+                &client,
+                homeboy,
+                generation_home,
+                daemon_lease_id.as_deref().unwrap_or_default(),
+            );
+            return Err(Error::internal_unexpected(
+                report
+                    .failure_message
+                    .unwrap_or_else(|| "generation tunnel failed".to_string()),
+            ));
+        }
+    };
     Ok(RunnerSession {
         runner_id: runner.id,
         mode: RunnerTunnelMode::DirectSsh,
@@ -136,6 +147,91 @@ pub(crate) fn start_direct_generation(
 
 pub(crate) fn publish_direct_generation(session: &RunnerSession) -> Result<()> {
     write_session(session)
+}
+
+pub(crate) fn retire_direct_generation(session: &RunnerSession) -> Result<()> {
+    if session.mode != RunnerTunnelMode::DirectSsh {
+        return Ok(());
+    }
+    let local_url = session
+        .local_url
+        .as_deref()
+        .ok_or_else(|| Error::internal_unexpected("generation session has no local daemon URL"))?;
+    let lease_id = session
+        .remote_daemon_lease_id
+        .as_deref()
+        .ok_or_else(|| Error::internal_unexpected("generation session has no daemon lease"))?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| {
+            Error::internal_unexpected(format!("build daemon lifecycle client: {error}"))
+        })?;
+    let graceful_stop = client
+        .post(format!(
+            "{}/lifecycle/stop",
+            local_url.trim_end_matches('/')
+        ))
+        .json(&serde_json::json!({ "lease_id": lease_id, "force": false }))
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map(|_| ())
+        .map_err(|error| Error::internal_unexpected(format!("stop drained generation: {error}")));
+    cleanup_direct_generation_with(
+        session,
+        graceful_stop,
+        |pid| {
+            let runner = load(&session.runner_id)?;
+            let Some((_, _, client)) = resolve_ssh_runner(&runner)? else {
+                return Err(Error::internal_unexpected(
+                    "generation runner no longer resolves to SSH",
+                ));
+            };
+            remote_daemon::remote_daemon_kill_pid(&client, pid).map_err(Error::internal_unexpected)
+        },
+        terminate_pid,
+    )
+}
+
+fn cleanup_direct_generation_with<Fallback, Tunnel>(
+    session: &RunnerSession,
+    graceful_stop: Result<()>,
+    mut force_stop_remote: Fallback,
+    mut terminate_tunnel: Tunnel,
+) -> Result<()>
+where
+    Fallback: FnMut(u32) -> Result<()>,
+    Tunnel: FnMut(u32),
+{
+    let cleanup_result = match graceful_stop {
+        Ok(()) => Ok(()),
+        Err(graceful_error) => match session.remote_daemon_pid {
+            Some(pid) => force_stop_remote(pid).map_err(|fallback_error| {
+                Error::internal_unexpected(format!(
+                    "generation graceful cleanup failed ({}) and exact PID fallback failed ({})",
+                    graceful_error.message, fallback_error.message
+                ))
+            }),
+            None => Err(graceful_error),
+        },
+    };
+    if let Some(pid) = session.tunnel_pid {
+        terminate_tunnel(pid);
+    }
+    cleanup_result
+}
+
+pub(crate) fn generation_active_jobs(session: &RunnerSession) -> Result<usize> {
+    let url = session
+        .local_url
+        .as_deref()
+        .ok_or_else(|| Error::internal_unexpected("generation session has no local daemon URL"))?;
+    let identity = session.homeboy_build_identity.as_deref().ok_or_else(|| {
+        Error::internal_unexpected("generation session has no daemon build identity")
+    })?;
+    daemon_http_freshness(url, &session.homeboy_version, identity)
+        .map(|freshness| freshness.active_jobs)
+        .map_err(Error::internal_unexpected)
 }
 
 /// Connect using an explicit dead-lease or missing-lease selector. A
