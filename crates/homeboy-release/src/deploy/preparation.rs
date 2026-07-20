@@ -507,10 +507,14 @@ fn prepare_payload(
         }
         generated_source_artifact = Some(cleanup);
     }
-    let path = release_artifact
-        .as_ref()
-        .map(|artifact| artifact.path.clone())
-        .unwrap_or(artifact_path(&component)?);
+    // Resolve the local build artifact only when there is no reusable release
+    // asset. `unwrap_or` evaluates its argument eagerly, so using it here would
+    // error on a missing local `build/*.zip` even when the release asset is
+    // present (e.g. after `homeboy release` cleaned the local build dir). #9164
+    let path = match release_artifact.as_ref() {
+        Some(artifact) => artifact.path.clone(),
+        None => artifact_path(&component)?,
+    };
     let metadata = std::fs::metadata(&path).map_err(|error| {
         Error::internal_io(
             format!("Prepared artifact is unavailable: {error}"),

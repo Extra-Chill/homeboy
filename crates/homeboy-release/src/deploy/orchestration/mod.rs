@@ -647,6 +647,106 @@ mod tests {
             .success());
     }
 
+    // Reproduces #9164: after `homeboy release` cleans the local build/ dir, a
+    // normal (non-tagged) deploy that resolves a reusable release asset must
+    // deploy that downloaded asset instead of demanding the cleaned local
+    // build_artifact. The lease is provided (as `deploy_components` does after
+    // verifying the asset), so preparation must consume it and never touch the
+    // missing local zip.
+    #[test]
+    fn release_asset_deploy_consumes_downloaded_asset_after_local_build_cleanup() {
+        with_isolated_home(|_| {
+            let repo = TempDir::new().expect("repo");
+            let root = repo.path();
+            // A plugin whose header version matches the release tag, committed and
+            // tagged, but with NO build/ artifact on disk (release cleanup removed it).
+            std::fs::write(
+                root.join("plugin.php"),
+                "<?php\n/*\nPlugin Name: Sample\nVersion: 0.36.0\n*/\n",
+            )
+            .expect("plugin header");
+            run_git(root, &["init", "-q"]);
+            run_git(root, &["config", "user.email", "test@example.com"]);
+            run_git(root, &["config", "user.name", "Test"]);
+            run_git(root, &["add", "."]);
+            run_git(root, &["commit", "-q", "-m", "release 0.36.0"]);
+            run_git(root, &["tag", "v0.36.0"]);
+            assert!(
+                !root.join("build/plugin.zip").exists(),
+                "local build artifact must be absent to model release cleanup"
+            );
+
+            // The verified, downloaded release asset (as resolved by deploy_components).
+            let download_dir = homeboy_core::engine::temp::runtime_temp_dir("deploy-download")
+                .expect("download dir");
+            let asset_path = download_dir.join("plugin.zip");
+            // A real (minimal) ZIP so the pre-deploy artifact inspection accepts it.
+            {
+                let file = std::fs::File::create(&asset_path).expect("asset file");
+                let mut zip = zip::ZipWriter::new(file);
+                let options = zip::write::FileOptions::default();
+                zip.start_file("plugin.php", options).expect("zip entry");
+                use std::io::Write as _;
+                zip.write_all(b"<?php\n/*\nPlugin Name: Sample\nVersion: 0.36.0\n*/\n")
+                    .expect("zip write");
+                zip.finish().expect("zip finish");
+            }
+            let asset_bytes = std::fs::read(&asset_path).expect("asset bytes");
+            let sha256 = crate::deploy::sha256_file(&asset_path).expect("sha");
+            let lease = ReleaseArtifactLease::test_new(
+                homeboy_core::git::release_download::ReleaseArtifact {
+                    path: asset_path.clone(),
+                    tag: "v0.36.0".to_string(),
+                    commit: Some("deadbeef".to_string()),
+                    url: "https://github.com/example/sample/releases/download/v0.36.0/plugin.zip"
+                        .to_string(),
+                    name: "plugin.zip".to_string(),
+                    size: asset_bytes.len() as u64,
+                    sha256: sha256.clone(),
+                },
+            )
+            .expect("lease");
+
+            let mut component =
+                artifact_component("sample", &root.to_string_lossy(), "build/plugin.zip");
+            component.remote_url = Some("https://github.com/example/sample".to_string());
+            component.version_targets = Some(vec![homeboy_core::component::VersionTarget {
+                file: "plugin.php".to_string(),
+                pattern: Some("Version:\\s*([0-9.]+)".to_string()),
+                artifact_path: None,
+            }]);
+
+            let mut config = base_deploy_config();
+            config.component_ids = vec!["sample".to_string()];
+            config.expected_version = Some("0.36.0".to_string());
+            config.force = true;
+            config.no_pull = true;
+
+            let release_artifacts = HashMap::from([("sample".to_string(), lease.clone())]);
+            let prepared = prepare_component_deployments(
+                &[component],
+                &config,
+                &Project::default(),
+                "/srv/site",
+                &HashMap::from([("sample".to_string(), "0.36.0".to_string())]),
+                &HashMap::from([("sample".to_string(), "0.35.0".to_string())]),
+                &release_artifacts,
+            )
+            .expect("release-asset deploy must prepare from the downloaded asset");
+
+            let artifact_path = prepared[0]
+                .artifact_path
+                .as_ref()
+                .expect("prepared release-asset deploy must carry an artifact path");
+            let deployed_bytes =
+                std::fs::read(artifact_path).expect("prepared artifact bytes must be readable");
+            assert_eq!(
+                deployed_bytes, asset_bytes,
+                "deploy must upload the downloaded release asset, not a local build"
+            );
+        });
+    }
+
     #[test]
     fn deploy_tag_for_version_formats_regular_release_tag() {
         let component = make_component("sample-plugin", "/tmp/not-a-git-repo");
