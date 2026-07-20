@@ -482,9 +482,13 @@ mod tests {
         let (port, server) = serve_health("lease-live", 42, Duration::from_millis(125));
         let session = session_for_health_endpoint(port, "lease-live", 42);
 
+        // Liveness splits its budget across three attempts and reserves half of
+        // each (`remaining / attempts_left / 2`), so a single probe only gets a
+        // fraction of the total timeout. The overall budget must be large enough
+        // that one probe still exceeds the endpoint's 125ms response time.
         assert!(session_is_live_with_timeout(
             &session,
-            Duration::from_millis(200)
+            Duration::from_millis(1500)
         ));
         server.join().expect("server");
     }

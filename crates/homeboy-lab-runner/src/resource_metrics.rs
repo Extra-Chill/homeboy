@@ -864,7 +864,12 @@ mod tests {
         )
         .expect_err("callback failure returns");
 
-        assert!(error.message.contains("persist child identity"));
+        // `Error::internal_io` carries a fixed "IO error" message and puts the
+        // formatted cause in `details["error"]`, so assert the child-identity
+        // failure surfaces there rather than on the top-level message.
+        assert!(error.details["error"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("persist child identity")));
         assert!(!homeboy_core::process::pid_is_running(
             pid.load(Ordering::SeqCst)
         ));
