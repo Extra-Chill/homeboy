@@ -583,7 +583,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
 
     fn dispatch_attempt(
         &self,
-        plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+        mut plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
         run_id: &str,
         derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> homeboy::core::Result<()> {
@@ -591,6 +591,9 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
         // baseline to this retry; only its evidence crosses the Lab boundary.
         let verified_cook_baseline =
             derived_cook_baseline.map(DerivedCookBaselineCapability::verified_baseline_provenance);
+        if let Some(verified_cook_baseline) = verified_cook_baseline.as_ref() {
+            attach_verified_cook_baseline(&mut plan, verified_cook_baseline);
+        }
         let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
@@ -697,6 +700,26 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                 )]),
             )),
             LabRouteOutcome::InFlight(_) => Ok(()),
+        }
+    }
+}
+
+fn attach_verified_cook_baseline(
+    plan: &mut homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    baseline: &serde_json::Value,
+) {
+    let Some(source_task_id) = baseline
+        .get("source_task_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    for task in &mut plan.tasks {
+        if task.task_id == source_task_id {
+            if !task.metadata.is_object() {
+                task.metadata = serde_json::json!({});
+            }
+            task.metadata["verified_cook_baseline"] = baseline.clone();
         }
     }
 }
