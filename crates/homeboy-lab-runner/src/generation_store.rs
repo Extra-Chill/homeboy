@@ -1,9 +1,10 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use homeboy_core::error::{Error, Result};
 use homeboy_core::paths;
 
-use crate::{RollingGenerations, RunnerSession};
+use crate::{RollingGenerations, RunnerDaemonGenerationStatus, RunnerSession};
 
 fn path(runner_id: &str) -> Result<PathBuf> {
     Ok(paths::runner_sessions_dir()?
@@ -67,6 +68,89 @@ pub(crate) fn job_session(
                 .map(|generation| generation.endpoint.clone())
         })
     }))
+}
+
+pub(crate) fn status_projection(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+) -> Result<Vec<RunnerDaemonGenerationStatus>> {
+    Ok(
+        read(runner_id, legacy)?.map_or_else(Vec::new, |generations| {
+            generations
+                .generations
+                .into_iter()
+                .map(|(generation, entry)| RunnerDaemonGenerationStatus {
+                    admission_owner: generation == generations.admission_owner,
+                    generation,
+                    drain_state: entry.drain_state,
+                    active_job_count: entry.active_jobs,
+                    homeboy_build_identity: entry.endpoint.homeboy_build_identity,
+                    remote_daemon_lease_id: entry.endpoint.remote_daemon_lease_id,
+                    remote_daemon_address: entry.endpoint.remote_daemon_address,
+                    local_url: entry.endpoint.local_url,
+                })
+                .collect()
+        }),
+    )
+}
+
+/// Reconciliation is intentionally fail-closed: an unreachable draining
+/// endpoint remains recorded and routable. Only its own health response may
+/// authorize the zero-job lease-bound stop.
+pub(crate) fn reconcile(runner_id: &str, legacy: Option<&RunnerSession>) -> Result<()> {
+    let Some(mut generations) = read(runner_id, legacy)? else {
+        return Ok(());
+    };
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| {
+            Error::internal_unexpected(format!("build generation reconcile client: {error}"))
+        })?;
+    let drained = generations
+        .generations
+        .iter()
+        .filter_map(|(generation, entry)| {
+            (entry.drain_state == crate::RollingDrainState::Draining)
+                .then_some((generation.clone(), entry.endpoint.clone()))
+        })
+        .filter_map(|(generation, session)| {
+            let local_url = session.local_url.clone()?;
+            let health = client
+                .get(format!("{}/health", local_url.trim_end_matches('/')))
+                .send()
+                .ok()?;
+            let body: serde_json::Value = health.json().ok()?;
+            let active = body
+                .pointer("/freshness/active_jobs")
+                .and_then(serde_json::Value::as_u64)?;
+            (active == 0).then_some((generation, session, local_url))
+        })
+        .collect::<Vec<_>>();
+    for (generation, session, local_url) in drained {
+        let Some(lease_id) = session.remote_daemon_lease_id.as_deref() else {
+            continue;
+        };
+        let stopped = client
+            .post(format!(
+                "{}/lifecycle/stop",
+                local_url.trim_end_matches('/')
+            ))
+            .json(&serde_json::json!({ "lease_id": lease_id, "force": false }))
+            .send()
+            .is_ok_and(|response| response.status().is_success());
+        if stopped {
+            if let Some(pid) = session.tunnel_pid {
+                crate::connection::terminate_generation_tunnel(pid);
+            }
+            generations.generations.remove(&generation);
+            generations
+                .job_owners
+                .retain(|_, owner| owner != &generation);
+        }
+    }
+    write(runner_id, &generations)
 }
 
 pub(crate) fn record_job(runner_id: &str, session: &RunnerSession, job_id: &str) -> Result<()> {

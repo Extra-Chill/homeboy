@@ -975,7 +975,7 @@ pub(super) fn is_loopback_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
-pub(super) fn terminate_pid(pid: u32) {
+pub(crate) fn terminate_pid(pid: u32) {
     if pid > i32::MAX as u32 {
         return;
     }

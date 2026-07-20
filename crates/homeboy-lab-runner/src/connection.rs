@@ -65,9 +65,8 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
 }
 
 /// Start and validate a second daemon without touching the recorded admission
-/// daemon. Its HOME is generation-scoped, which gives the existing daemon an
-/// independent lease and durable job store while keeping the runner protocol
-/// unchanged.
+/// daemon. Its state directory is generation-scoped while HOME and the normal
+/// runtime configuration remain shared, preserving runner credentials.
 pub(crate) fn rotate_daemon_generation(
     runner_id: &str,
     candidate_homeboy: &str,
@@ -102,11 +101,11 @@ pub(crate) fn rotate_daemon_generation(
         generation
     };
     let runner_segment = homeboy_core::paths::sanitize_path_segment(runner_id);
-    let state_home = format!("$HOME/.homeboy-daemon-generations/{runner_segment}/{generation}");
+    let state_dir =
+        format!("$HOME/.config/homeboy/daemon-generations/{runner_segment}/{generation}");
     let command = format!(
-        "HOME={} XDG_DATA_HOME={}/.local/share {} daemon ensure-running --addr 127.0.0.1:0",
-        format!("\"{state_home}\""),
-        format!("\"{state_home}\""),
+        "HOMEBOY_DAEMON_STATE_DIR={} {} daemon ensure-running --addr 127.0.0.1:0",
+        format!("\"{state_dir}\""),
         shell::quote_arg(candidate_homeboy),
     );
     let output = client.execute(&command);
@@ -203,6 +202,10 @@ pub(crate) fn rotate_daemon_generation(
         draining_job_ids,
     )?;
     write_session(&candidate)
+}
+
+pub(crate) fn terminate_generation_tunnel(pid: u32) {
+    terminate_pid(pid);
 }
 
 /// Connect using an explicit dead-lease or missing-lease selector. A
@@ -999,6 +1002,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     // direct SSH tunnel. Reuse that still-live tunnel rather than treating the
     // controller-local record lookup as a daemon disconnect.
     let session = read_session_or_live_peer(runner_id)?;
+    super::generation_store::reconcile(runner_id, session.as_ref())?;
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
