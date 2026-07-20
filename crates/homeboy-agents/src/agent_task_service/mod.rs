@@ -7,6 +7,7 @@
 
 mod cook;
 mod cook_budget;
+mod cook_promotion;
 mod cook_recipe;
 mod discovery;
 mod execution;
@@ -15,6 +16,7 @@ mod status_support;
 
 pub use cook::*;
 pub use cook_budget::*;
+pub use cook_promotion::*;
 pub use cook_recipe::*;
 pub use discovery::*;
 pub use execution::*;
