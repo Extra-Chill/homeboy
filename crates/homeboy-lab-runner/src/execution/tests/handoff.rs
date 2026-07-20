@@ -708,6 +708,79 @@ fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
     });
 }
 
+#[test]
+fn foreground_portable_cook_binds_the_daemon_job_before_terminal_projection() {
+    foreground_portable_run_binds_the_daemon_job_before_terminal_projection(
+        "cook-preacceptance-attempt-1",
+    );
+}
+
+#[test]
+fn foreground_portable_retry_binds_the_daemon_job_before_terminal_projection() {
+    foreground_portable_run_binds_the_daemon_job_before_terminal_projection(
+        "retry-preacceptance-attempt-1",
+    );
+}
+
+fn foreground_portable_run_binds_the_daemon_job_before_terminal_projection(run_id: &str) {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        crate::register_runner_daemon_exec_driver();
+        // Both controller entrypoints execute the same portable `run-plan`
+        // child without --detach-after-handoff. Its daemon acceptance must
+        // nevertheless bind the typed controller handoff before terminal
+        // projection validates the runner snapshot (#9240).
+        homeboy_agents::agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            "lab",
+            "dispatching",
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("persist portable controller proxy");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let daemon_url = format!("http://{}", listener.local_addr().expect("address"));
+        std::thread::spawn(move || {
+            let _ = homeboy_core::daemon::serve_listener(listener);
+        });
+
+        let (output, exit_code) = exec_via_daemon(
+            &ssh_runner(),
+            &daemon_url,
+            None,
+            workspace.path().display().to_string(),
+            None,
+            vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
+            Default::default(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            Vec::new(),
+            None,
+            Some(run_id.to_string()),
+            false,
+            true,
+            false,
+            false,
+            None,
+        )
+        .expect("foreground portable handoff");
+
+        assert_eq!(exit_code, 0);
+        let record = homeboy_agents::agent_task_lifecycle::status(run_id)
+            .expect("terminal projection keeps controller record readable");
+        assert_eq!(record.runner_id(), Some("lab"));
+        assert_eq!(record.runner_job_id(), output.job_id.as_deref());
+        assert!(record.lab_handoff.is_some_and(|handoff| {
+            handoff.state
+                == homeboy_agents::agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
+        }));
+    });
+}
+
 struct ReleaseBlockedWorkload(std::path::PathBuf);
 
 impl Drop for ReleaseBlockedWorkload {

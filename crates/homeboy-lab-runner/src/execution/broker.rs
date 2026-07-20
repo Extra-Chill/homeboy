@@ -163,10 +163,11 @@ pub(super) fn exec_via_reverse_broker(
         &command,
     )?;
     if let Some(run_id) = run_id.as_deref() {
-        // A detached handoff must durably transition its controller projection
-        // before the response can be lost. Reconciliation reuses this same
-        // operation after an intent-only crash.
-        if detach_after_handoff {
+        // Every portable agent-task run is a controller-owned Lab handoff.
+        // Persist the accepted daemon job before foreground cook or retry can
+        // validate a runner snapshot; metadata-only binding leaves the typed
+        // handoff pending and loses that identity at preacceptance (#9240).
+        if !run_id_owns_generic_exec {
             homeboy_agents::agent_task_lifecycle::record_detached_lab_run(
                 homeboy_agents::agent_task_lifecycle::DetachedLabRunRecord {
                     run_id,
@@ -176,19 +177,13 @@ pub(super) fn exec_via_reverse_broker(
                     remote_command: &command,
                 },
             )?;
-        } else if run_id_owns_generic_exec {
+        } else {
             homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
                 run_id,
                 &runner.id,
                 &job.id.to_string(),
                 &cwd,
                 &command,
-            )?;
-        } else {
-            homeboy_agents::agent_task_lifecycle::record_runner_job_identity(
-                run_id,
-                &runner.id,
-                &job.id.to_string(),
             )?;
         }
     }
