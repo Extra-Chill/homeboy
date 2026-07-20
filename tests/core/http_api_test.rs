@@ -491,6 +491,76 @@ fn generic_job_cancel_remains_unscoped_for_operator_compatibility() {
 }
 
 #[test]
+fn generic_job_cancel_is_idempotent_without_duplicating_events() {
+    let store = JobStore::default();
+    let job = store.create("audit");
+    let path = format!("/jobs/{}/cancel", job.id);
+
+    let first = http_api::handle_with_jobs(
+        HttpApiRequest {
+            method: HttpMethod::Post,
+            path: path.clone(),
+            body: None,
+        },
+        &store,
+    )
+    .expect("first cancellation succeeds");
+    let events_after_first_cancel = store.events(job.id).expect("events");
+
+    let repeated = http_api::handle_with_jobs(
+        HttpApiRequest {
+            method: HttpMethod::Post,
+            path,
+            body: None,
+        },
+        &store,
+    )
+    .expect("repeated cancellation succeeds");
+
+    assert_eq!(first.endpoint, "jobs.cancel");
+    assert_eq!(repeated.endpoint, "jobs.cancel");
+    assert_eq!(first.body["job"]["status"], "cancelled");
+    assert_eq!(repeated.body["job"]["status"], "cancelled");
+    assert_eq!(
+        store.events(job.id).expect("events").len(),
+        events_after_first_cancel.len(),
+        "repeated cancellation must preserve the original event log"
+    );
+
+    let completed = store.create("completed-audit");
+    store.start(completed.id).expect("job starts");
+    store.complete(completed.id, None).expect("job completes");
+    let completed_error = http_api::handle_with_jobs(
+        HttpApiRequest {
+            method: HttpMethod::Post,
+            path: format!("/jobs/{}/cancel", completed.id),
+            body: None,
+        },
+        &store,
+    )
+    .expect_err("completed jobs remain non-cancellable");
+    assert_eq!(
+        completed_error.code,
+        crate::ErrorCode::ValidationInvalidArgument
+    );
+
+    let unknown_error = http_api::handle_with_jobs(
+        HttpApiRequest {
+            method: HttpMethod::Post,
+            path: format!("/jobs/{}/cancel", uuid::Uuid::new_v4()),
+            body: None,
+        },
+        &store,
+    )
+    .expect_err("unknown jobs retain their structured validation error");
+    assert_eq!(
+        unknown_error.code,
+        crate::ErrorCode::ValidationInvalidArgument
+    );
+    assert_eq!(unknown_error.details["field"], "job_id");
+}
+
+#[test]
 fn runs_list_includes_active_runner_jobs() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();
