@@ -48,7 +48,7 @@ use super::fingerprint::FileFingerprint;
 mod hash;
 mod relationships;
 
-use self::hash::{exact_hash, structural_hash};
+use self::hash::{exact_hash, skeleton_signature, structural_hash};
 use self::relationships::{extract_extends, extract_implements};
 
 #[cfg(test)]
@@ -141,9 +141,10 @@ pub fn fingerprint_from_grammar(
         }
     }
 
-    // --- Method hashes and structural hashes ---
+    // --- Method hashes, structural hashes, skeleton signatures ---
     let mut method_hashes = HashMap::new();
     let mut structural_hashes = HashMap::new();
+    let mut skeleton_hashes = HashMap::new();
     for f in &functions {
         if f.is_test || f.body.is_empty() {
             continue;
@@ -157,6 +158,11 @@ pub fn fingerprint_from_grammar(
         method_hashes.insert(f.name.clone(), exact);
         let structural = structural_hash(&f.body, grammar);
         structural_hashes.insert(f.name.clone(), structural);
+        if let Some((token_count, skeleton)) = skeleton_signature(&f.body, grammar) {
+            // Encode the token count in the value so the detector can apply a
+            // significance floor without re-parsing the body.
+            skeleton_hashes.insert(f.name.clone(), format!("{token_count}:{skeleton}"));
+        }
     }
 
     // --- Visibility ---
@@ -255,6 +261,7 @@ pub fn fingerprint_from_grammar(
         content: content.to_string(),
         method_hashes,
         structural_hashes,
+        skeleton_hashes,
         visibility,
         properties,
         hooks,

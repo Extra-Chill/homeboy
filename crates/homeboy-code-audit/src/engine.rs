@@ -367,6 +367,26 @@ pub(super) fn audit_internal(
         all_findings.extend(cross_name_dup_findings);
     }
 
+    // Phase 4d1b: Skeleton duplication (same call/control-flow backbone, different
+    // error/return tail). The near-duplicate pass still encodes each expression's
+    // shape, so a primitive reimplemented with a different local error type hashes
+    // apart. This coarser pass keys on the call/keyword skeleton and catches those.
+    let skeleton_dup_findings = time_audit_detector(
+        &mut timing,
+        "detector.duplication.skeleton_duplicate",
+        plan.detector_enabled("duplication"),
+        || duplication::detect_skeleton_duplicates(&all_fingerprints),
+        Vec::new,
+    );
+    if !skeleton_dup_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Skeleton-duplicates: {} finding(s) (same backbone, different error/return tail)",
+            skeleton_dup_findings.len()
+        );
+        all_findings.extend(skeleton_dup_findings);
+    }
+
     // Phase 4d2: Parallel implementation detection (similar call patterns across files)
     let parallel_findings = time_audit_detector(
         &mut timing,

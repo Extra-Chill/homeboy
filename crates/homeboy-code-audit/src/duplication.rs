@@ -536,6 +536,163 @@ pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<F
     findings
 }
 
+// ============================================================================
+// Skeleton Duplication (same call/control-flow backbone, different error tail)
+// ============================================================================
+
+/// Minimum significant call/keyword tokens for a skeleton to be worth
+/// comparing. Mirrors the floor baked into the fingerprint's skeleton
+/// signature; enforced again here so the detector is robust to fingerprints
+/// produced by an older engine.
+const SKELETON_MIN_TOKENS: usize = 4;
+
+/// Split a stored skeleton value (`"<token_count>:<hash>"`) into its parts.
+fn parse_skeleton_value(value: &str) -> Option<(usize, &str)> {
+    let (count, hash) = value.split_once(':')?;
+    Some((count.parse().ok()?, hash))
+}
+
+/// Detect functions that share an identical **call/control-flow skeleton** but
+/// were missed by the exact, cross-name, and near-duplicate passes because
+/// their error/return tails differ.
+///
+/// The near-duplicate detector still encodes the *shape* of every expression,
+/// so two `git_output` helpers that map failures onto different local error
+/// enums (`HarvestError::Git { .. }` vs `Error::validation_invalid_argument(..)`)
+/// hash apart. This pass keys on the coarser skeleton signature — the ordered
+/// call/keyword backbone with argument interiors and error construction elided —
+/// so those same-primitive-different-plumbing reimplementations group together.
+///
+/// It is intentionally conservative:
+/// - only reports groups the finer passes did **not** already cover,
+/// - requires a real backbone (`SKELETON_MIN_TOKENS` significant tokens),
+/// - reuses the generic-name, trivial-method, and command↔core delegation
+///   filters so it does not re-flag idiomatic or delegation-shaped bodies.
+pub(crate) fn detect_skeleton_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+    // Names already reported as exact duplicates — skeleton is redundant there.
+    let exact_groups = build_groups(fingerprints);
+    let exact_duplicate_names: HashSet<String> = exact_groups
+        .iter()
+        .filter(|(_, locs)| locs.len() >= MIN_DUPLICATE_LOCATIONS)
+        .map(|((name, _), _)| name.clone())
+        .collect();
+
+    // skeleton_hash -> [(file, name, structural_hash)]
+    let mut by_skeleton: HashMap<&str, Vec<(&str, &str, Option<&str>)>> = HashMap::new();
+    for fp in fingerprints {
+        for (name, raw) in &fp.skeleton_hashes {
+            let Some((token_count, hash)) = parse_skeleton_value(raw) else {
+                continue;
+            };
+            if token_count < SKELETON_MIN_TOKENS {
+                continue;
+            }
+            if GENERIC_NAMES.contains(&name.as_str()) {
+                continue;
+            }
+            if is_trivial_method(
+                name,
+                Language::builtin_trivial_method_names().iter().copied(),
+                Language::builtin_trivial_method_prefixes().iter().copied(),
+            ) {
+                continue;
+            }
+            let structural = fp.structural_hashes.get(name).map(|s| s.as_str());
+            by_skeleton.entry(hash).or_default().push((
+                fp.relative_path.as_str(),
+                name.as_str(),
+                structural,
+            ));
+        }
+    }
+
+    let mut findings = Vec::new();
+    for locations in by_skeleton.values() {
+        // Group must span at least two files.
+        let distinct_files: HashSet<&str> = locations.iter().map(|(f, _, _)| *f).collect();
+        if distinct_files.len() < MIN_DUPLICATE_LOCATIONS {
+            continue;
+        }
+
+        // Skip when every member was already an exact duplicate (same name)…
+        let all_exact = locations
+            .iter()
+            .all(|(_, name, _)| exact_duplicate_names.contains(*name));
+        if all_exact {
+            continue;
+        }
+
+        // …or when the whole group shares one structural hash (the finer
+        // near-duplicate pass owns that case; skeleton adds nothing).
+        let structural_hashes: HashSet<&str> =
+            locations.iter().filter_map(|(_, _, s)| *s).collect();
+        if structural_hashes.len() == 1 && locations.iter().all(|(_, _, s)| s.is_some()) {
+            continue;
+        }
+
+        let files: Vec<&str> = distinct_files.into_iter().collect();
+
+        // Delegation pattern: command→core, or all-in-command modules.
+        if files.iter().all(|f| is_command_file(f)) {
+            continue;
+        }
+        let has_command = files.iter().any(|f| is_command_file(f));
+        let has_non_command = files.iter().any(|f| !is_command_file(f));
+        if has_command && has_non_command && files.len() == 2 {
+            continue;
+        }
+
+        let test_only = locations.iter().all(|(file, _, _)| is_test_path(file));
+        let severity = if test_only {
+            Severity::Info
+        } else {
+            Severity::Warning
+        };
+
+        let mut names: Vec<&str> = locations.iter().map(|(_, name, _)| *name).collect();
+        names.sort_unstable();
+        names.dedup();
+        let name_label = names.join("`, `");
+
+        let suggestion = format!(
+            "Functions `{}` share one call/control-flow skeleton but differ only in \
+             their error/return handling. This is usually the same primitive \
+             reimplemented with a local error type — extract a shared helper (or \
+             call the existing shared primitive) and let callers map the error.",
+            name_label
+        );
+
+        for (file, name, _) in locations {
+            let mut also: Vec<String> = locations
+                .iter()
+                .filter(|(f, n, _)| f != file || n != name)
+                .map(|(f, n, _)| format!("{n} in {f}"))
+                .collect();
+            also.sort();
+            also.dedup();
+            findings.push(Finding {
+                convention: "skeleton-duplication".to_string(),
+                severity: severity.clone(),
+                file: file.to_string(),
+                description: format!(
+                    "Skeleton-duplicate `{}` — same call/control-flow backbone as {}",
+                    name,
+                    also.join(", ")
+                ),
+                suggestion: suggestion.clone(),
+                kind: AuditFinding::SkeletonDuplicate,
+            });
+        }
+    }
+
+    findings.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then_with(|| a.description.cmp(&b.description))
+    });
+    findings
+}
+
 /// Find the body of a method/function in the file lines.
 ///
 /// Returns `(open_brace_line, close_brace_line)` — the line indices of the
