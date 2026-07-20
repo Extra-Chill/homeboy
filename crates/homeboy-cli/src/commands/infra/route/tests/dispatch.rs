@@ -1211,6 +1211,89 @@ fn retry_handoff_refuses_multiple_task_workspaces() {
 }
 
 #[test]
+fn retry_handoff_restores_distinct_cook_candidate_source_after_baseline_cleanup() {
+    crate::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("candidate source workspace");
+        let managed = tempfile::tempdir().expect("managed task workspace");
+        let baseline = source.path().join("temporary-baseline");
+        git_init(source.path());
+        git_init(managed.path());
+        std::fs::create_dir(&baseline).expect("create temporary baseline");
+        std::fs::remove_dir(&baseline).expect("clean temporary baseline");
+
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            "cook-distinct-source",
+            vec![serde_json::from_value(serde_json::json!({
+                "task_id": "retry-task",
+                "executor": { "backend": "fixture" },
+                "instructions": "retry the dirty candidate",
+                "workspace": {
+                    "root": baseline,
+                    "kind": "homeboy-worktree",
+                    "materialization": {
+                        "kind": "homeboy-worktree",
+                        "id": "managed@cook-distinct-source",
+                        "root": managed.path(),
+                        "branch": "fix/cook-distinct-source",
+                    }
+                },
+                "metadata": {
+                    "cook_continuation_workspace": {
+                        "candidate_source_root": source.path(),
+                        "task_workspace": {
+                            "root": managed.path(),
+                            "kind": "homeboy-worktree",
+                            "materialization": {
+                                "kind": "homeboy-worktree",
+                                "id": "managed@cook-distinct-source",
+                                "root": managed.path(),
+                                "branch": "fix/cook-distinct-source",
+                            }
+                        }
+                    },
+                    "cook_initial_candidate_baseline": {
+                        "source_root": source.path(),
+                        "commit": "fixture-commit",
+                        "tree": "fixture-tree",
+                    }
+                }
+            }))
+            .expect("task")],
+        );
+        agent_task_lifecycle::submit_plan(&plan, Some("failed-run")).expect("source plan");
+        agent_task_lifecycle::record_pre_execution_failure(
+            "failed-run",
+            &plan,
+            "controller_admission",
+            &Error::internal_unexpected("Lab rejected the initial attempt"),
+        )
+        .expect("source failure");
+
+        let normalized = ["homeboy", "agent-task", "retry", "failed-run", "--run"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let cli = Cli::parse_from(&normalized);
+        let handoff = materialize_agent_task_retry_handoff(&cli, &normalized)
+            .expect("retry handoff materialized")
+            .expect("retry handoff");
+
+        assert_eq!(
+            handoff.primary_workspace,
+            source.path().canonicalize().expect("candidate source root")
+        );
+        assert_eq!(
+            handoff.plan.tasks[0].workspace.root.as_deref(),
+            Some(source.path().to_str().expect("source path"))
+        );
+        assert_eq!(
+            handoff.plan.tasks[0].metadata["cook_continuation_workspace"]["task_workspace"]["root"],
+            serde_json::json!(managed.path())
+        );
+    });
+}
+
+#[test]
 fn retry_handoff_identifies_an_original_plan_without_a_workspace() {
     crate::test_support::with_isolated_home(|_| {
         let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(

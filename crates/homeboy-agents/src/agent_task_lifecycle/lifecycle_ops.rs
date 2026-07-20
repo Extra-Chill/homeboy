@@ -3024,9 +3024,8 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
 }
 
 /// Cook's first dirty-candidate baseline is process-local and removed after a
-/// failed admission. A retry returns to the durable continuation workspace;
-/// scheduler preflight verifies its recorded tree before it creates a fresh
-/// attempt.
+/// failed admission. A retry returns to the durable candidate source workspace;
+/// the original task workspace remains in metadata for routing and projection.
 fn restore_initial_cook_candidate_workspace(plan: &mut AgentTaskPlan) -> Result<()> {
     for task in &mut plan.tasks {
         let Some(baseline) = task.metadata.get("cook_initial_candidate_baseline") else {
@@ -3034,8 +3033,21 @@ fn restore_initial_cook_candidate_workspace(plan: &mut AgentTaskPlan) -> Result<
         };
         let continuation_root = task
             .metadata
-            .pointer("/cook_continuation_workspace/root")
+            .pointer("/cook_continuation_workspace/candidate_source_root")
             .and_then(Value::as_str)
+            // The first continuation snapshot used `root` for the task
+            // workspace. New records use candidate_source_root; retain the
+            // legacy form only when no source-root evidence is available.
+            .or_else(|| {
+                baseline
+                    .get("source_root")
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        task.metadata
+                            .pointer("/cook_continuation_workspace/root")
+                            .and_then(Value::as_str)
+                    })
+            })
             .or_else(|| {
                 task.workspace
                     .materialization
@@ -3043,12 +3055,11 @@ fn restore_initial_cook_candidate_workspace(plan: &mut AgentTaskPlan) -> Result<
                     .and_then(Value::as_str)
             })
             // Older records did not retain a continuation workspace separately.
-            // Their recorded source root remains the only durable fallback.
             .or_else(|| baseline.get("source_root").and_then(Value::as_str))
             .filter(|path| !path.trim().is_empty())
-            .ok_or_else(|| missing_cook_continuation_workspace(&task.task_id, None))?;
+            .ok_or_else(|| missing_cook_candidate_source_workspace(&task.task_id, None))?;
         if !std::path::Path::new(continuation_root).is_dir() {
-            return Err(missing_cook_continuation_workspace(
+            return Err(missing_cook_candidate_source_workspace(
                 &task.task_id,
                 Some(continuation_root),
             ));
@@ -3059,12 +3070,12 @@ fn restore_initial_cook_candidate_workspace(plan: &mut AgentTaskPlan) -> Result<
     Ok(())
 }
 
-fn missing_cook_continuation_workspace(task_id: &str, root: Option<&str>) -> Error {
+fn missing_cook_candidate_source_workspace(task_id: &str, root: Option<&str>) -> Error {
     let root_description = root.map(|root| format!(" at {root}")).unwrap_or_default();
     let mut error = Error::validation_invalid_argument(
         "workspace",
         format!(
-            "Cook retry continuation workspace for task '{task_id}' is unavailable{root_description}"
+            "Cook retry candidate source workspace for task '{task_id}' is unavailable{root_description}"
         ),
         root.map(str::to_string),
         None,
@@ -3073,9 +3084,9 @@ fn missing_cook_continuation_workspace(task_id: &str, root: Option<&str>) -> Err
     // input. Callers persist this as a retryable pre-execution failure.
     error.retryable = Some(true);
     error
-        .with_hint("Restore the recorded managed worktree, then retry the run.")
+        .with_hint("Restore the recorded candidate source workspace, then retry the run.")
         .with_hint(
-            "If the worktree was intentionally removed, create a replacement workspace and submit a new task from that workspace.",
+            "If the original --cwd is unavailable, rerun Cook from a replacement workspace with its explicit --cwd.",
         )
 }
 
