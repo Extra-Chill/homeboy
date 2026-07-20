@@ -16,6 +16,10 @@ use crate::agent_task_finalization::{
     AgentTaskPrFinalizationBackend, RealAgentTaskPrFinalizationBackend,
 };
 use crate::agent_task_gate::VerifyGateOptions;
+use crate::agent_task_gate::{
+    failure_fingerprint, run_gate_command_with_timeout, AgentTaskGateBaselineComparison,
+    AgentTaskGateStatus,
+};
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::resolve_candidate_revision;
 use crate::agent_task_promotion::{
@@ -284,6 +288,20 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
             return Err(error);
         }
     };
+    let task_base_sha = options.task_base_sha.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "task_base_sha",
+            "candidate adoption requires the recorded immutable task base for baseline-aware verification",
+            None,
+            None,
+        )
+    })?;
+    compare_adoption_gate_failures_to_base(
+        &mut promotion,
+        source_worktree,
+        task_base_sha,
+        &record.run_id,
+    )?;
     // The adopted candidate did not run through this cook's provider lifecycle.
     // Bind its declared model to the authenticated promotion instead of inferring
     // one from the immutable execution plan.
@@ -379,6 +397,130 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
         None,
         exit_code,
     ))
+}
+
+/// Candidate adoption can prove that an otherwise-red broad command is
+/// inherited only by executing the identical command at the recorded base.
+/// A changed failure fingerprint is deliberately still a hard gate failure.
+fn compare_adoption_gate_failures_to_base(
+    promotion: &mut AgentTaskPromotionReport,
+    source_worktree: &std::path::Path,
+    task_base_sha: &str,
+    run_id: &str,
+) -> Result<()> {
+    if !promotion.status.gate_failed() {
+        return Ok(());
+    }
+    let baseline_root = tempfile::tempdir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create candidate-adoption gate baseline".to_string()),
+        )
+    })?;
+    let baseline_path = baseline_root.path().join("base");
+    let output = std::process::Command::new("git")
+        .args(["worktree", "add", "--detach"])
+        .arg(&baseline_path)
+        .arg(task_base_sha)
+        .current_dir(source_worktree)
+        .output()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("materialize candidate-adoption gate baseline".to_string()),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(Error::internal_io(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            Some("materialize immutable candidate-adoption gate baseline".to_string()),
+        ));
+    }
+    let baseline_result = (|| -> Result<bool> {
+        // Match promotion's dependency and isolated-runtime setup before the
+        // base command is allowed to serve as comparison evidence.
+        homeboy_core::hygiene::materialize_worktree_dependencies(&baseline_path)?;
+        let mut all_failures_inherited = true;
+        let failed_gate_count = promotion
+            .deterministic_gates
+            .iter()
+            .filter(|gate| gate.status == AgentTaskGateStatus::Failed)
+            .count();
+        if failed_gate_count == 0 {
+            return Ok(false);
+        }
+        let mut compared = 0;
+        for (index, gate) in promotion.deterministic_gates.iter_mut().enumerate() {
+            if gate.status != AgentTaskGateStatus::Failed {
+                continue;
+            }
+            compared += 1;
+            agent_task_lifecycle::checkpoint_candidate_adoption(
+                run_id,
+                "baseline_verification",
+                &format!("baseline gate {compared}/{failed_gate_count}"),
+            )?;
+            let command = gate.command.last().cloned().unwrap_or_default();
+            let baseline_run_dir = homeboy_core::engine::run_dir::RunDir::create()?;
+            let baseline_runtime = homeboy_core::engine::invocation::InvocationGuard::acquire(
+                &baseline_run_dir,
+                &homeboy_core::engine::invocation::InvocationRequirements::default(),
+            )?;
+            let baseline = run_gate_command_with_timeout(
+                &baseline_path,
+                index + 1,
+                &command,
+                gate.visibility,
+                gate.reveal_policy,
+                &baseline_runtime.context().tmp_dir,
+                std::time::Duration::from_secs(5 * 60),
+            )?;
+            let candidate_fingerprint = failure_fingerprint(&gate.stdout, &gate.stderr);
+            let baseline_fingerprint = failure_fingerprint(&baseline.stdout, &baseline.stderr);
+            let matches = baseline.status == AgentTaskGateStatus::Failed
+                && candidate_fingerprint == baseline_fingerprint;
+            gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                base_ref: task_base_sha.to_string(),
+                exit_code: baseline.exit_code,
+                failure_fingerprint: baseline_fingerprint,
+                matches_candidate_failure: matches,
+            });
+            all_failures_inherited &= matches;
+            if matches {
+                gate.accept_inherited_failure();
+            }
+        }
+        Ok(all_failures_inherited)
+    })();
+    let cleanup = std::process::Command::new("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(&baseline_path)
+        .current_dir(source_worktree)
+        .status()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("remove candidate-adoption gate baseline".to_string()),
+            )
+        })?;
+    if !cleanup.success() {
+        return Err(Error::internal_io(
+            "git worktree remove failed".to_string(),
+            Some("remove candidate-adoption gate baseline".to_string()),
+        ));
+    }
+    let all_failures_inherited = baseline_result?;
+    if all_failures_inherited {
+        promotion.status = crate::agent_task_promotion::AgentTaskPromotionStatus::Applied;
+        for result in &mut promotion.gate_results {
+            if result.status == homeboy_core::gate::HomeboyGateStatus::Failed {
+                result.status = homeboy_core::gate::HomeboyGateStatus::Passed;
+                result.summary = "candidate failure matches the immutable baseline; no candidate regression detected".to_string();
+                result.retryable = Some(false);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn candidate_adoption_source(

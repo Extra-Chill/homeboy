@@ -550,6 +550,38 @@ mod tests {
     }
 
     #[test]
+    fn accepted_inherited_failure_completes_without_hiding_a_regression() {
+        let mut inherited = failed_gate();
+        inherited.status = AgentTaskGateStatus::AcceptedInheritedFailure;
+        let accepted = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(AgentTaskPromotionStatus::Applied, vec![inherited]),
+            attempt: 1,
+            max_attempts: 1,
+            source_run_id: Some("run-inherited".to_string()),
+            current_diff: String::new(),
+            metadata: Value::Null,
+        });
+        assert_eq!(accepted.status, AgentTaskCookLoopStatus::GreenCompleted);
+        assert!(accepted.failed_gates.is_empty());
+
+        let regression = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![failed_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 1,
+            source_run_id: Some("run-regression".to_string()),
+            current_diff: String::new(),
+            metadata: Value::Null,
+        });
+        assert_eq!(regression.status, AgentTaskCookLoopStatus::RetriesExhausted);
+        assert_eq!(regression.failed_gates.len(), 1);
+    }
+
+    #[test]
     fn no_changed_files_are_terminal_noop_feedback() {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
