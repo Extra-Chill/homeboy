@@ -535,11 +535,7 @@ mod tests {
             id: "build".to_string(),
             step_type: "build".to_string(),
             status: ReleaseStepStatus::Success,
-            missing: Vec::new(),
-            warnings: Vec::new(),
-            hints: Vec::new(),
-            data: None,
-            error: None,
+            ..Default::default()
         };
         // ReleaseStepResult has no PartialEq; compare via canonical serialization.
         assert_eq!(

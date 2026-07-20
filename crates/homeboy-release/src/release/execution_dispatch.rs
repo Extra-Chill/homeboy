@@ -410,14 +410,11 @@ fn run_dependencies_preflight(
             id: step.id.clone(),
             step_type: step.kind.clone(),
             status: ReleaseStepStatus::Skipped,
-            missing: Vec::new(),
-            warnings: Vec::new(),
-            hints: Vec::new(),
             data: Some(serde_json::json!({
                 "ran": false,
                 "reason": "--skip-deps-hydration",
             })),
-            error: None,
+            ..Default::default()
         };
     }
 
@@ -427,24 +424,18 @@ fn run_dependencies_preflight(
             id: step.id.clone(),
             step_type: step.kind.clone(),
             status: ReleaseStepStatus::Success,
-            missing: Vec::new(),
-            warnings: Vec::new(),
-            hints: Vec::new(),
             data: Some(serde_json::json!({
                 "ran": !result.installs.is_empty(),
                 "dependencies": result,
             })),
-            error: None,
+            ..Default::default()
         },
         Ok(None) => ReleaseStepResult {
             id: step.id.clone(),
             step_type: step.kind.clone(),
             status: ReleaseStepStatus::Success,
-            missing: Vec::new(),
-            warnings: Vec::new(),
-            hints: Vec::new(),
             data: Some(serde_json::json!({ "ran": false })),
-            error: None,
+            ..Default::default()
         },
         Err(err) => failed_result(&step.id, &step.kind, err),
     }
@@ -462,11 +453,9 @@ fn run_lint_preflight(step: &PlanStep, context: &ReleaseExecutionContext) -> Rel
                 id: step.id.clone(),
                 step_type: step.kind.clone(),
                 status: ReleaseStepStatus::Success,
-                missing: Vec::new(),
                 warnings: vec![message],
-                hints: Vec::new(),
                 data: Some(serde_json::json!({ "ran": true, "harness_error": true })),
-                error: None,
+                ..Default::default()
             }
         }
     }
@@ -484,11 +473,8 @@ fn successful_quality_result(step: &PlanStep, ran: bool) -> ReleaseStepResult {
         id: step.id.clone(),
         step_type: step.kind.clone(),
         status: ReleaseStepStatus::Success,
-        missing: Vec::new(),
-        warnings: Vec::new(),
-        hints: Vec::new(),
         data: Some(serde_json::json!({ "ran": ran })),
-        error: None,
+        ..Default::default()
     }
 }
 
@@ -529,14 +515,11 @@ fn configure_git_identity(
         id: step.id.clone(),
         step_type: step.kind.clone(),
         status: ReleaseStepStatus::Success,
-        missing: Vec::new(),
-        warnings: Vec::new(),
-        hints: Vec::new(),
         data: Some(serde_json::json!({
             "name": identity.name,
             "email": identity.email,
         })),
-        error: None,
+        ..Default::default()
     })
 }
 
@@ -590,11 +573,10 @@ fn failed_result(id: &str, step_type: &str, err: Error) -> ReleaseStepResult {
         id: id.to_string(),
         step_type: step_type.to_string(),
         status: ReleaseStepStatus::Failed,
-        missing: Vec::new(),
-        warnings: Vec::new(),
         hints: err.hints.clone(),
         data: Some(serde_json::json!({ "error_details": err.details })),
         error: Some(err.message),
+        ..Default::default()
     }
 }
 
@@ -1668,11 +1650,8 @@ mod tests {
             id: step_type.to_string(),
             step_type: step_type.to_string(),
             status: ReleaseStepStatus::Failed,
-            missing: vec![],
-            warnings: vec![],
-            hints: vec![],
-            data: None,
             error: Some("failed".to_string()),
+            ..Default::default()
         }
     }
 

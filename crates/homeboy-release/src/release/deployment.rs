@@ -45,11 +45,9 @@ pub(super) fn run_deployment_step(
         } else {
             ReleaseStepStatus::Success
         },
-        missing: Vec::new(),
-        warnings: Vec::new(),
-        hints: Vec::new(),
         data: Some(serde_json::json!({ "deployment": deployment })),
         error: deploy_failed.then(|| "Deployment failed".to_string()),
+        ..Default::default()
     }
 }
 
@@ -362,11 +360,8 @@ mod tests {
                     id: "deploy".to_string(),
                     step_type: "deploy".to_string(),
                     status: ReleaseStepStatus::Success,
-                    missing: vec![],
-                    warnings: vec![],
-                    hints: vec![],
                     data: Some(serde_json::json!({ "deployment": deployment })),
-                    error: None,
+                    ..Default::default()
                 }],
                 status: ReleaseStepStatus::Success,
                 warnings: vec![],
