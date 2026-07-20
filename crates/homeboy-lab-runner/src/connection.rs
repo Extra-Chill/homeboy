@@ -673,9 +673,11 @@ fn connect_with_orphan_adoption_and_live_lease(
             .and_then(|e| serde_json::to_value(e).ok()),
     };
     // The tunnel health check above re-proved the exact remote lease and PID.
-    // Refuse a runtime generation change before atomically publishing it.
+    // Persist its generation before the controller session so a later session
+    // drift still has authenticated promotion provenance to reconcile safely.
     if let Err(error) = promotion_lease
         .assert_generation()
+        .and_then(|_| super::generation_store::record_authenticated_admission(runner_id, &session))
         .and_then(|_| write_session(&session))
     {
         return Ok(session_write_failure_report(

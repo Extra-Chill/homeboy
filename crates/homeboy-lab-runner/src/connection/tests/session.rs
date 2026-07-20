@@ -68,6 +68,42 @@ fn stale_persisted_lease_requires_explicit_live_lease_adoption() {
 }
 
 #[test]
+fn authenticated_promotion_provenance_allows_ordinary_reconnect_after_session_drift() {
+    test_support::with_isolated_home(|_| {
+        let stale = direct_ssh_session("lease-recorded");
+        let mut promoted = direct_ssh_session("lease-live");
+        promoted.remote_daemon_pid = Some(4646);
+        promoted.homeboy_build_identity = Some("homeboy test+configured".to_string());
+        crate::generation_store::record_authenticated_admission("homeboy-lab", &promoted)
+            .expect("authenticated promotion records its admission generation");
+
+        let reconciled = crate::generation_store::admission_session("homeboy-lab", Some(&stale))
+            .expect("read promotion provenance")
+            .expect("promoted admission session");
+        let mut live = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
+        live.daemon.as_mut().expect("daemon").build_identity =
+            Some("homeboy test+configured".to_string());
+
+        assert_eq!(
+            remote_daemon_connect_action_for_runner(
+                Some(&reconciled),
+                &live,
+                "homeboy test+configured",
+                "homeboy-lab",
+                None,
+            )
+            .expect("ordinary reconnect uses authenticated promotion provenance"),
+            RemoteDaemonConnectAction::Reattach,
+        );
+        assert_eq!(
+            reconciled.remote_daemon_lease_id.as_deref(),
+            Some("lease-live")
+        );
+        assert_eq!(reconciled.remote_daemon_pid, Some(4646));
+    });
+}
+
+#[test]
 fn explicit_live_lease_adoption_requires_the_exact_current_lease_and_pid() {
     let session = direct_ssh_session("lease-recorded");
     let mut status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
