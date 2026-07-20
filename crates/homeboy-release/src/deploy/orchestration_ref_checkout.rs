@@ -42,6 +42,7 @@ impl ExactRefCheckout {
     pub(crate) fn materialize(component: &Component, requested_ref: &str) -> Result<Self> {
         let identity = resolve_exact_ref(component, requested_ref)?;
         let source_root = source_root(component)?;
+        ensure_resolved_commit_is_available(&source_root, component, &identity)?;
         let component_prefix = git::get_component_path_prefix(&component.local_path);
         let parent = std::env::temp_dir().join("homeboy-deploy-ref");
         std::fs::create_dir_all(&parent).map_err(|err| {
@@ -207,6 +208,61 @@ impl ExactRefCheckout {
     }
 }
 
+fn ensure_resolved_commit_is_available(
+    source_root: &Path,
+    component: &Component,
+    identity: &ExactRefIdentity,
+) -> Result<()> {
+    if git::run_git(
+        source_root,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("{}^{{commit}}", identity.resolved_sha),
+        ],
+        "check exact deploy ref availability",
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+
+    let remote = git::resolve_default_remote(source_root);
+    let remote_url = git::remote_url(source_root, &remote)
+        .ok_or_else(|| unresolvable_ref(&identity.requested_ref, source_root, &component.id))?;
+    let transport_env = component_transport_env(component, &remote_url);
+    homeboy_core::log_status!(
+        "deploy",
+        "phase=exact_ref_fetch component={} ref={} commit={}",
+        component.id,
+        identity.requested_ref,
+        identity.resolved_sha
+    );
+    git::run_git_with_env_timeout(
+        source_root,
+        &["fetch", "--no-tags", &remote, &identity.requested_ref],
+        "fetch preflighted exact deploy ref",
+        &transport_env,
+        REMOTE_REF_QUERY_TIMEOUT,
+    )
+    .map_err(|error| remote_transport_error(&remote, &component.id, &error))?;
+    let fetched = git::run_git(
+        source_root,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("{}^{{commit}}", identity.resolved_sha),
+        ],
+        "verify fetched preflighted exact deploy ref",
+    )
+    .map_err(|_| unresolvable_ref(&identity.requested_ref, source_root, &component.id))?;
+    if fetched.trim() == identity.resolved_sha {
+        Ok(())
+    } else {
+        Err(identity_mismatch(&identity.requested_ref, &component.id))
+    }
+}
+
 fn rebase_source_path(value: &str, original_root: &Path, materialized_root: &Path) -> String {
     let path = Path::new(value);
     if !path.is_absolute() {
@@ -320,81 +376,24 @@ fn resolve_remote_commit(
     };
     let transport_env = component_transport_env(component, &remote_url);
 
-    if is_full_sha(requested_ref) {
-        homeboy_core::log_status!(
-            "deploy",
-            "phase=exact_ref_fetch component={} ref={}",
-            component_id,
-            requested_ref
-        );
-        if git::run_git_with_env_timeout(
-            source_root,
-            &["fetch", "--no-tags", &remote, requested_ref],
-            "fetch exact deploy SHA",
-            &transport_env,
-            REMOTE_REF_QUERY_TIMEOUT,
-        )
-        .is_ok()
-        {
-            let fetched = git::run_git(
-                source_root,
-                &[
-                    "rev-parse",
-                    "--verify",
-                    &format!("{requested_ref}^{{commit}}"),
-                ],
-                "verify fetched exact deploy SHA",
-            )
-            .map_err(|_| unresolvable_ref(requested_ref, source_root, component_id))?
-            .trim()
-            .to_string();
-            if fetched.eq_ignore_ascii_case(requested_ref) {
-                return Ok(ResolvedCommit {
-                    sha: fetched,
-                    source: format!("remote:{remote}"),
-                    mode: "remote_sha".to_string(),
-                });
-            }
-            return Err(identity_mismatch(requested_ref, component_id));
-        }
-    }
-
-    let remote_ref = resolve_named_remote_ref(
+    let (sha, _remote_ref) = resolve_named_remote_ref(
         source_root,
         &remote,
         requested_ref,
         component_id,
         &transport_env,
     )?;
-    homeboy_core::log_status!(
-        "deploy",
-        "phase=exact_ref_fetch component={} ref={}",
-        component_id,
-        requested_ref
-    );
-    git::run_git_with_env_timeout(
-        source_root,
-        &["fetch", "--no-tags", &remote, &remote_ref],
-        "fetch named exact deploy ref",
-        &transport_env,
-        REMOTE_REF_QUERY_TIMEOUT,
-    )
-    .map_err(|err| remote_transport_error(&remote, component_id, &err))?;
-    let sha = git::run_git(
-        source_root,
-        &["rev-parse", "--verify", "FETCH_HEAD^{commit}"],
-        "verify fetched named exact deploy ref",
-    )
-    .map_err(|_| unresolvable_ref(requested_ref, source_root, component_id))?
-    .trim()
-    .to_string();
     if is_full_sha(requested_ref) && !sha.eq_ignore_ascii_case(requested_ref) {
         return Err(identity_mismatch(requested_ref, component_id));
     }
     Ok(ResolvedCommit {
         sha,
         source: format!("remote:{remote}"),
-        mode: "remote_named_ref".to_string(),
+        mode: if is_full_sha(requested_ref) {
+            "remote_sha".to_string()
+        } else {
+            "remote_named_ref".to_string()
+        },
     })
 }
 
@@ -404,7 +403,7 @@ fn resolve_named_remote_ref(
     requested_ref: &str,
     component_id: &str,
     transport_env: &[(String, String)],
-) -> Result<String> {
+) -> Result<(String, String)> {
     let args = if is_full_sha(requested_ref) {
         vec!["ls-remote", "--refs", remote]
     } else {
@@ -424,18 +423,23 @@ fn resolve_named_remote_ref(
         REMOTE_REF_QUERY_TIMEOUT,
     )
     .map_err(|err| remote_transport_error(remote, component_id, &err))?;
-    let candidates: Vec<&str> = output
+    let candidates: Vec<(&str, &str)> = output
         .lines()
         .filter_map(|line| line.split_once(char::is_whitespace))
         .filter_map(|(sha, reference)| {
             let reference = reference.trim();
             (is_full_sha(requested_ref) && sha.eq_ignore_ascii_case(requested_ref)
                 || remote_ref_matches(reference, requested_ref))
-            .then_some(reference)
+            .then_some((sha, reference))
         })
         .collect();
     match candidates.as_slice() {
-        [reference] => Ok((*reference).to_string()),
+        [(sha, reference)] => Ok(((*sha).to_string(), (*reference).to_string())),
+        candidates if is_full_sha(requested_ref)
+            && candidates.iter().all(|(sha, _)| sha.eq_ignore_ascii_case(requested_ref)) =>
+        {
+            Ok((requested_ref.to_string(), candidates[0].1.to_string()))
+        }
         [] => Err(unresolvable_ref(requested_ref, source_root, component_id)),
         _ => Err(Error::validation_invalid_argument(
             "ref",
@@ -730,6 +734,33 @@ mod tests {
     }
 
     #[test]
+    fn batch_preflight_leaves_every_checkout_unchanged_when_a_later_ref_fails() {
+        let fixture = remote_fixture();
+        let remote_only_checkout = stale_clone(&fixture);
+        let remote_only_component = fixture_component(&remote_only_checkout);
+        let failing_repo = fixture_repo();
+        let failing_component = fixture_component(failing_repo.path());
+        let before = [&remote_only_checkout, failing_repo.path()]
+            .into_iter()
+            .map(git_state_snapshot)
+            .collect::<Vec<_>>();
+
+        let error = crate::deploy::preflight_exact_refs(&[
+            (&remote_only_component, "accepted"),
+            (&failing_component, "missing-ref"),
+        ])
+        .expect_err("a later failed member must reject the complete preflight");
+
+        assert!(error.message.contains("missing-ref"));
+        for (path, expected) in [&remote_only_checkout, failing_repo.path()]
+            .into_iter()
+            .zip(before)
+        {
+            assert_eq!(git_state_snapshot(path), expected);
+        }
+    }
+
+    #[test]
     fn missing_remote_ref_and_transport_failure_are_actionable() {
         let fixture = remote_fixture();
         let checkout = stale_clone(&fixture);
@@ -997,5 +1028,14 @@ mod tests {
             .expect("utf8")
             .trim()
             .to_string()
+    }
+
+    fn git_state_snapshot(path: &Path) -> (String, String, Option<Vec<u8>>) {
+        let fetch_head = git_output(path, &["rev-parse", "--git-path", "FETCH_HEAD"]);
+        (
+            git_output(path, &["status", "--porcelain=v1"]),
+            git_output(path, &["worktree", "list", "--porcelain"]),
+            std::fs::read(path.join(fetch_head)).ok(),
+        )
     }
 }

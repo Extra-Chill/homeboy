@@ -44,6 +44,14 @@ pub fn preflight_exact_ref(
     Ok(orchestration_ref_checkout::resolve_exact_ref(component, requested_ref)?.resolved_sha)
 }
 
+/// Resolve every exact source identity before a caller crosses a mutation boundary.
+/// Remote inspection uses `ls-remote`, so this cannot update configured checkouts.
+pub fn preflight_exact_refs(refs: &[(&component::Component, &str)]) -> Result<()> {
+    refs.iter().try_for_each(|(component, requested_ref)| {
+        orchestration_ref_checkout::resolve_exact_ref(component, requested_ref).map(|_| ())
+    })
+}
+
 use homeboy_core::component;
 use homeboy_core::context::{require_project_base_path, resolve_project_ssh_with_base_path};
 use homeboy_core::error::{Error, Result};

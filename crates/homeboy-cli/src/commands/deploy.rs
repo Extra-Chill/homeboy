@@ -83,7 +83,11 @@ pub struct DeployArgs {
     #[arg(long)]
     pub head: bool,
     /// Validate this versioned release-set manifest before any deploy action
-    #[arg(long, value_name = "PATH")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["head", "tagged", "requested_ref", "outdated", "behind_upstream"]
+    )]
     pub release_set: Option<String>,
     /// Deploy an exact Git ref resolved from the declared component repository
     #[arg(
@@ -157,11 +161,19 @@ pub fn run(
     mut args: DeployArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<DeployCommandOutput> {
+    if args.release_set.is_some() && args.check {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "check",
+            "--check cannot be combined with --release-set; use --dry-run to inspect every exact source ref without creating a worktree or installing dependencies",
+            None,
+            None,
+        ));
+    }
     let release_set = args.release_set.as_deref().map(load_release_set).transpose()?;
+    validate_apply_boundary(&args)?;
     if let Some(release_set) = release_set.as_ref() {
         apply_release_set(release_set, &mut args)?;
     }
-    validate_apply_boundary(&args)?;
 
     // Fleet deploy
     if let Some(ref fleet_id) = args.fleet {
@@ -242,7 +254,10 @@ fn validate_apply_boundary(args: &DeployArgs) -> homeboy::core::Result<()> {
     if args.apply
         || args.dry_run
         || args.check
-        || (!args.head && args.requested_ref.is_none() && !args.force)
+        || (!args.head
+            && args.requested_ref.is_none()
+            && args.release_set.is_none()
+            && !args.force)
     {
         return Ok(());
     }
@@ -250,6 +265,7 @@ fn validate_apply_boundary(args: &DeployArgs) -> homeboy::core::Result<()> {
     let dangerous_flags = [
         (args.head, "--head"),
         (args.requested_ref.is_some(), "--ref"),
+        (args.release_set.is_some(), "--release-set"),
         (args.force, "--force"),
     ]
     .into_iter()
@@ -319,6 +335,7 @@ fn apply_release_set(
             None,
         ));
     }
+    let mut refs = Vec::with_capacity(active.len());
     for (entry, component) in &active {
         let root = homeboy::core::git::get_git_root(&component.local_path).map_err(|_| {
             homeboy::core::Error::validation_invalid_argument(
@@ -341,8 +358,9 @@ fn apply_release_set(
                 None,
             ));
         }
-        homeboy_release::deploy::preflight_exact_ref(component, &entry.requested_ref)?;
+        refs.push((component, entry.requested_ref.as_str()));
     }
+    homeboy_release::deploy::preflight_exact_refs(&refs)?;
     args.component = Some(active.iter().map(|(entry, _)| entry.id.clone()).collect());
     args.component_ids.clear();
     args.exact_refs = active

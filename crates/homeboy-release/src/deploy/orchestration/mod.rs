@@ -138,7 +138,7 @@ pub(super) fn deploy_components(
 
     // Resolve first, then materialize immutable detached worktrees for real deploys.
     // Dry-run resolves in `run_dry_run_mode` and never creates a worktree.
-    let exact_ref_checkouts = if !config.dry_run {
+    let exact_ref_checkouts = if !config.dry_run && !config.check {
         if config.has_requested_refs() {
             components
                 .iter()
