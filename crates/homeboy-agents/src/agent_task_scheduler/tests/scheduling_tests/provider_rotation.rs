@@ -237,6 +237,10 @@ mod provider_rotation_tests {
         assert_eq!(attempts[1]["attempt"], 2);
         assert_eq!(attempts[1]["backend"], "fallback-backend-a");
         assert_eq!(attempts[1]["status"], "succeeded");
+        assert_eq!(
+            aggregate.outcomes[0].metadata["execution_budget"]["executions_used"], 2,
+            "only dispatched provider attempts consume the execution budget"
+        );
         assert!(aggregate.events.iter().any(|event| {
             event.message.as_deref() == Some("provider rotation queued: entry 1 of 2")
         }));

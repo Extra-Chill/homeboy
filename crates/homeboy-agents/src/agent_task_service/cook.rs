@@ -24,7 +24,7 @@ use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
 use homeboy_core::command_invocation::CommandInvocation;
-use homeboy_core::{Error, ErrorCode, Result};
+use homeboy_core::{Error, Result};
 
 use super::cook_baseline::{
     cook_attempt_harvest_context, materialize_follow_up_baseline,
@@ -122,6 +122,12 @@ pub struct AgentTaskCookReport {
     pub finalization: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
+    /// Preserves the lifecycle-owned failure boundary when cook stops before
+    /// provider dispatch instead of collapsing it into an attempt-budget result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_failure_classification: Option<String>,
 }
 
 /// Adopt an externally prepared immutable commit into a durable cook. The
@@ -674,7 +680,10 @@ where
                         &plan,
                         options.source_worktree_path.as_deref(),
                         &run_id,
-                    )?
+                    )
+                    .map_err(|error| {
+                        with_pre_execution_phase(error, "materialize_initial_candidate_baseline")
+                    })?
                 } else {
                     None
                 };
@@ -709,15 +718,15 @@ where
                 let record = match agent_task_lifecycle::status(&run_id) {
                     Ok(record) => Some(record),
                     Err(_) => {
-                        let phase = options
-                            .attempt_dispatcher
-                            .as_ref()
-                            .map(|dispatcher| dispatcher.pre_execution_failure_phase())
-                            .unwrap_or("cook_pre_execution");
+                        let phase = pre_execution_failure_phase(
+                            &error,
+                            options.attempt_dispatcher.as_deref(),
+                        );
                         record_pre_execution_failure(&plan, &run_id, &error, phase)?;
                         agent_task_lifecycle::status(&run_id).ok()
                     }
                 };
+                let pre_execution_failure = pre_execution_failure_details(record.as_ref(), &error);
                 agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
                 attempts.push(AgentTaskCookAttemptReport {
                     attempt,
@@ -726,18 +735,18 @@ where
                         .as_ref()
                         .map(|record| format!("{:?}", record.state))
                         .unwrap_or_else(|| "DispatchFailed".to_string()),
-                    aggregate_path: record.and_then(|record| record.aggregate_path),
+                    aggregate_path: record
+                        .as_ref()
+                        .and_then(|record| record.aggregate_path.clone()),
                     promotion: None,
                     feedback: None,
                 });
-                if is_deterministic_pre_execution_failure(&error) {
-                    return Ok(cook_report(
+                if !pre_execution_failure.retryable {
+                    return Ok(pre_execution_failure_report(
                         cook_id,
-                        "policy_failure",
                         attempts,
-                        None,
-                        Some(error.to_string()),
-                        1,
+                        pre_execution_failure,
+                        error,
                     ));
                 }
                 if attempt == max_attempts {
@@ -1083,16 +1092,78 @@ where
     ))
 }
 
-fn is_deterministic_pre_execution_failure(error: &Error) -> bool {
-    matches!(
-        error.code,
-        ErrorCode::ConfigInvalidJson
-            | ErrorCode::ConfigInvalidValue
-            | ErrorCode::ValidationMissingArgument
-            | ErrorCode::ValidationInvalidArgument
-            | ErrorCode::ValidationInvalidJson
-            | ErrorCode::ValidationMultipleErrors
-    )
+#[derive(Debug)]
+struct PreExecutionFailureDetails {
+    retryable: bool,
+    phase: Option<String>,
+    classification: Option<String>,
+}
+
+fn with_pre_execution_phase(mut error: Error, phase: &str) -> Error {
+    if !error.details.is_object() {
+        error.details = serde_json::json!({});
+    }
+    error.details["pre_execution_phase"] = Value::String(phase.to_string());
+    error
+}
+
+fn pre_execution_failure_phase<'a>(
+    error: &'a Error,
+    dispatcher: Option<&dyn AgentTaskCookAttemptDispatcher>,
+) -> &'a str {
+    error
+        .details
+        .get("pre_execution_phase")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            dispatcher
+                .map(|dispatcher| dispatcher.pre_execution_failure_phase())
+                .unwrap_or("cook_pre_execution")
+        })
+}
+
+fn pre_execution_failure_details(
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+    error: &Error,
+) -> PreExecutionFailureDetails {
+    let failure = record.and_then(|record| record.metadata.get("pre_execution_failure"));
+    PreExecutionFailureDetails {
+        retryable: failure
+            .and_then(|failure| failure.get("retryable"))
+            .and_then(Value::as_bool)
+            .unwrap_or(error.retryable == Some(true)),
+        phase: failure
+            .and_then(|failure| failure.get("phase"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        classification: failure
+            .and_then(|failure| failure.get("failure_classification"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+fn pre_execution_failure_report(
+    cook_id: String,
+    attempts: Vec<AgentTaskCookAttemptReport>,
+    failure: PreExecutionFailureDetails,
+    error: Error,
+) -> AgentTaskRunResult<AgentTaskCookReport> {
+    let phase = failure.phase.as_deref().unwrap_or("cook_pre_execution");
+    let classification = failure.classification.as_deref().unwrap_or("unknown");
+    let mut report = cook_report(
+        cook_id,
+        "pre_execution_failure",
+        attempts,
+        None,
+        Some(format!(
+            "pre-provider failure in phase `{phase}` classified as `{classification}`: {error}"
+        )),
+        1,
+    );
+    report.value.terminal_phase = failure.phase;
+    report.value.terminal_failure_classification = failure.classification;
+    report
 }
 
 /// Pre-execution failures happen before a provider can receive work. Persist a
@@ -1300,6 +1371,11 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct RetryableTransportFailingAttemptDispatcher {
+        dispatches: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
     struct FlakyPreparationDispatcher {
         failures_remaining: AtomicUsize,
     }
@@ -1408,6 +1484,22 @@ mod tests {
                 ))
             })?;
             Ok(())
+        }
+    }
+
+    impl AgentTaskCookAttemptDispatcher for RetryableTransportFailingAttemptDispatcher {
+        fn durable_recipe(&self) -> Result<Value> {
+            Ok(serde_json::json!({ "kind": "test-retryable-transport-failure" }))
+        }
+
+        fn dispatch_attempt(
+            &self,
+            _plan: AgentTaskPlan,
+            _run_id: &str,
+            _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+        ) -> Result<()> {
+            self.dispatches.fetch_add(1, Ordering::SeqCst);
+            Err(Error::internal_unexpected("fixture transport disconnected").with_retryable(true))
         }
     }
 
@@ -1610,11 +1702,21 @@ mod tests {
             options.provider_command = Some("fixture-provider".to_string());
             options.initial_run_id = run_id.to_string();
             options.source_worktree_path = Some(temp.path().to_path_buf());
+            options.max_attempts = 3;
 
             let result =
                 run_cook(options, UnusedExecutor).expect("cook records materialization failure");
 
-            assert_eq!(result.value.status, "retries_exhausted");
+            assert_eq!(result.value.status, "pre_execution_failure");
+            assert_eq!(result.value.attempts.len(), 1);
+            assert_eq!(
+                result.value.terminal_phase.as_deref(),
+                Some("materialize_initial_candidate_baseline")
+            );
+            assert_eq!(
+                result.value.terminal_failure_classification.as_deref(),
+                Some("invalid_input")
+            );
             let record =
                 agent_task_lifecycle::status(cook_id).expect("cook alias resolves failure");
             assert_eq!(record.run_id, run_id);
@@ -1727,12 +1829,62 @@ mod tests {
                 .expect("cook returns the persisted input failure");
 
             assert_eq!(result.exit_code, 1);
-            assert_eq!(result.value.status, "policy_failure");
+            assert_eq!(result.value.status, "pre_execution_failure");
             assert_eq!(result.value.attempts.len(), 1);
             assert_eq!(result.value.history_run_ids, vec![run_id]);
+            assert_eq!(
+                result.value.terminal_phase.as_deref(),
+                Some("controller_admission")
+            );
+            assert_eq!(
+                result.value.terminal_failure_classification.as_deref(),
+                Some("invalid_input")
+            );
             let record = agent_task_lifecycle::status(run_id).expect("attempt exists");
             assert!(record.provider_handles.is_empty());
             assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        });
+    }
+
+    #[test]
+    fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let dispatches = Arc::new(AtomicUsize::new(0));
+            let cook_id = "cook-retryable-transport";
+            let mut options = batch_cook_options(
+                cook_id,
+                Arc::new(RetryableTransportFailingAttemptDispatcher {
+                    dispatches: Arc::clone(&dispatches),
+                }),
+            );
+            options.provider_command = Some("fixture-provider".to_string());
+            options.initial_run_id = "cook-retryable-transport-attempt-1".to_string();
+            options.max_attempts = 2;
+
+            let result = run_cook(options, UnusedExecutor).expect("cook records transport retries");
+
+            assert_eq!(result.exit_code, 1);
+            assert_eq!(result.value.status, "retries_exhausted");
+            assert_eq!(result.value.attempts.len(), 2);
+            assert_eq!(dispatches.load(Ordering::SeqCst), 2);
+            assert_eq!(result.value.history_run_ids.len(), 2);
+            assert_eq!(
+                result.value.history_run_ids[0],
+                "cook-retryable-transport-attempt-1"
+            );
+            assert!(
+                result.value.history_run_ids[1].starts_with("cook-retryable-transport-attempt-2-")
+            );
+            for run_id in &result.value.history_run_ids {
+                let record = agent_task_lifecycle::status(run_id).expect("retry attempt exists");
+                assert!(record.provider_handles.is_empty());
+                assert_eq!(record.metadata["provider_executions_consumed"], 0);
+                assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
+                assert_eq!(
+                    record.metadata["pre_execution_failure"]["failure_classification"],
+                    "transient"
+                );
+            }
         });
     }
 
@@ -1787,7 +1939,7 @@ mod tests {
                     .as_ref()
                     .expect("failed cook report")
                     .status,
-                "retries_exhausted"
+                "pre_execution_failure"
             );
             assert_eq!(result.value.cooks[1].cook_id, "second");
             assert_eq!(result.value.cooks[1].exit_code, 0);
