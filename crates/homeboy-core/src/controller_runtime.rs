@@ -30,6 +30,28 @@ const ADMISSION_LOCK_ATTEMPTS: usize = 500;
 const ADMISSION_LOCK_RETRY: Duration = Duration::from_millis(10);
 static ADMISSION_LOCK_PROCESS_GUARDS: OnceLock<Mutex<BTreeMap<PathBuf, &'static Mutex<()>>>> =
     OnceLock::new();
+#[cfg(all(unix, any(test, feature = "test-support")))]
+static TEST_CONTROLLER_FIXTURE_DIGESTS: OnceLock<
+    Mutex<BTreeMap<TestExecutableFileIdentity, String>>,
+> = OnceLock::new();
+#[cfg(all(test, unix))]
+static TEST_CONTROLLER_FIXTURE_DIGEST_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// A source fixture is immutable for a hermetic test context. Include inode and
+/// change time so replacing or modifying a path cannot reuse its prior digest.
+#[cfg(all(unix, any(test, feature = "test-support")))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TestExecutableFileIdentity {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
 
 /// Report-only retention inventory for immutable controller runtime pins.
 ///
@@ -450,7 +472,7 @@ fn current_executable() -> Result<PathBuf> {
 }
 
 fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
-    let digest = executable_digest(executable)?;
+    let digest = controller_executable_digest(executable)?;
     let pinned_path = pinned_path(identity, &digest)?;
     publish_pin(executable, &pinned_path, &digest)?;
 
@@ -1024,7 +1046,7 @@ fn validate_pin(runtime: &Value) -> Result<()> {
             None,
         ));
     }
-    let actual = executable_digest(path)?;
+    let actual = test_candidate_or_executable_digest(path)?;
     if actual != expected {
         return Err(Error::validation_invalid_argument(
             "controller_runtime",
@@ -1037,7 +1059,7 @@ fn validate_pin(runtime: &Value) -> Result<()> {
     }
     let identity =
         required_runtime_string(runtime, "/originating/build_identity", "build identity")?;
-    verify_self_identity(path, identity)?;
+    verify_self_identity(path, identity, Some(&actual))?;
     Ok(())
 }
 
@@ -1052,7 +1074,7 @@ fn verify_artifact(path: &Path, expected: &str, identity: &str) -> Result<()> {
             None,
         ));
     }
-    verify_self_identity(path, identity)
+    verify_self_identity(path, identity, Some(&actual))
 }
 
 fn verify_executable(path: &Path, label: &str) -> Result<()> {
@@ -1075,8 +1097,8 @@ fn verify_executable(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn verify_self_identity(path: &Path, expected: &str) -> Result<()> {
-    let actual = executable_identity(path)?;
+fn verify_self_identity(path: &Path, expected: &str, verified_digest: Option<&str>) -> Result<()> {
+    let actual = executable_identity(path, verified_digest)?;
     if actual == expected {
         return Ok(());
     }
@@ -1136,9 +1158,11 @@ fn verify_self_status_identity(path: &Path, expected: &str) -> Result<()> {
     ))
 }
 
-fn executable_identity(path: &Path) -> Result<String> {
+fn executable_identity(path: &Path, verified_digest: Option<&str>) -> Result<String> {
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = verified_digest;
     #[cfg(any(test, feature = "test-support"))]
-    if let Some(identity) = test_controller_identity(path) {
+    if let Some(identity) = test_controller_identity(path, verified_digest) {
         return identity;
     }
     let output = Command::new(path)
@@ -1178,10 +1202,10 @@ fn executable_identity(path: &Path) -> Result<String> {
 /// is limited to byte-identical copies of its explicit source executable, so
 /// arbitrary fake controller binaries still execute and fail closed.
 #[cfg(any(test, feature = "test-support"))]
-fn test_controller_identity(path: &Path) -> Option<Result<String>> {
+fn test_controller_identity(path: &Path, verified_digest: Option<&str>) -> Option<Result<String>> {
     let source = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV)?;
     let identity = std::env::var(TEST_CONTROLLER_RUNTIME_IDENTITY_ENV).ok()?;
-    let source_digest = executable_digest(Path::new(&source)).map_err(|error| {
+    let source_digest = test_controller_fixture_digest(Path::new(&source)).map_err(|error| {
         Error::validation_invalid_argument(
             "controller_runtime",
             format!("test controller source cannot be hashed: {error}"),
@@ -1189,7 +1213,10 @@ fn test_controller_identity(path: &Path) -> Option<Result<String>> {
             None,
         )
     });
-    let candidate_digest = executable_digest(path);
+    let candidate_digest = match verified_digest {
+        Some(digest) => Ok(digest.to_string()),
+        None => test_candidate_or_executable_digest(path),
+    };
     match (source_digest, candidate_digest) {
         (Ok(source_digest), Ok(candidate_digest)) if source_digest == candidate_digest => {
             Some(Ok(identity))
@@ -1199,8 +1226,106 @@ fn test_controller_identity(path: &Path) -> Option<Result<String>> {
     }
 }
 
+#[cfg(all(unix, any(test, feature = "test-support")))]
+fn test_controller_fixture_digest(path: &Path) -> Result<String> {
+    let file_identity = test_executable_file_identity(path)?;
+    let cache = TEST_CONTROLLER_FIXTURE_DIGESTS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some(digest) = cache
+        .lock()
+        .expect("test controller source digest cache is not poisoned")
+        .get(&file_identity)
+        .cloned()
+    {
+        return Ok(digest);
+    }
+
+    #[cfg(test)]
+    TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let digest = executable_digest(path)?;
+    cache
+        .lock()
+        .expect("test controller source digest cache is not poisoned")
+        .insert(file_identity, digest.clone());
+    Ok(digest)
+}
+
+#[cfg(all(not(unix), any(test, feature = "test-support")))]
+fn test_controller_fixture_digest(path: &Path) -> Result<String> {
+    executable_digest(path)
+}
+
+#[cfg(all(unix, any(test, feature = "test-support")))]
+fn test_registered_fixture_digest(path: &Path) -> Option<String> {
+    let file_identity = test_executable_file_identity(path).ok()?;
+    TEST_CONTROLLER_FIXTURE_DIGESTS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("test controller fixture digest cache is not poisoned")
+        .get(&file_identity)
+        .cloned()
+}
+
+#[cfg(all(unix, any(test, feature = "test-support")))]
+fn test_executable_file_identity(path: &Path) -> Result<TestExecutableFileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::metadata(path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("inspect test controller executable".to_string()),
+        )
+    })?;
+    Ok(TestExecutableFileIdentity {
+        path: path.to_path_buf(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.size(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+    })
+}
+
+#[cfg(all(unix, any(test, feature = "test-support")))]
+fn test_candidate_or_executable_digest(path: &Path) -> Result<String> {
+    test_registered_fixture_digest(path).map_or_else(
+        || {
+            #[cfg(test)]
+            TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            executable_digest(path)
+        },
+        Ok,
+    )
+}
+
+#[cfg(all(not(unix), any(test, feature = "test-support")))]
+fn test_candidate_or_executable_digest(path: &Path) -> Result<String> {
+    executable_digest(path)
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn test_candidate_or_executable_digest(path: &Path) -> Result<String> {
+    executable_digest(path)
+}
+
+#[cfg(all(unix, any(test, feature = "test-support")))]
+fn controller_executable_digest(path: &Path) -> Result<String> {
+    if std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV)
+        .is_some_and(|source| Path::new(&source) == path)
+    {
+        return test_controller_fixture_digest(path);
+    }
+    executable_digest(path)
+}
+
+#[cfg(not(all(unix, any(test, feature = "test-support"))))]
+fn controller_executable_digest(path: &Path) -> Result<String> {
+    executable_digest(path)
+}
+
 fn activated_executable_identity(path: &Path) -> Result<String> {
-    executable_identity(path)
+    executable_identity(path, None)
 }
 
 fn executable_digest(path: &Path) -> Result<String> {
@@ -1267,6 +1392,7 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
     if destination.exists() {
         let actual = executable_digest(destination)?;
         if actual == expected_digest {
+            register_test_fixture_candidate(source, destination, expected_digest);
             return Ok(());
         }
         return Err(Error::validation_invalid_argument(
@@ -1313,12 +1439,14 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
     match fs::hard_link(&staging, destination) {
         Ok(()) => {
             let _ = fs::remove_file(&staging);
+            register_test_fixture_candidate(source, destination, expected_digest);
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let _ = fs::remove_file(&staging);
             let actual = executable_digest(destination)?;
             if actual == expected_digest {
+                register_test_fixture_candidate(source, destination, expected_digest);
                 Ok(())
             } else {
                 Err(Error::validation_invalid_argument(
@@ -1341,6 +1469,29 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
         }
     }
 }
+
+#[cfg(all(unix, any(test, feature = "test-support")))]
+fn register_test_fixture_candidate(source: &Path, candidate: &Path, expected_digest: &str) {
+    let Some(configured_source) = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV) else {
+        return;
+    };
+    if Path::new(&configured_source) != source
+        || test_registered_fixture_digest(source).as_deref() != Some(expected_digest)
+    {
+        return;
+    }
+    let Ok(candidate_identity) = test_executable_file_identity(candidate) else {
+        return;
+    };
+    TEST_CONTROLLER_FIXTURE_DIGESTS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("test controller fixture digest cache is not poisoned")
+        .insert(candidate_identity, expected_digest.to_string());
+}
+
+#[cfg(not(all(unix, any(test, feature = "test-support"))))]
+fn register_test_fixture_candidate(_source: &Path, _candidate: &Path, _expected_digest: &str) {}
 
 fn required_runtime_string<'a>(runtime: &'a Value, pointer: &str, label: &str) -> Result<&'a str> {
     runtime
@@ -1739,8 +1890,76 @@ mod tests {
                 std::env::current_exe().expect("current test executable")
             );
             assert_eq!(
-                executable_identity(&pinned).expect("fixture identity"),
+                executable_identity(&pinned, None).expect("fixture identity"),
                 build_identity::current().display
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_fixture_identity_cache_reuses_sealed_candidates_and_invalidates_changes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        crate::test_support::with_isolated_home(|_| {
+            TEST_CONTROLLER_FIXTURE_DIGESTS
+                .get_or_init(|| Mutex::new(BTreeMap::new()))
+                .lock()
+                .expect("test controller source digest cache is not poisoned")
+                .clear();
+            TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+
+            let runtime = pin_current().expect("pin test controller fixture");
+            let candidate = runtime
+                .pointer("/originating/pinned_executable")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .expect("pinned candidate");
+            validate_pin(&runtime).expect("first fixture identity validation");
+            validate_pin(&runtime).expect("second fixture identity validation");
+            assert_eq!(
+                TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "source and sealed candidate avoid additional full reads"
+            );
+
+            fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))
+                .expect("change candidate mode");
+            validate_pin(&runtime).expect("chmod preserves valid candidate bytes");
+            assert_eq!(
+                TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                2,
+                "chmod invalidates metadata identity and performs one rehash"
+            );
+
+            fs::write(&candidate, b"mutated candidate").expect("mutate candidate");
+            assert!(
+                validate_pin(&runtime).is_err(),
+                "mutated candidate fails closed"
+            );
+            assert_eq!(
+                TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                3,
+                "content mutation misses the cache and rehashes before failing"
+            );
+
+            fs::remove_file(&candidate).expect("remove candidate");
+            fs::copy(
+                crate::test_support::controller_runtime_test_executable(),
+                &candidate,
+            )
+            .expect("replace candidate");
+            fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))
+                .expect("make replacement executable");
+            fs::write(&candidate, b"replacement candidate").expect("replace candidate bytes");
+            assert!(
+                validate_pin(&runtime).is_err(),
+                "replaced candidate fails closed"
+            );
+            assert_eq!(
+                TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                4,
+                "replacement misses the cache and rehashes before failing"
             );
         });
     }
@@ -1787,7 +2006,7 @@ mod tests {
                 "homeboy 0.288.13+original"
             );
             assert_eq!(
-                executable_identity(&global).expect("global replacement identity"),
+                executable_identity(&global, None).expect("global replacement identity"),
                 "homeboy 0.288.13+replacement"
             );
         });

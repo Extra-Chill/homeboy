@@ -11,6 +11,9 @@ use crate::api_jobs::{Job, JobEventKind, JobStore, RemoteRunnerJobRequest, Remot
 
 static SHARED_EMPTY_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_COMMITTED_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
+static SHARED_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
+static EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static SHORT_EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 /// An explicit executable selection for a hermetic test command.
 ///
@@ -242,7 +245,7 @@ impl HomeGuard {
         );
         std::env::set_var(
             crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
-            test_controller_fixture(context.runtime_dir()),
+            test_controller_fixture(),
         );
         std::env::set_var(
             crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
@@ -282,22 +285,17 @@ impl HomeGuard {
 fn short_invocation_tempdir() -> TempDir {
     #[cfg(unix)]
     {
-        for base in short_tempdir_candidates() {
-            let Ok(candidate) = tempfile::Builder::new()
-                .prefix("hb-test-")
-                .tempdir_in(&base)
-            else {
-                continue;
-            };
-            if dir_allows_exec(candidate.path()) {
-                return candidate;
-            }
-            // Not exec-capable (e.g. `noexec` mount) — drop it and try the
-            // next candidate rather than handing back a dir scripts can't run
-            // from.
-        }
+        tempdir_with_cached_exec_base(
+            SHORT_EXEC_CAPABLE_TEMP_BASE.get_or_init(|| Mutex::new(None)),
+            short_tempdir_candidates(),
+            "hb-test-",
+            dir_allows_exec,
+        )
     }
-    TempDir::new().expect("invocation runtime tempdir")
+    #[cfg(not(unix))]
+    {
+        TempDir::new().expect("invocation runtime tempdir")
+    }
 }
 
 /// Ordered short base directories to consider for the invocation runtime root.
@@ -352,6 +350,59 @@ fn dir_allows_exec(dir: &Path) -> bool {
     allowed
 }
 
+/// Reuse a validated base directory, but always create a new child tempdir.
+/// If a cached base disappears or becomes unavailable, retry the normal ordered
+/// probe and replace the cached base only after a successful execution probe.
+#[cfg(unix)]
+fn tempdir_with_cached_exec_base(
+    cache: &Mutex<Option<PathBuf>>,
+    candidates: Vec<PathBuf>,
+    prefix: &str,
+    probe: impl Fn(&Path) -> bool,
+) -> TempDir {
+    let cached = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(base) = cached {
+        if let Ok(directory) = tempfile::Builder::new().prefix(prefix).tempdir_in(&base) {
+            return directory;
+        }
+    }
+
+    for base in candidates {
+        let Ok(directory) = tempfile::Builder::new().prefix(prefix).tempdir_in(&base) else {
+            continue;
+        };
+        if probe(directory.path()) {
+            *cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(base);
+            return directory;
+        }
+        // Not exec-capable (e.g. `noexec` mount) — drop it and try the next
+        // candidate rather than handing back a dir scripts cannot run from.
+    }
+    TempDir::new().expect("exec-capable tempdir fallback")
+}
+
+#[cfg(unix)]
+fn exec_capable_tempdir_candidates() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let push = |path: PathBuf, roots: &mut Vec<PathBuf>| {
+        if path.is_dir() && !roots.contains(&path) {
+            roots.push(path);
+        }
+    };
+    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        push(PathBuf::from(tmpdir), &mut roots);
+    }
+    for fixed in ["/tmp", "/var/tmp", "/dev/shm"] {
+        push(PathBuf::from(fixed), &mut roots);
+    }
+    roots
+}
+
 /// Create a tempdir that is guaranteed exec-capable where possible.
 ///
 /// Tests that write a script and then run it (e.g. capability parser scripts)
@@ -367,32 +418,17 @@ fn dir_allows_exec(dir: &Path) -> bool {
 pub fn exec_capable_tempdir() -> TempDir {
     #[cfg(unix)]
     {
-        let mut roots: Vec<PathBuf> = Vec::new();
-        let push = |path: PathBuf, roots: &mut Vec<PathBuf>| {
-            if path.is_dir() && !roots.contains(&path) {
-                roots.push(path);
-            }
-        };
-        if let Some(tmpdir) = std::env::var_os("TMPDIR") {
-            push(PathBuf::from(tmpdir), &mut roots);
-        }
-        for fixed in ["/tmp", "/var/tmp", "/dev/shm"] {
-            push(PathBuf::from(fixed), &mut roots);
-        }
-
-        for base in roots {
-            let Ok(candidate) = tempfile::Builder::new()
-                .prefix("hb-test-")
-                .tempdir_in(&base)
-            else {
-                continue;
-            };
-            if dir_allows_exec(candidate.path()) {
-                return candidate;
-            }
-        }
+        tempdir_with_cached_exec_base(
+            EXEC_CAPABLE_TEMP_BASE.get_or_init(|| Mutex::new(None)),
+            exec_capable_tempdir_candidates(),
+            "hb-test-",
+            dir_allows_exec,
+        )
     }
-    TempDir::new().expect("exec-capable tempdir")
+    #[cfg(not(unix))]
+    {
+        TempDir::new().expect("exec-capable tempdir")
+    }
 }
 
 impl Drop for HomeGuard {
@@ -453,14 +489,39 @@ impl Drop for HomeGuard {
     }
 }
 
-fn test_controller_fixture(directory: &Path) -> PathBuf {
-    let path = directory.join("homeboy-controller-fixture");
-    fs::copy(
-        std::env::current_exe().expect("current test executable"),
-        &path,
-    )
-    .expect("copy controller fixture");
-    path
+fn test_controller_fixture() -> PathBuf {
+    SHARED_CONTROLLER_RUNTIME_FIXTURE
+        .get_or_init(|| {
+            let directory = exec_capable_tempdir();
+            let path = directory.path().join("homeboy-controller-fixture");
+            fs::copy(
+                std::env::current_exe().expect("current test executable"),
+                &path,
+            )
+            .expect("copy controller fixture");
+            make_test_controller_fixture_read_only(&path);
+            directory
+        })
+        .path()
+        .join("homeboy-controller-fixture")
+}
+
+fn make_test_controller_fixture_read_only(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(0o500))
+            .expect("seal controller fixture");
+    }
+    #[cfg(not(unix))]
+    {
+        let mut permissions = fs::metadata(path)
+            .expect("inspect controller fixture")
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(path, permissions).expect("seal controller fixture");
+    }
 }
 
 /// Source executable selected by the hermetic controller-runtime test contract.
@@ -996,4 +1057,77 @@ fn write_broker_response(stream: &mut TcpStream, body: serde_json::Value) {
         body.len(), body
     )
     .expect("write broker response");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_exec_base_probes_once_and_creates_distinct_tempdirs() {
+        let base = TempDir::new().expect("temp base");
+        let cache = Mutex::new(None);
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+        let create = || {
+            tempdir_with_cached_exec_base(
+                &cache,
+                vec![base.path().to_path_buf()],
+                "hb-cache-",
+                |_| {
+                    probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    true
+                },
+            )
+        };
+
+        let first = create();
+        let second = create();
+
+        assert_eq!(probes.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_ne!(first.path(), second.path());
+        assert!(first.path().starts_with(base.path()));
+        assert!(second.path().starts_with(base.path()));
+    }
+
+    #[test]
+    fn isolated_homes_share_the_read_only_controller_fixture_and_not_pins() {
+        let first = with_isolated_home(|_| {
+            let fixture = controller_runtime_test_executable();
+            let runtime = crate::controller_runtime::pin_current().expect("pin first fixture");
+            let pin = runtime["originating"]["pinned_executable"]
+                .as_str()
+                .map(PathBuf::from)
+                .expect("first pinned fixture");
+            (fixture, pin)
+        });
+        let second = with_isolated_home(|_| {
+            let fixture = controller_runtime_test_executable();
+            let runtime = crate::controller_runtime::pin_current().expect("pin second fixture");
+            let pin = runtime["originating"]["pinned_executable"]
+                .as_str()
+                .map(PathBuf::from)
+                .expect("second pinned fixture");
+            (fixture, pin)
+        });
+
+        assert_eq!(first.0, second.0);
+        assert_ne!(
+            first.0,
+            std::env::current_exe().expect("current test executable")
+        );
+        assert_ne!(first.1, second.1);
+        assert!(first.0.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(&first.0)
+                .expect("fixture metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o222, 0);
+            assert_ne!(mode & 0o111, 0);
+        }
+    }
 }
