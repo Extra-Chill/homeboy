@@ -10,7 +10,7 @@ use super::*;
 /// scratch under `.homeboy/`) after the snapshot baseline is established, so it
 /// is checkout drift rather than provider output — including it produces a patch
 /// that deletes/rewrites runner metadata and cannot be promoted cleanly. (#8534)
-const HARVEST_METADATA_EXCLUDE_PATHSPECS: &[&str] = &[
+pub(super) const RUNNER_METADATA_EXCLUDE_PATHSPECS: &[&str] = &[
     ":(exclude).homeboy/runner-workspace.json",
     ":(exclude).homeboy/lab-at-files/**",
 ];
@@ -47,8 +47,8 @@ pub(super) fn harvest_uncommitted_patch(
             "--all",
             "--",
             ".",
-            HARVEST_METADATA_EXCLUDE_PATHSPECS[0],
-            HARVEST_METADATA_EXCLUDE_PATHSPECS[1],
+            RUNNER_METADATA_EXCLUDE_PATHSPECS[0],
+            RUNNER_METADATA_EXCLUDE_PATHSPECS[1],
         ],
     )?;
     let mut uncommitted_patch_args = vec![
@@ -61,13 +61,13 @@ pub(super) fn harvest_uncommitted_patch(
         "--",
         ".",
     ];
-    uncommitted_patch_args.extend_from_slice(HARVEST_METADATA_EXCLUDE_PATHSPECS);
+    uncommitted_patch_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
     let patch = git_output_raw(root, &uncommitted_patch_args)?;
     if patch.trim().is_empty() {
         return Ok(());
     }
     let mut uncommitted_changed_args = vec!["diff", "--cached", "--name-only", "HEAD", "--", "."];
-    uncommitted_changed_args.extend_from_slice(HARVEST_METADATA_EXCLUDE_PATHSPECS);
+    uncommitted_changed_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
     let changed_files = git_changed_files(root, &uncommitted_changed_args)?;
     let path = attempt_patch_path(running, "uncommitted")?;
     std::fs::write(&path, patch.as_bytes()).map_err(|error| HarvestError::ArtifactWrite {
@@ -240,7 +240,7 @@ fn harvest_committed_patch_with_metadata(
         "--",
         ".",
     ];
-    committed_patch_args.extend_from_slice(HARVEST_METADATA_EXCLUDE_PATHSPECS);
+    committed_patch_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
     let patch = git_output_raw(root, &committed_patch_args)?;
     if patch.trim().is_empty() {
         return Ok(());
@@ -263,7 +263,7 @@ fn harvest_committed_patch_with_metadata(
     ));
     let commits = collect_metadata(root, &range)?;
     let mut committed_changed_args = vec!["diff", "--name-only", base, "HEAD", "--", "."];
-    committed_changed_args.extend_from_slice(HARVEST_METADATA_EXCLUDE_PATHSPECS);
+    committed_changed_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
     let changed_files = git_changed_files(root, &committed_changed_args)?;
     outcome
         .artifacts
@@ -420,6 +420,19 @@ pub(super) fn git_is_repository(cwd: &Path) -> Result<bool, HarvestError> {
             message: error.to_string(),
         })?;
     Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
+/// Report workspace changes while excluding state injected by Homeboy's runner.
+pub(super) fn git_status_ignoring_runner_metadata(cwd: &Path) -> Result<String, HarvestError> {
+    let mut args = vec![
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--",
+        ".",
+    ];
+    args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
+    git_output(cwd, &args)
 }
 
 pub(crate) fn git_output(cwd: &Path, args: &[&str]) -> Result<String, HarvestError> {
