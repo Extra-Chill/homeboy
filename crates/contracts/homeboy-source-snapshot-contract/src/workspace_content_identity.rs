@@ -41,11 +41,12 @@ pub const WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE: &str = "unix-executable"
 pub const WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE: &str = "unix-owner-executable";
 
 /// The default permission policy for new workspace-content identities.
-#[cfg(unix)]
-pub const WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY: &str =
-    WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE;
-/// The default permission policy for new workspace-content identities.
-#[cfg(not(unix))]
+///
+/// Snapshot archives can cross controller and runner platform boundaries. File
+/// bytes and paths survive that transfer, while Unix mode bits are not a
+/// portable provenance capability. New snapshots therefore use the content-only
+/// policy; explicit Unix policies remain available to verify their versioned
+/// historical contracts.
 pub const WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY: &str = WORKSPACE_CONTENT_PERMISSION_PORTABLE;
 
 /// The algorithm-identity marker string for a permission policy, or `None` if
@@ -99,6 +100,19 @@ mod tests {
     fn portable_policy_marker_is_stable_and_platform_independent() {
         assert_eq!(
             workspace_content_hash_algorithm(WORKSPACE_CONTENT_PERMISSION_PORTABLE).as_deref(),
+            Some("homeboy-workspace-content-v2+portable-content-only")
+        );
+    }
+
+    #[test]
+    fn default_policy_is_portable_across_controller_and_runner_platforms() {
+        assert_eq!(
+            WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+            WORKSPACE_CONTENT_PERMISSION_PORTABLE
+        );
+        assert_eq!(
+            workspace_content_hash_algorithm(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY)
+                .as_deref(),
             Some("homeboy-workspace-content-v2+portable-content-only")
         );
     }

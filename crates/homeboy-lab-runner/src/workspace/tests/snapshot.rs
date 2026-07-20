@@ -1844,6 +1844,56 @@ fn workspace_content_hash_versions_legacy_any_execute_separately_from_owner_exec
 }
 
 #[test]
+#[cfg(unix)]
+fn snapshot_content_hash_is_portable_when_transport_drops_owner_execute() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let controller = tempfile::tempdir().expect("controller workspace");
+    let runner = tempfile::tempdir().expect("runner workspace");
+    for workspace in [controller.path(), runner.path()] {
+        fs::write(workspace.join("tool"), "#!/bin/sh\necho homeboy\n").expect("tool");
+    }
+    fs::set_permissions(
+        controller.path().join("tool"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("controller permissions");
+    fs::set_permissions(
+        runner.path().join("tool"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .expect("runner permissions");
+
+    assert_ne!(
+        workspace_content_hash_for_policy(
+            controller.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+        )
+        .expect("controller Unix hash"),
+        workspace_content_hash_for_policy(
+            runner.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+        )
+        .expect("runner Unix hash"),
+        "Unix mode provenance is not portable through a cross-platform snapshot"
+    );
+    assert_eq!(
+        workspace_content_hash(controller.path(), &[]).expect("controller portable hash"),
+        workspace_content_hash(runner.path(), &[]).expect("runner portable hash"),
+        "new snapshots bind the portable content contract"
+    );
+
+    fs::write(runner.path().join("tool"), "#!/bin/sh\necho changed\n").expect("mutate tool");
+    assert_ne!(
+        workspace_content_hash(controller.path(), &[]).expect("controller portable hash"),
+        workspace_content_hash(runner.path(), &[]).expect("changed runner portable hash"),
+        "portable identity remains fail-closed for content changes"
+    );
+}
+
+#[test]
 fn workspace_content_manifest_contains_every_materialized_path() {
     let workspace = tempfile::tempdir().expect("workspace");
     fs::write(workspace.path().join("a".repeat(193)), "contents\n").expect("long path file");
