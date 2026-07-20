@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.26.0] - 2026-07-20
+
+### Added
+- add collapse_struct_defaults — inverse of propagate
+
 ## [1.25.0] - 2026-07-17
 
 ### Added
