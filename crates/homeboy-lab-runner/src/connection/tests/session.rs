@@ -4,6 +4,8 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 
+use crate::RunnerAvailability;
+
 use super::*;
 
 #[test]
@@ -334,6 +336,44 @@ fn parses_self_identity_json_envelope() {
     assert_eq!(
         identity.build_identity.as_deref(),
         Some("homeboy 0.228.13+19a41cd5102d")
+    );
+}
+
+#[test]
+fn aligned_runner_identity_protocol_with_shell_preamble_accepts_jobs() {
+    let configured = parse_self_identity_output(
+        "Setting up Swift test infrastructure...\n{\"success\":true,\"data\":{\"version\":\"0.298.0\",\"display\":\"homeboy 0.298.0+9682bf1ad0b2\"}}\n",
+    )
+    .expect("configured runner identity after shell preamble");
+    let daemon = serde_json::json!({
+        "version": "0.298.0",
+        "build_identity": { "display": "homeboy 0.298.0+9682bf1ad0b2" },
+        "runtime_paths": { "loaded": [], "current": [], "stale": [] },
+    });
+    let daemon_version = daemon_version_from_body(&daemon).expect("daemon version");
+    let daemon_identity = daemon_identity_from_body(&daemon).expect("daemon build identity");
+
+    assert!(daemon_runtime_is_current(
+        daemon_version,
+        "0.298.0",
+        &configured.version,
+        compare_identities(Some(daemon_identity), configured.build_identity.as_deref()),
+        &daemon_runtime_stale_paths_from_body(&daemon),
+        &changed_runtime_paths(
+            &HashMap::new(),
+            &daemon_runtime_loaded_paths_from_body(&daemon)
+        ),
+    ));
+    assert!(
+        RunnerAvailability::from_status_parts(
+            "homeboy-lab",
+            true,
+            false,
+            0,
+            &RunnerActiveJobState::Available,
+            None,
+        )
+        .accepts_jobs
     );
 }
 
