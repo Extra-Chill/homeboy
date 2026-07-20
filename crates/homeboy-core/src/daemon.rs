@@ -857,6 +857,10 @@ pub fn stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult> {
 /// This deliberately does not use the daemon HTTP lifecycle endpoint.
 pub fn force_stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult> {
     let _lock = acquire_daemon_operation_lock()?;
+    force_stop_for_lease_unlocked(expected_lease_id)
+}
+
+fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopResult> {
     let path = state_path()?;
     let state_path_display = path.display().to_string();
     let validation = validate_lease_file(&path)?;
@@ -980,6 +984,12 @@ fn stop_with_force_for_lease(expected_lease_id: &str, force: bool) -> Result<Dae
             Some(expected_lease_id.to_string()),
             None,
         ));
+    }
+    // A replacement binary cannot ask a stale daemon to run its own lifecycle
+    // endpoint. The persisted lease, token, and zero-job gate below still bind
+    // direct termination to this exact daemon owner.
+    if !validation.fresh && validation.running {
+        return force_stop_for_lease_unlocked(expected_lease_id);
     }
     let mut result = stop_unlocked_with_force(force)?;
     if !result.stopped {
