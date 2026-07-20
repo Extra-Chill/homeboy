@@ -83,6 +83,37 @@ homeboy_node_targeted_test_script() {
     return 1
 }
 
+# True when any selected runner arg is a TypeScript test file. Bare `node
+# --test` cannot execute `.ts`/`.tsx` sources — they resolve `.js` specifiers and
+# need a TypeScript loader (e.g. tsx) — so it fails with ERR_MODULE_NOT_FOUND
+# before any test runs, which must not be classified as a product test failure.
+homeboy_runner_args_include_typescript() {
+    local arg
+    for arg in "${RUNNER_ARGS[@]}"; do
+        case "$arg" in
+            *.ts | *.tsx | *.mts | *.cts) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# Resolve a Node built-in test-runner command that can execute TypeScript when
+# the selected files require it. Prefers a resolvable `tsx` loader
+# (`node --import tsx --test`); returns non-zero when TypeScript files are
+# selected but no loader is available so the caller can fail with actionable
+# guidance instead of running bare `node --test`.
+homeboy_node_builtin_test_command() {
+    if ! homeboy_runner_args_include_typescript; then
+        printf 'node --test'
+        return 0
+    fi
+    if node --import tsx --eval '' >/dev/null 2>&1; then
+        printf 'node --import tsx --test'
+        return 0
+    fi
+    return 1
+}
+
 WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}"
 if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; then
     # shellcheck source=/dev/null
@@ -96,10 +127,19 @@ elif [ ${#RUNNER_ARGS[@]} -gt 0 ] && TARGETED_TEST_SCRIPT="$(homeboy_node_target
     TEST_CMD="$(homeboy_node_script_command "$TARGETED_TEST_SCRIPT")"
 elif homeboy_has_npm_script "test"; then
     TEST_CMD="$(homeboy_project_run_script_command test)"
+elif TEST_CMD="$(homeboy_node_builtin_test_command)"; then
+    # Node 18+ ships a built-in test runner (with a tsx loader for TypeScript).
+    # This is the right default for projects without an explicit script.
+    :
 else
-    # Node 18+ ships a built-in test runner. This is the right default
-    # for tiny projects without an explicit script.
-    TEST_CMD="node --test"
+    # TypeScript test files were selected but no runner can execute them: no
+    # `test`/targeted package script and no resolvable `tsx` loader. Fail with
+    # actionable guidance rather than invoking bare `node --test`, whose
+    # module-resolution error is not a product test failure. (#8324)
+    echo "Error: selected TypeScript test file(s) require a declared test runner or a 'tsx' loader, but neither was found." >&2
+    echo "  - Add a package.json \"test\" script (or configure node_targeted_test_script) that runs the TypeScript tests (e.g. via tsx), or" >&2
+    echo "  - Add 'tsx' as a dependency so 'node --import tsx --test' can execute them." >&2
+    exit 1
 fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
