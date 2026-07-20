@@ -133,6 +133,38 @@ fn reconciles_multiple_stale_generation_leases_to_one_authoritative_idle_lease()
 }
 
 #[test]
+fn converged_idle_generations_rebind_the_normal_disconnect_owner() {
+    let status = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);
+    let mut session = direct_ssh_session("lease-old");
+    session.remote_daemon_pid = Some(1111);
+    session.remote_daemon_address = Some("127.0.0.1:40501".to_string());
+    let mut second = direct_ssh_session("lease-older");
+    second.remote_daemon_pid = Some(2222);
+    second.remote_daemon_address = Some("127.0.0.1:35831".to_string());
+    let mut third = direct_ssh_session("lease-earliest");
+    third.remote_daemon_address = Some("127.0.0.1:42399".to_string());
+    let daemon = status.daemon.expect("authoritative daemon");
+
+    let rebound = super::super::stop_transport_recovery::rebind_idle_generation_owner(
+        &session,
+        &daemon,
+        daemon.lease_id.clone().expect("lease"),
+    );
+
+    assert_eq!(
+        rebound.remote_daemon_lease_id.as_deref(),
+        Some("lease-stale")
+    );
+    assert_eq!(rebound.remote_daemon_pid, Some(4444));
+    assert_eq!(
+        rebound.remote_daemon_address.as_deref(),
+        Some("127.0.0.1:49152")
+    );
+    assert_ne!(session.remote_daemon_address, second.remote_daemon_address);
+    assert_ne!(second.remote_daemon_address, third.remote_daemon_address);
+}
+
+#[test]
 fn stale_generation_reconciliation_requires_every_ledger_entry_to_be_direct_and_leased() {
     let first = direct_ssh_session("lease-a");
     let second = direct_ssh_session("lease-b");

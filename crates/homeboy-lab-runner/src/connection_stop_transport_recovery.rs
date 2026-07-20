@@ -32,7 +32,7 @@ pub(crate) fn disconnect_with_session(
     )?;
     promotion_lease.assert_generation()?;
     let local_session = read_session(runner_id)?;
-    let session = match expected_session {
+    let mut session = match expected_session {
         Some(expected_session)
             if local_session.as_ref().is_some_and(|current_session| {
                 same_remote_daemon_ownership(runner_id, expected_session, current_session)
@@ -57,28 +57,30 @@ pub(crate) fn disconnect_with_session(
             ));
         }
     }
-    if let Some(session) = &session {
+    if let Some(session) = &mut session {
         // The legacy controller record names only the admission owner. Drain
         // generations have their own lease and tunnel, so teardown is complete
         // only after every persisted endpoint is resolved independently.
-        let generations = super::super::generation_store::live_sessions(runner_id, Some(session))?;
-        if reconcile_authoritative_idle_stale_generations(runner_id, &generations)? {
-            super::super::generation_store::clear(runner_id)?;
-            let ownership = read_ownership(runner_id)?;
-            if should_stop_remote_daemon(
-                session,
-                ownership.as_ref(),
-                has_live_peer_session(session)?,
-            ) {
-                remove_ownership(runner_id)?;
-            }
-            remove_session(runner_id)?;
-            return Ok(RunnerDisconnectReport {
-                runner_id: runner_id.to_string(),
-                disconnected: true,
-                session: Some(session.clone()),
-                session_path: session_path(runner_id)?.display().to_string(),
-            });
+        let mut generations =
+            super::super::generation_store::live_sessions(runner_id, Some(session))?;
+        let mut reconciled_tunnel_pids = Vec::new();
+        if let Some(authoritative_session) =
+            reconcile_authoritative_idle_stale_generations(runner_id, session, &generations)?
+        {
+            reconciled_tunnel_pids.extend(
+                generations
+                    .iter()
+                    .filter_map(|generation| generation.tunnel_pid),
+            );
+            reconciled_tunnel_pids.sort_unstable();
+            reconciled_tunnel_pids.dedup();
+            *session = authoritative_session.clone();
+            // The one re-probed owner remains for the ordinary lease-bound
+            // disconnect below. Keep the durable ledger and every tunnel until
+            // that stop succeeds so failed recovery remains fully reversible.
+            let mut authoritative_session = authoritative_session;
+            authoritative_session.tunnel_pid = None;
+            generations = vec![authoritative_session];
         }
         let mut unresolved = Vec::new();
         for generation in generations {
@@ -105,6 +107,9 @@ pub(crate) fn disconnect_with_session(
                 Some(unresolved.into_iter().map(|entry| entry.to_string()).collect()),
             ));
         }
+        for pid in reconciled_tunnel_pids {
+            terminate_pid(pid);
+        }
         super::super::generation_store::clear(runner_id)?;
         let ownership = read_ownership(runner_id)?;
         if should_stop_remote_daemon(session, ownership.as_ref(), has_live_peer_session(session)?) {
@@ -125,18 +130,19 @@ pub(crate) fn disconnect_with_session(
 /// the remote status and typed jobs probe prove the exact lease is safe to stop.
 fn reconcile_authoritative_idle_stale_generations(
     runner_id: &str,
+    session: &RunnerSession,
     generations: &[RunnerSession],
-) -> Result<bool> {
+) -> Result<Option<RunnerSession>> {
     let Some(persisted_leases) = eligible_stale_generation_leases(generations) else {
-        return Ok(false);
+        return Ok(None);
     };
     if persisted_leases.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let runner = load(runner_id)?;
     let homeboy = remote_runner_homeboy_path(&runner, "runner stale-generation reconciliation")?;
     let Some((_, _, client)) = remote_daemon::resolve_ssh_runner(&runner)? else {
-        return Ok(false);
+        return Ok(None);
     };
     let mut status = remote_daemon::remote_daemon_status(&client, homeboy).map_err(|error| {
         Error::validation_invalid_argument(
@@ -158,42 +164,24 @@ fn reconcile_authoritative_idle_stale_generations(
             )
         })?
     else {
-        return Ok(false);
+        return Ok(None);
     };
-    remote_daemon::remote_daemon_force_stop(&client, homeboy, &lease_id).map_err(|error| {
-        Error::validation_invalid_argument(
-            "disconnect",
-            format!("authoritative lease-bound daemon stop failed: {error}"),
-            Some(runner_id.to_string()),
-            None,
-        )
-    })?;
-    let mut final_status =
-        remote_daemon::remote_daemon_status(&client, homeboy).map_err(|error| {
-            Error::validation_invalid_argument(
-                "disconnect",
-                format!("authoritative daemon re-probe after stop failed: {error}"),
-                Some(runner_id.to_string()),
-                None,
-            )
-        })?;
-    remote_daemon::probe_remote_daemon_endpoint(&client, &mut final_status);
-    remote_daemon::authoritative_lease_stop_confirmed(&final_status, &lease_id).map_err(
-        |error| {
-            Error::validation_invalid_argument(
-                "disconnect",
-                error,
-                Some(runner_id.to_string()),
-                None,
-            )
-        },
-    )?;
-    for generation in generations {
-        if let Some(pid) = generation.tunnel_pid {
-            terminate_pid(pid);
-        }
-    }
-    Ok(true)
+    let daemon = status.daemon.expect("authoritative lease requires daemon");
+    Ok(Some(rebind_idle_generation_owner(
+        session, &daemon, lease_id,
+    )))
+}
+
+pub(in crate::connection) fn rebind_idle_generation_owner(
+    session: &RunnerSession,
+    daemon: &remote_daemon::RemoteDaemon,
+    lease_id: String,
+) -> RunnerSession {
+    let mut authoritative_session = session.clone();
+    authoritative_session.remote_daemon_lease_id = Some(lease_id);
+    authoritative_session.remote_daemon_pid = daemon.pid;
+    authoritative_session.remote_daemon_address = Some(daemon.address.clone());
+    authoritative_session
 }
 
 /// Clearing the ledger is safe only when every generation is represented by a
