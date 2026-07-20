@@ -131,6 +131,14 @@ pub struct AgentTaskCandidateAdoptionAttempt {
     pub updated_at: String,
     pub owner_pid: u32,
     pub heartbeat_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_process_group: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gate_output_tail: String,
     #[serde(default)]
     pub resume_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]

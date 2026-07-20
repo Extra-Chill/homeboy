@@ -40,7 +40,8 @@ use super::cook_budget::{
 };
 use super::cook_promotion::{
     attempt_needs_execution, cook_report, finalize_or_load_cook_pr,
-    finalize_or_load_cook_pr_with_backend, promote_or_load_attempt, promotion_source,
+    finalize_or_load_cook_pr_with_backend, persisted_promotion_for_attempt,
+    promote_or_load_attempt, promotion_source,
 };
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
@@ -240,42 +241,117 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
     } else {
         options.gates.verify.join(" && ")
     };
-    agent_task_lifecycle::start_candidate_adoption(
+    if !options.gates.rerun_completed_gates
+        && record.candidate_adoption.as_ref().is_some_and(|adoption| {
+            adoption.state == "completed"
+                && adoption.candidate_sha == candidate_sha
+                && adoption.ai_model == adoption_ai_model
+        })
+    {
+        let promotion = persisted_promotion_for_attempt(&record.run_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "candidate_ref",
+                "completed candidate adoption is missing its persisted promotion result",
+                Some(candidate_sha.clone()),
+                None,
+            )
+        })?;
+        let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request,
+            promotion_report: promotion.clone(),
+            attempt: 1,
+            max_attempts: options.max_attempts,
+            source_run_id: Some(record.run_id.clone()),
+            current_diff: String::new(),
+            metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
+        });
+        let finalization = record.metadata.get("cook_finalization").cloned();
+        let status = finalization
+            .as_ref()
+            .and_then(|value| value["status"].as_str())
+            .unwrap_or("green_no_finalize")
+            .to_string();
+        return Ok(cook_report(
+            cook_id.to_string(),
+            &status,
+            vec![AgentTaskCookAttemptReport {
+                attempt: 1,
+                run_id: record.run_id.clone(),
+                run_state: format!("{:?}", record.state),
+                aggregate_path: record.aggregate_path.clone(),
+                promotion: Some(promotion),
+                feedback: Some(feedback),
+            }],
+            finalization,
+            Some("reused the completed candidate adoption result; set rerun_completed_gates to rerun its gates".to_string()),
+            if status == "review_ready" || status == "green_no_finalize" { 0 } else { 1 },
+        ));
+    }
+    agent_task_lifecycle::start_candidate_adoption_with_rerun_policy(
         &record.run_id,
         &candidate_sha,
         &adoption_ai_model,
         &gate_identity,
+        options.gates.rerun_completed_gates,
     )?;
-    let promotion = promote_with_checkpoint(
-        AgentTaskPromotionOptions {
-            source,
-            source_run_id: Some(record.run_id.clone()),
-            source_path,
-            source_worktree_path: options.source_worktree_path.clone(),
-            base_ref: Some(options.base.clone()),
-            task_base_sha: options.task_base_sha.clone(),
-            candidate_ref: Some(candidate_sha.clone()),
-            to_worktree: options.to_worktree.clone(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: options.gates.clone(),
-            provider_command: options.provider_command.clone(),
-            provider_invocation: options.provider_invocation.clone(),
+    let gate_run_id = record.run_id.clone();
+    let promotion = crate::agent_task_promotion::with_gate_supervision(
+        crate::agent_task_gate::GateSupervision {
+            timeout: options.gates.gate_timeout(),
+            heartbeat_interval: options.gates.gate_heartbeat_interval(),
+            on_spawn: Arc::new({
+                let run_id = gate_run_id.clone();
+                move |pid, command| {
+                    agent_task_lifecycle::start_candidate_adoption_gate(
+                        &run_id,
+                        command,
+                        pid,
+                        options.gates.gate_timeout_seconds,
+                    )
+                }
+            }),
+            on_heartbeat: Arc::new({
+                let run_id = gate_run_id.clone();
+                move |tail| agent_task_lifecycle::heartbeat_candidate_adoption_gate(&run_id, tail)
+            }),
+            is_cancelled: Arc::new(move || {
+                agent_task_lifecycle::candidate_adoption_cancel_requested(&gate_run_id)
+                    .unwrap_or(false)
+            }),
         },
-        |checkpoint| {
-            let checkpoint = serde_json::to_value(checkpoint).map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("serialize adopted candidate checkpoint".to_string()),
-                )
-            })?;
-            agent_task_lifecycle::checkpoint_candidate_adoption(
-                &record.run_id,
-                "post_apply_verification",
-                &gate_identity,
-            )?;
-            agent_task_lifecycle::record_promotion(&record.run_id, checkpoint).map(|_| ())
+        || {
+            promote_with_checkpoint(
+                AgentTaskPromotionOptions {
+                    source,
+                    source_run_id: Some(record.run_id.clone()),
+                    source_path,
+                    source_worktree_path: options.source_worktree_path.clone(),
+                    base_ref: Some(options.base.clone()),
+                    task_base_sha: options.task_base_sha.clone(),
+                    candidate_ref: Some(candidate_sha.clone()),
+                    to_worktree: options.to_worktree.clone(),
+                    task_id: None,
+                    artifact_id: None,
+                    dry_run: false,
+                    gates: options.gates.clone(),
+                    provider_command: options.provider_command.clone(),
+                    provider_invocation: options.provider_invocation.clone(),
+                },
+                |checkpoint| {
+                    let checkpoint = serde_json::to_value(checkpoint).map_err(|error| {
+                        Error::internal_json(
+                            error.to_string(),
+                            Some("serialize adopted candidate checkpoint".to_string()),
+                        )
+                    })?;
+                    agent_task_lifecycle::checkpoint_candidate_adoption(
+                        &record.run_id,
+                        "post_apply_verification",
+                        &gate_identity,
+                    )?;
+                    agent_task_lifecycle::record_promotion(&record.run_id, checkpoint).map(|_| ())
+                },
+            )
         },
     );
     let mut promotion = match promotion {
@@ -288,6 +364,14 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
             return Err(error);
         }
     };
+    if agent_task_lifecycle::candidate_adoption_cancel_requested(&record.run_id)? {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "candidate adoption was cancelled before baseline verification",
+            Some(record.run_id.clone()),
+            None,
+        ));
+    }
     let task_base_sha = options.task_base_sha.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "task_base_sha",
@@ -302,6 +386,14 @@ fn adopt_cook_candidate_with_dispatcher_and_backend<B: AgentTaskPrFinalizationBa
         task_base_sha,
         &record.run_id,
     )?;
+    if agent_task_lifecycle::candidate_adoption_cancel_requested(&record.run_id)? {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "candidate adoption was cancelled before promotion could finalize",
+            Some(record.run_id.clone()),
+            None,
+        ));
+    }
     // The adopted candidate did not run through this cook's provider lifecycle.
     // Bind its declared model to the authenticated promotion instead of inferring
     // one from the immutable execution plan.
@@ -3187,6 +3279,7 @@ mod tests {
                     verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
                     private_verify: Vec::new(),
                     private_gate_reveal: Default::default(),
+                    ..Default::default()
                 },
                 max_attempts: 1,
                 no_finalize: false,
@@ -3262,6 +3355,7 @@ mod tests {
                     verify: vec!["cargo test unsupported".to_string()],
                     private_verify: Vec::new(),
                     private_gate_reveal: Default::default(),
+                    ..VerifyGateOptions::default()
                 },
                 max_attempts: 1,
                 no_finalize: false,

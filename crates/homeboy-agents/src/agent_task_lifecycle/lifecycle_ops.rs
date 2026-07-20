@@ -1167,6 +1167,16 @@ pub fn start_candidate_adoption(
     ai_model: &str,
     active_gate: &str,
 ) -> Result<AgentTaskRunRecord> {
+    start_candidate_adoption_with_rerun_policy(run_id, candidate_sha, ai_model, active_gate, false)
+}
+
+pub fn start_candidate_adoption_with_rerun_policy(
+    run_id: &str,
+    candidate_sha: &str,
+    ai_model: &str,
+    active_gate: &str,
+    rerun_completed_gates: bool,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let candidate_sha = candidate_sha.to_string();
     let ai_model = ai_model.to_string();
@@ -1175,6 +1185,12 @@ pub fn start_candidate_adoption(
     let record = store::mutate_record(&run_id, |record| {
         let now = now_timestamp();
         if let Some(existing) = record.candidate_adoption.as_mut() {
+            if existing.gate_process_group.is_some_and(|pgid| {
+                homeboy_core::process::isolated_process_group_is_running(pgid).unwrap_or(false)
+            }) {
+                conflict = true;
+                return false;
+            }
             if existing.state == "verification_running" {
                 if homeboy_core::process::pid_is_running(existing.owner_pid) {
                     conflict = true;
@@ -1200,6 +1216,14 @@ pub fn start_candidate_adoption(
                 record.updated_at = Some(now);
                 return true;
             }
+            if existing.state == "completed"
+                && existing.candidate_sha == candidate_sha
+                && existing.ai_model == ai_model
+                && !rerun_completed_gates
+            {
+                conflict = true;
+                return false;
+            }
             if existing.state == "verification_running" || existing.state == "interrupted" {
                 conflict = true;
                 return false;
@@ -1215,6 +1239,10 @@ pub fn start_candidate_adoption(
             updated_at: now.clone(),
             owner_pid: std::process::id(),
             heartbeat_at: now.clone(),
+            gate_process_group: None,
+            gate_started_at: None,
+            gate_timeout_seconds: None,
+            gate_output_tail: String::new(),
             resume_count: 0,
             terminal_error: None,
             completed_at: None,
@@ -1252,6 +1280,61 @@ pub fn start_candidate_adoption(
     Ok(record)
 }
 
+pub fn start_candidate_adoption_gate(
+    run_id: &str,
+    command: &str,
+    process_group: u32,
+    timeout_seconds: u64,
+) -> Result<()> {
+    let run_id = sanitize_run_id(run_id);
+    store::mutate_record(&run_id, |record| {
+        let Some(attempt) = record.candidate_adoption.as_mut() else {
+            return false;
+        };
+        if attempt.state != "verification_running" {
+            return false;
+        }
+        let now = now_timestamp();
+        attempt.phase = "gate_running".to_string();
+        attempt.active_gate = command.to_string();
+        attempt.gate_process_group = Some(process_group);
+        attempt.gate_started_at = Some(now.clone());
+        attempt.gate_timeout_seconds = Some(timeout_seconds);
+        attempt.gate_output_tail.clear();
+        attempt.heartbeat_at = now.clone();
+        attempt.updated_at = now.clone();
+        record.updated_at = Some(now);
+        true
+    })?;
+    Ok(())
+}
+
+pub fn heartbeat_candidate_adoption_gate(run_id: &str, output_tail: &str) -> Result<()> {
+    let run_id = sanitize_run_id(run_id);
+    store::mutate_record(&run_id, |record| {
+        let Some(attempt) = record.candidate_adoption.as_mut() else {
+            return false;
+        };
+        if attempt.state != "verification_running" {
+            return false;
+        }
+        let now = now_timestamp();
+        attempt.heartbeat_at = now.clone();
+        attempt.updated_at = now.clone();
+        attempt.gate_output_tail = output_tail.to_string();
+        record.updated_at = Some(now);
+        true
+    })?;
+    Ok(())
+}
+
+pub fn candidate_adoption_cancel_requested(run_id: &str) -> Result<bool> {
+    Ok(store::read_record(&sanitize_run_id(run_id))?
+        .candidate_adoption
+        .as_ref()
+        .is_some_and(|attempt| attempt.state == "cancel_requested" || attempt.state == "cancelled"))
+}
+
 pub fn checkpoint_candidate_adoption(run_id: &str, phase: &str, active_gate: &str) -> Result<()> {
     let run_id = sanitize_run_id(run_id);
     store::mutate_record(&run_id, |record| {
@@ -1281,6 +1364,9 @@ pub fn finish_candidate_adoption(
         let Some(attempt) = record.candidate_adoption.as_mut() else {
             return false;
         };
+        if attempt.state == "cancelled" || attempt.state == "cancel_requested" {
+            return false;
+        }
         let now = now_timestamp();
         attempt.updated_at = now.clone();
         attempt.heartbeat_at = now.clone();
@@ -1310,9 +1396,20 @@ fn reconcile_candidate_adoption(record: &mut AgentTaskRunRecord) -> bool {
     }
     let now = now_timestamp();
     attempt.state = "interrupted".to_string();
-    attempt.phase = "owner_stale".to_string();
+    attempt.phase = if attempt.gate_process_group.is_some_and(|pgid| {
+        homeboy_core::process::isolated_process_group_is_running(pgid).unwrap_or(false)
+    }) {
+        "gate_orphaned"
+    } else {
+        "owner_stale"
+    }
+    .to_string();
     attempt.updated_at = now.clone();
-    attempt.terminal_error = Some("adoption owner process is not running; rerun adopt with the recorded candidate SHA to resume".to_string());
+    attempt.terminal_error = Some(if attempt.phase == "gate_orphaned" {
+        "adoption controller stopped while its gate process group remains live; cancel the adoption before resuming"
+    } else {
+        "adoption owner process is not running; rerun adopt with the recorded candidate SHA to resume"
+    }.to_string());
     record.updated_at = Some(now);
     true
 }
