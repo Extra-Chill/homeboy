@@ -679,15 +679,18 @@ mod tests {
     #[test]
     fn import_matches_module_variants() {
         // Direct match
-        assert!(import_matches_module("core::fixer", "core::fixer"));
-        // With crate prefix
-        assert!(import_matches_module("crate::fixer", "core::fixer"));
-        // Source has crate prefix
-        assert!(import_matches_module("core::fixer", "crate::fixer"));
-        // Both have crate prefix
+        assert!(import_matches_module("refactor::fixer", "refactor::fixer"));
+        // Import has crate:: prefix, source does not
+        assert!(import_matches_module("crate::fixer", "fixer"));
+        // Source has crate:: prefix, import does not
+        assert!(import_matches_module("fixer", "crate::fixer"));
+        // Both have crate:: prefix
         assert!(import_matches_module("crate::fixer", "crate::fixer"));
+        // `crate::` is this crate's root; after the crate extraction a bare
+        // `core::` prefix is a distinct module, not a crate synonym.
+        assert!(!import_matches_module("crate::fixer", "core::fixer"));
         // No match
-        assert!(!import_matches_module("core::fixer", "core::other"));
+        assert!(!import_matches_module("refactor::fixer", "refactor::other"));
     }
 
     #[test]
@@ -701,8 +704,7 @@ mod tests {
         };
 
         let rewrite =
-            compute_import_rewrite(&import, "walk_source_files", "core::refactor::transform")
-                .unwrap();
+            compute_import_rewrite(&import, "walk_source_files", "refactor::transform").unwrap();
         assert_eq!(
             rewrite.replacement,
             "use crate::refactor::transform::walk_source_files;"
@@ -724,7 +726,7 @@ mod tests {
         };
 
         let rewrite =
-            compute_import_rewrite(&import, "module_path_from_file", "core::symbol_graph").unwrap();
+            compute_import_rewrite(&import, "module_path_from_file", "symbol_graph").unwrap();
 
         // Should keep remaining in old group and add new import
         assert!(rewrite
