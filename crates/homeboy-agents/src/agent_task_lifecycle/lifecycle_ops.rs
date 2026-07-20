@@ -375,6 +375,7 @@ where
         lifecycle: lifecycle_for_submitted_plan(plan),
         lab_handoff: None,
         candidate_adoption: None,
+        adoption_run_id: None,
         metadata,
     };
     store::write_record(&record)?;
@@ -923,16 +924,6 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     if record != before_liveness_reconciliation {
         store::write_record(&record)?;
     }
-    if requested_run_id != record.run_id {
-        if let Ok(index) = store::read_cook_index(&requested_run_id) {
-            let metadata = record.ensure_metadata_object();
-            metadata.insert("cook_alias".to_string(), json!(requested_run_id));
-            metadata.insert(
-                "cook_index".to_string(),
-                serde_json::to_value(index).unwrap_or(Value::Null),
-            );
-        }
-    }
     if record.state.is_terminal() {
         if let Ok(aggregate) = store::read_aggregate(&record.run_id) {
             if !crate::agent_task_lifecycle::terminal_artifact_projection_is_verified(
@@ -1013,7 +1004,70 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
             }
         }
     }
+    if requested_run_id != record.run_id {
+        if let Ok(index) = store::read_cook_index(&requested_run_id) {
+            project_cook_alias_adoption(&mut record, &index)?;
+            let metadata = record.ensure_metadata_object();
+            metadata.insert("cook_alias".to_string(), json!(requested_run_id));
+            metadata.insert(
+                "cook_index".to_string(),
+                serde_json::to_value(index).unwrap_or(Value::Null),
+            );
+        }
+    }
     Ok(record)
+}
+
+fn project_cook_alias_adoption(
+    record: &mut AgentTaskRunRecord,
+    index: &AgentTaskCookIndex,
+) -> Result<()> {
+    let mut selected: Option<(
+        bool,
+        String,
+        usize,
+        String,
+        AgentTaskCandidateAdoptionAttempt,
+    )> = None;
+
+    for (index_order, indexed_attempt) in index.attempts.iter().enumerate() {
+        let Ok(mut attempt_record) = store::read_record(&indexed_attempt.run_id) else {
+            continue;
+        };
+        if reconcile_candidate_adoption(&mut attempt_record) {
+            store::write_record(&attempt_record)?;
+        }
+        let Some(adoption) = attempt_record.candidate_adoption else {
+            continue;
+        };
+        let candidate = (
+            adoption.is_active(),
+            adoption.updated_at.clone(),
+            index_order,
+            indexed_attempt.run_id.clone(),
+            adoption,
+        );
+        let replace = selected.as_ref().is_none_or(|current| {
+            candidate.0 > current.0
+                // Among equally active or inactive attempts, the newest
+                // adoption timestamp wins; index order breaks timestamp ties.
+                || (candidate.0 == current.0
+                    && (candidate.1.as_str(), candidate.2)
+                        > (current.1.as_str(), current.2))
+        });
+        if replace {
+            selected = Some(candidate);
+        }
+    }
+
+    if let Some((_, _, _, adoption_run_id, adoption)) = selected {
+        record.adoption_run_id = Some(adoption_run_id);
+        record.candidate_adoption = Some(adoption);
+    } else {
+        record.adoption_run_id = None;
+        record.candidate_adoption = None;
+    }
+    Ok(())
 }
 
 /// Claim or resume the one controller-owned candidate adoption for a run. The

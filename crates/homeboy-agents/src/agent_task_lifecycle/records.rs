@@ -112,6 +112,10 @@ pub struct AgentTaskRunRecord {
     /// verified against this durable cook run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_adoption: Option<AgentTaskCandidateAdoptionAttempt>,
+    /// Owning run for `candidate_adoption` when status was resolved through a
+    /// Cook alias. Exact run status leaves this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adoption_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -133,6 +137,12 @@ pub struct AgentTaskCandidateAdoptionAttempt {
     pub terminal_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+}
+
+impl AgentTaskCandidateAdoptionAttempt {
+    pub fn is_active(&self) -> bool {
+        self.state == "verification_running"
+    }
 }
 
 /// Durable authority for a controller-to-Lab runner handoff. This lives on the

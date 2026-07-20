@@ -18,6 +18,149 @@ use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 #[test]
+fn cook_alias_status_projects_active_adoption_from_earlier_attempt() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-issue-9168-active";
+        let earlier = submit_plan(&test_plan(), Some("adoption-earlier")).expect("earlier run");
+        record_cook_attempt(cook_id, 1, &earlier.run_id).expect("index earlier run");
+        start_candidate_adoption(
+            &earlier.run_id,
+            "1111111111111111111111111111111111111111",
+            "openai/gpt-5.6-sol",
+            "cargo test",
+        )
+        .expect("start earlier adoption");
+
+        let latest = submit_plan(&test_plan(), Some("adoption-latest")).expect("latest run");
+        record_cook_attempt(cook_id, 2, &latest.run_id).expect("index latest run");
+
+        let unrelated =
+            submit_plan(&test_plan(), Some("adoption-unrelated")).expect("unrelated run");
+        start_candidate_adoption(
+            &unrelated.run_id,
+            "9999999999999999999999999999999999999999",
+            "openai/gpt-5.6-sol",
+            "cargo test",
+        )
+        .expect("start unrelated adoption");
+
+        let projected = status(cook_id).expect("Cook alias status");
+        assert_eq!(projected.run_id, latest.run_id);
+        assert_eq!(projected.state, latest.state);
+        assert_eq!(
+            projected.adoption_run_id.as_deref(),
+            Some(earlier.run_id.as_str())
+        );
+        let adoption = projected.candidate_adoption.expect("projected adoption");
+        assert_eq!(adoption.state, "verification_running");
+        assert_eq!(
+            adoption.candidate_sha,
+            "1111111111111111111111111111111111111111"
+        );
+    });
+}
+
+#[test]
+fn cook_alias_status_has_no_adoption_projection_without_indexed_adoption() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-issue-9168-none";
+        let first = submit_plan(&test_plan(), Some("no-adoption-first")).expect("first run");
+        record_cook_attempt(cook_id, 1, &first.run_id).expect("index first run");
+        let latest = submit_plan(&test_plan(), Some("no-adoption-latest")).expect("latest run");
+        record_cook_attempt(cook_id, 2, &latest.run_id).expect("index latest run");
+
+        let projected = status(cook_id).expect("Cook alias status");
+        assert_eq!(projected.run_id, latest.run_id);
+        assert!(projected.adoption_run_id.is_none());
+        assert!(projected.candidate_adoption.is_none());
+    });
+}
+
+#[test]
+fn cook_alias_status_selects_latest_terminal_adoption_then_index_order() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-issue-9168-terminal";
+        let mut runs = Vec::new();
+        for attempt in 1..=3 {
+            let run = submit_plan(&test_plan(), Some(&format!("terminal-adoption-{attempt}")))
+                .expect("terminal run");
+            record_cook_attempt(cook_id, attempt, &run.run_id).expect("index terminal run");
+            start_candidate_adoption(
+                &run.run_id,
+                &format!("{attempt:040}"),
+                "openai/gpt-5.6-sol",
+                "cargo test",
+            )
+            .expect("start terminal adoption");
+            finish_candidate_adoption(
+                &run.run_id,
+                (attempt != 1).then(|| format!("attempt {attempt} failed")),
+            )
+            .expect("finish terminal adoption");
+            runs.push(run);
+        }
+        for (run, timestamp) in runs.iter().zip([
+            "2026-07-20T12:00:03+00:00",
+            "2026-07-20T12:00:01+00:00",
+            "2026-07-20T12:00:03+00:00",
+        ]) {
+            rewrite_record_for_test(&run.run_id, |record| {
+                record
+                    .candidate_adoption
+                    .as_mut()
+                    .expect("terminal adoption")
+                    .updated_at = timestamp.to_string();
+            })
+            .expect("set deterministic adoption timestamp");
+        }
+
+        let projected = status(cook_id).expect("Cook alias status");
+        assert_eq!(projected.run_id, runs[2].run_id);
+        assert_eq!(
+            projected.adoption_run_id.as_deref(),
+            Some(runs[2].run_id.as_str())
+        );
+        let adoption = projected.candidate_adoption.expect("terminal projection");
+        assert_eq!(adoption.state, "failed");
+        assert_eq!(adoption.candidate_sha, format!("{:040}", 3));
+    });
+}
+
+#[test]
+fn exact_run_id_status_keeps_its_own_adoption_without_alias_projection() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-issue-9168-exact";
+        let earlier = submit_plan(&test_plan(), Some("exact-earlier")).expect("earlier run");
+        record_cook_attempt(cook_id, 1, &earlier.run_id).expect("index earlier run");
+        start_candidate_adoption(
+            &earlier.run_id,
+            "2222222222222222222222222222222222222222",
+            "openai/gpt-5.6-sol",
+            "cargo test",
+        )
+        .expect("start earlier adoption");
+        let latest = submit_plan(&test_plan(), Some("exact-latest")).expect("latest run");
+        record_cook_attempt(cook_id, 2, &latest.run_id).expect("index latest run");
+
+        let exact_earlier = status(&earlier.run_id).expect("exact earlier status");
+        assert_eq!(exact_earlier.run_id, earlier.run_id);
+        assert!(exact_earlier.adoption_run_id.is_none());
+        assert_eq!(
+            exact_earlier
+                .candidate_adoption
+                .expect("own adoption")
+                .candidate_sha,
+            "2222222222222222222222222222222222222222"
+        );
+
+        let exact_latest = status(&latest.run_id).expect("exact latest status");
+        assert_eq!(exact_latest.run_id, latest.run_id);
+        assert!(exact_latest.adoption_run_id.is_none());
+        assert!(exact_latest.candidate_adoption.is_none());
+    });
+}
+
+#[test]
 fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
     with_isolated_home(|_| {
         let record = submit_plan(&test_plan(), Some("adoption-progress")).expect("submit");
