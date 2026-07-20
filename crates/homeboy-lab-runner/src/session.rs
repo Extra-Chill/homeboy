@@ -571,6 +571,20 @@ impl RunnerStaleDaemonWarning {
             shell::quote_arg(runner_id),
             homeboy_product_identity::product_version()
         )];
+        let message = if !same_homeboy_version(&session_homeboy_version, &current_homeboy_version) {
+            format!(
+                "connected runner daemon control plane version `{session_homeboy_version}` differs from configured job command binary version `{current_homeboy_version}`; run recovery_commands in order when runner active jobs are drained"
+            )
+        } else if let (Some(session_identity), Some(current_identity)) = (
+            session_homeboy_build_identity.as_deref(),
+            current_homeboy_build_identity.as_deref(),
+        ) {
+            format!(
+                "connected runner daemon control plane build identity `{session_identity}` differs from configured job command binary build identity `{current_identity}`; run recovery_commands in order when runner active jobs are drained"
+            )
+        } else {
+            "connected runner daemon runtime requires explicit identity verification; run recovery_commands in order when runner active jobs are drained".to_string()
+        };
         Self {
             severity: "warning",
             active_daemon_control_plane_version: session_homeboy_version.clone(),
@@ -582,7 +596,7 @@ impl RunnerStaleDaemonWarning {
             session_homeboy_build_identity,
             current_homeboy_build_identity,
             refresh_command: recovery_commands.join(" && "),
-            message: "connected runner daemon control plane was started by a different Homeboy build than the configured job command binary; run recovery_commands in order when runner active jobs are drained".to_string(),
+            message,
             stale_runtime_paths: Vec::new(),
             changed_runtime_paths: Vec::new(),
             recovery_commands,
@@ -618,7 +632,22 @@ impl RunnerStaleDaemonWarning {
         self.stale_runtime_paths = stale_runtime_paths;
         self.changed_runtime_paths = changed_runtime_paths;
         if !self.stale_runtime_paths.is_empty() || !self.changed_runtime_paths.is_empty() {
-            self.message = "connected runner daemon runtime paths are stale; run recovery_commands after active jobs are drained to replace the active daemon with the configured runtime paths".to_string();
+            let stale_paths = self.stale_runtime_paths.iter().map(|path| {
+                format!(
+                    "{} at `{}` fingerprint `{}` -> `{}`",
+                    path.env, path.path, path.loaded_fingerprint, path.current_fingerprint
+                )
+            });
+            let changed_paths = self.changed_runtime_paths.iter().map(|path| {
+                format!(
+                    "{} path `{:?}` -> `{:?}`",
+                    path.env, path.loaded_path, path.configured_path
+                )
+            });
+            self.message = format!(
+                "connected runner daemon runtime paths are stale: {}; run recovery_commands after active jobs are drained to replace the active daemon with the configured runtime paths",
+                stale_paths.chain(changed_paths).collect::<Vec<_>>().join("; ")
+            );
             self.recovery_commands = vec![format!(
                 "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
                 shell::quote_arg(runner_id),
@@ -627,6 +656,14 @@ impl RunnerStaleDaemonWarning {
         }
         self
     }
+}
+
+fn same_homeboy_version(left: &str, right: &str) -> bool {
+    left.trim().strip_prefix("homeboy ").unwrap_or(left.trim())
+        == right
+            .trim()
+            .strip_prefix("homeboy ")
+            .unwrap_or(right.trim())
 }
 
 #[derive(Debug, Clone, Serialize)]

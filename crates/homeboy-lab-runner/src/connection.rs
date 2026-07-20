@@ -29,7 +29,7 @@ use super::session::{
     RunnerActiveJobSource, RunnerActiveJobState, RunnerChangedRuntimePath, RunnerConnectReport,
     RunnerDisconnectReport, RunnerFailureKind, RunnerLeaselessRecoveryContract,
     RunnerLeaselessRecoveryEvidence, RunnerSession, RunnerSessionRole, RunnerSessionState,
-    RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode,
+    RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode,
 };
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 use homeboy_core::broker_auth;
@@ -1752,12 +1752,14 @@ fn stale_daemon_warning(
         .and_then(|local_url| daemon_http_runtime_loaded_paths(local_url).ok())
         .map(|loaded| changed_runtime_paths(&runner.env, &loaded))
         .unwrap_or_default();
-    if versions_match(&observed_session_version, &current_version)
-        && versions_match(&session.homeboy_version, &current_version)
-        && identity_comparison == IdentityComparison::Match
-        && stale_runtime_paths.is_empty()
-        && changed_runtime_paths.is_empty()
-    {
+    if daemon_runtime_is_current(
+        &observed_session_version,
+        &session.homeboy_version,
+        &current_version,
+        identity_comparison,
+        &stale_runtime_paths,
+        &changed_runtime_paths,
+    ) {
         return Ok(None);
     }
     Ok(Some(
@@ -1775,6 +1777,21 @@ fn stale_daemon_warning(
         )
         .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths),
     ))
+}
+
+fn daemon_runtime_is_current(
+    observed_daemon_version: &str,
+    session_version: &str,
+    command_version: &str,
+    identity_comparison: IdentityComparison,
+    stale_runtime_paths: &[RunnerStaleRuntimePath],
+    changed_runtime_paths: &[RunnerChangedRuntimePath],
+) -> bool {
+    versions_match(observed_daemon_version, command_version)
+        && versions_match(session_version, command_version)
+        && identity_comparison == IdentityComparison::Match
+        && stale_runtime_paths.is_empty()
+        && changed_runtime_paths.is_empty()
 }
 
 fn unverifiable_configured_identity_message(homeboy: &str) -> String {
