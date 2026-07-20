@@ -25,6 +25,8 @@ const options = clean({
   env: settings.bench_env,
   wpConfigDefines: settings.wp_config_defines,
   workloads: settings.wordpress_runtime_workloads,
+  prepareSteps: settings.wordpress_runtime_prepare_steps,
+  postSteps: settings.wordpress_runtime_post_steps,
 });
 
 try {

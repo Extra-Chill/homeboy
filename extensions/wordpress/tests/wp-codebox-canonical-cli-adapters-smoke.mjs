@@ -48,6 +48,8 @@ try {
       validation_dependencies: [component, dependency, dependency],
       wordpress_runtime_workloads: [{ id: 'canonical-workload', run: [] }],
       wordpress_runtime_blueprint: { steps: [] },
+      wordpress_runtime_prepare_steps: [{ command: 'wordpress.wp-cli', args: ['command=option get home'] }],
+      wordpress_runtime_post_steps: [{ command: 'wordpress.browser-probe', args: ['url=/'] }],
     }),
   };
   const extension = path.resolve(import.meta.dirname, '..');
@@ -76,6 +78,8 @@ try {
   assert.deepEqual(options[1].mounts, [{ source: path.join(extension, 'vendor'), target: '/wp-codebox-vendor', mode: 'readonly' }]);
   assert.equal(options[1].multisite, false, 'phpunit recipe defaults to single-site when nothing requests multisite');
   assert.equal(options[0].workloads[0].id, 'canonical-workload');
+  assert.deepEqual(options[0].prepareSteps, [{ command: 'wordpress.wp-cli', args: ['command=option get home'] }]);
+  assert.deepEqual(options[0].postSteps, [{ command: 'wordpress.browser-probe', args: ['url=/'] }]);
   assert.equal(Object.hasOwn(options[0], 'wp_codebox_workloads'), false);
   assert.deepEqual(JSON.parse(await readFile(results, 'utf8')).scenarios, []);
   assert.deepEqual(JSON.parse(await readFile(testResults, 'utf8')), { total: 1, passed: 1, failed: 0, skipped: 0 });

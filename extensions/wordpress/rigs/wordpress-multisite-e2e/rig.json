@@ -1,0 +1,42 @@
+{
+  "id": "wordpress-multisite-e2e",
+  "description": "Disposable path-based WordPress multisite E2E network fixture",
+  "resources": {
+    "exclusive": ["wordpress-multisite-e2e:${env.HOMEBOY_ARTIFACT_ROOT}"]
+  },
+  "pipeline": {
+    "up": [
+      {
+        "kind": "requirement",
+        "executable": "node",
+        "remediation": "Install Node.js 18 or newer"
+      },
+      {
+        "kind": "requirement",
+        "executable": "wp-codebox",
+        "executable_env": "HOMEBOY_WP_CODEBOX_BIN",
+        "remediation": "Install WP Codebox or set HOMEBOY_WP_CODEBOX_BIN"
+      },
+      {
+        "kind": "command",
+        "label": "run disposable multisite E2E network",
+        "command": "node ${package.root}/run.mjs",
+        "cwd": "${env.PWD}"
+      }
+    ],
+    "check": [
+      {
+        "kind": "check",
+        "label": "validate multisite rig contracts",
+        "command": "node ${package.root}/tests/contract.test.mjs",
+        "cwd": "${package.root}"
+      },
+      {
+        "kind": "check",
+        "label": "validate generated WP Codebox recipe",
+        "command": "node ${package.root}/run.mjs --dry-run",
+        "cwd": "${env.PWD}"
+      }
+    ]
+  }
+}
