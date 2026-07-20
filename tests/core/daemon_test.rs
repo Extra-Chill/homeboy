@@ -1029,7 +1029,12 @@ fn routes_health_version_and_config_paths() {
 
     let version = route("GET", "/version");
     assert_eq!(version.status_code, 200);
-    assert_eq!(version.body["version"], env!("CARGO_PKG_VERSION"));
+    // The daemon reports the product version, not homeboy-core's crate version
+    // (which is a fixed `0.1.0` after the workspace crate split).
+    assert_eq!(
+        version.body["version"],
+        homeboy_product_identity::product_version()
+    );
 
     let paths = route("GET", "/config/paths");
     assert_eq!(paths.status_code, 200);
@@ -1082,6 +1087,7 @@ fn routes_read_only_http_api_contract() {
 
 #[test]
 fn cancelling_daemon_exec_job_terminates_process_tree() {
+    super::tests::register_enqueue_test_driver();
     let _home = create_lab_local_runner();
     let store = JobStore::default();
     let cwd = std::env::temp_dir().join(format!("homeboy-daemon-cancel-{}", std::process::id()));
@@ -1646,6 +1652,7 @@ fn create_lab_local_runner() -> HomeGuard {
 
 #[test]
 fn routes_exec_body_to_daemon_job() {
+    super::tests::register_enqueue_test_driver();
     let _home = create_lab_local_runner();
     let store = JobStore::default();
     let response = route_with_job_store_and_body(
@@ -1690,6 +1697,7 @@ fn routes_exec_body_to_daemon_job() {
 
 #[test]
 fn routes_exec_preserves_path_materialization_plan_on_job_metadata() {
+    super::tests::register_enqueue_test_driver();
     let _home = create_lab_local_runner();
     let store = JobStore::default();
     let cwd = std::env::current_dir()

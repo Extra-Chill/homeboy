@@ -2297,7 +2297,16 @@ mod tests {
     use std::process::Command;
     use std::sync::Arc;
 
-    struct EnqueueTestDriver;
+    pub(super) struct EnqueueTestDriver;
+
+    /// Register the enqueue test driver for daemon `/exec` tests. The daemon
+    /// `/exec` endpoint routes through the `RunnerExecDriver` hook (#8632), whose
+    /// real implementation lives in the extracted runner crate (#8698). Core's
+    /// daemon tests must register a driver or the endpoint fails closed with a
+    /// 400 (`runner subsystem is unavailable`).
+    pub(super) fn register_enqueue_test_driver() {
+        runner_exec_driver::register_runner_exec_driver(Arc::new(EnqueueTestDriver));
+    }
 
     #[test]
     fn admission_reservation_blocks_daemon_replacement_until_released() {
