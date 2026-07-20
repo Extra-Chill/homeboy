@@ -686,7 +686,9 @@ pub(crate) fn resolve_source_workspace(source_path: Option<&Path>) -> Result<Pat
     .with_hint("Run from the Homeboy source workspace, or pass: homeboy upgrade --method source --source-path <PATH>"))
 }
 
-fn prepare_source_workspace_for_upgrade(workspace_root: &Path) -> Result<Option<String>> {
+pub(crate) fn prepare_source_workspace_for_upgrade(
+    workspace_root: &Path,
+) -> Result<Option<String>> {
     if !git_command_success(workspace_root, &["rev-parse", "--is-inside-work-tree"])? {
         return Ok(None);
     }
