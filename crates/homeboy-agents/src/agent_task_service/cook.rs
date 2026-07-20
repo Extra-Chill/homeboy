@@ -3355,6 +3355,7 @@ mod tests {
                     verify: vec!["cargo test unsupported".to_string()],
                     private_verify: Vec::new(),
                     private_gate_reveal: Default::default(),
+                    ..VerifyGateOptions::default()
                 },
                 max_attempts: 1,
                 no_finalize: false,
