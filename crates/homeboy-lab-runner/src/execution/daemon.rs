@@ -155,6 +155,11 @@ pub(super) fn exec_via_daemon(
     let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
+    if let Some(session) = accepted_session.as_ref() {
+        // A refresh may move future admissions to a newer daemon while this job
+        // runs. Persist the accepting lease before returning its durable ID.
+        super::super::generations::record_job(&runner.id, &job.id.to_string(), session)?;
+    }
     persist_runner_execution_transition(
         &RunnerExecutionRecord::in_flight(job.id.to_string(), runner.id.clone(), "daemon")
             .with_job_id(job.id.to_string())

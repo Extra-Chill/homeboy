@@ -41,6 +41,7 @@ mod daemon_http_get;
 mod evidence;
 mod execution;
 mod extension_materialization;
+mod generations;
 mod git_dependency_materialization;
 mod homeboy_refresh;
 mod job_preparation;

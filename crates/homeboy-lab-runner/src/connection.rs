@@ -64,6 +64,80 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     connect_with_orphan_adoption(runner_id, None, &[], false, None, None, None)
 }
 
+/// Start and prove a new direct-daemon generation without touching the active
+/// session. The caller atomically publishes the returned session only after
+/// this complete startup and tunnel-health transaction succeeds.
+pub(crate) fn start_direct_generation(
+    runner_id: &str,
+    homeboy: &str,
+    generation_home: &str,
+) -> Result<RunnerSession> {
+    let runner = load(runner_id)?;
+    let (server_id, server, client) = resolve_ssh_runner(&runner)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "direct daemon generations require an SSH runner",
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
+    let identity = remote_homeboy_identity(&client, homeboy).map_err(Error::internal_unexpected)?;
+    let expected_identity = identity.build_identity.clone().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "homeboy_path",
+            "generation binary did not provide an immutable build identity",
+            Some(homeboy.to_string()),
+            None,
+        )
+    })?;
+    let daemon =
+        remote_daemon::remote_daemon_ensure_running_in_home(&client, homeboy, generation_home)
+            .map_err(Error::internal_unexpected)?;
+    let session_path = session_path(runner_id)?;
+    let (local_port, tunnel_pid, local_url, daemon) = connect_remote_daemon(
+        &server,
+        &client,
+        homeboy,
+        daemon,
+        &identity.version,
+        &expected_identity,
+        runner_id,
+        &session_path,
+    )
+    .map_err(|(report, _)| {
+        Error::internal_unexpected(
+            report
+                .failure_message
+                .unwrap_or_else(|| "generation tunnel failed".to_string()),
+        )
+    })?;
+    Ok(RunnerSession {
+        runner_id: runner.id,
+        mode: RunnerTunnelMode::DirectSsh,
+        role: RunnerSessionRole::Controller,
+        server_id: Some(server_id),
+        controller_id: Some(controller_id()),
+        broker_url: None,
+        remote_daemon_address: Some(daemon.address),
+        local_port: Some(local_port),
+        local_url: Some(local_url),
+        tunnel_pid,
+        remote_daemon_pid: daemon.pid,
+        remote_daemon_lease_id: daemon.lease_id,
+        homeboy_version: identity.version,
+        homeboy_build_identity: Some(expected_identity),
+        connected_at: Utc::now().to_rfc3339(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: None,
+        leaseless_recovery_evidence: None,
+    })
+}
+
+pub(crate) fn publish_direct_generation(session: &RunnerSession) -> Result<()> {
+    write_session(session)
+}
+
 /// Connect using an explicit dead-lease or missing-lease selector. A
 /// lease-less store is handled by its dedicated operator-confirmed path.
 pub fn connect_with_recovery(

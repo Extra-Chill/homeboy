@@ -927,6 +927,57 @@ pub(super) fn remote_daemon_ensure_running(
     })
 }
 
+/// Start an independent daemon store for a runner generation. A generation's
+/// HOME is immutable after admission, so its lease, job store, and artifacts
+/// cannot be overwritten by a later binary promotion.
+pub(super) fn remote_daemon_ensure_running_in_home(
+    client: &SshClient,
+    homeboy: &str,
+    home: &str,
+) -> std::result::Result<RemoteDaemon, String> {
+    let command = format!(
+        "mkdir -p {home} {home}/.local/share && HOME={home} XDG_DATA_HOME={home}/.local/share {} daemon ensure-running --addr 127.0.0.1:0",
+        shell::quote_arg(homeboy),
+        home = shell::quote_arg(home),
+    );
+    let output = client.execute(&command);
+    if !output.success {
+        return Err(command_failure_message(
+            "remote generation daemon startup failed",
+            &output,
+        ));
+    }
+    let envelope = parse_envelope(&output.stdout)
+        .map_err(|err| format!("remote generation daemon startup returned invalid JSON: {err}"))?;
+    if !envelope.success {
+        return Err(format!(
+            "remote generation daemon startup failed: {}",
+            envelope.error.unwrap_or(Value::Null)
+        ));
+    }
+    let data = envelope
+        .data
+        .ok_or_else(|| "remote generation daemon startup returned no data".to_string())?;
+    Ok(RemoteDaemon {
+        address: data
+            .get("address")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        pid: data
+            .get("pid")
+            .and_then(Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok()),
+        lease_id: data
+            .get("lease_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        version: None,
+        build_identity: None,
+        inspected_freshness: None,
+    })
+}
+
 pub(super) fn remote_daemon_force_stop(
     client: &SshClient,
     homeboy: &str,
