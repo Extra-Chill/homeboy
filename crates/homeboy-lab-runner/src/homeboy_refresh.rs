@@ -94,6 +94,8 @@ pub struct HomeboyReconnectDeferred {
     pub active_job_ids: Vec<String>,
     pub selected_binary_path: String,
     pub followup_commands: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ownership_contention: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -376,6 +378,7 @@ pub fn refresh_homeboy_binary(
                     active_job_ids,
                     selected_binary_path: plan.binary_path.clone(),
                     followup_commands,
+                    ownership_contention: None,
                 }),
                 failure: None,
                 bootstrap_provenance: None,
@@ -478,7 +481,34 @@ pub fn refresh_homeboy_binary(
             options.force,
         ) {
             Ok(job_ids) => job_ids,
-            Err(_) => unreachable!("reconnect admission was checked before binary promotion"),
+            Err(_) => {
+                let deferred = defer_reconnect_after_promotion_race(
+                    &plan.runner_id,
+                    &plan.binary_path,
+                    previous_homeboy_path.as_deref(),
+                    &active_jobs,
+                )?;
+                return Ok((
+                    HomeboyBinaryRefreshOutput {
+                        variant: "refresh_homeboy",
+                        command: "runner.refresh_homeboy",
+                        runner_id: plan.runner_id.clone(),
+                        dry_run: false,
+                        plan: plan.clone(),
+                        identity: Some(identity),
+                        updated_fields: Vec::new(),
+                        daemon_refreshed: false,
+                        interrupted_job_ids: Vec::new(),
+                        selected_binary_path: plan.binary_path.clone(),
+                        reconnect_required: true,
+                        followup_commands: deferred.followup_commands.clone(),
+                        reconnect_deferred: Some(deferred),
+                        failure: None,
+                        bootstrap_provenance: None,
+                    },
+                    1,
+                ));
+            }
         };
         if let Err(error) =
             disconnect_with_session(&plan.runner_id, refresh_session.as_ref(), options.force)
@@ -1259,6 +1289,33 @@ fn restore_runner_homeboy_path_if_selected(
         match merge(Some(runner_id), &patch.to_string(), &[])? {
             MergeOutput::Single(_) | MergeOutput::Bulk(_) => Ok(true),
         }
+    })
+}
+
+fn defer_reconnect_after_promotion_race(
+    runner_id: &str,
+    selected_homeboy_path: &str,
+    previous_homeboy_path: Option<&str>,
+    active_jobs: &[homeboy_core::api_jobs::ActiveRunnerJobSummary],
+) -> Result<HomeboyReconnectDeferred> {
+    let active_job_ids = active_jobs
+        .iter()
+        .map(|job| job.job_id.clone())
+        .collect::<Vec<_>>();
+    let restored = restore_runner_homeboy_path_if_selected(
+        runner_id,
+        selected_homeboy_path,
+        previous_homeboy_path,
+    )?;
+    let ownership_contention = (!restored).then(|| format!(
+        "runner `{runner_id}` binary selection changed after this promotion selected `{selected_homeboy_path}`; preserving the newer owner while reconnect remains deferred"
+    ));
+    Ok(HomeboyReconnectDeferred {
+        reason: "active_daemon_jobs",
+        active_job_ids: active_job_ids.clone(),
+        selected_binary_path: selected_homeboy_path.to_string(),
+        followup_commands: active_job_followups(runner_id, &active_job_ids),
+        ownership_contention,
     })
 }
 
