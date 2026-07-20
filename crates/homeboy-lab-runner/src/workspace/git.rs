@@ -429,6 +429,25 @@ fn refetch_controller_bundle_commits(
     remote: &str,
     refs: &[String],
 ) -> Result<()> {
+    // Only fetch refs whose local object closure is actually incomplete. A
+    // changed-scope run selects the clean worktree HEAD alongside the resolved
+    // base, but that HEAD can be a new *local-only* commit that was never pushed
+    // (#8309). The promisor remote cannot serve it — `git fetch <remote> <sha>`
+    // fails with "upload-pack: not our ref <sha>" — and it does not need to,
+    // because a locally-authored commit is already fully present. Fetching only
+    // the refs with missing objects hydrates the promised base/ancestry closure
+    // through the promisor transport while leaving fully-local commits alone.
+    let mut incomplete_refs = Vec::new();
+    for git_ref in refs {
+        if ref_has_missing_objects(local_path, git_ref)? {
+            incomplete_refs.push(git_ref.clone());
+        }
+    }
+
+    if incomplete_refs.is_empty() {
+        return Ok(());
+    }
+
     // Fetch only the closure of the requested refs. `--refetch` was used here to
     // reapply the partial-clone filter, but it "fetches all objects as a fresh
     // clone would" (git-fetch(1)), re-pulling objects reachable from unrelated
@@ -440,7 +459,7 @@ fn refetch_controller_bundle_commits(
     let output = Command::new("git")
         .args(["fetch", "--no-tags", "--filter=blob:none"])
         .arg(remote)
-        .args(refs)
+        .args(&incomplete_refs)
         .current_dir(local_path)
         .output()
         .map_err(|err| {
@@ -457,6 +476,47 @@ fn refetch_controller_bundle_commits(
         "refetch controller git bundle commits failed: {}",
         String::from_utf8_lossy(&output.stderr)
     )))
+}
+
+/// Report whether `git_ref`'s local object closure is missing any objects.
+///
+/// Walks the ref with lazy fetching disabled so a partial clone *reports* absent
+/// promisor objects instead of silently fetching them. A ref that is fully
+/// present locally (e.g. a new local-only commit that was never pushed) reports
+/// no missing objects and must not be requested from the promisor remote, which
+/// cannot serve an unpushed commit. A ref that cannot be resolved at all (its
+/// tip commit is itself absent) is treated as incomplete so the promisor fetch
+/// can attempt to hydrate it.
+pub(super) fn ref_has_missing_objects(local_path: &Path, git_ref: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "core.commitGraph=false",
+            "rev-list",
+            "--objects",
+            "--no-object-names",
+            "--missing=print",
+        ])
+        .arg(git_ref)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .current_dir(local_path)
+        .output()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("probe controller bundle ref objects".to_string()),
+            )
+        })?;
+
+    // The tip commit itself is absent locally: rev-list cannot walk the ref, so
+    // treat it as incomplete and let the promisor fetch hydrate it.
+    if !output.status.success() {
+        return Ok(true);
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.starts_with('?')))
 }
 
 fn promisor_remote(local_path: &Path) -> Result<Option<String>> {
