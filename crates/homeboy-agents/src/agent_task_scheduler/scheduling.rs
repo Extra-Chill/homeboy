@@ -680,6 +680,14 @@ impl AgentTaskScheduleSupport {
             }
 
             let mut task = running.remove(index);
+            if let Some(run_id) = task.run_id.as_deref() {
+                let _ = crate::agent_task_lifecycle::record_provider_execution_terminal(
+                    run_id,
+                    &task.task_id,
+                    task.attempt,
+                    "timed_out",
+                );
+            }
             let mut outcome =
                 deferred_timeout_outcome(&task.task_id, timeout_ms, "scheduler_timeout");
             outcome.diagnostics.push(AgentTaskDiagnostic {

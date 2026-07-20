@@ -504,6 +504,46 @@ where
                     cancellation: cancellation.clone(),
                 };
 
+                if let Some(run_id) = self.run_id.as_deref() {
+                    match crate::agent_task_lifecycle::reserve_provider_execution(
+                        run_id, &request, attempt,
+                    ) {
+                        Ok(crate::agent_task_lifecycle::ProviderExecutionReservation::Acquired) => {}
+                        Ok(crate::agent_task_lifecycle::ProviderExecutionReservation::AlreadyReserved) => {
+                            let outcome = scratch_allocation_failure(
+                                task_id.clone(),
+                                "provider execution was already reserved by an interrupted controller; reconcile the durable run instead of redispatching".to_string(),
+                            );
+                            release_scratch(&scratch, "provider_execution_already_reserved", &outcome);
+                            events.push(event(&task_id, AgentTaskState::Failed, attempt, outcome.summary.clone()));
+                            record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                            continue;
+                        }
+                        Err(error) => {
+                            let outcome = scratch_allocation_failure(
+                            task_id.clone(),
+                            format!(
+                                "could not durably record provider execution: {}",
+                                error.message
+                            ),
+                        );
+                        release_scratch(
+                            &scratch,
+                            "provider_execution_persistence_failed",
+                            &outcome,
+                        );
+                        events.push(event(
+                            &task_id,
+                            AgentTaskState::Failed,
+                            attempt,
+                            outcome.summary.clone(),
+                        ));
+                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                        continue;
+                        }
+                    }
+                }
+
                 let resource_wait_message = scheduled.resource_wait.as_ref().map(|wait| {
                     format!(
                         "acquired exclusive resource '{}' after waiting {} ms; previous holder '{}'",
@@ -615,6 +655,39 @@ where
                         let _ = join_handle.join();
                     }
                     let mut outcome = result.outcome;
+                    if let Some(run_id) = running_task.run_id.as_deref() {
+                        let terminal_state = match outcome.status {
+                            AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
+                                "succeeded"
+                            }
+                            AgentTaskOutcomeStatus::Cancelled => "cancelled",
+                            AgentTaskOutcomeStatus::Timeout => "timed_out",
+                            AgentTaskOutcomeStatus::CandidateRecoverable => "candidate_recoverable",
+                            _ => "failed",
+                        };
+                        if let Err(error) =
+                            crate::agent_task_lifecycle::record_provider_execution_terminal(
+                                run_id,
+                                &outcome.task_id,
+                                result.attempt,
+                                terminal_state,
+                            )
+                        {
+                            outcome.status = AgentTaskOutcomeStatus::Failed;
+                            outcome.failure_classification =
+                                Some(AgentTaskFailureClassification::ExecutionFailed);
+                            outcome.summary = Some(format!(
+                                    "provider returned successfully but Homeboy could not durably record it: {}",
+                                    error.message
+                                ));
+                            outcome.diagnostics.push(AgentTaskDiagnostic {
+                                class: "agent_task.provider_execution_persistence_failed"
+                                    .to_string(),
+                                message: error.message,
+                                data: serde_json::Value::Null,
+                            });
+                        }
+                    }
                     attach_candidate_adoption_provenance(
                         &mut outcome,
                         running_task.adoption.as_ref(),
