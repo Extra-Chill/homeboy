@@ -1344,6 +1344,60 @@ fn list_records_skips_malformed_observation_records() {
 }
 
 #[test]
+fn record_health_summary_stays_bounded_with_many_malformed_records() {
+    with_isolated_home(|_| {
+        // A state directory full of historical malformed agent-task records must
+        // not produce unbounded per-record output. The health summary aggregates
+        // every malformed record into a total count while capping the retained
+        // samples, so read-only activity/upgrade output stays bounded. (#8397)
+        let malformed_count = crate::agent_task_lifecycle::health::HEALTH_SAMPLE_LIMIT * 3;
+        let store = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("observation store");
+        for index in 0..malformed_count {
+            store
+                .upsert_imported_run(&homeboy_core::observation::RunRecord {
+                    id: format!("bad-run-{index}"),
+                    kind: "agent-task".to_string(),
+                    component_id: None,
+                    started_at: "2026-01-01T00:00:00Z".to_string(),
+                    finished_at: None,
+                    status: "running".to_string(),
+                    command: None,
+                    cwd: None,
+                    homeboy_version: None,
+                    git_sha: None,
+                    rig_id: None,
+                    // A record with the observation schema but no `agent_task_run`
+                    // metadata is classified as MissingMetadata (malformed).
+                    metadata_json: json!({
+                        "schema": "homeboy/agent-task-observation-record/v1"
+                    }),
+                })
+                .expect("malformed record inserted");
+        }
+
+        let health = record_health_summary().expect("health summary");
+
+        // Every malformed record is counted…
+        assert_eq!(health.malformed, malformed_count);
+        // …but the retained sample set stays bounded regardless of volume.
+        assert!(
+            health.samples.len() <= crate::agent_task_lifecycle::health::HEALTH_SAMPLE_LIMIT,
+            "samples ({}) must not exceed HEALTH_SAMPLE_LIMIT ({})",
+            health.samples.len(),
+            crate::agent_task_lifecycle::health::HEALTH_SAMPLE_LIMIT
+        );
+        // Each retained sample carries an actionable remediation command.
+        for sample in &health.samples {
+            assert!(
+                !sample.remediation.is_empty(),
+                "each malformed sample must carry a remediation hint"
+            );
+        }
+    });
+}
+
+#[test]
 fn artifact_refs_omit_evidence_refs_with_empty_uri() {
     let outcomes = vec![outcome_with_refs(
         "task-a",
