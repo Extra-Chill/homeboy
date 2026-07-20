@@ -54,6 +54,80 @@ pub fn pid_is_running(pid: u32) -> bool {
     }
 }
 
+/// The result of checking a persisted local process identity.
+///
+/// A PID is not sufficient ownership evidence because operating systems can
+/// reuse it. Linux records pair a PID with `/proc/<pid>/stat` starttime ticks;
+/// platforms without that evidence fail closed when asked to verify one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessIdentityState {
+    Dead,
+    Live,
+    IdentityMismatch,
+    Unverifiable,
+}
+
+/// Check whether a recorded local process identity still names its owner.
+///
+/// This deliberately distinguishes an absent process from unavailable
+/// inspection evidence so callers can reclaim only a conclusively dead owner.
+pub fn process_identity_state(
+    pid: u32,
+    expected_linux_starttime_ticks: Option<u64>,
+) -> ProcessIdentityState {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return ProcessIdentityState::Unverifiable;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let path = format!("/proc/{pid}/stat");
+        let stat = match std::fs::read_to_string(&path) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return ProcessIdentityState::Dead;
+            }
+            Err(_) => return ProcessIdentityState::Unverifiable,
+        };
+        let Some(starttime_ticks) = parse_linux_process_starttime_ticks(&stat) else {
+            return ProcessIdentityState::Unverifiable;
+        };
+        if linux_process_state_from_stat(&stat) == Some('Z') {
+            return ProcessIdentityState::Dead;
+        }
+        return match expected_linux_starttime_ticks {
+            Some(expected) if expected != starttime_ticks => ProcessIdentityState::IdentityMismatch,
+            _ => ProcessIdentityState::Live,
+        };
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        if expected_linux_starttime_ticks.is_some() {
+            return ProcessIdentityState::Unverifiable;
+        }
+        return unsafe {
+            if libc::kill(pid as libc::pid_t, 0) == 0 {
+                ProcessIdentityState::Live
+            } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                ProcessIdentityState::Dead
+            } else {
+                ProcessIdentityState::Unverifiable
+            }
+        };
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = expected_linux_starttime_ticks;
+        if pid == std::process::id() {
+            ProcessIdentityState::Live
+        } else {
+            ProcessIdentityState::Unverifiable
+        }
+    }
+}
+
 /// Prove a live process owns one exact environment value.
 ///
 /// This is intended for persisted random ownership tokens. Callers should
@@ -209,6 +283,11 @@ pub fn linux_process_starttime_ticks(pid: u32) -> std::result::Result<Option<u64
 fn parse_linux_process_starttime_ticks(stat: &str) -> Option<u64> {
     let after_command = stat.rsplit_once(") ")?.1;
     after_command.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_state_from_stat(stat: &str) -> Option<char> {
+    stat.rsplit_once(") ")?.1.chars().next()
 }
 
 /// Install a Ctrl-C / SIGINT handler that flips `stop` to `true` on the first
