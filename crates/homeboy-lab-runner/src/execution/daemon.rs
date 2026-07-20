@@ -157,9 +157,18 @@ pub(super) fn exec_via_daemon(
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
     if let Some(session) = accepted_session.as_ref() {
-        // A refresh may move future admissions to a newer daemon while this job
-        // runs. Persist the accepting lease before returning its durable ID.
-        super::super::generations::record_job(&runner.id, &job.id.to_string(), session)?;
+        // Persist the endpoint selected at admission before any controller-side
+        // wait or evidence work can fail. Follow-up operations route by this
+        // durable job identity while an older generation drains.
+        super::super::generation_store::record_job(&runner.id, session, &job.id.to_string())?;
+        if let Some(durable_run_id) = run_id.as_deref() {
+            super::super::generation_store::record_job_run(
+                &runner.id,
+                session,
+                &job.id.to_string(),
+                durable_run_id,
+            )?;
+        }
     }
     persist_runner_execution_transition(
         &RunnerExecutionRecord::in_flight(job.id.to_string(), runner.id.clone(), "daemon")
@@ -390,7 +399,7 @@ pub(super) fn exec_via_daemon(
     persist_runner_execution_transition(&execution_record, &cwd, &command)?;
     // A completed job is a durable lifecycle transition. It is the primary
     // trigger for draining-generation retirement, not a side effect of status.
-    super::super::generations::reconcile_terminal_job(&runner.id)?;
+    super::super::generation_store::reconcile(&runner.id, accepted_session.as_ref())?;
 
     Ok((
         RunnerExecOutput {

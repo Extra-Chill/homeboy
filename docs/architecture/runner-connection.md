@@ -31,3 +31,18 @@ the daemon through an SSH `-L 127.0.0.1:<local>:127.0.0.1:<remote>` tunnel.
 
 Session metadata is stored at `~/.config/homeboy/runner-sessions/<id>.json` so
 `status` and `disconnect` can inspect or close the local tunnel later.
+
+## Rolling Generations
+
+The runner-layer rolling-generation primitive models daemon replacement as
+generations. A validated candidate starts on its own endpoint before it becomes
+the admission owner. Existing jobs remain owned by the draining generation,
+including their logs, cancellation, artifacts, and reconciliation records. A
+draining generation retires only after its authoritative active-job count reaches
+zero.
+
+Its serializable status names the admission owner and each generation's endpoint,
+active-job count, and `admitting` or `draining` state. A failed candidate startup
+is removed without changing the prior owner; repeating a refresh for the active
+generation is idempotent. Older single-generation records remain valid as one
+admitting generation.

@@ -1,3 +1,4 @@
+use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 
 use homeboy_core::daemon::{
@@ -462,35 +463,84 @@ pub struct RunnerConnectReport {
     pub failure_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct RunnerStatusReport {
     pub runner_id: String,
     pub connected: bool,
     pub state: RunnerSessionState,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<RunnerSession>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_daemon: Option<RunnerStaleDaemonWarning>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_freshness: Option<DaemonFreshnessReport>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_jobs: Vec<ActiveRunnerJobSummary>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_runner_jobs: Vec<RunnerJob>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stale_runner_jobs: Vec<RunnerJob>,
-    #[serde(default)]
     pub active_job_count: usize,
-    #[serde(default)]
     pub stale_runner_job_count: usize,
     pub active_job_state: RunnerActiveJobState,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub active_job_source: Option<RunnerActiveJobSource>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub active_job_error: Option<RunnerActiveJobError>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub active_job_recovery_evidence: Option<RunnerActiveJobRecoveryEvidence>,
     pub session_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunnerDaemonGenerationStatus {
+    pub generation: String,
+    pub admission_owner: bool,
+    pub drain_state: crate::RollingDrainState,
+    pub active_job_count: usize,
+    pub homeboy_build_identity: Option<String>,
+    pub remote_daemon_lease_id: Option<String>,
+    pub remote_daemon_address: Option<String>,
+    pub local_url: Option<String>,
+}
+
+impl Serialize for RunnerStatusReport {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let generations =
+            crate::generation_store::status_projection(&self.runner_id, self.session.as_ref())
+                .unwrap_or_default();
+        let mut state = serializer.serialize_struct("RunnerStatusReport", 17)?;
+        state.serialize_field("runner_id", &self.runner_id)?;
+        state.serialize_field("connected", &self.connected)?;
+        state.serialize_field("state", &self.state)?;
+        if let Some(session) = &self.session {
+            state.serialize_field("session", session)?;
+        }
+        state.serialize_field("generations", &generations)?;
+        if let Some(stale_daemon) = &self.stale_daemon {
+            state.serialize_field("stale_daemon", stale_daemon)?;
+        }
+        if let Some(daemon_freshness) = &self.daemon_freshness {
+            state.serialize_field("daemon_freshness", daemon_freshness)?;
+        }
+        if !self.active_jobs.is_empty() {
+            state.serialize_field("active_jobs", &self.active_jobs)?;
+        }
+        if !self.active_runner_jobs.is_empty() {
+            state.serialize_field("active_runner_jobs", &self.active_runner_jobs)?;
+        }
+        if !self.stale_runner_jobs.is_empty() {
+            state.serialize_field("stale_runner_jobs", &self.stale_runner_jobs)?;
+        }
+        state.serialize_field("active_job_count", &self.active_job_count)?;
+        state.serialize_field("stale_runner_job_count", &self.stale_runner_job_count)?;
+        state.serialize_field("active_job_state", &self.active_job_state)?;
+        if let Some(active_job_source) = &self.active_job_source {
+            state.serialize_field("active_job_source", active_job_source)?;
+        }
+        if let Some(active_job_error) = &self.active_job_error {
+            state.serialize_field("active_job_error", active_job_error)?;
+        }
+        if let Some(evidence) = &self.active_job_recovery_evidence {
+            state.serialize_field("active_job_recovery_evidence", evidence)?;
+        }
+        state.serialize_field("session_path", &self.session_path)?;
+        state.end()
+    }
 }
 
 impl RunnerStatusReport {
@@ -514,6 +564,49 @@ impl RunnerStatusReport {
         } else {
             RunnerRecoveryState::Idle
         }
+    }
+}
+
+#[cfg(test)]
+mod status_serialization_tests {
+    use super::*;
+
+    #[test]
+    fn status_serialization_omits_empty_legacy_fields_and_includes_generations() {
+        let report = RunnerStatusReport {
+            runner_id: "missing-runner".to_string(),
+            connected: false,
+            state: RunnerSessionState::Disconnected,
+            session: None,
+            stale_daemon: None,
+            daemon_freshness: None,
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::NotQueried,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "test".to_string(),
+        };
+
+        let value = serde_json::to_value(report).expect("serialize status");
+        for field in [
+            "session",
+            "stale_daemon",
+            "daemon_freshness",
+            "active_jobs",
+            "active_runner_jobs",
+            "stale_runner_jobs",
+            "active_job_source",
+            "active_job_error",
+            "active_job_recovery_evidence",
+        ] {
+            assert!(value.get(field).is_none(), "{field} must be omitted");
+        }
+        assert_eq!(value["generations"], serde_json::json!([]));
     }
 }
 

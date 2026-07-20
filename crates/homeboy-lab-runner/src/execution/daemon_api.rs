@@ -103,16 +103,7 @@ pub fn daemon_api_post(runner_id: &str, path: &str) -> Result<Value> {
 pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> Result<Value> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;
-    let job_id = path
-        .strip_prefix("/jobs/")
-        .and_then(|value| value.split('/').next());
-    let routed_session = job_id
-        .map(|job_id| super::super::generations::session_for_job(runner_id, job_id))
-        .transpose()?
-        .flatten();
-    let Some(session) =
-        routed_session.or_else(|| connected.session.filter(|_| connected.connected))
-    else {
+    let Some(legacy_session) = connected.session.filter(|_| connected.connected) else {
         return Err(Error::validation_invalid_argument(
             "runner",
             "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` first",
@@ -122,6 +113,7 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
             ]),
         ));
     };
+    let session = daemon_api_session_for_path(runner_id, path, legacy_session)?;
     let client = Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
@@ -173,6 +165,88 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
             "Use a direct daemon connection or a reverse runner session registered with a broker before querying runner jobs.".to_string(),
         ]),
     ))
+}
+
+fn daemon_api_session_for_path(
+    runner_id: &str,
+    path: &str,
+    legacy_session: RunnerSession,
+) -> Result<RunnerSession> {
+    let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    let (job_id, run_id, artifact_id) = match segments.as_slice() {
+        ["jobs", job_id, "artifacts", artifact_id, ..] => (Some(*job_id), None, Some(*artifact_id)),
+        ["jobs", job_id, ..] => (Some(*job_id), None, None),
+        ["runs", run_id, ..] => (None, Some(*run_id), None),
+        _ => (None, None, None),
+    };
+    Ok(super::super::generation_store::endpoint_session(
+        runner_id,
+        job_id.filter(|id| !id.is_empty()),
+        run_id.filter(|id| !id.is_empty()),
+        artifact_id.filter(|id| !id.is_empty()),
+        Some(&legacy_session),
+    )?
+    .unwrap_or(legacy_session))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
+    use homeboy_core::test_support;
+
+    fn session(lease: &str, endpoint: &str) -> RunnerSession {
+        RunnerSession {
+            runner_id: "runner-a".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: RunnerSessionRole::Controller,
+            server_id: Some("server-a".to_string()),
+            controller_id: Some("controller-a".to_string()),
+            broker_url: None,
+            remote_daemon_address: Some(format!("{endpoint}:4000")),
+            local_port: Some(4000),
+            local_url: Some(format!("http://{endpoint}:4000")),
+            tunnel_pid: None,
+            remote_daemon_pid: Some(42),
+            remote_daemon_lease_id: Some(lease.to_string()),
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: Some(format!("homeboy test+{lease}")),
+            connected_at: "2026-07-20T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }
+    }
+
+    #[test]
+    fn daemon_api_routes_persisted_a_and_b_job_operations_to_their_generation() {
+        test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon-a");
+            let b = session("lease-b", "daemon-b");
+            crate::generation_store::record_job("runner-a", &a, "job-a").expect("record A job");
+            crate::generation_store::activate(
+                "runner-a",
+                &a,
+                "build-b".to_string(),
+                b.clone(),
+                &["job-a".to_string()],
+            )
+            .expect("activate B");
+            crate::generation_store::record_job("runner-a", &b, "job-b").expect("record B job");
+
+            assert_eq!(
+                daemon_api_session_for_path("runner-a", "/jobs/job-a/events", b.clone())
+                    .expect("route A operation"),
+                a
+            );
+            assert_eq!(
+                daemon_api_session_for_path("runner-a", "/jobs/job-b", b.clone())
+                    .expect("route B operation"),
+                b
+            );
+        });
+    }
 }
 
 pub(super) fn daemon_post(client: &Client, local_url: &str, path: &str) -> Result<Value> {

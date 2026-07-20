@@ -189,10 +189,7 @@ pub(super) mod test_cancel_hook {
 pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobEvent>)> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;
-    let routed_session = super::super::generations::session_for_job(runner_id, job_id)?;
-    let Some(session) =
-        routed_session.or_else(|| connected.session.filter(|_| connected.connected))
-    else {
+    let Some(legacy_session) = connected.session.filter(|_| connected.connected) else {
         return Err(Error::validation_invalid_argument(
             "runner",
             "runner is not connected; run `homeboy runner connect <runner-id>` first",
@@ -203,6 +200,14 @@ pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobE
             ]),
         ));
     };
+    let session = super::super::generation_store::endpoint_session(
+        runner_id,
+        Some(job_id),
+        None,
+        None,
+        Some(&legacy_session),
+    )?
+    .unwrap_or(legacy_session);
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -247,15 +252,20 @@ pub fn runner_job_cancel_projection(
 ) -> Result<(Job, Vec<JobEvent>)> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;
-    let routed_session = super::super::generations::session_for_job(runner_id, job_id)?;
-    let Some(session) =
-        routed_session.or_else(|| connected.session.filter(|_| connected.connected))
-    else {
+    let Some(legacy_session) = connected.session.filter(|_| connected.connected) else {
         return Err(runner_job_cancel_unsupported(
             &runner.id,
             "runner is not connected",
         ));
     };
+    let session = super::super::generation_store::endpoint_session(
+        runner_id,
+        Some(job_id),
+        Some(durable_run_id),
+        None,
+        Some(&legacy_session),
+    )?
+    .unwrap_or(legacy_session);
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .build()

@@ -5,7 +5,16 @@ use homeboy_error::Result;
 use super::{homeboy, homeboy_data, sanitize_path_segment};
 
 /// Daemon runtime state directory (~/.config/homeboy/daemon/).
+/// Override only the daemon's lease/job store. This deliberately leaves HOME
+/// and normal config resolution intact for generation-scoped daemon processes.
+pub const DAEMON_STATE_DIR_ENV: &str = "HOMEBOY_DAEMON_STATE_DIR";
+
 fn daemon_state_dir() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var(DAEMON_STATE_DIR_ENV) {
+        if !path.trim().is_empty() {
+            return Ok(PathBuf::from(path));
+        }
+    }
     Ok(homeboy()?.join("daemon"))
 }
 

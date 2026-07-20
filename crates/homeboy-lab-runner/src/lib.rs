@@ -41,8 +41,11 @@ mod daemon_http_get;
 mod evidence;
 mod execution;
 mod extension_materialization;
-mod generations;
-pub use generations::{inventory as runner_generation_inventory, RunnerDaemonGenerationStatus};
+mod generation_store;
+pub fn runner_generation_inventory(runner_id: &str) -> Result<Vec<RunnerDaemonGenerationStatus>> {
+    let report = connection::status(runner_id)?;
+    generation_store::status_projection(runner_id, report.session.as_ref())
+}
 mod git_dependency_materialization;
 mod homeboy_refresh;
 mod job_preparation;
@@ -69,6 +72,7 @@ mod origin_refs;
 mod progress;
 mod resource_metrics;
 mod rig_materialization;
+mod rolling_generation;
 mod runtime_materialization_status;
 mod runtime_overlay_freshness;
 mod session;
@@ -178,14 +182,17 @@ pub(crate) use resource_metrics::RunnerCommandProgressSink;
 pub use resource_metrics::{
     RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
 };
+pub use rolling_generation::{
+    RollingDrainState, RollingGeneration, RollingGenerations, RollingStart,
+};
 pub use runtime_materialization_status::{RunnerBinarySource, RuntimeMaterializationStatus};
 pub use session::{
     LabRunnerHandoff, ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource,
     RunnerActiveJobState, RunnerArtifactRef, RunnerAvailability, RunnerChangedRuntimePath,
-    RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind, RunnerJob,
-    RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner,
-    RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerConnectReport, RunnerDaemonGenerationStatus, RunnerDisconnectReport, RunnerFailureKind,
+    RunnerJob, RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence,
+    RunnerLifecycleOwner, RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRecoveryState,
+    RunnerResult, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
     RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceLease,
     RunnerWorkspaceLeaseSet,
 };
