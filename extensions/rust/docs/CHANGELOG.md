@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.27.0] - 2026-07-20
+
+### Added
+- add find_definition refactor command for struct discovery
+
 ## [1.26.0] - 2026-07-20
 
 ### Added
