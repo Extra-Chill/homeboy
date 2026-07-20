@@ -329,9 +329,24 @@ fn verify_synthetic_snapshot_git_baseline(
     if git(workspace, &["rev-parse", SYNTHETIC_SNAPSHOT_BASELINE_REF])? != head {
         return Err("synthetic snapshot baseline ref does not match HEAD".to_string());
     }
+    // The synthetic baseline commits only the source content: reserved runner
+    // bookkeeping and @file paths are deliberately excluded from the staged tree
+    // (see `materialize_verified_lab_snapshot_git_baseline`). Scope the
+    // cleanliness check to the same paths so those excluded, still-present files
+    // are not reclassified as untracked dirt. This mirrors the exclusions used
+    // by `verify_materialized_snapshot_git_checkout` and
+    // `verify_exact_snapshot_git_checkout`.
     if !git(
         workspace,
-        &["status", "--porcelain", "--untracked-files=all"],
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            SYNTHETIC_BASELINE_PATHS[0],
+            SYNTHETIC_BASELINE_PATHS[1],
+            SYNTHETIC_BASELINE_PATHS[2],
+        ],
     )?
     .is_empty()
     {
@@ -1374,6 +1389,65 @@ mod tests {
                 "provider edit\n"
             );
         }
+    }
+
+    #[test]
+    fn verify_synthetic_baseline_ignores_reserved_runner_files() {
+        // The synthetic baseline excludes reserved runner bookkeeping from its
+        // committed tree, so those files remain present but untracked in the
+        // working tree. The baseline verifier must not reclassify them as dirt,
+        // otherwise the committed-change harvest fails with "synthetic snapshot
+        // Git workspace is not clean" even though the source content is pristine.
+        let workspace = tempfile::tempdir().expect("runner workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        std::fs::create_dir_all(workspace.path().join(".homeboy"))
+            .expect("runner metadata directory");
+        std::fs::write(
+            workspace.path().join(".homeboy/runner-workspace.json"),
+            "runner-owned metadata\n",
+        )
+        .expect("runner metadata");
+        std::fs::create_dir_all(workspace.path().join(".homeboy/lab-at-files"))
+            .expect("lab @file directory");
+        std::fs::write(
+            workspace.path().join(".homeboy/lab-at-files/handoff.json"),
+            "at-file payload\n",
+        )
+        .expect("lab @file payload");
+
+        let snapshot = snapshot(workspace.path());
+        let lab = lab(workspace.path(), &snapshot);
+        materialize_verified_lab_snapshot_git_baseline(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            lab.clone(),
+        )
+        .expect("synthetic baseline");
+
+        // Reserved files remain on disk but excluded from the baseline tree.
+        assert!(workspace
+            .path()
+            .join(".homeboy/runner-workspace.json")
+            .exists());
+        assert!(
+            !git(workspace.path(), &["ls-tree", "-r", "--name-only", "HEAD"])
+                .expect("baseline tree")
+                .contains(".homeboy/runner-workspace.json")
+        );
+
+        let provenance = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            lab,
+        )
+        .expect("verify provenance");
+
+        // The harvest provenance check must succeed despite the untracked
+        // reserved runner files.
+        verify_lab_workspace_git_root(workspace.path(), &provenance)
+            .expect("synthetic baseline verifies as clean with reserved runner files present");
     }
 
     #[derive(Clone)]
