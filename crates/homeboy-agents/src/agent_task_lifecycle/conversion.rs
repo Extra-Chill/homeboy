@@ -262,6 +262,10 @@ pub(crate) fn normalize_progress_events(
             event_type: "agent_task.state_changed".to_string(),
             status: event.state,
             message: event.message.clone(),
+            provider: None,
+            phase: None,
+            activity: None,
+            heartbeat_at_ms: None,
             progress: json!({
                 "attempt": event.attempt,
             }),

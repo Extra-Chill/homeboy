@@ -1,6 +1,7 @@
 use crate::cli_surface::Commands;
 use crate::command_contract::LabCommandPortability;
 use crate::commands::agent_task;
+use crate::runner::runners::LabRunnerReadiness;
 
 use crate::commands::resources::{DoctorOutput, ResourceRecommendation};
 
@@ -60,11 +61,11 @@ pub fn resource_policy_context_from_evaluation(
     resources: &DoctorOutput,
     warning: Option<&ResourcePolicyWarning>,
     local_override: bool,
-    default_runner: Option<&str>,
+    lab_readiness: Option<&LabRunnerReadiness>,
     runner_hosted: bool,
 ) -> ResourcePolicyContext {
     let runner_selection =
-        runner_selection_context(command, local_override, default_runner, runner_hosted);
+        runner_selection_context(command, local_override, lab_readiness, runner_hosted);
     ResourcePolicyContext {
         command: command.label.to_string(),
         severity: severity_str(resources.recommendation).to_string(),
@@ -101,35 +102,59 @@ pub fn resource_policy_context_to_json(context: &ResourcePolicyContext) -> serde
 fn runner_selection_context(
     command: HotCommand,
     local_override: bool,
-    default_runner: Option<&str>,
+    lab_readiness: Option<&LabRunnerReadiness>,
     runner_hosted: bool,
 ) -> ResourcePolicyRunnerSelection {
     if runner_hosted {
         return ResourcePolicyRunnerSelection {
             runner_id: None,
+            available_runner_ids: Vec::new(),
+            readiness_state: "runner_hosted".to_string(),
+            readiness_reasons: Vec::new(),
+            remediation_commands: Vec::new(),
             reason: "runner_hosted".to_string(),
         };
     }
     if local_override {
         return ResourcePolicyRunnerSelection {
             runner_id: None,
+            available_runner_ids: Vec::new(),
+            readiness_state: "local_override".to_string(),
+            readiness_reasons: Vec::new(),
+            remediation_commands: Vec::new(),
             reason: "placement_local_override".to_string(),
         };
     }
     if command.lab_offload_supported {
-        if let Some(runner_id) = default_runner {
+        if let Some(readiness) = lab_readiness {
             return ResourcePolicyRunnerSelection {
-                runner_id: Some(runner_id.to_string()),
-                reason: "default_lab_runner".to_string(),
+                runner_id: readiness.selected_runner_id.clone(),
+                available_runner_ids: readiness.available_runner_ids.clone(),
+                readiness_state: readiness.state.as_str().to_string(),
+                readiness_reasons: readiness.reasons.clone(),
+                remediation_commands: readiness.remediation_commands.clone(),
+                reason: if readiness.selected_runner_id.is_some() {
+                    "default_lab_runner".to_string()
+                } else {
+                    "no_selectable_lab_runner".to_string()
+                },
             };
         }
         return ResourcePolicyRunnerSelection {
             runner_id: None,
+            available_runner_ids: Vec::new(),
+            readiness_state: "absent".to_string(),
+            readiness_reasons: Vec::new(),
+            remediation_commands: Vec::new(),
             reason: "local_no_default_runner".to_string(),
         };
     }
     ResourcePolicyRunnerSelection {
         runner_id: None,
+        available_runner_ids: Vec::new(),
+        readiness_state: "not_applicable".to_string(),
+        readiness_reasons: Vec::new(),
+        remediation_commands: Vec::new(),
         reason: "local_only_contract".to_string(),
     }
 }
@@ -238,14 +263,14 @@ pub fn evaluate(command: HotCommand, resources: &DoctorOutput) -> Option<Resourc
 pub fn evaluate_with_runner_hint(
     command: HotCommand,
     resources: &DoctorOutput,
-    default_runner: Option<&str>,
+    lab_readiness: Option<&LabRunnerReadiness>,
 ) -> Option<ResourcePolicyWarning> {
     match resources.recommendation {
         ResourceRecommendation::Ok => None,
         recommendation => Some(ResourcePolicyWarning {
             command: command.label,
             recommendation,
-            message: warning_message(command, recommendation, resources, default_runner),
+            message: warning_message(command, recommendation, resources, lab_readiness),
         }),
     }
 }
@@ -359,15 +384,24 @@ fn warning_message(
     command: HotCommand,
     recommendation: ResourceRecommendation,
     resources: &DoctorOutput,
-    default_runner: Option<&str>,
+    lab_readiness: Option<&LabRunnerReadiness>,
 ) -> String {
     let severity = severity_str(recommendation);
     let reason = primary_reason(resources);
     if command.lab_offload_supported {
-        if let Some(runner_id) = default_runner {
-            return format!(
+        if let Some(readiness) = lab_readiness {
+            if let Some(runner_id) = readiness.selected_runner_id.as_deref() {
+                return format!(
                 "Resource policy warning: machine is {severity}; starting `{}` locally may skew results or add pressure. {reason} Homeboy found Lab runner `{runner_id}`; use --runner {runner_id} to route this portable command through Lab offload, or omit local-hot overrides so automatic Lab routing can use it.",
                 command.label
+            );
+            }
+            return format!(
+                "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} Lab runner inventory is {} (available runner IDs: {}). {}",
+                command.label,
+                readiness.state.as_str(),
+                if readiness.available_runner_ids.is_empty() { "none".to_string() } else { readiness.available_runner_ids.join(", ") },
+                readiness.remediation_commands.join("; "),
             );
         }
         return format!(
@@ -471,6 +505,16 @@ mod tests {
         }
     }
 
+    fn ready_lab() -> LabRunnerReadiness {
+        LabRunnerReadiness {
+            state: crate::runner::runners::LabRunnerReadinessState::ConnectedReady,
+            selected_runner_id: Some("homeboy-lab".to_string()),
+            available_runner_ids: vec!["homeboy-lab".to_string()],
+            reasons: Vec::new(),
+            remediation_commands: Vec::new(),
+        }
+    }
+
     fn local_only_hot(label: &'static str, reason: &'static str) -> HotCommand {
         HotCommand {
             label,
@@ -506,13 +550,38 @@ mod tests {
         let warning = evaluate_with_runner_hint(
             lab_supported_hot("agent-task providers"),
             &resources(ResourceRecommendation::Hot),
-            Some("homeboy-lab"),
+            Some(&ready_lab()),
         )
         .expect("hot machines warn");
 
         assert!(warning.message.contains("Lab runner `homeboy-lab`"));
         assert!(warning.message.contains("--runner homeboy-lab"));
         assert!(!warning.message.contains("--runner <id>"));
+    }
+
+    #[test]
+    fn connected_ineligible_runner_is_not_reported_as_absent() {
+        let readiness = LabRunnerReadiness {
+            state: crate::runner::runners::LabRunnerReadinessState::ConnectedIneligible,
+            selected_runner_id: None,
+            available_runner_ids: Vec::new(),
+            reasons: vec!["active_jobs_unavailable".to_string()],
+            remediation_commands: vec!["homeboy runner status homeboy-lab".to_string()],
+        };
+        let warning = evaluate_with_runner_hint(
+            lab_supported_hot("agent-task providers"),
+            &resources(ResourceRecommendation::Hot),
+            Some(&readiness),
+        )
+        .expect("hot machines warn");
+
+        assert!(warning.message.contains("connected_ineligible"));
+        assert!(warning
+            .message
+            .contains("homeboy runner status homeboy-lab"));
+        assert!(!warning
+            .message
+            .contains("No Homeboy Lab runner is configured"));
     }
 
     #[test]
@@ -699,7 +768,7 @@ mod tests {
         let warning = evaluate_with_runner_hint(
             lab_supported_hot("agent-task providers"),
             &resources(ResourceRecommendation::Hot),
-            Some("homeboy-lab"),
+            Some(&ready_lab()),
         )
         .expect("hot machines warn");
 
@@ -716,7 +785,7 @@ mod tests {
         let warning = evaluate_with_runner_hint(
             lab_supported_hot("agent-task cook/run-plan/retry --run"),
             &resources(ResourceRecommendation::Hot),
-            Some("homeboy-lab"),
+            Some(&ready_lab()),
         )
         .expect("hot machines warn");
 
@@ -886,7 +955,7 @@ mod tests {
             &resources,
             Some(&warning),
             false,
-            Some("homeboy-lab"),
+            Some(&ready_lab()),
             false,
         );
 
@@ -903,6 +972,10 @@ mod tests {
             context.runner_selection,
             ResourcePolicyRunnerSelection {
                 runner_id: Some("homeboy-lab".to_string()),
+                available_runner_ids: vec!["homeboy-lab".to_string()],
+                readiness_state: "connected_ready".to_string(),
+                readiness_reasons: Vec::new(),
+                remediation_commands: Vec::new(),
                 reason: "default_lab_runner".to_string(),
             }
         );
@@ -925,7 +998,7 @@ mod tests {
             &resources,
             Some(&warning),
             true,
-            Some("homeboy-lab"),
+            Some(&ready_lab()),
             false,
         );
 
@@ -989,7 +1062,7 @@ mod tests {
             &resources,
             Some(&warning),
             false,
-            Some("homeboy-lab"),
+            Some(&ready_lab()),
             false,
         );
         let value = resource_policy_context_to_json(&context);
@@ -1000,6 +1073,14 @@ mod tests {
         assert_eq!(value["warned"], true);
         assert!(value["message"].is_string());
         assert_eq!(value["runner_selection"]["runner_id"], "homeboy-lab");
+        assert_eq!(
+            value["runner_selection"]["available_runner_ids"][0],
+            "homeboy-lab"
+        );
+        assert_eq!(
+            value["runner_selection"]["readiness_state"],
+            "connected_ready"
+        );
         assert_eq!(value["runner_selection"]["reason"], "default_lab_runner");
         assert_eq!(value["host"]["load_severity"], "hot");
         assert_eq!(value["host"]["cpu_count"], 4);
@@ -1061,7 +1142,7 @@ mod tests {
         let with_runner = evaluate_with_runner_hint(
             lab_supported_hot("review test"),
             &resources(ResourceRecommendation::Hot),
-            Some("homeboy-lab"),
+            Some(&ready_lab()),
         )
         .expect("hot machines warn");
         assert!(with_runner.message.contains("Lab runner `homeboy-lab`"));

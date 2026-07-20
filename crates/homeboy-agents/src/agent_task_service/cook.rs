@@ -702,11 +702,20 @@ where
     } else {
         options
     };
+    materialize_initial_cook_attempt(&options)?;
     // Transport readiness can serialize on a reconnect/runtime-promotion
     // lease. Complete it before entering the provider-attempt loop so that
     // waiting for a shared Lab session never consumes a cook attempt.
     if let Some(dispatcher) = &options.attempt_dispatcher {
-        dispatcher.prepare_for_cook()?;
+        if let Err(error) = dispatcher.prepare_for_cook() {
+            agent_task_lifecycle::record_pre_execution_failure(
+                &options.initial_run_id,
+                &options.initial_plan,
+                dispatcher.pre_execution_failure_phase(),
+                &error,
+            )?;
+            return Err(error);
+        }
     }
     let max_attempts = options.max_attempts.max(1);
     let mut attempts = Vec::new();
@@ -724,15 +733,16 @@ where
         };
         let needs_execution = agent_task_lifecycle::status(&run_id)
             .map(|record| {
-                !matches!(
+                (!matches!(
                     record.state,
                     agent_task_lifecycle::AgentTaskRunState::Succeeded
                         | agent_task_lifecycle::AgentTaskRunState::PartialFailure
                         | agent_task_lifecycle::AgentTaskRunState::Failed
                         | agent_task_lifecycle::AgentTaskRunState::Cancelled
-                ) && !record.lab_handoff.as_ref().is_some_and(|handoff| {
-                    handoff.state == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
-                })
+                ) || retryable_pre_execution_failure(&record))
+                    && !record.lab_handoff.as_ref().is_some_and(|handoff| {
+                        handoff.state == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
+                    })
             })
             .unwrap_or(true);
         if needs_execution {
@@ -791,22 +801,17 @@ where
             if let Err(error) = execution {
                 let record = match agent_task_lifecycle::status(&run_id) {
                     Ok(record)
-                        if matches!(
-                            record.state,
-                            agent_task_lifecycle::AgentTaskRunState::Succeeded
-                                | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-                                | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
-                                | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-                                | agent_task_lifecycle::AgentTaskRunState::Failed
-                                | agent_task_lifecycle::AgentTaskRunState::Cancelled
-                        ) || record.lab_handoff.as_ref().is_some_and(|handoff| {
-                            handoff.state
-                                == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
-                        }) =>
+                        if record.state == agent_task_lifecycle::AgentTaskRunState::Queued =>
                     {
-                        Some(record)
+                        let phase = pre_execution_failure_phase(
+                            &error,
+                            options.attempt_dispatcher.as_deref(),
+                        );
+                        record_pre_execution_failure(&plan, &run_id, &error, phase)?;
+                        agent_task_lifecycle::status(&run_id).ok()
                     }
-                    Ok(_) | Err(_) => {
+                    Ok(record) => Some(record),
+                    Err(_) => {
                         let phase = pre_execution_failure_phase(
                             &error,
                             options.attempt_dispatcher.as_deref(),
@@ -1181,6 +1186,35 @@ where
     ))
 }
 
+/// Persist the controller-owned initial attempt before transport preparation so
+/// runner eligibility failures remain addressable through the cook alias.
+fn materialize_initial_cook_attempt(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    if agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
+        return Ok(());
+    }
+    match agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id)) {
+        Ok(_) => {
+            agent_task_lifecycle::record_cook_attempt(&options.cook_id, 1, &options.initial_run_id)
+                .map(|_| ())
+        }
+        Err(error) => {
+            // `submit_plan` persists admission failures before returning them.
+            if agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
+                agent_task_lifecycle::record_cook_attempt(
+                    &options.cook_id,
+                    1,
+                    &options.initial_run_id,
+                )?;
+            }
+            Err(error)
+        }
+    }
+}
+
+fn retryable_pre_execution_failure(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
+    record.metadata["pre_execution_failure"]["retryable"] == Value::Bool(true)
+}
+
 #[derive(Debug)]
 struct PreExecutionFailureDetails {
     retryable: bool,
@@ -1263,9 +1297,10 @@ fn record_pre_execution_failure(
     error: &Error,
     phase: &str,
 ) -> Result<()> {
-    if agent_task_lifecycle::submit_plan(plan, Some(run_id)).is_ok() {
-        agent_task_lifecycle::record_pre_execution_failure(run_id, plan, phase, error)?;
+    if !agent_task_lifecycle::run_record_exists(run_id)? {
+        agent_task_lifecycle::submit_plan(plan, Some(run_id))?;
     }
+    agent_task_lifecycle::record_pre_execution_failure(run_id, plan, phase, error)?;
     Ok(())
 }
 
@@ -1542,7 +1577,8 @@ mod tests {
                     "fixture runner is unavailable",
                     None,
                     None,
-                ));
+                )
+                .with_retryable(true));
             }
             Ok(())
         }
@@ -1795,7 +1831,7 @@ mod tests {
                 0
             );
             assert_eq!(
-                logs.events.last().map(|event| event.state),
+                logs.events.last().map(|event| event.status),
                 Some(AgentTaskState::Failed)
             );
             assert_eq!(retry.metadata["retry_of"], run_id);
@@ -1870,7 +1906,7 @@ mod tests {
     }
 
     #[test]
-    fn cook_transport_preparation_failure_does_not_create_a_provider_attempt() {
+    fn cook_transport_preparation_failure_is_durable_and_resumes_after_runner_recovery() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let cook_id = "cook-runner-unavailable";
             let first_run_id = "cook-runner-unavailable-attempt-1";
@@ -1884,15 +1920,30 @@ mod tests {
             options.initial_run_id = first_run_id.to_string();
             options.max_attempts = 2;
 
-            let error = run_cook(options, UnusedExecutor)
+            let error = run_cook(options.clone(), UnusedExecutor)
                 .expect_err("transport preparation is outside the provider-attempt loop");
 
             assert!(error.message.contains("fixture runner is unavailable"));
-            assert!(!agent_task_lifecycle::run_record_exists(first_run_id)
-                .expect("transport failure does not materialize an attempt"));
-            assert!(
-                agent_task_lifecycle::cook_index(cook_id).is_err(),
-                "transport failure must not consume a cook attempt"
+            let blocked = agent_task_lifecycle::status(cook_id)
+                .expect("cook alias exposes the preflight-blocked attempt");
+            assert_eq!(blocked.run_id, first_run_id);
+            assert_eq!(
+                blocked.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert_eq!(
+                blocked.metadata["pre_execution_failure"]["retryable"],
+                Value::Bool(true)
+            );
+
+            let resumed = run_cook(options, UnusedExecutor)
+                .expect("repaired runner resumes the immutable cook attempt");
+            assert_eq!(resumed.value.status, "in_flight");
+            assert_eq!(
+                agent_task_lifecycle::status(cook_id)
+                    .expect("resumed cook alias")
+                    .runner_job_id(),
+                Some("accepted-daemon-job")
             );
         });
     }
@@ -2062,10 +2113,13 @@ mod tests {
                 .expect_err("transport preparation remains outside cook retries");
 
             assert!(error.message.contains("fixture runner is unavailable"));
-            assert!(
-                !agent_task_lifecycle::run_record_exists("cook-runner-exhaustion-attempt-1")
-                    .expect("transport failure does not materialize an attempt")
+            let record = agent_task_lifecycle::status("cook-runner-exhaustion")
+                .expect("transport failure remains inspectable");
+            assert_eq!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
             );
+            assert_eq!(record.metadata["provider_executions_consumed"], 0);
         });
     }
 

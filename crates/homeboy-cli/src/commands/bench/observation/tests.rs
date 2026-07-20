@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use homeboy::core::engine::run_dir::{self, RunDir};
 use homeboy::core::observation::ObservationStore;
+use homeboy::runner::runners::{LabRunnerReadiness, LabRunnerReadinessState};
 use homeboy_extension::bench::artifact::BenchArtifact;
 use homeboy_extension::bench::{parse_bench_results_str, BenchResults, BenchRunWorkflowResult};
 
@@ -917,6 +918,16 @@ fn synthetic_resources(recommendation: ResourceRecommendation) -> DoctorOutput {
     }
 }
 
+fn ready_lab() -> LabRunnerReadiness {
+    LabRunnerReadiness {
+        state: LabRunnerReadinessState::ConnectedReady,
+        selected_runner_id: Some("homeboy-lab".to_string()),
+        available_runner_ids: vec!["homeboy-lab".to_string()],
+        reasons: Vec::new(),
+        remediation_commands: Vec::new(),
+    }
+}
+
 #[test]
 fn bench_observation_persists_resource_policy_warning_for_hot_machine() {
     with_isolated_home(|home| {
@@ -931,7 +942,7 @@ fn bench_observation_persists_resource_policy_warning_for_hot_machine() {
             &synthetic,
             Some(&warning),
             false,
-            Some("homeboy-lab"),
+            Some(&ready_lab()),
             false,
         ));
 
@@ -1002,7 +1013,7 @@ fn bench_observation_records_local_placement_override_with_legacy_evidence() {
             &synthetic,
             Some(&warning),
             true,
-            Some("homeboy-lab"),
+            Some(&ready_lab()),
             false,
         ));
 

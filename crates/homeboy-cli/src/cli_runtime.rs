@@ -843,20 +843,24 @@ fn is_builtin_subcommand(name: &str) -> bool {
 fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
     if let Some(hot_command) = resource_policy::hot_command(&cli.command) {
         if let Ok((resources, _)) = crate::commands::resources::run_preflight() {
-            let default_lab_runner = if hot_command.lab_offload_supported {
-                crate::runner::resolve_default_lab_runner().ok().flatten()
+            let lab_readiness = if hot_command.lab_offload_supported {
+                crate::runner::lab_runner_readiness().ok()
             } else {
                 None
             };
             // An explicit runner is a routing decision, not a default-runner
             // fallback. Let Lab offload report any runner-specific readiness or
             // capability failure rather than blocking it at controller preflight.
-            let selected_lab_runner =
-                resource_policy_runner_hint(cli, default_lab_runner.as_deref());
+            let selected_lab_runner = resource_policy_runner_hint(
+                cli,
+                lab_readiness
+                    .as_ref()
+                    .and_then(|readiness| readiness.selected_runner_id.as_deref()),
+            );
             let warning = resource_policy::evaluate_with_runner_hint(
                 hot_command,
                 &resources,
-                selected_lab_runner,
+                lab_readiness.as_ref(),
             );
             let runner_hosted = resource_policy::is_runner_hosted_exec();
             if let Some(warning) = warning.as_ref() {
@@ -878,7 +882,7 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                         warning.as_ref()
                     },
                     matches!(cli.placement, crate::cli_surface::Placement::Local),
-                    selected_lab_runner,
+                    lab_readiness.as_ref(),
                     runner_hosted,
                 );
             if cli.runner.is_some()

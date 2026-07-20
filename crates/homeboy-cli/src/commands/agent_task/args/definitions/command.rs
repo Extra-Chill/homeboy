@@ -6,7 +6,7 @@ use super::super::super::tool::AgentTaskToolArgs;
 use super::cook::{AgentTaskCookArgs, AgentTaskLoopArgs, PromotionProviderArgs};
 use super::fanout::AgentTaskFanoutArgs;
 use super::lifecycle::{
-    AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
+    AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs, LogsArgs,
     PromoteArgs, ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs,
     RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
 };
@@ -45,7 +45,7 @@ pub enum AgentTaskCommand {
     Active(ActiveArgs),
     ReconcileRecords(ReconcileRecordsArgs),
     Latest(LatestArgs),
-    Logs(StatusArgs),
+    Logs(LogsArgs),
     Artifacts(StatusArgs),
     Evidence(EvidenceArgs),
     Diagnose(DiagnoseArgs),
