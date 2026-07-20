@@ -1952,9 +1952,40 @@ pub(crate) fn reconcile_runner_job_snapshot(
     Ok(())
 }
 
-/// A terminal daemon transport result is not an agent-task result on its own.
-/// Keep the controller record live until the daemon publishes the aggregate
-/// lifecycle event, which is the single authoritative terminal projection.
+/// Project an authoritative terminal daemon snapshot into its persisted run.
+/// The daemon calls this before returning a foreground `runner exec --run-id`,
+/// so its caller never reports a terminal command while the durable run remains
+/// active. Replaying the same terminal snapshot is a no-op once projected.
+pub fn project_terminal_runner_result(
+    run_id: &str,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) -> Result<bool> {
+    if !matches!(
+        snapshot.job.status,
+        homeboy_core::api_jobs::JobStatus::Succeeded
+            | homeboy_core::api_jobs::JobStatus::Failed
+            | homeboy_core::api_jobs::JobStatus::Cancelled
+    ) {
+        return Ok(false);
+    }
+
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    validate_runner_job_snapshot(&record, snapshot)?;
+    if let Some(event) = terminal_runner_lifecycle_event(&record, snapshot)? {
+        if store::read_aggregate(&record.run_id).ok().as_ref() == Some(&event.aggregate) {
+            return Ok(false);
+        }
+        project_terminal_runner_lifecycle_event(&mut record, snapshot, &event)?;
+        return Ok(true);
+    }
+    if record.state.is_terminal() {
+        return Ok(false);
+    }
+    project_terminal_runner_job_snapshot(&mut record, snapshot);
+    store::write_record(&record)?;
+    Ok(true)
+}
+
 fn record_pending_runner_synchronization(
     record: &mut AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
@@ -1980,6 +2011,66 @@ fn record_pending_runner_synchronization(
     );
 }
 
+fn project_terminal_runner_job_snapshot(
+    record: &mut AgentTaskRunRecord,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) {
+    // Only the explicit foreground runner-exec path reaches this helper.
+    // Detached reconciliation remains pending until its inner aggregate arrives.
+    record.updated_at = Some(now_timestamp());
+    let (run_state, task_state, phase) = match snapshot.job.status {
+        homeboy_core::api_jobs::JobStatus::Succeeded => (
+            AgentTaskRunState::Succeeded,
+            AgentTaskState::Succeeded,
+            "completed",
+        ),
+        homeboy_core::api_jobs::JobStatus::Failed => {
+            (AgentTaskRunState::Failed, AgentTaskState::Failed, "failed")
+        }
+        homeboy_core::api_jobs::JobStatus::Cancelled => (
+            AgentTaskRunState::Cancelled,
+            AgentTaskState::Cancelled,
+            "cancelled",
+        ),
+        homeboy_core::api_jobs::JobStatus::Queued | homeboy_core::api_jobs::JobStatus::Running => {
+            return
+        }
+    };
+    set_run_state(record, run_state);
+    for task in &mut record.tasks {
+        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+            task.state = task_state;
+        }
+    }
+    record_runner_job_terminal_metadata(record, snapshot.job.status, &snapshot.events);
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("phase".to_string(), json!(phase));
+    metadata.insert(
+        "phase_activity".to_string(),
+        json!("authoritative runner daemon result projected"),
+    );
+    metadata.insert("provider_state".to_string(), json!(phase));
+    metadata.insert(
+        "runner_result_synchronization".to_string(),
+        json!({
+            "state": "projected",
+            "runner_job_status": snapshot.job.status,
+        }),
+    );
+    if let Some(handoff) = metadata.get_mut("runner_handoff") {
+        handoff["state"] = json!("terminal");
+    }
+    metadata.insert(
+        METADATA_KEY_RETRYABLE.to_string(),
+        json!(run_state != AgentTaskRunState::Succeeded),
+    );
+    metadata.remove(METADATA_KEY_STALE_RUNNING);
+    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
+}
+
+/// Extracts the richer inner agent-task aggregate when the terminal daemon
+/// result includes one. Generic reconciliation retains a transport-only result
+/// as pending; foreground explicit runner execution projects it directly.
 fn terminal_runner_lifecycle_event(
     record: &AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
