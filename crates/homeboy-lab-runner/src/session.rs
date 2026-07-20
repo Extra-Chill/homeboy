@@ -507,22 +507,37 @@ impl Serialize for RunnerStatusReport {
         state.serialize_field("runner_id", &self.runner_id)?;
         state.serialize_field("connected", &self.connected)?;
         state.serialize_field("state", &self.state)?;
-        state.serialize_field("session", &self.session)?;
+        if let Some(session) = &self.session {
+            state.serialize_field("session", session)?;
+        }
         state.serialize_field("generations", &generations)?;
-        state.serialize_field("stale_daemon", &self.stale_daemon)?;
-        state.serialize_field("daemon_freshness", &self.daemon_freshness)?;
-        state.serialize_field("active_jobs", &self.active_jobs)?;
-        state.serialize_field("active_runner_jobs", &self.active_runner_jobs)?;
-        state.serialize_field("stale_runner_jobs", &self.stale_runner_jobs)?;
+        if let Some(stale_daemon) = &self.stale_daemon {
+            state.serialize_field("stale_daemon", stale_daemon)?;
+        }
+        if let Some(daemon_freshness) = &self.daemon_freshness {
+            state.serialize_field("daemon_freshness", daemon_freshness)?;
+        }
+        if !self.active_jobs.is_empty() {
+            state.serialize_field("active_jobs", &self.active_jobs)?;
+        }
+        if !self.active_runner_jobs.is_empty() {
+            state.serialize_field("active_runner_jobs", &self.active_runner_jobs)?;
+        }
+        if !self.stale_runner_jobs.is_empty() {
+            state.serialize_field("stale_runner_jobs", &self.stale_runner_jobs)?;
+        }
         state.serialize_field("active_job_count", &self.active_job_count)?;
         state.serialize_field("stale_runner_job_count", &self.stale_runner_job_count)?;
         state.serialize_field("active_job_state", &self.active_job_state)?;
-        state.serialize_field("active_job_source", &self.active_job_source)?;
-        state.serialize_field("active_job_error", &self.active_job_error)?;
-        state.serialize_field(
-            "active_job_recovery_evidence",
-            &self.active_job_recovery_evidence,
-        )?;
+        if let Some(active_job_source) = &self.active_job_source {
+            state.serialize_field("active_job_source", active_job_source)?;
+        }
+        if let Some(active_job_error) = &self.active_job_error {
+            state.serialize_field("active_job_error", active_job_error)?;
+        }
+        if let Some(evidence) = &self.active_job_recovery_evidence {
+            state.serialize_field("active_job_recovery_evidence", evidence)?;
+        }
         state.serialize_field("session_path", &self.session_path)?;
         state.end()
     }
@@ -549,6 +564,49 @@ impl RunnerStatusReport {
         } else {
             RunnerRecoveryState::Idle
         }
+    }
+}
+
+#[cfg(test)]
+mod status_serialization_tests {
+    use super::*;
+
+    #[test]
+    fn status_serialization_omits_empty_legacy_fields_and_includes_generations() {
+        let report = RunnerStatusReport {
+            runner_id: "missing-runner".to_string(),
+            connected: false,
+            state: RunnerSessionState::Disconnected,
+            session: None,
+            stale_daemon: None,
+            daemon_freshness: None,
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::NotQueried,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "test".to_string(),
+        };
+
+        let value = serde_json::to_value(report).expect("serialize status");
+        for field in [
+            "session",
+            "stale_daemon",
+            "daemon_freshness",
+            "active_jobs",
+            "active_runner_jobs",
+            "stale_runner_jobs",
+            "active_job_source",
+            "active_job_error",
+            "active_job_recovery_evidence",
+        ] {
+            assert!(value.get(field).is_none(), "{field} must be omitted");
+        }
+        assert_eq!(value["generations"], serde_json::json!([]));
     }
 }
 

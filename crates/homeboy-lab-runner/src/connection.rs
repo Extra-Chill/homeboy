@@ -208,14 +208,57 @@ pub(crate) fn rotate_daemon_generation(
         last_seen_at: None,
         leaseless_recovery_evidence: None,
     };
-    super::generation_store::activate(
+    if let Err(error) = super::generation_store::activate(
         runner_id,
         &current,
-        generation,
+        generation.clone(),
         candidate.clone(),
         draining_job_ids,
-    )?;
-    write_session(&candidate)
+    ) {
+        rollback_rotated_candidate(
+            runner_id,
+            &current,
+            &generation,
+            &candidate,
+            candidate_homeboy,
+            &client,
+        );
+        return Err(error);
+    }
+    if let Err(error) = write_session(&candidate) {
+        rollback_rotated_candidate(
+            runner_id,
+            &current,
+            &generation,
+            &candidate,
+            candidate_homeboy,
+            &client,
+        );
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn rollback_rotated_candidate(
+    runner_id: &str,
+    current: &RunnerSession,
+    generation: &str,
+    candidate: &RunnerSession,
+    candidate_homeboy: &str,
+    client: &SshClient,
+) {
+    if let Some(lease_id) = candidate.remote_daemon_lease_id.as_deref() {
+        let command = format!(
+            "{} daemon stop --force --lease-id {}",
+            shell::quote_arg(candidate_homeboy),
+            shell::quote_arg(lease_id),
+        );
+        let _ = client.execute(&command);
+    }
+    if let Some(pid) = candidate.tunnel_pid {
+        terminate_generation_tunnel(pid);
+    }
+    let _ = super::generation_store::rollback_activation(runner_id, current, generation);
 }
 
 pub(crate) fn terminate_generation_tunnel(pid: u32) {

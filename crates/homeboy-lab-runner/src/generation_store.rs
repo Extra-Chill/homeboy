@@ -282,9 +282,9 @@ pub(crate) fn activate(
 ) -> Result<()> {
     let mut generations = read(runner_id, Some(current))?
         .unwrap_or_else(|| RollingGenerations::new(legacy_generation(current), current.clone()));
-    generations.begin(generation.clone(), candidate);
-    generations.activate(&generation);
     let draining_owner = legacy_generation(current);
+    // Legacy sessions have no ledger yet. Pin authoritative active work before
+    // activation because `activate` retires zero-job drains immediately.
     for job_id in draining_job_ids {
         if generations
             .job_owners
@@ -296,6 +296,8 @@ pub(crate) fn activate(
             }
         }
     }
+    generations.begin(generation.clone(), candidate);
+    generations.activate(&generation);
     write(runner_id, &generations)
 }
 
@@ -313,6 +315,29 @@ pub(crate) fn rollback_candidate(
         write(runner_id, &generations)?;
     }
     Ok(())
+}
+
+/// Undo a candidate that was activated locally but could not be durably
+/// published as the controller session. The previous admission remains intact.
+pub(crate) fn rollback_activation(
+    runner_id: &str,
+    current: &RunnerSession,
+    generation: &str,
+) -> Result<()> {
+    let Some(mut generations) = read(runner_id, Some(current))? else {
+        return Ok(());
+    };
+    let previous = legacy_generation(current);
+    if generations.admission_owner == generation {
+        generations.generations.remove(generation);
+        if let Some(entry) = generations.generations.get_mut(&previous) {
+            entry.drain_state = crate::RollingDrainState::Admitting;
+            generations.admission_owner = previous;
+        }
+    } else {
+        generations.rollback(generation);
+    }
+    write(runner_id, &generations)
 }
 
 #[cfg(test)]
@@ -488,6 +513,63 @@ mod tests {
             assert_eq!(final_projection.len(), 1);
             assert_eq!(final_projection[0].generation, "build-b");
             assert_eq!(final_projection[0].active_job_count, 1);
+        });
+    }
+
+    #[test]
+    fn legacy_rotation_pins_active_a_jobs_before_b_can_retire_it() {
+        test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon-a", Some(101));
+            let b = session("lease-b", "daemon-b", Some(202));
+
+            // This is the deployed pre-generation state: there is no ledger,
+            // but the daemon reports authoritative active job identities.
+            activate(
+                "runner-a",
+                &a,
+                "build-b".to_string(),
+                b.clone(),
+                &["legacy-job-a".to_string()],
+            )
+            .expect("activate B without losing legacy A work");
+
+            let ledger = read("runner-a", Some(&b))
+                .expect("read ledger")
+                .expect("ledger");
+            assert_eq!(ledger.generations["lease-a"].active_jobs, 1);
+            assert_eq!(ledger.job_owner("legacy-job-a"), Some("lease-a"));
+            assert_eq!(
+                job_session("runner-a", "legacy-job-a", Some(&b)).expect("route A job"),
+                Some(a)
+            );
+            assert_eq!(
+                admission_session("runner-a", Some(&b)).expect("route admissions"),
+                Some(b)
+            );
+        });
+    }
+
+    #[test]
+    fn activation_rollback_restores_a_after_post_validation_failure() {
+        test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon-a", Some(101));
+            let b = session("lease-b", "daemon-b", Some(202));
+            activate(
+                "runner-a",
+                &a,
+                "build-b".to_string(),
+                b,
+                &["job-a".to_string()],
+            )
+            .expect("activate B");
+
+            // This is the same ledger state reached when either durable
+            // activation publication or controller-session publication fails.
+            rollback_activation("runner-a", &a, "build-b").expect("restore A");
+            let restored = read("runner-a", Some(&a)).expect("read").expect("ledger");
+            assert_eq!(restored.admission_owner, "lease-a");
+            assert_eq!(restored.job_owner("job-a"), Some("lease-a"));
+            assert!(!restored.generations.contains_key("build-b"));
         });
     }
 }
