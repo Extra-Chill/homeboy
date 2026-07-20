@@ -12,6 +12,7 @@ pub mod audit_fixability_provider;
 pub mod auto;
 pub mod collapse;
 pub mod decompose;
+mod definition;
 pub mod edit_op_tagged;
 pub mod move_items;
 pub mod plan;
