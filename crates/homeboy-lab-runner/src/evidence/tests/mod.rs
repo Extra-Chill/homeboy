@@ -6,7 +6,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{Runner, RunnerKind};
-use homeboy_core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobEventKind, JobStatus};
+use homeboy_core::api_jobs::{
+    Job, JobArtifactMetadata, JobEvent, JobEventKind, JobStatus, RunnerJobLifecycleMetadata,
+    RunnerJobProjection,
+};
 use homeboy_core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use homeboy_core::server::{RunnerPolicy, RunnerSettings};
 
@@ -16,8 +19,8 @@ use super::detail::{
 use super::download::{content_disposition_filename, download_remote_artifact};
 use super::mirror::{
     bounded_remote_events, import_mirrored_artifact_with_downloader, mirror_job_run,
-    mirrored_patch_result, primary_mirrored_run, MIRRORED_REMOTE_EVENT_LIMIT,
-    MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
+    mirror_remote_observation_runs_by_id_with, mirrored_patch_result, primary_mirrored_run,
+    MIRRORED_REMOTE_EVENT_LIMIT, MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
 };
 use super::tokens::{
     is_reportable_artifact_evidence_path, is_retrievable_runner_artifact, runner_artifact_token,
@@ -835,4 +838,122 @@ fn test_explicit_observation_run_ids_prefers_result_lineage() {
             "run-from-ref".to_string(),
         ]
     );
+}
+
+#[test]
+fn terminal_mirroring_imports_only_the_submitted_overlapping_job_run_and_artifacts() {
+    let mut first = Job {
+        id: Uuid::new_v4(),
+        operation: "runner.exec".to_string(),
+        status: JobStatus::Succeeded,
+        created_at_ms: 1_700_000_000_000,
+        updated_at_ms: 1_700_000_001_000,
+        started_at_ms: Some(1_700_000_000_000),
+        finished_at_ms: Some(1_700_000_001_000),
+        event_count: 0,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        stale_reason: None,
+        daemon_lease_id: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: vec![JobArtifactMetadata {
+            id: "first-result".to_string(),
+            name: Some("fuzz_results".to_string()),
+            path: Some("runner-artifact://lab/first-run/first-result".to_string()),
+            url: None,
+            mime: None,
+            size_bytes: None,
+            sha256: None,
+            content_base64: None,
+            metadata: None,
+        }],
+        runner_job_projection: None,
+    };
+    let mut second = first.clone();
+    second.id = Uuid::new_v4();
+    second.artifacts[0].id = "second-result".to_string();
+    second.artifacts[0].path = Some("runner-artifact://lab/second-run/second-result".to_string());
+
+    for (job, run_id) in [(&mut first, "first-run"), (&mut second, "second-run")] {
+        job.runner_job_projection = Some(RunnerJobProjection {
+            runner_id: "lab".to_string(),
+            command: "homeboy fuzz run".to_string(),
+            cwd: Some("/srv/homeboy/project".to_string()),
+            source: "runner-daemon".to_string(),
+            kind: "runner.exec".to_string(),
+            lifecycle: Some(RunnerJobLifecycleMetadata {
+                durable_run_id: Some(run_id.to_string()),
+                ..Default::default()
+            }),
+        });
+    }
+
+    for (job, expected_run, other_run, artifact_id) in [
+        (&first, "first-run", "second-run", "first-result"),
+        (&second, "second-run", "first-run", "second-result"),
+    ] {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let runner = ssh_runner();
+            let details = std::collections::HashMap::from([
+                (
+                    "first-run",
+                    json!({
+                        "id": "first-run",
+                        "kind": "fuzz",
+                        "started_at": "2023-11-14T22:13:20Z",
+                        "finished_at": "2023-11-14T22:13:21Z",
+                        "status": "pass",
+                        "artifacts": [{"id": "first-result", "kind": "fuzz_results"}]
+                    }),
+                ),
+                (
+                    "second-run",
+                    json!({
+                        "id": "second-run",
+                        "kind": "fuzz",
+                        "started_at": "2023-11-14T22:13:20Z",
+                        "finished_at": "2023-11-14T22:13:21Z",
+                        "status": "fail",
+                        "artifacts": [{"id": "second-result", "kind": "fuzz_results"}]
+                    }),
+                ),
+            ]);
+
+            let run_ids = explicit_observation_run_ids(&json!({}), job);
+            let mirrored = mirror_remote_observation_runs_by_id_with(
+                &store,
+                &runner,
+                job,
+                &run_ids,
+                None,
+                |run_id| Ok(details.get(run_id).cloned()),
+            )
+            .expect("mirror submitted terminal run");
+
+            assert_eq!(mirrored.len(), 1);
+            assert_eq!(mirrored[0].id, expected_run);
+            assert_eq!(
+                mirrored[0].metadata_json["lab"]["remote_job_id"],
+                job.id.to_string()
+            );
+            assert!(store
+                .get_run(other_run)
+                .expect("other run lookup")
+                .is_none());
+            assert_eq!(
+                store
+                    .get_artifact(artifact_id)
+                    .expect("artifact lookup")
+                    .expect("mirrored artifact")
+                    .run_id,
+                expected_run
+            );
+        });
+    }
 }

@@ -193,20 +193,6 @@ fn lab_artifact_metadata(
     Value::Object(object)
 }
 
-pub(super) fn remote_run_matches_job_window(summary: &Value, job: &Job) -> bool {
-    let Some(started_at) = summary.get("started_at").and_then(Value::as_str) else {
-        return false;
-    };
-    let Ok(started_at) = chrono::DateTime::parse_from_rfc3339(started_at) else {
-        return false;
-    };
-    let started_ms = started_at.timestamp_millis();
-    let job_start = i64::try_from(job.started_at_ms.unwrap_or(job.created_at_ms)).unwrap_or(0);
-    let job_finish =
-        i64::try_from(job.finished_at_ms.unwrap_or(job.updated_at_ms)).unwrap_or(i64::MAX);
-    started_ms >= job_start.saturating_sub(5_000) && started_ms <= job_finish.saturating_add(5_000)
-}
-
 pub(super) fn explicit_observation_run_ids(result: &Value, job: &Job) -> Vec<String> {
     let mut ids = Vec::new();
     for pointer in [
@@ -250,5 +236,12 @@ pub(super) fn explicit_observation_run_ids(result: &Value, job: &Job) -> Vec<Str
             }
         }
     }
+    push_unique_string(
+        &mut ids,
+        job.runner_job_projection
+            .as_ref()
+            .and_then(|projection| projection.lifecycle.as_ref())
+            .and_then(|lifecycle| lifecycle.durable_run_id.as_deref()),
+    );
     ids
 }
