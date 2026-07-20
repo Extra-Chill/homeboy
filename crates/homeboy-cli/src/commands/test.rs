@@ -380,6 +380,7 @@ fn finish_test_observation(
         RunStatus::Fail
     };
     persist_test_findings(&observation, workflow);
+    persist_validation_progress_artifacts(&observation);
     observation.active.finish(status, Some(metadata));
 }
 
@@ -401,6 +402,36 @@ fn persist_test_findings(
         ));
     }
     observation.active.record_findings(&records);
+}
+
+fn persist_validation_progress_artifacts(observation: &TestObservation) {
+    let Some(run_dir) = observation
+        .run_dir
+        .as_ref()
+        .and_then(|path| RunDir::from_existing(path.clone()).ok())
+    else {
+        return;
+    };
+    let Some(ledger) =
+        homeboy::core::validation_progress::ValidationProgressLedger::read_from_run_dir(&run_dir)
+    else {
+        return;
+    };
+
+    for command in ledger.commands {
+        for (stream, artifact) in [
+            ("stdout", command.stdout_artifact),
+            ("stderr", command.stderr_artifact),
+        ] {
+            let Some(artifact) = artifact else {
+                continue;
+            };
+            observation.active.record_artifact_if_file(
+                &format!("validation_command_{}_{}", command.index + 1, stream),
+                &run_dir.path().join(artifact),
+            );
+        }
+    }
 }
 
 fn finish_test_drift_observation(
@@ -527,7 +558,7 @@ mod tests {
     use homeboy::core::component::Component;
     use homeboy::core::observation::{FindingListFilter, ObservationStore};
     use homeboy::refactor::plan::{build_test_refactor_request, TestSourceOptions};
-    use homeboy_extension::test::{TestAnalysisInput, TestFailure};
+    use homeboy_extension::test::{TestAnalysisInput, TestCounts, TestFailure};
     use std::fs;
     use std::path::PathBuf;
 
@@ -766,6 +797,75 @@ mod tests {
                 .expect("list cluster by fingerprint");
             assert_eq!(cluster.len(), 1);
             assert_eq!(cluster[0].metadata_json["record_kind"], "analysis_cluster");
+        });
+    }
+
+    #[test]
+    fn test_observation_attaches_validation_command_output() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let args = sample_args();
+            let run_dir = RunDir::create().expect("run dir");
+            let stdout = homeboy::core::validation_progress::write_command_artifact(
+                &run_dir,
+                0,
+                "stdout",
+                "test fixture::fails ... FAILED",
+            )
+            .expect("write stdout");
+            let stderr = homeboy::core::validation_progress::write_command_artifact(
+                &run_dir,
+                0,
+                "stderr",
+                "compiler diagnostic",
+            )
+            .expect("write stderr");
+            let mut progress = homeboy::core::validation_progress::ValidationProgressRecorder::new(
+                &run_dir,
+                None,
+                vec![("test runner".to_string(), "fixture".to_string())],
+            )
+            .expect("progress");
+            progress.start(0).expect("start");
+            progress.finish(0, 101, stdout, stderr).expect("finish");
+
+            let observation =
+                start_test_observation("homeboy", home.path(), &args, "test", Some(&run_dir))
+                    .expect("observation should start");
+            let run_id = observation.active.run_id().to_string();
+            finish_test_observation(
+                Some(observation),
+                &extension_test::TestRunWorkflowResult {
+                    status: "failed".to_string(),
+                    component: "homeboy".to_string(),
+                    exit_code: 101,
+                    test_counts: Some(TestCounts::new(0, 0, 0, 0)),
+                    findings: None,
+                    failure_analysis_input: None,
+                    coverage: None,
+                    baseline_comparison: None,
+                    analysis: None,
+                    autofix: None,
+                    hints: None,
+                    test_scope: None,
+                    summary: None,
+                    raw_output: None,
+                    extension_phase_timings: Vec::new(),
+                },
+            );
+
+            let artifacts = ObservationStore::open_initialized()
+                .expect("store")
+                .list_artifacts(&run_id)
+                .expect("list artifacts");
+            assert_eq!(artifacts.len(), 2);
+            assert!(artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "validation_command_1_stdout"));
+            assert!(artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "validation_command_1_stderr"));
+            run_dir.cleanup();
         });
     }
 
