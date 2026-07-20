@@ -24,7 +24,7 @@ use crate::agent_task_promotion::{
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
-    AgentTaskReviewTestStep,
+    AgentTaskReviewEvidence, AgentTaskReviewTestStep,
 };
 use homeboy_core::{config, Error, Result};
 
@@ -295,35 +295,7 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
                     .map(|record| record.lifecycle),
             },
             ai_used_for: options.ai_used_for.clone(),
-            review_dossier: AgentTaskReviewDossier {
-                schema: "homeboy/agent-task-review-dossier/v1".to_string(),
-                summary: options.title.clone(),
-                what_changed: vec!["Applies the verified agent-task candidate.".to_string()],
-                how_to_test: options
-                    .gates
-                    .verify
-                    .iter()
-                    .cloned()
-                    .map(|command| AgentTaskReviewTestStep {
-                        command,
-                        expected: "passes".to_string(),
-                    })
-                    .collect(),
-                compatibility: "No compatibility impact was recorded by the cook workflow."
-                    .to_string(),
-                evidence: Vec::new(),
-                ai_assistance: AgentTaskReviewAiAssistance {
-                    used: true,
-                    tool: options.ai_tool.clone(),
-                    model: options
-                        .ai_model
-                        .clone()
-                        .unwrap_or_else(|| "not recorded".to_string()),
-                    used_for: options.ai_used_for.clone(),
-                },
-                source_relationships: Vec::new(),
-                overrides: Vec::new(),
-            },
+            review_dossier: cook_review_dossier(options, promotion)?,
             review_profile: resolve_review_profile(&path)?,
             manual_finalization: false,
             protected_branches: options.protected_branches.clone(),
@@ -331,6 +303,107 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         backend,
     )?;
     Ok(serde_json::to_value(report).unwrap_or(Value::Null))
+}
+
+fn cook_review_dossier(
+    options: &AgentTaskCookServiceOptions,
+    promotion: &AgentTaskPromotionReport,
+) -> Result<AgentTaskReviewDossier> {
+    let changed_files = promotion.changed_files.join(", ");
+    let changed_file_count = promotion.changed_files.len();
+    let gate_count = promotion.gate_results.len();
+    let task_summary = options
+        .initial_plan
+        .tasks
+        .iter()
+        .find_map(|task| {
+            task.instructions
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+        })
+        .unwrap_or("No single-line task objective was retained in durable task evidence.");
+    let adoption = promotion.provenance.get("adoption").is_some();
+    let how_to_test = options
+        .gates
+        .verify
+        .iter()
+        .map(|command| {
+            let matched = promotion.deterministic_gates.iter().any(|gate| {
+                gate.status == crate::agent_task_gate::AgentTaskGateStatus::Succeeded
+                    && gate.visibility == homeboy_core::gate::HomeboyGateVisibility::Visible
+                    && gate.command.as_slice() == ["sh", "-lc", command]
+            });
+            if !matched {
+                return Err(Error::validation_invalid_argument(
+                    "verification",
+                    "Cook cannot publish a test command without matching successful visible durable gate evidence",
+                    Some(command.clone()),
+                    None,
+                ));
+            }
+            if !crate::agent_task_review_dossier::reviewer_runnable_command(command) {
+                return Err(Error::validation_invalid_argument(
+                    "verification",
+                    "Cook cannot publish a test command containing an operator-only reference",
+                    Some(command.clone()),
+                    None,
+                ));
+            }
+            Ok(AgentTaskReviewTestStep {
+                command: command.clone(),
+                expected: "passes as recorded by Cook's deterministic gate".to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(AgentTaskReviewDossier {
+        schema: "homeboy/agent-task-review-dossier/v1".to_string(),
+        summary: options.title.clone(),
+        what_changed: vec![
+            format!("Task objective: {task_summary}"),
+            format!(
+                "Verified candidate changed {changed_file_count} file(s): {changed_files}."
+            ),
+            format!(
+                "Cook completed {gate_count} deterministic verification gate(s) before finalization."
+            ),
+            if adoption {
+                "Candidate adoption provenance: an immutable candidate was adopted through the recorded Cook workflow and passed the recorded gates.".to_string()
+            } else {
+                "Candidate adoption provenance: the candidate was promoted from the recorded Cook task execution.".to_string()
+            },
+        ],
+        how_to_test,
+        compatibility: format!(
+            "Compatibility impact is unknown from durable task and promotion evidence. The candidate is bounded to {changed_file_count} changed file(s): {changed_files}; review externally consumed interfaces in this scope."
+        ),
+        evidence: vec![
+            AgentTaskReviewEvidence {
+                summary: format!(
+                    "Verified candidate scope: {changed_file_count} changed file(s): {changed_files}."
+                ),
+                url: None,
+            },
+            AgentTaskReviewEvidence {
+                summary: format!(
+                    "Cook deterministic verification: {gate_count} gate(s) completed green."
+                ),
+                url: None,
+            },
+        ],
+        ai_assistance: AgentTaskReviewAiAssistance {
+            used: true,
+            tool: options.ai_tool.clone(),
+            model: options
+                .ai_model
+                .clone()
+                .unwrap_or_else(|| "not recorded".to_string()),
+            used_for: options.ai_used_for.clone(),
+        },
+        source_relationships: Vec::new(),
+        overrides: Vec::new(),
+    })
 }
 
 pub(crate) fn cook_report(

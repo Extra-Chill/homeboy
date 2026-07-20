@@ -3126,6 +3126,7 @@ mod tests {
             "target": {"worktree": "homeboy@8058", "path": "/repo"},
             "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
             "changed_files": ["src/lib.rs"],
+            "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-lc", "cargo test --locked agent_task_promotion --lib"], "exit_code": 0}],
             "gate_results": [{"id": "gate", "name": "cargo test --locked agent_task_promotion --lib", "kind": "command", "status": "passed"}],
             "operator_notification": {"status": "completed", "message": "complete"},
             "verified_base": {"base": "main", "sha": "verified-base"},
@@ -3214,7 +3215,12 @@ mod tests {
                 "## AI assistance",
                 "openai/gpt-5.6-terra",
                 "Verified finalization base: main at verified-base",
-                "1. Run `cargo test --locked agent_task_promotion --lib`; expect passes.",
+                "Verified candidate changed 1 file(s): src/lib.rs.",
+                "Cook completed 1 deterministic verification gate(s) before finalization.",
+                "1. Run `cargo test --locked agent_task_promotion --lib`; expect passes as recorded by Cook's deterministic gate.",
+                "Compatibility impact is unknown from durable task and promotion evidence.",
+                "Verified candidate scope: 1 changed file(s): src/lib.rs.",
+                "Cook deterministic verification: 1 gate(s) completed green.",
             ] {
                 assert!(
                     backend.body.contains(section),
@@ -3235,6 +3241,53 @@ mod tests {
                 );
             }
             assert!(backend.committed && backend.pushed && backend.created);
+        });
+    }
+
+    #[test]
+    fn cook_rejects_test_claim_without_matching_durable_gate() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "cook-8058-mismatch";
+            let plan = AgentTaskPlan::new("cook-8058", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+            let options = AgentTaskCookServiceOptions {
+                cook_id: "cook-8058".to_string(),
+                initial_run_id: run_id.to_string(),
+                initial_plan: AgentTaskPlan::new("cook-8058", Vec::new()),
+                to_worktree: "homeboy@8058".to_string(),
+                source_worktree_path: None,
+                provider_command: None,
+                provider_invocation: None,
+                gates: VerifyGateOptions {
+                    verify: vec!["cargo test unsupported".to_string()],
+                    private_verify: Vec::new(),
+                    private_gate_reveal: Default::default(),
+                },
+                max_attempts: 1,
+                no_finalize: false,
+                base: "main".to_string(),
+                task_base_sha: Some("task-candidate-base".to_string()),
+                head: Some("fix/8058".to_string()),
+                title: "Close #8058".to_string(),
+                commit_message: "test".to_string(),
+                source_refs: Vec::new(),
+                protected_branches: vec!["main".to_string()],
+                ai_tool: "OpenCode".to_string(),
+                ai_model: Some("openai/gpt-5.6-terra".to_string()),
+                ai_used_for: "Drafted test coverage.".to_string(),
+                attempt_dispatcher: None,
+                harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
+            };
+            let error = finalize_cook_pr_with_backend(
+                &options,
+                run_id,
+                &promotion(run_id),
+                &mut CaptureBackend::default(),
+            )
+            .expect_err("unsupported test claim is rejected");
+            assert!(error
+                .message
+                .contains("matching successful visible durable gate"));
         });
     }
 
