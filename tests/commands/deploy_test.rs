@@ -2,6 +2,7 @@ use super::{resolve_multi_args, run, DeployArgs};
 use crate::cli_surface::{Cli, Commands};
 use crate::commands::GlobalArgs;
 use clap::Parser;
+use std::collections::BTreeMap;
 
 #[test]
 fn deploy_head_requires_apply_for_real_deploy() {
@@ -336,6 +337,7 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         requested_ref: None,
         tagged: false,
         resume: None,
+        exact_refs: BTreeMap::new(),
     };
     customize(&mut args);
     args

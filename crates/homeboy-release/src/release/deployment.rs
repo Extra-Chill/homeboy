@@ -256,6 +256,7 @@ fn release_deployment_config(
         allow_downgrade: false,
         head: false,
         requested_ref: None,
+        requested_refs: Default::default(),
         tagged: false,
         prepared_artifact: Some(prepared_artifact),
         resume_run_id: None,

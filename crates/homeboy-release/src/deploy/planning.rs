@@ -978,6 +978,7 @@ mod tests {
             allow_downgrade: false,
             head: false,
             requested_ref: None,
+            requested_refs: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

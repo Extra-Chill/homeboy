@@ -139,10 +139,16 @@ pub(super) fn deploy_components(
     // Resolve first, then materialize immutable detached worktrees for real deploys.
     // Dry-run resolves in `run_dry_run_mode` and never creates a worktree.
     let exact_ref_checkouts = if !config.dry_run {
-        if let Some(requested_ref) = config.requested_ref.as_deref() {
+        if config.has_requested_refs() {
             components
                 .iter()
-                .map(|component| ExactRefCheckout::materialize(component, requested_ref))
+                .filter_map(|component| {
+                    config
+                        .requested_ref_for(&component.id)
+                        .map(|requested_ref| {
+                            ExactRefCheckout::materialize(component, requested_ref)
+                        })
+                })
                 .collect::<Result<Vec<_>>>()?
         } else {
             Vec::new()
@@ -226,7 +232,7 @@ pub(super) fn deploy_components(
         .collect();
 
     // Sync: pull latest changes before deploying (unless --no-pull or --skip-build)
-    if config.requested_ref.is_none() && !config.no_pull && !config.skip_build {
+    if !config.has_requested_refs() && !config.no_pull && !config.skip_build {
         sync_components(&local_build_components)?;
     }
 
@@ -237,17 +243,17 @@ pub(super) fn deploy_components(
         warn_non_default_branch(&local_build_components, config)?;
     }
 
-    if config.requested_ref.is_none() && !config.force {
+    if !config.has_requested_refs() && !config.force {
         check_uncommitted_changes(&local_build_components)?;
     }
 
     // Check for HEAD-vs-tag gap before the tag checkout.
-    if config.requested_ref.is_none() && !config.head && !config.skip_build {
+    if !config.has_requested_refs() && !config.head && !config.skip_build {
         check_unreleased_commits(&local_build_components, config)?;
     }
 
     // Checkout the deploy tag for each component (unless --head or --skip-build).
-    let tag_checkouts = if config.requested_ref.is_none() && !config.head && !config.skip_build {
+    let tag_checkouts = if !config.has_requested_refs() && !config.head && !config.skip_build {
         checkout_deploy_tags(&local_build_components, config.expected_version.as_deref())?
     } else {
         Vec::new()
@@ -501,6 +507,7 @@ mod tests {
             allow_downgrade: false,
             head: false,
             requested_ref: None,
+            requested_refs: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

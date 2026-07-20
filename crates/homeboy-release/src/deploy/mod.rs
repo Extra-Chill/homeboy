@@ -262,6 +262,7 @@ pub fn run_multi(
             allow_downgrade: config.allow_downgrade,
             head: config.head,
             requested_ref: config.requested_ref.clone(),
+            requested_refs: config.requested_refs.clone(),
             tagged: config.tagged,
             prepared_artifact: config.prepared_artifact.clone(),
             resume_run_id: None,
@@ -421,15 +422,24 @@ fn lifecycle_identity(
     components.sort();
     let mut targets = project_ids.to_vec();
     targets.sort();
-    let source = config.requested_ref.clone().unwrap_or_else(|| {
-        if config.head {
-            "HEAD".to_string()
-        } else if let Some(artifact) = config.prepared_artifact.as_ref() {
-            format!("{}@{}", artifact.tag, artifact.source_commit)
-        } else {
-            "release-tag".to_string()
-        }
-    });
+    let source = if !config.requested_refs.is_empty() {
+        config
+            .requested_refs
+            .iter()
+            .map(|(component, reference)| format!("{component}@{reference}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    } else {
+        config.requested_ref.clone().unwrap_or_else(|| {
+            if config.head {
+                "HEAD".to_string()
+            } else if let Some(artifact) = config.prepared_artifact.as_ref() {
+                format!("{}@{}", artifact.tag, artifact.source_commit)
+            } else {
+                "release-tag".to_string()
+            }
+        })
+    };
     let artifact = config.prepared_artifact.as_ref().map_or_else(
         || {
             config
@@ -517,6 +527,7 @@ mod tests {
             allow_downgrade: false,
             head: false,
             requested_ref: None,
+            requested_refs: Default::default(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

@@ -117,7 +117,7 @@ pub(super) fn resolve_preflight_artifact_path(
             Some(Path::new(&component.local_path)),
         ) {
             Ok(path) => {
-                if config.requested_ref.is_some()
+                if config.requested_ref_for(&component.id).is_some()
                     && !path.starts_with(Path::new(&component.local_path))
                 {
                     return Err(failed_preflight_artifact_result(

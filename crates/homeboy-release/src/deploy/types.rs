@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::{fs, io::Read};
 
@@ -88,6 +89,8 @@ pub struct DeployConfig {
     pub head: bool,
     /// Resolve and deploy this Git ref from each component's declared repository.
     pub requested_ref: Option<String>,
+    /// Exact Git refs keyed by component ID for a multi-ref release set.
+    pub requested_refs: BTreeMap<String, String>,
     /// Force tag-based deploy, ignoring any reusable build artifacts
     pub tagged: bool,
     /// An immutable artifact prepared by an upstream workflow.
@@ -117,10 +120,24 @@ impl DeployConfig {
             allow_downgrade: false,
             head: true,
             requested_ref: None,
+            requested_refs: BTreeMap::new(),
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
         }
+    }
+}
+
+impl DeployConfig {
+    pub(crate) fn requested_ref_for(&self, component_id: &str) -> Option<&str> {
+        self.requested_refs
+            .get(component_id)
+            .map(String::as_str)
+            .or(self.requested_ref.as_deref())
+    }
+
+    pub(crate) fn has_requested_refs(&self) -> bool {
+        self.requested_ref.is_some() || !self.requested_refs.is_empty()
     }
 }
 

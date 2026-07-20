@@ -1,5 +1,6 @@
 use clap::Args;
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 use homeboy_release::deploy::{
     self, ComponentDeployResult, DeployConfig, DeploySummary, MultiDeploySummary,
@@ -97,6 +98,9 @@ pub struct DeployArgs {
     /// Resume a prior multi-project deploy run after exact identity validation
     #[arg(long, value_name = "RUN_ID")]
     pub resume: Option<String>,
+    // Populated only by a validated release-set manifest.
+    #[arg(skip)]
+    exact_refs: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -307,28 +311,13 @@ fn apply_release_set(
             None,
         ));
     }
-    let refs = active
-        .iter()
-        .map(|(entry, _)| entry.requested_ref.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    if refs.len() != 1 {
+    if args.requested_ref.is_some() {
         return Err(homeboy::core::Error::validation_invalid_argument(
-            "release_set",
-            "This deploy vertical requires one exact ref shared by every release-set component",
+            "ref",
+            "--ref cannot be combined with --release-set; the manifest owns each component ref",
             None,
             None,
         ));
-    }
-    let requested_ref = refs.into_iter().next().expect("non-empty release set");
-    if let Some(ref supplied) = args.requested_ref {
-        if supplied != requested_ref {
-            return Err(homeboy::core::Error::validation_invalid_argument(
-                "ref",
-                "--ref must match the release-set component ref",
-                None,
-                None,
-            ));
-        }
     }
     for (entry, component) in &active {
         let root = homeboy::core::git::get_git_root(&component.local_path).map_err(|_| {
@@ -356,7 +345,10 @@ fn apply_release_set(
     }
     args.component = Some(active.iter().map(|(entry, _)| entry.id.clone()).collect());
     args.component_ids.clear();
-    args.requested_ref = Some(requested_ref.to_string());
+    args.exact_refs = active
+        .iter()
+        .map(|(entry, _)| (entry.id.clone(), entry.requested_ref.clone()))
+        .collect();
     Ok(())
 }
 
@@ -484,6 +476,7 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         allow_downgrade: args.allow_downgrade,
         head: args.head,
         requested_ref: args.requested_ref.clone(),
+        requested_refs: args.exact_refs.clone(),
         tagged: args.tagged,
         prepared_artifact: None,
         resume_run_id: args.resume.clone(),
