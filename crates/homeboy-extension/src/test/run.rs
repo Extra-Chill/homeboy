@@ -315,7 +315,15 @@ fn run_main_test_workflow_inner(
         .transpose()?
         .flatten();
 
-    let failure_analysis_input = parse_failures_file(&failures_file)?;
+    // The failure sidecar is optional enrichment: it feeds `--analyze` findings
+    // and failure classification, but the primary execution result (success,
+    // counts, phase, raw output) is already resolved above. A malformed sidecar
+    // must not replace that primary result with a JSON parse error and mask the
+    // real underlying failure (e.g. a pre-test runtime/bind failure whose
+    // structured evidence the runner already reported). Degrade to no
+    // enrichment and attach the parse problem as a secondary diagnostic. (#8489)
+    let (failure_analysis_input, sidecar_diagnostic) =
+        parse_optional_failure_sidecar(&failures_file);
     let findings = failure_analysis_input
         .as_ref()
         .and_then(homeboy_findings_from_test_analysis_input);
@@ -374,6 +382,12 @@ fn run_main_test_workflow_inner(
     }
 
     let mut hints = Vec::new();
+
+    // Surface an ignored malformed failure sidecar as a secondary diagnostic so
+    // the degraded classification is visible without masking the primary result.
+    if let Some(diagnostic) = sidecar_diagnostic {
+        hints.push(diagnostic);
+    }
 
     if status == "failed" && args.passthrough_args.is_empty() {
         hints.push(format!(
@@ -523,6 +537,28 @@ fn run_main_test_workflow_inner(
         raw_output,
         extension_phase_timings: output.extension_phase_timings,
     })
+}
+
+/// Parse the optional failure sidecar, degrading gracefully on malformed data.
+///
+/// Returns the parsed enrichment input (or `None` when absent/unparseable) and
+/// an optional secondary diagnostic describing an ignored malformed sidecar. A
+/// malformed sidecar never propagates as an error: the primary execution result
+/// is already resolved and must not be replaced by a sidecar parse failure that
+/// masks the real underlying failure. (#8489)
+fn parse_optional_failure_sidecar(
+    failures_file: &Path,
+) -> (Option<TestAnalysisInput>, Option<String>) {
+    match parse_failures_file(failures_file) {
+        Ok(input) => (input, None),
+        Err(error) => {
+            let diagnostic = format!(
+                "Ignored a malformed test-failures sidecar ({}); the primary run result is preserved. Re-run with --analyze after the extension emits a valid sidecar for failure classification.",
+                error.message
+            );
+            (None, Some(diagnostic))
+        }
+    }
 }
 
 struct TestCheckoutGuard {
@@ -1069,6 +1105,68 @@ mod tests {
         assert_eq!(json["test_counts"]["failed"], 1);
         assert_eq!(json["failure"]["category"], "findings");
         assert_clean(repo.path());
+    }
+
+    #[test]
+    fn malformed_failure_sidecar_is_ignored_with_a_diagnostic_not_an_error() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let sidecar = temp.path().join("test-failures.json");
+        // A malformed failure object — here `source_line` is a string where a
+        // number is required — the kind of schema-invalid sidecar a failed
+        // recipe can emit. It must not abort the run and mask the real failure. (#8489)
+        std::fs::write(
+            &sidecar,
+            r#"[{"test_id":"bootstrap","message":"input.materialize timeout","error_type":"timeout","source_line":"not-a-number"}]"#,
+        )
+        .expect("write malformed sidecar");
+
+        let (input, diagnostic) = parse_optional_failure_sidecar(&sidecar);
+
+        assert!(
+            input.is_none(),
+            "a malformed sidecar must not yield enrichment input"
+        );
+        let diagnostic = diagnostic.expect("a malformed sidecar must attach a diagnostic");
+        assert!(
+            diagnostic.contains("malformed test-failures sidecar"),
+            "diagnostic: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("primary run result is preserved"),
+            "diagnostic: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn valid_failure_sidecar_parses_without_a_diagnostic() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let sidecar = temp.path().join("test-failures.json");
+        std::fs::write(
+            &sidecar,
+            r#"[{"test_id":"SomeTest::method","message":"assertion failed","error_type":"assertion"}]"#,
+        )
+        .expect("write valid sidecar");
+
+        let (input, diagnostic) = parse_optional_failure_sidecar(&sidecar);
+
+        let input = input.expect("a valid sidecar must yield enrichment input");
+        assert_eq!(input.failures.len(), 1);
+        assert_eq!(input.failures[0].error_type, "assertion");
+        assert!(
+            diagnostic.is_none(),
+            "a valid sidecar must not attach a diagnostic"
+        );
+    }
+
+    #[test]
+    fn absent_failure_sidecar_yields_no_input_and_no_diagnostic() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let sidecar = temp.path().join("does-not-exist.json");
+
+        let (input, diagnostic) = parse_optional_failure_sidecar(&sidecar);
+
+        assert!(input.is_none());
+        assert!(diagnostic.is_none());
     }
 
     #[test]
