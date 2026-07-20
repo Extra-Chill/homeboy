@@ -192,14 +192,7 @@ impl ObservationStore {
             .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let stored_path = persisted_artifact_path(run_id, &id, path)?;
-        let staged_path = stored_path.with_file_name(format!(
-            ".{}-{}.staging",
-            stored_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("artifact"),
-            Uuid::new_v4()
-        ));
+        let staged_path = staged_artifact_path(&stored_path, Uuid::new_v4());
         copy_artifact_file(path, &staged_path)?;
         let staged_metadata = fs::metadata(&staged_path).map_err(|error| {
             Error::internal_io(
@@ -1000,11 +993,18 @@ fn remote_projection_identity_matches(
         && existing.metadata_json == incoming.metadata_json
 }
 
+fn staged_artifact_path(stored_path: &Path, staging_id: Uuid) -> std::path::PathBuf {
+    // Keep sibling staging names well below common NAME_MAX limits regardless of
+    // the content-addressed final artifact name.
+    stored_path.with_file_name(format!(".artifact-{staging_id}.staging"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::observation::{ArtifactViewerLink, NewRunRecord};
     use crate::test_support::with_isolated_home;
+    use std::collections::BTreeSet;
 
     #[test]
     fn stable_artifact_id_publishes_copied_bytes_and_rejects_conflicts() {
@@ -1060,6 +1060,78 @@ mod tests {
                 fs::read(&first.path).expect("original persisted bytes"),
                 b"first bytes"
             );
+            let stored_directory = Path::new(&first.path).parent().expect("stored directory");
+            assert!(fs::read_dir(stored_directory)
+                .expect("stored directory entries")
+                .all(|entry| !entry
+                    .expect("stored directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".artifact-")));
+        });
+    }
+
+    #[test]
+    fn staging_paths_are_bounded_and_unique_for_long_final_names() {
+        let root = Path::new("/artifacts/run");
+        for final_name in ["a".repeat(240), "é".repeat(120)] {
+            let stored_path = root.join(final_name);
+            let staging_paths = [Uuid::from_u128(1), Uuid::from_u128(2)]
+                .into_iter()
+                .map(|staging_id| staged_artifact_path(&stored_path, staging_id))
+                .collect::<Vec<_>>();
+            let staging_names = staging_paths
+                .iter()
+                .map(|path| path.file_name().expect("staging file name").to_owned())
+                .collect::<BTreeSet<_>>();
+
+            assert_eq!(staging_names.len(), 2);
+            for staging_path in staging_paths {
+                assert_eq!(staging_path.parent(), Some(root));
+                assert!(staging_path
+                    .file_name()
+                    .expect("staging file name")
+                    .to_string_lossy()
+                    .starts_with(".artifact-"));
+                assert!(
+                    staging_path
+                        .file_name()
+                        .expect("staging file name")
+                        .to_string_lossy()
+                        .len()
+                        < 64
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn long_artifact_names_persist_without_expanding_staging_names() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("test").cwd_path(home.path()).build())
+                .expect("run");
+
+            for (index, name) in ["a".repeat(200), "é".repeat(100)].into_iter().enumerate() {
+                let source = home.path().join(name);
+                fs::write(&source, b"long filename artifact").expect("write source");
+                let artifact = store
+                    .record_artifact_with_id(
+                        &run.id,
+                        "evidence",
+                        &source,
+                        &format!("long-name-{index}"),
+                        serde_json::json!({}),
+                    )
+                    .expect("persist long-name artifact");
+
+                assert!(Path::new(&artifact.path).is_file());
+                assert_eq!(
+                    fs::read(&artifact.path).expect("persisted bytes"),
+                    b"long filename artifact"
+                );
+            }
         });
     }
 
