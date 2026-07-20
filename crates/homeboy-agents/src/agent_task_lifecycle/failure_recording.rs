@@ -242,15 +242,10 @@ pub fn record_pre_dispatch_failure(
             workspace: AgentTaskWorkspace {
                 mode: AgentTaskWorkspaceMode::Existing,
                 root: Some(failure.remote_workspace.to_string()),
-                slug: None,
                 kind: Some("lab-offload".to_string()),
-                component_id: None,
-                branch: None,
-                base_ref: None,
-                task_url: None,
                 cleanup: Some("preserve".to_string()),
-                attempt: None,
                 materialization: metadata.clone(),
+                ..Default::default()
             },
             component_contracts: Vec::new(),
             policy: AgentTaskPolicy::default(),
