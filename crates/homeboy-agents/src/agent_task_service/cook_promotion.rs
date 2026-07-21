@@ -19,8 +19,8 @@ use crate::agent_task_finalization::{
 };
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
-    promote_with_checkpoint, AgentTaskPromotionOptions, AgentTaskPromotionReport,
-    AgentTaskPromotionStatus,
+    candidate_fingerprint, promote_with_checkpoint, resume_promoted_patch,
+    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -176,6 +176,303 @@ pub(crate) fn attempt_needs_execution(run_id: &str) -> bool {
             )
         })
         .unwrap_or(true)
+}
+
+pub(crate) fn is_moving_base_finalization_error(error: &Error) -> bool {
+    error.code == homeboy_core::ErrorCode::ValidationInvalidArgument
+        && error
+            .message
+            .contains("HEAD is behind or diverged from resolved base")
+}
+
+/// A controller-only continuation for a candidate whose declared destination
+/// base advanced after its original deterministic gates completed green.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MovingBaseCookRecovery {
+    pub schema: String,
+    pub cook_id: String,
+    pub run_id: String,
+    pub promotion: AgentTaskPromotionReport,
+    pub prior_verified_base: String,
+    pub passed_gates: Value,
+    pub blocker: String,
+    pub continuation: String,
+    #[serde(default)]
+    pub base_movements: u32,
+}
+
+pub(crate) fn moving_base_recovery_for_run(run_id: &str) -> Result<Option<MovingBaseCookRecovery>> {
+    agent_task_lifecycle::status(run_id)?
+        .metadata
+        .get("cook_moving_base_recovery")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "cook_moving_base_recovery",
+                format!("invalid durable moving-base recovery: {error}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })
+}
+
+pub(crate) fn next_moving_base_recovery(
+    mut recovery: MovingBaseCookRecovery,
+    blocker: String,
+) -> MovingBaseCookRecovery {
+    recovery.base_movements = recovery.base_movements.saturating_add(1);
+    // The exact authenticated destination changed outside this controller. It
+    // is not a moving-base retry; retain the proof but never retry or rebase it.
+    if blocker.contains("differs from the exact promoted candidate") {
+        recovery.base_movements = 3;
+    }
+    recovery.blocker = blocker;
+    recovery
+}
+
+pub(crate) fn moving_base_recovery_from_promotion(
+    cook_id: &str,
+    run_id: &str,
+    promotion: AgentTaskPromotionReport,
+) -> MovingBaseCookRecovery {
+    MovingBaseCookRecovery {
+        schema: "homeboy/agent-task-cook-moving-base-recovery/v1".to_string(),
+        cook_id: cook_id.to_string(),
+        run_id: run_id.to_string(),
+        prior_verified_base: promotion
+            .verified_base
+            .as_ref()
+            .map(|base| base.sha.clone())
+            .unwrap_or_default(),
+        passed_gates: serde_json::to_value(&promotion.gate_results).unwrap_or(Value::Null),
+        promotion,
+        blocker: String::new(),
+        continuation: "homeboy agent-task run-next".to_string(),
+        base_movements: 0,
+    }
+}
+
+pub(crate) fn refreshed_moving_base_recovery(
+    mut recovery: MovingBaseCookRecovery,
+    promotion: &AgentTaskPromotionReport,
+) -> MovingBaseCookRecovery {
+    recovery.prior_verified_base = promotion
+        .verified_base
+        .as_ref()
+        .map(|base| base.sha.clone())
+        .unwrap_or_default();
+    recovery.passed_gates = serde_json::to_value(&promotion.gate_results).unwrap_or(Value::Null);
+    recovery.promotion = promotion.clone();
+    recovery
+}
+
+pub(crate) fn moving_base_recovery_report(
+    cook_id: String,
+    attempts: Vec<AgentTaskCookAttemptReport>,
+    recovery: MovingBaseCookRecovery,
+    continuation_queued: bool,
+) -> AgentTaskRunResult<AgentTaskCookReport> {
+    let stop_reason = if recovery.base_movements >= 3 {
+        Some(format!("moving-base recovery exhausted after {} refreshed base observations: {}; inspect the retained recovery evidence and reconcile the destination before retrying", recovery.base_movements, recovery.blocker))
+    } else if !continuation_queued {
+        Some(format!(
+            "moving-base recovery stopped: {}; inspect the retained recovery evidence before retrying",
+            recovery.blocker
+        ))
+    } else {
+        Some(format!(
+            "{}; continuation is queued without provider dispatch: {}",
+            recovery.blocker, recovery.continuation
+        ))
+    };
+    let mut report = cook_report(
+        cook_id,
+        "candidate_recoverable",
+        attempts,
+        None,
+        stop_reason,
+        1,
+    );
+    report.value.moving_base_recovery = Some(recovery);
+    report
+}
+
+/// Continue only the controller-owned half of a green Cook: authenticate the
+/// original promoted candidate, pin a fresh destination base, rebase it, then
+/// rebuild promotion/gate proof without returning to a provider.
+pub(crate) fn recover_moving_base_cook_candidate(
+    options: &AgentTaskCookServiceOptions,
+    recovery: &MovingBaseCookRecovery,
+) -> Result<AgentTaskPromotionReport> {
+    if recovery.base_movements >= 3 {
+        return Err(Error::validation_invalid_argument("base", "moving-base recovery budget is exhausted; inspect the retained recovery evidence before retrying", None, None));
+    }
+    let path = recovery
+        .promotion
+        .provenance
+        .get("worktree_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion.provenance.worktree_path",
+                "moving-base recovery requires the authenticated promotion destination",
+                None,
+                None,
+            )
+        })?;
+    if recovery.promotion.status != AgentTaskPromotionStatus::Applied {
+        return Err(Error::validation_invalid_argument(
+            "promotion",
+            "moving-base recovery requires an applied promotion with green gates",
+            None,
+            None,
+        ));
+    }
+    let expected = recovery
+        .promotion
+        .provenance
+        .get("candidate")
+        .cloned()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion.provenance.candidate",
+                "moving-base recovery requires the exact promoted candidate fingerprint",
+                None,
+                None,
+            )
+        })?;
+    let expected = serde_json::from_value(expected).map_err(|_| {
+        Error::validation_invalid_argument(
+            "promotion.provenance.candidate",
+            "moving-base recovery candidate fingerprint is invalid",
+            None,
+            None,
+        )
+    })?;
+    if candidate_fingerprint(path)? != expected {
+        return Err(Error::validation_invalid_argument("path", "moving-base recovery destination differs from the exact promoted candidate; refusing to rebase divergent content", Some(path.to_string()), None));
+    }
+    let fresh_base = observe_and_fetch_base(path, &options.base)?;
+    let dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !dirty.status.success() {
+        return Err(Error::git_command_failed(
+            "could not inspect moving-base recovery destination".to_string(),
+        ));
+    }
+    if !dirty.stdout.is_empty() {
+        let add = std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(path)
+            .output()
+            .map_err(|error| Error::git_command_failed(error.to_string()))?;
+        if !add.status.success() {
+            return Err(Error::git_command_failed(
+                String::from_utf8_lossy(&add.stderr).trim().to_string(),
+            ));
+        }
+        let commit = homeboy_core::git::commit_at(
+            None,
+            Some(&options.commit_message),
+            homeboy_core::git::CommitOptions::default(),
+            Some(path),
+        )?;
+        if !commit.success {
+            return Err(Error::git_command_failed(commit.stderr));
+        }
+    }
+    let rebase = std::process::Command::new("git")
+        .args(["rebase", &fresh_base])
+        .current_dir(path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !rebase.status.success() {
+        let _ = std::process::Command::new("git")
+            .args(["rebase", "--abort"])
+            .current_dir(path)
+            .output();
+        return Err(Error::validation_invalid_argument("base", format!("moving-base recovery rebase onto `{fresh_base}` failed; destination was left unchanged: {}", String::from_utf8_lossy(&rebase.stderr).trim()), None, None));
+    }
+    let mut checkpoint = serde_json::to_value(&recovery.promotion)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    checkpoint["status"] = serde_json::json!("verification_pending");
+    checkpoint["verified_base"] = serde_json::json!({ "base": options.base, "sha": fresh_base });
+    checkpoint["provenance"]["candidate"] = serde_json::to_value(candidate_fingerprint(path)?)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    checkpoint["provenance"]["resume_inputs"] = serde_json::json!({ "base_ref": options.base, "task_base_sha": options.task_base_sha, "candidate_ref": null });
+    let (source, source_path) = promotion_source(&recovery.run_id)?;
+    let refreshed = resume_promoted_patch(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some(recovery.run_id.clone()),
+            source_path,
+            source_worktree_path: options.source_worktree_path.clone(),
+            base_ref: Some(options.base.clone()),
+            task_base_sha: options.task_base_sha.clone(),
+            candidate_ref: None,
+            to_worktree: options.to_worktree.clone(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: options.gates.clone(),
+            provider_command: options.provider_command.clone(),
+            provider_invocation: options.provider_invocation.clone(),
+        },
+        std::path::Path::new(path),
+        &checkpoint,
+    )?;
+    Ok(refreshed)
+}
+
+fn observe_and_fetch_base(path: &str, base: &str) -> Result<String> {
+    let observed = std::process::Command::new("git")
+        .args([
+            "ls-remote",
+            "--heads",
+            "origin",
+            &format!("refs/heads/{base}"),
+        ])
+        .current_dir(path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    let sha = String::from_utf8_lossy(&observed.stdout)
+        .split_whitespace()
+        .next()
+        .filter(|sha| !sha.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "base",
+                format!("could not observe destination base `{base}` for moving-base recovery"),
+                None,
+                None,
+            )
+        })?
+        .to_string();
+    let fetched = std::process::Command::new("git")
+        .args([
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "origin",
+            &sha,
+        ])
+        .current_dir(path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !fetched.status.success() {
+        return Err(Error::validation_invalid_argument(
+            "base",
+            format!("could not materialize refreshed destination base `{base}` at {sha}"),
+            None,
+            None,
+        ));
+    }
+    Ok(sha)
 }
 
 /// Finalization publishes controller-owned state. Persist its completed report
@@ -438,6 +735,7 @@ pub(crate) fn cook_report(
             stop_reason,
             terminal_phase: None,
             terminal_failure_classification: None,
+            moving_base_recovery: None,
         },
         exit_code,
     }

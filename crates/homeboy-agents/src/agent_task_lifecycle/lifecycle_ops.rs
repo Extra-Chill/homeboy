@@ -2746,3 +2746,44 @@ pub fn record_cook_finalization(run_id: &str, finalization: Value) -> Result<Age
         None => store::read_record(&run_id),
     }
 }
+
+/// Checkpoint controller-owned recovery after a promoted, green candidate loses
+/// its publication base. The terminal provider result remains untouched.
+pub fn record_cook_moving_base_recovery(
+    run_id: &str,
+    recovery: Value,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        if record.metadata.get("cook_moving_base_recovery") == Some(&recovery) {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        record
+            .ensure_metadata_object()
+            .insert("cook_moving_base_recovery".to_string(), recovery.clone());
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
+pub fn clear_cook_moving_base_recovery(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        let Some(metadata) = record.metadata.as_object_mut() else {
+            return false;
+        };
+        if metadata.remove("cook_moving_base_recovery").is_none() {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
