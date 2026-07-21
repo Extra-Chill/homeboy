@@ -168,14 +168,14 @@ pub(super) fn exec_via_reverse_broker(
         // validate a runner snapshot; metadata-only binding leaves the typed
         // handoff pending and loses that identity at preacceptance (#9240).
         if !run_id_owns_generic_exec {
-            homeboy_agents::agent_task_lifecycle::record_detached_lab_run(
-                homeboy_agents::agent_task_lifecycle::DetachedLabRunRecord {
+            homeboy_agents::agent_task_lifecycle::bind_accepted_lab_runner_job(
+                &homeboy_core::lab_contract::RunnerJobIdentity::new(
                     run_id,
-                    runner_id: &runner.id,
-                    runner_job_id: &job.id.to_string(),
-                    remote_workspace: &cwd,
-                    remote_command: &command,
-                },
+                    &runner.id,
+                    job.id.to_string(),
+                ),
+                &cwd,
+                &command,
             )?;
         } else {
             homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(

@@ -199,14 +199,14 @@ pub(super) fn exec_via_daemon(
             // the controller record. Metadata-only binding leaves the typed
             // handoff pending and can expose a valid snapshot to validation with
             // no accepted controller job identity (#9240).
-            homeboy_agents::agent_task_lifecycle::record_detached_lab_run(
-                homeboy_agents::agent_task_lifecycle::DetachedLabRunRecord {
+            homeboy_agents::agent_task_lifecycle::bind_accepted_lab_runner_job(
+                &homeboy_core::lab_contract::RunnerJobIdentity::new(
                     run_id,
-                    runner_id: &runner.id,
-                    runner_job_id: &job.id.to_string(),
-                    remote_workspace: &cwd,
-                    remote_command: &command,
-                },
+                    &runner.id,
+                    job.id.to_string(),
+                ),
+                &cwd,
+                &command,
             )?;
         } else {
             homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(

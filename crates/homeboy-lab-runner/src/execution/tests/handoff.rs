@@ -647,6 +647,14 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
             run.metadata_json["lab"]["remote_job"]["id"].as_str(),
             Some(job_id)
         );
+        let controller_record = homeboy_agents::agent_task_lifecycle::status(stable_run_id)
+            .expect("accepted reverse-broker handoff remains durable");
+        assert!(controller_record.lab_handoff.is_some_and(|handoff| {
+            handoff.state
+                == homeboy_agents::agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
+                && handoff.runner_id == "lab"
+                && handoff.runner_job_id.as_deref() == Some(job_id)
+        }));
     });
 }
 
@@ -720,6 +728,11 @@ fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
             .expect("controller record remains observable after accepted handoff");
         assert_eq!(controller_record.runner_id(), Some("lab"));
         assert_eq!(controller_record.runner_job_id(), Some(job_id.as_str()));
+        assert!(controller_record.lab_handoff.is_some_and(|handoff| {
+            handoff.state
+                == homeboy_agents::agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
+                && handoff.runner_job_id.as_deref() == Some(job_id.as_str())
+        }));
         wait_for_path(&started, "blocked workload start");
         let client = Client::builder().no_proxy().build().expect("daemon client");
         let job = fetch_daemon_job(&client, &daemon_url, &job_id).expect("running daemon job");
