@@ -196,6 +196,19 @@ fn lab_handoff_run_plan_executes_with_runner_provenance_after_transport_is_consu
             "foreground-daemon-job",
         )
         .expect("foreground daemon binds its job before run-plan");
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+        ];
+        agent_task_lifecycle::record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
+            run_id: "lab-handoff-run-plan",
+            runner_id: "homeboy-lab",
+            runner_job_id: "foreground-daemon-job",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("foreground daemon accepts the Lab handoff before run-plan");
 
         let result = run_loaded_plan(
             test_plan(),
@@ -219,11 +232,12 @@ fn lab_handoff_run_plan_executes_with_runner_provenance_after_transport_is_consu
 
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.value.totals.succeeded, 1);
+        let record =
+            lifecycle_status("lab-handoff-run-plan").expect("completed runner-local record");
+        assert_eq!(record.runner_job_id(), Some("foreground-daemon-job"));
         assert_eq!(
-            lifecycle_status("lab-handoff-run-plan")
-                .expect("completed runner-local record")
-                .runner_job_id(),
-            Some("foreground-daemon-job")
+            record.lab_handoff.expect("accepted daemon handoff").state,
+            agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
         );
     });
 }

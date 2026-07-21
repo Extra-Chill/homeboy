@@ -388,6 +388,12 @@ where
             if let Some(runner_job_id) = existing.runner_job_id() {
                 record.metadata["runner_job_id"] = json!(runner_job_id);
             }
+            if existing.lab_handoff.as_ref().is_some_and(|handoff| {
+                handoff.state == AgentTaskLabHandoffState::Accepted
+                    && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
+            }) {
+                record.lab_handoff = existing.lab_handoff;
+            }
         }
     }
     store::write_record(&record)?;
