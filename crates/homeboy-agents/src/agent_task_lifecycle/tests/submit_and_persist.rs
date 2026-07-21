@@ -340,6 +340,12 @@ fn runner_exec_run_id_creates_generic_run_on_demand() {
 #[test]
 fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
     with_isolated_home(|_| {
+        let _runner = RunnerContinuationTestGuard::install(Box::new(IntentReplayProvider {
+            store: JobStore::default(),
+            submitted: Arc::new(Mutex::new(Vec::new())),
+            lookups: Arc::new(Mutex::new(Vec::new())),
+            fail_after_accept_once: Arc::new(Mutex::new(false)),
+        }));
         let command = vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
@@ -353,6 +359,11 @@ fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
             durable_plan: None,
         })
         .expect("controller proxy recorded before handoff");
+        record_lab_offload_submission_request(
+            "expired-handoff-late-acceptance",
+            &replay_request("expired-handoff-late-acceptance", &command),
+        )
+        .expect("persist complete pending submission request");
         rewrite_record_for_test("expired-handoff-late-acceptance", |record| {
             record
                 .lab_handoff
