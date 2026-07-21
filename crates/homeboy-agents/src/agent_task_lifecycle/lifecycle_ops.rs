@@ -1504,9 +1504,23 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
         handoff.state == AgentTaskLabHandoffState::Accepted
             && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
     }) {
-        if accepted.runner_id == input.runner_id
-            && accepted.runner_job_id.as_deref() == Some(input.runner_job_id)
-        {
+        // Idempotent re-acceptance: the incoming acceptance names the same
+        // run/runner/job as the already-accepted handoff. Route through the
+        // shared `RunnerJobIdentity` so this agrees with every other
+        // handoff-identity site rather than hand-rolling the tuple compare.
+        // Both identities are scoped to this run, so the run id is `record.run_id`
+        // on each side (the compare reduces to runner + job, as before).
+        let accepted_identity = homeboy_core::lab_contract::RunnerJobIdentity::new(
+            record.run_id.as_str(),
+            accepted.runner_id.as_str(),
+            accepted.runner_job_id.as_deref().unwrap_or_default(),
+        );
+        let incoming_identity = homeboy_core::lab_contract::RunnerJobIdentity::new(
+            record.run_id.as_str(),
+            input.runner_id,
+            input.runner_job_id,
+        );
+        if accepted_identity.matches(&incoming_identity) {
             return Ok(record);
         }
         return Err(Error::validation_invalid_argument(
