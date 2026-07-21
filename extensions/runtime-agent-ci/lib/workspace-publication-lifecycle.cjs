@@ -680,26 +680,36 @@ function evaluateFinalizationEvidence(policy, evidence) {
   if (!plainObject(policy)) {
     return withLifecycleGateResult('finalization_evidence', { enabled: false, success: true, checks: [] });
   }
+  const changedPublicContracts = Array.isArray(policy.changed_public_contracts) ? policy.changed_public_contracts : [];
   const requirements = Array.isArray(policy.required_evidence) ? policy.required_evidence : [];
   const failures = [];
+  if (changedPublicContracts.length === 0) {
+    failures.push('Finalization evidence policy requires at least one changed public contract');
+  }
+  for (const contract of changedPublicContracts) {
+    if (!plainObject(contract) || typeof contract.id !== 'string' || contract.id.trim() === '' || typeof contract.summary !== 'string' || contract.summary.trim() === '') {
+      failures.push('Each changed public contract requires a non-empty id and summary');
+    }
+  }
   for (const requirement of requirements) {
-    if (!plainObject(requirement) || typeof requirement.id !== 'string' || requirement.id.trim() === '') {
+    if (!plainObject(requirement) || typeof requirement.role !== 'string' || requirement.role.trim() === '') {
       failures.push('Finalization evidence policy contains an invalid required_evidence entry');
       continue;
     }
-    const ref = evidence.find((entry) => [entry.id, entry.name, entry.role, entry.evidence_id].includes(requirement.id));
+    const role = requirement.role.trim();
+    const ref = evidence.find((entry) => entry.role === role);
     if (!ref) {
-      failures.push(`Required finalization evidence is missing: ${requirement.id}`);
+      failures.push(`Required finalization evidence is missing: ${role}`);
       continue;
     }
     for (const field of Array.isArray(requirement.fields) ? requirement.fields : []) {
       const value = ref[field.name];
       if (typeof value !== 'string' || value.trim() === '' || (field.min_length && value.trim().length < field.min_length) || (Array.isArray(field.values) && !field.values.includes(value))) {
-        failures.push(`Finalization evidence ${requirement.id} has an invalid ${field.name}`);
+        failures.push(`Finalization evidence ${role} has an invalid ${field.name}`);
       }
     }
     if (requirement.reviewer_facing !== false && requirement.durable_url_required === true && !durableEvidenceUrl(ref.url || ref.uri || ref.href || ref.public_url || ref.publicUrl || '')) {
-      failures.push(`Reviewer-facing finalization evidence must use a durable non-local URL: ${requirement.id}`);
+      failures.push(`Reviewer-facing finalization evidence must use a durable non-local URL: ${role}`);
     }
   }
   return withLifecycleGateResult('finalization_evidence', {
@@ -710,6 +720,33 @@ function evaluateFinalizationEvidence(policy, evidence) {
     failures,
     error: failures.join('; '),
   });
+}
+
+function finalizationPublicContractArgs(policy, evidence) {
+  if (!plainObject(policy)) {
+    return [];
+  }
+  const evidenceByRole = new Map(evidence.map((entry) => [entry.role, entry]));
+  const compatibilityImpact = evidenceByRole.get('compatibility-impact');
+  const externalConsumerImpact = evidenceByRole.get('external-consumer-impact');
+  const externalUsage = evidenceByRole.get('external-usage');
+  const args = [];
+  for (const contract of policy.changed_public_contracts) {
+    args.push('--changed-public-contract', `${contract.id.trim()}=>${contract.summary.trim()}`);
+  }
+  args.push(
+    '--compatibility-impact', compatibilityImpact.statement.trim(),
+    '--external-consumer-impact', externalConsumerImpact.statement.trim(),
+    '--external-usage-status', externalUsage.status.trim(),
+    '--external-usage-source', externalUsage.source.trim(),
+    '--external-usage-limitations', externalUsage.limitations.trim(),
+    '--external-usage-url', evidenceUrl(externalUsage),
+  );
+  return args;
+}
+
+function evidenceUrl(ref) {
+  return ref.url || ref.uri || ref.href || ref.public_url || ref.publicUrl || '';
 }
 
 function durableEvidenceUrl(value) {
@@ -746,6 +783,9 @@ function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycl
   if (evidenceGate.enabled && !evidenceGate.success) {
     throw new Error(evidenceGate.error);
   }
+  const publicContractArgs = evidenceGate.enabled
+    ? finalizationPublicContractArgs(evidenceGate.policy, evidenceGate.evidence)
+    : [];
   const gateArgs = finalizationGateArgs({
     ...lifecycle,
     gate_results: [
@@ -765,7 +805,9 @@ function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycl
   const verificationCommands = [
     ...commandList(config, 'verification_commands').map((entry) => entry.command),
     ...(Array.isArray(evidenceGate.policy?.testing_instructions)
-      ? evidenceGate.policy.testing_instructions.map((instruction) => instruction?.command).filter((command) => typeof command === 'string' && command.trim() !== '')
+      ? evidenceGate.policy.testing_instructions
+        .filter((instruction, index) => Number.isInteger(instruction?.number) && instruction.number === index + 1)
+        .map((instruction) => instruction.command).filter((command) => typeof command === 'string' && command.trim() !== '')
       : []),
   ];
   const args = [
@@ -791,6 +833,7 @@ function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycl
   for (const command of verificationCommands) {
     args.push('--targeted-check-run', command);
   }
+  args.push(...publicContractArgs);
   for (const ref of config.source_refs || config.sourceRefs || []) {
     args.push('--source-ref', ref);
   }
@@ -1021,6 +1064,7 @@ module.exports = {
   changedFiles,
   evaluateSideEffectPolicy,
   evaluateFinalizationEvidence,
+  finalizationPublicContractArgs,
   evaluateWritablePaths: validateWritablePaths,
   evaluateWorkspaceContract,
   finalizeWorkspaceReview,

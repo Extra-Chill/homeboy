@@ -23,6 +23,16 @@ const {
   validateWritablePaths,
 } = require('../lib/workspace-publication-lifecycle.cjs');
 
+function optionValue(args, option) {
+  const index = args.indexOf(option);
+  assert.notEqual(index, -1, `Expected ${option} in finalization arguments`);
+  return args[index + 1];
+}
+
+function optionValues(args, option) {
+  return args.flatMap((argument, index) => argument === option ? [args[index + 1]] : []);
+}
+
 const writable = validateWritablePaths({ writable_paths: ['docs/**', 'README.md'] }, [
   './docs/generated.md',
   'README.md',
@@ -52,11 +62,13 @@ assert.deepEqual(
 );
 
 const finalizationEvidencePolicy = {
+  changed_public_contracts: [{ id: 'rest:/example/v1/items', summary: 'The item collection response changed.' }],
   required_evidence: [
-    { id: 'compatibility', reviewer_facing: true, durable_url_required: true, fields: [{ name: 'statement', min_length: 1 }, { name: 'external_consumers', min_length: 1 }] },
-    { id: 'usage-scan', reviewer_facing: true, durable_url_required: true, fields: [{ name: 'status', values: ['completed', 'unavailable_manual_review'] }, { name: 'source', min_length: 1 }, { name: 'limitations', min_length: 1 }] },
+    { role: 'compatibility-impact', reviewer_facing: true, durable_url_required: true, fields: [{ name: 'statement', min_length: 1 }] },
+    { role: 'external-consumer-impact', reviewer_facing: true, durable_url_required: true, fields: [{ name: 'statement', min_length: 1 }] },
+    { role: 'external-usage', reviewer_facing: true, durable_url_required: true, fields: [{ name: 'status', values: ['completed', 'unavailable_manual_review'] }, { name: 'source', min_length: 1 }, { name: 'limitations', min_length: 1 }] },
   ],
-  testing_instructions: [{ command: 'npm test -- compatibility' }],
+  testing_instructions: [{ number: 1, command: 'npm test -- public-contract-evidence' }],
 };
 
 const finalizationFixture = {
@@ -65,16 +77,21 @@ const finalizationFixture = {
 };
 assert.throws(
   () => finalizeWorkspaceReview({ finalization_evidence_policy: finalizationEvidencePolicy }, '/tmp', finalizationFixture.publication, finalizationFixture.delta, { scenario: { metadata: {} } }),
-  /Required finalization evidence is missing: compatibility/,
+  /Required finalization evidence is missing: compatibility-impact/,
 );
 assert.throws(
   () => finalizeWorkspaceReview({ finalization_evidence_policy: finalizationEvidencePolicy }, '/tmp', finalizationFixture.publication, finalizationFixture.delta, {
     scenario: { metadata: { finalization_evidence: [
-      { id: 'compatibility', statement: 'No external behavior changes.', external_consumers: 'Marketplace extensions.', url: 'file:///tmp/compatibility.md' },
-      { id: 'usage-scan', status: 'completed', source: 'Marketplace search', limitations: 'Keyword search only.', url: 'https://example.com/scan' },
+      { role: 'compatibility-impact', statement: 'No external behavior changes.', url: 'file:///tmp/compatibility.md' },
+      { role: 'external-consumer-impact', statement: 'Marketplace extensions.', url: 'https://example.com/consumers' },
+      { role: 'external-usage', status: 'completed', source: 'Marketplace search', limitations: 'Keyword search only.', url: 'https://example.com/scan' },
     ] } },
   }),
   /Reviewer-facing finalization evidence must use a durable non-local URL: compatibility/,
+);
+assert.throws(
+  () => finalizeWorkspaceReview({ finalization_evidence_policy: { ...finalizationEvidencePolicy, changed_public_contracts: [{ id: 'rest:/example/v1/items' }] } }, '/tmp', finalizationFixture.publication, finalizationFixture.delta, { scenario: { metadata: {} } }),
+  /Each changed public contract requires a non-empty id and summary/,
 );
 
 const templates = publicationTemplates({
@@ -222,8 +239,9 @@ try {
     metadata: {
       job_id: 'job-1',
       finalization_evidence: [
-        { id: 'compatibility', statement: 'No external behavior changes.', external_consumers: 'Marketplace extensions.', url: 'https://github.com/owner/repo/pull/1291#compatibility' },
-        { id: 'usage-scan', status: 'unavailable_manual_review', source: 'Marketplace API', limitations: 'The API was unavailable; manual review recorded in the PR.', url: 'https://github.com/owner/repo/pull/1291#usage-scan' },
+        { role: 'compatibility-impact', statement: 'No external behavior changes.', url: 'https://github.com/owner/repo/pull/1291#compatibility-impact' },
+        { role: 'external-consumer-impact', statement: 'Marketplace extensions.', url: 'https://github.com/owner/repo/pull/1291#external-consumer-impact' },
+        { role: 'external-usage', status: 'unavailable_manual_review', source: 'Marketplace API', limitations: 'The API was unavailable; manual review recorded in the PR.', url: 'https://github.com/owner/repo/pull/1291#external-usage' },
       ],
     },
   }, workspace, ['docs/generated.md'], {
@@ -263,8 +281,15 @@ try {
   assert.equal(finalizationCall.args.includes('--changed-file'), true);
   assert.equal(finalizationCall.args.includes('docs/generated.md'), true);
   assert.equal(finalizationCall.args.some((argument) => argument.startsWith('finalization_evidence=passed')), true);
-  assert.equal(finalizationCall.args.includes('npm test -- compatibility'), true);
-  assert.equal(finalizationCall.args.includes('https://github.com/owner/repo/pull/1291#usage-scan'), true);
+  assert.deepEqual(optionValues(finalizationCall.args, '--targeted-check-run'), ['npm test -- public-contract-evidence']);
+  assert.equal(finalizationCall.args.includes('https://github.com/owner/repo/pull/1291#external-usage'), true);
+  assert.deepEqual(optionValues(finalizationCall.args, '--changed-public-contract'), ['rest:/example/v1/items=>The item collection response changed.']);
+  assert.equal(optionValue(finalizationCall.args, '--compatibility-impact'), 'No external behavior changes.');
+  assert.equal(optionValue(finalizationCall.args, '--external-consumer-impact'), 'Marketplace extensions.');
+  assert.equal(optionValue(finalizationCall.args, '--external-usage-status'), 'unavailable_manual_review');
+  assert.equal(optionValue(finalizationCall.args, '--external-usage-source'), 'Marketplace API');
+  assert.equal(optionValue(finalizationCall.args, '--external-usage-limitations'), 'The API was unavailable; manual review recorded in the PR.');
+  assert.equal(optionValue(finalizationCall.args, '--external-usage-url'), 'https://github.com/owner/repo/pull/1291#external-usage');
   assert.equal(calls.some((call) => call.command === 'gh'), false);
   assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'checkout'), false);
   assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'reset'), false);

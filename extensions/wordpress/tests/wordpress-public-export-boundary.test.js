@@ -40,6 +40,9 @@ assert.equal(typeof wordpress.buildWordPressRuntimeSurfaceCoverageManifest, 'fun
 assert.equal(typeof wordpress.buildWordPressFuzzPlanFromSurfaces, 'function');
 assert.equal(typeof wordpress.discoverWooCommercePublicContracts, 'function');
 assert.equal(wordpress.WOOCOMMERCE_PUBLIC_CONTRACT_DISCOVERY_SCHEMA, 'homeboy/woocommerce-public-contract-discovery/v1');
+assert.equal(typeof wordpress.createHomeboyPublicContractEvidence, 'function');
+assert.equal(typeof wordpress.toFinalizationEvidencePolicy, 'function');
+assert.equal(wordpress.HOMEBOY_PUBLIC_CONTRACT_EVIDENCE_SCHEMA, 'homeboy/public-contract-evidence/v1');
 assert.equal(typeof wordpress.compileWordPressFuzzCampaign, 'function');
 assert.equal(typeof wordpress.runWordPressFuzzCampaign, 'function');
 assert.equal(typeof wordpress.validateWordPressFuzzCampaignArtifacts, 'function');

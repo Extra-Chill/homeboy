@@ -4,6 +4,10 @@
  * Internal dependencies
  */
 const { normalizeWordPressRuntimeSurfaceDiscovery } = require('./wordpress-runtime-surface-discovery');
+const {
+	createHomeboyPublicContractEvidence,
+	toFinalizationEvidencePolicy,
+} = require('./homeboy-public-contract-evidence-adapter');
 
 const WOOCOMMERCE_PUBLIC_CONTRACT_DISCOVERY_SCHEMA = 'homeboy/woocommerce-public-contract-discovery/v1';
 const WOOCOMMERCE_REVIEW_PROFILE = Object.freeze({
@@ -21,6 +25,10 @@ function discoverWooCommercePublicContracts(input = {}) {
 		.map((surface) => publicContract(surface))
 		.sort((left, right) => left.id.localeCompare(right.id));
 	const changedContracts = changedWooCommercePublicContracts(input, contracts);
+	const publicContractEvidence = createHomeboyPublicContractEvidence({
+		changed_public_contracts: changedContracts,
+		testing_instructions: input.testing_instructions,
+	});
 
 	return {
 		schema: WOOCOMMERCE_PUBLIC_CONTRACT_DISCOVERY_SCHEMA,
@@ -28,40 +36,23 @@ function discoverWooCommercePublicContracts(input = {}) {
 		compatibility,
 		contracts,
 		changed_contracts: changedContracts,
-		usage_evidence: {
+		external_usage: {
+			role: 'external-usage',
+			source: 'woocommerce-marketplace-extension-scan',
+			allowed_statuses: ['completed', 'unavailable_manual_review'],
 			review_profile: WOOCOMMERCE_REVIEW_PROFILE,
-			purpose: 'Validate the declared WooCommerce public contracts with the WordPress extension review profile.',
+			purpose: 'Scan WooCommerce marketplace and extension usage for the changed public contracts.',
 		},
-		finalization_evidence_policy: changedContracts.length > 0 ? buildWooCommerceCompatibilityEvidencePolicy() : null,
+		public_contract_evidence: publicContractEvidence,
+		finalization_evidence_policy: toFinalizationEvidencePolicy(publicContractEvidence),
 	};
 }
 
-function buildWooCommerceCompatibilityEvidencePolicy() {
-	return {
-		schema: 'homeboy/finalization-evidence-policy/v1',
-		required_evidence: [
-			{
-				id: 'woocommerce-backwards-compatibility-impact',
-				reviewer_facing: true,
-				durable_url_required: true,
-				fields: [{ name: 'statement', min_length: 1 }, { name: 'external_consumers', min_length: 1 }],
-			},
-			{
-				id: 'woocommerce-extension-usage-scan',
-				reviewer_facing: true,
-				durable_url_required: true,
-				fields: [
-					{ name: 'status', values: ['completed', 'unavailable_manual_review'] },
-					{ name: 'source', min_length: 1 },
-					{ name: 'limitations', min_length: 1 },
-				],
-			},
-		],
-		testing_instructions: [
-			{ command: 'homeboy build <component>' },
-			{ command: 'homeboy test <component> --ci-job wp-codebox-phpunit' },
-		],
-	};
+function buildWooCommerceCompatibilityEvidencePolicy(input = {}) {
+	return toFinalizationEvidencePolicy(createHomeboyPublicContractEvidence({
+		changed_public_contracts: [{ id: 'woocommerce-public-contract', summary: 'A WooCommerce public contract changed.' }],
+		testing_instructions: input.testing_instructions,
+	}));
 }
 
 function changedWooCommercePublicContracts(input, contracts) {
@@ -106,6 +97,7 @@ function publicContract(surface) {
 	const value = stringValue(surface.metadata.value);
 	return {
 		id: surface.id,
+		summary: `${surface.type}: ${value}`,
 		type: surface.type,
 		identifier: value,
 		workload: surface.workload,
