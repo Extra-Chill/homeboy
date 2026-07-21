@@ -791,6 +791,18 @@ fn detect_unused_params(functions: &[FunctionInfo], grammar: &Grammar) -> Vec<Un
                 continue;
             }
 
+            // Skip type-path segments misparsed as parameter names. When the
+            // grammar mis-captures a multi-line/generic signature, a crate/type
+            // path segment inside a type (e.g. `serde_json` in
+            // `inputs: impl IntoIterator<Item = (String, serde_json::Value)>`)
+            // can surface as a bogus "parameter". A real binding is followed by
+            // a single `:`; a path segment is followed by `::`. If `pname`
+            // appears as a `pname::` path segment in the raw params, it is a
+            // type fragment, not a binding — never flag it. (#unused-param-fp)
+            if is_type_path_segment(&f.params, pname) {
+                continue;
+            }
+
             // Skip params whose type hint is a grammar-declared framework
             // contract type. The parameter exists to satisfy a callback
             // signature, not because the function must use it (#1136).
@@ -815,6 +827,29 @@ fn detect_unused_params(functions: &[FunctionInfo], grammar: &Grammar) -> Vec<Un
     }
 
     unused
+}
+
+/// Whether `name` appears in `params` only as a type-path segment (`name::…`),
+/// i.e. it is a crate/module/type identifier inside a type rather than a real
+/// parameter binding. Real bindings are `name:` (single colon); path segments
+/// are `name::`. Used to discard grammar-misparse false positives where a type
+/// fragment surfaces as a bogus parameter name.
+fn is_type_path_segment(params: &str, name: &str) -> bool {
+    let needle = format!("{}::", name);
+    let mut from = 0;
+    while let Some(rel) = params[from..].find(&needle) {
+        let at = from + rel;
+        // Require a word boundary before `name` so `foo_bar::` doesn't match
+        // when looking for `bar`.
+        let boundary_ok = at == 0
+            || !params.as_bytes()[at - 1].is_ascii_alphanumeric()
+                && params.as_bytes()[at - 1] != b'_';
+        if boundary_ok {
+            return true;
+        }
+        from = at + needle.len();
+    }
+    false
 }
 
 /// A parameter with its (optional) type hint and its name.
