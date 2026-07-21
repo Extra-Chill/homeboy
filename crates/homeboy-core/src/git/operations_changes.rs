@@ -314,7 +314,12 @@ pub fn changes_at(
 
     let commits = match baseline.source {
         Some(BaselineSource::LastNCommits) => get_last_n_commits(&path, DEFAULT_COMMIT_LIMIT)?,
-        _ => get_commits_since_tag(&path, baseline.reference.as_deref())?,
+        _ => match component.as_ref() {
+            Some(component) => {
+                get_component_changes_since_tag(component, baseline.reference.as_deref())?
+            }
+            None => get_commits_since_tag(&path, baseline.reference.as_deref())?,
+        },
     };
 
     // Resolve changelog info if component has changelog configured

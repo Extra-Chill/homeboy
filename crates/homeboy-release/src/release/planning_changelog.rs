@@ -91,7 +91,7 @@ pub(super) fn generate_changelog_entries(
         .filter(|c| c.category.to_changelog_entry_type().is_some())
         .collect();
 
-    let entries = group_commits_for_changelog(&releasable);
+    let entries = group_commits_for_changelog(component, &releasable);
     let count: usize = entries.values().map(|v| v.len()).sum();
 
     homeboy_core::log_status!(
@@ -172,23 +172,9 @@ pub(super) fn ensure_changelog_initialized(component: &Component) -> Result<()> 
     Ok(())
 }
 
-/// Strip trailing PR/issue references like "(#123)" or "(#123, #456)" from text.
-fn strip_pr_reference(value: &str) -> String {
-    let trimmed = value.trim();
-    if let Some(pos) = trimmed.rfind('(') {
-        let after = &trimmed[pos..];
-        if after.ends_with(')')
-            && after[1..after.len() - 1]
-                .split(',')
-                .all(|part| part.trim().starts_with('#'))
-        {
-            return trimmed[..pos].trim().to_string();
-        }
-    }
-    trimmed.to_string()
-}
-
+/// Group component-scoped commits into reviewer-facing changelog sections.
 fn group_commits_for_changelog(
+    component: &Component,
     commits: &[git::CommitInfo],
 ) -> std::collections::HashMap<String, Vec<String>> {
     let mut entries_by_type: std::collections::HashMap<String, Vec<String>> =
@@ -196,7 +182,7 @@ fn group_commits_for_changelog(
 
     for commit in commits {
         if let Some(entry_type) = commit.category.to_changelog_entry_type() {
-            let message = strip_pr_reference(git::strip_conventional_prefix(&commit.subject));
+            let message = format_changelog_entry(component, commit);
             entries_by_type
                 .entry(entry_type.to_string())
                 .or_default()
@@ -216,7 +202,7 @@ fn group_commits_for_changelog(
                         | git::CommitCategory::Release
                 )
             })
-            .map(|c| strip_pr_reference(git::strip_conventional_prefix(&c.subject)))
+            .map(|c| format_changelog_entry(component, c))
             .unwrap_or_else(|| "Internal improvements".to_string());
 
         entries_by_type.insert("changed".to_string(), vec![fallback]);
@@ -225,11 +211,56 @@ fn group_commits_for_changelog(
     entries_by_type
 }
 
+/// Render the authoritative component change set for reviewer-facing release
+/// notes. Commit subjects retain their GitHub references as clickable links and
+/// are attributed to the commit author. A mixed commit is emitted once because
+/// the scoped git path query returns each matching commit only once.
+fn format_changelog_entry(component: &Component, commit: &git::CommitInfo) -> String {
+    let subject = git::strip_conventional_prefix(&commit.subject);
+    let subject = github_reference_links(component, &subject);
+    match commit_author(component, &commit.hash) {
+        Some(author) => format!("{} (by {})", subject, author),
+        None => subject,
+    }
+}
+
+fn commit_author(component: &Component, hash: &str) -> Option<String> {
+    let output =
+        git::execute_git_for_release(&component.local_path, &["show", "-s", "--format=%an", hash])
+            .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let author = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!author.is_empty()).then_some(author)
+}
+
+fn github_reference_links(component: &Component, subject: &str) -> String {
+    let remote = component.remote_url.clone().or_else(|| {
+        git::release_download::detect_remote_url(std::path::Path::new(&component.local_path))
+    });
+    let Some(remote) = remote else {
+        return subject.to_string();
+    };
+    let Some(repo) = git::release_download::parse_github_url(&remote) else {
+        return subject.to_string();
+    };
+    let reference = regex::Regex::new(r"#(\d+)").expect("valid GitHub reference regex");
+    reference
+        .replace_all(subject, |captures: &regex::Captures<'_>| {
+            format!(
+                "[#{}](https://{}/{}/{}/pull/{})",
+                &captures[1], repo.host, repo.owner, repo.repo, &captures[1]
+            )
+        })
+        .into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         build_changelog_plan, ensure_changelog_initialized, generate_changelog_entries,
-        group_commits_for_changelog, read_changelog_for_release, strip_pr_reference,
+        group_commits_for_changelog, read_changelog_for_release,
     };
     use crate::release::scope::ReleaseScope;
     use crate::release::types::ReleaseOptions;
@@ -273,6 +304,9 @@ mod tests {
     }
 
     fn commit_file(dir: &std::path::Path, name: &str, content: &str, message: &str) {
+        if let Some(parent) = dir.join(name).parent() {
+            std::fs::create_dir_all(parent).expect("create fixture parent");
+        }
         std::fs::write(dir.join(name), content).expect("write fixture file");
         run_git(dir, &["add", name]);
         run_git(dir, &["commit", "-q", "-m", message]);
@@ -411,23 +445,9 @@ mod tests {
         )
         .expect("changelog entries should generate");
 
-        assert_eq!(entries["added"], vec!["add release planner"]);
-    }
-
-    #[test]
-    fn test_strip_pr_reference() {
-        assert_eq!(strip_pr_reference("fix something (#526)"), "fix something");
         assert_eq!(
-            strip_pr_reference("feat: add feature (#123, #456)"),
-            "feat: add feature"
-        );
-        assert_eq!(
-            strip_pr_reference("no pr reference here"),
-            "no pr reference here"
-        );
-        assert_eq!(
-            strip_pr_reference("has parens (not a pr ref)"),
-            "has parens (not a pr ref)"
+            entries["added"],
+            vec!["add release planner (#2478) (by Homeboy Test)"]
         );
     }
 
@@ -444,7 +464,8 @@ mod tests {
             ),
         ];
 
-        let entries = group_commits_for_changelog(&commits);
+        let component = Component::default();
+        let entries = group_commits_for_changelog(&component, &commits);
         let added = &entries["added"];
         let fixed = &entries["fixed"];
 
@@ -468,12 +489,86 @@ mod tests {
             ),
         ];
 
-        let entries = group_commits_for_changelog(&commits);
+        let component = Component::default();
+        let entries = group_commits_for_changelog(&component, &commits);
         let added = &entries["added"];
         let fixed = &entries["fixed"];
 
-        assert_eq!(added[0], "agent-first scoping — Phase 1 schema");
-        assert_eq!(fixed[0], "rename $class param — fixes bootstrap crash");
+        assert_eq!(added[0], "agent-first scoping — Phase 1 schema (#738)");
+        assert_eq!(
+            fixed[0],
+            "rename $class param — fixes bootstrap crash (#711)"
+        );
+    }
+
+    #[test]
+    fn blocks_engine_shaped_changes_exclude_siblings_and_preserve_attribution() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["tag", "php-transformer-v0.2.6"]);
+        run_git(dir, &["config", "user.name", "PHP Author"]);
+        commit_file(
+            dir,
+            "figma-transformer/src/index.ts",
+            "figma",
+            "feat: figma-only change (#912)",
+        );
+        commit_file(
+            dir,
+            "php-transformer/src/index.php",
+            "php",
+            "fix: php-only change (#942)",
+        );
+        std::fs::write(dir.join("php-transformer/src/index.php"), "mixed").unwrap();
+        std::fs::write(dir.join("figma-transformer/src/index.ts"), "mixed").unwrap();
+        run_git(
+            dir,
+            &[
+                "add",
+                "php-transformer/src/index.php",
+                "figma-transformer/src/index.ts",
+            ],
+        );
+        run_git(
+            dir,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fix: shared transformer change (#943)",
+            ],
+        );
+
+        let component = Component {
+            id: "php-transformer".to_string(),
+            local_path: dir.join("php-transformer").to_string_lossy().to_string(),
+            remote_url: Some("https://github.com/Automattic/blocks-engine.git".to_string()),
+            ..Default::default()
+        };
+        let scope = ReleaseScope::resolve(&component, &component.id).unwrap();
+        let (_, commits) = scope.commits_since_latest_tag().unwrap();
+        let entries = group_commits_for_changelog(&component, &commits);
+        let fixed = &entries["fixed"];
+
+        assert_eq!(
+            fixed.len(),
+            2,
+            "mixed commits are emitted once per component release"
+        );
+        assert!(fixed.iter().all(|entry| !entry.contains("figma-only")));
+        assert!(fixed.iter().any(|entry| {
+            entry.contains("php-only change")
+                && entry.contains("PHP Author")
+                && entry.contains("https://github.com/Automattic/blocks-engine/pull/942")
+        }));
+        assert_eq!(
+            fixed
+                .iter()
+                .filter(|entry| entry.contains("shared transformer change"))
+                .count(),
+            1
+        );
     }
 
     #[test]

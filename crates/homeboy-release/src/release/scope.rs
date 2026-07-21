@@ -4,6 +4,7 @@ use homeboy_core::git;
 
 #[derive(Debug, Clone)]
 pub(super) struct ReleaseScope {
+    component: Component,
     pub git_root: String,
     pub component_path: String,
     pub path_prefix: String,
@@ -42,6 +43,7 @@ impl ReleaseScope {
         let tag_prefix = (!path_prefix.is_empty()).then(|| component_id.to_string());
 
         Ok(Self {
+            component: component.clone(),
             git_root,
             component_path: component.local_path.clone(),
             path_prefix,
@@ -76,12 +78,7 @@ impl ReleaseScope {
     pub fn commits_since_latest_tag(&self) -> Result<(Option<String>, Vec<git::CommitInfo>)> {
         git::fetch_tags(&self.git_root)?;
         let latest_tag = self.latest_tag()?;
-        let path_prefixes: Vec<&str> = self.path_prefixes.iter().map(String::as_str).collect();
-        let commits = git::get_commits_since_tag_for_paths(
-            &self.git_root,
-            latest_tag.as_deref(),
-            &path_prefixes,
-        )?;
+        let commits = git::get_component_changes_since_tag(&self.component, latest_tag.as_deref())?;
         Ok((latest_tag, commits))
     }
 }
