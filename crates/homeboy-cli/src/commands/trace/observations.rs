@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use homeboy::core::engine::run_dir::RunDir;
@@ -10,11 +11,29 @@ use extension_trace::resolve_declared_trace_artifact_path;
 pub(super) struct TraceArtifactObservationResult {
     pub missing_declared_artifacts: usize,
     pub invalid_declared_artifacts: usize,
+    pub persistence_failures: usize,
+    pub trace_results_path: Option<String>,
+    pub artifact_dir_path: Option<String>,
+    pub declared_artifact_paths: BTreeMap<String, String>,
 }
 
 impl TraceArtifactObservationResult {
     pub fn has_declared_artifact_failures(&self) -> bool {
         self.missing_declared_artifacts > 0 || self.invalid_declared_artifacts > 0
+    }
+
+    pub fn evidence_promoted(&self) -> bool {
+        self.trace_results_path.is_some()
+            && !self.has_declared_artifact_failures()
+            && self.persistence_failures == 0
+    }
+
+    pub fn rewrite_declared_artifact_paths(&self, results: &mut extension_trace::TraceResults) {
+        for artifact in &mut results.artifacts {
+            if let Some(path) = self.declared_artifact_paths.get(&artifact.path) {
+                artifact.path = path.clone();
+            }
+        }
     }
 }
 
@@ -27,15 +46,17 @@ pub(super) fn record_trace_artifacts(
     let mut observation_result = TraceArtifactObservationResult::default();
     let trace_results_path =
         run_dir.step_file(homeboy::core::engine::run_dir::files::TRACE_RESULTS);
-    record_artifact_if_file(store, run_id, "trace-results", &trace_results_path);
+    observation_result.trace_results_path =
+        record_artifact_if_file(store, run_id, "trace-results", &trace_results_path);
+    if trace_results_path.is_file() && observation_result.trace_results_path.is_none() {
+        observation_result.persistence_failures += 1;
+    }
     let artifact_dir = run_dir.path().join("artifacts");
-    let mut recorded_declared_directory = false;
     if let Some(results) = results {
         for artifact in &results.artifacts {
             if let Some(resolved) =
                 declared_trace_artifact_candidate(artifact, run_dir, &artifact_dir)
             {
-                let is_declared_directory = resolved.is_dir();
                 record_declared_artifact(
                     store,
                     run_id,
@@ -44,7 +65,6 @@ pub(super) fn record_trace_artifacts(
                     &resolved,
                     &mut observation_result,
                 );
-                recorded_declared_directory |= is_declared_directory;
             } else {
                 record_unresolved_declared_artifact(
                     store,
@@ -56,8 +76,11 @@ pub(super) fn record_trace_artifacts(
             }
         }
     }
-    if !recorded_declared_directory {
-        record_artifact_dir_if_non_empty(store, run_id, "trace-artifacts", &artifact_dir);
+    let artifact_dir_exists = artifact_dir.is_dir();
+    observation_result.artifact_dir_path =
+        record_artifact_dir(store, run_id, "trace-artifacts", &artifact_dir);
+    if artifact_dir_exists && observation_result.artifact_dir_path.is_none() {
+        observation_result.persistence_failures += 1;
     }
     observation_result
 }
@@ -84,26 +107,34 @@ fn declared_trace_artifact_candidate(
     Some(run_dir.path().join(relative))
 }
 
-fn record_artifact_if_file(store: &ObservationStore, run_id: &str, kind: &str, path: &Path) {
-    if path.is_file() {
-        let _ = store.record_artifact(run_id, kind, path);
-    }
-}
-
-fn record_artifact_dir_if_non_empty(
+fn record_artifact_if_file(
     store: &ObservationStore,
     run_id: &str,
     kind: &str,
     path: &Path,
-) {
-    if path.is_dir()
-        && std::fs::read_dir(path)
+) -> Option<String> {
+    if path.is_file() {
+        return store
+            .record_artifact(run_id, kind, path)
             .ok()
-            .and_then(|mut entries| entries.next())
-            .is_some()
-    {
-        let _ = store.record_directory_artifact(run_id, kind, path);
+            .map(|artifact| artifact.path);
     }
+    None
+}
+
+fn record_artifact_dir(
+    store: &ObservationStore,
+    run_id: &str,
+    kind: &str,
+    path: &Path,
+) -> Option<String> {
+    if path.is_dir() {
+        return store
+            .record_directory_artifact(run_id, kind, path)
+            .ok()
+            .map(|artifact| artifact.path);
+    }
+    None
 }
 
 fn record_declared_artifact(
@@ -174,21 +205,29 @@ fn record_declared_artifact(
         return;
     };
 
-    if let Err(error) = record_result {
-        result.invalid_declared_artifacts += 1;
-        record_declared_artifact_finding(
-            store,
-            run_id,
-            "trace.artifact.record_failed",
-            "error",
-            format!(
-                "trace result declared artifact '{}' at '{}' could not be persisted: {}",
-                artifact.label, artifact.path, error.message
-            ),
-            artifact,
-            run_root,
-            resolved,
-        );
+    match record_result {
+        Ok(record) => {
+            result
+                .declared_artifact_paths
+                .insert(artifact.path.clone(), record.path);
+        }
+        Err(error) => {
+            result.invalid_declared_artifacts += 1;
+            result.persistence_failures += 1;
+            record_declared_artifact_finding(
+                store,
+                run_id,
+                "trace.artifact.record_failed",
+                "error",
+                format!(
+                    "trace result declared artifact '{}' at '{}' could not be persisted: {}",
+                    artifact.label, artifact.path, error.message
+                ),
+                artifact,
+                run_root,
+                resolved,
+            );
+        }
     }
 }
 
@@ -319,6 +358,11 @@ mod tests {
                 )
                 .expect("run");
             let run_dir = RunDir::create().expect("run dir");
+            std::fs::write(
+                run_dir.step_file(homeboy::core::engine::run_dir::files::TRACE_RESULTS),
+                "{}",
+            )
+            .expect("trace results");
             let browser_dir = run_dir
                 .path()
                 .join("artifacts/provider-artifacts/runtime-abc/files/browser");
@@ -327,13 +371,14 @@ mod tests {
                 .expect("write network");
             std::fs::write(browser_dir.join("console.jsonl"), "{\"text\":\"ok\"}\n")
                 .expect("write console");
-            let results = sample_results(vec![TraceArtifact {
+            let mut results = sample_results(vec![TraceArtifact {
                 label: "Provider browser probe".to_string(),
                 path: "artifacts/provider-artifacts/runtime-abc/files/browser".to_string(),
                 kind: None,
             }]);
 
             let outcome = record_trace_artifacts(&store, &run.id, &run_dir, Some(&results));
+            outcome.rewrite_declared_artifact_paths(&mut results);
             let artifacts = store.list_artifacts(&run.id).expect("artifacts");
             let declared_artifact = artifacts
                 .iter()
@@ -343,7 +388,12 @@ mod tests {
                 .expect("declared trace artifact");
 
             assert!(!outcome.has_declared_artifact_failures());
+            assert!(outcome.evidence_promoted());
             let persisted = PathBuf::from(&declared_artifact.path);
+            assert_eq!(results.artifacts[0].path, declared_artifact.path);
+            let scratch_path = run_dir.path().to_path_buf();
+            run_dir.finish(true);
+            assert!(!scratch_path.exists());
             assert_eq!(
                 std::fs::read_to_string(persisted.join("network.jsonl")).expect("network"),
                 "{\"url\":\"/\"}\n"
@@ -352,7 +402,6 @@ mod tests {
                 std::fs::read_to_string(persisted.join("console.jsonl")).expect("console"),
                 "{\"text\":\"ok\"}\n"
             );
-            run_dir.cleanup();
         });
     }
 
@@ -394,7 +443,9 @@ mod tests {
                 missing_finding.metadata_json["declared_artifact"]["path"],
                 "artifacts/provider-artifacts/runtime-missing/files/browser/network.jsonl"
             );
-            run_dir.cleanup();
+            let scratch_path = run_dir.path().to_path_buf();
+            run_dir.finish(false);
+            assert!(scratch_path.exists());
         });
     }
 }

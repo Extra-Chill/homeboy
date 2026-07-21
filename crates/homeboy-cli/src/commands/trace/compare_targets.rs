@@ -522,11 +522,7 @@ impl TargetAggregateBuilder {
         if !passed {
             self.failure_count += 1;
         }
-        let artifact_path = execution
-            .run_dir
-            .step_file(homeboy::core::engine::run_dir::files::TRACE_RESULTS)
-            .to_string_lossy()
-            .to_string();
+        let artifact_path = execution.artifact_path();
         let mut seen_span_ids = BTreeSet::new();
         if let Some(results) = execution.workflow.results.as_ref() {
             for (metric, value) in &results.metrics {
@@ -577,6 +573,7 @@ impl TargetAggregateBuilder {
                     .as_ref()
                     .and_then(|results| results.failure.clone())
             });
+        execution.finish(passed);
         self.runs.push(extension_trace::TraceAggregateRunOutput {
             index,
             passed,

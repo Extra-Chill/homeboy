@@ -462,19 +462,27 @@ fn compare_adoption_gate_failures_to_base(
             )?;
             let command = gate.command.last().cloned().unwrap_or_default();
             let baseline_run_dir = homeboy_core::engine::run_dir::RunDir::create()?;
-            let baseline_runtime = homeboy_core::engine::invocation::InvocationGuard::acquire(
-                &baseline_run_dir,
-                &homeboy_core::engine::invocation::InvocationRequirements::default(),
-            )?;
-            let baseline = run_gate_command_with_timeout(
-                &baseline_path,
-                index + 1,
-                &command,
-                gate.visibility,
-                gate.reveal_policy,
-                &baseline_runtime.context().tmp_dir,
-                std::time::Duration::from_secs(5 * 60),
-            )?;
+            let baseline = match (|| {
+                let baseline_runtime = homeboy_core::engine::invocation::InvocationGuard::acquire(
+                    &baseline_run_dir,
+                    &homeboy_core::engine::invocation::InvocationRequirements::default(),
+                )?;
+                run_gate_command_with_timeout(
+                    &baseline_path,
+                    index + 1,
+                    &command,
+                    gate.visibility,
+                    gate.reveal_policy,
+                    &baseline_runtime.context().tmp_dir,
+                    std::time::Duration::from_secs(5 * 60),
+                )
+            })() {
+                Ok(baseline) => baseline,
+                Err(error) => {
+                    baseline_run_dir.finish(false);
+                    return Err(error);
+                }
+            };
             let candidate_fingerprint = failure_fingerprint(&gate.stdout, &gate.stderr);
             let baseline_fingerprint = failure_fingerprint(&baseline.stdout, &baseline.stderr);
             let matches = baseline.status == AgentTaskGateStatus::Failed
@@ -489,6 +497,7 @@ fn compare_adoption_gate_failures_to_base(
             if matches {
                 gate.accept_inherited_failure();
             }
+            baseline_run_dir.finish(true);
         }
         Ok(all_failures_inherited)
     })();

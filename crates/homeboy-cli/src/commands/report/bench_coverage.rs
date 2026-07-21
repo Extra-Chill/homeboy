@@ -4,7 +4,9 @@ use serde::Serialize;
 use homeboy::core::component::{self, Component};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy_extension::bench::{run_bench_list_workflow, BenchListWorkflowArgs, BenchScenario};
+use homeboy_extension::bench::{
+    run_bench_list_workflow, BenchListWorkflowArgs, BenchListWorkflowResult, BenchScenario,
+};
 use homeboy_extension::{resolve_extension_for_capability, ExtensionCapability};
 
 use crate::commands::escape_markdown_table_cell;
@@ -148,19 +150,25 @@ fn component_report(
         &run_dir,
     );
 
+    Ok(finish_component_report(component, &run_dir, list))
+}
+
+fn finish_component_report(
+    component: &Component,
+    run_dir: &RunDir,
+    list: homeboy::core::Result<BenchListWorkflowResult>,
+) -> ComponentBenchCoverage {
     let list = match list {
         Ok(list) => list,
         Err(error) => {
-            return Ok(empty_capability_error(component, error));
+            run_dir.finish(false);
+            return empty_capability_error(component, error);
         }
     };
 
-    Ok(build_component_report(
-        component.id.clone(),
-        true,
-        &list.scenarios,
-        None,
-    ))
+    let report = build_component_report(component.id.clone(), true, &list.scenarios, None);
+    run_dir.finish(true);
+    report
 }
 
 fn empty_capability_error(
@@ -439,5 +447,43 @@ mod tests {
         let markdown = render_markdown(&report);
         assert!(markdown.contains("`audit-self`"));
         assert!(markdown.contains("| `lint` | no | - |"));
+    }
+
+    #[test]
+    fn component_report_disposes_success_and_retains_workflow_errors() {
+        crate::test_support::with_isolated_home(|_| {
+            let component =
+                Component::new("fixture".to_string(), ".".to_string(), String::new(), None);
+            let success_run = RunDir::create().expect("success run");
+            let success_path = success_run.path().to_path_buf();
+            let report = finish_component_report(
+                &component,
+                &success_run,
+                Ok(BenchListWorkflowResult {
+                    component: "fixture".to_string(),
+                    component_id: "fixture".to_string(),
+                    scenarios: vec![scenario("audit-self")],
+                    count: 1,
+                    profiles: Vec::new(),
+                    hints: Vec::new(),
+                    rig_package: None,
+                }),
+            );
+            assert_eq!(report.scenarios.len(), 1);
+            assert!(!success_path.exists());
+
+            let failed_run = RunDir::create().expect("failed run");
+            let failed_path = failed_run.path().to_path_buf();
+            let report = finish_component_report(
+                &component,
+                &failed_run,
+                Err(homeboy::core::Error::internal_io(
+                    "bench list failed".to_string(),
+                    None,
+                )),
+            );
+            assert!(report.error.is_some());
+            assert!(failed_path.exists());
+        });
     }
 }
