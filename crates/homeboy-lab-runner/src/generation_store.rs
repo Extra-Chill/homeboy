@@ -434,6 +434,9 @@ pub(crate) fn clear(runner_id: &str) -> Result<()> {
 }
 
 trait GenerationEndpointOperations {
+    /// Terminal linked handoffs can survive a controller restart in a daemon's
+    /// job store. Settle them before treating its active count as ownership.
+    fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool;
     fn active_jobs(&self, session: &RunnerSession) -> Option<u64>;
     fn stop(&self, session: &RunnerSession) -> bool;
     fn terminate_tunnel(&self, pid: u32);
@@ -444,6 +447,19 @@ struct HttpGenerationEndpointOperations {
 }
 
 impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
+    fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool {
+        let Some(local_url) = session.local_url.as_deref() else {
+            return false;
+        };
+        self.client
+            .post(format!(
+                "{}/jobs/reconcile-terminal",
+                local_url.trim_end_matches('/')
+            ))
+            .send()
+            .is_ok_and(|response| response.status().is_success())
+    }
+
     fn active_jobs(&self, session: &RunnerSession) -> Option<u64> {
         let local_url = session.local_url.as_deref()?;
         let health = self
@@ -481,8 +497,9 @@ impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
 }
 
 /// Reconciliation is intentionally fail-closed: an unreachable draining
-/// endpoint remains recorded and routable. Only its own health response may
-/// authorize the zero-job lease-bound stop.
+/// endpoint remains recorded and routable. Each reachable draining daemon first
+/// settles terminal durable handoffs, then its own health response becomes the
+/// authoritative count for that generation.
 pub(crate) fn reconcile(runner_id: &str, legacy: Option<&RunnerSession>) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
@@ -506,7 +523,7 @@ fn reconcile_with(
     let Some(generations) = read(runner_id, legacy)? else {
         return Ok(());
     };
-    let zero_job_generations = generations
+    let observed_generations = generations
         .generations
         .iter()
         .filter_map(|(generation, entry)| {
@@ -514,7 +531,13 @@ fn reconcile_with(
                 .then_some((generation.clone(), entry.endpoint.clone()))
         })
         .filter_map(|(generation, session)| {
-            (operations.active_jobs(&session) == Some(0)).then_some((generation, session))
+            if !operations.reconcile_terminal_jobs(&session) {
+                return None;
+            }
+            operations
+                .active_jobs(&session)
+                .and_then(|active_jobs| usize::try_from(active_jobs).ok())
+                .map(|active_jobs| (generation, session, active_jobs))
         })
         .collect::<Vec<_>>();
     // Settle authoritative zero-job observations under the registry lock. The
@@ -523,25 +546,22 @@ fn reconcile_with(
         let Some(mut generations) = read_locked(runner_id, legacy)? else {
             return Ok(Vec::new());
         };
-        for (generation, _) in &zero_job_generations {
-            let draining = generations
-                .generations
-                .get(generation)
-                .is_some_and(|entry| entry.drain_state == crate::RollingDrainState::Draining);
-            if draining {
-                generations
-                    .generations
-                    .get_mut(generation)
-                    .expect("generation was checked")
-                    .active_jobs = 0;
-                generations
-                    .job_owners
-                    .retain(|_, owner| owner != generation);
+        for (generation, _, active_jobs) in &observed_generations {
+            if let Some(entry) = generations.generations.get_mut(generation) {
+                if entry.drain_state != crate::RollingDrainState::Draining {
+                    continue;
+                }
+                entry.active_jobs = *active_jobs;
+                if *active_jobs == 0 {
+                    generations
+                        .job_owners
+                        .retain(|_, owner| owner != generation);
+                }
             }
         }
-        let stoppable = zero_job_generations
+        let stoppable = observed_generations
             .iter()
-            .filter_map(|(generation, _)| {
+            .filter_map(|(generation, _, _)| {
                 generations.generations.get(generation).and_then(|entry| {
                     (entry.drain_state == crate::RollingDrainState::Draining
                         && entry.active_jobs == 0
@@ -596,7 +616,20 @@ pub(crate) fn record_job(runner_id: &str, session: &RunnerSession, job_id: &str)
         let mut generations = read_locked(runner_id, Some(session))?.unwrap_or_else(|| {
             RollingGenerations::new(legacy_generation(session), session.clone())
         });
-        generations.admit_job(job_id);
+        let owner = session
+            .remote_daemon_lease_id
+            .as_deref()
+            .and_then(|lease_id| {
+                generations
+                    .generations
+                    .iter()
+                    .find_map(|(generation, entry)| {
+                        (entry.endpoint.remote_daemon_lease_id.as_deref() == Some(lease_id))
+                            .then_some(generation.clone())
+                    })
+            })
+            .unwrap_or_else(|| generations.admission_owner.clone());
+        generations.admit_job_for(&owner, job_id);
         write(runner_id, &generations)
     })
 }
@@ -856,11 +889,24 @@ mod tests {
     #[derive(Default)]
     struct FakeEndpointOperations {
         active_jobs: RefCell<std::collections::BTreeMap<String, u64>>,
+        terminal_reconcile_failures: RefCell<std::collections::BTreeSet<String>>,
+        terminal_reconciled_leases: RefCell<Vec<String>>,
         stopped_leases: RefCell<Vec<String>>,
         terminated_pids: RefCell<Vec<u32>>,
     }
 
     impl GenerationEndpointOperations for FakeEndpointOperations {
+        fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool {
+            let lease_id = session.remote_daemon_lease_id.clone().expect("lease");
+            self.terminal_reconciled_leases
+                .borrow_mut()
+                .push(lease_id.clone());
+            !self
+                .terminal_reconcile_failures
+                .borrow()
+                .contains(&lease_id)
+        }
+
         fn active_jobs(&self, session: &RunnerSession) -> Option<u64> {
             self.active_jobs
                 .borrow()
@@ -1060,6 +1106,10 @@ mod tests {
         struct ProcessBlockingOperations(std::path::PathBuf);
 
         impl GenerationEndpointOperations for ProcessBlockingOperations {
+            fn reconcile_terminal_jobs(&self, _: &RunnerSession) -> bool {
+                true
+            }
+
             fn active_jobs(&self, _: &RunnerSession) -> Option<u64> {
                 std::fs::write(self.0.join("remote-check-complete"), "checked")
                     .expect("signal remote drain check");
@@ -1439,6 +1489,133 @@ mod tests {
             assert_eq!(final_projection.len(), 1);
             assert_eq!(final_projection[0].generation, "build-b");
             assert_eq!(final_projection[0].active_job_count, 1);
+        });
+    }
+
+    #[test]
+    fn reconciliation_rebuilds_draining_counts_and_retires_terminal_generations() {
+        test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon-a", Some(101));
+            let b = session("lease-b", "daemon-b", Some(202));
+            let c = session("lease-c", "daemon-c", Some(303));
+
+            record_job("runner-a", &a, "job-a").expect("record A job");
+            activate(
+                "runner-a",
+                &a,
+                "build-b".to_string(),
+                b.clone(),
+                &["job-a".to_string()],
+            )
+            .expect("promote B");
+            record_job("runner-a", &b, "job-b").expect("record B job");
+            activate(
+                "runner-a",
+                &b,
+                "build-c".to_string(),
+                c.clone(),
+                &["job-b".to_string()],
+            )
+            .expect("promote C");
+            record_job("runner-a", &c, "job-c").expect("record C job");
+
+            // Simulate stale persisted ownership from an earlier controller.
+            let mut persisted = read("runner-a", Some(&c))
+                .expect("read registry")
+                .expect("registry");
+            persisted
+                .generations
+                .get_mut("lease-a")
+                .expect("A")
+                .active_jobs = 9;
+            persisted
+                .generations
+                .get_mut("build-b")
+                .expect("B")
+                .active_jobs = 18;
+            write("runner-a", &persisted).expect("write stale counts");
+
+            // Reload first to prove reconciliation does not depend on controller memory.
+            let restored = read("runner-a", Some(&c))
+                .expect("restart read")
+                .expect("registry");
+            assert_eq!(restored.generations["lease-a"].active_jobs, 9);
+            assert_eq!(restored.generations["build-b"].active_jobs, 18);
+
+            let operations = FakeEndpointOperations::default();
+            operations
+                .active_jobs
+                .borrow_mut()
+                .extend([("lease-a".to_string(), 0), ("lease-b".to_string(), 1)]);
+            reconcile_with("runner-a", Some(&c), &operations).expect("reconcile terminal A");
+
+            let projected = status_projection("runner-a", Some(&c)).expect("project after A");
+            assert_eq!(projected.len(), 2);
+            assert!(projected
+                .iter()
+                .any(|entry| entry.generation == "build-b" && entry.active_job_count == 1));
+            assert!(projected
+                .iter()
+                .any(|entry| entry.generation == "build-c" && entry.active_job_count == 1));
+            assert_eq!(operations.stopped_leases.borrow().as_slice(), ["lease-a"]);
+            assert_eq!(operations.terminated_pids.borrow().as_slice(), [101]);
+            assert_eq!(
+                operations.terminal_reconciled_leases.borrow().as_slice(),
+                ["lease-b", "lease-a"]
+            );
+
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-b".to_string(), 0);
+            reconcile_with("runner-a", Some(&c), &operations).expect("reconcile terminal B");
+            let projected = status_projection("runner-a", Some(&c)).expect("final projection");
+            assert_eq!(projected.len(), 1);
+            assert_eq!(projected[0].generation, "build-c");
+            assert_eq!(projected[0].active_job_count, 1);
+            assert_eq!(
+                operations.stopped_leases.borrow().as_slice(),
+                ["lease-a", "lease-b"]
+            );
+            assert_eq!(operations.terminated_pids.borrow().as_slice(), [101, 202]);
+        });
+    }
+
+    #[test]
+    fn failed_terminal_reconciliation_keeps_the_generation_draining() {
+        test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon-a", Some(101));
+            let b = session("lease-b", "daemon-b", Some(202));
+
+            record_job("runner-a", &a, "job-a").expect("record A job");
+            activate(
+                "runner-a",
+                &a,
+                "build-b".to_string(),
+                b.clone(),
+                &["job-a".to_string()],
+            )
+            .expect("promote B");
+
+            let operations = FakeEndpointOperations::default();
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-a".to_string(), 0);
+            operations
+                .terminal_reconcile_failures
+                .borrow_mut()
+                .insert("lease-a".to_string());
+
+            reconcile_with("runner-a", Some(&b), &operations)
+                .expect("failed settlement remains fail-closed");
+
+            let projected = status_projection("runner-a", Some(&b)).expect("projection");
+            assert!(projected
+                .iter()
+                .any(|entry| entry.generation == "lease-a" && entry.active_job_count == 1));
+            assert!(operations.stopped_leases.borrow().is_empty());
+            assert!(operations.terminated_pids.borrow().is_empty());
         });
     }
 

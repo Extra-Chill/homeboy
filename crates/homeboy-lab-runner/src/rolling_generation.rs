@@ -128,9 +128,25 @@ impl<E> RollingGenerations<E> {
     }
 
     pub fn admit_job(&mut self, job_id: impl Into<String>) -> &str {
-        let owner = self.admit().to_string();
-        self.job_owners.insert(job_id.into(), owner);
+        let owner = self.admission_owner.clone();
+        self.admit_job_for(&owner, job_id);
         &self.admission_owner
+    }
+
+    /// Records a recovered job against the endpoint that actually exposed it.
+    /// Re-observing the same ID is idempotent and never moves it to a newer
+    /// admission generation.
+    pub fn admit_job_for(&mut self, generation: &str, job_id: impl Into<String>) -> bool {
+        let job_id = job_id.into();
+        if self.job_owners.contains_key(&job_id) || !self.generations.contains_key(generation) {
+            return false;
+        }
+        self.generations
+            .get_mut(generation)
+            .expect("generation was checked")
+            .active_jobs += 1;
+        self.job_owners.insert(job_id, generation.to_string());
+        true
     }
 
     pub fn job_owner(&self, job_id: &str) -> Option<&str> {
@@ -348,6 +364,17 @@ mod tests {
         assert_eq!(recovered.job_owner("job-b"), Some("B"));
         assert!(recovered.complete_job("job-a"));
         assert!(!recovered.generations.contains_key("A"));
+    }
+
+    #[test]
+    fn repeated_admission_of_the_same_job_is_idempotent() {
+        let mut generations = RollingGenerations::new("A", "endpoint-a");
+
+        generations.admit_job("job-a");
+        generations.admit_job("job-a");
+
+        assert_eq!(generations.job_owner("job-a"), Some("A"));
+        assert_eq!(generations.generations["A"].active_jobs, 1);
     }
 
     #[test]
