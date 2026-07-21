@@ -634,7 +634,7 @@ fn connect_with_orphan_adoption_and_live_lease(
         homeboy,
         live_lease_expectation,
         &daemon,
-        &configured_build_identity,
+        &expected_identity,
     ) {
         return Ok(session_write_failure_report(
             runner_id,

@@ -134,6 +134,37 @@ fn explicit_live_lease_adoption_requires_the_exact_current_lease_and_pid() {
 }
 
 #[test]
+fn explicit_live_lease_adoption_accepts_an_exact_reachable_stale_daemon() {
+    let session = direct_ssh_session("lease-recorded");
+    let mut status = remote_daemon_status_for_test(false, true, 1, "lease-live", 4646);
+    status.daemon.as_mut().expect("daemon").build_identity = Some("homeboy test+live".to_string());
+
+    assert_eq!(
+        remote_daemon::remote_daemon_connect_action_for_runner(
+            Some(&session),
+            &status,
+            "homeboy test+configured",
+            "runner-a",
+            Some(("lease-live", 4646)),
+        )
+        .expect("exact operator adoption reattaches without replacing the live daemon"),
+        RemoteDaemonConnectAction::Reattach,
+    );
+
+    for expectation in [Some(("lease-other", 4646)), Some(("lease-live", 9999))] {
+        assert!(remote_daemon::remote_daemon_connect_action_for_runner(
+            Some(&session),
+            &status,
+            "homeboy test+configured",
+            "runner-a",
+            expectation,
+        )
+        .expect_err("changed stale lease or PID must fail closed")
+        .contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
+    }
+}
+
+#[test]
 fn stale_active_mismatched_daemon_never_reattaches_or_adopts() {
     let session = direct_ssh_session("lease-recorded");
     let mut status = remote_daemon_status_for_test(false, true, 1, "lease-live", 4646);
