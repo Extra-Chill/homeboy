@@ -688,15 +688,17 @@ pub(crate) fn record_terminal_artifact_projection(
 }
 
 /// The authoritative model recorded on an aggregate outcome, if any.
+///
+/// Locates the outcome for `task_id` and reads its concrete model through the
+/// canonical [`AgentTaskOutcome::selected_model`] reader, so aggregate → task
+/// model reconciliation uses the same present/non-blank definition as every
+/// other model-resolution site.
 fn aggregate_selected_model(aggregate: &AgentTaskAggregate, task_id: &str) -> Option<String> {
     aggregate
         .outcomes
         .iter()
         .find(|outcome| outcome.task_id == task_id)
-        .and_then(|outcome| outcome.metadata.get("model"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
+        .and_then(|outcome| outcome.selected_model())
         .map(str::to_string)
 }
 

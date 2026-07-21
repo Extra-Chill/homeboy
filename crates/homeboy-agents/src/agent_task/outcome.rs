@@ -66,6 +66,27 @@ impl Default for AgentTaskOutcome {
     }
 }
 
+impl AgentTaskOutcome {
+    /// The concrete provider model this outcome recorded, if any.
+    ///
+    /// This is the single authoritative reader for "what model did this run
+    /// actually execute under" — the value lives in `metadata.model` and every
+    /// lifecycle reconciliation path (aggregate → task, provider handle
+    /// backfill, terminal-record repair) needs it. Previously each site
+    /// re-implemented `metadata.get("model") → as_str → trim → non-empty` with
+    /// subtly different handling (one path forgot the trim), which is why the
+    /// same "reconcile the terminal provider model" fix landed three times
+    /// (#9405/#9415/#9423). Centralizing the read here gives one definition:
+    /// present, non-blank after trimming, or `None`.
+    pub fn selected_model(&self) -> Option<&str> {
+        self.metadata
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+    }
+}
+
 #[cfg(test)]
 impl AgentTaskOutcome {
     pub(crate) fn redacted(&self) -> Self {
