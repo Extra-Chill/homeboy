@@ -1280,8 +1280,12 @@ pub(super) fn resolve_ai_tool_disclosure(
         .unwrap_or_else(|| ai_tool.to_string())
 }
 
+/// Legacy AI-usage disclosure default. The reviewer-facing "Used for" text is
+/// now authored by the agent's `review_form.used_for` and enforced by the cook
+/// loop's review-form gate, so this no longer feeds the PR body. Defaults empty
+/// (no canned platitude); retained only for recipe back-compatibility.
 fn default_ai_used_for() -> String {
-    "Drafted implementation and tests; Chris reviews and owns the change.".to_string()
+    String::new()
 }
 
 fn batch_commands(batch_id: &str) -> Value {

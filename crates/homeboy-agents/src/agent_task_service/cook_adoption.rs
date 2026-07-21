@@ -42,6 +42,26 @@ use super::cook_promotion::{
 };
 use super::AgentTaskRunResult;
 
+/// Read the AI-authored review form off an adopted candidate's terminal
+/// outcome. The candidate was produced by an earlier cook attempt, so any form
+/// the original agent emitted is recorded on its aggregate. Absent/invalid here
+/// re-triggers the review-form gate exactly as it would for a fresh cook.
+fn adopted_review_form(
+    run_id: &str,
+) -> Result<Option<crate::agent_task_review_dossier::AiFilledReviewForm>> {
+    let aggregate = agent_task_lifecycle::read_aggregate(run_id)?;
+    aggregate
+        .outcomes
+        .last()
+        .map(|outcome| {
+            crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
+                &outcome.outputs,
+            )
+        })
+        .transpose()
+        .map(Option::flatten)
+}
+
 /// Adopt an externally prepared immutable commit into a durable cook. The
 /// source recipe remains authoritative for repository, base, gates, and
 /// finalization policy; adoption only replaces provider artifact harvesting.
@@ -171,6 +191,8 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
             max_attempts: options.max_attempts,
             source_run_id: Some(record.run_id.clone()),
             current_diff: String::new(),
+            require_review_form: true,
+            review_form: adopted_review_form(&record.run_id)?,
             metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
         });
         let finalization = record.metadata.get("cook_finalization").cloned();
@@ -325,6 +347,8 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
         max_attempts: options.max_attempts,
         source_run_id: Some(record.run_id.clone()),
         current_diff: gate_feedback_current_diff(&promotion),
+        require_review_form: true,
+        review_form: adopted_review_form(&record.run_id)?,
         metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
     });
     let attempt = AgentTaskCookAttemptReport {

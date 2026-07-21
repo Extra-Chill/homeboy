@@ -9,6 +9,7 @@ use crate::agent_task_gate::{
     AgentTaskGateVisibility,
 };
 use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
+use crate::agent_task_review_dossier::AiFilledReviewForm;
 use homeboy_core::gate::{HomeboyGateResult, HomeboyGateStatus};
 
 pub const AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA: &str =
@@ -25,6 +26,18 @@ pub struct AgentTaskCookLoopOptions {
     pub source_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub current_diff: String,
+    /// Whether the AI-authored review form is a required gate for this
+    /// evaluation. Cook finalization enables it (a green change is not "done"
+    /// until a valid form exists); standalone/diagnostic evaluations leave it
+    /// off so they never demand a form the caller isn't producing.
+    #[serde(default)]
+    pub require_review_form: bool,
+    /// The AI-authored review form parsed off the terminal attempt outcome, if
+    /// the agent emitted one. A green cook is not "done" until this is present
+    /// and valid — a missing/invalid form nudges another attempt exactly like a
+    /// red deterministic gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_form: Option<AiFilledReviewForm>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -114,17 +127,41 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     let should_retry = options.promotion_report.status == AgentTaskPromotionStatus::GateFailed
         && !failed_gates.is_empty()
         && retry_budget_remaining > 0;
-    let follow_up_request = should_retry.then(|| build_follow_up_request(&options, &failed_gates));
+    // Deterministic gates take precedence: a red gate must be fixed before the
+    // review form is even worth requesting. Only once the change itself is green
+    // (and actually produced changes) does the AI-authored form become the last
+    // outstanding "gate".
+    let gates_green_with_changes = failed_gates.is_empty()
+        && options.promotion_report.status != AgentTaskPromotionStatus::NoChangesGateFailed
+        && quality.classification != AgentTaskCookLoopQualityClassification::NoChanges;
+    let review_form_gap = (options.require_review_form && gates_green_with_changes)
+        .then(|| review_form_requirement_gap(&options.review_form));
+
+    let follow_up_request = if should_retry {
+        Some(build_follow_up_request(&options, &failed_gates))
+    } else if let Some(Some(gap)) = &review_form_gap {
+        // Gates are green but the AI form is missing/invalid: nudge another
+        // attempt with actionable feedback, exactly like a red gate — unless the
+        // retry budget is exhausted.
+        (retry_budget_remaining > 0).then(|| build_review_form_follow_up_request(&options, gap))
+    } else {
+        None
+    };
+
     let status = if follow_up_request.is_some() {
         AgentTaskCookLoopStatus::RetryRequested
     } else if options.promotion_report.status == AgentTaskPromotionStatus::NoChangesGateFailed {
         AgentTaskCookLoopStatus::NoOpGateFailed
     } else if quality.classification == AgentTaskCookLoopQualityClassification::NoChanges {
         AgentTaskCookLoopStatus::NoChanges
-    } else if failed_gates.is_empty() {
-        AgentTaskCookLoopStatus::GreenCompleted
-    } else {
+    } else if !failed_gates.is_empty() {
         AgentTaskCookLoopStatus::RetriesExhausted
+    } else if matches!(&review_form_gap, Some(Some(_))) {
+        // Green change, but the agent never produced a valid form and the retry
+        // budget is spent. The cook does not publish a PR without the form.
+        AgentTaskCookLoopStatus::RetriesExhausted
+    } else {
+        AgentTaskCookLoopStatus::GreenCompleted
     };
 
     AgentTaskCookLoopReport {
@@ -306,6 +343,86 @@ fn build_follow_up_request(
     request
 }
 
+/// Returns `Some(feedback)` describing why the AI review form is not yet
+/// acceptable (absent or failing validation), or `None` when the form is valid.
+fn review_form_requirement_gap(form: &Option<AiFilledReviewForm>) -> Option<String> {
+    match form {
+        None => Some(format!(
+            "The change passed deterministic gates but no review form was emitted. {}",
+            AiFilledReviewForm::requirement_feedback()
+        )),
+        Some(form) => form.validate().err().map(|error| error.message),
+    }
+}
+
+/// Build a follow-up attempt request that nudges the agent to emit a valid
+/// review form. Mirrors `build_follow_up_request` but the outstanding work is
+/// authoring the review form, not fixing a red gate.
+fn build_review_form_follow_up_request(
+    options: &AgentTaskCookLoopOptions,
+    gap_feedback: &str,
+) -> AgentTaskRequest {
+    let mut request = options.source_request.clone();
+    let next_attempt = options.attempt.saturating_add(1);
+    request.schema = AGENT_TASK_REQUEST_SCHEMA.to_string();
+    request.task_id = format!("{}-review-form-{}", request.task_id, next_attempt);
+    request.parent_plan_id = request
+        .parent_plan_id
+        .clone()
+        .or_else(|| options.source_run_id.clone());
+    request.instructions = format!(
+        "Continue the Homeboy cook loop from the current candidate worktree state.\n\nThe change is complete and deterministic gates passed, but the reviewer-facing review form is not yet valid, so the pull request cannot be opened.\n\n{gap_feedback}\n\nDo not modify the code. Emit the `review_form` object in your task outputs and finish.",
+    );
+    request.inputs = json!({
+        "cook_loop": {
+            "source_run_id": options.source_run_id,
+            "source_task_id": options.source_request.task_id,
+            "source_patch_task_id": options.promotion_report.source.task_id,
+            "promotion_status": options.promotion_report.status,
+            "attempt": options.attempt,
+            "next_attempt": next_attempt,
+            "max_attempts": options.max_attempts,
+            "retry_budget_remaining_after_dispatch": options.max_attempts.saturating_sub(next_attempt),
+            "to_worktree": options.promotion_report.to_worktree,
+            "changed_files": options.promotion_report.changed_files,
+            "review_form_required": true,
+            "review_form_feedback": gap_feedback,
+            "current_diff": options.current_diff,
+        }
+    });
+    request.source_refs.push(AgentTaskSourceRef {
+        kind: "agent-task-run".to_string(),
+        uri: options
+            .source_run_id
+            .as_ref()
+            .map(|run_id| format!("homeboy://agent-task/run/{run_id}"))
+            .unwrap_or_else(|| {
+                format!(
+                    "homeboy://agent-task/task/{}",
+                    options.source_request.task_id
+                )
+            }),
+        revision: None,
+    });
+    request.workspace.mode = AgentTaskWorkspaceMode::Existing;
+    request.workspace.root = request
+        .workspace
+        .root
+        .clone()
+        .or_else(|| worktree_root_hint(&options.promotion_report));
+    request.metadata = json!({
+        "cook_loop": {
+            "kind": "review-form-feedback",
+            "attempt": next_attempt,
+            "previous_attempt": options.attempt,
+            "max_attempts": options.max_attempts,
+            "source_task_id": options.source_request.task_id,
+            "source_run_id": options.source_run_id,
+        }
+    });
+    request
+}
+
 fn gate_failure(gate: &AgentTaskGateReport) -> AgentTaskCookLoopGateFailure {
     let command = gate
         .failure_evidence
@@ -479,6 +596,8 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-3676".to_string()),
             current_diff: "diff --git a/src/lib.rs b/src/lib.rs".to_string(),
+            require_review_form: false,
+            review_form: None,
             metadata: Value::Null,
         });
 
@@ -516,6 +635,8 @@ mod tests {
             max_attempts: 2,
             source_run_id: Some("run-3676".to_string()),
             current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
             metadata: Value::Null,
         });
 
@@ -537,6 +658,8 @@ mod tests {
             max_attempts: 3,
             source_run_id: None,
             current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
             metadata: Value::Null,
         });
 
@@ -560,6 +683,8 @@ mod tests {
             max_attempts: 1,
             source_run_id: Some("run-inherited".to_string()),
             current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
             metadata: Value::Null,
         });
         assert_eq!(accepted.status, AgentTaskCookLoopStatus::GreenCompleted);
@@ -575,6 +700,8 @@ mod tests {
             max_attempts: 1,
             source_run_id: Some("run-regression".to_string()),
             current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
             metadata: Value::Null,
         });
         assert_eq!(regression.status, AgentTaskCookLoopStatus::RetriesExhausted);
@@ -594,6 +721,8 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-4324".to_string()),
             current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
             metadata: Value::Null,
         });
 
@@ -619,6 +748,8 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-verified-no-op".to_string()),
             current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
             metadata: Value::Null,
         });
         assert_eq!(verified.status, AgentTaskCookLoopStatus::GreenCompleted);
@@ -638,6 +769,8 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-failed-no-op".to_string()),
             current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
             metadata: Value::Null,
         });
         assert_eq!(failed.status, AgentTaskCookLoopStatus::NoOpGateFailed);
@@ -660,6 +793,8 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-4327".to_string()),
             current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
             metadata: Value::Null,
         });
 
@@ -686,6 +821,8 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-3688".to_string()),
             current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
             metadata: Value::Null,
         });
 
@@ -708,6 +845,8 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-3688".to_string()),
             current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
             metadata: Value::Null,
         });
 
@@ -741,6 +880,8 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-3688".to_string()),
             current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
             metadata: Value::Null,
         });
 
@@ -749,6 +890,131 @@ mod tests {
 
         assert!(agent_context.contains("./hidden-heldout-check"));
         assert!(agent_context.contains("secret fixture mismatch"));
+    }
+
+    fn valid_review_form() -> AiFilledReviewForm {
+        AiFilledReviewForm {
+            summary: "Fix the reload crash.".to_string(),
+            what_changed: vec!["Guard the null render path.".to_string()],
+            compatibility: "Internal only; no compatibility impact.".to_string(),
+            used_for: "Reproduced the crash, isolated the null path, added a guard, and verified with a focused gate before finalizing.".to_string(),
+        }
+    }
+
+    #[test]
+    fn green_change_without_review_form_requests_another_attempt() {
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-form-1".to_string()),
+            current_diff: String::new(),
+            require_review_form: true,
+            review_form: None,
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.status, AgentTaskCookLoopStatus::RetryRequested);
+        let request = report
+            .follow_up_request
+            .expect("missing form must nudge a follow-up attempt");
+        assert!(request.task_id.contains("review-form"));
+        assert_eq!(request.inputs["cook_loop"]["review_form_required"], true);
+        assert!(request.instructions.contains("review_form"));
+    }
+
+    #[test]
+    fn green_change_with_valid_review_form_completes() {
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-form-2".to_string()),
+            current_diff: String::new(),
+            require_review_form: true,
+            review_form: Some(valid_review_form()),
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.status, AgentTaskCookLoopStatus::GreenCompleted);
+        assert!(report.follow_up_request.is_none());
+    }
+
+    #[test]
+    fn green_change_with_invalid_review_form_requests_another_attempt_with_feedback() {
+        let mut form = valid_review_form();
+        form.used_for = form.summary.clone(); // not a distinct reflection
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-form-3".to_string()),
+            current_diff: String::new(),
+            require_review_form: true,
+            review_form: Some(form),
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.status, AgentTaskCookLoopStatus::RetryRequested);
+        let request = report.follow_up_request.expect("invalid form nudges retry");
+        assert!(request.inputs["cook_loop"]["review_form_feedback"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("distinct from summary"));
+    }
+
+    #[test]
+    fn missing_review_form_with_exhausted_budget_does_not_complete() {
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+            ),
+            attempt: 3,
+            max_attempts: 3,
+            source_run_id: Some("run-form-4".to_string()),
+            current_diff: String::new(),
+            require_review_form: true,
+            review_form: None,
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.status, AgentTaskCookLoopStatus::RetriesExhausted);
+        assert!(report.follow_up_request.is_none());
+    }
+
+    #[test]
+    fn review_form_not_required_completes_green_without_a_form() {
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-form-5".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.status, AgentTaskCookLoopStatus::GreenCompleted);
+        assert!(report.follow_up_request.is_none());
     }
 
     fn source_request() -> AgentTaskRequest {
