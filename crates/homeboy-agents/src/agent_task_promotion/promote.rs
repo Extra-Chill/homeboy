@@ -73,16 +73,14 @@ pub fn promote_with_checkpoint(
     if let Some(provenance) = provider.provenance() {
         report.provenance["worktree_provider"] = provenance.clone();
     }
-    if let Ok(runner_id) = std::env::var(homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV) {
-        if !runner_id.trim().is_empty() {
-            report.provenance["lab_offload"] = json!({
-                "runner_id": runner_id,
-                "source_aggregate": report.source.path,
-                "source_artifact": report.patch_artifact.path,
-                "target_worktree": report.to_worktree,
-                "target_workspace": report.target.path,
-            });
-        }
+    if let Some(runner_id) = crate::agent_task_lifecycle::execution_runner_id() {
+        report.provenance["lab_offload"] = json!({
+            "runner_id": runner_id,
+            "source_aggregate": report.source.path,
+            "source_artifact": report.patch_artifact.path,
+            "target_worktree": report.to_worktree,
+            "target_workspace": report.target.path,
+        });
     }
     Ok(report)
 }
