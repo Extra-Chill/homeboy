@@ -196,28 +196,9 @@ pub(crate) fn offset_in_test_region(offset: usize, regions: &[(usize, usize)]) -
         .any(|(start, end)| offset >= *start && offset <= *end)
 }
 
-/// The crate name for a `crates/<crate>/…` path, else `None` (non-workspace
-/// layout — callers fall back to conservative behavior).
-///
-/// Used by content-scanning detectors that attribute a caller's raw literal or
-/// command to a canonical definition elsewhere: a cross-crate attribution is
-/// only valid when the definition is reachable from the caller's crate.
-pub(crate) fn crate_of_path(path: &str) -> Option<&str> {
-    let rest = path.strip_prefix("crates/")?;
-    rest.split('/').next().filter(|s| !s.is_empty())
-}
-
-/// Whether a `pub`/`pub(...)` visibility prefix makes a definition reachable
-/// from *another* crate. Only crate-wide `pub` qualifies — `pub(crate)`,
-/// `pub(super)`, `pub(in …)`, and private are unreachable across a crate
-/// boundary, so attributing a cross-crate reference to them is a false positive.
-pub(crate) fn visibility_is_crate_public(vis_prefix: &str) -> bool {
-    vis_prefix.trim() == "pub"
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{crate_of_path, inline_test_regions, offset_in_test_region};
+    use super::{inline_test_regions, offset_in_test_region};
     use homeboy_engine_primitives::language::Language;
 
     #[test]
@@ -239,14 +220,5 @@ mod tests {
         let content = "<?php\nfunction prod() { return 1; }\n";
         let regions = inline_test_regions(content, Language::Php.inline_test_region_markers());
         assert!(regions.is_empty());
-    }
-
-    #[test]
-    fn crate_of_path_extracts_workspace_crate() {
-        assert_eq!(
-            crate_of_path("crates/homeboy-core/src/lib.rs"),
-            Some("homeboy-core")
-        );
-        assert_eq!(crate_of_path("src/lib.rs"), None);
     }
 }

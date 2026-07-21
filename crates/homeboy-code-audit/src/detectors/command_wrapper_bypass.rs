@@ -26,10 +26,8 @@ use regex::Regex;
 use super::super::conventions::AuditFinding;
 use super::super::findings::{Finding, Severity};
 use super::super::fingerprint::FileFingerprint;
-use super::super::walker::{
-    crate_of_path, inline_test_regions, is_test_path, offset_in_test_region,
-    visibility_is_crate_public,
-};
+use super::super::walker::{inline_test_regions, is_test_path, offset_in_test_region};
+use crate::conventions::Language;
 
 /// Minimum arg-vector length to consider. Single-element commands (`["init"]`,
 /// `["fetch"]`) are too generic to attribute to one wrapper.
@@ -117,7 +115,7 @@ fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Findi
         if is_test_path(&fp.relative_path) {
             continue;
         }
-        for (name, is_public, body, body_offset) in thin_wrapper_bodies(&fp.content) {
+        for (name, is_public, body, body_offset) in thin_wrapper_bodies(&fp.content, fp.language) {
             // A thin wrapper's body contains exactly one arg-vector literal.
             let matches: Vec<_> = argvec_regex().find_iter(&body).collect();
             if matches.len() != 1 {
@@ -185,18 +183,20 @@ fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Findi
                 continue;
             }
             // Only attribute a bypass to a helper the call site can actually
-            // reach. A private/`pub(crate)` helper in a DIFFERENT crate is
-            // unreachable, so suggesting "call it instead" is a false positive.
-            // Same-crate calls are always fine; cross-crate requires `pub`.
-            let call_crate = crate_of_path(&fp.relative_path);
-            let def_crate = crate_of_path(&def.file);
-            let cross_crate = match (call_crate, def_crate) {
+            // reach. A non-boundary-public helper in a DIFFERENT module boundary
+            // (Rust crate) is unreachable, so suggesting "call it instead" is a
+            // false positive. Same-boundary calls are always fine; cross-boundary
+            // requires boundary-public visibility. Boundaries are derived per the
+            // caller's language.
+            let call_boundary = fp.language.module_boundary_of_path(&fp.relative_path);
+            let def_boundary = fp.language.module_boundary_of_path(&def.file);
+            let cross_boundary = match (call_boundary, def_boundary) {
                 (Some(a), Some(b)) => a != b,
-                // Unknown layout on either side — be conservative and treat as
-                // same-crate (do not suppress) to preserve prior behavior.
+                // No derivable boundary on either side — be conservative and
+                // treat as same-boundary (do not suppress) to preserve behavior.
                 _ => false,
             };
-            if cross_crate && !def.is_public {
+            if cross_boundary && !def.is_public {
                 continue;
             }
             let cmd = elems.join(" ");
@@ -231,7 +231,7 @@ fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Findi
 /// matching from each `fn` declaration; bounded to short bodies so we only
 /// consider genuine one-call wrappers, not large functions that happen to
 /// contain one arg-vector. `is_public` is true only for crate-`pub` helpers.
-fn thin_wrapper_bodies(content: &str) -> Vec<(String, bool, String, usize)> {
+fn thin_wrapper_bodies(content: &str, language: Language) -> Vec<(String, bool, String, usize)> {
     /// Max characters in a wrapper body — a one-call delegation is tiny; this
     /// keeps us from treating a large function's incidental arg-vector as the
     /// canonical definition.
@@ -242,7 +242,7 @@ fn thin_wrapper_bodies(content: &str) -> Vec<(String, bool, String, usize)> {
     for caps in fn_decl_regex().captures_iter(content) {
         let is_public = caps
             .get(1)
-            .map(|m| visibility_is_crate_public(m.as_str()))
+            .map(|m| language.is_boundary_public_visibility(m.as_str()))
             .unwrap_or(false);
         let name = caps[2].to_string();
         let decl_end = caps.get(0).unwrap().end();
