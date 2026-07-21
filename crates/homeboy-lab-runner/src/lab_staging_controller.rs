@@ -431,7 +431,7 @@ fn controller_job_from_response(value: &Value, status: u16) -> Result<homeboy_co
     }
     serde_json::from_value(
         value
-            .pointer("/data/job")
+            .pointer("/data/body/job")
             .cloned()
             .ok_or_else(|| Error::internal_unexpected("controller daemon response has no job"))?,
     )
@@ -1314,6 +1314,10 @@ trait LabStagingStageOperations: Send + Sync {
         checkpoint: &LabStagingCheckpoint,
         runner_job_id: &str,
     ) -> Result<()>;
+    fn recover_admitted_runner_job(
+        &self,
+        request: &LabStagingExecutionRequest,
+    ) -> Result<Option<String>>;
     fn prove_no_runner_admission(&self, request: &LabStagingExecutionRequest) -> Result<()>;
     fn cancel_and_reconcile_runner_job(
         &self,
@@ -2177,6 +2181,27 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         )?;
         Ok(())
     }
+    fn recover_admitted_runner_job(
+        &self,
+        request: &LabStagingExecutionRequest,
+    ) -> Result<Option<String>> {
+        let Some((runner_id, runner_job_id)) =
+            homeboy_agents::agent_task_lifecycle::recorded_runner_job_identity(
+                &request.recipe.run_id,
+            )?
+        else {
+            return Ok(None);
+        };
+        if runner_id != request.recipe.runner_id {
+            return Err(Error::validation_invalid_argument(
+                "runner_id",
+                "accepted Lab runner binding does not match its staging recipe",
+                Some(runner_id),
+                None,
+            ));
+        }
+        Ok(Some(runner_job_id))
+    }
     fn prove_no_runner_admission(&self, request: &LabStagingExecutionRequest) -> Result<()> {
         let status = crate::status(&request.recipe.runner_id)?;
         if status
@@ -2382,10 +2407,14 @@ impl LabStagingExecutionAdapter for StageExecutionAdapter {
     ) -> Result<()> {
         self.operations
             .validate_recorded_identities(request, checkpoint)?;
-        match checkpoint.final_runner_job_id.as_deref() {
+        let runner_job_id = match checkpoint.final_runner_job_id.clone() {
+            Some(job_id) => Some(job_id),
+            None => self.operations.recover_admitted_runner_job(request)?,
+        };
+        match runner_job_id {
             Some(job_id) => self
                 .operations
-                .cancel_and_reconcile_runner_job(request, job_id),
+                .cancel_and_reconcile_runner_job(request, &job_id),
             None => self.operations.prove_no_runner_admission(request),
         }
     }
@@ -2647,6 +2676,8 @@ pub fn register() {
 mod tests {
     use super::*;
     use homeboy_core::lab_contract::LabCommandContract;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn recipe_command() -> LabOffloadCommand {
@@ -2747,6 +2778,146 @@ mod tests {
         register();
     }
 
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        let mut request = Vec::new();
+        let mut content_length = None;
+        loop {
+            let mut chunk = [0_u8; 4096];
+            let count = stream.read(&mut chunk).expect("read request");
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..count]);
+            if content_length.is_none() {
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    content_length = Some(
+                        headers
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("content-length: ")
+                                    .or_else(|| line.strip_prefix("Content-Length: "))
+                            })
+                            .map(|value| value.parse::<usize>().expect("content length"))
+                            .unwrap_or(0),
+                    );
+                }
+            }
+            if let (Some(header_end), Some(content_length)) = (
+                request.windows(4).position(|part| part == b"\r\n\r\n"),
+                content_length,
+            ) {
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+        String::from_utf8(request).expect("UTF-8 request")
+    }
+
+    fn controller_job(
+        id: uuid::Uuid,
+        status: homeboy_core::api_jobs::JobStatus,
+    ) -> homeboy_core::api_jobs::Job {
+        homeboy_core::api_jobs::Job {
+            id,
+            operation: format!("controller.{LAB_STAGING_DISPATCH_JOB_TYPE}"),
+            status,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            started_at_ms: None,
+            finished_at_ms: None,
+            event_count: 0,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            stale_reason: None,
+            daemon_lease_id: None,
+            target_runner_id: None,
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+            runner_job_projection: None,
+        }
+    }
+
+    #[test]
+    fn controller_submission_recovers_create_and_start_after_accepted_response_loss() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let endpoint = format!("http://{}", listener.local_addr().expect("address"));
+        let job_id = uuid::Uuid::new_v4();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 0..4 {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                requests.push(read_http_request(&mut stream));
+                if index == 0 || index == 2 {
+                    continue;
+                }
+                let status = if index == 1 {
+                    homeboy_core::api_jobs::JobStatus::Queued
+                } else {
+                    homeboy_core::api_jobs::JobStatus::Running
+                };
+                let body = json!({
+                    "success": true,
+                    "data": { "body": { "job": controller_job(job_id, status) } },
+                })
+                .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("write response");
+            }
+            requests
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("client");
+        let create_body = json!({
+            "job_type": LAB_STAGING_DISPATCH_JOB_TYPE,
+            "version": LAB_STAGING_DISPATCH_VERSION,
+            "request": envelope(),
+            "idempotency_key": "attempt-1",
+        });
+
+        let created = post_controller_job_with_retries(
+            &client,
+            format!("{endpoint}/controller/jobs"),
+            Some(create_body),
+            "create test controller job",
+        )
+        .expect("recover create response");
+        let started = post_controller_job_with_retries(
+            &client,
+            format!("{endpoint}/controller/jobs/{job_id}/start"),
+            None,
+            "start test controller job",
+        )
+        .expect("recover start response");
+        let requests = server.join().expect("server");
+
+        assert_eq!(created.id, job_id);
+        assert_eq!(created.status, homeboy_core::api_jobs::JobStatus::Queued);
+        assert_eq!(started.id, job_id);
+        assert_eq!(started.status, homeboy_core::api_jobs::JobStatus::Running);
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(requests[2], requests[3]);
+        assert!(requests[0].starts_with("POST /controller/jobs HTTP/1.1"));
+        assert!(requests[2].starts_with(&format!("POST /controller/jobs/{job_id}/start HTTP/1.1")));
+    }
+
     #[test]
     fn progress_and_result_projections_are_safe() {
         let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
@@ -2786,6 +2957,7 @@ mod tests {
         calls: Mutex<Vec<&'static str>>,
         fail_hydration: Mutex<bool>,
         cancel_during_hydration: Mutex<bool>,
+        recovered_runner_job_id: Mutex<Option<String>>,
     }
 
     impl RecordedStageOperations {
@@ -2806,6 +2978,13 @@ mod tests {
                 .cancel_during_hydration
                 .lock()
                 .expect("cancellation lock") = true;
+        }
+
+        fn recover_runner_job(&self, runner_job_id: &str) {
+            *self
+                .recovered_runner_job_id
+                .lock()
+                .expect("runner job lock") = Some(runner_job_id.to_string());
         }
     }
 
@@ -2917,6 +3096,18 @@ mod tests {
         fn prove_no_runner_admission(&self, _request: &LabStagingExecutionRequest) -> Result<()> {
             self.record("prove-no-admission");
             Ok(())
+        }
+
+        fn recover_admitted_runner_job(
+            &self,
+            _request: &LabStagingExecutionRequest,
+        ) -> Result<Option<String>> {
+            self.record("recover-runner-job");
+            Ok(self
+                .recovered_runner_job_id
+                .lock()
+                .expect("runner job lock")
+                .clone())
         }
 
         fn cancel_and_reconcile_runner_job(
@@ -3037,10 +3228,34 @@ mod tests {
             operations.calls(),
             [
                 "validate",
+                "recover-runner-job",
                 "prove-no-admission",
                 "validate",
                 "cancel-runner-job"
             ]
+        );
+    }
+
+    #[test]
+    fn adapter_cancellation_recovers_child_accepted_before_checkpoint_binding() {
+        let operations = Arc::new(RecordedStageOperations::default());
+        operations.recover_runner_job("runner-job-1");
+        let adapter = StageExecutionAdapter::new(operations.clone());
+        let request = execution_request();
+        let mut dispatching = LabStagingCheckpoint::initial(&envelope());
+        dispatching.phase = LabStagingPhase::DispatchRunner;
+        dispatching.source_snapshot_id = Some("snapshot-1".to_string());
+        dispatching.workspace_id = Some("workspace-1".to_string());
+        dispatching.runtime_id = Some("runtime-1".to_string());
+        dispatching.hydration_id = Some("hydration-1".to_string());
+
+        adapter
+            .cancel(&request, &dispatching)
+            .expect("cancel accepted child before checkpoint binding");
+
+        assert_eq!(
+            operations.calls(),
+            ["validate", "recover-runner-job", "cancel-runner-job"]
         );
     }
 

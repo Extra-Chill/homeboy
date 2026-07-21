@@ -804,6 +804,17 @@ pub fn record_runner_job_identity(
     Ok(record)
 }
 
+/// Read the accepted runner binding without triggering status reconciliation.
+/// Controller-owned cancellation uses this durable parent projection to close
+/// the window between child acceptance and its next controller checkpoint.
+pub fn recorded_runner_job_identity(run_id: &str) -> Result<Option<(String, String)>> {
+    let record = store::read_record(&sanitize_run_id(run_id))?;
+    Ok(record
+        .runner_id()
+        .zip(record.runner_job_id())
+        .map(|(runner_id, runner_job_id)| (runner_id.to_string(), runner_job_id.to_string())))
+}
+
 /// Metadata `kind` marker for a generic runner-execution run. It distinguishes
 /// an ad hoc `runner exec --run-id` durable run from an agent-task lifecycle
 /// record so ownership collisions are detectable (#8447).
