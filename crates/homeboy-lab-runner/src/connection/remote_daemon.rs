@@ -579,6 +579,19 @@ pub(super) fn remote_daemon_connect_action_for_runner(
     // proves no active or unresolved work. The stop itself remains lease-bound
     // through Homeboy's daemon lifecycle command.
     if !status.fresh {
+        if live_lease_expectation
+            == Some((
+                daemon.lease_id.as_deref().expect("checked above"),
+                daemon.pid.expect("checked above"),
+            ))
+            && daemon
+                .build_identity
+                .as_deref()
+                .is_some_and(|identity| !identity.trim().is_empty())
+            && status.endpoint_probe_error.is_none()
+        {
+            return Ok(RemoteDaemonConnectAction::Reattach);
+        }
         if status.active_jobs == 0
             && status.work_evidence.is_authoritatively_idle()
             && status.endpoint_probe_error.is_none()
