@@ -24,7 +24,7 @@ use super::super::conventions::AuditFinding;
 use super::super::findings::{Finding, Severity};
 use super::super::fingerprint::FileFingerprint;
 use super::super::walker::{
-    cfg_test_regions, crate_of_path, is_test_path, offset_in_cfg_test_region,
+    crate_of_path, inline_test_regions, is_test_path, offset_in_test_region,
     visibility_is_crate_public,
 };
 
@@ -103,9 +103,10 @@ fn detect_constant_bypass_literals(fingerprints: &[&FileFingerprint]) -> Vec<Fin
         // Literals inside inline `#[cfg(test)]` blocks of a production file are
         // test data/fixtures, not production constant drift. `is_test_path` only
         // excludes whole test files, so skip matches inside cfg(test) regions.
-        let test_regions = cfg_test_regions(&fp.content);
+        let test_regions =
+            inline_test_regions(&fp.content, fp.language.inline_test_region_markers());
         for (offset, literal) in string_literals(&fp.content) {
-            if offset_in_cfg_test_region(offset, &test_regions) {
+            if offset_in_test_region(offset, &test_regions) {
                 continue;
             }
             let Some(def) = consts.get(&literal) else {
