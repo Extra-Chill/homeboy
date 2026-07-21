@@ -39,20 +39,43 @@ pub(super) fn build_semver_recommendation(
         }));
     }
 
-    let requested = git::SemverBump::parse(requested_bump).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "bump_type",
-            format!("Invalid bump type: {}", requested_bump),
-            None,
-            Some(vec![
-                "Use one of: patch, minor, major, or an explicit version like 2.0.0".to_string(),
-            ]),
-        )
-    })?;
-
-    let is_underbump = recommended
-        .map(|r| requested.rank() < r.rank())
-        .unwrap_or(false);
+    // Auto-detect mode: no explicit `--bump` was given (`requested_bump ==
+    // "none"`). When conventional commits recommend a bump, that recommendation
+    // IS the effective bump — parsing the sentinel "none" as an explicit bump
+    // would fail with a spurious `Invalid bump type: none` even though there are
+    // releasable commits (#7598). Only a genuinely absent recommendation reaches
+    // here (the no-recommendation case returned above), so this is never an
+    // underbump.
+    let (requested, is_underbump) = if requested_bump == "none" {
+        let recommended = recommended.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "bump_type",
+                "Could not determine a version bump from commit history. Pass an explicit --bump (patch, minor, major, or a version like 2.0.0).",
+                None,
+                Some(vec![
+                    "Use conventional-commit prefixes (fix:, feat:, feat!:) so the bump can be auto-detected".to_string(),
+                    "Or force a specific bump: homeboy release <component> --bump patch".to_string(),
+                ]),
+            )
+        })?;
+        (recommended, false)
+    } else {
+        let requested = git::SemverBump::parse(requested_bump).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "bump_type",
+                format!("Invalid bump type: {}", requested_bump),
+                None,
+                Some(vec![
+                    "Use one of: patch, minor, major, or an explicit version like 2.0.0"
+                        .to_string(),
+                ]),
+            )
+        })?;
+        let is_underbump = recommended
+            .map(|r| requested.rank() < r.rank())
+            .unwrap_or(false);
+        (requested, is_underbump)
+    };
 
     Ok(Some(ReleaseSemverRecommendation {
         latest_tag: latest_tag.clone(),
@@ -370,6 +393,67 @@ mod tests {
             recommendation.is_none(),
             "internal no-op bump sentinel should let the planner build a skip plan"
         );
+    }
+
+    #[test]
+    fn none_request_with_fix_commits_recommends_patch_without_erroring() {
+        // #7598: with no explicit --bump (requested_bump == "none") and only
+        // conventional `fix:` commits since the last tag, auto-detection must
+        // resolve to a patch bump — not fail with `Invalid bump type: none`.
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["tag", "v1.11.3"]);
+        commit_file(
+            dir,
+            "a.txt",
+            "a",
+            "fix: correct community profile visual bugs (#145)",
+        );
+        commit_file(
+            dir,
+            "b.txt",
+            "b",
+            "fix: align concert/music-fan cards (#146)",
+        );
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+        let recommendation = build_semver_recommendation(&component, "none", &release_scope)
+            .expect("auto-detected patch bump must not error")
+            .expect("releasable fix commits must yield a recommendation");
+
+        assert_eq!(recommendation.recommended_bump.as_deref(), Some("patch"));
+        assert_eq!(recommendation.requested_bump, "patch");
+        assert!(
+            !recommendation.is_underbump,
+            "auto-detection cannot underbump its own recommendation"
+        );
+    }
+
+    #[test]
+    fn none_request_with_feat_commits_recommends_minor() {
+        // Auto-detection must also lift a `feat:` to minor, not just patch.
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["tag", "v1.0.0"]);
+        commit_file(dir, "f.txt", "f", "feat: add a capability");
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+        let recommendation = build_semver_recommendation(&component, "none", &release_scope)
+            .expect("auto-detected minor bump must not error")
+            .expect("releasable feat commit must yield a recommendation");
+
+        assert_eq!(recommendation.recommended_bump.as_deref(), Some("minor"));
+        assert_eq!(recommendation.requested_bump, "minor");
     }
 
     #[test]
