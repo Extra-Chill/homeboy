@@ -186,9 +186,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         &results_path,
     );
     let campaign_contract = fuzz_campaign_contract(fuzz_config.as_ref(), args.seed.as_deref());
-    if success {
-        run_dir.cleanup();
-    }
+    run_dir.finish(success);
 
     Ok((
         FuzzRunOutput {

@@ -789,6 +789,7 @@ fn run_component_with_rig_context(
         extension_bench::from_main_workflow_with_rig(workflow, rig_snapshot)
     };
     output.persisted_run = persisted_run;
+    run_dir.finish(exit_code == 0);
     Ok((output, exit_code))
 }
 
