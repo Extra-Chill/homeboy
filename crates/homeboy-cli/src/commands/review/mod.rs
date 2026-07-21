@@ -414,19 +414,12 @@ pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCo
 
     let mut top_hints: Vec<String> = Vec::new();
 
-    // Changelog-edit guard (#4876): homeboy regenerates the changelog from
-    // conventional commits at release time, so hand-editing the tracked
-    // changelog in a feature PR is both pointless and a guaranteed multi-PR
-    // merge-conflict surface. Surface a steering hint when the changeset
-    // modifies the component's configured changelog target. Agnostic: keys off
-    // `changelog_target` with no hardcoded filenames, and only runs when we
-    // actually computed a changed-file set (scoped review).
-    if let Some(changed_files) = review_context.precomputed_changed_files() {
-        if let Some(violation) =
-            changelog::detect_changelog_edit(component.changelog_target.as_deref(), changed_files)
-        {
-            top_hints.push(violation.message);
-        }
+    // Changelog-edit guard (#4876): the configured target is release-owned.
+    // Review has no release provenance, so a matching scoped mutation is an
+    // authored edit and must fail rather than remain a non-blocking hint.
+    let manual_changelog_edit = manual_changelog_edit(&component, &review_context);
+    if let Some(violation) = &manual_changelog_edit {
+        top_hints.push(violation.message.clone());
     }
 
     let mut audit_stage = None;
@@ -534,6 +527,13 @@ pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCo
             ci_profile: ci_profile_stage,
         },
     );
+    let overall_exit = if manual_changelog_edit.is_some() {
+        output.summary.passed = false;
+        output.summary.status = "failed".to_string();
+        overall_exit.max(1)
+    } else {
+        overall_exit
+    };
     attach_review_actionable(&mut output);
 
     print_human_summary(&output);
@@ -541,6 +541,19 @@ pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCo
     observation::finish_success(review_observation, &output, overall_exit);
 
     Ok((output, overall_exit))
+}
+
+fn manual_changelog_edit(
+    component: &homeboy::core::component::Component,
+    review_context: &ReviewExecutionContext,
+) -> Option<changelog::ChangelogGuardViolation> {
+    let changed_files = review_context.precomputed_changed_files()?;
+    changelog::detect_manual_changelog_edit(
+        component.changelog_target.as_deref(),
+        changed_files,
+        component.release.allow_manual_changelog_edits,
+        None,
+    )
 }
 
 fn attach_review_actionable(output: &mut ReviewCommandOutput) {
@@ -1182,6 +1195,28 @@ mod tests {
             build_audit_args(&args, &review_context).profile,
             "architecture"
         );
+    }
+
+    #[test]
+    fn review_rejects_manual_configured_changelog_edits_only() {
+        let review_context = ReviewExecutionContext {
+            scope: "changed-since".to_string(),
+            changed_file_count: Some(1),
+            precomputed_changed_files: Some(vec!["CHANGELOG.md".to_string()]),
+        };
+        let mut component = homeboy::core::component::Component {
+            changelog_target: Some("CHANGELOG.md".to_string()),
+            ..Default::default()
+        };
+
+        assert!(manual_changelog_edit(&component, &review_context).is_some());
+
+        component.release.allow_manual_changelog_edits = true;
+        assert!(manual_changelog_edit(&component, &review_context).is_none());
+
+        component.release.allow_manual_changelog_edits = false;
+        component.changelog_target = None;
+        assert!(manual_changelog_edit(&component, &review_context).is_none());
     }
 
     fn review_args_fixture() -> ReviewArgs {

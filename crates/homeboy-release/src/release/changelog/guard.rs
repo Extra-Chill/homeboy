@@ -9,12 +9,11 @@
 //! flight against the same branch (#4876).
 //!
 //! This guard detects when a non-release changeset modifies the component's
-//! configured changelog target so callers (`homeboy review`, CI) can steer the
-//! contributor back to conventional commits instead of hand-editing the
-//! changelog. It is intentionally agnostic: it keys off the component's
-//! resolved `changelog_target` and a list of changed paths, with no
-//! hardcoded filenames.
+//! configured changelog target. It also exposes a small provenance policy that
+//! other generated-file guards can reuse: only an identified Homeboy release
+//! run may author generated output.
 
+use homeboy_core::execution::ChangeArtifactProvenance;
 use std::path::{Component as PathComponent, Path, PathBuf};
 
 /// Outcome of checking a changeset against the changelog-edit guard.
@@ -24,6 +23,24 @@ pub struct ChangelogGuardViolation {
     pub path: String,
     /// Human-readable steering message explaining the policy and the fix.
     pub message: String,
+}
+
+/// Whether generated output has durable provenance from Homeboy release.
+///
+/// File guards deliberately do not trust a producer label alone: a release
+/// run and its producing step must also be recorded so the authorization can
+/// be traced after the process exits.
+pub fn generated_file_mutation_is_authorized(
+    provenance: Option<&ChangeArtifactProvenance>,
+) -> bool {
+    provenance.is_some_and(|provenance| {
+        provenance.source == "release"
+            && provenance
+                .run_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+            && provenance.step_id.as_deref() == Some("changelog.finalize")
+    })
 }
 
 /// Detect whether `changed_files` modifies the configured `changelog_target`.
@@ -58,6 +75,21 @@ pub fn detect_changelog_edit(
         path: matched.clone(),
         message: steering_message(matched),
     })
+}
+
+/// Detect a configured changelog mutation that is not release-generated.
+///
+/// The path discriminator remains the component's configured target. The
+/// provenance policy is intentionally independent of path matching so it can
+/// protect other generated files without broadening this changelog guard.
+pub fn detect_manual_changelog_edit(
+    changelog_target: Option<&str>,
+    changed_files: &[String],
+    allow_manual_edits: bool,
+    provenance: Option<&ChangeArtifactProvenance>,
+) -> Option<ChangelogGuardViolation> {
+    let violation = detect_changelog_edit(changelog_target, changed_files)?;
+    (!allow_manual_edits && !generated_file_mutation_is_authorized(provenance)).then_some(violation)
 }
 
 /// Build the steering message shown when a changeset hand-edits the changelog.
@@ -185,5 +217,69 @@ mod tests {
     #[test]
     fn empty_changeset_is_a_noop() {
         assert!(detect_changelog_edit(Some("docs/changelog.md"), &[]).is_none());
+    }
+
+    #[test]
+    fn manual_changelog_edit_is_rejected_without_release_provenance() {
+        assert!(detect_manual_changelog_edit(
+            Some("docs/changelog.md"),
+            &files(&["docs/changelog.md"]),
+            false,
+            None,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn release_generated_changelog_edit_is_accepted_with_durable_provenance() {
+        let provenance = ChangeArtifactProvenance {
+            source: "release".to_string(),
+            run_id: Some("release.component".to_string()),
+            step_id: Some("changelog.finalize".to_string()),
+            command: None,
+            captured_at: None,
+        };
+
+        assert!(generated_file_mutation_is_authorized(Some(&provenance)));
+        assert!(detect_manual_changelog_edit(
+            Some("docs/changelog.md"),
+            &files(&["docs/changelog.md"]),
+            false,
+            Some(&provenance),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn generated_file_policy_rejects_incomplete_or_untrusted_provenance() {
+        for provenance in [
+            ChangeArtifactProvenance {
+                source: "manual".to_string(),
+                run_id: Some("release.component".to_string()),
+                step_id: Some("changelog.finalize".to_string()),
+                command: None,
+                captured_at: None,
+            },
+            ChangeArtifactProvenance {
+                source: "release".to_string(),
+                run_id: Some(" ".to_string()),
+                step_id: Some("changelog.finalize".to_string()),
+                command: None,
+                captured_at: None,
+            },
+        ] {
+            assert!(!generated_file_mutation_is_authorized(Some(&provenance)));
+        }
+    }
+
+    #[test]
+    fn manual_edit_policy_allows_an_explicit_component_opt_out() {
+        assert!(detect_manual_changelog_edit(
+            Some("docs/changelog.md"),
+            &files(&["docs/changelog.md"]),
+            true,
+            None,
+        )
+        .is_none());
     }
 }

@@ -233,6 +233,10 @@ pub struct GithubHostConfig {
 pub struct ComponentReleaseConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_release: Option<ComponentGithubReleaseConfig>,
+    /// Allow contributors to edit `changelog_target` outside Homeboy releases.
+    /// Disabled by default because configured changelogs are release-generated.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_manual_changelog_edits: bool,
     /// Per-ZIP source-to-archive coverage declarations for transformed packages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub package_coverage: Vec<PackageCoverageConfig>,
@@ -476,4 +480,16 @@ fn is_default_branch(s: &str) -> bool {
 }
 pub(super) fn is_false(value: &bool) -> bool {
     !*value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ComponentReleaseConfig;
+
+    #[test]
+    fn manual_changelog_edit_policy_is_absent_when_defaulted() {
+        let value = serde_json::to_value(ComponentReleaseConfig::default()).expect("serialize");
+
+        assert!(value.get("allow_manual_changelog_edits").is_none());
+    }
 }

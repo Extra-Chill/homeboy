@@ -1,7 +1,7 @@
 //! types — extracted from version.rs.
 
 use homeboy_core::is_zero;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 // VersionTargetInfo and ComponentVersionSnapshot moved DOWN to
 // homeboy-release-contract so core's context status mechanics can hold them in
@@ -33,7 +33,7 @@ pub struct BumpResult {
 }
 
 /// Result of validating and finalizing changelog for a version operation.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangelogValidationResult {
     pub changelog_path: String,
     pub changelog_finalized: bool,
