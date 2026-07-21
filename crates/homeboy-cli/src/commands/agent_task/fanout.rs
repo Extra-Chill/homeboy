@@ -267,6 +267,15 @@ fn cook_batch_inner(
         ));
     }
     apply_provider_profile(&mut args);
+    // Resolve the effective backend (explicit --backend or the configured
+    // default) and validate it up front (#7717). Otherwise an omitted
+    // --backend silently rode a config default like `codebox` all the way to
+    // provider execution, where each child cook failed late with a
+    // provider-shaped `no extension agent-task provider found for backend`
+    // error instead of an early, actionable configuration failure. Making the
+    // effective backend explicit here also surfaces it in the preflight and
+    // pins every child cook to the same resolved backend.
+    resolve_and_validate_effective_backend(&mut args)?;
     let plan = build_cook_batch_plan(&args)?;
     let branches = plan
         .cooks
@@ -859,6 +868,70 @@ fn apply_provider_profile(args: &mut AgentTaskFanoutCookBatchArgs) {
     }
 }
 
+/// Resolve the effective execution backend for the batch and fail early when it
+/// has no installed provider (#7717).
+///
+/// When `--backend` is omitted the effective backend comes from the configured
+/// `agent_task.default_backend`. We pin it onto `args.backend` so it is visible
+/// in the preflight and carried identically to every child cook, then confirm a
+/// provider can serve it — turning a late, provider-shaped child failure into an
+/// early configuration error listing the backends that are actually installed.
+fn resolve_and_validate_effective_backend(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
+    let effective = match args.backend.as_deref() {
+        Some(backend) if !backend.trim().is_empty() => backend.trim().to_string(),
+        _ => match provider::default_backend().map_err(|error| {
+            invalid_fanout(&format!("could not resolve default backend: {error}"))
+        })? {
+            Some(backend) => backend,
+            // No explicit backend and no configured default: leave resolution to
+            // the existing per-cook/component defaulting and its own diagnostics.
+            None => return Ok(()),
+        },
+    };
+
+    // Validate against installed providers only when the batch will actually
+    // execute. Dry-run/planning legitimately runs where no provider is installed
+    // (e.g. CI compiling the plan), so a hard provider check there would reject
+    // valid planning. Execution is where an unresolved backend fails late, so
+    // that is exactly where we fail early instead.
+    let will_execute = args.run_plan && !args.dry_run;
+    if will_execute {
+        let catalog = AgentTaskProviderCatalog::discover();
+        let selector = args.selector.as_deref();
+        if !matches!(
+            provider::resolve_provider_for_backend(catalog.providers(), &effective, selector),
+            provider::ProviderResolution::Resolved(_)
+        ) {
+            let mut available: Vec<String> = catalog
+                .providers()
+                .iter()
+                .map(|p| p.backend.clone())
+                .collect();
+            available.sort();
+            available.dedup();
+            let available_hint = if available.is_empty() {
+                "no agent-task provider backends are installed; install a provider extension (e.g. opencode)".to_string()
+            } else {
+                format!("installed backends: {}", available.join(", "))
+            };
+            let source = if args.backend.is_some() {
+                "requested via --backend"
+            } else {
+                "resolved from agent_task.default_backend"
+            };
+            return Err(invalid_fanout(&format!(
+                "agent-task fanout backend '{effective}' ({source}) has no installed provider. \
+                 Pass --backend <installed> explicitly, or set agent_task.default_backend to an installed backend. {available_hint}"
+            )));
+        }
+    }
+
+    // Pin the resolved backend so the preflight and every child cook use it,
+    // making an otherwise-implicit default visible and consistent.
+    args.backend = Some(effective);
+    Ok(())
+}
+
 fn selected_provider_profile(name: Option<&str>) -> Option<AgentTaskProviderProfileDeclaration> {
     let name = name?.trim();
     AgentTaskProviderCatalog::discover()
@@ -1434,6 +1507,51 @@ mod tests {
                 Some("homeboy@fix-issue-6453-homeboy")
             );
         });
+    }
+
+    #[test]
+    fn executing_batch_fails_early_for_a_backend_without_a_provider() {
+        // #7717: an executing batch whose backend cannot be served by any
+        // installed provider must fail early with an actionable configuration
+        // error, not ride the backend all the way to a late provider-shaped
+        // child failure. The test environment installs no providers, so any
+        // backend is unresolved — which is exactly the "no installed provider"
+        // path.
+        let mut args = cook_batch_args();
+        args.backend = Some("codebox-nonexistent".to_string());
+        args.selector = None;
+        args.dry_run = false;
+        args.run_plan = true;
+
+        let error = resolve_and_validate_effective_backend(&mut args)
+            .expect_err("an executing batch with an unresolved backend must fail early");
+        assert_eq!(error.details["field"], "input");
+        assert!(
+            error.message.contains("codebox-nonexistent")
+                && error.message.contains("no installed provider"),
+            "error must name the backend and the missing provider: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("--backend"),
+            "error must be actionable: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn dry_run_batch_pins_the_backend_without_requiring_a_provider() {
+        // Dry-run/planning must not require an installed provider — it only
+        // builds the plan. The effective backend is still pinned so it is
+        // visible and carried consistently.
+        let mut args = cook_batch_args();
+        args.backend = Some("sandbox".to_string());
+        args.dry_run = true;
+        args.run_plan = false;
+
+        resolve_and_validate_effective_backend(&mut args)
+            .expect("dry-run planning must not require an installed provider");
+        assert_eq!(args.backend.as_deref(), Some("sandbox"));
     }
 
     #[test]
