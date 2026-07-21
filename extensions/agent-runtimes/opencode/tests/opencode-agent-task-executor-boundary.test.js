@@ -964,6 +964,69 @@ process.exit(0);
 		workspaceRootResult.artifacts.every((artifact) => artifact.path.startsWith(path.join(quietWorkspace, '.homeboy', 'opencode'))),
 		true
 	);
+
+	// #8829: a review-only cook that only inspects an existing candidate can be
+	// dispatched without a workspace path that resolves to an absolute directory.
+	// The read-only inspection tools (read/glob/grep) must still be permitted
+	// within the workspace — otherwise OpenCode falls back to its default `ask`,
+	// is denied non-interactively, and the cook fails with `opencode.policy_denied`
+	// before it can inspect the candidate. Reads outside the workspace stay denied.
+	const reviewCapturePath = path.join(root, 'opencode-review-config.json');
+	const reviewCliPath = path.join(root, 'mock-opencode-review.cjs');
+	fs.writeFileSync(reviewCliPath, `#!/usr/bin/env node
+const fs = require('node:fs');
+const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
+fs.writeFileSync(${JSON.stringify(reviewCapturePath)}, JSON.stringify(config));
+process.stdout.write(JSON.stringify({ type: 'result', result: { summary: 'Reviewed candidate; no changes required.' } }));
+`);
+	// A review-only cook whose workspace is referenced by a *relative* cwd (the
+	// #8829 trigger): it names a real, existing directory but does not resolve to
+	// an absolute path, so no concrete workspace read patterns are generated. The
+	// base permission denies only `*.env` reads with no catch-all allow rule.
+	const reviewWorkspace = path.join(root, 'review-workspace');
+	fs.mkdirSync(reviewWorkspace, { recursive: true });
+	spawnSync('git', ['init'], { cwd: reviewWorkspace, encoding: 'utf8' });
+	spawnSync('git', ['commit', '--allow-empty', '-m', 'candidate'], {
+		cwd: reviewWorkspace,
+		encoding: 'utf8',
+		env: {
+			...process.env,
+			GIT_AUTHOR_NAME: 'Homeboy Test',
+			GIT_AUTHOR_EMAIL: 'homeboy@example.test',
+			GIT_COMMITTER_NAME: 'Homeboy Test',
+			GIT_COMMITTER_EMAIL: 'homeboy@example.test',
+		},
+	});
+	const relativeReviewCwd = path.relative(process.cwd(), reviewWorkspace);
+	assert.equal(path.isAbsolute(relativeReviewCwd), false);
+	const reviewResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-review-only',
+		instructions: 'Review the existing candidate and preserve it when correct.',
+		executor: {
+			...request.executor,
+			config: {
+				...request.executor.config,
+				command_args: [reviewCliPath],
+				cwd: relativeReviewCwd,
+				runtime_env: {
+					OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: { read: { '*.env': 'deny' } } }),
+				},
+			},
+		},
+	}, { env: fixtureEnv });
+
+	assert.equal(reviewResult.status, 'succeeded', JSON.stringify(reviewResult.diagnostics));
+	const reviewConfig = JSON.parse(fs.readFileSync(reviewCapturePath, 'utf8'));
+	// Read-only inspection is permitted within the workspace...
+	assert.equal(reviewConfig.permission.read['*'], 'allow');
+	assert.equal(reviewConfig.agent.build.permission.read['*'], 'allow');
+	assert.equal(nativeToolAction(reviewConfig, 'build', 'glob', 'src/**/*.js'), 'allow');
+	assert.equal(nativeToolAction(reviewConfig, 'build', 'grep', 'TODO'), 'allow');
+	// ...while reads outside the workspace and the pre-existing secret deny remain denied.
+	assert.equal(reviewConfig.permission.read['..'], 'deny');
+	assert.equal(reviewConfig.permission.read['../*'], 'deny');
+	assert.equal(reviewConfig.permission.read['*.env'], 'deny');
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });
 }

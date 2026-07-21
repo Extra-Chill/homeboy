@@ -298,7 +298,16 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '') {
 			),
 		};
 	}
-	if (workspaceReadPatterns.length > 0) {
+	// The native workspace read/inspection tools (read, glob, grep) correspond to
+	// this executor's declared read-only Homeboy workspace capabilities and are
+	// always permitted within the task cwd, with reads outside it still denied.
+	// This must not be gated on resolving concrete workspace read patterns: a
+	// review-only cook (e.g. `--no-finalize` inspecting an existing candidate)
+	// whose cwd does not resolve to an absolute path would otherwise leave the
+	// inherited `read` policy without a `*: allow` rule, so OpenCode falls back to
+	// its default `ask`, is denied non-interactively, and the cook fails with
+	// `opencode.policy_denied` before it can inspect the candidate (#8829).
+	{
 		content.permission = permissionWithWorkspaceToolAllowances(content.permission);
 		content.agent[primaryAgent] = {
 			...objectValue(content.agent[primaryAgent]),
