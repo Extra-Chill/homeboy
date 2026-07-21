@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.28.0] - 2026-07-21
+
+### Added
+- enforce Woo compatibility evidence
+
 ## [3.27.2] - 2026-07-21
 
 ### Fixed
