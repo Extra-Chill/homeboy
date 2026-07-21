@@ -1040,7 +1040,23 @@ pub(super) fn terminal_runner_poll_failure(
     source: Error,
 ) -> Error {
     let job_id = job.id.to_string();
+    // A controller-side daemon transport drop is NOT a terminal job failure:
+    // the durable runner job is still executing remotely, and reconnecting can
+    // resume observing it. Only terminalize when the poll failure is something
+    // other than a recoverable transport drop (an authoritative "job gone" /
+    // decode error the daemon actually returned). Otherwise keep the run
+    // recoverable so a reconnect can pick it back up instead of reporting a
+    // still-running job as failed (#7928).
+    let transient_transport_drop =
+        super::super::daemon_health::runner_daemon_health_failure(&source).is_some();
     let mut error = daemon_job_context_error(&runner.id, &job_id, persisted_run_id, source);
+    if transient_transport_drop {
+        // `daemon_job_context_error` already marks this recoverable
+        // (retryable, status: "recoverable_followup_required") with durable-job
+        // resumption guidance; preserve that instead of forcing a terminal
+        // failure.
+        return error;
+    }
     error.retryable = Some(false);
     error.details["status"] = Value::String("terminal_failure".to_string());
     error.details["reason"] = Value::String("runner_job_unobservable".to_string());
