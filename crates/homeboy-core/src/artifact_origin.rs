@@ -284,17 +284,15 @@ fn response_for_request(root: &Path, method: &str, target: &str) -> Result<Artif
         return Ok(response);
     }
     let Some(path) = safe_target_path(root, target) else {
-        return Ok(json_error_response(
-            404,
-            br#"{"error":"not_found"}"#.to_vec(),
-            headers,
-        ));
+        return Ok(not_found_response(method, target, headers));
     };
+    if !path.is_file() {
+        return Ok(not_found_response(method, target, headers));
+    }
     let body = match std::fs::read(&path) {
         Ok(body) => body,
-        Err(_) => br#"{"error":"not_found"}"#.to_vec(),
+        Err(_) => return Ok(not_found_response(method, target, headers)),
     };
-    let status = if path.is_file() { 200 } else { 404 };
     headers.push((
         "content-type".to_string(),
         crate::artifact_metadata::content_type_from_path(&path)
@@ -302,7 +300,7 @@ fn response_for_request(root: &Path, method: &str, target: &str) -> Result<Artif
     ));
     headers.push(("content-length".to_string(), body.len().to_string()));
     Ok(ArtifactOriginResponse {
-        status,
+        status: 200,
         headers,
         body: if method.eq_ignore_ascii_case("HEAD") {
             Vec::new()
@@ -323,6 +321,51 @@ fn json_error_response(
         status,
         headers,
         body,
+    }
+}
+
+/// Actionable 404 for the artifact origin.
+///
+/// A bare `{"error":"not_found"}` gave callers no way to tell an ad-hoc,
+/// wrong-shape URL apart from genuinely missing evidence or a stale/broken
+/// origin. Reviewers hitting a hand-built path (e.g. `/{run-id}/{uuid}.png`)
+/// would misread the 404 as ingress/daemon staleness. This response names the
+/// requested path and the path shapes the origin actually resolves so the
+/// caller can self-correct instead of abandoning the retrieval.
+fn not_found_response(
+    method: &str,
+    target: &str,
+    mut headers: Vec<(String, String)>,
+) -> ArtifactOriginResponse {
+    let requested = target.split('?').next().unwrap_or(target);
+    let message = "no artifact resolved for this path; it did not match a run-scoped artifact \
+                   route and no file exists at that path under the artifact root";
+    let hint = "Run-scoped artifact IDs are not filenames; do not hand-build \
+                `/<run-id>/<uuid>-candidate.png`-style URLs. Resolve the real path with \
+                `homeboy tunnel artifact-origin inspect --path <file-or-url>`.";
+    let body = serde_json::json!({
+        "error": "not_found",
+        "requested_path": requested,
+        "message": message,
+        "resolvable_path_shapes": [
+            "/runs/<run-id>/artifacts/<artifact-id>",
+            "/runs/<run-id>/artifacts/<artifact-id>/content",
+            "/artifacts/<artifact-id>",
+            "/<artifact-root-relative-path> (e.g. /workflow-bench/<bundle>/report.html)"
+        ],
+        "hint": hint,
+    });
+    let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| br#"{"error":"not_found"}"#.to_vec());
+    headers.push(("content-type".to_string(), "application/json".to_string()));
+    headers.push(("content-length".to_string(), bytes.len().to_string()));
+    ArtifactOriginResponse {
+        status: 404,
+        headers,
+        body: if method.eq_ignore_ascii_case("HEAD") {
+            Vec::new()
+        } else {
+            bytes
+        },
     }
 }
 
@@ -652,6 +695,72 @@ mod tests {
                 .display()
                 .to_string()
         );
+    }
+
+    #[test]
+    fn missing_file_returns_actionable_diagnostic_with_resolvable_shapes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        // A hand-built run-scoped-looking URL that does NOT match the
+        // `/runs/<id>/artifacts/<id>` route and has no file on disk: exactly
+        // the shape a reviewer guessed against the artifact tunnel.
+        let response = response_for_request(
+            temp.path(),
+            "GET",
+            "/968cfee7-87a5-443a-92be-6d0753bc3c01/c422027c-candidate.png",
+        )
+        .expect("response");
+
+        assert_eq!(response.status, 404);
+        assert!(response
+            .headers
+            .contains(&("content-type".to_string(), "application/json".to_string())));
+
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("json body");
+        assert_eq!(body["error"], "not_found");
+        assert_eq!(
+            body["requested_path"],
+            "/968cfee7-87a5-443a-92be-6d0753bc3c01/c422027c-candidate.png"
+        );
+        let shapes = body["resolvable_path_shapes"]
+            .as_array()
+            .expect("resolvable_path_shapes array");
+        assert!(shapes
+            .iter()
+            .any(|shape| shape.as_str() == Some("/runs/<run-id>/artifacts/<artifact-id>")));
+        assert!(body["hint"]
+            .as_str()
+            .expect("hint")
+            .contains("artifact-origin inspect"));
+    }
+
+    #[test]
+    fn missing_file_head_request_omits_diagnostic_body() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let response =
+            response_for_request(temp.path(), "HEAD", "/does/not/exist.png").expect("response");
+
+        assert_eq!(response.status, 404);
+        assert!(response.body.is_empty());
+        // content-length still advertises the diagnostic payload size.
+        assert!(response
+            .headers
+            .iter()
+            .any(|(name, value)| name == "content-length" && value != "0"));
+    }
+
+    #[test]
+    fn path_traversal_returns_actionable_diagnostic() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let response =
+            response_for_request(temp.path(), "GET", "/../etc/passwd").expect("response");
+
+        assert_eq!(response.status, 404);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("json body");
+        assert_eq!(body["error"], "not_found");
+        assert!(body["resolvable_path_shapes"].is_array());
     }
 
     struct EnvGuard {
