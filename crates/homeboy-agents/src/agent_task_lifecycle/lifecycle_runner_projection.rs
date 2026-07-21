@@ -407,14 +407,26 @@ fn validate_terminal_child_identity(
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
     event: &crate::agent_task_lifecycle::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
 ) -> Result<()> {
-    let expected_runner_id = record.runner_id().unwrap_or_default();
-    let expected_job_id = record.runner_job_id().unwrap_or_default();
-    let expected_run_id = record.run_id.as_str();
-    if event.identity.runner_id == expected_runner_id
-        && event.identity.runner_job_id == expected_job_id
-        && snapshot.job.id.to_string() == expected_job_id
-        && event.identity.run_id.as_deref() == Some(expected_run_id)
-        && event.identity.persisted_run_id.as_deref() == Some(expected_run_id)
+    // Canonical run/runner/job identity the controller expects, and the identity
+    // the terminal event carries (built from its *persisted* run id). Comparing
+    // via the shared `RunnerJobIdentity` keeps the runner/job/run tuple check in
+    // lockstep with every other handoff-identity site.
+    let expected = homeboy_core::lab_contract::RunnerJobIdentity::new(
+        record.run_id.as_str(),
+        record.runner_id().unwrap_or_default(),
+        record.runner_job_id().unwrap_or_default(),
+    );
+    let event_identity = homeboy_core::lab_contract::RunnerJobIdentity::new(
+        event.identity.persisted_run_id.clone().unwrap_or_default(),
+        event.identity.runner_id.clone(),
+        event.identity.runner_job_id.clone(),
+    );
+    // Beyond the run/runner/job tuple, the terminal event must also agree on the
+    // raw transport run id (not just the persisted run id) and the snapshot's
+    // own job id, so the whole child projection provably belongs to this run.
+    if expected.matches(&event_identity)
+        && event.identity.run_id.as_deref() == Some(record.run_id.as_str())
+        && snapshot.job.id.to_string() == expected.runner_job_id
     {
         return Ok(());
     }

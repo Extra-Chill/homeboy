@@ -84,6 +84,78 @@ pub struct AgentTaskDispatchIdentity {
     pub handoff_id: Option<String>,
 }
 
+/// The core run/runner/job identity a Lab-offloaded job carries across the
+/// controller, the runner snapshot, and terminal lifecycle events.
+///
+/// This is the canonical shape the whole handoff lifecycle validates against —
+/// previously each call site hand-rolled the same `run_id`/`runner_id`/
+/// `runner_job_id` tuple comparison with subtly different edge-case handling,
+/// which is why identity-binding bugs landed one path at a time (empty-string
+/// compares, missing-id-vs-mismatch confusion, etc). Centralizing the
+/// comparison here gives every consumer one definition of "same job".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerJobIdentity {
+    pub run_id: String,
+    pub runner_id: String,
+    pub runner_job_id: String,
+}
+
+impl RunnerJobIdentity {
+    pub fn new(
+        run_id: impl Into<String>,
+        runner_id: impl Into<String>,
+        runner_job_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            run_id: run_id.into(),
+            runner_id: runner_id.into(),
+            runner_job_id: runner_job_id.into(),
+        }
+    }
+
+    /// Whether every identity field is populated. A partially-established
+    /// identity (e.g. a controller run before its accepted runner job id is
+    /// bound) is not a mismatch — callers should surface "identity not
+    /// established" rather than compare against an empty field (#9240).
+    pub fn is_complete(&self) -> bool {
+        !self.run_id.trim().is_empty()
+            && !self.runner_id.trim().is_empty()
+            && !self.runner_job_id.trim().is_empty()
+    }
+
+    /// Whether two identities name the same run + runner + job.
+    pub fn matches(&self, other: &RunnerJobIdentity) -> bool {
+        self.run_id == other.run_id
+            && self.runner_id == other.runner_id
+            && self.runner_job_id == other.runner_job_id
+    }
+
+    /// A stable, human-readable description used in mismatch diagnostics.
+    pub fn describe(&self) -> String {
+        format!(
+            "run '{}', runner '{}', job '{}'",
+            self.run_id, self.runner_id, self.runner_job_id
+        )
+    }
+}
+
+impl AgentTaskDispatchIdentity {
+    /// Project this dispatch identity onto the canonical run/runner/job tuple.
+    /// Prefers the persisted run id (the controller's durable run) and falls
+    /// back to the transport `run_id`.
+    pub fn runner_job_identity(&self) -> RunnerJobIdentity {
+        RunnerJobIdentity {
+            run_id: self
+                .persisted_run_id
+                .clone()
+                .or_else(|| self.run_id.clone())
+                .unwrap_or_default(),
+            runner_id: self.runner_id.clone(),
+            runner_job_id: self.runner_job_id.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabRunnerHandoffFollowCommands {
     pub job_logs: String,
@@ -278,4 +350,58 @@ pub fn run_location_index_path(remote_cwd: &str) -> String {
         "{}{RUNNER_ARTIFACT_ROOT_DIR_SUFFIX}/homeboy-run-location-index.json",
         remote_cwd.trim_end_matches('/')
     )
+}
+
+#[cfg(test)]
+mod runner_job_identity_tests {
+    use super::{AgentTaskDispatchIdentity, RunnerJobIdentity};
+
+    #[test]
+    fn matches_requires_all_three_fields_to_agree() {
+        let a = RunnerJobIdentity::new("run-1", "runner-a", "job-1");
+        assert!(a.matches(&RunnerJobIdentity::new("run-1", "runner-a", "job-1")));
+        assert!(!a.matches(&RunnerJobIdentity::new("run-2", "runner-a", "job-1")));
+        assert!(!a.matches(&RunnerJobIdentity::new("run-1", "runner-b", "job-1")));
+        assert!(!a.matches(&RunnerJobIdentity::new("run-1", "runner-a", "job-2")));
+    }
+
+    #[test]
+    fn is_complete_flags_a_partially_established_identity() {
+        // #9240: a controller run before its accepted runner job id is bound has
+        // an empty job id — that is "not established", not a mismatch. Callers
+        // rely on this to surface the right diagnostic instead of comparing
+        // against an empty field.
+        assert!(RunnerJobIdentity::new("run-1", "runner-a", "job-1").is_complete());
+        assert!(!RunnerJobIdentity::new("run-1", "runner-a", "").is_complete());
+        assert!(!RunnerJobIdentity::new("run-1", "", "job-1").is_complete());
+        assert!(!RunnerJobIdentity::new("", "runner-a", "job-1").is_complete());
+        assert!(!RunnerJobIdentity::new("run-1", "runner-a", "   ").is_complete());
+    }
+
+    #[test]
+    fn dispatch_identity_prefers_persisted_run_id() {
+        let identity = AgentTaskDispatchIdentity {
+            runner_id: "runner-a".to_string(),
+            runner_job_id: "job-1".to_string(),
+            persisted_run_id: Some("persisted-run".to_string()),
+            run_id: Some("transport-run".to_string()),
+            handoff_id: None,
+        };
+        let projected = identity.runner_job_identity();
+        assert_eq!(projected.run_id, "persisted-run");
+        assert_eq!(projected.runner_id, "runner-a");
+        assert_eq!(projected.runner_job_id, "job-1");
+    }
+
+    #[test]
+    fn dispatch_identity_falls_back_to_transport_run_id() {
+        let identity = AgentTaskDispatchIdentity {
+            runner_id: "runner-a".to_string(),
+            runner_job_id: "job-1".to_string(),
+            persisted_run_id: None,
+            run_id: Some("transport-run".to_string()),
+            handoff_id: None,
+        };
+        assert_eq!(identity.runner_job_identity().run_id, "transport-run");
+    }
 }
