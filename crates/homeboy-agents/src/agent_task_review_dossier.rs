@@ -410,10 +410,14 @@ impl AgentTaskReviewDossier {
                 );
             }
         }
-        for evidence in &self.evidence {
+        for (index, evidence) in self.evidence.iter().enumerate() {
             scalar("evidence.summary", &evidence.summary)?;
             if let Some(url) = &evidence.url {
-                validate_reviewer_url(url)?;
+                validate_reviewer_url(
+                    &format!("evidence[{index}].url"),
+                    url,
+                    &format!("review dossier evidence summary `{}`", evidence.summary),
+                )?;
             }
         }
         for contract in &self.changed_public_contracts {
@@ -450,7 +454,14 @@ impl AgentTaskReviewDossier {
                 )?;
                 scalar("public_contract_evidence.external_usage.source", &evidence.external_usage.source)?;
                 scalar("public_contract_evidence.external_usage.limitations", &evidence.external_usage.limitations)?;
-                validate_reviewer_url(&evidence.external_usage.url)?;
+                validate_reviewer_url(
+                    "public_contract_evidence.external_usage.url",
+                    &evidence.external_usage.url,
+                    &format!(
+                        "public-contract external usage source `{}`",
+                        evidence.external_usage.source
+                    ),
+                )?;
                 if evidence.compatibility_impact.trim().is_empty()
                     || evidence.external_consumer_impact.trim().is_empty()
                     || evidence.external_usage.source.trim().is_empty()
@@ -517,6 +528,11 @@ pub fn enrich_dossier(
     ci_expected: &[String],
     lifecycle: Option<&homeboy_core::run_lifecycle_record::RunLifecycleRecord>,
 ) {
+    // Durable/operator evidence can be hydrated before finalization. Keep it in
+    // the run report, but do not carry operator-only URLs into the reviewer form.
+    dossier
+        .evidence
+        .retain(|evidence| !evidence.url.as_deref().is_some_and(operator_only_reference));
     for gate in gates {
         dossier.evidence.push(AgentTaskReviewEvidence {
             summary: gate_evidence_summary(gate),
@@ -535,10 +551,20 @@ pub fn enrich_dossier(
             url: None,
         });
     }
-    for reference in source_refs.iter().chain(artifact_refs) {
+    for (provenance, reference) in source_refs
+        .iter()
+        .enumerate()
+        .map(|(index, reference)| (format!("source_refs[{index}]"), reference))
+        .chain(
+            artifact_refs
+                .iter()
+                .enumerate()
+                .map(|(index, reference)| (format!("artifact_refs[{index}]"), reference)),
+        )
+    {
         if is_reviewer_url(reference) {
             dossier.evidence.push(AgentTaskReviewEvidence {
-                summary: "Reviewer-resolvable source evidence".to_string(),
+                summary: format!("Reviewer-resolvable evidence from {provenance}"),
                 url: Some(reference.clone()),
             });
         }
@@ -879,15 +905,22 @@ fn validate_issue_reference(value: &str) -> Result<()> {
 fn is_reviewer_url(value: &str) -> bool {
     value.starts_with("https://") && !operator_only_reference(value)
 }
-fn validate_reviewer_url(value: &str) -> Result<()> {
-    let url = reqwest::Url::parse(value).map_err(|_| {
-        Error::validation_invalid_argument("evidence.url", "evidence URL is invalid", None, None)
-    })?;
+fn validate_reviewer_url(field: &str, value: &str, provenance: &str) -> Result<()> {
+    let url = match reqwest::Url::parse(value) {
+        Ok(url) => url,
+        Err(_) => return invalid_reviewer_url(field, value, provenance, "is invalid"),
+    };
     let host = url.host_str().unwrap_or_default();
-    if operator_only_reference(value) || host.is_empty() {
-        return invalid("evidence.url", "evidence URL must be a public HTTPS URL");
+    if url.scheme() != "https" || operator_only_reference(value) || host.is_empty() {
+        return invalid_reviewer_url(field, value, provenance, "must be a public HTTPS URL");
     }
     Ok(())
+}
+fn invalid_reviewer_url(field: &str, value: &str, provenance: &str, problem: &str) -> Result<()> {
+    invalid(
+        field,
+        &format!("reviewer evidence URL `{value}` from {provenance} {problem}"),
+    )
 }
 fn invalid(field: &str, message: &str) -> Result<()> {
     Err(Error::validation_invalid_argument(
@@ -1102,6 +1135,50 @@ mod tests {
             url: Some("https://localhost/a".into()),
         });
         assert!(value.validate(&default_profile()).is_err());
+    }
+
+    #[test]
+    fn reviewer_url_diagnostic_identifies_the_url_and_its_provenance() {
+        let mut value = dossier();
+        value.evidence.push(AgentTaskReviewEvidence {
+            summary: "durable artifact retained for operators".into(),
+            url: Some("homeboy://agent-task/run/run-9568/artifacts".into()),
+        });
+
+        let error = value
+            .validate(&default_profile())
+            .expect_err("internal URL is not reviewer-resolvable");
+
+        assert!(error
+            .message
+            .contains("homeboy://agent-task/run/run-9568/artifacts"));
+        assert!(error
+            .message
+            .contains("durable artifact retained for operators"));
+    }
+
+    #[test]
+    fn public_contract_url_diagnostic_identifies_the_url_and_source() {
+        let mut value = dossier();
+        value
+            .changed_public_contracts
+            .push(AgentTaskPublicContract {
+                id: "api.widget.render".into(),
+                summary: "Changes the rendered result.".into(),
+            });
+        let mut evidence = public_contract_evidence();
+        evidence.external_usage.source = "Internal durable artifact".into();
+        evidence.external_usage.url = "homeboy://agent-task/run/run-9568/artifacts".into();
+        value.public_contract_evidence = Some(evidence);
+
+        let error = value
+            .validate(&default_profile())
+            .expect_err("internal public-contract URL is not reviewer-resolvable");
+
+        assert!(error
+            .message
+            .contains("homeboy://agent-task/run/run-9568/artifacts"));
+        assert!(error.message.contains("Internal durable artifact"));
     }
 
     fn public_contract_evidence() -> AgentTaskPublicContractEvidence {
