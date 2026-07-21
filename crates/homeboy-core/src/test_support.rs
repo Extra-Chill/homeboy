@@ -1111,6 +1111,38 @@ fn handle_reverse_broker_request(
             .expect("claim broker job");
         return ok(json!({ "claim": claim }));
     }
+    // Reverse-runner file transfer (`RunnerFileChannel::BrokerHttp`) posts
+    // `/files/{mkdir,upload,download}` for the same host the fixture runs on, so
+    // the fixture performs the real filesystem operation. Without these the
+    // detached Lab cook's Homeboy-owned artifact-directory creation fails with
+    // "unknown reverse broker fixture path" (#9408).
+    if request.method == "POST" && request.path == "/files/mkdir" {
+        let path = request.body["path"].as_str().expect("broker mkdir path");
+        std::fs::create_dir_all(path).expect("broker fixture mkdir");
+        return ok(json!({ "created": true }));
+    }
+    if request.method == "POST" && request.path == "/files/upload" {
+        use base64::Engine;
+        let path = request.body["path"].as_str().expect("broker upload path");
+        let encoded = request.body["content_base64"]
+            .as_str()
+            .expect("broker upload content_base64");
+        let content = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("decode broker upload");
+        if let Some(parent) = Path::new(path).parent() {
+            std::fs::create_dir_all(parent).expect("broker fixture upload parent");
+        }
+        std::fs::write(path, content).expect("broker fixture upload write");
+        return ok(json!({ "uploaded": true }));
+    }
+    if request.method == "POST" && request.path == "/files/download" {
+        use base64::Engine;
+        let path = request.body["path"].as_str().expect("broker download path");
+        let content = std::fs::read(path).expect("broker fixture download read");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(content);
+        return ok(json!({ "content_base64": encoded }));
+    }
     if request.method == "GET" {
         if let Some(job_id) = request.path.strip_prefix("/jobs/") {
             let job = store
