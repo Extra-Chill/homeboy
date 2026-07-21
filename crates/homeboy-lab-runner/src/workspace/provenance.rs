@@ -65,7 +65,8 @@ pub(crate) fn materialize_verified_lab_snapshot_git_baseline(
         verify_lab_workspace_git_root(materialized_workspace_path, &provenance)?;
         return git(materialized_workspace_path, &["rev-parse", "HEAD"]);
     }
-    if let Some(path) = nested_git_metadata(materialized_workspace_path)? {
+    if let Some(path) = nested_git_metadata(materialized_workspace_path, &provenance.sync_excludes)?
+    {
         return Err(format!(
             "snapshot workspace contains nested Git metadata at {}",
             path.display()
@@ -134,7 +135,7 @@ fn verify_materialized_snapshot_git_checkout(
     if root != git_root {
         return Err("Git top-level does not exactly match the managed workspace root".to_string());
     }
-    if let Some(path) = nested_git_metadata(workspace)? {
+    if let Some(path) = nested_git_metadata(workspace, &provenance.sync_excludes)? {
         return Err(format!(
             "snapshot workspace contains nested Git metadata at {}",
             path.display()
@@ -306,7 +307,7 @@ fn verify_synthetic_snapshot_git_baseline(
     if root != git_root {
         return Err("Git top-level does not exactly match the managed workspace root".to_string());
     }
-    if let Some(path) = nested_git_metadata(workspace)? {
+    if let Some(path) = nested_git_metadata(workspace, &provenance.sync_excludes)? {
         return Err(format!(
             "snapshot workspace contains nested Git metadata at {}",
             path.display()
@@ -856,8 +857,43 @@ fn git_with_env(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn nested_git_metadata(workspace: &Path) -> std::result::Result<Option<PathBuf>, String> {
-    fn visit(root: &Path, path: &Path) -> std::result::Result<Option<PathBuf>, String> {
+/// Find nested `.git` metadata under `workspace`, skipping any path the snapshot
+/// contract excludes (e.g. `vendor`, `vendor/**`).
+///
+/// A reused Lab workspace can retain previously materialized excluded content
+/// (Composer `vendor/` with its own nested `.git`) even though the current
+/// snapshot excludes it. Traversing into those excluded directories treated the
+/// stale nested `.git` as current snapshot content and failed committed-change
+/// harvest closed (#9395). The synthetic baseline never stages excluded paths,
+/// so nested Git metadata under them is irrelevant to baseline integrity — only
+/// nested `.git` under *non-excluded* source paths is a real violation.
+fn nested_git_metadata(
+    workspace: &Path,
+    excludes: &[String],
+) -> std::result::Result<Option<PathBuf>, String> {
+    // Content excludes drive the descent-skip decision, but the ubiquitous
+    // `.git`/`.git/**` patterns must NOT: those exist to exempt the workspace's
+    // own top-level `.git` from content hashing, and matching them by basename
+    // would skip the very nested-`.git` detection this function performs (so a
+    // nested `.git` under a non-excluded source path would be missed, #9395
+    // criterion 4). Detect `.git` unconditionally; only skip descending into a
+    // directory the snapshot excludes as *content* (e.g. `vendor`, `vendor/**`).
+    let content_excludes: Vec<String> = excludes
+        .iter()
+        .filter(|pattern| {
+            let normalized = pattern
+                .trim_start_matches("./")
+                .trim_end_matches("/**")
+                .trim_end_matches('/');
+            normalized != ".git"
+        })
+        .cloned()
+        .collect();
+    fn visit(
+        root: &Path,
+        path: &Path,
+        content_excludes: &[String],
+    ) -> std::result::Result<Option<PathBuf>, String> {
         for entry in std::fs::read_dir(path)
             .map_err(|error| format!("could not inspect snapshot workspace: {error}"))?
         {
@@ -872,14 +908,20 @@ fn nested_git_metadata(workspace: &Path) -> std::result::Result<Option<PathBuf>,
                 .map_err(|error| format!("could not inspect snapshot entry type: {error}"))?
                 .is_dir()
             {
-                if let Some(found) = visit(root, &path)? {
+                // A directory the snapshot contract excludes as content is not
+                // part of the baseline, so nested Git metadata beneath it is
+                // irrelevant — never descend into it.
+                if super::snapshot::is_excluded(root, &path, content_excludes, &[]) {
+                    continue;
+                }
+                if let Some(found) = visit(root, &path, content_excludes)? {
                     return Ok(Some(found));
                 }
             }
         }
         Ok(None)
     }
-    visit(workspace, workspace)
+    visit(workspace, workspace, &content_excludes)
 }
 
 fn env_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
@@ -1969,6 +2011,83 @@ mod tests {
         .expect_err("changed snapshot workspace must fail");
         assert!(error.contains("runner workspace sync --mode snapshot"));
         assert!(!error.contains("git status --short"));
+    }
+
+    #[test]
+    fn synthetic_baseline_ignores_nested_git_under_excluded_vendor_content() {
+        // A reused Lab workspace can retain previously materialized excluded
+        // content (Composer `vendor/` with its own nested `.git`) even though the
+        // current snapshot excludes `vendor`/`vendor/**`. Committed-change harvest
+        // must not treat that stale nested `.git` as current snapshot content and
+        // fail closed during baseline materialization (#9395).
+        let workspace = tempfile::tempdir().expect("runner workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("snapshot source");
+        // Stale excluded dependency content with its own nested Git metadata.
+        std::fs::create_dir_all(workspace.path().join("vendor/pkg/.git"))
+            .expect("nested vendor git metadata");
+        std::fs::write(
+            workspace.path().join("vendor/pkg/.git/HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .expect("nested vendor git HEAD");
+        std::fs::write(workspace.path().join("vendor/pkg/lib.php"), "<?php\n")
+            .expect("vendor content");
+
+        let mut snapshot = snapshot(workspace.path());
+        snapshot.sync_excludes = vec![
+            ".git".to_string(),
+            ".git/**".to_string(),
+            "vendor".to_string(),
+            "vendor/**".to_string(),
+        ];
+        let lab = lab(workspace.path(), &snapshot);
+        let baseline = materialize_verified_lab_snapshot_git_baseline(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            lab,
+        )
+        .expect("baseline succeeds despite nested git under excluded vendor");
+        assert!(!baseline.is_empty());
+    }
+
+    #[test]
+    fn synthetic_baseline_still_fails_on_nested_git_in_non_excluded_source() {
+        // A nested `.git` under a non-excluded source path is a real snapshot
+        // integrity violation and must still fail closed (#9395 criterion 4).
+        let workspace = tempfile::tempdir().expect("runner workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("snapshot source");
+        std::fs::create_dir_all(workspace.path().join("packages/embedded/.git"))
+            .expect("nested source git metadata");
+        std::fs::write(
+            workspace.path().join("packages/embedded/.git/HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .expect("nested source git HEAD");
+
+        let mut snapshot = snapshot(workspace.path());
+        snapshot.sync_excludes = vec![
+            ".git".to_string(),
+            ".git/**".to_string(),
+            "vendor".to_string(),
+            "vendor/**".to_string(),
+        ];
+        let lab = lab(workspace.path(), &snapshot);
+        let error = materialize_verified_lab_snapshot_git_baseline(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            lab,
+        )
+        .expect_err("nested git in non-excluded source must fail closed");
+        assert!(
+            error.contains("nested Git metadata"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("packages/embedded"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
