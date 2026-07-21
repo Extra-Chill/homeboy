@@ -18,7 +18,7 @@ use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::idiomatic::is_trivial_method;
-use super::walker::is_test_path;
+use super::walker::{cfg_test_regions, is_test_path};
 use homeboy_audit_contract::DuplicationDetectorConfig;
 
 // `DuplicateGroup` now lives in the shared audit contract; re-exported so
@@ -117,11 +117,53 @@ pub(crate) fn detect_duplicate_groups(fingerprints: &[&FileFingerprint]) -> Vec<
 /// `convention_methods` are excluded — identical implementations across convention-
 /// following files are expected behavior (e.g. `__construct`, `checkPermission`,
 /// interface methods with identical bodies).
+/// Set of `(method_name, file)` pairs whose definition sits inside an inline
+/// `#[cfg(test)]` region of a production file. These are test fixtures
+/// (`make_fp`, `git_repo`, `local_client`, …) that `is_test_path` — which only
+/// classifies whole test *files* — cannot see. Duplication among them is
+/// per-module test scaffolding, not production copy-paste, so it should be
+/// treated the same as `is_test_path` duplication (Info severity, test-helper
+/// suggestion).
+fn inline_test_context_methods(fingerprints: &[&FileFingerprint]) -> HashSet<(String, String)> {
+    let mut out = HashSet::new();
+    for fp in fingerprints {
+        let regions = cfg_test_regions(&fp.content);
+        if regions.is_empty() {
+            continue;
+        }
+        for method_name in fp.method_hashes.keys() {
+            // Find the method's `fn <name>` declaration offset; flag it when it
+            // falls inside a cfg(test) region.
+            let needle = format!("fn {}", method_name);
+            if let Some(pos) = fp.content.find(&needle) {
+                if regions
+                    .iter()
+                    .any(|(start, end)| pos >= *start && pos <= *end)
+                {
+                    out.insert((method_name.clone(), fp.relative_path.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether a duplicate location is test code — either a whole test file
+/// (`is_test_path`) or a method defined inside an inline `#[cfg(test)]` block.
+fn is_test_location(
+    method_name: &str,
+    file: &str,
+    inline_test_methods: &HashSet<(String, String)>,
+) -> bool {
+    is_test_path(file) || inline_test_methods.contains(&(method_name.to_string(), file.to_string()))
+}
+
 pub(crate) fn detect_duplicates(
     fingerprints: &[&FileFingerprint],
     convention_methods: &std::collections::HashSet<String>,
 ) -> Vec<Finding> {
     let hash_groups = build_groups(fingerprints);
+    let inline_test_methods = inline_test_context_methods(fingerprints);
     let mut findings = Vec::new();
 
     for ((method_name, _hash), locations) in &hash_groups {
@@ -134,7 +176,9 @@ pub(crate) fn detect_duplicates(
             continue;
         }
 
-        let test_only_duplicate = locations.iter().all(|file| is_test_path(file));
+        let test_only_duplicate = locations
+            .iter()
+            .all(|file| is_test_location(method_name, file, &inline_test_methods));
         let severity = if test_only_duplicate {
             Severity::Info
         } else {
@@ -205,6 +249,7 @@ const CROSS_NAME_MIN_BODY_LINES: usize = 1;
 /// exact detector; a cross-name group is still reported (its value is the
 /// *cross-name* link), but same-name-only groups are left to `detect_duplicates`.
 pub(crate) fn detect_cross_name_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+    let inline_test_methods = inline_test_context_methods(fingerprints);
     // hash -> list of (file, method_name)
     let mut by_body: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
     for fp in fingerprints {
@@ -233,7 +278,9 @@ pub(crate) fn detect_cross_name_duplicates(fingerprints: &[&FileFingerprint]) ->
             continue;
         }
 
-        let test_only = locations.iter().all(|(file, _)| is_test_path(file));
+        let test_only = locations
+            .iter()
+            .all(|(file, name)| is_test_location(name, file, &inline_test_methods));
         let severity = if test_only {
             Severity::Info
         } else {

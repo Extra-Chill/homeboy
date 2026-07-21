@@ -72,6 +72,54 @@ fn duplicate_functions_under_tests_are_info_findings() {
 }
 
 #[test]
+fn duplicate_helpers_in_inline_cfg_test_blocks_are_info_findings() {
+    // `make_fp` is a fixture duplicated across the inline `#[cfg(test)]` blocks
+    // of two PRODUCTION files. `is_test_path` cannot see it (the files aren't
+    // test-path files), but it is still test scaffolding — Info, not Warning.
+    let mut fp1 = make_fingerprint("src/a.rs", &["make_fp"], &[("make_fp", "h1")]);
+    fp1.content =
+        "fn prod() {}\n\n#[cfg(test)]\nmod tests {\n    fn make_fp() -> Fp { Fp::default() }\n}\n"
+            .to_string();
+    let mut fp2 = make_fingerprint("src/b.rs", &["make_fp"], &[("make_fp", "h1")]);
+    fp2.content =
+        "fn other() {}\n\n#[cfg(test)]\nmod tests {\n    fn make_fp() -> Fp { Fp::default() }\n}\n"
+            .to_string();
+
+    let findings = detect_duplicates(&[&fp1, &fp2], &std::collections::HashSet::new());
+
+    assert_eq!(findings.len(), 2);
+    assert!(
+        findings.iter().all(|f| f.severity == Severity::Info),
+        "inline cfg(test) fixture duplication is test-only (Info), got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.file, &f.severity))
+            .collect::<Vec<_>>()
+    );
+    assert!(findings
+        .iter()
+        .all(|f| f.suggestion.contains("shared test helper")));
+}
+
+#[test]
+fn production_duplicate_alongside_inline_test_still_warns() {
+    // The same function name duplicated in PRODUCTION scope (not inside a
+    // cfg(test) block) must stay Warning — the inline-test relaxation is scoped.
+    let mut fp1 = make_fingerprint("src/a.rs", &["helper"], &[("helper", "h9")]);
+    fp1.content = "fn helper() -> u8 { 1 }\n".to_string();
+    let mut fp2 = make_fingerprint("src/b.rs", &["helper"], &[("helper", "h9")]);
+    fp2.content = "fn helper() -> u8 { 1 }\n".to_string();
+
+    let findings = detect_duplicates(&[&fp1, &fp2], &std::collections::HashSet::new());
+
+    assert_eq!(findings.len(), 2);
+    assert!(
+        findings.iter().all(|f| f.severity == Severity::Warning),
+        "production duplicates remain Warning"
+    );
+}
+
+#[test]
 fn no_duplicates_different_hashes() {
     let fp1 = make_fingerprint("src/a.rs", &["process"], &[("process", "hash_a")]);
     let fp2 = make_fingerprint("src/b.rs", &["process"], &[("process", "hash_b")]);
