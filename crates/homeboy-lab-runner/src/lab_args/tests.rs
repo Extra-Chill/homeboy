@@ -1538,6 +1538,145 @@ mod materialize_specs_tests {
     use super::*;
 
     #[test]
+    fn materialize_run_plan_translates_executable_paths_before_remote_dispatch() {
+        let controller_workspace = "/controller/worktree";
+        let runner_workspace = "/runner/worktree";
+        let mappings = vec![
+            LabPathRemap {
+                local: controller_workspace.to_string(),
+                remote: runner_workspace.to_string(),
+            },
+            LabPathRemap {
+                local: "/controller/source".to_string(),
+                remote: "/runner/source".to_string(),
+            },
+            LabPathRemap {
+                local: "/controller/provider-plugin".to_string(),
+                remote: "/runner/provider-plugin".to_string(),
+            },
+            LabPathRemap {
+                local: "/controller/runtime-overlay".to_string(),
+                remote: "/runner/runtime-overlay".to_string(),
+            },
+            LabPathRemap {
+                local: "/controller/runtime-source".to_string(),
+                remote: "/runner/runtime-source".to_string(),
+            },
+        ];
+        let plan = serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "durable-recovery",
+            "metadata": { "workspace_root": controller_workspace },
+            "tasks": [{
+                "task_id": "task-1",
+                "workspace": {
+                    "root": controller_workspace,
+                    "materialization": {
+                        "root": controller_workspace,
+                        "source_checkout": "/controller/source"
+                    }
+                },
+                "executor": {
+                    "backend": "opencode",
+                    "config": {
+                        "workspace_root": controller_workspace,
+                        "provider_plugin_paths": ["/controller/provider-plugin/plugin.json"],
+                        "runtime_overlays": [{
+                            "source": "/controller/runtime-overlay",
+                            "materialized_path": "/controller/runtime-overlay/materialized"
+                        }]
+                    }
+                },
+                "metadata": {
+                    "workspace": {
+                        "root": controller_workspace,
+                        "source_checkout": "/controller/source"
+                    },
+                    "resolved_runtime_identity": {
+                        "provider": {
+                            "extension_path": "/controller/provider-plugin",
+                            "runtime_path": "/controller/runtime-overlay/runtime",
+                            "runner_sources": [{ "path": "/controller/runtime-source" }]
+                        },
+                        "materialization_plan": {
+                            "runtime_path": "/controller/runtime-overlay/runtime",
+                            "selected_identity": {
+                                "source_path": "/controller/runtime-source"
+                            },
+                            "runtime_sources": [{
+                                "locator": {
+                                    "kind": "local_path",
+                                    "path": "/controller/runtime-source"
+                                },
+                                "destination_path": "runtime/source"
+                            }]
+                        }
+                    }
+                }
+            }]
+        })
+        .to_string();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            plan,
+        ];
+        let mut staged = None;
+
+        let out = materialize_agent_task_specs_in_args(
+            &args,
+            &mappings,
+            Path::new(controller_workspace),
+            |spec| {
+                staged = Some(spec.spec.to_string());
+                Ok(Some((
+                    "@/runner/staged/agent-task-plan.json".to_string(),
+                    (),
+                )))
+            },
+        )
+        .expect("materialize recovered run plan");
+        let staged = staged.expect("staged plan");
+        let value: serde_json::Value = serde_json::from_str(&staged).expect("staged plan JSON");
+
+        assert_eq!(out.argv[4], "@/runner/staged/agent-task-plan.json");
+        assert_eq!(value["metadata"]["workspace_root"], runner_workspace);
+        assert_eq!(value["tasks"][0]["workspace"]["root"], runner_workspace);
+        assert_eq!(
+            value["tasks"][0]["workspace"]["materialization"]["source_checkout"],
+            "/runner/source"
+        );
+        assert_eq!(
+            value["tasks"][0]["executor"]["config"]["provider_plugin_paths"][0],
+            "/runner/provider-plugin/plugin.json"
+        );
+        assert_eq!(
+            value["tasks"][0]["executor"]["config"]["runtime_overlays"][0]["source"],
+            "/runner/runtime-overlay"
+        );
+        assert_eq!(
+            value["tasks"][0]["metadata"]["resolved_runtime_identity"]["materialization_plan"]
+                ["runtime_sources"][0]["locator"]["path"],
+            "/runner/runtime-source"
+        );
+        assert_eq!(
+            value["tasks"][0]["metadata"]["resolved_runtime_identity"]["materialization_plan"]
+                ["runtime_sources"][0]["destination_path"],
+            "runtime/source"
+        );
+        assert_eq!(
+            value["tasks"][0]["metadata"]["workspace_source_provenance"]["controller_root"],
+            controller_workspace
+        );
+        assert!(!staged.contains("/controller/provider-plugin"));
+        assert!(!staged.contains("/controller/runtime-overlay"));
+        assert!(!staged.contains("/controller/runtime-source"));
+        assert_eq!(staged.matches(controller_workspace).count(), 1);
+    }
+
+    #[test]
     fn materialize_agent_task_specs_syncs_inline_and_file_plan_json() {
         let temp = tempfile::tempdir().expect("tempdir");
         let plan = serde_json::json!({
