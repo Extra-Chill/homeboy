@@ -5,6 +5,7 @@ use std::time::Duration;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::paths;
 
+use crate::rolling_generation::RollingResultOwnerRetirement;
 use crate::{RollingGenerations, RunnerDaemonGenerationStatus, RunnerSession};
 
 /// The durable generation registry is scoped to one runner. Keep this wrapper
@@ -505,7 +506,7 @@ fn reconcile_with(
     let Some(generations) = read(runner_id, legacy)? else {
         return Ok(());
     };
-    let drained = generations
+    let zero_job_generations = generations
         .generations
         .iter()
         .filter_map(|(generation, entry)| {
@@ -516,7 +517,44 @@ fn reconcile_with(
             (operations.active_jobs(&session) == Some(0)).then_some((generation, session))
         })
         .collect::<Vec<_>>();
-    let retired = drained
+    // Settle authoritative zero-job observations under the registry lock. The
+    // endpoint stop remains outside this lock because it is remote I/O.
+    let stoppable = with_registry_lock(runner_id, || {
+        let Some(mut generations) = read_locked(runner_id, legacy)? else {
+            return Ok(Vec::new());
+        };
+        for (generation, _) in &zero_job_generations {
+            let draining = generations
+                .generations
+                .get(generation)
+                .is_some_and(|entry| entry.drain_state == crate::RollingDrainState::Draining);
+            if draining {
+                generations
+                    .generations
+                    .get_mut(generation)
+                    .expect("generation was checked")
+                    .active_jobs = 0;
+                generations
+                    .job_owners
+                    .retain(|_, owner| owner != generation);
+            }
+        }
+        let stoppable = zero_job_generations
+            .iter()
+            .filter_map(|(generation, _)| {
+                generations.generations.get(generation).and_then(|entry| {
+                    (entry.drain_state == crate::RollingDrainState::Draining
+                        && entry.active_jobs == 0
+                        && !generations.has_result_owners(generation))
+                    .then_some((generation.clone(), entry.endpoint.clone()))
+                })
+            })
+            .collect::<Vec<_>>();
+        write(runner_id, &generations)?;
+        Ok(stoppable)
+    })?;
+
+    let stopped = stoppable
         .into_iter()
         .filter_map(|(generation, session)| {
             if operations.stop(&session) {
@@ -533,13 +571,14 @@ fn reconcile_with(
         let Some(mut generations) = read_locked(runner_id, legacy)? else {
             return Ok(());
         };
-        for generation in &retired {
+        for generation in &stopped {
             if generations
                 .generations
                 .get(generation)
                 .is_some_and(|entry| {
                     entry.drain_state == crate::RollingDrainState::Draining
                         && entry.active_jobs == 0
+                        && !generations.has_result_owners(generation)
                 })
             {
                 generations.generations.remove(generation);
@@ -617,6 +656,66 @@ pub(crate) fn record_job_artifacts(
         }
         write(runner_id, &generations)
     })
+}
+
+/// Release a durable run's generation routing claim after terminal retention
+/// removes the run record. Reconciliation remains fail-closed and only stops a
+/// drained, zero-job endpoint after its final owner is gone.
+pub(crate) fn retire_run_owner(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+    run_id: &str,
+) -> Result<()> {
+    retire_result_owner(runner_id, legacy, RollingResultOwnerRetirement::Run(run_id))
+}
+
+/// Release one artifact routing claim after its owning lifecycle has consumed,
+/// finalized, or pruned the artifact.
+pub(crate) fn retire_artifact_owner(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+    artifact_id: &str,
+) -> Result<()> {
+    retire_result_owner(
+        runner_id,
+        legacy,
+        RollingResultOwnerRetirement::Artifact(artifact_id),
+    )
+}
+
+fn retire_result_owner(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+    retirement: RollingResultOwnerRetirement<'_>,
+) -> Result<()> {
+    with_registry_lock(runner_id, || {
+        let Some(mut generations) = read_locked(runner_id, legacy)? else {
+            return Ok(());
+        };
+        generations.retire_result_owner(retirement);
+        // Persist before network reconciliation; a restart can retry an unreachable
+        // endpoint without restoring an owner whose lifecycle was already removed.
+        write(runner_id, &generations)
+    })?;
+    reconcile(runner_id, legacy)
+}
+
+/// Reconcile a bounded page of authoritative retained result ids. This repairs
+/// stale registry claims after controller restart without guessing retention.
+pub(crate) fn reconcile_result_owners(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+    retained_run_ids: &std::collections::BTreeSet<String>,
+    retained_artifact_ids: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    with_registry_lock(runner_id, || {
+        let Some(mut generations) = read_locked(runner_id, legacy)? else {
+            return Ok(());
+        };
+        generations.reconcile_result_owners(retained_run_ids, retained_artifact_ids);
+        write(runner_id, &generations)
+    })?;
+    reconcile(runner_id, legacy)
 }
 
 pub(crate) fn activate(
@@ -1174,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_rewrites_keep_runner_identity_through_promotion_and_drain() {
+    fn draining_generation_keeps_result_routing_after_zero_job_reconciliation() {
         test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
@@ -1213,6 +1312,21 @@ mod tests {
             let drained = persisted_registry("runner-a");
             assert_eq!(drained["runner_id"], "runner-a");
             assert_eq!(drained["admission_owner"], "build-b");
+            assert!(drained["job_owners"].get("job-a").is_none());
+            assert_eq!(drained["run_owners"]["run-a"], "lease-a");
+            assert_eq!(drained["artifact_owners"]["artifact-a"], "lease-a");
+            assert_eq!(
+                endpoint_session("runner-a", None, Some("run-a"), None, Some(&b))
+                    .expect("route retained run"),
+                Some(a.clone())
+            );
+            assert_eq!(
+                endpoint_session("runner-a", None, None, Some("artifact-a"), Some(&b))
+                    .expect("route retained artifact"),
+                Some(a)
+            );
+            assert!(operations.stopped_leases.borrow().is_empty());
+            assert!(operations.terminated_pids.borrow().is_empty());
         });
     }
 

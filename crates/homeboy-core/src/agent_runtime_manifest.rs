@@ -10,7 +10,7 @@ use homeboy_extension_contract::{ExtensionManifest, RequirementsConfig};
 
 pub const AGENT_RUNTIME_MANIFEST_SCHEMA: &str = "homeboy/agent-runtime-manifest/v1";
 pub const AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA: &str =
-    "homeboy/agent-runtime-materialization-plan/v1";
+    "homeboy/agent-runtime-materialization-plan/v2";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRuntimeDiscoveryDiagnostic {
@@ -65,6 +65,12 @@ pub struct AgentRuntimeManifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AgentRuntimeMaterializationContract {
+    /// Runtime-local sources are copied into a job-scoped, content-addressed
+    /// generation. `source_roots` remains the legacy runner-global contract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_sources: Vec<AgentRuntimeMaterializationSource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preparation: Vec<AgentRuntimePreparationAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_roots: Vec<homeboy_agents_contract::AgentTaskProviderRunnerSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -89,6 +95,8 @@ pub struct AgentRuntimeMaterializationContract {
 impl AgentRuntimeMaterializationContract {
     fn is_empty(&self) -> bool {
         self.source_roots.is_empty()
+            && self.runtime_sources.is_empty()
+            && self.preparation.is_empty()
             && self.dependencies.is_empty()
             && self.executable_requirements.is_empty()
             && self.readiness_checks.is_empty()
@@ -97,6 +105,41 @@ impl AgentRuntimeMaterializationContract {
             && self.workspace.is_none()
             && self.extra.is_empty()
     }
+}
+
+/// A reproducible input for a runtime generation. A source is either a
+/// controller-local checkout (which Lab snapshots) or an immutable remote.
+/// No credentials, environment values, or shell snippets belong here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRuntimeMaterializationSource {
+    pub id: String,
+    pub locator: AgentRuntimeSourceLocator,
+    pub content_identity: String,
+    pub destination_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentRuntimeSourceLocator {
+    LocalPath {
+        path: String,
+    },
+    Git {
+        remote_url: String,
+        revision: String,
+    },
+}
+
+/// A bounded argv-only build step run inside the isolated generation root.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRuntimePreparationAction {
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_outputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_identity: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -254,6 +297,14 @@ pub struct AgentRuntimeMaterializationPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_sources: Vec<AgentRuntimeMaterializationSource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preparation: Vec<AgentRuntimePreparationAction>,
+    /// Stable identity for the requested source/build recipe. Lab uses this as
+    /// the generation key, never a mutable checkout path.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub generation_identity: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_roots: Vec<homeboy_agents_contract::AgentTaskProviderRunnerSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<AgentRuntimeMaterializationDependency>,
@@ -330,6 +381,23 @@ pub fn runtime_materialization_plan(
         })
         .collect();
 
+    let mut runtime_sources = manifest.materialization.runtime_sources.clone();
+    if runtime_sources.is_empty() {
+        if let (Some(path), Some(revision)) = (manifest.runtime_path.as_ref(), revision.as_ref()) {
+            runtime_sources.push(AgentRuntimeMaterializationSource {
+                id: "controller-runtime".to_string(),
+                locator: AgentRuntimeSourceLocator::LocalPath { path: path.clone() },
+                content_identity: revision.clone(),
+                destination_path: "runtime".to_string(),
+            });
+        }
+    }
+    let generation_identity = runtime_generation_identity(
+        &manifest.id,
+        &runtime_sources,
+        &manifest.materialization.preparation,
+    );
+
     AgentRuntimeMaterializationPlan {
         schema: AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA.to_string(),
         runtime_id: manifest.id.clone(),
@@ -347,6 +415,9 @@ pub fn runtime_materialization_plan(
         // materializer that verifies the selected object may report it current.
         freshness: AgentRuntimeFreshness::Unverifiable,
         runtime_path: manifest.runtime_path.clone(),
+        runtime_sources,
+        preparation: manifest.materialization.preparation.clone(),
+        generation_identity,
         source_roots,
         dependencies: manifest.materialization.dependencies.clone(),
         executable_requirements: manifest.materialization.executable_requirements.clone(),
@@ -354,6 +425,132 @@ pub fn runtime_materialization_plan(
         env_passthrough,
         workspace: manifest.materialization.workspace.clone(),
     }
+}
+
+/// Validate declarations before a controller hands them to Lab. This is kept in
+/// core so every producer and consumer agrees on the safe, portable shape.
+pub fn validate_runtime_materialization_plan(plan: &AgentRuntimeMaterializationPlan) -> Result<()> {
+    let mut source_ids = std::collections::BTreeSet::new();
+    let mut destinations = std::collections::BTreeSet::new();
+    for source in &plan.runtime_sources {
+        if source.id.trim().is_empty() || source.content_identity.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "runtime_sources",
+                "runtime source requires id and content_identity",
+                None,
+                None,
+            ));
+        }
+        if !source_ids.insert(&source.id) {
+            return Err(Error::validation_invalid_argument(
+                "runtime_sources.id",
+                "runtime source IDs must be unique",
+                Some(source.id.clone()),
+                None,
+            ));
+        }
+        if !is_immutable_revision(&source.content_identity) {
+            return Err(Error::validation_invalid_argument(
+                "runtime_sources.content_identity",
+                "runtime source content identity must be an immutable revision",
+                Some(source.content_identity.clone()),
+                None,
+            ));
+        }
+        validate_runtime_relative_path(
+            "runtime_sources.destination_path",
+            &source.destination_path,
+        )?;
+        if !destinations.insert(&source.destination_path) {
+            return Err(Error::validation_invalid_argument(
+                "runtime_sources.destination_path",
+                "runtime source destinations must be unique",
+                Some(source.destination_path.clone()),
+                None,
+            ));
+        }
+        match &source.locator {
+            AgentRuntimeSourceLocator::LocalPath { path } if Path::new(path).is_absolute() => {}
+            AgentRuntimeSourceLocator::LocalPath { .. } => {
+                return Err(Error::validation_invalid_argument(
+                    "runtime_sources.locator.path",
+                    "controller-local runtime source path must be absolute",
+                    None,
+                    None,
+                ))
+            }
+            AgentRuntimeSourceLocator::Git {
+                remote_url,
+                revision,
+            } => {
+                if remote_url.trim().is_empty()
+                    || remote_url.contains('@')
+                    || !is_immutable_revision(revision)
+                    || revision != &source.content_identity
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "runtime_sources.locator",
+                        "runtime git source requires a sanitized remote and a revision matching its immutable content identity",
+                        None,
+                        None,
+                    ));
+                }
+            }
+        }
+    }
+    for action in &plan.preparation {
+        if action.argv.is_empty()
+            || action
+                .argv
+                .iter()
+                .any(|arg| arg.is_empty() || arg.contains('\0'))
+        {
+            return Err(Error::validation_invalid_argument(
+                "preparation.argv",
+                "runtime preparation requires a non-empty argv without NUL bytes",
+                None,
+                None,
+            ));
+        }
+        validate_runtime_relative_path("preparation.cwd", &action.cwd)?;
+        for output in &action.expected_outputs {
+            validate_runtime_relative_path("preparation.expected_outputs", output)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_runtime_relative_path(field: &str, value: &str) -> Result<()> {
+    let path = Path::new(value);
+    if value.trim().is_empty()
+        || path.is_absolute()
+        || path.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(Error::validation_invalid_argument(
+            field,
+            "runtime materialization paths must be non-empty relative paths without traversal",
+            Some(value.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn runtime_generation_identity(
+    runtime_id: &str,
+    sources: &[AgentRuntimeMaterializationSource],
+    preparation: &[AgentRuntimePreparationAction],
+) -> String {
+    use sha2::{Digest, Sha256};
+    let encoded = serde_json::to_vec(&(runtime_id, sources, preparation)).unwrap_or_default();
+    format!("sha256:{:x}", Sha256::digest(encoded))
 }
 
 fn runtime_source_revision(path: &Path) -> Option<String> {
@@ -729,4 +926,103 @@ fn agent_runtime_core_incompatible_diagnostic(
         extension_id: extension_id.map(str::to_string),
         path: path.map(str::to_string),
     })
+}
+
+#[cfg(test)]
+mod materialization_tests {
+    use super::*;
+
+    fn plan() -> AgentRuntimeMaterializationPlan {
+        AgentRuntimeMaterializationPlan {
+            schema: AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA.to_string(),
+            runtime_id: "runtime".to_string(),
+            selected_identity: Default::default(),
+            provider_id: "provider".to_string(),
+            source_selector: "test".to_string(),
+            source_revision: None,
+            freshness: Default::default(),
+            runtime_path: None,
+            runtime_sources: vec![AgentRuntimeMaterializationSource {
+                id: "source".to_string(),
+                locator: AgentRuntimeSourceLocator::LocalPath {
+                    path: "/tmp/runtime-source".to_string(),
+                },
+                content_identity: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                destination_path: "runtime".to_string(),
+            }],
+            preparation: vec![AgentRuntimePreparationAction {
+                argv: vec!["build".to_string()],
+                cwd: "runtime".to_string(),
+                expected_outputs: vec!["runtime/bin/tool".to_string()],
+                runtime_identity: Some("tool@1".to_string()),
+            }],
+            generation_identity: "sha256:test".to_string(),
+            source_roots: Vec::new(),
+            dependencies: Vec::new(),
+            executable_requirements: Vec::new(),
+            readiness_checks: Vec::new(),
+            env_passthrough: Vec::new(),
+            workspace: None,
+        }
+    }
+
+    #[test]
+    fn runtime_materialization_contract_accepts_bounded_noop() {
+        assert!(validate_runtime_materialization_plan(&plan()).is_ok());
+    }
+
+    #[test]
+    fn runtime_materialization_contract_rejects_path_traversal_and_unsafe_argv() {
+        let mut invalid = plan();
+        invalid.runtime_sources[0].destination_path = "../shared".to_string();
+        assert!(validate_runtime_materialization_plan(&invalid).is_err());
+
+        let mut invalid = plan();
+        invalid.preparation[0].cwd = "/shared".to_string();
+        assert!(validate_runtime_materialization_plan(&invalid).is_err());
+
+        let mut invalid = plan();
+        invalid.preparation[0].argv = vec!["run\0bad".to_string()];
+        assert!(validate_runtime_materialization_plan(&invalid).is_err());
+    }
+
+    #[test]
+    fn runtime_materialization_contract_rejects_ambiguous_source_identity() {
+        let mut invalid = plan();
+        invalid
+            .runtime_sources
+            .push(invalid.runtime_sources[0].clone());
+        assert!(validate_runtime_materialization_plan(&invalid).is_err());
+
+        let mut invalid = plan();
+        invalid.runtime_sources[0].content_identity = "mutable".to_string();
+        assert!(validate_runtime_materialization_plan(&invalid).is_err());
+
+        let mut invalid = plan();
+        invalid.runtime_sources[0].locator = AgentRuntimeSourceLocator::Git {
+            remote_url: "https://example.test/runtime.git".to_string(),
+            revision: "ffffffffffffffffffffffffffffffffffffffff".to_string(),
+        };
+        assert!(validate_runtime_materialization_plan(&invalid).is_err());
+    }
+
+    #[test]
+    fn runtime_generation_identity_changes_with_source_revision() {
+        let first = plan();
+        let mut second = first.clone();
+        second.runtime_sources[0].content_identity =
+            "ffffffffffffffffffffffffffffffffffffffff".to_string();
+        assert_ne!(
+            runtime_generation_identity(
+                &first.runtime_id,
+                &first.runtime_sources,
+                &first.preparation
+            ),
+            runtime_generation_identity(
+                &second.runtime_id,
+                &second.runtime_sources,
+                &second.preparation
+            )
+        );
+    }
 }

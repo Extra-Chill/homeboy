@@ -117,6 +117,9 @@ use super::super::{
     RunnerWorkspaceApplyOutput, RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy,
 };
+use crate::runtime_materializer::{
+    resolve_lab_agent_runtime, runtime_execution_evidence, RunnerRuntimeMaterializerOperations,
+};
 
 #[cfg(test)]
 pub(super) use inner::accepted_runner_job_id_with;

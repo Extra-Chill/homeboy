@@ -344,6 +344,14 @@ pub(super) fn exec_via_daemon(
         )?;
     }
     let artifacts = job.artifacts.clone();
+    if let Some(session) = accepted_session.as_ref() {
+        super::super::generation_store::record_job_artifacts(
+            &runner.id,
+            session,
+            &job_id,
+            artifacts.iter().map(|artifact| artifact.id.clone()),
+        )?;
+    }
     let mutation_artifacts = mutation_artifacts_from_job(&job, &result);
     if print_handoff_output {
         print_lab_offload_handoff(
