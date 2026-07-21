@@ -384,27 +384,14 @@ pub fn refresh_homeboy_binary(
     }
 
     promotion_lease.assert_generation()?;
-    // Only a reconnect replaces the daemon, so it is the only mode allowed to
-    // change the runner-global daemon control binary. A non-reconnecting
-    // refresh materializes a command build for a workflow without creating
-    // stale-daemon drift for unrelated jobs.
-    let promote_daemon_binary = options.reconnect;
+    // Selection belongs to the controller-owned runner registry. It must be
+    // persisted after the candidate has been verified, whether or not this
+    // invocation also replaces the active daemon.
     let bootstrap = if disconnected_ssh {
         ssh_bootstrap_promote_with(
             &plan,
             || Ok(exec_output.stdout.clone()),
-            |homeboy_path| {
-                if !promote_daemon_binary {
-                    return Ok(Vec::new());
-                }
-                homeboy_core::config::with_config_lock(|| {
-                    let patch = refreshed_runner_patch(&plan.runner_id, homeboy_path)?;
-                    match merge(Some(&plan.runner_id), &patch.to_string(), &[])? {
-                        MergeOutput::Single(result) => Ok(result.updated_fields),
-                        MergeOutput::Bulk(_) => Ok(Vec::new()),
-                    }
-                })
-            },
+            |homeboy_path| promote_verified_runner_binary(&plan.runner_id, homeboy_path),
         )
     } else {
         let identity = parse_identity(&exec_output.stdout)?;
@@ -416,17 +403,7 @@ pub fn refresh_homeboy_binary(
                 None,
             )
         })?;
-        let updated_fields = if promote_daemon_binary {
-            homeboy_core::config::with_config_lock(|| {
-                let patch = refreshed_runner_patch(&plan.runner_id, &plan.binary_path)?;
-                match merge(Some(&plan.runner_id), &patch.to_string(), &[])? {
-                    MergeOutput::Single(result) => Ok(result.updated_fields),
-                    MergeOutput::Bulk(_) => Ok(Vec::new()),
-                }
-            })?
-        } else {
-            Vec::new()
-        };
+        let updated_fields = promote_verified_runner_binary(&plan.runner_id, &plan.binary_path)?;
         Ok(SshBootstrapPromotion {
             identity,
             source_sha: source_sha_from_output(&exec_output.stdout),
@@ -1303,6 +1280,22 @@ fn refreshed_runner_patch(runner_id: &str, homeboy_path: &str) -> Result<Value> 
     Ok(serde_json::json!({
         "homeboy_path": homeboy_path,
     }))
+}
+
+/// Persist a verified selection in the controller-owned runner registry.
+/// Runner commands may execute remotely, but registry mutation must remain on
+/// the controller so subsequent jobs use the selected binary.
+fn promote_verified_runner_binary(runner_id: &str, homeboy_path: &str) -> Result<Vec<String>> {
+    homeboy_core::config::with_config_lock(|| {
+        if load(runner_id)?.settings.homeboy_path.as_deref() == Some(homeboy_path) {
+            return Ok(Vec::new());
+        }
+        let patch = refreshed_runner_patch(runner_id, homeboy_path)?;
+        match merge(Some(runner_id), &patch.to_string(), &[])? {
+            MergeOutput::Single(result) => Ok(result.updated_fields),
+            MergeOutput::Bulk(_) => Ok(Vec::new()),
+        }
+    })
 }
 
 fn restore_runner_homeboy_path(runner_id: &str, homeboy_path: Option<&str>) -> Result<()> {

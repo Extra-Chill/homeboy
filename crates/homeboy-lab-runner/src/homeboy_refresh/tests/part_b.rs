@@ -397,15 +397,7 @@ fn ssh_bootstrap_success_promotes_verified_exact_sha_with_provenance() {
         let result = ssh_bootstrap_promote_with(
             &plan,
             || Ok(verified_bootstrap_output("abc123")),
-            |path| {
-                homeboy_core::config::with_config_lock(|| {
-                    let patch = refreshed_runner_patch("lab-local", path)?;
-                    match merge(Some("lab-local"), &patch.to_string(), &[])? {
-                        MergeOutput::Single(result) => Ok(result.updated_fields),
-                        MergeOutput::Bulk(_) => Ok(Vec::new()),
-                    }
-                })
-            },
+            |path| promote_verified_runner_binary("lab-local", path),
         )
         .expect("verified bootstrap promotes");
         assert_eq!(result.source_sha.as_deref(), Some("abc123"));
@@ -418,6 +410,92 @@ fn ssh_bootstrap_success_promotes_verified_exact_sha_with_provenance() {
                 .as_deref(),
             Some("/verified/homeboy")
         );
+    });
+}
+
+#[test]
+fn controller_binary_selection_is_idempotent() {
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
+            false,
+        )
+        .expect("runner");
+
+        assert_eq!(
+            promote_verified_runner_binary("lab-local", "/verified/homeboy")
+                .expect("persist controller selection"),
+            ["homeboy_path"]
+        );
+        assert!(
+            promote_verified_runner_binary("lab-local", "/verified/homeboy")
+                .expect("repeat controller selection")
+                .is_empty()
+        );
+        assert_eq!(
+            crate::load("lab-local")
+                .expect("reload controller registry")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            Some("/verified/homeboy")
+        );
+    });
+}
+
+#[test]
+fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
+    test_support::with_isolated_home(|_| {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let binary = fixture.path().join("homeboy");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s\\n' '{\"data\":{\"git_commit\":\"exact-remote-sha\",\"git_dirty\":false}}'\n",
+        )
+        .expect("write selected binary");
+        let status = Command::new("chmod")
+            .args(["0755", binary.to_str().expect("binary path")])
+            .status()
+            .expect("make selected binary executable");
+        assert!(status.success());
+        crate::create(
+            r#"{"id":"lab-local","kind":"local","homeboy_path":"/old/homeboy"}"#,
+            false,
+        )
+        .expect("runner");
+        let options = HomeboyBinaryRefreshOptions {
+            runner_id: "lab-local".to_string(),
+            mode: HomeboyBinaryRefreshMode::Select {
+                binary_path: binary.display().to_string(),
+            },
+            source: None,
+            git_ref: None,
+            target_dir: None,
+            reconnect: false,
+            force: false,
+            dry_run: false,
+        };
+
+        let (selected, exit_code) = refresh_homeboy_binary(options.clone()).expect("selection");
+        assert_eq!(exit_code, 0);
+        assert_eq!(selected.updated_fields, ["homeboy_path"]);
+        assert_eq!(selected.selected_binary_path, binary.display().to_string());
+        assert!(!selected.daemon_refreshed);
+        assert!(selected.reconnect_required);
+        assert_eq!(
+            crate::load("lab-local")
+                .expect("reload controller registry")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            binary.to_str()
+        );
+
+        let (repeated, exit_code) = refresh_homeboy_binary(options).expect("repeat selection");
+        assert_eq!(exit_code, 0);
+        assert!(repeated.updated_fields.is_empty());
+        assert!(!repeated.daemon_refreshed);
+        assert!(repeated.reconnect_required);
     });
 }
 
