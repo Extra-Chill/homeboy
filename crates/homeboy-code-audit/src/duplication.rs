@@ -618,6 +618,54 @@ fn parse_skeleton_value(value: &str) -> Option<(usize, &str)> {
     Some((count.parse().ok()?, hash))
 }
 
+/// Generic name segments that carry no domain meaning. A group sharing only one
+/// of these tokens is not semantically related — `get`/`from`/etc. appear in
+/// functions across every domain, so they cannot distinguish a real
+/// primitive-reimplementation from a coincidental skeleton collision.
+const SKELETON_NAME_STOPWORDS: &[&str] = &[
+    "get", "set", "new", "from", "to", "is", "as", "into", "with", "for", "of", "the", "a", "and",
+    "or", "on", "at", "by", "fn", "run", "do", "make", "build", "id", "value", "val", "data",
+    "self", "this", "it", "item", "items", "list", "map", "key", "name",
+];
+
+/// Split a function name into its significant lowercase tokens (snake_case
+/// segments, minus generic stopwords).
+fn significant_name_tokens(name: &str) -> HashSet<String> {
+    name.split('_')
+        .map(|segment| segment.to_ascii_lowercase())
+        .filter(|segment| {
+            segment.len() >= 3 && !SKELETON_NAME_STOPWORDS.contains(&segment.as_str())
+        })
+        .collect()
+}
+
+/// Whether a skeleton group is semantically related enough to report: every
+/// member must share at least one significant name token with some other
+/// member. Two identical names trivially qualify; unrelated names
+/// (`out_of_order_span_message` vs `install_check_name`) do not.
+///
+/// This distinguishes a real primitive-reimplementation cluster (whose names
+/// carry a common stem) from a coincidental control-flow-shape collision.
+fn skeleton_group_shares_name_token(names: &[&str]) -> bool {
+    let token_sets: Vec<HashSet<String>> = names
+        .iter()
+        .map(|name| significant_name_tokens(name))
+        .collect();
+
+    // Every member must connect to at least one other member via a shared
+    // token. A member with no significant tokens, or none in common with any
+    // sibling, breaks the group's semantic cohesion.
+    token_sets.iter().enumerate().all(|(i, tokens)| {
+        if tokens.is_empty() {
+            return false;
+        }
+        token_sets
+            .iter()
+            .enumerate()
+            .any(|(j, other)| i != j && !tokens.is_disjoint(other))
+    })
+}
+
 /// Detect functions that share an identical **call/control-flow skeleton** but
 /// were missed by the exact, cross-name, and near-duplicate passes because
 /// their error/return tails differ.
@@ -688,6 +736,23 @@ pub(crate) fn detect_skeleton_duplicates(fingerprints: &[&FileFingerprint]) -> V
         // primitive-reimplementation clusters (the scattered `git_output` /
         // `run_git` family) are small and stay well under this ceiling.
         if locations.len() > SKELETON_MAX_GROUP {
+            continue;
+        }
+
+        // Require semantic affinity: the grouped functions must share at least
+        // one significant name token. The skeleton hash keys purely on
+        // call/control-flow shape, so semantically unrelated functions that
+        // happen to share a backbone collide — a timeline error formatter
+        // (`out_of_order_span_message`) and a command→check-name mapper
+        // (`install_check_name`) both reduce to "match/if-else returning a
+        // String", but consolidating them would couple unrelated domains. Real
+        // primitive-reimplementations — the `git_output`/`run_git` family this
+        // detector targets — carry a shared name stem (`git`, `output`,
+        // `normalize`, `redacted`, `trimmed`). Groups whose names share no
+        // significant token are coincidental shape collisions, not
+        // consolidatable duplication.
+        let group_names: Vec<&str> = locations.iter().map(|(_, name, _)| *name).collect();
+        if !skeleton_group_shares_name_token(&group_names) {
             continue;
         }
 
