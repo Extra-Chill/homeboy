@@ -228,6 +228,10 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
         });
     }
 
+    if !command.portability_contract().is_resource_intensive() {
+        return None;
+    }
+
     let contract = command.lab_contract()?;
 
     match contract.portability {
@@ -722,6 +726,45 @@ mod tests {
         assert_eq!(hot.label, "review lint");
         assert!(hot.lab_offload_supported);
         assert!(hot.lab_offload_unsupported_reason.is_none());
+    }
+
+    #[test]
+    fn rig_source_management_keeps_lab_diagnostics_without_resource_admission() {
+        for args in [
+            ["homeboy", "rig", "install", "./rig-package"].as_slice(),
+            ["homeboy", "rig", "update", "demo-rig"].as_slice(),
+            ["homeboy", "rig", "sync", "demo-rig"].as_slice(),
+            ["homeboy", "rig", "sources"].as_slice(),
+        ] {
+            let cli = Cli::parse_from(args);
+            let portability = cli.command.portability_contract();
+            let contract = portability
+                .lab_command()
+                .expect("rig source management keeps its Lab diagnostic contract");
+
+            assert!(!portability.is_resource_intensive());
+            assert_eq!(
+                contract.portability,
+                LabCommandPortability::LocalOnly(
+                    crate::command_contract::RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON
+                )
+            );
+            assert!(hot_command(&cli.command).is_none());
+        }
+    }
+
+    #[test]
+    fn rig_workloads_remain_resource_managed() {
+        for args in [
+            ["homeboy", "rig", "up", "demo-rig"].as_slice(),
+            ["homeboy", "rig", "check", "demo-rig"].as_slice(),
+            ["homeboy", "rig", "run", "demo-rig", "--profile", "smoke"].as_slice(),
+        ] {
+            let cli = Cli::parse_from(args);
+
+            assert!(cli.command.portability_contract().is_resource_intensive());
+            assert!(hot_command(&cli.command).is_some());
+        }
     }
 
     #[test]

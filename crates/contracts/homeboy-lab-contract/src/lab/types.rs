@@ -110,27 +110,44 @@ pub struct LabCommandContract {
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, PartialEq, Eq)]
 pub struct CommandPortabilityContract {
     lab_command: Option<LabCommandContract>,
+    resource_intensive: bool,
 }
 
 impl CommandPortabilityContract {
     pub const fn none() -> Self {
-        Self { lab_command: None }
+        Self {
+            lab_command: None,
+            resource_intensive: false,
+        }
     }
 
     pub const fn lab(command: LabCommandContract) -> Self {
         Self {
             lab_command: Some(command),
+            resource_intensive: true,
+        }
+    }
+
+    pub const fn lightweight_lab(command: LabCommandContract) -> Self {
+        Self {
+            lab_command: Some(command),
+            resource_intensive: false,
         }
     }
 
     pub const fn lab_optional(command: Option<LabCommandContract>) -> Self {
         Self {
             lab_command: command,
+            resource_intensive: command.is_some(),
         }
     }
 
     pub const fn lab_command(self) -> Option<LabCommandContract> {
         self.lab_command
+    }
+
+    pub const fn is_resource_intensive(self) -> bool {
+        self.resource_intensive
     }
 }
 
