@@ -135,54 +135,62 @@ pub(crate) fn count_unclaimed_source_files(root: &Path) -> usize {
     codebase_scan::walk_files(root, &config).len()
 }
 
-/// Byte ranges `(start, end)` of inline `#[cfg(test)]` blocks in `content`.
+/// Byte ranges `(start, end)` of inline test-region blocks in `content` for a
+/// given language, using the language's `inline_test_region_markers()`.
 ///
 /// `is_test_path` only classifies whole test *files*. Detectors that scan raw
-/// file content (constant-bypass, command-wrapper-bypass, …) also need to skip
-/// matches inside inline `#[cfg(test)] mod tests { … }` / `#[cfg(test)] fn … {}`
-/// blocks of production files, where literals and raw commands are test
-/// fixtures rather than production code.
+/// file content (constant-bypass, command-wrapper-bypass, duplication, …) also
+/// need to skip matches inside inline test blocks of production files (Rust's
+/// `#[cfg(test)] mod tests { … }`), where literals/commands/fixtures are test
+/// scaffolding rather than production code. Languages with no inline test
+/// marker (test code lives in separate files) yield no regions.
 ///
-/// Matches the `#[cfg(test)]` attribute, then brace-matches the block that
-/// follows it. Attribute-only items with no block (`#[cfg(test)] use …;`) are
-/// ignored. Ranges span attribute→closing brace.
-pub(crate) fn cfg_test_regions(content: &str) -> Vec<(usize, usize)> {
-    const ATTR: &str = "#[cfg(test)]";
+/// For each marker occurrence, brace-matches the block that follows it. Marker
+/// occurrences with no following block are ignored. Ranges span marker→closing
+/// brace. The concrete marker syntax is sourced from the agnostic language home
+/// so this helper carries no hardcoded language token.
+pub(crate) fn inline_test_regions(content: &str, markers: &[&str]) -> Vec<(usize, usize)> {
     let bytes = content.as_bytes();
     let mut regions = Vec::new();
-    let mut search_from = 0usize;
-    while let Some(rel) = content[search_from..].find(ATTR) {
-        let attr_start = search_from + rel;
-        // Advance past this attribute regardless of outcome (no infinite loop).
-        search_from = attr_start + ATTR.len();
-
-        let Some(brace_rel) = content[search_from..].find('{') else {
+    for marker in markers {
+        if marker.is_empty() {
             continue;
-        };
-        let open = search_from + brace_rel;
-        let mut depth = 0i32;
-        let mut close = None;
-        for (i, &b) in bytes[open..].iter().enumerate() {
-            if b == b'{' {
-                depth += 1;
-            } else if b == b'}' {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(open + i);
-                    break;
+        }
+        let mut search_from = 0usize;
+        while let Some(rel) = content[search_from..].find(marker) {
+            let marker_start = search_from + rel;
+            // Advance past this marker regardless of outcome (no infinite loop).
+            search_from = marker_start + marker.len();
+
+            let Some(brace_rel) = content[search_from..].find('{') else {
+                continue;
+            };
+            let open = search_from + brace_rel;
+            let mut depth = 0i32;
+            let mut close = None;
+            for (i, &b) in bytes[open..].iter().enumerate() {
+                if b == b'{' {
+                    depth += 1;
+                } else if b == b'}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
                 }
             }
-        }
-        if let Some(close) = close {
-            regions.push((attr_start, close));
-            search_from = close + 1;
+            if let Some(close) = close {
+                regions.push((marker_start, close));
+                search_from = close + 1;
+            }
         }
     }
+    regions.sort_by_key(|(start, _)| *start);
     regions
 }
 
 /// Whether `offset` falls within any `(start, end)` region.
-pub(crate) fn offset_in_cfg_test_region(offset: usize, regions: &[(usize, usize)]) -> bool {
+pub(crate) fn offset_in_test_region(offset: usize, regions: &[(usize, usize)]) -> bool {
     regions
         .iter()
         .any(|(start, end)| offset >= *start && offset <= *end)
@@ -205,4 +213,40 @@ pub(crate) fn crate_of_path(path: &str) -> Option<&str> {
 /// boundary, so attributing a cross-crate reference to them is a false positive.
 pub(crate) fn visibility_is_crate_public(vis_prefix: &str) -> bool {
     vis_prefix.trim() == "pub"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{crate_of_path, inline_test_regions, offset_in_test_region};
+    use homeboy_engine_primitives::language::Language;
+
+    #[test]
+    fn finds_rust_cfg_test_block_via_language_marker() {
+        let content = "fn prod() {}\n#[cfg(test)]\nmod tests {\n    fn helper() {}\n}\n";
+        let regions = inline_test_regions(content, Language::Rust.inline_test_region_markers());
+        assert_eq!(regions.len(), 1);
+        // The `helper` inside the block is covered; `prod` at the top is not.
+        let helper_off = content.find("fn helper").unwrap();
+        let prod_off = content.find("fn prod").unwrap();
+        assert!(offset_in_test_region(helper_off, &regions));
+        assert!(!offset_in_test_region(prod_off, &regions));
+    }
+
+    #[test]
+    fn no_marker_language_yields_no_regions() {
+        // A PHP file with a brace block and no inline marker must yield no
+        // regions — the markers slice is empty, so nothing is stripped.
+        let content = "<?php\nfunction prod() { return 1; }\n";
+        let regions = inline_test_regions(content, Language::Php.inline_test_region_markers());
+        assert!(regions.is_empty());
+    }
+
+    #[test]
+    fn crate_of_path_extracts_workspace_crate() {
+        assert_eq!(
+            crate_of_path("crates/homeboy-core/src/lib.rs"),
+            Some("homeboy-core")
+        );
+        assert_eq!(crate_of_path("src/lib.rs"), None);
+    }
 }

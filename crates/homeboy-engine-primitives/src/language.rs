@@ -206,4 +206,56 @@ impl Language {
     pub fn has_framework_lifecycle_dispatch(&self) -> bool {
         matches!(self, Language::Php)
     }
+
+    /// Source markers that open an *inline* test region — a block embedded in a
+    /// production file whose contents are test scaffolding (fixtures, in-file
+    /// unit tests), e.g. Rust's `#[cfg(test)]` module attribute. Detectors that
+    /// scan raw content brace-match the block following each marker so they can
+    /// skip test-only literals/commands/duplicates that `is_test_path` (which
+    /// only classifies whole test *files*) cannot see.
+    ///
+    /// Empty for languages whose test code lives exclusively in separate files
+    /// (handled by [`Self::builtin_test_file_suffixes`]) rather than inline
+    /// blocks — those need no in-file region stripping.
+    ///
+    /// The concrete syntax lives here in the agnostic language home so detector
+    /// implementations under `code_audit::detectors` stay free of hardcoded
+    /// language tokens.
+    pub fn inline_test_region_markers(&self) -> &'static [&'static str] {
+        match self {
+            Language::Rust => &["#[cfg(test)]"],
+            // PHP / JS / TS keep tests in separate files; no inline block marker.
+            Language::Php | Language::JavaScript | Language::TypeScript | Language::Unknown => &[],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Language;
+
+    #[test]
+    fn rust_declares_the_cfg_test_inline_marker() {
+        assert_eq!(
+            Language::Rust.inline_test_region_markers(),
+            &["#[cfg(test)]"]
+        );
+    }
+
+    #[test]
+    fn separate_file_test_languages_declare_no_inline_marker() {
+        // PHP/JS/TS/Unknown keep tests in separate files — no inline block to
+        // strip, so detectors get an empty marker set (and thus no regions).
+        for lang in [
+            Language::Php,
+            Language::JavaScript,
+            Language::TypeScript,
+            Language::Unknown,
+        ] {
+            assert!(
+                lang.inline_test_region_markers().is_empty(),
+                "{lang:?} should declare no inline test-region marker"
+            );
+        }
+    }
 }

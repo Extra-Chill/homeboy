@@ -18,7 +18,7 @@ use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::idiomatic::is_trivial_method;
-use super::walker::{cfg_test_regions, is_test_path};
+use super::walker::{inline_test_regions, is_test_path};
 use homeboy_audit_contract::DuplicationDetectorConfig;
 
 // `DuplicateGroup` now lives in the shared audit contract; re-exported so
@@ -127,7 +127,7 @@ pub(crate) fn detect_duplicate_groups(fingerprints: &[&FileFingerprint]) -> Vec<
 fn inline_test_context_methods(fingerprints: &[&FileFingerprint]) -> HashSet<(String, String)> {
     let mut out = HashSet::new();
     for fp in fingerprints {
-        let regions = cfg_test_regions(&fp.content);
+        let regions = inline_test_regions(&fp.content, fp.language.inline_test_region_markers());
         if regions.is_empty() {
             continue;
         }

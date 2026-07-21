@@ -27,7 +27,7 @@ use super::super::conventions::AuditFinding;
 use super::super::findings::{Finding, Severity};
 use super::super::fingerprint::FileFingerprint;
 use super::super::walker::{
-    cfg_test_regions, crate_of_path, is_test_path, offset_in_cfg_test_region,
+    crate_of_path, inline_test_regions, is_test_path, offset_in_test_region,
     visibility_is_crate_public,
 };
 
@@ -165,9 +165,10 @@ fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Findi
         // a freshly-built repo), not production command drift. `is_test_path`
         // only excludes whole test files, so compute the file's cfg(test) byte
         // ranges here and skip matches that fall inside them.
-        let test_regions = cfg_test_regions(&fp.content);
+        let test_regions =
+            inline_test_regions(&fp.content, fp.language.inline_test_region_markers());
         for m in argvec_regex().find_iter(&fp.content) {
-            if offset_in_cfg_test_region(m.start(), &test_regions) {
+            if offset_in_test_region(m.start(), &test_regions) {
                 continue;
             }
             let inner = argvec_regex()
