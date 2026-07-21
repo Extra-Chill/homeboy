@@ -488,7 +488,15 @@ pub struct RunnerDaemonGenerationStatus {
     pub generation: String,
     pub admission_owner: bool,
     pub drain_state: crate::RollingDrainState,
+    /// Persisted admission counter. It is only authoritative when
+    /// `observed_active_job_count` is present.
     pub active_job_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_active_job_count: Option<usize>,
+    pub active_job_count_authoritative: bool,
+    pub job_owner_count: usize,
+    pub run_owner_count: usize,
+    pub artifact_owner_count: usize,
     pub homeboy_build_identity: Option<String>,
     pub remote_daemon_lease_id: Option<String>,
     pub remote_daemon_address: Option<String>,
