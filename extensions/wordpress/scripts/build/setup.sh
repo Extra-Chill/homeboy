@@ -207,6 +207,13 @@ EOF
     git -C "${repo_dir}" fetch --quiet origin "${ref}"
     git -C "${repo_dir}" checkout --quiet FETCH_HEAD
 
+    local source_sha
+    source_sha="$(git -C "${repo_dir}" rev-parse HEAD)"
+    export WP_CODEBOX_SOURCE_REF="${ref}"
+    export WP_CODEBOX_SOURCE_SHA="${source_sha}"
+    write_github_env "WP_CODEBOX_SOURCE_REF" "${ref}"
+    write_github_env "WP_CODEBOX_SOURCE_SHA" "${source_sha}"
+
     npm --prefix "${repo_dir}" install --quiet --no-fund --no-audit --omit=optional
     npm --prefix "${repo_dir}" run build --silent
 

@@ -62,12 +62,17 @@ cat > "${FAKE_BIN}/git" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
+SOURCE_SHA="0123456789abcdef0123456789abcdef01234567"
+
 case "$1" in
     clone)
         dest="${@: -1}"
         mkdir -p "${dest}/.git"
         ;;
     -C)
+        if [ "${3:-}" = "rev-parse" ] && [ "${4:-}" = "HEAD" ]; then
+            printf '%s\n' "${SOURCE_SHA}"
+        fi
         exit 0
         ;;
     *)
@@ -173,6 +178,18 @@ fi
 
 if [ ! -f "${source_wp_codebox_core_module}" ]; then
     echo "Expected source fallback to export built runtime core module" >&2
+    exit 1
+fi
+
+if ! grep -q '^WP_CODEBOX_SOURCE_REF=main$' "${SOURCE_GITHUB_ENV_FILE}"; then
+    echo "Expected source fallback to export the requested WP Codebox ref" >&2
+    cat "${SOURCE_GITHUB_ENV_FILE}" >&2
+    exit 1
+fi
+
+if ! grep -q '^WP_CODEBOX_SOURCE_SHA=0123456789abcdef0123456789abcdef01234567$' "${SOURCE_GITHUB_ENV_FILE}"; then
+    echo "Expected source fallback to export the resolved WP Codebox SHA" >&2
+    cat "${SOURCE_GITHUB_ENV_FILE}" >&2
     exit 1
 fi
 
