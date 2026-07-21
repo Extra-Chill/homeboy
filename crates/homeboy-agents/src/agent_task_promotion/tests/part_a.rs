@@ -223,6 +223,56 @@ fn promotion_rejects_missing_or_mismatched_recovered_controller_projection() {
 }
 
 #[test]
+fn promotion_uses_recovered_controller_projection_without_public_artifact_path() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "recovered-lab-run";
+        let task_id = "implement";
+        let artifact_id = "patch";
+        let mut source: Value = serde_json::from_str(&recovered_runner_aggregate(
+            task_id,
+            artifact_id,
+            &sha256_hex(VALID_PATCH),
+            VALID_PATCH.len(),
+        ))
+        .expect("aggregate JSON");
+        source["outcomes"][0]["artifacts"][0]
+            .as_object_mut()
+            .expect("patch artifact")
+            .remove("path");
+        record_controller_projection(run_id, task_id, artifact_id, VALID_PATCH);
+        let temp = tempfile::tempdir().expect("promotion tempdir");
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(temp.path().join("target")),
+            ..Default::default()
+        };
+
+        let result = promote_with_provider(
+            AgentTaskPromotionOptions {
+                source: source.to_string(),
+                source_run_id: Some(run_id.to_string()),
+                source_path: None,
+                source_worktree_path: None,
+                base_ref: None,
+                task_base_sha: None,
+                candidate_ref: None,
+                to_worktree: "homeboy@recovered-promotion".to_string(),
+                task_id: Some(task_id.to_string()),
+                artifact_id: Some(artifact_id.to_string()),
+                dry_run: false,
+                gates: VerifyGateOptions::default(),
+                provider_command: None,
+                provider_invocation: None,
+            },
+            &mut provider,
+        )
+        .expect("controller projection is promoted without a public artifact path");
+
+        assert_eq!(result.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(provider.apply_calls.len(), 1);
+    });
+}
+
+#[test]
 fn promote_recoverable_candidate_rejects_mismatched_run_provenance() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (source_path, source) = recoverable_patch_source(&temp, 1);
