@@ -357,6 +357,7 @@ fn retained_storage_report(
             limit: usize::MAX,
             run_max_bytes: retention.runtime_run_max_bytes,
             run_max_count: retention.runtime_run_max_count,
+            cursor: None,
         })?;
     for row in runtime_tmp
         .rows
@@ -772,6 +773,7 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
                 limit: usize::try_from(limit).unwrap_or(usize::MAX),
                 run_max_bytes: configured.runtime_run_max_bytes,
                 run_max_count: configured.runtime_run_max_count,
+                cursor: args.cursor.as_deref(),
             })?;
         categories.push(category_from_output(
             RUNTIME_TMP_METADATA,

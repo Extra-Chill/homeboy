@@ -130,6 +130,16 @@ impl RunDir {
         self.path.join(files::ANNOTATIONS_DIR)
     }
 
+    /// Bind this scratch directory to the persisted observation run consuming it.
+    pub fn bind_run_id(&self, run_id: &str) -> Result<()> {
+        super::temp::bind_run_dir_owner(&self.path, Some(run_id), None)
+    }
+
+    /// Bind an active invocation lease before child work starts.
+    pub(crate) fn bind_invocation(&self, invocation_id: &str) -> Result<()> {
+        super::temp::bind_run_dir_owner(&self.path, None, Some(invocation_id))
+    }
+
     /// Generate backward-compatible env var pairs for extension scripts.
     ///
     /// Returns `(key, value)` pairs that map the legacy product-prefixed
@@ -352,6 +362,7 @@ mod tests {
                 limit: 10,
                 run_max_bytes: 1024 * 1024,
                 run_max_count: 10,
+                cursor: None,
             },
         )
         .expect("cleanup inventory");

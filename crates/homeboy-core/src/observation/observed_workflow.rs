@@ -208,6 +208,10 @@ impl ObservedWorkflowRunner {
         &self.run_dir
     }
 
+    pub fn bind_run_id(&self, run_id: &str) -> crate::Result<()> {
+        self.run_dir.bind_run_id(run_id)
+    }
+
     pub fn finish<O, T, F, E>(
         self,
         observation: Option<O>,
@@ -219,7 +223,29 @@ impl ObservedWorkflowRunner {
         F: FnOnce(O, &T),
         E: FnOnce(O, &crate::Error),
     {
-        match self.resource_run.write_to_run_dir(&self.run_dir) {
+        let scratch_succeeded = workflow.is_ok();
+        self.finish_with_scratch_outcome(
+            observation,
+            workflow,
+            scratch_succeeded,
+            finish_success,
+            finish_error,
+        )
+    }
+
+    pub fn finish_with_scratch_outcome<O, T, F, E>(
+        self,
+        observation: Option<O>,
+        workflow: crate::Result<T>,
+        scratch_succeeded: bool,
+        finish_success: F,
+        finish_error: E,
+    ) -> crate::Result<T>
+    where
+        F: FnOnce(O, &T),
+        E: FnOnce(O, &crate::Error),
+    {
+        let result = match self.resource_run.write_to_run_dir(&self.run_dir) {
             Ok(_) => finish_observed_workflow(observation, workflow, finish_success, finish_error),
             Err(error) => {
                 if let Some(observation) = observation {
@@ -227,14 +253,21 @@ impl ObservedWorkflowRunner {
                 }
                 Err(error)
             }
+        };
+        if result.is_ok() && scratch_succeeded {
+            self.run_dir.cleanup();
         }
+        result
     }
 
     pub fn finish_adapted<T, A>(self, adapter: A, workflow: crate::Result<T>) -> crate::Result<T>
     where
         A: WorkflowObservationAdapter<T>,
     {
-        match self.resource_run.write_to_run_dir(&self.run_dir) {
+        let scratch_succeeded = workflow
+            .as_ref()
+            .is_ok_and(|workflow| adapter.success_status(workflow) == RunStatus::Pass);
+        let result = match self.resource_run.write_to_run_dir(&self.run_dir) {
             Ok(_) => finish_adapted_observed_workflow(adapter, workflow),
             Err(error) => {
                 let mut observation = BestEffortObservedRun::start(adapter.start_record());
@@ -244,7 +277,11 @@ impl ObservedWorkflowRunner {
                 })));
                 Err(error)
             }
+        };
+        if result.is_ok() && scratch_succeeded {
+            self.run_dir.cleanup();
         }
+        result
     }
 }
 
@@ -344,7 +381,10 @@ mod tests {
         );
 
         assert_eq!(result.expect("workflow success"), 7);
-        assert!(resource_summary_path.is_file());
+        assert!(
+            !resource_summary_path.exists(),
+            "successful workflow removes scratch after observation callbacks consume it"
+        );
         assert_eq!(events.borrow().as_slice(), ["success:7"]);
     }
 
@@ -371,6 +411,26 @@ mod tests {
         assert!(resource_summary_path.is_file());
         assert_eq!(events.borrow().len(), 1);
         assert!(events.borrow()[0].contains("simulated workflow error"));
+    }
+
+    #[test]
+    fn observed_workflow_runner_retains_semantic_failure_evidence() {
+        let runner = ObservedWorkflowRunner::create("test demo").expect("runner");
+        let resource_summary_path = runner.run_dir().step_file("resource-summary.json");
+
+        let result = runner.finish_with_scratch_outcome(
+            None::<()>,
+            Ok::<_, crate::Error>(1),
+            false,
+            |_, _| {},
+            |_, _| {},
+        );
+
+        assert_eq!(result.expect("completed workflow"), 1);
+        assert!(
+            resource_summary_path.is_file(),
+            "completed but failed workflows retain evidence"
+        );
     }
 
     #[test]
