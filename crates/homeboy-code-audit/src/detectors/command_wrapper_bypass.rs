@@ -80,6 +80,35 @@ const EXEC_SINK_TOKENS: &[&str] = &[
     "process", "invoke",
 ];
 
+/// Whether a body is a *direct delegation* — the exec call is the body's tail
+/// expression rather than a result captured by a `let`-binding to drive further
+/// logic.
+///
+/// A canonical thin wrapper returns the command call directly:
+/// `run(p, &[..])` or `run(p, &[..]).map(trim)`. A short function that merely
+/// *contains* a raw command captures it (`let x = git_output(p, &[..])?;`) to
+/// do more work, and is a genuine bypass. The distinguishing signal is whether
+/// the first meaningful statement/expression binds the value: a leading `let`
+/// (before the arg-vector) means "capture and use", i.e. not a pure delegation.
+fn is_direct_delegation(body: &str) -> bool {
+    // Position of the arg-vector within the body; everything before it is the
+    // call prefix (`run(p, ` etc.). If a `let` binding opens before the
+    // arg-vector, the command result is being captured rather than returned.
+    let Some(argv_at) = argvec_regex().find(body).map(|m| m.start()) else {
+        return false;
+    };
+    let prefix = &body[..argv_at];
+    !prefix_has_binding_keyword(prefix)
+}
+
+/// Whether a body prefix contains a statement-level binding keyword (`let`) as a
+/// whole word — signalling the command result is captured, not returned.
+fn prefix_has_binding_keyword(prefix: &str) -> bool {
+    static LET_RE: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\blet\b").expect("valid let regex"));
+    LET_RE.is_match(prefix)
+}
+
 /// Whether a wrapper body passes its arg-vector to an exec sink.
 fn wraps_exec_sink(body: &str) -> bool {
     static CALL_RE: std::sync::LazyLock<Regex> =
@@ -110,6 +139,18 @@ struct WrapperDef {
 fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     // argvec-key -> canonical wrapper.
     let mut wrappers: HashMap<Vec<String>, WrapperDef> = HashMap::new();
+    // `(file, argv_offset)` of EVERY canonical thin wrapper's own delegation —
+    // including sibling wrappers that wrap an arg-vector already claimed by
+    // another wrapper. A file may define several thin wrappers around the same
+    // command with different return contracts (e.g. an Option-returning
+    // `head_sha` and a Result-returning `get_head_commit`); each is a canonical
+    // definition, not a raw bypass of the other. The flagging pass skips these
+    // offsets so a legitimate sibling wrapper is never reported (advising
+    // callers to "call the other instead" would silently change error
+    // handling). Only the first wrapper per arg-vector wins the `wrappers` map
+    // (the attribution target), but ALL of them are recorded here.
+    let mut wrapper_argv_sites: std::collections::HashSet<(String, usize)> =
+        std::collections::HashSet::new();
 
     for fp in fingerprints {
         if is_test_path(&fp.relative_path) {
@@ -129,6 +170,18 @@ fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Findi
             if !wraps_exec_sink(&body) {
                 continue;
             }
+            // A canonical wrapper *directly returns* its delegation: the body is
+            // the exec call as the tail expression (optionally post-processed
+            // with `.map(...)`/`.trim()`), not a `let`-binding that captures the
+            // result to do further work. `fn f() { run(&[...]) }` and
+            // `fn f() { run(&[...]).map(trim) }` are wrappers;
+            // `fn f() { let x = run(&[...])?; use(x); }` is a function that
+            // happens to call the command — a genuine bypass. This is the signal
+            // that separates a sibling wrapper (skip) from an ordinary short
+            // caller (flag).
+            if !is_direct_delegation(&body) {
+                continue;
+            }
             let m = matches[0];
             let elems = argvec_elements(
                 argvec_regex()
@@ -140,10 +193,12 @@ fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Findi
             if elems.len() < MIN_ARGV_LEN {
                 continue;
             }
+            let argv_offset = body_offset + m.start();
+            wrapper_argv_sites.insert((fp.relative_path.clone(), argv_offset));
             wrappers.entry(elems).or_insert(WrapperDef {
                 name: name.clone(),
                 file: fp.relative_path.clone(),
-                argv_offset: body_offset + m.start(),
+                argv_offset,
                 is_public,
             });
         }
@@ -167,6 +222,15 @@ fn detect_command_wrapper_bypass(fingerprints: &[&FileFingerprint]) -> Vec<Findi
             inline_test_regions(&fp.content, fp.language.inline_test_region_markers());
         for m in argvec_regex().find_iter(&fp.content) {
             if offset_in_test_region(m.start(), &test_regions) {
+                continue;
+            }
+            // A canonical thin wrapper's own delegation is never a bypass — not
+            // of the wrapper it happens to duplicate the arg-vector of, and not
+            // of itself. This covers sibling wrappers with different return
+            // contracts (Option vs Result) around the same command. Non-wrapper
+            // code (functions doing real work) is not in this set, so genuine
+            // raw bypasses are still flagged.
+            if wrapper_argv_sites.contains(&(fp.relative_path.clone(), m.start())) {
                 continue;
             }
             let inner = argvec_regex()

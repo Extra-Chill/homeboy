@@ -29,6 +29,53 @@ fn flags_raw_argvector_that_bypasses_a_thin_wrapper() {
 }
 
 #[test]
+fn does_not_flag_a_sibling_thin_wrapper_with_a_different_return_contract() {
+    // `head_sha` returns Option (best-effort read); `get_head_commit` is a
+    // separate canonical thin wrapper around the SAME arg-vector that returns
+    // Result (error-propagating, for callers that must not silently swallow a
+    // failed rev-parse). Both are legitimate sibling helpers — callers pick the
+    // contract they need. `get_head_commit` is NOT a raw bypass of `head_sha`;
+    // flagging it as one and telling callers to "call head_sha instead" would
+    // downgrade error handling. A thin wrapper delegating an arg-vector is a
+    // canonical definition, not drift.
+    let option_helper = fp(
+        "src/git/primitives_query.rs",
+        "pub fn head_sha(git_root: &Path) -> Option<String> {\n    output_optional(git_root, &[\"rev-parse\", \"HEAD\"])\n}\n",
+    );
+    let result_helper = fp(
+        "src/git/operations_tags.rs",
+        "pub fn get_head_commit(path: &str) -> Result<String> {\n    run_in(path, \"git\", &[\"rev-parse\", \"HEAD\"], \"get HEAD commit\")\n}\n",
+    );
+    let findings = detect_command_wrapper_bypass(&[&option_helper, &result_helper]);
+    assert!(
+        findings.is_empty(),
+        "a sibling thin wrapper around the same arg-vector is a canonical helper, not a bypass; got: {findings:?}"
+    );
+}
+
+#[test]
+fn still_flags_a_raw_call_in_a_non_wrapper_function_even_beside_sibling_wrappers() {
+    // Guard against over-suppression: the sibling-wrapper skip must be scoped to
+    // genuine thin wrappers. A raw arg-vector inside a function that does real
+    // work (not a one-call delegation) is still a bypass.
+    let helper = fp(
+        "src/git/primitives_query.rs",
+        "pub fn head_sha(git_root: &Path) -> Option<String> {\n    output_optional(git_root, &[\"rev-parse\", \"HEAD\"])\n}\n",
+    );
+    let user = fp(
+        "src/finalization/backend.rs",
+        "fn go(path: &str) {\n    let before = do_setup(path);\n    let head = git_output(path, &[\"rev-parse\", \"HEAD\"])?;\n    finalize(before, head);\n}\n",
+    );
+    let findings = detect_command_wrapper_bypass(&[&helper, &user]);
+    assert_eq!(
+        findings.len(),
+        1,
+        "raw call in a working function is still a bypass"
+    );
+    assert_eq!(findings[0].file, "src/finalization/backend.rs");
+}
+
+#[test]
 fn does_not_flag_the_wrapper_definition_itself() {
     let helper = fp(
         "src/git/primitives_query.rs",
