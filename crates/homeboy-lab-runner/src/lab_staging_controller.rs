@@ -598,8 +598,10 @@ struct DurableLabDispatchReceipt {
     workspace_attachment_digest: String,
     runtime_attachment_digest: String,
     hydration_attachment_digest: String,
-    daemon_lease_id: String,
-    reservation_job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    daemon_lease_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reservation_job_id: Option<String>,
     runner_job_id: String,
     remote_workspace: String,
     remote_command: Vec<String>,
@@ -649,8 +651,6 @@ impl DurableLabDispatchReceipt {
             || self.workspace_attachment_digest.is_empty()
             || self.runtime_attachment_digest.is_empty()
             || self.hydration_attachment_digest.is_empty()
-            || self.daemon_lease_id.is_empty()
-            || self.reservation_job_id.is_empty()
             || self.runner_job_id.is_empty()
             || self.remote_workspace.is_empty()
             || self.remote_command.is_empty()
@@ -1373,6 +1373,81 @@ impl ProductionLabStagingOperations {
         )
     }
 
+    /// The lifecycle's accepted identity is authoritative once daemon admission
+    /// has completed. A controller crash can occur after that atomic bind but
+    /// before this staging receipt is written; rebuild the receipt from the
+    /// immutable stage attachments instead of submitting the provider again.
+    fn recover_dispatch_receipt(
+        request: &LabStagingExecutionRequest,
+        checkpoint: &LabStagingCheckpoint,
+    ) -> Result<Option<DurableLabDispatchReceipt>> {
+        if let Ok(receipt) = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
+            DurableLabDispatchReceipt,
+        >(
+            &request.recipe.run_id,
+            DURABLE_LAB_DISPATCH_RECEIPT_ATTACHMENT_KIND,
+        ) {
+            receipt.payload.validate(request, checkpoint)?;
+            return Ok(Some(receipt.payload));
+        }
+        let Some(identity) =
+            homeboy_agents::agent_task_lifecycle::accepted_lab_runner_job_identity(
+                &request.recipe.run_id,
+            )?
+        else {
+            return Ok(None);
+        };
+        if identity.run_id != request.recipe.run_id
+            || identity.runner_id != request.recipe.runner_id
+        {
+            return Err(Error::validation_invalid_argument(
+                "runner_job_identity",
+                "accepted Lab runner identity does not match its staging recipe",
+                Some(identity.describe()),
+                None,
+            ));
+        }
+        let workspace = Self::durable_workspace(request)?;
+        let runtime = Self::durable_runtime(request)?;
+        let hydration = Self::durable_hydration(request)?;
+        let remote_command =
+            serde_json::from_value(runtime.payload.output.get("command").cloned().ok_or_else(
+                || Error::internal_unexpected("durable runtime has no final command"),
+            )?)
+            .map_err(|_| {
+                Error::validation_invalid_argument(
+                    "durable_runtime_stage",
+                    "Lab staging final command is invalid",
+                    None,
+                    None,
+                )
+            })?;
+        let receipt = DurableLabDispatchReceipt {
+            schema: "homeboy/durable-lab-dispatch-receipt/v1".to_string(),
+            run_id: request.recipe.run_id.clone(),
+            runner_id: request.recipe.runner_id.clone(),
+            recipe_digest: canonical_digest(&request.recipe)?,
+            workspace_attachment_digest: workspace.payload_digest,
+            runtime_attachment_digest: runtime.payload_digest,
+            hydration_attachment_digest: hydration.payload_digest,
+            // Lease and reservation evidence authorize submission only. The
+            // accepted lifecycle identity is the recovery authority.
+            daemon_lease_id: None,
+            reservation_job_id: None,
+            runner_job_id: identity.runner_job_id,
+            remote_workspace: workspace.payload.remote_cwd,
+            remote_command,
+            workload_identity: canonical_digest(&hydration.payload.hydration_metadata)?,
+        };
+        receipt.validate(request, checkpoint)?;
+        homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
+            &request.recipe.run_id,
+            DURABLE_LAB_DISPATCH_RECEIPT_ATTACHMENT_KIND,
+            &receipt,
+        )?;
+        Ok(Some(receipt))
+    }
+
     fn cancellation_error() -> Error {
         Error::internal_unexpected("Lab staging was cancelled during runtime materialization")
     }
@@ -1420,14 +1495,8 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 .validate(request, checkpoint, &workspace, &runtime)?;
         }
         if checkpoint.final_runner_job_id.is_some() {
-            homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
-                DurableLabDispatchReceipt,
-            >(
-                &request.recipe.run_id,
-                DURABLE_LAB_DISPATCH_RECEIPT_ATTACHMENT_KIND,
-            )?
-            .payload
-            .validate(request, checkpoint)?;
+            Self::recover_dispatch_receipt(request, checkpoint)?
+                .ok_or_else(|| Self::ambiguous_intent("dispatch"))?;
         }
         if checkpoint.phase == LabStagingPhase::Completed {
             homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
@@ -1502,20 +1571,15 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 )))
             }
             LabStagingPhase::DispatchRunner => {
-                let dispatch = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
-                    DurableLabDispatchReceipt,
-                >(
-                    &request.recipe.run_id,
-                    DURABLE_LAB_DISPATCH_RECEIPT_ATTACHMENT_KIND,
-                )
-                .map_err(|_| Self::ambiguous_intent("dispatch"))?;
+                let dispatch = Self::recover_dispatch_receipt(request, checkpoint)?
+                    .ok_or_else(|| Self::ambiguous_intent("dispatch"))?;
                 let mut completed = checkpoint.clone();
                 completed.phase = LabStagingPhase::ObserveRunner;
                 completed.stage_intent = None;
-                completed.final_runner_job_id = Some(dispatch.payload.runner_job_id.clone());
-                dispatch.payload.validate(request, &completed)?;
+                completed.final_runner_job_id = Some(dispatch.runner_job_id.clone());
+                dispatch.validate(request, &completed)?;
                 Ok(Some(LabStagingStageEffect::Dispatch(
-                    dispatch.payload.runner_job_id,
+                    dispatch.runner_job_id,
                 )))
             }
             LabStagingPhase::ObserveRunner => {
@@ -2086,14 +2150,14 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         }
         // Lifecycle is bound before the receipt and controller checkpoint expose
         // the accepted job to recovery.
-        homeboy_agents::agent_task_lifecycle::record_detached_lab_run(
-            homeboy_agents::agent_task_lifecycle::DetachedLabRunRecord {
-                run_id: &request.recipe.run_id,
-                runner_id: &request.recipe.runner_id,
-                runner_job_id: &runner_job_id,
-                remote_workspace: &workspace.payload.remote_cwd,
-                remote_command: &command,
-            },
+        homeboy_agents::agent_task_lifecycle::bind_accepted_lab_runner_job(
+            &homeboy_core::lab_contract::RunnerJobIdentity::new(
+                &request.recipe.run_id,
+                &request.recipe.runner_id,
+                &runner_job_id,
+            ),
+            &workspace.payload.remote_cwd,
+            &command,
         )?;
         let receipt = DurableLabDispatchReceipt {
             schema: "homeboy/durable-lab-dispatch-receipt/v1".to_string(),
@@ -2103,8 +2167,8 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             workspace_attachment_digest: workspace.payload_digest,
             runtime_attachment_digest: runtime.payload_digest,
             hydration_attachment_digest: hydration.payload_digest,
-            daemon_lease_id: authority.daemon_lease_id().to_string(),
-            reservation_job_id: authority.reservation_job_id().to_string(),
+            daemon_lease_id: Some(authority.daemon_lease_id().to_string()),
+            reservation_job_id: Some(authority.reservation_job_id().to_string()),
             runner_job_id: runner_job_id.clone(),
             remote_workspace: workspace.payload.remote_cwd,
             remote_command: command,
@@ -3786,8 +3850,8 @@ mod tests {
             workspace_attachment_digest: "sha256:workspace".to_string(),
             runtime_attachment_digest: "sha256:runtime".to_string(),
             hydration_attachment_digest: "sha256:hydration".to_string(),
-            daemon_lease_id: "lease-1".to_string(),
-            reservation_job_id: "reservation-1".to_string(),
+            daemon_lease_id: Some("lease-1".to_string()),
+            reservation_job_id: Some("reservation-1".to_string()),
             runner_job_id: "runner-job-1".to_string(),
             remote_workspace: "/runner/workspace".to_string(),
             remote_command: vec!["homeboy".to_string(), "agent-task".to_string()],
@@ -3800,6 +3864,122 @@ mod tests {
         let mut tampered = receipt;
         tampered.runner_job_id = "other-job".to_string();
         assert!(tampered.validate(&request, &checkpoint).is_err());
+    }
+
+    #[test]
+    fn production_dispatch_recovery_rebuilds_receipt_after_accepted_bind_before_receipt() {
+        let _serial = global_state_lock().lock().expect("lock");
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let request = execution_request();
+            submit_recipe_run(&request.recipe.run_id);
+            homeboy_agents::agent_task_lifecycle::record_lab_offload_phase(
+                &request.recipe.run_id,
+                &request.recipe.runner_id,
+                "dispatching",
+                Some("/runner/workspaces/attempt-1"),
+                None,
+                None,
+                Some(&request.durable_agent_task_plan),
+            )
+            .expect("record staging handoff");
+
+            let workspace = durable_workspace_state(&request);
+            let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+            checkpoint.phase = LabStagingPhase::DispatchRunner;
+            checkpoint.source_snapshot_id = Some(workspace.source_snapshot_id.clone());
+            checkpoint.workspace_id = Some(workspace.workspace_id.clone());
+            checkpoint.runtime_id = Some("runtime-1".to_string());
+
+            let runtime = DurableLabRuntimeStage {
+                schema: "homeboy/durable-lab-runtime-stage/v1".to_string(),
+                run_id: request.recipe.run_id.clone(),
+                runner_id: request.recipe.runner_id.clone(),
+                recipe_digest: canonical_digest(&request.recipe).expect("recipe digest"),
+                plan_digest: canonical_plan_digest(&request.durable_agent_task_plan)
+                    .expect("plan digest"),
+                workspace_id: workspace.workspace_id.clone(),
+                runtime_id: "runtime-1".to_string(),
+                output: json!({
+                    "remote_cwd": workspace.workspace_id,
+                    "command": ["homeboy", "agent-task", "run-plan"],
+                }),
+            };
+            let hydration_record = json!({ "NotApplied": { "reason": "fixture" } });
+            let hydration = DurableLabHydrationStage {
+                schema: "homeboy/durable-lab-hydration-stage/v1".to_string(),
+                run_id: request.recipe.run_id.clone(),
+                runner_id: request.recipe.runner_id.clone(),
+                recipe_digest: canonical_digest(&request.recipe).expect("recipe digest"),
+                plan_digest: canonical_plan_digest(&request.durable_agent_task_plan)
+                    .expect("plan digest"),
+                workspace_id: workspace.workspace_id.clone(),
+                runtime_id: runtime.runtime_id.clone(),
+                hydration_id: canonical_digest(&hydration_record).expect("hydration digest"),
+                plan: Value::Null,
+                hydration_record: hydration_record.clone(),
+                hydration_metadata: hydration_metadata_from_record(&hydration_record),
+                execution_ids: Vec::new(),
+                dispatch_inputs: json!({
+                    "workspace_stage": workspace.stage,
+                    "runtime_output": runtime.output,
+                    "plan": null,
+                }),
+            };
+            checkpoint.hydration_id = Some(hydration.hydration_id.clone());
+            homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
+                &request.recipe.run_id,
+                DURABLE_LAB_WORKSPACE_STAGE_ATTACHMENT_KIND,
+                &workspace,
+            )
+            .expect("persist workspace receipt");
+            homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
+                &request.recipe.run_id,
+                DURABLE_LAB_RUNTIME_STAGE_ATTACHMENT_KIND,
+                &runtime,
+            )
+            .expect("persist runtime receipt");
+            homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
+                &request.recipe.run_id,
+                DURABLE_LAB_HYDRATION_STAGE_ATTACHMENT_KIND,
+                &hydration,
+            )
+            .expect("persist hydration receipt");
+
+            homeboy_agents::agent_task_lifecycle::bind_accepted_lab_runner_job(
+                &homeboy_core::lab_contract::RunnerJobIdentity::new(
+                    &request.recipe.run_id,
+                    &request.recipe.runner_id,
+                    "runner-job-accepted",
+                ),
+                "/runner/workspaces/attempt-1",
+                &[
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "run-plan".to_string(),
+                ],
+            )
+            .expect("bind accepted job before receipt");
+
+            let intent = checkpoint.intent_for_current_action();
+            let recovered = ProductionLabStagingOperations
+                .recover_stage(&request, &checkpoint, &intent)
+                .expect("recover accepted dispatch")
+                .expect("recovered dispatch effect");
+            assert!(matches!(
+                recovered,
+                LabStagingStageEffect::Dispatch(ref job_id) if job_id == "runner-job-accepted"
+            ));
+            let receipt = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
+                DurableLabDispatchReceipt,
+            >(
+                &request.recipe.run_id,
+                DURABLE_LAB_DISPATCH_RECEIPT_ATTACHMENT_KIND,
+            )
+            .expect("reconstructed dispatch receipt");
+            assert_eq!(receipt.payload.runner_job_id, "runner-job-accepted");
+            assert!(receipt.payload.daemon_lease_id.is_none());
+            assert!(receipt.payload.reservation_job_id.is_none());
+        });
     }
 
     #[test]

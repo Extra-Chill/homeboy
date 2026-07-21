@@ -104,6 +104,80 @@ fn accepted_detached_handoff(run_id: &str) -> AgentTaskRunRecord {
 }
 
 #[test]
+fn accepted_runner_identity_binds_before_snapshot_validation_and_survives_caller_loss() {
+    with_isolated_home(|_| {
+        let run_id = "cook-9567-pre-provider-race";
+        let plan = test_plan();
+        record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "provider_dispatch",
+            Some("/runner/workspace/homeboy"),
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("persist pending handoff before daemon acceptance");
+        let identity = homeboy_core::lab_contract::RunnerJobIdentity::new(
+            run_id,
+            "homeboy-lab",
+            "00000000-0000-0000-0000-000000009567",
+        );
+
+        // Daemon admission persists the typed accepted identity before a
+        // foreground caller can observe a snapshot or disappear.
+        let accepted = bind_accepted_lab_runner_job(&identity, "/runner/workspace/homeboy", &[])
+            .expect("bind accepted daemon job");
+        let replay = bind_accepted_lab_runner_job(&identity, "/runner/workspace/homeboy", &[])
+            .expect("repeated acceptance is idempotent");
+        assert_eq!(accepted, replay);
+
+        let foreign = bind_accepted_lab_runner_job(
+            &homeboy_core::lab_contract::RunnerJobIdentity::new(
+                run_id,
+                "homeboy-lab",
+                "00000000-0000-0000-0000-000000009568",
+            ),
+            "/runner/workspace/homeboy",
+            &[],
+        )
+        .expect_err("a foreign daemon job cannot replace accepted identity");
+        assert_eq!(foreign.code, ErrorCode::ValidationInvalidArgument);
+
+        // Reloading models controller/caller loss after daemon acceptance. A
+        // status reconciliation validates the accepted job directly and never
+        // needs to replay the provider command.
+        let mut recovered = status(run_id).expect("reload accepted handoff");
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
+        snapshot.job.id = uuid::Uuid::parse_str(&identity.runner_job_id).expect("valid job id");
+        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+        snapshot.events.clear();
+        reconcile_runner_job_snapshot(&mut recovered, &snapshot)
+            .expect("accepted identity validates recovered runner snapshot");
+        assert_eq!(
+            recovered.runner_job_id(),
+            Some(identity.runner_job_id.as_str())
+        );
+        assert_eq!(recovered.state, AgentTaskRunState::Running);
+    });
+}
+
+#[test]
+fn accepted_runner_identity_rejects_mutable_metadata_without_typed_handoff() {
+    with_isolated_home(|_| {
+        let run_id = "cook-9567-metadata-is-not-acceptance";
+        let mut record = submit_plan(&test_plan(), Some(run_id)).expect("persist run");
+        record.metadata["runner_id"] = json!("homeboy-lab");
+        record.metadata["runner_job_id"] = json!("foreign-job");
+        store::write_record(&record).expect("persist mutable metadata");
+
+        assert!(accepted_lab_runner_job_identity(run_id)
+            .expect("read typed handoff")
+            .is_none());
+    });
+}
+
+#[test]
 fn submit_plan_persists_queued_status() {
     with_isolated_home(|_| {
         let plan = test_plan();

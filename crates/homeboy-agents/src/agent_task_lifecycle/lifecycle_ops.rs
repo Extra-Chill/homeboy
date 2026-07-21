@@ -815,6 +815,28 @@ pub fn recorded_runner_job_identity(run_id: &str) -> Result<Option<(String, Stri
         .map(|(runner_id, runner_job_id)| (runner_id.to_string(), runner_job_id.to_string())))
 }
 
+/// Read only a typed, daemon-authoritative accepted Lab handoff. Unlike the
+/// compatibility metadata projection, this cannot be forged by mutating a run
+/// record's `runner_id` or `runner_job_id` fields.
+pub fn accepted_lab_runner_job_identity(
+    run_id: &str,
+) -> Result<Option<homeboy_core::lab_contract::RunnerJobIdentity>> {
+    let record = store::read_record(&sanitize_run_id(run_id))?;
+    let Some(handoff) = record.lab_handoff.as_ref().filter(|handoff| {
+        handoff.validation_error().is_none()
+            && handoff.state == AgentTaskLabHandoffState::Accepted
+            && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
+    }) else {
+        return Ok(None);
+    };
+    let identity = homeboy_core::lab_contract::RunnerJobIdentity::new(
+        &record.run_id,
+        &handoff.runner_id,
+        handoff.runner_job_id.clone().unwrap_or_default(),
+    );
+    Ok(identity.is_complete().then_some(identity))
+}
+
 /// Metadata `kind` marker for a generic runner-execution run. It distinguishes
 /// an ad hoc `runner exec --run-id` durable run from an agent-task lifecycle
 /// record so ownership collisions are detectable (#8447).
@@ -1397,6 +1419,31 @@ pub struct DetachedLabRunRecord<'a> {
     pub runner_job_id: &'a str,
     pub remote_workspace: &'a str,
     pub remote_command: &'a [String],
+}
+
+/// Atomically persist a daemon-accepted Lab job before a caller can inspect its
+/// snapshot. The typed identity keeps every acceptance path on the canonical
+/// run/runner/job comparison used by reconciliation and terminal projection.
+pub fn bind_accepted_lab_runner_job(
+    identity: &homeboy_core::lab_contract::RunnerJobIdentity,
+    remote_workspace: &str,
+    remote_command: &[String],
+) -> Result<AgentTaskRunRecord> {
+    if !identity.is_complete() {
+        return Err(Error::validation_invalid_argument(
+            "runner_job_identity",
+            "accepted Lab runner job identity requires run id, runner id, and runner job id",
+            Some(identity.describe()),
+            None,
+        ));
+    }
+    record_detached_lab_run(DetachedLabRunRecord {
+        run_id: &identity.run_id,
+        runner_id: &identity.runner_id,
+        runner_job_id: &identity.runner_job_id,
+        remote_workspace,
+        remote_command,
+    })
 }
 
 #[derive(Debug, Clone)]

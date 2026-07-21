@@ -543,7 +543,7 @@ impl AgentTaskLabHandoff {
         self.validation_error().is_none()
     }
 
-    fn validation_error(&self) -> Option<&'static str> {
+    pub(crate) fn validation_error(&self) -> Option<&'static str> {
         if self.runner_id.trim().is_empty() {
             return Some("Lab handoff runner_id is blank");
         }
