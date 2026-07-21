@@ -89,6 +89,8 @@ pub struct ArtifactCleanupOutput {
     pub remaining_count: usize,
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
+    /// Replays the reviewed cleanup scope with mutation explicitly enabled.
+    pub next_command: String,
     pub summary: ArtifactCleanupSummary,
     pub candidates: Vec<ArtifactCleanupCandidate>,
     pub skipped: Vec<ArtifactCleanupSkipped>,
@@ -305,12 +307,41 @@ fn cleanup_artifacts_in_worktrees(
         remaining_count,
         estimated_bytes,
         reclaimed_bytes,
+        next_command: artifact_cleanup_apply_command(options),
         summary,
         candidates,
         skipped,
         applied,
         failed,
     })
+}
+
+fn artifact_cleanup_apply_command(options: &ArtifactCleanupOptions) -> String {
+    use crate::engine::shell::quote_arg;
+
+    let mut command = "homeboy cleanup artifacts".to_string();
+    if options.self_artifacts {
+        command.push_str(" --self");
+    } else if let Some(path) = &options.path {
+        command.push_str(&format!(" --path {}", quote_arg(&path.to_string_lossy())));
+    }
+    for temp_root in &options.temp_roots {
+        command.push_str(&format!(
+            " --temp-root {}",
+            quote_arg(&temp_root.to_string_lossy())
+        ));
+    }
+    if options.sort == ArtifactCleanupSort::Size {
+        command.push_str(" --sort size");
+    }
+    if let Some(limit) = options.limit {
+        command.push_str(&format!(" --limit {limit}"));
+    }
+    if options.merged_only {
+        command.push_str(" --merged-only");
+    }
+    command.push_str(" --apply");
+    command
 }
 
 pub fn cleanup_resources_from_config(
@@ -1939,6 +1970,36 @@ mod tests {
 
         assert!(output.applied_count >= 1, "merged target must be reclaimed");
         assert!(!repo.path().join("target").exists());
+    }
+
+    #[test]
+    fn artifact_cleanup_preview_apply_command_preserves_reviewed_scope() {
+        let options = ArtifactCleanupOptions {
+            path: Some(PathBuf::from("/tmp/review scope")),
+            apply: false,
+            self_artifacts: false,
+            temp_roots: vec![
+                PathBuf::from("/tmp/first root"),
+                PathBuf::from("/tmp/second"),
+            ],
+            sort: ArtifactCleanupSort::Size,
+            limit: Some(7),
+            merged_only: true,
+        };
+
+        assert_eq!(
+            artifact_cleanup_apply_command(&options),
+            "homeboy cleanup artifacts --path '/tmp/review scope' --temp-root '/tmp/first root' --temp-root /tmp/second --sort size --limit 7 --merged-only --apply"
+        );
+
+        assert_eq!(
+            artifact_cleanup_apply_command(&ArtifactCleanupOptions {
+                path: None,
+                self_artifacts: true,
+                ..options
+            }),
+            "homeboy cleanup artifacts --self --temp-root '/tmp/first root' --temp-root /tmp/second --sort size --limit 7 --merged-only --apply"
+        );
     }
 
     fn git_repo() -> TempDir {
