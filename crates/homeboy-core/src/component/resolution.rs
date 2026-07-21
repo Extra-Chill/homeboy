@@ -2,7 +2,7 @@ use crate::component::{
     discover_from_portable, inventory, load, try_discover_from_portable, Component,
 };
 use crate::error::{Error, Result};
-use crate::git::{run_git, run_git_output};
+use crate::git::run_git;
 use homeboy_extension_contract::ExtensionCapability;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -504,17 +504,13 @@ fn path_strictly_contains(parent: &Path, child: &Path) -> bool {
 }
 
 /// Find the git root directory for a given path.
+///
+/// Delegates to the canonical [`crate::git::repo_root`] helper — which runs
+/// `rev-parse --show-toplevel` and returns the trimmed, non-empty toplevel as a
+/// `PathBuf` on success — rather than assembling the raw arg-vector here. The
+/// observable contract (best-effort `Option<PathBuf>`) is unchanged.
 pub fn detect_git_root(dir: &Path) -> Option<PathBuf> {
-    let output = run_git_output(dir, &["rev-parse", "--show-toplevel"], "git root").ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !path.is_empty() {
-        return Some(PathBuf::from(path));
-    }
-    None
+    crate::git::repo_root(dir)
 }
 
 /// Resolve a Component from an optional ID, with CWD auto-discovery fallback.

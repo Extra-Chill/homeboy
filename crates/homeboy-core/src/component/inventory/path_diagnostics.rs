@@ -1,6 +1,6 @@
 use crate::component::Component;
 use crate::engine::shell::quote_path;
-use crate::git::{output_optional, run_git_output};
+use crate::git::output_optional;
 use crate::transient_workspace_policy::TransientWorkspacePolicy;
 use std::path::{Path, PathBuf};
 
@@ -78,7 +78,7 @@ pub(super) fn local_path_diagnostic_for(
             .and_then(|path| output_optional(path, &["rev-parse", "--abbrev-ref", "HEAD"])),
         head: git_root_path
             .as_ref()
-            .and_then(|path| output_optional(path, &["rev-parse", "--short", "HEAD"])),
+            .and_then(|path| crate::git::head_sha_short(path)),
         remote_url: git_root_path
             .as_ref()
             .and_then(|path| output_optional(path, &["config", "--get", "remote.origin.url"])),
@@ -118,16 +118,10 @@ pub(super) fn detect_git_root(path: &Path) -> Option<PathBuf> {
         return Some(path.to_path_buf());
     }
 
-    let output = run_git_output(path, &["rev-parse", "--show-toplevel"], "git rev-parse").ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if raw.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(raw))
-    }
+    // Fall back to `rev-parse --show-toplevel` via the canonical `repo_root`
+    // helper (trimmed, non-empty toplevel as a `PathBuf`) instead of assembling
+    // the raw arg-vector. The `.git`-exists fast path above is preserved.
+    crate::git::repo_root(path)
 }
 
 fn shell_quote_for_hint(value: &str) -> String {
