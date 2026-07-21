@@ -112,6 +112,7 @@ pub fn browser_evidence_compare_from_dirs_with_visual_and_adapters(
             &visual_options,
             baseline_label,
             candidate_label,
+            include_local_paths,
         )?;
     }
     let totals = BrowserEvidenceCompareTotals {

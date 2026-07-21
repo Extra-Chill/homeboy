@@ -262,6 +262,12 @@ fn render_visual_compare(out: &mut String, variant: &BrowserEvidenceVariantCompa
             .collect::<Vec<_>>()
             .join("; ");
         let _ = writeln!(out, "- Artifacts: {}", rendered);
+        let _ = writeln!(
+            out,
+            "- Note: visual-compare artifact paths are local/relative operator notes, not \
+             public URLs. Do not hand-build tunnel URLs from these names; resolve a \
+             reviewer-facing URL with `homeboy tunnel artifact-origin inspect --path <file>`."
+        );
     }
     out.push('\n');
 }
