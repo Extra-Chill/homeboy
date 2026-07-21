@@ -1237,6 +1237,58 @@ fn skeleton_duplicate_flags_same_backbone_with_different_error_tail() {
 }
 
 #[test]
+fn skeleton_duplicate_ignores_semantically_unrelated_names_sharing_a_backbone() {
+    // Real false positive: a timeline error formatter and a command→check-name
+    // mapper share the "match/if-else returning a String" backbone but are
+    // unrelated domains with no shared name token. Consolidating them would
+    // couple unrelated modules — this must NOT be flagged.
+    let fp1 = make_fingerprint_with_skeleton(
+        "crates/contracts/homeboy-lifecycle-contract/src/timeline.rs",
+        &["out_of_order_span_message"],
+        &[("out_of_order_span_message", "structuralAAA")],
+        &[("out_of_order_span_message", "6:skelSAME")],
+    );
+    let fp2 = make_fingerprint_with_skeleton(
+        "crates/homeboy-tunnel/src/preview_ingress/install.rs",
+        &["install_check_name"],
+        &[("install_check_name", "structuralBBB")],
+        &[("install_check_name", "6:skelSAME")],
+    );
+
+    let findings = detect_skeleton_duplicates(&[&fp1, &fp2]);
+    assert!(
+        findings.is_empty(),
+        "unrelated names sharing only a control-flow shape are coincidental, not duplication: {findings:?}"
+    );
+}
+
+#[test]
+fn skeleton_duplicate_still_flags_names_sharing_a_significant_token() {
+    // Real reimplementation: `non_empty_trimmed` and `trimmed` are the same
+    // trim-to-Option primitive copied across crates. They share the "trimmed"
+    // token, so the semantic-affinity gate keeps flagging them.
+    let fp1 = make_fingerprint_with_skeleton(
+        "crates/homeboy-agents/src/agent_task/artifacts.rs",
+        &["non_empty_trimmed"],
+        &[("non_empty_trimmed", "structuralAAA")],
+        &[("non_empty_trimmed", "5:skelTRIM")],
+    );
+    let fp2 = make_fingerprint_with_skeleton(
+        "crates/homeboy-fuzz/src/coverage.rs",
+        &["trimmed"],
+        &[("trimmed", "structuralBBB")],
+        &[("trimmed", "5:skelTRIM")],
+    );
+
+    let findings = detect_skeleton_duplicates(&[&fp1, &fp2]);
+    assert_eq!(
+        findings.len(),
+        2,
+        "names sharing the 'trimmed' token are a real reimplementation and stay flagged"
+    );
+}
+
+#[test]
 fn skeleton_duplicate_ignores_group_with_one_shared_structural_hash() {
     // Same skeleton AND same structural hash — the near-duplicate pass owns
     // this; skeleton must not double-report it.
