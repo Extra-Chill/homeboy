@@ -121,6 +121,79 @@ where
     Ok(record)
 }
 
+/// One child of a fanout run-plan batch: the durable run id the coordinator
+/// dispatches and the task/cook id it was compiled from.
+#[derive(Debug, Clone)]
+pub struct FanoutRunBatchChild {
+    pub task_id: String,
+    pub run_id: String,
+}
+
+/// Persist the durable batch record for an `agent-task fanout run-plan`
+/// invocation before child admission.
+///
+/// `fanout run-plan` executes cooks directly on the controller (unlike
+/// `fanout submit`, which queues them), but it previously never wrote the
+/// `agent-task-batches/<fanout_id>.json` record that `fanout status`/`artifacts`
+/// read. A named, Lab-routed run-plan therefore admitted its children and then
+/// failed `fanout status <id>` with `No such file or directory` (#9397).
+///
+/// Writing the record here, keyed by `fanout_id` with each child's durable run
+/// id, lets `status` resolve every child live (including detached Lab runs and
+/// retries) and survives controller exit / partial admission. Children start in
+/// `Running` because run-plan dispatches immediately; `status` reconciles the
+/// live per-child state on read.
+pub fn persist_fanout_run_batch(
+    fanout_id: &str,
+    plan_id: &str,
+    children: &[FanoutRunBatchChild],
+    metadata: Value,
+) -> Result<AgentTaskBatchRecord> {
+    if children.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "cooks",
+            "agent-task fanout run-plan requires at least one cook",
+            Some(fanout_id.to_string()),
+            None,
+        ));
+    }
+    let batch_id = sanitize_id(fanout_id);
+    let mut seen = HashSet::new();
+    for child in children {
+        if !seen.insert(child.run_id.clone()) {
+            return Err(Error::validation_invalid_argument(
+                "cook_id",
+                format!(
+                    "agent-task fanout run-plan child run id '{}' is duplicated",
+                    child.run_id
+                ),
+                Some(fanout_id.to_string()),
+                None,
+            ));
+        }
+    }
+    let record = AgentTaskBatchRecord {
+        schema: AGENT_TASK_BATCH_SCHEMA.to_string(),
+        batch_id,
+        plan_id: plan_id.to_string(),
+        state: AgentTaskBatchState::Running,
+        submitted_at: now_timestamp(),
+        updated_at: None,
+        task_count: children.len(),
+        child_runs: children
+            .iter()
+            .map(|child| AgentTaskBatchChildRun {
+                task_id: child.task_id.clone(),
+                run_id: child.run_id.clone(),
+                state: AgentTaskRunState::Running,
+            })
+            .collect(),
+        metadata,
+    };
+    write_batch(&record)?;
+    Ok(record)
+}
+
 pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
     let mut batch = read_batch(batch_id)?;
     let mut changed = false;
@@ -628,6 +701,73 @@ mod tests {
         let error = submit_plan_batch(&plan, Some("workflow")).expect_err("workflow rejected");
 
         assert!(error.message.contains("independent tasks"));
+    }
+
+    #[test]
+    fn fanout_run_plan_persists_batch_record_readable_by_status() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let children = vec![
+            FanoutRunBatchChild {
+                task_id: "audit".to_string(),
+                run_id: "cook-audit".to_string(),
+            },
+            FanoutRunBatchChild {
+                task_id: "rules".to_string(),
+                run_id: "cook-rules".to_string(),
+            },
+        ];
+
+        let record = persist_fanout_run_batch(
+            "rules-memory-gaps-20260721",
+            "rules-memory-gaps-20260721",
+            &children,
+            json!({ "source": "fanout-run-plan" }),
+        )
+        .expect("batch record persisted");
+
+        assert_eq!(record.batch_id, "rules-memory-gaps-20260721");
+        assert_eq!(record.task_count, 2);
+        assert_eq!(record.state, AgentTaskBatchState::Running);
+
+        // The exact failure from #9397: `fanout status <id>` could not read the
+        // batch file because run-plan never wrote it. It is now readable.
+        let persisted = read_batch("rules-memory-gaps-20260721").expect("batch record readable");
+        assert_eq!(persisted.child_runs.len(), 2);
+        assert_eq!(persisted.child_runs[0].run_id, "cook-audit");
+        assert_eq!(persisted.child_runs[1].run_id, "cook-rules");
+        assert!(persisted
+            .child_runs
+            .iter()
+            .all(|child| child.state == AgentTaskRunState::Running));
+    }
+
+    #[test]
+    fn fanout_run_plan_rejects_duplicate_child_run_ids() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let children = vec![
+            FanoutRunBatchChild {
+                task_id: "a".to_string(),
+                run_id: "cook-dup".to_string(),
+            },
+            FanoutRunBatchChild {
+                task_id: "b".to_string(),
+                run_id: "cook-dup".to_string(),
+            },
+        ];
+
+        let error = persist_fanout_run_batch("dup-batch", "dup-batch", &children, Value::Null)
+            .expect_err("duplicate child run ids rejected");
+
+        assert!(error.message.contains("duplicated"));
+    }
+
+    #[test]
+    fn fanout_run_plan_rejects_empty_cooks() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let error = persist_fanout_run_batch("empty-batch", "empty-batch", &[], Value::Null)
+            .expect_err("empty cooks rejected");
+
+        assert!(error.message.contains("at least one cook"));
     }
 
     fn request(task_id: &str) -> AgentTaskRequest {
