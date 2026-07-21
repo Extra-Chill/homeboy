@@ -851,6 +851,80 @@ fn durable_finalization_requires_successful_provider_run_and_hydrates_model() {
 }
 
 #[test]
+fn finalization_keeps_internal_durable_refs_for_operators_but_not_reviewers() {
+    let internal_ref = "homeboy://agent-task/run/run-9568/artifacts#task=cook&artifact=patch";
+    let reviewer_ref = "https://github.com/Extra-Chill/homeboy/issues/9568";
+
+    let mut durable_options = options();
+    durable_options.manual_finalization = false;
+    durable_options.changed_files = vec!["src/lib.rs".to_string()];
+    durable_options.evidence.source_refs = vec![reviewer_ref.to_string()];
+    durable_options.evidence.artifact_refs = vec![internal_ref.to_string()];
+    durable_options.review_dossier.evidence.push(
+        crate::agent_task_review_dossier::AgentTaskReviewEvidence {
+            summary: "Hydrated durable artifact".to_string(),
+            url: Some(internal_ref.to_string()),
+        },
+    );
+    let mut durable_gate_proof = successful_gate_proof();
+    durable_gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+    let mut durable_backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(successful_lifecycle("openai/gpt-5.6-terra")),
+        gate_proof: Some(durable_gate_proof),
+        ..Default::default()
+    };
+    let durable_report = finalize_pr_with_backend(durable_options, &mut durable_backend)
+        .expect("durable finalization succeeds");
+
+    let mut manual_options = options();
+    manual_options.evidence.source_refs = vec![reviewer_ref.to_string()];
+    manual_options.evidence.artifact_refs.clear();
+    manual_options.review_dossier.evidence.push(
+        crate::agent_task_review_dossier::AgentTaskReviewEvidence {
+            summary: "Hydrated source-run artifact".to_string(),
+            url: Some(internal_ref.to_string()),
+        },
+    );
+    let mut manual_backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        ..Default::default()
+    };
+    let manual_report = finalize_pr_with_backend(manual_options, &mut manual_backend)
+        .expect("manual finalization succeeds");
+
+    assert!(durable_report
+        .evidence
+        .artifact_refs
+        .contains(&internal_ref.to_string()));
+    assert!(durable_report
+        .publication_intent
+        .artifact_refs
+        .contains(&internal_ref.to_string()));
+    assert!(manual_report.evidence.artifact_refs.is_empty());
+    assert!(manual_report.publication_intent.artifact_refs.is_empty());
+
+    for (report, body) in [
+        (&durable_report, &durable_backend.last_body),
+        (&manual_report, &manual_backend.last_body),
+    ] {
+        assert!(report
+            .review_dossier
+            .evidence
+            .iter()
+            .any(|evidence| evidence.url.as_deref() == Some(reviewer_ref)));
+        assert!(!report.review_dossier.evidence.iter().any(|evidence| {
+            evidence
+                .url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("homeboy://"))
+        }));
+        assert!(body.contains(reviewer_ref));
+        assert!(!body.contains(internal_ref));
+    }
+}
+
+#[test]
 fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adoption_recovery() {
     let recovery_lifecycle = RunLifecycleRecord {
         execution: RunExecutionLifecycle {
