@@ -12,5 +12,6 @@ pub use source_snapshot::{default_sync_excludes, SourceSnapshot, SourceSnapshotP
 pub use workspace_content_identity::{
     workspace_content_hash_algorithm, WorkspaceContentManifest, WorkspaceContentManifestEntry,
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
-    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
