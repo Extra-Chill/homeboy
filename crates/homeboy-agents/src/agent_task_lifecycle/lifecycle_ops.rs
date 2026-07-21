@@ -1089,6 +1089,22 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
                     &aggregate,
                 )?;
             }
+            // Reproject authoritative aggregate model evidence onto a terminal
+            // record whose durable lifecycle model is stale-null (#9411). A run
+            // that went terminal before the #9404/#9405 model repair keeps
+            // `provider_runtime[].metadata.model = null`, which blocks
+            // `finalize-pr` even though the aggregate recorded a concrete model.
+            if crate::agent_task_lifecycle::terminal_provider_model_reconciliation_needed(
+                &record, &aggregate,
+            ) {
+                let controller_plan = store::read_controller_plan(&record.run_id)?;
+                let projection_plan = aggregate_projection_plan(&controller_plan, &aggregate);
+                crate::agent_task_lifecycle::reconcile_terminal_provider_model(
+                    &mut record,
+                    &projection_plan,
+                    &aggregate,
+                )?;
+            }
         }
     }
     // Read-side reconciliation only writes the durable continuation signal.
