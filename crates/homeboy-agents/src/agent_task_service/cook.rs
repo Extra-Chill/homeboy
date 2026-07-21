@@ -13,7 +13,7 @@ use crate::agent_task_dispatch_plan::build_dispatch_plan;
 use crate::agent_task_dispatch_service::{self, AgentTaskDispatchCommand};
 use crate::agent_task_gate::VerifyGateOptions;
 use crate::agent_task_lifecycle;
-use crate::agent_task_promotion::AgentTaskPromotionReport;
+use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
@@ -33,7 +33,11 @@ use super::cook_pre_execution::{
     terminal_executor_matches, with_pre_execution_phase,
 };
 use super::cook_promotion::{
-    attempt_needs_execution, cook_report, finalize_or_load_cook_pr, promote_or_load_attempt,
+    attempt_needs_execution, cook_report, finalize_or_load_cook_pr,
+    is_moving_base_finalization_error, moving_base_recovery_for_run,
+    moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
+    promote_or_load_attempt, recover_moving_base_cook_candidate, refreshed_moving_base_recovery,
+    MovingBaseCookRecovery,
 };
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
@@ -137,6 +141,8 @@ pub struct AgentTaskCookReport {
     pub terminal_phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_failure_classification: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moving_base_recovery: Option<MovingBaseCookRecovery>,
 }
 
 /// A bounded collection of independently durable cooks. Each cook retains the
@@ -292,10 +298,51 @@ where
 {
     let _runtime_generation =
         homeboy_core::runtime_promotion::pin_cook_generation(&options.cook_id)?;
+    run_cook_with_finalizer(options, executor, finalize_or_load_cook_pr)
+}
+
+fn run_cook_with_finalizer<E, F>(
+    options: AgentTaskCookServiceOptions,
+    executor: E,
+    finalize: F,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
+{
+    run_cook_with_boundaries(
+        options,
+        executor,
+        finalize,
+        recover_moving_base_cook_candidate,
+    )
+}
+
+fn run_cook_with_boundaries<E, F, R>(
+    options: AgentTaskCookServiceOptions,
+    executor: E,
+    mut finalize: F,
+    mut recover: R,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
+    R: FnMut(
+        &AgentTaskCookServiceOptions,
+        &MovingBaseCookRecovery,
+    ) -> Result<AgentTaskPromotionReport>,
+{
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
-    // caller-owned overrides and retain their existing behavior.
-    if options.attempt_dispatcher.is_none()
+    // caller-owned overrides and retain their existing behavior. A typed
+    // moving-base continuation has already completed provider work and must
+    // not require a provider merely to rebase and reverify its candidate.
+    let moving_base_continuation = agent_task_lifecycle::status(&options.initial_run_id)
+        .ok()
+        .and_then(|record| record.metadata.get("cook_moving_base_recovery").cloned())
+        .is_some();
+    if !moving_base_continuation
+        && options.attempt_dispatcher.is_none()
         && options.provider_command.is_none()
         && options.provider_invocation.is_none()
     {
@@ -623,7 +670,96 @@ where
                         0,
                     ));
                 }
-                let finalization = finalize_or_load_cook_pr(&options, &run_id, &promotion)?;
+                let mut active_moving_base_recovery = None;
+                let promotion = match moving_base_recovery_for_run(&run_id)? {
+                    Some(recovery) => match recover(&options, &recovery) {
+                        Ok(promotion) => {
+                            agent_task_lifecycle::record_promotion(
+                                &run_id,
+                                serde_json::to_value(&promotion).map_err(|error| {
+                                    Error::internal_json(error.to_string(), None)
+                                })?,
+                            )?;
+                            let recovery = refreshed_moving_base_recovery(recovery, &promotion);
+                            agent_task_lifecycle::record_cook_moving_base_recovery(
+                                &run_id,
+                                serde_json::to_value(&recovery).map_err(|error| {
+                                    Error::internal_json(error.to_string(), None)
+                                })?,
+                            )?;
+                            if promotion.status != AgentTaskPromotionStatus::Applied {
+                                let mut recovery = recovery;
+                                recovery.blocker = format!(
+                                    "rebased candidate did not pass the declared deterministic gates ({:?}); finalization was not attempted",
+                                    promotion.status
+                                );
+                                agent_task_lifecycle::record_cook_moving_base_recovery(
+                                    &run_id,
+                                    serde_json::to_value(&recovery).map_err(|error| {
+                                        Error::internal_json(error.to_string(), None)
+                                    })?,
+                                )?;
+                                return Ok(moving_base_recovery_report(
+                                    cook_id, attempts, recovery, false,
+                                ));
+                            }
+                            active_moving_base_recovery = Some(recovery);
+                            promotion
+                        }
+                        Err(error) => {
+                            let recovery = next_moving_base_recovery(recovery, error.to_string());
+                            agent_task_lifecycle::record_cook_moving_base_recovery(
+                                &run_id,
+                                serde_json::to_value(&recovery).map_err(|error| {
+                                    Error::internal_json(error.to_string(), None)
+                                })?,
+                            )?;
+                            if recovery.base_movements < 3 {
+                                super::enqueue_terminal_continuation(&cook_id, &run_id)?;
+                            }
+                            let continuation_queued = recovery.base_movements < 3;
+                            return Ok(moving_base_recovery_report(
+                                cook_id,
+                                attempts,
+                                recovery,
+                                continuation_queued,
+                            ));
+                        }
+                    },
+                    None => promotion,
+                };
+                let finalization = match finalize(&options, &run_id, &promotion) {
+                    Ok(finalization) => {
+                        if active_moving_base_recovery.is_some() {
+                            agent_task_lifecycle::clear_cook_moving_base_recovery(&run_id)?;
+                        }
+                        finalization
+                    }
+                    Err(error) if is_moving_base_finalization_error(&error) => {
+                        let recovery = next_moving_base_recovery(
+                            active_moving_base_recovery.unwrap_or_else(|| {
+                                moving_base_recovery_from_promotion(&cook_id, &run_id, promotion)
+                            }),
+                            error.to_string(),
+                        );
+                        agent_task_lifecycle::record_cook_moving_base_recovery(
+                            &run_id,
+                            serde_json::to_value(&recovery)
+                                .map_err(|error| Error::internal_json(error.to_string(), None))?,
+                        )?;
+                        if recovery.base_movements < 3 {
+                            super::enqueue_terminal_continuation(&cook_id, &run_id)?;
+                        }
+                        let continuation_queued = recovery.base_movements < 3;
+                        return Ok(moving_base_recovery_report(
+                            cook_id,
+                            attempts,
+                            recovery,
+                            continuation_queued,
+                        ));
+                    }
+                    Err(error) => return Err(error),
+                };
                 let final_status = finalization["status"]
                     .as_str()
                     .unwrap_or("unknown")
@@ -815,7 +951,10 @@ mod tests {
     };
     use super::super::cook_baseline::git_output;
     use super::super::cook_promotion::{
-        finalize_cook_pr_with_backend, persisted_promotion_for_attempt,
+        finalize_cook_pr_with_backend, moving_base_recovery_for_run,
+        moving_base_recovery_from_promotion, moving_base_recovery_report,
+        next_moving_base_recovery, persisted_promotion_for_attempt,
+        recover_moving_base_cook_candidate, refreshed_moving_base_recovery, MovingBaseCookRecovery,
     };
     use super::*;
     use crate::agent_task::{
@@ -859,6 +998,512 @@ mod tests {
             format!("{retry_attempt:?}"),
             "HarvestExecutionContext { source_snapshot: None, lab_offload: None }"
         );
+    }
+
+    #[test]
+    fn moving_base_recovery_report_retains_typed_evidence_and_exact_continuation() {
+        let recovery = MovingBaseCookRecovery {
+            schema: "homeboy/agent-task-cook-moving-base-recovery/v1".to_string(),
+            cook_id: "cook-9267".to_string(),
+            run_id: "run-9267".to_string(),
+            promotion: promotion("run-9267"),
+            prior_verified_base: "a".repeat(40),
+            passed_gates: serde_json::json!([{"status": "passed"}]),
+            blocker: "HEAD is behind or diverged from resolved base".to_string(),
+            continuation: "homeboy agent-task run-next".to_string(),
+            base_movements: 0,
+        };
+        let report =
+            moving_base_recovery_report("cook-9267".to_string(), Vec::new(), recovery, true);
+
+        assert_eq!(report.value.status, "candidate_recoverable");
+        let recovery = report
+            .value
+            .moving_base_recovery
+            .expect("typed recovery state");
+        assert_eq!(recovery.run_id, "run-9267");
+        assert_eq!(recovery.continuation, "homeboy agent-task run-next");
+        assert_eq!(recovery.prior_verified_base, "a".repeat(40));
+        assert!(report
+            .value
+            .stop_reason
+            .unwrap()
+            .contains("without provider dispatch"));
+    }
+
+    #[test]
+    fn moving_base_recovery_persists_across_restart_without_provider_replay() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "moving-base-restart";
+            let plan = AgentTaskPlan::new("moving-base-restart", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+            })
+            .unwrap();
+            let recovery =
+                moving_base_recovery_from_promotion("cook-restart", run_id, promotion(run_id));
+
+            agent_task_lifecycle::record_cook_moving_base_recovery(
+                run_id,
+                serde_json::to_value(&recovery).unwrap(),
+            )
+            .unwrap();
+
+            let restarted = moving_base_recovery_for_run(run_id)
+                .unwrap()
+                .expect("durable recovery");
+            let record = agent_task_lifecycle::status(run_id).unwrap();
+            assert_eq!(restarted.cook_id, "cook-restart");
+            assert_eq!(restarted.run_id, run_id);
+            assert_eq!(record.metadata["provider_executions_consumed"], 1);
+        });
+    }
+
+    #[test]
+    fn moving_base_recovery_refreshes_authenticated_candidate_before_retrying_finalization() {
+        let mut original = promotion("moving-base-refresh");
+        original.provenance["candidate"] =
+            serde_json::json!({"kind": "git", "fingerprint": {"tree": "old"}});
+        let recovery =
+            moving_base_recovery_from_promotion("cook-refresh", "moving-base-refresh", original);
+        let mut refreshed = promotion("moving-base-refresh");
+        refreshed.verified_base.as_mut().unwrap().sha = "fresh-base".to_string();
+        refreshed.provenance["candidate"] =
+            serde_json::json!({"kind": "git", "fingerprint": {"tree": "rebased"}});
+
+        let refreshed = refreshed_moving_base_recovery(recovery, &refreshed);
+
+        assert_eq!(refreshed.prior_verified_base, "fresh-base");
+        assert_eq!(
+            refreshed.promotion.provenance["candidate"]["fingerprint"]["tree"],
+            "rebased"
+        );
+        assert_eq!(refreshed.base_movements, 0);
+    }
+
+    #[test]
+    fn divergent_destination_and_repeated_base_movement_are_terminalized() {
+        let recovery = moving_base_recovery_from_promotion(
+            "cook-bound",
+            "moving-base-bound",
+            promotion("moving-base-bound"),
+        );
+        let divergent = next_moving_base_recovery(
+            recovery.clone(),
+            "moving-base recovery destination differs from the exact promoted candidate"
+                .to_string(),
+        );
+        assert_eq!(divergent.base_movements, 3);
+        assert!(moving_base_recovery_report(
+            "cook-bound".to_string(),
+            Vec::new(),
+            divergent,
+            false
+        )
+        .value
+        .stop_reason
+        .unwrap()
+        .contains("exhausted"));
+
+        let first = next_moving_base_recovery(recovery, "base advanced".to_string());
+        let second = next_moving_base_recovery(first, "base advanced again".to_string());
+        let exhausted = next_moving_base_recovery(second, "base advanced a third time".to_string());
+        assert_eq!(exhausted.base_movements, 3);
+    }
+
+    #[test]
+    fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
+            use crate::agent_task_scheduler::{
+                AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
+                AgentTaskProgressEvent,
+            };
+
+            let run_id = "cook-9267-attempt-1";
+            let mut options = batch_cook_options(
+                "cook-9267",
+                Arc::new(RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::new(AtomicUsize::new(0)),
+                }),
+            );
+            options.initial_run_id = run_id.to_string();
+            options.no_finalize = false;
+            options.provider_command = Some("fixture-provider".to_string());
+            options.gates = VerifyGateOptions {
+                verify: vec!["public gate".to_string()],
+                private_verify: vec!["private gate".to_string()],
+                private_gate_reveal:
+                    crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
+            };
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
+            agent_task_lifecycle::record_run_aggregate(
+                run_id,
+                &options.initial_plan,
+                &AgentTaskAggregate {
+                    schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                    plan_id: options.initial_plan.plan_id.clone(),
+                    status: AgentTaskAggregateStatus::Succeeded,
+                    totals: AgentTaskAggregateTotals {
+                        succeeded: 1,
+                        ..Default::default()
+                    },
+                    outcomes: vec![AgentTaskOutcome {
+                        schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                        task_id: "provider".to_string(),
+                        status: AgentTaskOutcomeStatus::Succeeded,
+                        summary: Some("provider dispatched once".to_string()),
+                        failure_classification: None,
+                        artifacts: Vec::new(),
+                        typed_artifacts: Vec::new(),
+                        evidence_refs: Vec::new(),
+                        diagnostics: Vec::new(),
+                        outputs: Value::Null,
+                        workflow: None,
+                        follow_up: None,
+                        metadata: Value::Null,
+                    }],
+                    events: vec![AgentTaskProgressEvent {
+                        task_id: "provider".to_string(),
+                        state: AgentTaskState::Succeeded,
+                        attempt: 1,
+                        message: None,
+                    }],
+                    artifact_lineage: Vec::new(),
+                    child_runs: Vec::new(),
+                    artifact_bindings: Vec::new(),
+                    queue: Default::default(),
+                },
+            )
+            .unwrap();
+            let mut applied = promotion(run_id);
+            applied.provenance["candidate"] =
+                serde_json::json!({"kind":"git","fingerprint":{"tree":"before"}});
+            agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
+                .unwrap();
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+            })
+            .unwrap();
+
+            let first = run_cook_with_finalizer(options.clone(), UnusedExecutor, |_, _, _| {
+                Err(Error::validation_invalid_argument(
+                    "base",
+                    "HEAD is behind or diverged from resolved base `main`",
+                    None,
+                    None,
+                ))
+            })
+            .unwrap();
+            assert_eq!(first.value.status, "candidate_recoverable");
+            let claim = crate::agent_task_service::claim_continuation()
+                .unwrap()
+                .expect("run-next continuation");
+            let rebase_count = Arc::new(AtomicUsize::new(0));
+            let finalization_count = Arc::new(AtomicUsize::new(0));
+            let rebase_count_for_recover = Arc::clone(&rebase_count);
+            let finalization_count_for_finalize = Arc::clone(&finalization_count);
+            let second = run_cook_with_boundaries(
+                options.clone(),
+                UnusedExecutor,
+                move |_, _, promotion| {
+                    finalization_count_for_finalize.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(
+                        promotion.verified_base.as_ref().unwrap().sha,
+                        "pinned-refreshed-base"
+                    );
+                    Ok(serde_json::json!({"status":"review_ready", "run_id": run_id}))
+                },
+                move |options, recovery| {
+                    rebase_count_for_recover.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(
+                        options.gates.private_gate_reveal,
+                        crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence
+                    );
+                    let mut refreshed = recovery.promotion.clone();
+                    refreshed.verified_base.as_mut().unwrap().sha =
+                        "pinned-refreshed-base".to_string();
+                    refreshed.provenance["candidate"] =
+                        serde_json::json!({"kind":"git","fingerprint":{"tree":"rebased"}});
+                    Ok(refreshed)
+                },
+            )
+            .unwrap();
+            claim.complete().unwrap();
+            assert_eq!(second.value.status, "review_ready");
+            assert_eq!(rebase_count.load(Ordering::SeqCst), 1);
+            assert_eq!(finalization_count.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                agent_task_lifecycle::status(run_id).unwrap().metadata
+                    ["provider_executions_consumed"],
+                1
+            );
+            assert!(crate::agent_task_service::claim_continuation()
+                .unwrap()
+                .is_none());
+            assert!(second.value.moving_base_recovery.is_none());
+
+            // A rebase must not turn a failed declared gate into an attempted
+            // finalization or a second provider dispatch.
+            agent_task_lifecycle::record_cook_moving_base_recovery(
+                run_id,
+                serde_json::to_value(moving_base_recovery_from_promotion(
+                    "cook-9267",
+                    run_id,
+                    applied,
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+            let third = run_cook_with_boundaries(
+                options,
+                UnusedExecutor,
+                |_, _, _| panic!("failed rebased gates must not finalize"),
+                |_, recovery| {
+                    let mut failed = recovery.promotion.clone();
+                    failed.status = AgentTaskPromotionStatus::GateFailed;
+                    Ok(failed)
+                },
+            )
+            .unwrap();
+            assert_eq!(third.value.status, "candidate_recoverable");
+            assert!(third
+                .value
+                .stop_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("finalization was not attempted")));
+            assert_eq!(
+                moving_base_recovery_for_run(run_id)
+                    .unwrap()
+                    .expect("failed gate recovery remains durable")
+                    .promotion
+                    .status,
+                AgentTaskPromotionStatus::GateFailed
+            );
+            assert!(crate::agent_task_service::claim_continuation()
+                .unwrap()
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_divergence() {
+        use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
+        use crate::agent_task_scheduler::{
+            AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
+        };
+
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("temporary repositories");
+            let remote = temp.path().join("origin.git");
+            let seed = temp.path().join("seed");
+            let destination = temp.path().join("destination");
+            let advance = temp.path().join("advance");
+            let git = |path: &std::path::Path, args: &[&str]| {
+                let output = Command::new("git")
+                    .args(args)
+                    .current_dir(path)
+                    .output()
+                    .expect("run git");
+                assert!(
+                    output.status.success(),
+                    "git {:?} failed: {}",
+                    args,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            };
+
+            std::fs::create_dir(&remote).unwrap();
+            git(&remote, &["init", "--bare", "--initial-branch=main"]);
+            std::fs::create_dir(&seed).unwrap();
+            git(&seed, &["init", "--initial-branch=main"]);
+            git(&seed, &["config", "user.name", "Test"]);
+            git(&seed, &["config", "user.email", "test@example.com"]);
+            std::fs::create_dir(seed.join("src")).unwrap();
+            std::fs::write(seed.join("src/lib.rs"), "old\n").unwrap();
+            git(&seed, &["add", "."]);
+            git(&seed, &["commit", "-m", "base"]);
+            git(
+                &seed,
+                &["remote", "add", "origin", remote.to_str().unwrap()],
+            );
+            git(&seed, &["push", "-u", "origin", "main"]);
+
+            std::fs::create_dir(&destination).unwrap();
+            git(
+                temp.path(),
+                &[
+                    "clone",
+                    remote.to_str().unwrap(),
+                    destination.to_str().unwrap(),
+                ],
+            );
+            git(&destination, &["config", "user.name", "Test"]);
+            git(&destination, &["config", "user.email", "test@example.com"]);
+            std::fs::write(destination.join("src/lib.rs"), "new\n").unwrap();
+            let patch = temp.path().join("candidate.patch");
+            let patch_output = Command::new("git")
+                .args(["diff", "--binary"])
+                .current_dir(&destination)
+                .output()
+                .unwrap();
+            assert!(patch_output.status.success());
+            std::fs::write(&patch, patch_output.stdout).unwrap();
+            let candidate =
+                crate::agent_task_promotion::candidate_fingerprint(destination.to_str().unwrap())
+                    .unwrap();
+            let verified_base = git_output(&destination, &["rev-parse", "HEAD"]).unwrap();
+
+            std::fs::create_dir(&advance).unwrap();
+            git(
+                temp.path(),
+                &["clone", remote.to_str().unwrap(), advance.to_str().unwrap()],
+            );
+            git(&advance, &["config", "user.name", "Test"]);
+            git(&advance, &["config", "user.email", "test@example.com"]);
+            std::fs::write(advance.join("base-advanced.txt"), "advanced\n").unwrap();
+            git(&advance, &["add", "."]);
+            git(&advance, &["commit", "-m", "advance base"]);
+            git(&advance, &["push", "origin", "main"]);
+            let advanced_base = git_output(&advance, &["rev-parse", "HEAD"]).unwrap();
+
+            let run_id = "moving-base-real-git";
+            let mut options = batch_cook_options(
+                "moving-base-real-git",
+                Arc::new(RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::new(AtomicUsize::new(0)),
+                }),
+            );
+            options.initial_run_id = run_id.to_string();
+            options.no_finalize = false;
+            options.gates = VerifyGateOptions {
+                verify: vec![
+                    "test -f base-advanced.txt && test \"$(cat src/lib.rs)\" = new".to_string(),
+                ],
+                ..Default::default()
+            };
+            agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
+            agent_task_lifecycle::record_run_aggregate(
+                run_id,
+                &options.initial_plan,
+                &AgentTaskAggregate {
+                    schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                    plan_id: options.initial_plan.plan_id.clone(),
+                    status: AgentTaskAggregateStatus::Succeeded,
+                    totals: AgentTaskAggregateTotals {
+                        succeeded: 1,
+                        ..Default::default()
+                    },
+                    outcomes: vec![AgentTaskOutcome {
+                        schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                        task_id: "provider".to_string(),
+                        status: AgentTaskOutcomeStatus::Succeeded,
+                        summary: None,
+                        failure_classification: None,
+                        artifacts: vec![AgentTaskArtifact {
+                            id: "candidate".to_string(),
+                            kind: "patch".to_string(),
+                            path: Some(patch.display().to_string()),
+                            ..Default::default()
+                        }],
+                        typed_artifacts: Vec::new(),
+                        evidence_refs: Vec::new(),
+                        diagnostics: Vec::new(),
+                        outputs: Value::Null,
+                        workflow: None,
+                        follow_up: None,
+                        metadata: Value::Null,
+                    }],
+                    events: Vec::new(),
+                    artifact_lineage: Vec::new(),
+                    child_runs: Vec::new(),
+                    artifact_bindings: Vec::new(),
+                    queue: Default::default(),
+                },
+            )
+            .unwrap();
+            let applied: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "applied",
+                "source": {"kind": "aggregate", "task_id": "provider", "run_id": run_id},
+                "to_worktree": options.to_worktree,
+                "target": {"worktree": options.to_worktree, "path": destination},
+                "patch_artifact": {"id": "candidate", "kind": "patch", "path": patch},
+                "changed_files": ["src/lib.rs"],
+                "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-lc", "true"], "exit_code": 0}],
+                "gate_results": [{"id": "gate", "name": "true", "kind": "command", "status": "passed"}],
+                "verified_base": {"base": "main", "sha": verified_base},
+                "provenance": {"worktree_path": destination, "candidate": candidate},
+                "operator_notification": {"status": "completed", "message": "green"}
+            }))
+            .unwrap();
+            agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
+                .unwrap();
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+            })
+            .unwrap();
+            let first = run_cook_with_finalizer(options.clone(), UnusedExecutor, |_, _, _| {
+                Err(Error::validation_invalid_argument(
+                    "base",
+                    "HEAD is behind or diverged from resolved base `main`",
+                    None,
+                    None,
+                ))
+            })
+            .unwrap();
+            assert_eq!(first.value.status, "candidate_recoverable");
+            assert!(moving_base_recovery_for_run(run_id).unwrap().is_some());
+            let claim = crate::agent_task_service::claim_continuation()
+                .unwrap()
+                .expect("durable moving-base continuation");
+            let finalization_calls = Arc::new(AtomicUsize::new(0));
+            let finalization_calls_for_finalizer = Arc::clone(&finalization_calls);
+            let expected_base = advanced_base.clone();
+            let second =
+                run_cook_with_finalizer(options.clone(), UnusedExecutor, move |_, _, recovered| {
+                    finalization_calls_for_finalizer.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(recovered.status, AgentTaskPromotionStatus::Applied);
+                    assert_eq!(recovered.verified_base.as_ref().unwrap().sha, expected_base);
+                    Ok(serde_json::json!({"status": "review_ready"}))
+                })
+                .unwrap();
+            assert_eq!(second.value.status, "review_ready");
+            claim.complete().unwrap();
+            assert_eq!(finalization_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                git_output(
+                    &destination,
+                    &["merge-base", "--is-ancestor", &advanced_base, "HEAD"]
+                )
+                .unwrap(),
+                ""
+            );
+            assert_eq!(
+                agent_task_lifecycle::status(run_id).unwrap().metadata
+                    ["provider_executions_consumed"],
+                1
+            );
+            assert!(moving_base_recovery_for_run(run_id).unwrap().is_none());
+            assert!(crate::agent_task_service::claim_continuation()
+                .unwrap()
+                .is_none());
+
+            std::fs::write(destination.join("divergent.txt"), "not authorized\n").unwrap();
+            let rebased_promotion = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
+            let rebased_recovery = moving_base_recovery_from_promotion(
+                "moving-base-real-git",
+                run_id,
+                rebased_promotion,
+            );
+            let error =
+                recover_moving_base_cook_candidate(&options, &rebased_recovery).unwrap_err();
+            assert!(error
+                .message
+                .contains("differs from the exact promoted candidate"));
+        });
     }
 
     #[derive(Debug)]

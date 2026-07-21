@@ -756,7 +756,7 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
         dry_run: false,
         gates: VerifyGateOptions {
             verify: vec!["true".to_string()],
-            private_verify: Vec::new(),
+            private_verify: vec!["true".to_string()],
             private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
             ..Default::default()
         },
@@ -780,13 +780,22 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
         report.command_evidence[0].command,
         vec!["git", "apply", "--reverse", "--check", "-"]
     );
-    assert_eq!(report.gate_results.len(), 1);
+    assert_eq!(report.gate_results.len(), 2);
     assert_eq!(
         report.gate_results[0].status,
         homeboy_core::gate::HomeboyGateStatus::Passed
     );
     assert_eq!(report.provenance["resumed_post_apply_promotion"], true);
     assert!(report.provenance["candidate"].is_object());
+    assert_eq!(report.deterministic_gates.len(), 2);
+    assert_eq!(
+        report.deterministic_gates[1].visibility,
+        AgentTaskGateVisibility::Private
+    );
+    assert_eq!(
+        report.deterministic_gates[1].reveal_policy,
+        AgentTaskGateRevealPolicy::FullEvidence
+    );
     assert_eq!(report.provenance["resumed_post_apply_promotion"], true);
 }
 
