@@ -76,6 +76,7 @@ fn detect_vacuous_tests(file: &str, content: &str) -> Vec<Finding> {
     if inline_source_file {
         product_symbols.extend(collect_local_product_symbols(content));
     }
+    let has_product_glob_import = has_product_glob_import(content);
     let tests = extract_test_functions(content);
 
     let mut findings = tests
@@ -109,7 +110,7 @@ fn detect_vacuous_tests(file: &str, content: &str) -> Vec<Finding> {
     }
 
     findings.extend(tests.into_iter().filter_map(|test| {
-        vacuous_reason(&test, &product_symbols).map(|reason| Finding {
+        vacuous_reason(&test, &product_symbols, has_product_glob_import).map(|reason| Finding {
             convention: "test_quality".to_string(),
             severity: Severity::Info,
             file: file_path.clone(),
@@ -122,6 +123,18 @@ fn detect_vacuous_tests(file: &str, content: &str) -> Vec<Finding> {
     }));
 
     findings
+}
+
+/// Whether the file has a glob import from product scope — `use super::*;`,
+/// `use crate::…::*;`, or `use homeboy::…::*;`. Such a glob brings product
+/// functions into scope as bare, unqualified calls that cannot be enumerated as
+/// named imports, so a "no product reference" vacuity verdict is unreliable.
+fn has_product_glob_import(content: &str) -> bool {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?m)^\s*use\s+(?:super|crate|homeboy)(?:::[^;*]+)?::\*\s*;")
+            .expect("valid product glob-import regex")
+    });
+    RE.is_match(content)
 }
 
 fn collect_product_imports(content: &str) -> Vec<ProductImport> {
@@ -334,7 +347,11 @@ fn detect_unused_product_imports(
         .collect()
 }
 
-fn vacuous_reason(test: &TestFunction, product_symbols: &BTreeSet<String>) -> Option<&'static str> {
+fn vacuous_reason(
+    test: &TestFunction,
+    product_symbols: &BTreeSet<String>,
+    has_product_glob_import: bool,
+) -> Option<&'static str> {
     if test.body.contains("compile contract") {
         return None;
     }
@@ -348,6 +365,17 @@ fn vacuous_reason(test: &TestFunction, product_symbols: &BTreeSet<String>) -> Op
 
     if compact.contains("assert!(true);") && count_statements(&body) <= 1 {
         return Some("body only asserts true");
+    }
+
+    // A `use super::*;` / `use crate::…::*;` glob import pulls product functions
+    // into scope as *bare* calls (`submit_plan(&plan)`, `cancel_run(id)`) that
+    // carry no `crate::`/`super::` prefix and aren't enumerable as named
+    // imports. When such a glob is present we cannot prove a bare call is NOT
+    // product code, so the "no product reference" conclusions below would be
+    // false positives — suppress them. Empty-body / `assert!(true)` vacuity
+    // (handled above) is unaffected because it does not depend on this.
+    if has_product_glob_import {
+        return None;
     }
 
     if !contains_assertion(&body) && !contains_product_reference(&body, product_symbols) {
@@ -913,6 +941,67 @@ mod tests {
         );
 
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn keeps_super_glob_tests_calling_parent_module_product_code() {
+        // The exercised product functions (submit_plan, cancel_run) live in the
+        // PARENT module and enter scope via `use super::*;`, so they are neither
+        // named imports nor same-file locals — the glob is the only signal that
+        // these bare calls are product code. The test clearly asserts on
+        // production behavior and must NOT be flagged vacuous.
+        let findings = detect_vacuous_tests(
+            "src/lifecycle/tests/status_and_recovery.rs",
+            r#"
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_run_signals_live_running_record() {
+        submit_plan(&plan, Some("run-cancel-live")).expect("submitted");
+        mark_running("run-cancel-live").expect("marked running");
+        let cancelled = cancel_run("run-cancel-live", None).expect("cancelled");
+        assert_eq!(cancelled.state, RunState::Cancelled);
+        assert_eq!(cancelled.tasks[0].state, TaskState::Cancelled);
+    }
+}
+"#,
+        );
+
+        assert!(
+            findings.is_empty(),
+            "test exercising parent-module product code via `use super::*;` must not be vacuous, got: {:?}",
+            findings.iter().map(|f| &f.description).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn glob_import_does_not_mask_empty_body_vacuity() {
+        // The glob-import suppression must NOT hide genuinely empty / assert!(true)
+        // tests — those vacuity reasons don't depend on product-reference proof.
+        let findings = detect_vacuous_tests(
+            "src/lifecycle/tests/placeholder.rs",
+            r#"
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placeholder() {
+        assert!(true);
+    }
+}
+"#,
+        );
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == AuditFinding::VacuousTest
+                    && f.description.contains("placeholder")),
+            "assert!(true) is still vacuous even with a glob import present"
+        );
     }
 
     #[test]
