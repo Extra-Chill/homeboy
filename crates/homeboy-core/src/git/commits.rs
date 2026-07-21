@@ -579,6 +579,17 @@ pub fn get_commits_since_tag_for_paths(
     tag: Option<&str>,
     path_prefixes: &[&str],
 ) -> Result<Vec<CommitInfo>> {
+    get_commits_since_tag_for_scope(path, tag, path_prefixes, &[])
+}
+
+/// Get commits in a release scope while honoring both included and excluded
+/// repository-relative paths.
+pub fn get_commits_since_tag_for_scope(
+    path: &str,
+    tag: Option<&str>,
+    path_prefixes: &[&str],
+    excluded_prefixes: &[&str],
+) -> Result<Vec<CommitInfo>> {
     let range = tag
         .map(|t| format!("{}..HEAD", t))
         .unwrap_or_else(|| "HEAD".to_string());
@@ -592,11 +603,14 @@ pub fn get_commits_since_tag_for_paths(
     ];
 
     // Add path filters for monorepo scoping: `git log <range> -- <path>...`
-    if !path_prefixes.is_empty() {
+    if !path_prefixes.is_empty() || !excluded_prefixes.is_empty() {
         args.push("--".to_string());
     }
     for prefix in path_prefixes {
         args.push(prefix.to_string());
+    }
+    for prefix in excluded_prefixes {
+        args.push(format!(":(exclude){prefix}"));
     }
 
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -623,6 +637,11 @@ pub fn get_component_changes_since_tag(
         .iter()
         .filter_map(|path| normalize_component_change_path(path))
         .collect();
+    let mut excluded_prefixes: Vec<String> = scope
+        .exclude
+        .iter()
+        .filter_map(|path| normalize_component_change_path(path))
+        .collect();
 
     if prefixes.is_empty() {
         if let Some(prefix) = component_prefix.clone() {
@@ -634,17 +653,25 @@ pub fn get_component_changes_since_tag(
 
     if let Some(component_prefix) = component_prefix {
         let component_prefix = component_prefix.trim_end_matches('/');
-        for prefix in &mut prefixes {
-            if prefix != component_prefix && !prefix.starts_with(&format!("{component_prefix}/")) {
-                *prefix = format!("{component_prefix}/{prefix}");
-            }
-        }
+        prefix_component_paths(&mut prefixes, component_prefix);
+        prefix_component_paths(&mut excluded_prefixes, component_prefix);
     }
 
     prefixes.sort();
     prefixes.dedup();
+    excluded_prefixes.sort();
+    excluded_prefixes.dedup();
     let prefixes: Vec<&str> = prefixes.iter().map(String::as_str).collect();
-    get_commits_since_tag_for_paths(&git_root, tag, &prefixes)
+    let excluded_prefixes: Vec<&str> = excluded_prefixes.iter().map(String::as_str).collect();
+    get_commits_since_tag_for_scope(&git_root, tag, &prefixes, &excluded_prefixes)
+}
+
+fn prefix_component_paths(paths: &mut [String], component_prefix: &str) {
+    for path in paths {
+        if path != component_prefix && !path.starts_with(&format!("{component_prefix}/")) {
+            *path = format!("{component_prefix}/{path}");
+        }
+    }
 }
 
 fn normalize_component_change_path(path: &str) -> Option<String> {
