@@ -352,6 +352,26 @@ impl Component {
         serde_json::to_value(self).and_then(|value| serde_json::to_string(&canonical_json(value)))
     }
 
+    /// Return a stable identity for comparing a component's *configured*
+    /// attachment across independently loaded snapshots — release-set preflight
+    /// vs. deploy execution (#9205).
+    ///
+    /// Excludes `build_artifact`, which is a deterministic, execution-only
+    /// derivation of `local_path` + the configured artifact (deploy planning
+    /// resolves it to an absolute path via `resolve_path_string`, while
+    /// preflight captures the pre-resolution component). Comparing the raw
+    /// serialization therefore reported a clean attachment as "changed after
+    /// release-set preflight" even though no configuration drifted. Real
+    /// attachment/config/path drift still changes every remaining field, so the
+    /// drift guard keeps its fail-closed intent.
+    pub fn canonical_attachment_identity(&self) -> serde_json::Result<String> {
+        let mut value = serde_json::to_value(self)?;
+        if let Some(object) = value.as_object_mut() {
+            object.remove("build_artifact");
+        }
+        serde_json::to_string(&canonical_json(value))
+    }
+
     pub fn new(
         id: String,
         local_path: String,
@@ -550,4 +570,48 @@ where
 {
     let opt = Option::<String>::deserialize(deserializer)?;
     Ok(opt.filter(|s| !s.is_empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_attachment_identity_ignores_build_artifact_but_catches_config_drift() {
+        let base = Component::new(
+            "agents-api".to_string(),
+            "/source/agents-api".to_string(),
+            "wp-content/plugins/agents-api".to_string(),
+            Some("dist/plugin.zip".to_string()),
+        );
+
+        // Same attachment, but build_artifact resolved to an absolute path during
+        // execution (the #9205 divergence). Attachment identity must be equal.
+        let mut resolved = base.clone();
+        resolved.build_artifact = Some("/source/agents-api/dist/plugin.zip".to_string());
+        assert_eq!(
+            base.canonical_attachment_identity().expect("base identity"),
+            resolved
+                .canonical_attachment_identity()
+                .expect("resolved identity"),
+            "build_artifact resolution must not change the attachment identity"
+        );
+
+        // The raw canonical_identity still differs (build_artifact is included),
+        // proving the attachment variant is what makes them agree.
+        assert_ne!(
+            base.canonical_identity().expect("base"),
+            resolved.canonical_identity().expect("resolved"),
+            "raw canonical_identity should still reflect the build_artifact difference"
+        );
+
+        // A real config change (different remote_path) still drifts.
+        let mut drifted = base.clone();
+        drifted.remote_path = "wp-content/plugins/changed".to_string();
+        assert_ne!(
+            base.canonical_attachment_identity().expect("base"),
+            drifted.canonical_attachment_identity().expect("drifted"),
+            "real config drift must still change the attachment identity"
+        );
+    }
 }
