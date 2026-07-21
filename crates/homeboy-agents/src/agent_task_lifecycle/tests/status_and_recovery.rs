@@ -966,7 +966,7 @@ fn terminal_lab_artifact_attachment_refuses_runner_provenance_mismatch() {
         })
         .expect_err("artifact provenance must retain its original runner");
         assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "run_id");
+        assert_eq!(error.details["field"], "lab_handoff");
     });
 }
 

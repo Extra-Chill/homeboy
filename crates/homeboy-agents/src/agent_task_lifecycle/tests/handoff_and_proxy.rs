@@ -951,13 +951,21 @@ fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
             plan
         );
 
-        std::fs::remove_file(record.plan_path)
-            .expect("remove authoritative controller plan despite projected display path");
-        rewrite_record_for_test(&record.run_id, |record| {
-            record.state = AgentTaskRunState::Running;
+        let missing_plan = record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "cook-lab-missing-controller-plan",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace",
+            remote_command: &command,
+            durable_plan: Some(&plan),
         })
-        .expect("restore active handoff projection");
-        let error = status(&record.run_id).expect_err("missing controller plan fails closed");
+        .expect("missing-plan fixture persists its controller plan");
+        rewrite_record_for_test(&missing_plan.run_id, |record| {
+            record.plan_path = "/runner/workspace/plan.json".to_string();
+        })
+        .expect("project runner-local plan path");
+        std::fs::remove_file(missing_plan.plan_path)
+            .expect("remove authoritative controller plan despite projected display path");
+        let error = status(&missing_plan.run_id).expect_err("missing controller plan fails closed");
         assert_eq!(error.code, ErrorCode::InternalIoError);
     });
 }

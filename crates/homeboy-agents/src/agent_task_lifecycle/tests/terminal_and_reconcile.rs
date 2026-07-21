@@ -503,7 +503,7 @@ fn terminal_lab_artifact_attachment_skips_missing_controller_plan_and_preserves_
         let attached = record_detached_lab_run(DetachedLabRunRecord {
             run_id: "agent-task-late-artifact",
             runner_id: "homeboy-lab",
-            runner_job_id: "job-artifact-attach",
+            runner_job_id: "job-original",
             remote_workspace: "/home/lab/agent-task-runs/agent-task-late-artifact",
             remote_command: &command,
         })
