@@ -177,7 +177,12 @@ pub(crate) fn pin_runtime_temp_dir(dir: &Path) -> Result<RuntimeTempPin> {
 }
 
 pub(crate) fn managed_run_temp_dir(prefix: &str) -> Result<(PathBuf, RuntimeTempPin)> {
-    let path = runtime_temp_dir(prefix)?;
+    let root = ensure_runtime_tmp_dir()?;
+    let _lock = acquire_cleanup_lock(&root)?;
+    let path = root.join(unique_name(prefix, ""));
+    fs::create_dir(&path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("create temp dir {prefix}")))
+    })?;
     let owner = RuntimeRunOwner {
         schema: RUN_OWNER_SCHEMA.to_string(),
         owner_id: uuid::Uuid::new_v4().to_string(),
@@ -218,6 +223,15 @@ pub(crate) fn bind_run_dir_owner(
     run_id: Option<&str>,
     invocation_id: Option<&str>,
 ) -> Result<()> {
+    let root = path.parent().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runDir",
+            "managed run directory has no runtime root",
+            Some(path.display().to_string()),
+            None,
+        )
+    })?;
+    let _lock = acquire_cleanup_lock(root)?;
     let mut owner = read_run_owner(path)?;
     if let Some(run_id) = run_id {
         owner.run_id = Some(run_id.to_string());
@@ -237,6 +251,12 @@ mod owner_support {
         if !path.exists() {
             return;
         }
+        let Some(root) = path.parent() else {
+            return;
+        };
+        let Ok(_lock) = acquire_cleanup_lock(root) else {
+            return;
+        };
         let Ok(mut owner) = read_run_owner(path) else {
             return;
         };
@@ -275,7 +295,7 @@ mod owner_support {
 
     pub(super) fn write_run_owner(path: &Path, owner: &RuntimeRunOwner) -> Result<()> {
         let owner_path = path.join(RUN_OWNER_FILE);
-        let temporary = path.join(format!("{RUN_OWNER_FILE}.tmp-{}", std::process::id()));
+        let temporary = path.join(format!("{RUN_OWNER_FILE}.tmp-{}", uuid::Uuid::new_v4()));
         let raw = serde_json::to_vec_pretty(owner).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
@@ -400,6 +420,50 @@ mod owner_support {
         }
     }
 
+    pub(super) fn managed_deletion_protection(
+        path: &Path,
+        inspected: &RuntimeRunOwner,
+        age_seconds: u64,
+    ) -> Option<String> {
+        match read_run_owner(path) {
+            Ok(current) => {
+                if current.owner_id != inspected.owner_id
+                    || current.run_id != inspected.run_id
+                    || current.invocation_ids != inspected.invocation_ids
+                    || current.state != inspected.state
+                {
+                    return Some("runtime run ownership changed after inspection".to_string());
+                }
+                if let Some(reason) = inspection_owner_protection(&current) {
+                    return Some(reason);
+                }
+                if current.state == "active" && owner_process_identity_matches(&current) {
+                    return Some(format!(
+                        "runtime run owner PID {} is running",
+                        current.owner_pid
+                    ));
+                }
+            }
+            Err(_)
+                if inspected.state == "corrupt" && age_seconds >= CORRUPT_OWNER_GRACE.as_secs() => {
+            }
+            Err(_) => return Some("runtime run ownership changed after inspection".to_string()),
+        }
+        match runtime_temp_pin_state(path) {
+            RuntimeTempPinState::Active(pid) => {
+                Some(format!("runtime temp pin owner PID {pid} is running"))
+            }
+            RuntimeTempPinState::Malformed(reason)
+                if age_seconds < CORRUPT_OWNER_GRACE.as_secs() =>
+            {
+                Some(format!("{reason}; protected during quarantine grace"))
+            }
+            RuntimeTempPinState::Malformed(_)
+            | RuntimeTempPinState::Dead
+            | RuntimeTempPinState::Absent => None,
+        }
+    }
+
     pub(super) fn runtime_root() -> Result<PathBuf> {
         if let Ok(override_dir) = env::var(runtime_tmpdir_env()) {
             let trimmed = override_dir.trim();
@@ -416,6 +480,10 @@ mod owner_support {
     }
 }
 use owner_support::*;
+
+#[path = "implementation/storage.rs"]
+mod storage;
+use storage::*;
 
 /// Inspected/planned/removed byte totals shared across cleanup output DTOs.
 /// Flattened into the parent structs so the JSON wire format keeps
@@ -553,26 +621,30 @@ pub fn cleanup_runtime_tmp_bounded(
             .cmp(&unique_name_timestamp(&left.file_name().to_string_lossy()))
             .then_with(|| right.file_name().cmp(&left.file_name()))
     });
-    let (cursor_name, mut retained_count, mut retained_bytes) = options
+    let (cursor_phase, cursor_name, mut retained_count, mut retained_bytes) = options
         .cursor
         .and_then(parse_runtime_cursor)
-        .unwrap_or((None, 0, 0));
-    let start = cursor_name
-        .as_deref()
-        .and_then(|cursor| {
-            let cursor_timestamp = unique_name_timestamp(cursor);
-            managed.iter().position(|entry| {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let timestamp = unique_name_timestamp(&name);
-                timestamp < cursor_timestamp
-                    || (timestamp == cursor_timestamp && name.as_str() < cursor)
+        .unwrap_or(("managed", None, 0, 0));
+    let start = if cursor_phase == "unmanaged" {
+        managed.len()
+    } else {
+        cursor_name
+            .as_deref()
+            .and_then(|cursor| {
+                let cursor_timestamp = unique_name_timestamp(cursor);
+                managed.iter().position(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let timestamp = unique_name_timestamp(&name);
+                    timestamp < cursor_timestamp
+                        || (timestamp == cursor_timestamp && name.as_str() < cursor)
+                })
             })
-        })
-        .unwrap_or(0);
+            .unwrap_or(0)
+    };
     let page_end = start
         .saturating_add(options.limit.max(1))
         .min(managed.len());
-    output.has_more = page_end < managed.len();
+    let managed_has_more = page_end < managed.len();
     let page_last_name = managed
         .get(page_end.saturating_sub(1))
         .map(|entry| entry.file_name().to_string_lossy().to_string());
@@ -733,10 +805,6 @@ pub fn cleanup_runtime_tmp_bounded(
         }
         managed_decisions.push((inspection, eligibility_reason));
     }
-    if output.has_more {
-        output.next_cursor =
-            page_last_name.map(|name| format_runtime_cursor(&name, retained_count, retained_bytes));
-    }
     // Candidate-first ordering lets bounded invocations converge even when the
     // configured inspection limit is smaller than the retained count budget.
     managed_decisions.sort_by(|left, right| {
@@ -769,6 +837,19 @@ pub fn cleanup_runtime_tmp_bounded(
             row.reason = reason;
             output.skipped_count += 1;
         } else if let Some(reason) = eligibility_reason {
+            if options.apply {
+                if let Some(protection) = managed_deletion_protection(
+                    &inspection.path,
+                    &inspection.owner,
+                    inspection.age_seconds,
+                ) {
+                    row.reason = protection.clone();
+                    row.protection_reason = Some(protection);
+                    output.skipped_count += 1;
+                    output.rows.push(row);
+                    continue;
+                }
+            }
             row.action = if options.apply { "removed" } else { "remove" }.to_string();
             row.reason = reason;
             output.planned_count += 1;
@@ -806,11 +887,37 @@ pub fn cleanup_runtime_tmp_bounded(
         output.rows.push(row);
     }
 
-    for entry in unmanaged.into_iter().take(if output.has_more {
+    let unmanaged_len = unmanaged.len();
+    let unmanaged_start = if managed_has_more {
+        0
+    } else if cursor_phase == "unmanaged" {
+        cursor_name
+            .as_deref()
+            .and_then(|cursor| {
+                unmanaged
+                    .iter()
+                    .position(|entry| entry.file_name().to_string_lossy().as_ref() > cursor)
+            })
+            .unwrap_or(unmanaged_len)
+    } else {
+        0
+    };
+    let unmanaged_capacity = if managed_has_more {
         0
     } else {
         options.limit.max(1).saturating_sub(output.rows.len())
-    }) {
+    };
+    let unmanaged_end = unmanaged_start
+        .saturating_add(unmanaged_capacity)
+        .min(unmanaged_len);
+    let unmanaged_last_name = unmanaged
+        .get(unmanaged_end.saturating_sub(1))
+        .map(|entry| entry.file_name().to_string_lossy().to_string());
+    for entry in unmanaged
+        .into_iter()
+        .skip(unmanaged_start)
+        .take(unmanaged_capacity)
+    {
         lock.heartbeat()?;
         output.totals.inspected_count += 1;
         let path = entry.path();
@@ -887,6 +994,20 @@ pub fn cleanup_runtime_tmp_bounded(
         output.rows.push(row);
     }
 
+    if managed_has_more {
+        output.has_more = true;
+        output.next_cursor = page_last_name
+            .map(|name| format_runtime_cursor("managed", &name, retained_count, retained_bytes));
+    } else if unmanaged_end < unmanaged_len {
+        output.has_more = true;
+        output.next_cursor = Some(format_runtime_cursor(
+            "unmanaged",
+            unmanaged_last_name.as_deref().unwrap_or(""),
+            retained_count,
+            retained_bytes,
+        ));
+    }
+
     Ok(output)
 }
 
@@ -901,19 +1022,24 @@ mod cleanup_support {
     }
 
     pub(super) fn format_runtime_cursor(
+        phase: &str,
         name: &str,
         retained_count: usize,
         retained_bytes: u64,
     ) -> String {
-        format!("{name}|{retained_count}|{retained_bytes}")
+        format!("{phase}|{name}|{retained_count}|{retained_bytes}")
     }
 
-    pub(super) fn parse_runtime_cursor(cursor: &str) -> Option<(Option<String>, usize, u64)> {
-        let mut fields = cursor.rsplitn(3, '|');
+    pub(super) fn parse_runtime_cursor(cursor: &str) -> Option<(&str, Option<String>, usize, u64)> {
+        let mut fields = cursor.rsplitn(4, '|');
         let retained_bytes = fields.next()?.parse().ok()?;
         let retained_count = fields.next()?.parse().ok()?;
         let name = fields.next()?.to_string();
-        Some((Some(name), retained_count, retained_bytes))
+        let phase = fields.next().unwrap_or("managed");
+        if !matches!(phase, "managed" | "unmanaged") {
+            return None;
+        }
+        Some((phase, Some(name), retained_count, retained_bytes))
     }
 
     pub(super) fn skip_row(path: PathBuf, name: String, reason: &str) -> RuntimeTempCleanupRow {
@@ -1081,6 +1207,41 @@ mod cleanup_support {
         output.totals.planned_size_bytes += row.size_bytes;
         output.planned_allocated_bytes += row.allocated_bytes;
         if apply {
+            if metadata.is_dir() {
+                match runtime_temp_pin_state(path) {
+                    RuntimeTempPinState::Active(pid) => {
+                        row.action = "skip".to_string();
+                        row.reason = format!("runtime temp pin owner PID {pid} is running");
+                        row.protection_reason = Some(row.reason.clone());
+                        output.planned_count = output.planned_count.saturating_sub(1);
+                        output.totals.planned_size_bytes = output
+                            .totals
+                            .planned_size_bytes
+                            .saturating_sub(row.size_bytes);
+                        output.planned_allocated_bytes = output
+                            .planned_allocated_bytes
+                            .saturating_sub(row.allocated_bytes);
+                        output.skipped_count += 1;
+                        return Ok(());
+                    }
+                    RuntimeTempPinState::Malformed(reason) => {
+                        row.action = "skip".to_string();
+                        row.reason = reason;
+                        row.protection_reason = Some(row.reason.clone());
+                        output.planned_count = output.planned_count.saturating_sub(1);
+                        output.totals.planned_size_bytes = output
+                            .totals
+                            .planned_size_bytes
+                            .saturating_sub(row.size_bytes);
+                        output.planned_allocated_bytes = output
+                            .planned_allocated_bytes
+                            .saturating_sub(row.allocated_bytes);
+                        output.skipped_count += 1;
+                        return Ok(());
+                    }
+                    RuntimeTempPinState::Dead | RuntimeTempPinState::Absent => {}
+                }
+            }
             let available_before = filesystem_available_bytes(path);
             remove_runtime_tmp_entry(path, metadata)?;
             if !path.exists() {
@@ -1108,94 +1269,6 @@ mod cleanup_support {
         let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         let candidate = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         candidate.starts_with(root)
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    pub(super) struct StorageMeasure {
-        pub(super) logical_bytes: u64,
-        pub(super) allocated_bytes: u64,
-    }
-
-    pub(super) fn path_storage_measure(path: &Path) -> Result<StorageMeasure> {
-        path_storage_measure_inner(path, &mut HashSet::new())
-    }
-
-    fn path_storage_measure_inner(
-        path: &Path,
-        seen: &mut HashSet<(u64, u64)>,
-    ) -> Result<StorageMeasure> {
-        let metadata = fs::symlink_metadata(path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("stat {}", path.display())))
-        })?;
-        if file_identity(&metadata).is_some_and(|identity| !seen.insert(identity)) {
-            return Ok(StorageMeasure {
-                logical_bytes: 0,
-                allocated_bytes: 0,
-            });
-        }
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Ok(StorageMeasure {
-                logical_bytes: metadata.len(),
-                allocated_bytes: allocated_bytes(&metadata),
-            });
-        }
-        let mut total = StorageMeasure {
-            logical_bytes: 0,
-            allocated_bytes: allocated_bytes(&metadata),
-        };
-        for entry in fs::read_dir(path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-        })? {
-            let entry = entry.map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("read entry {}", path.display())),
-                )
-            })?;
-            let measure = path_storage_measure_inner(&entry.path(), seen)?;
-            total.logical_bytes = total.logical_bytes.saturating_add(measure.logical_bytes);
-            total.allocated_bytes = total
-                .allocated_bytes
-                .saturating_add(measure.allocated_bytes);
-        }
-        Ok(total)
-    }
-
-    #[cfg(unix)]
-    fn file_identity(metadata: &fs::Metadata) -> Option<(u64, u64)> {
-        use std::os::unix::fs::MetadataExt;
-        Some((metadata.dev(), metadata.ino()))
-    }
-
-    #[cfg(not(unix))]
-    fn file_identity(_metadata: &fs::Metadata) -> Option<(u64, u64)> {
-        None
-    }
-
-    #[cfg(unix)]
-    fn allocated_bytes(metadata: &fs::Metadata) -> u64 {
-        use std::os::unix::fs::MetadataExt;
-        metadata.blocks().saturating_mul(512)
-    }
-
-    #[cfg(not(unix))]
-    fn allocated_bytes(metadata: &fs::Metadata) -> u64 {
-        metadata.len()
-    }
-
-    pub(super) fn filesystem_available_bytes(path: &Path) -> Option<u64> {
-        fs4::available_space(path.parent().unwrap_or(path)).ok()
-    }
-
-    pub(super) fn verified_reclaimed_bytes(
-        before: Option<u64>,
-        after: Option<u64>,
-        allocated: u64,
-    ) -> u64 {
-        match (before, after) {
-            (Some(before), Some(after)) => after.saturating_sub(before).min(allocated),
-            _ => 0,
-        }
     }
 
     pub(super) fn remove_runtime_tmp_entry(path: &Path, metadata: &fs::Metadata) -> Result<()> {

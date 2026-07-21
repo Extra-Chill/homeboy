@@ -320,7 +320,7 @@ pub fn collect_refactor_sources(
         Vec::new()
     };
 
-    Ok(RefactorSourceRun {
+    let output = RefactorSourceRun {
         component_id: request.component.id,
         source_path: root_str,
         sources,
@@ -337,7 +337,9 @@ pub fn collect_refactor_sources(
         warnings,
         hints,
         guard_block: None,
-    })
+    };
+    run_dir.finish(true);
+    Ok(output)
 }
 
 fn allows_dirty_worktree_write(request: &RefactorSourceRequest) -> bool {

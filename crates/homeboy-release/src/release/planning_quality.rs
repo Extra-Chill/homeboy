@@ -147,11 +147,15 @@ pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome
     .and_then(|runner| runner.run())
     {
         Ok(output) => output,
-        Err(e) => return runner_error(e),
+        Err(e) => {
+            release_run_dir.finish(false);
+            return runner_error(e);
+        }
     };
 
     if output.success {
         homeboy_core::log_status!("release", "Lint passed");
+        release_run_dir.finish(true);
         return LintQualityOutcome::Passed { ran: true };
     }
 
@@ -163,6 +167,7 @@ pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome
     // a real lint failure — the linter found nothing to report. The underlying
     // linter is clean, so this must not hard-block the release.
     if findings.is_empty() {
+        release_run_dir.finish(false);
         return LintQualityOutcome::HarnessError {
             message: harness_failure_message("Lint", output.exit_code),
         };
@@ -182,10 +187,12 @@ pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome
                 "Lint has known findings but no new drift (baseline honored)"
             );
             homeboy_core::log_status!("release", "Lint passed");
+            release_run_dir.finish(true);
             return LintQualityOutcome::Passed { ran: true };
         }
     }
 
+    release_run_dir.finish(false);
     LintQualityOutcome::Failed(quality_error(
         "lint",
         code_quality_failure_message("Lint", &output),
@@ -268,6 +275,7 @@ pub(super) fn validate_test_quality(component: &Component) -> Result<bool> {
 
     if output.success {
         homeboy_core::log_status!("release", "Tests passed");
+        test_run_dir.finish(true);
         Ok(true)
     } else {
         let evidence = command_evidence(
@@ -277,6 +285,7 @@ pub(super) fn validate_test_quality(component: &Component) -> Result<bool> {
             &output.stdout,
             &output.stderr,
         );
+        test_run_dir.finish(false);
         Err(quality_error_with_evidence(
             "test",
             code_quality_failure_message("Tests", &output),

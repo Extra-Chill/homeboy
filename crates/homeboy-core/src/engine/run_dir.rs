@@ -26,6 +26,7 @@
 
 use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// Well-known filenames for step outputs within a run directory.
@@ -72,11 +73,14 @@ pub struct RunDir {
 struct RunDirLifecycle {
     path: PathBuf,
     _pin: super::temp::RuntimeTempPin,
+    disposition: AtomicU8,
 }
 
 impl Drop for RunDirLifecycle {
     fn drop(&mut self) {
-        super::temp::retain_failed_run_dir(&self.path);
+        if self.disposition.load(Ordering::Acquire) == 0 {
+            super::temp::retain_failed_run_dir(&self.path);
+        }
     }
 }
 
@@ -97,7 +101,11 @@ impl RunDir {
         })?;
         Ok(Self {
             path: path.clone(),
-            _lifecycle: Some(Arc::new(RunDirLifecycle { path, _pin: pin })),
+            _lifecycle: Some(Arc::new(RunDirLifecycle {
+                path,
+                _pin: pin,
+                disposition: AtomicU8::new(0),
+            })),
         })
     }
 
@@ -253,8 +261,31 @@ impl RunDir {
 
     /// Clean up the run directory. Called after the pipeline completes.
     pub fn cleanup(&self) {
-        super::temp::mark_run_dir_succeeded(&self.path);
-        let _ = std::fs::remove_dir_all(&self.path);
+        self.finish(true);
+    }
+
+    /// Record an explicit terminal lifecycle outcome.
+    pub fn finish(&self, succeeded: bool) {
+        let Some(lifecycle) = self._lifecycle.as_ref() else {
+            if succeeded {
+                let _ = std::fs::remove_dir_all(&self.path);
+            }
+            return;
+        };
+        let disposition = if succeeded { 1 } else { 2 };
+        if lifecycle
+            .disposition
+            .compare_exchange(0, disposition, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        if succeeded {
+            super::temp::mark_run_dir_succeeded(&self.path);
+            let _ = std::fs::remove_dir_all(&self.path);
+        } else {
+            super::temp::retain_failed_run_dir(&self.path);
+        }
     }
 }
 
@@ -370,6 +401,26 @@ mod tests {
         assert_eq!(output.removed_count, 0);
         assert_eq!(output.rows[0].owner_state.as_deref(), Some("failed"));
         assert!(path.exists());
+        std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
+    }
+
+    #[test]
+    fn explicit_failure_retains_and_success_removes() {
+        let _guard = crate::test_support::home_env_guard();
+        let root = tempfile::tempdir().expect("runtime root");
+        std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", root.path());
+
+        let failed = RunDir::create().expect("failed run dir");
+        let failed_path = failed.path().to_path_buf();
+        failed.finish(false);
+        drop(failed);
+        assert!(failed_path.exists());
+
+        let succeeded = RunDir::create().expect("successful run dir");
+        let succeeded_path = succeeded.path().to_path_buf();
+        succeeded.finish(true);
+        drop(succeeded);
+        assert!(!succeeded_path.exists());
         std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
     }
 

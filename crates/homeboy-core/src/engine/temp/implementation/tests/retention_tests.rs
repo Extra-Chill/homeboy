@@ -249,3 +249,117 @@ fn concurrent_cleanup_serializes_and_removes_once() {
     assert!(!path.exists());
     env::remove_var(runtime_tmpdir_env());
 }
+
+#[test]
+fn concurrent_shared_run_binding_preserves_every_invocation() {
+    let _guard = home_env_guard();
+    let root = tempfile::tempdir().expect("tempdir");
+    env::set_var(runtime_tmpdir_env(), root.path());
+    let (path, pin) = managed_run_temp_dir("homeboy-run-bind").expect("managed run");
+    let threads = (0..12)
+        .map(|index| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                bind_run_dir_owner(&path, None, Some(&format!("invocation-{index}")))
+                    .expect("bind invocation");
+            })
+        })
+        .collect::<Vec<_>>();
+    for thread in threads {
+        thread.join().expect("binding thread");
+    }
+
+    let owner = read_run_owner(&path).expect("owner");
+    assert_eq!(owner.invocation_ids.len(), 12);
+    for index in 0..12 {
+        assert!(owner
+            .invocation_ids
+            .contains(&format!("invocation-{index}")));
+    }
+    drop(pin);
+    env::remove_var(runtime_tmpdir_env());
+}
+
+#[test]
+fn deletion_revalidation_blocks_invocation_bound_after_inspection() {
+    let _guard = home_env_guard();
+    let root = tempfile::tempdir().expect("tempdir");
+    env::set_var(runtime_tmpdir_env(), root.path());
+    let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
+    let path = run_dir.path().to_path_buf();
+    fs::remove_file(path.join(RUNTIME_TEMP_PIN_FILE)).expect("remove pin");
+    run_dir.finish(false);
+    let inspected = read_run_owner(&path).expect("inspected owner");
+
+    let invocation = super::super::super::invocation::InvocationGuard::acquire(
+        &run_dir,
+        &super::super::super::invocation::InvocationRequirements::default(),
+    )
+    .expect("late invocation binding");
+    let protection = managed_deletion_protection(&path, &inspected, u64::MAX)
+        .expect("ownership change protects deletion");
+
+    assert!(protection.contains("ownership changed") || protection.contains("invocation lease"));
+    assert!(path.exists());
+    drop(invocation);
+    env::remove_var(runtime_tmpdir_env());
+}
+
+#[test]
+fn unmanaged_only_cleanup_pages_with_cursor() {
+    let _guard = home_env_guard();
+    let root = tempfile::tempdir().expect("tempdir");
+    env::set_var(runtime_tmpdir_env(), root.path());
+    for index in 0..3 {
+        let path = runtime_temp_dir(&format!("homeboy-unmanaged-page-{index}"))
+            .expect("unmanaged directory");
+        fs::write(path.join("payload"), b"payload").expect("payload");
+    }
+    let mut cursor = None;
+    let mut names = Vec::new();
+    loop {
+        let mut options = bounded_options(false, Some("homeboy-unmanaged-page"));
+        options.older_than_days = 0;
+        options.limit = 1;
+        options.cursor = cursor.as_deref();
+        let page = cleanup_runtime_tmp_bounded(options).expect("cleanup page");
+        assert_eq!(page.totals.inspected_count, 1);
+        names.push(page.rows[0].name.clone());
+        if !page.has_more {
+            assert!(page.next_cursor.is_none());
+            break;
+        }
+        cursor = page.next_cursor;
+        assert!(cursor.is_some());
+    }
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), 3);
+    env::remove_var(runtime_tmpdir_env());
+}
+
+#[cfg(unix)]
+#[test]
+fn external_hardlink_is_not_reported_as_reclaimable_allocation() {
+    let _guard = home_env_guard();
+    let root = tempfile::tempdir().expect("tempdir");
+    env::set_var(runtime_tmpdir_env(), root.path());
+    let path = runtime_temp_dir("homeboy-external-hardlink").expect("runtime dir");
+    let payload = path.join("payload.bin");
+    fs::write(&payload, vec![b'x'; 64 * 1024]).expect("payload");
+    let external = root.path().join("external-link.bin");
+    fs::hard_link(&payload, &external).expect("external hardlink");
+
+    assert_eq!(
+        path_storage_measure(&payload)
+            .expect("payload measure")
+            .allocated_bytes,
+        0
+    );
+    let output =
+        cleanup_runtime_tmp(true, 0, Some("homeboy-external-hardlink"), 10).expect("cleanup");
+    assert_eq!(output.removed_count, 1);
+    assert!(external.exists());
+    assert!(output.verified_reclaimed_bytes <= output.removed_allocated_bytes);
+    env::remove_var(runtime_tmpdir_env());
+}

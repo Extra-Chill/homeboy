@@ -226,8 +226,9 @@ fn run_replay_like(
     }
     let output = runner.run()?;
     let exit_code = if output.success { 0 } else { output.exit_code };
+    let succeeded = output.success;
 
-    Ok((
+    let result = (
         FuzzReplayOutput {
             command: mode.command_name().to_string(),
             status: if output.success { "passed" } else { "failed" }.to_string(),
@@ -264,7 +265,9 @@ fn run_replay_like(
             next_steps: replay_next_steps(false, mode),
         },
         exit_code,
-    ))
+    );
+    run_dir.finish(succeeded);
+    Ok(result)
 }
 
 #[derive(Clone)]
