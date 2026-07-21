@@ -1,4 +1,6 @@
-use super::super::workflow::{run_main_lint_workflow, run_self_check_lint_workflow};
+use super::super::workflow::{
+    finish_scoped_lint_run_dir, run_main_lint_workflow, run_self_check_lint_workflow,
+};
 use super::{component, lint_args};
 use homeboy_core::component::{Component, ComponentScriptsConfig};
 use homeboy_core::engine::run_dir::RunDir;
@@ -76,4 +78,22 @@ fn lint_config_deserializes_changed_file_routes() {
     assert_eq!(config.changed_file_routes[0].step, "phpcs,phpstan");
     assert_eq!(config.changed_file_routes[1].globs, vec!["assets/**/*.css"]);
     assert_eq!(config.changed_file_routes[1].step, "stylelint");
+}
+
+#[test]
+fn scoped_lint_run_dir_disposes_success_and_failure_explicitly() {
+    let _guard = homeboy_core::test_support::home_env_guard();
+    let root = tempfile::tempdir().expect("runtime root");
+    std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", root.path());
+
+    let success = RunDir::create().expect("success run");
+    let success_path = success.path().to_path_buf();
+    finish_scoped_lint_run_dir(Some(&success), true);
+    assert!(!success_path.exists());
+
+    let failure = RunDir::create().expect("failure run");
+    let failure_path = failure.path().to_path_buf();
+    finish_scoped_lint_run_dir(Some(&failure), false);
+    assert!(failure_path.exists());
+    std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
 }

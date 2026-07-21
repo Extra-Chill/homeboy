@@ -242,13 +242,8 @@ fn run_scoped_lint_runs(
     )?;
 
     for (index, run) in runs.iter().enumerate() {
-        let scoped_run_dir;
-        let active_run_dir = if index == 0 {
-            run_dir
-        } else {
-            scoped_run_dir = RunDir::create()?;
-            &scoped_run_dir
-        };
+        let scoped_run_dir = (index > 0).then(RunDir::create).transpose()?;
+        let active_run_dir = scoped_run_dir.as_ref().unwrap_or(run_dir);
 
         let runner = build_lint_runner(
             component,
@@ -297,6 +292,7 @@ fn run_scoped_lint_runs(
                 exit_code = output.exit_code;
             }
         }
+        finish_scoped_lint_run_dir(scoped_run_dir.as_ref(), output.success);
     }
 
     Ok(extension::RunnerOutput {
@@ -308,6 +304,12 @@ fn run_scoped_lint_runs(
         child_resource: None,
         extension_phase_timings,
     })
+}
+
+pub(super) fn finish_scoped_lint_run_dir(run_dir: Option<&RunDir>, success: bool) {
+    if let Some(run_dir) = run_dir {
+        run_dir.finish(success);
+    }
 }
 
 pub fn run_self_check_lint_workflow(
