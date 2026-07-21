@@ -63,6 +63,7 @@ mod pr_ownership;
 mod proof;
 mod reports;
 mod request;
+mod run_command;
 mod run_failure_summary;
 pub mod runner_availability;
 mod spec;
