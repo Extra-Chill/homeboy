@@ -170,6 +170,10 @@ pub(crate) fn tasks_for_aggregate(
         .iter()
         .map(|request| {
             let mut task = queued_task(request);
+            let outcome = aggregate
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.task_id == request.task_id);
             if let Some(event) = aggregate
                 .events
                 .iter()
@@ -177,12 +181,15 @@ pub(crate) fn tasks_for_aggregate(
                 .find(|event| event.task_id == request.task_id)
             {
                 task.state = event.state;
-            } else if let Some(outcome) = aggregate
-                .outcomes
-                .iter()
-                .find(|outcome| outcome.task_id == request.task_id)
-            {
+            } else if let Some(outcome) = outcome {
                 task.state = task_state_for_outcome_status(outcome.status);
+            }
+            if let Some(model) = outcome
+                .and_then(|outcome| outcome.metadata.get("model"))
+                .and_then(Value::as_str)
+                .filter(|model| !model.trim().is_empty())
+            {
+                task.model = Some(model.to_string());
             }
             task
         })

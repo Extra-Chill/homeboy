@@ -1202,8 +1202,9 @@ fn completed_generic_executor_outcome_preserves_runtime_evidence_without_provide
     with_isolated_home(|_| {
         let mut plan = test_plan();
         plan.tasks[0].executor.backend = "opencode".to_string();
-        plan.tasks[0].executor.model = Some("openai/gpt-5.6-terra".to_string());
-        let aggregate = succeeded_aggregate(&plan);
+        plan.tasks[0].executor.model = None;
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.outcomes[0].metadata = json!({ "model": "openai/gpt-5.6-terra" });
 
         let record = record_completed_run(&plan, &aggregate, Some("generic-executor-outcome"))
             .expect("recorded");
@@ -1217,6 +1218,10 @@ fn completed_generic_executor_outcome_preserves_runtime_evidence_without_provide
         assert_eq!(record.metadata["provider_run_ids"], json!([]));
         assert_eq!(runtime.backend, "opencode");
         assert_eq!(runtime.state, ProviderRuntimeState::Succeeded);
+        assert_eq!(
+            record.tasks[0].model.as_deref(),
+            Some("openai/gpt-5.6-terra")
+        );
         assert!(runtime.external_runtime_ids.is_empty());
         assert_eq!(
             runtime.metadata["evidence_source"],
