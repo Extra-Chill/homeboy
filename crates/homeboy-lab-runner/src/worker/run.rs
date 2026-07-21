@@ -429,7 +429,12 @@ fn materialize_snapshot_git_baseline(envelope: &RunnerExecutionEnvelope) -> Resu
         lab,
     )
     .map(|_| ())
-    .map_err(Error::internal_unexpected)
+    // Baseline materialization is Homeboy infrastructure setup that runs before
+    // any provider execution. A failure here is a transient/infrastructure
+    // condition, not a provider outcome — classify it retryable so recovery can
+    // re-attempt rather than terminalizing the cook as a provider failure
+    // (#9399).
+    .map_err(|message| Error::internal_unexpected(message).with_retryable(true))
 }
 
 /// Materialize broker-owned command files in the worker's durable data root and
