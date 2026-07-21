@@ -846,6 +846,22 @@ pub(crate) fn exec_with_status_snapshot(
 
     if should_force_diagnostic_ssh(&runner, &options) {
         run_capability_preflight(&runner)?;
+        // The diagnostic-SSH transport executes synchronously and never accepts
+        // a durable runner job, so — unlike the daemon path — it must create the
+        // generic runner-exec run itself. Without this, a caller-supplied
+        // `--run-id` with declared `--artifact`/`--summary` fails artifact
+        // promotion with `run record not found` even though the run was never
+        // created (Extra-Chill/homeboy#9485, restoring #8447 for SSH).
+        if options.run_id_owns_generic_exec {
+            if let Some(run_id) = options.run_id.as_deref() {
+                homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run(
+                    run_id,
+                    &runner.id,
+                    &cwd,
+                    &options.command,
+                )?;
+            }
+        }
         return exec_diagnostic_ssh(
             &runner,
             cwd,

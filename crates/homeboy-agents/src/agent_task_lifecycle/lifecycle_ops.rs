@@ -865,6 +865,52 @@ pub fn record_runner_exec_job_identity(
     Ok(record)
 }
 
+/// Create (or validate ownership of) a generic runner-exec run that has no
+/// daemon runner job — the diagnostic-SSH transport executes synchronously and
+/// never accepts a durable runner job, but a caller-supplied `--run-id` with
+/// declared `--artifact`/`--artifact-dir`/`--summary` still needs a persisted
+/// run to attach that evidence to. Mirrors [`record_runner_exec_job_identity`]'s
+/// on-demand creation and fail-closed ownership check, minus the job binding
+/// (Extra-Chill/homeboy#9485, restoring #8447 for the SSH path).
+pub fn ensure_generic_runner_exec_run(
+    run_id: &str,
+    runner_id: &str,
+    remote_workspace: &str,
+    remote_command: &[String],
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let mut record = match store::read_record(&run_id) {
+        Ok(record) => match record_run_kind(&record) {
+            Some(RUNNER_EXEC_RUN_KIND) => record,
+            other => {
+                return Err(Error::validation_invalid_argument(
+                    "run_id",
+                    format!(
+                        "run '{run_id}' already exists as {} and cannot be reused as a generic runner-exec run",
+                        other
+                            .map(|kind| format!("an agent-task run (kind '{kind}')"))
+                            .unwrap_or_else(|| "an agent-task run".to_string())
+                    ),
+                    Some(run_id.clone()),
+                    Some(vec![
+                        "Pass a distinct --run-id for ad hoc runner exec evidence.".to_string(),
+                    ]),
+                ));
+            }
+        },
+        Err(error) if error.code == ErrorCode::ValidationInvalidArgument => submit_plan(
+            &runner_exec_plan(&run_id, runner_id, remote_workspace, remote_command),
+            Some(&run_id),
+        )?,
+        Err(error) => return Err(error),
+    };
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("kind".to_string(), json!(RUNNER_EXEC_RUN_KIND));
+    metadata.insert("runner_id".to_string(), json!(runner_id));
+    store::write_record(&record)?;
+    Ok(record)
+}
+
 fn runner_exec_plan(
     run_id: &str,
     runner_id: &str,
