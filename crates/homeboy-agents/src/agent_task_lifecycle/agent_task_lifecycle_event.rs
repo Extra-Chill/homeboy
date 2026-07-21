@@ -114,7 +114,19 @@ pub(crate) fn agent_task_run_plan_lifecycle_event_from_persisted_job_events(
     let Some(stdout) = result.get("stdout").and_then(serde_json::Value::as_str) else {
         return Ok(None);
     };
-    let envelope = parse_offloaded_run_plan_envelope(stdout)?;
+    // Recovery-only: this is reached for every terminal runner-exec result that
+    // carries a `--run-id`, including generic (non-agent-task) execs whose
+    // stdout is arbitrary command output (`pwd`, a fuzz report, empty, ...).
+    // Plain command stdout is not an agent-task run-plan envelope, so a parse
+    // failure here means "no agent-task aggregate to recover", not a hard error.
+    // Only an actual run-plan envelope should produce a lifecycle event
+    // (Extra-Chill/homeboy#9459).
+    let Some(envelope) = parse_offloaded_run_plan_envelope(stdout)
+        .ok()
+        .filter(is_agent_task_run_plan_envelope)
+    else {
+        return Ok(None);
+    };
     let Some(data) = envelope.get("data") else {
         return Ok(None);
     };
@@ -352,5 +364,95 @@ mod tests {
             error.details["context"],
             "hydrate nested Lab terminal agent-task aggregate"
         );
+    }
+
+    fn terminal_result_event(result: serde_json::Value) -> JobEvent {
+        JobEvent {
+            sequence: 1,
+            job_id: uuid::Uuid::nil(),
+            kind: JobEventKind::Result,
+            timestamp_ms: 1,
+            message: None,
+            data: Some(result),
+        }
+    }
+
+    #[test]
+    fn generic_runner_exec_plain_stdout_recovers_no_agent_task_event() {
+        // A generic `runner exec ... --run-id X -- pwd` terminal result carries
+        // arbitrary command stdout and no agent-task workload. The recovery path
+        // must NOT parse plain command output as an agent-task run-plan envelope
+        // (Extra-Chill/homeboy#9459).
+        for stdout in [
+            "/home/runner/workspace\n",
+            "",
+            "line one\nline two\n",
+            "{ not valid json",
+        ] {
+            let events = vec![terminal_result_event(serde_json::json!({
+                "exit_code": 0,
+                "stdout": stdout,
+                "stderr": "",
+            }))];
+
+            let event = agent_task_run_plan_lifecycle_event_from_persisted_job_events(
+                &events,
+                "homeboy-lab",
+                "runner-job-1",
+                "generic-pwd",
+            )
+            .expect("generic runner exec stdout must not error");
+
+            assert!(
+                event.is_none(),
+                "plain stdout `{stdout:?}` must not recover an agent-task lifecycle event"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_runner_exec_nonzero_exit_with_json_stdout_recovers_no_agent_task_event() {
+        // A strict fuzz workload can emit a valid JSON result document to stdout
+        // while intentionally exiting non-zero. That JSON is a command result,
+        // not an agent-task run-plan envelope, so recovery still yields no event
+        // and preserves the runner exit code path (Extra-Chill/homeboy#9459).
+        let events = vec![terminal_result_event(serde_json::json!({
+            "exit_code": 1,
+            "stdout": r#"{"status":"fail","findings":3}"#,
+            "stderr": "",
+        }))];
+
+        let event = agent_task_run_plan_lifecycle_event_from_persisted_job_events(
+            &events,
+            "homeboy-lab",
+            "runner-job-1",
+            "gutenberg-fuzz",
+        )
+        .expect("generic JSON stdout must not error");
+
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn persisted_run_plan_envelope_in_stdout_still_recovers_event() {
+        // The recovery contract for real agent-task run-plan results is
+        // preserved: an aggregate envelope embedded in stdout still hydrates.
+        let events = vec![terminal_result_event(serde_json::json!({
+            "exit_code": 0,
+            "stdout": r#"{"data":{"schema":"homeboy/agent-task-aggregate/v1","plan_id":"plan-x","status":"succeeded","totals":{"skipped":0,"succeeded":0,"failed":0},"outcomes":[]}}"#,
+            "stderr": "",
+        }))];
+
+        let event = agent_task_run_plan_lifecycle_event_from_persisted_job_events(
+            &events,
+            "homeboy-lab",
+            "runner-job-1",
+            "controller-run",
+        )
+        .expect("run-plan envelope recovery")
+        .expect("agent-task lifecycle event");
+
+        assert_eq!(event.identity.run_id.as_deref(), Some("controller-run"));
+        assert_eq!(event.aggregate.plan_id, "plan-x");
     }
 }
