@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.27.2] - 2026-07-21
+
+### Fixed
+- rebuild extension Composer vendor tree
+
 ## [3.27.1] - 2026-07-20
 
 ### Fixed
