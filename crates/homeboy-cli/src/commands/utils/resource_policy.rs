@@ -1,5 +1,5 @@
 use crate::cli_surface::Commands;
-use crate::command_contract::LabCommandPortability;
+use crate::command_contract::{LabCommandPortability, LabRoutingPolicy};
 use crate::commands::agent_task;
 use crate::runner::runners::LabRunnerReadiness;
 
@@ -24,6 +24,7 @@ pub struct HotCommand {
     pub lab_offload_supported: bool,
     pub lab_offload_unsupported_reason: Option<&'static str>,
     pub allows_warm_runner_coordination: bool,
+    pub routing_policy: LabRoutingPolicy,
 }
 
 impl HotCommand {
@@ -33,6 +34,7 @@ impl HotCommand {
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: false,
+            routing_policy: LabRoutingPolicy::default(),
         }
     }
 
@@ -42,6 +44,7 @@ impl HotCommand {
             lab_offload_supported: false,
             lab_offload_unsupported_reason: reason,
             allows_warm_runner_coordination: false,
+            routing_policy: LabRoutingPolicy::default(),
         }
     }
 }
@@ -207,6 +210,7 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: true,
+            routing_policy: LabRoutingPolicy::default(),
         });
     }
 
@@ -225,16 +229,21 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: true,
+            routing_policy: LabRoutingPolicy::default(),
         });
     }
 
     let contract = command.lab_contract()?;
 
     match contract.portability {
-        LabCommandPortability::Portable => Some(HotCommand::lab_supported(contract.hot_label)),
-        LabCommandPortability::LocalOnly(reason) => {
-            Some(HotCommand::local_only(contract.hot_label, Some(reason)))
-        }
+        LabCommandPortability::Portable => Some(HotCommand {
+            routing_policy: contract.routing_policy,
+            ..HotCommand::lab_supported(contract.hot_label)
+        }),
+        LabCommandPortability::LocalOnly(reason) => Some(HotCommand {
+            routing_policy: contract.routing_policy,
+            ..HotCommand::local_only(contract.hot_label, Some(reason))
+        }),
     }
 }
 
@@ -331,14 +340,18 @@ pub fn evaluate_with_runner_hint(
     resources: &DoctorOutput,
     lab_readiness: Option<&LabRunnerReadiness>,
 ) -> Option<ResourcePolicyWarning> {
-    match resources.recommendation {
-        ResourceRecommendation::Ok => None,
-        recommendation => Some(ResourcePolicyWarning {
-            command: command.label,
-            recommendation,
-            message: warning_message(command, recommendation, resources, lab_readiness),
-        }),
+    let recommendation = resources.recommendation;
+    if !command
+        .routing_policy
+        .should_pressure_offload(severity_str(recommendation))
+    {
+        return None;
     }
+    Some(ResourcePolicyWarning {
+        command: command.label,
+        recommendation,
+        message: warning_message(command, recommendation, resources, lab_readiness),
+    })
 }
 
 /// Cook keeps durable coordination, promotion, and gates on the controller,
@@ -600,6 +613,7 @@ mod tests {
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: false,
+            routing_policy: LabRoutingPolicy::default(),
         }
     }
 
@@ -626,6 +640,7 @@ mod tests {
             lab_offload_supported: false,
             lab_offload_unsupported_reason: Some(reason),
             allows_warm_runner_coordination: false,
+            routing_policy: LabRoutingPolicy::default(),
         }
     }
 
@@ -649,6 +664,40 @@ mod tests {
             &resources(ResourceRecommendation::Warm)
         )
         .is_some());
+    }
+
+    #[test]
+    fn cheap_promotion_uses_hot_only_resource_admission_for_dry_run_and_apply() {
+        for dry_run in [false, true] {
+            let mut args = vec![
+                "homeboy",
+                "agent-task",
+                "promote",
+                "/runner/artifacts/aggregate.json",
+                "--to-worktree",
+                "homeboy@fix-9432",
+            ];
+            if dry_run {
+                args.push("--dry-run");
+            }
+            let cli = Cli::parse_from(args);
+            let command = hot_command(&cli.command).expect("promotion is resource-managed");
+
+            assert!(command.routing_policy.offload_only_when_hot);
+            assert!(evaluate(command, &resources(ResourceRecommendation::Warm)).is_none());
+            assert!(evaluate(command, &resources(ResourceRecommendation::Hot)).is_some());
+        }
+    }
+
+    #[test]
+    fn normal_expensive_command_retains_warm_and_hot_resource_admission() {
+        let cli = Cli::parse_from(["homeboy", "review", "audit"]);
+        let command = hot_command(&cli.command).expect("review audit is resource-managed");
+
+        assert!(!command.routing_policy.offload_only_when_hot);
+        for recommendation in [ResourceRecommendation::Warm, ResourceRecommendation::Hot] {
+            assert!(evaluate(command, &resources(recommendation)).is_some());
+        }
     }
 
     #[test]
@@ -994,6 +1043,7 @@ mod tests {
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: true,
+            routing_policy: LabRoutingPolicy::default(),
         };
         let ready = ready_lab();
         let mut resources = coordination_resources();
