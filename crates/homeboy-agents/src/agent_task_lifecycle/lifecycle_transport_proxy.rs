@@ -230,7 +230,14 @@ pub(crate) fn bind_pending_lab_handoff_snapshot(
                 && handoff.authority == AgentTaskLabHandoffAuthority::Controller
         })
         .map(|handoff| handoff.runner_id.clone())
-        .or_else(|| record.runner_id().map(str::to_string));
+        .or_else(|| record.runner_id().map(str::to_string))
+        // A proxy interrupted *before* Lab acceptance has neither an accepted
+        // runner_job_id nor a Pending controller handoff — the controller only
+        // recorded its planned execution intent. On recovery the runner accepts
+        // a fresh replacement job; bind it from that durable execution record's
+        // runner so snapshot validation converges instead of rejecting a valid
+        // replacement against an empty controller job id (#9382).
+        .or_else(|| planned_execution_record_runner_id(record));
     let Some(runner_id) = runner_id else {
         return Ok(());
     };
@@ -268,6 +275,38 @@ pub(crate) fn bind_pending_lab_handoff_snapshot(
         remote_command: &remote_command,
     })?;
     Ok(())
+}
+
+/// The runner id recorded on a controller-owned proxy's durable execution
+/// record when it has a planned (pre-acceptance) execution intent but no
+/// accepted runner job yet.
+///
+/// This is the recovery-safe fallback for [`bind_pending_lab_handoff_snapshot`]:
+/// it only yields a runner when the execution record is *planned* (not yet
+/// bound to a job id) and names this exact run, so binding a replacement job
+/// cannot latch onto a terminal or mismatched execution record.
+fn planned_execution_record_runner_id(record: &AgentTaskRunRecord) -> Option<String> {
+    let execution = record
+        .metadata
+        .get("runner_execution_record")
+        .and_then(|value| {
+            serde_json::from_value::<
+                    homeboy_core::runner_execution_envelope::RunnerExecutionRecord,
+                >(value.clone())
+                .ok()
+        })?;
+    if execution.job_id.is_some() {
+        return None;
+    }
+    if execution
+        .agent_task_run_id
+        .as_deref()
+        .is_some_and(|run_id| run_id != record.run_id)
+    {
+        return None;
+    }
+    let runner_id = execution.runner_id.trim();
+    (!runner_id.is_empty()).then(|| runner_id.to_string())
 }
 
 pub(crate) fn is_transport_proxy(record: &AgentTaskRunRecord) -> bool {

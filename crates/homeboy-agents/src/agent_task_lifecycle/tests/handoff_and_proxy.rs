@@ -455,6 +455,63 @@ fn runner_snapshot_binds_pending_lab_handoff_before_validation() {
 }
 
 #[test]
+fn preacceptance_snapshot_binds_replacement_job_from_planned_execution_record() {
+    // Issue #9382: a durable Lab-offloaded run interrupted *before* acceptance
+    // has no accepted runner_job_id and — after deadline/recovery handling — no
+    // Pending controller handoff to bind from either. Its runner identity lives
+    // only in the planned `runner_execution_record`. Recovery re-executes the
+    // exact run, the runner accepts a fresh replacement job, and its snapshot
+    // must bind that replacement rather than reject it as "no accepted runner
+    // job identity".
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "preacceptance-recovery",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("planned controller proxy");
+
+        // Simulate the post-interruption recovery state: the pending controller
+        // handoff is gone (deadline/recovery cleared it) AND the metadata
+        // runner_id was not persisted, so the runner identity survives only on
+        // the planned execution record. Without the #9382 fix the binder has no
+        // runner source and validation rejects the replacement job.
+        record.lab_handoff = None;
+        record
+            .metadata
+            .as_object_mut()
+            .expect("metadata object")
+            .remove("runner_id");
+        assert!(record.runner_id().is_none());
+        assert_eq!(
+            record.metadata["runner_execution_record"]["status"],
+            "planned"
+        );
+        assert_eq!(
+            record.metadata["runner_execution_record"]["runner_id"],
+            "homeboy-lab"
+        );
+        store::write_record(&record).expect("persist recovery state");
+
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+        snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
+        snapshot.events.clear();
+        let replacement_job_id = snapshot.job.id.to_string();
+
+        reconcile_transport_proxy_snapshot(&mut record, &snapshot)
+            .expect("replacement runner snapshot binds the planned execution record");
+
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(record.runner_job_id(), Some(replacement_job_id.as_str()));
+        assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
+    });
+}
+
+#[test]
 fn runner_snapshot_rejects_conflicting_bound_lab_job_identity() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
