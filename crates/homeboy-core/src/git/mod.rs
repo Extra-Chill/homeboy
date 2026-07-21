@@ -94,6 +94,8 @@ pub use primitives_query::{
     short_head_revision, status_porcelain, status_porcelain_bytes, toplevel,
 };
 
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::path::Path;
 use std::process::Command;
 
@@ -107,9 +109,108 @@ pub const BOT_NAME: &str = "homeboy-ci[bot]";
 pub const BOT_EMAIL: &str = "266378653+homeboy-ci[bot]@users.noreply.github.com";
 
 /// Parsed git identity (name + email).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitIdentity {
     pub name: String,
     pub email: String,
+}
+
+/// Evidence that the repository-local identity matched its origin-host policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitIdentityProof {
+    pub host: String,
+    pub name: String,
+    pub email: String,
+    pub scope: String,
+}
+
+/// Validate the repository-local identity selected for the origin host.
+pub fn validate_publication_identity(path: &str) -> crate::error::Result<GitIdentityProof> {
+    let remote = git_config(path, &["config", "--get", "remote.origin.url"])?;
+    let host = remote_host(&remote).ok_or_else(|| {
+        identity_error(
+            "origin remote does not contain a usable hostname",
+            json!({ "origin": remote, "remediation": [] }),
+        )
+    })?;
+    let config = crate::defaults::load_config();
+    let Some(expected) = config.git_hosts.get(&host) else {
+        return Ok(GitIdentityProof {
+            host,
+            name: git_config(path, &["config", "--get", "user.name"])?,
+            email: git_config(path, &["config", "--get", "user.email"])?,
+            scope: "effective_unrestricted".to_string(),
+        });
+    };
+    if expected.name.trim().is_empty() || expected.email.trim().is_empty() {
+        return Err(identity_error(
+            "configured Git identity policy requires non-empty name and email",
+            json!({ "host": host, "remediation": [{ "kind": "complete_host_policy" }] }),
+        ));
+    }
+
+    let name = git_config(path, &["config", "--local", "--get", "user.name"])?;
+    let email = git_config(path, &["config", "--local", "--get", "user.email"])?;
+    if name != expected.name || email != expected.email {
+        return Err(identity_error(
+            "effective repository-local Git identity does not match the origin host policy",
+            json!({
+                "host": host,
+                "expected": { "name": expected.name, "email": expected.email },
+                "actual": { "name": name, "email": email },
+                "remediation": [{
+                    "kind": "configure_repository_local_identity",
+                    "commands": [
+                        format!("git -C {} config --local user.name {:?}", path, expected.name),
+                        format!("git -C {} config --local user.email {:?}", path, expected.email)
+                    ]
+                }]
+            }),
+        ));
+    }
+    Ok(GitIdentityProof {
+        host,
+        name,
+        email,
+        scope: "repository_local".to_string(),
+    })
+}
+
+fn git_config(path: &str, args: &[&str]) -> crate::error::Result<String> {
+    let output = execute_git(path, args)
+        .map_err(|error| crate::error::Error::git_command_failed(error.to_string()))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    Ok(String::new())
+}
+
+fn remote_host(remote: &str) -> Option<String> {
+    let authority = remote
+        .trim()
+        .strip_prefix("https://")
+        .or_else(|| remote.trim().strip_prefix("http://"))
+        .or_else(|| remote.trim().strip_prefix("ssh://"))
+        .or_else(|| remote.trim().split_once('@').map(|(_, value)| value))?;
+    let host = authority
+        .split('@')
+        .next_back()?
+        .split('/')
+        .next()?
+        .split(':')
+        .next()?
+        .trim();
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+fn identity_error(message: &str, details: serde_json::Value) -> crate::error::Error {
+    crate::error::Error {
+        code: crate::error::ErrorCode::ValidationInvalidArgument,
+        message: message.to_string(),
+        details,
+        hints: Vec::new(),
+        retryable: Some(false),
+    }
 }
 
 /// Parse a `--git-identity` value into name + email.
@@ -213,6 +314,10 @@ pub(crate) fn run_resolved_git(
 #[cfg(test)]
 mod identity_tests {
     use super::*;
+    use crate::defaults::{save_config, GitHostConfig, HomeboyConfig};
+    use crate::test_support::with_isolated_home;
+    use std::collections::HashMap;
+    use std::process::Command;
 
     #[test]
     fn bot_shorthand() {
@@ -240,6 +345,131 @@ mod identity_tests {
         let id = parse_git_identity(Some("My Service"));
         assert_eq!(id.name, "My Service");
         assert_eq!(id.email, BOT_EMAIL);
+    }
+
+    #[test]
+    fn publication_identity_unrestricted_host_preserves_effective_identity() {
+        with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let repo = temp.path();
+            for args in [
+                vec!["init"],
+                vec![
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@git.example.test:owner/repo.git",
+                ],
+                vec!["config", "user.name", "Existing Author"],
+                vec!["config", "user.email", "author@example.test"],
+            ] {
+                let status = Command::new("git")
+                    .args(args)
+                    .current_dir(repo)
+                    .status()
+                    .expect("run git");
+                assert!(status.success());
+            }
+
+            let proof = validate_publication_identity(repo.to_str().expect("path"))
+                .expect("unrestricted host");
+
+            assert_eq!(proof.host, "git.example.test");
+            assert_eq!(proof.name, "Existing Author");
+            assert_eq!(proof.email, "author@example.test");
+            assert_eq!(proof.scope, "effective_unrestricted");
+        });
+    }
+
+    #[test]
+    fn publication_identity_configured_host_requires_repository_local_identity() {
+        with_isolated_home(|_| {
+            let temp = identity_test_repo();
+            save_identity_policy();
+
+            let error = validate_publication_identity(temp.path().to_str().expect("path"))
+                .expect_err("repository-local identity is required");
+
+            assert_eq!(error.details["host"], "git.example.test");
+            assert_eq!(
+                error.details["remediation"][0]["kind"],
+                "configure_repository_local_identity"
+            );
+        });
+    }
+
+    #[test]
+    fn publication_identity_configured_host_rejects_incorrect_identity() {
+        with_isolated_home(|_| {
+            let temp = identity_test_repo();
+            save_identity_policy();
+            run_identity_git(temp.path(), &["config", "user.name", "Wrong Author"]);
+            run_identity_git(temp.path(), &["config", "user.email", "wrong@example.test"]);
+
+            let error = validate_publication_identity(temp.path().to_str().expect("path"))
+                .expect_err("incorrect identity");
+
+            assert_eq!(error.details["actual"]["name"], "Wrong Author");
+            assert_eq!(error.details["expected"]["name"], "Expected Author");
+        });
+    }
+
+    #[test]
+    fn publication_identity_configured_host_accepts_correct_identity() {
+        with_isolated_home(|_| {
+            let temp = identity_test_repo();
+            save_identity_policy();
+            run_identity_git(temp.path(), &["config", "user.name", "Expected Author"]);
+            run_identity_git(
+                temp.path(),
+                &["config", "user.email", "expected@example.test"],
+            );
+
+            let proof = validate_publication_identity(temp.path().to_str().expect("path"))
+                .expect("correct identity");
+
+            assert_eq!(proof.name, "Expected Author");
+            assert_eq!(proof.email, "expected@example.test");
+            assert_eq!(proof.scope, "repository_local");
+        });
+    }
+
+    fn identity_test_repo() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("tempdir");
+        run_identity_git(temp.path(), &["init"]);
+        run_identity_git(
+            temp.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@git.example.test:owner/repo.git",
+            ],
+        );
+        temp
+    }
+
+    fn save_identity_policy() {
+        save_config(&HomeboyConfig {
+            git_hosts: HashMap::from([(
+                "git.example.test".to_string(),
+                GitHostConfig {
+                    name: "Expected Author".to_string(),
+                    email: "expected@example.test".to_string(),
+                },
+            )]),
+            ..HomeboyConfig::default()
+        })
+        .expect("save config");
+    }
+
+    fn run_identity_git(path: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .status()
+            .expect("run git");
+        assert!(status.success());
     }
 }
 

@@ -268,6 +268,13 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         })
     }
 
+    fn validate_publication_identity(
+        &mut self,
+        path: &str,
+    ) -> Result<homeboy_core::git::GitIdentityProof> {
+        homeboy_core::git::validate_publication_identity(path)
+    }
+
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()> {
         let output = commit_at(None, Some(message), CommitOptions::default(), Some(path))?;
         if !output.success {
