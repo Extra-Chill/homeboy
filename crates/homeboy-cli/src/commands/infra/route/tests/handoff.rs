@@ -665,12 +665,13 @@ fn agent_task_fanout_submit_batch_requires_explicit_runner_under_lab_placement()
 
 #[test]
 fn agent_task_fanout_run_plan_coordination_is_controller_local() {
+    // `--runner` implies Lab placement and is mutually exclusive with an
+    // explicit `--placement` at parse time (#9002), so a runner-pinned fanout
+    // uses `--runner` alone.
     let normalized = vec![
         "homeboy".to_string(),
         "--runner".to_string(),
         "homeboy-lab".to_string(),
-        "--placement".to_string(),
-        "lab".to_string(),
         "agent-task".to_string(),
         "fanout".to_string(),
         "run-plan".to_string(),
@@ -685,7 +686,6 @@ fn agent_task_fanout_run_plan_coordination_is_controller_local() {
     // their own Lab placement (#8045).
     let command = lab_offload_command(&cli.command).unwrap().unwrap();
     assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-    assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
     assert_eq!(command.hot_label, "agent-task fanout run-plan");
     assert!(!command.is_portable());
     assert!(!command.routing_policy.default_lab_offload);
@@ -698,12 +698,13 @@ fn agent_task_fanout_run_plan_coordination_is_controller_local() {
 
 #[test]
 fn agent_task_fanout_cook_batch_run_plan_keeps_cook_coordinators_local() {
+    // `--runner` implies Lab placement and conflicts with an explicit
+    // `--placement` at parse time (#9002); the runner-pinned coordinator uses
+    // `--runner` alone.
     let normalized = vec![
         "homeboy".to_string(),
         "--runner".to_string(),
         "homeboy-lab".to_string(),
-        "--placement".to_string(),
-        "lab".to_string(),
         "agent-task".to_string(),
         "fanout".to_string(),
         "cook-batch".to_string(),
@@ -718,7 +719,6 @@ fn agent_task_fanout_cook_batch_run_plan_keeps_cook_coordinators_local() {
 
     let command = lab_offload_command(&cli.command).unwrap().unwrap();
     assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-    assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
     assert_eq!(command.hot_label, "agent-task fanout cook-batch");
     assert!(!command.is_portable());
     assert!(!command.routing_policy.default_lab_offload);
