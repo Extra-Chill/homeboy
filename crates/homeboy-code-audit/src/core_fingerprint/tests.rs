@@ -346,6 +346,42 @@ pub fn settings_json(overrides: &[(String, serde_json::Value)]) -> Self {
 }
 
 #[test]
+fn rust_unused_param_multiline_signature_type_path_not_flagged() {
+    // Multi-line signature where a crate path segment (`serde_json`) sits inside
+    // a generic type. The grammar can mis-capture such signatures and surface
+    // `serde_json` as a bogus parameter; it must never be flagged as unused.
+    let grammar = rust_grammar();
+    let content = r#"
+pub fn ready_labeled(
+    id: impl Into<String>,
+    kind: impl Into<String>,
+    inputs: impl IntoIterator<Item = (String, serde_json::Value)>,
+) -> Self {
+    Self::ready(id, kind).inputs(inputs).build()
+}
+"#;
+
+    let fp = fingerprint_from_grammar(content, &grammar, "src/lib.rs").unwrap();
+
+    assert!(
+        !fp.unused_parameters.iter().any(|p| p.param == "serde_json"),
+        "`serde_json` is a type-path segment, not a parameter. Got: {:?}",
+        fp.unused_parameters
+    );
+}
+
+#[test]
+fn is_type_path_segment_distinguishes_bindings_from_paths() {
+    let params =
+        "id: impl Into<String>, inputs: impl IntoIterator<Item = (String, serde_json::Value)>";
+    assert!(is_type_path_segment(params, "serde_json"));
+    assert!(!is_type_path_segment(params, "inputs"));
+    assert!(!is_type_path_segment(params, "id"));
+    // Word-boundary: `json` must not match inside `serde_json::`.
+    assert!(!is_type_path_segment(params, "json"));
+}
+
+#[test]
 fn rust_unused_param_detection_sees_comparison_usage() {
     let grammar = rust_grammar();
     let content = r#"
