@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.301.1] - 2026-07-21
+
+### Fixed
+- persist accepted runner identity before recovery ([#9573](https://github.com/Extra-Chill/homeboy/pull/9573)) (by Chris Huber)
+- bind terminal Lab job before snapshot validation ([#9572](https://github.com/Extra-Chill/homeboy/pull/9572)) (by Chris Huber)
+- skeleton_duplication requires shared name token, not just control-flow shape ([#9569](https://github.com/Extra-Chill/homeboy/pull/9569)) (by Chris Huber)
+
 ## [0.301.0] - 2026-07-21
 
 ### Added
