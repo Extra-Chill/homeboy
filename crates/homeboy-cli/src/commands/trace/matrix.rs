@@ -214,22 +214,17 @@ pub(super) fn run_scenario_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutp
                         execution.workflow.exit_code == 0 && execution.workflow.status == "pass";
                     let stdout_output = extension_trace::from_main_workflow(
                         execution.workflow.clone(),
-                        execution.rig_state,
+                        execution.rig_state.clone(),
                         false,
                     )
                     .0;
-                    write_json_artifact(&output_path, &stdout_output)?;
-                    let artifact_path = execution
-                        .run_dir
-                        .step_file(homeboy::core::engine::run_dir::files::TRACE_RESULTS)
-                        .to_string_lossy()
-                        .to_string();
-                    let artifact_dir = execution
-                        .run_dir
-                        .path()
-                        .join("artifacts")
-                        .to_string_lossy()
-                        .to_string();
+                    if let Err(error) = write_json_artifact(&output_path, &stdout_output) {
+                        execution.finish(false);
+                        return Err(error);
+                    }
+                    let artifact_path = execution.artifact_path();
+                    let artifact_dir = execution.artifact_dir();
+                    execution.finish(passed);
                     (
                         passed,
                         execution.workflow.status,

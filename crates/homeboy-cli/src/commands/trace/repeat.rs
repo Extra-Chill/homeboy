@@ -57,11 +57,7 @@ pub(super) fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
                 if !passed {
                     failure_count += 1;
                 }
-                let artifact_path = execution
-                    .run_dir
-                    .step_file(homeboy::core::engine::run_dir::files::TRACE_RESULTS)
-                    .to_string_lossy()
-                    .to_string();
+                let artifact_path = execution.artifact_path();
                 let mut seen_span_ids = BTreeSet::new();
                 if let Some(results) = execution.workflow.results.as_ref() {
                     for (metric, value) in &results.metrics {
@@ -100,6 +96,7 @@ pub(super) fn run_repeat(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
                         *span_failures.entry(span_id.clone()).or_default() += 1;
                     }
                 }
+                execution.finish(passed);
                 runs.push(extension_trace::TraceAggregateRunOutput {
                     index,
                     passed,

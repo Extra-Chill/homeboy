@@ -482,11 +482,13 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
     let profile = resolved_profile_output_for_args(&args);
     let span_metadata = trace_span_metadata_for_args(&args)?;
     let execution = execute_trace_run(args)?;
+    let workflow_succeeded =
+        execution.workflow.exit_code == 0 && execution.workflow.status == "pass";
 
     let (mut stdout_output, mut artifact_output, exit_code) =
         extension_trace::from_main_workflow_outputs(
-            execution.workflow,
-            execution.rig_state,
+            execution.workflow.clone(),
+            execution.rig_state.clone(),
             summary_only,
         );
     extension_trace::attach_span_summary_metadata(&mut stdout_output, &span_metadata);
@@ -495,6 +497,7 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
         extension_trace::attach_span_summary_metadata(output, &span_metadata);
         attach_profile_output(output, profile);
     }
+    execution.finish(workflow_succeeded);
     Ok(((stdout_output, artifact_output), exit_code))
 }
 
@@ -584,14 +587,24 @@ fn execute_trace_run_impl(args: TraceArgs) -> homeboy::core::Result<TraceRunExec
         .as_ref()
         .map(|context| rig::snapshot_state(&context.rig_spec));
     let run_dir = RunDir::create()?;
-    run_trace_experiment_setup_for_plan(experiment_plan.as_ref(), &run_dir)?;
-    let experiment_settings = trace_experiment_settings(experiment_plan.as_ref())?;
-    let mut experiment_env = trace_experiment_env(experiment_plan.as_ref())?;
+    retain_trace_error(
+        &run_dir,
+        run_trace_experiment_setup_for_plan(experiment_plan.as_ref(), &run_dir),
+    )?;
+    let experiment_settings = retain_trace_error(
+        &run_dir,
+        trace_experiment_settings(experiment_plan.as_ref()),
+    )?;
+    let mut experiment_env =
+        retain_trace_error(&run_dir, trace_experiment_env(experiment_plan.as_ref()))?;
     experiment_env.extend(args.matrix_env.clone());
-    let trace_secret_env_status = hydrate_trace_secret_env(
-        &args.secret_env,
-        Some(&ctx.component_id),
-        &mut experiment_env,
+    let trace_secret_env_status = retain_trace_error(
+        &run_dir,
+        hydrate_trace_secret_env(
+            &args.secret_env,
+            Some(&ctx.component_id),
+            &mut experiment_env,
+        ),
     )?;
     let scenario_id = scenario.clone();
     let rig_id = args.rig.clone();
@@ -642,11 +655,15 @@ fn execute_trace_run_impl(args: TraceArgs) -> homeboy::core::Result<TraceRunExec
     let (extra_workloads, trace_dependencies, runner_capabilities, invocation_requirements) =
         trace_workload_inputs(rig_context.as_ref(), ctx.extension_id.as_deref());
     warn_rig_owned_trace_workload_expansion(rig_context.as_ref(), ctx.extension_id.as_deref());
-    let trace_probes =
-        trace_probes_for_args(&args, rig_context.as_ref(), ctx.extension_id.as_deref())?;
-    let public_preview =
-        trace_public_preview_for_args(&args, rig_context.as_ref(), ctx.extension_id.as_deref())?;
-    let attachments = TraceAttachment::parse_all(&args.attachments)?;
+    let trace_probes = retain_trace_error(
+        &run_dir,
+        trace_probes_for_args(&args, rig_context.as_ref(), ctx.extension_id.as_deref()),
+    )?;
+    let public_preview = retain_trace_error(
+        &run_dir,
+        trace_public_preview_for_args(&args, rig_context.as_ref(), ctx.extension_id.as_deref()),
+    )?;
+    let attachments = retain_trace_error(&run_dir, TraceAttachment::parse_all(&args.attachments))?;
     let resolved_settings = ctx.resolved_settings();
     let mut json_settings = experiment_settings;
     json_settings.extend(resolved_settings.json_overrides());
@@ -656,7 +673,7 @@ fn execute_trace_run_impl(args: TraceArgs) -> homeboy::core::Result<TraceRunExec
             .into_iter()
             .map(|(key, value)| (key, serde_json::Value::String(value))),
     );
-    let workflow = match extension_trace::run_trace_workflow(
+    let mut workflow = match extension_trace::run_trace_workflow(
         &ctx.component,
         TraceRunWorkflowArgs {
             component_label: effective_id.clone(),
@@ -704,8 +721,8 @@ fn execute_trace_run_impl(args: TraceArgs) -> homeboy::core::Result<TraceRunExec
             );
             let teardown_result =
                 run_trace_experiment_teardown_for_plan(experiment_plan.as_ref(), &run_dir);
-            artifact_result?;
-            teardown_result?;
+            retain_trace_error(&run_dir, artifact_result)?;
+            retain_trace_error(&run_dir, teardown_result)?;
             workflow
         }
         Err(error) => {
@@ -713,12 +730,17 @@ fn execute_trace_run_impl(args: TraceArgs) -> homeboy::core::Result<TraceRunExec
             if let Some(observation) = observation.as_ref() {
                 persist_trace_workflow_error(observation, &run_dir, &error);
             }
+            run_dir.finish(false);
             return Err(error);
         }
     };
-    if let Some(observation) = observation.as_ref() {
-        persist_trace_workflow_result(observation, &run_dir, &workflow, rig_state.as_ref());
-    }
+    let artifact_observation = observation
+        .as_ref()
+        .map(|observation| {
+            persist_trace_workflow_result(observation, &run_dir, &mut workflow, rig_state.as_ref())
+        })
+        .unwrap_or_default();
+    let evidence_promoted = artifact_observation.evidence_promoted();
 
     let run_id = observation
         .as_ref()
@@ -727,9 +749,22 @@ fn execute_trace_run_impl(args: TraceArgs) -> homeboy::core::Result<TraceRunExec
     Ok(TraceRunExecution {
         workflow,
         run_dir,
+        artifact_path: artifact_observation.trace_results_path,
+        artifact_dir: artifact_observation.artifact_dir_path,
+        evidence_promoted,
         rig_state,
         run_id,
     })
+}
+
+fn retain_trace_error<T>(
+    run_dir: &RunDir,
+    result: homeboy::core::Result<T>,
+) -> homeboy::core::Result<T> {
+    if result.is_err() {
+        run_dir.finish(false);
+    }
+    result
 }
 
 fn trace_scenario(args: &TraceArgs) -> homeboy::core::Result<&str> {
@@ -798,9 +833,16 @@ fn run_list(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
             rig_id: args.rig,
         },
         &run_dir,
-    )?;
-
-    Ok(extension_trace::from_list_workflow(effective_id, list))
+    );
+    let output = match list {
+        Ok(list) => extension_trace::from_list_workflow(effective_id, list),
+        Err(error) => {
+            run_dir.finish(false);
+            return Err(error);
+        }
+    };
+    run_dir.finish(true);
+    Ok(output)
 }
 
 struct TraceRigContext {

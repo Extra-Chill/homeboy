@@ -158,9 +158,9 @@ pub(crate) fn finish_lab_dispatch_observation(
 pub(super) fn persist_trace_workflow_result(
     observation: &ActiveTraceObservation,
     run_dir: &RunDir,
-    workflow: &extension_trace::TraceRunWorkflowResult,
+    workflow: &mut extension_trace::TraceRunWorkflowResult,
     rig_state: Option<&rig::RigStateSnapshot>,
-) {
+) -> observations::TraceArtifactObservationResult {
     let run_status = trace_run_status(workflow);
     let baseline_status = baseline_status(workflow);
     let results = workflow.results.as_ref();
@@ -221,6 +221,9 @@ pub(super) fn persist_trace_workflow_result(
         run_dir,
         results,
     );
+    if let Some(results) = workflow.results.as_mut() {
+        artifact_observation.rewrite_declared_artifact_paths(results);
+    }
     let finish_status =
         if run_status == RunStatus::Pass && artifact_observation.has_declared_artifact_failures() {
             RunStatus::Fail
@@ -236,6 +239,7 @@ pub(super) fn persist_trace_workflow_result(
             Some(&artifact_observation),
         )),
     );
+    artifact_observation
 }
 
 pub(super) fn persist_trace_workflow_error(
