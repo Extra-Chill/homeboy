@@ -301,6 +301,13 @@ fn daemon_worker_marks_nested_cook_as_runner_hosted() {
             plan.env.get(RUNNER_ID_ENV).map(String::as_str),
             Some("homeboy-lab")
         );
+        assert_eq!(
+            plan.env
+                .get(homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV)
+                .map(String::as_str),
+            Some("homeboy-lab"),
+            "daemon-local execution retains the runner provenance needed by nested run-plan"
+        );
     });
 }
 
