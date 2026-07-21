@@ -4,6 +4,31 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.299.1] - 2026-07-21
+
+### Changed
+- extract stop orchestration from daemon god file
+- extract runner-file HTTP ops from daemon god file
+- handle reverse-broker file transfer in the fixture (#9408)
+- extract daemon-lease reconciliation from JobStore god file
+- Enforce host-scoped Git identity before publication
+- extract run_command action execution from controller actions god file
+
+### Fixed
+- ignore execution-resolved build_artifact in release-set drift guard
+- skip excluded content when detecting nested Git metadata (#9395)
+- fix(agent-task): stage Lab retry handoffs
+- fix(agent-task): reconcile terminal lifecycle provider model from aggregate
+- keep gitignored .homeboy out of the synthetic snapshot baseline (#9399)
+- Fix explicit stale live lease adoption
+- fix(agent-task): persist fanout run-plan batch record for status resolution
+- preserve Cook candidate when post-provider handoff fails (#9377)
+- bind pre-acceptance recovery job from planned execution record (#9382)
+- persist observations outside runtime home
+- preserve reconciled provider model
+- redact visual-compare artifact paths in reviewer-facing output
+- resume gates for applied promotions
+
 ## [0.299.0] - 2026-07-21
 
 ### Changed
