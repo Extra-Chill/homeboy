@@ -41,6 +41,7 @@ pub(super) fn deploy_components(
     base_path: &str,
     release_artifacts: &mut ReleaseArtifactStore,
 ) -> Result<DeployOrchestrationResult> {
+    let mut effective_config = config.clone();
     let loaded = load_project_components(project, &config.component_ids, config.check)?;
     validate_preflighted_component_identities(&loaded.deployable, config)?;
     validate_supported_build_configs(&loaded.deployable)?;
@@ -109,6 +110,13 @@ pub(super) fn deploy_components(
             },
         });
     }
+
+    // This must precede artifact resolution and every source operation below.
+    // Strict project policy failures are therefore unable to trigger a build,
+    // checkout/pull, dependency install, or remote deployment mutation.
+    let deployment_provenance =
+        preflight::guard_deployment_provenance(&project, &components, &mut effective_config)?;
+    let config = &effective_config;
 
     // Remote-path resolution is a pre-mutation guard: it fails closed so a real
     // deploy never writes to an unresolved destination. Read-only modes
@@ -356,6 +364,9 @@ pub(super) fn deploy_components(
         }
         if let Some(prepared_artifact) = config.prepared_artifact.clone() {
             result = result.with_prepared_artifact(prepared_artifact);
+        }
+        if let Some(evidence) = deployment_provenance.get(&component.id) {
+            result = result.with_deployment_provenance(evidence.clone());
         }
 
         // Attach explicit build provenance to every result, regardless of strategy.

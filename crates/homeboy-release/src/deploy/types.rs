@@ -368,6 +368,20 @@ pub struct BuildProvenance {
     pub artifact_identity: Option<ArtifactIdentity>,
 }
 
+/// The proof that satisfied a project deployment provenance policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeploymentProvenanceEvidence {
+    pub policy: String,
+    pub kind: String,
+    pub resolved_sha: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forge: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+}
+
 // DeployReason and ComponentStatus moved DOWN to homeboy-release-contract so
 // core's fleet/project/context status mechanics can reference them without a
 // cycle. Re-exported here so the deploy/release code keeps its paths.
@@ -460,6 +474,9 @@ pub struct ComponentDeployResult {
     /// Identity of an upstream-prepared artifact, when used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prepared_artifact: Option<PreparedDeployArtifact>,
+    /// Project policy proof that authorized this component's source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_provenance: Option<DeploymentProvenanceEvidence>,
 }
 
 impl ComponentDeployResult {
@@ -494,6 +511,7 @@ impl ComponentDeployResult {
             resolution_mode: None,
             build_provenance: None,
             prepared_artifact: None,
+            deployment_provenance: None,
         }
     }
 
@@ -609,6 +627,14 @@ impl ComponentDeployResult {
         self
     }
 
+    pub(super) fn with_deployment_provenance(
+        mut self,
+        evidence: DeploymentProvenanceEvidence,
+    ) -> Self {
+        self.deployment_provenance = Some(evidence);
+        self
+    }
+
     pub(super) fn with_source_identity(mut self, component: &Component, head_deploy: bool) -> Self {
         let path = Path::new(&component.local_path);
         self.local_path = Some(component.local_path.clone());
@@ -676,8 +702,8 @@ fn detect_linked_worktree(path: &Path) -> Option<bool> {
 mod tests {
     use super::{
         compare_deployed_versions, parse_bulk_component_ids, ComponentDeployResult,
-        ComponentStatus, DeployConfig, DeployResult, PreparedDeployArtifact, ReleaseState,
-        ReleaseStateStatus,
+        ComponentStatus, DeployConfig, DeployResult, DeploymentProvenanceEvidence,
+        PreparedDeployArtifact, ReleaseState, ReleaseStateStatus,
     };
     use homeboy_core::component::{Component, ScopedExtensionConfig};
     use homeboy_core::project::Project;
@@ -974,6 +1000,26 @@ mod tests {
         assert_eq!(
             evidence["git_head"],
             "0123456789abcdef0123456789abcdef01234567"
+        );
+    }
+
+    #[test]
+    fn deployment_provenance_evidence_is_persisted_in_serialized_deploy_result() {
+        let result = deploy_result().with_deployment_provenance(DeploymentProvenanceEvidence {
+            policy: "accepted-ref".to_string(),
+            kind: "forge".to_string(),
+            resolved_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            requested_ref: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            forge: Some("github".to_string()),
+            reference: Some("https://github.com/acme/example/pull/42".to_string()),
+        });
+
+        let evidence = serde_json::to_value(result).expect("serialize deploy result");
+        assert_eq!(evidence["deployment_provenance"]["policy"], "accepted-ref");
+        assert_eq!(evidence["deployment_provenance"]["kind"], "forge");
+        assert_eq!(
+            evidence["deployment_provenance"]["reference"],
+            "https://github.com/acme/example/pull/42"
         );
     }
 
