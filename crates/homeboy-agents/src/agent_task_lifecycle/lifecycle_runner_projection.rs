@@ -366,17 +366,28 @@ fn validate_runner_job_snapshot(
     record: &AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
-    // Distinguish "controller identity not yet established" from a genuine
-    // identity mismatch. When the controller has never persisted an accepted
-    // runner job id, `runner_job_id()` is `None` and comparing a valid runner
-    // snapshot UUID against an empty string spuriously rejects it as a mismatch
-    // (issue #9240: "runner snapshot job <uuid> does not match controller job "
-    // — the blank trailing value is the missing-identity signal, not a mismatch).
-    // Callers must bind or propagate the accepted Lab job id before validation;
-    // surface the absence as its own diagnostic so it is fixed at the source
-    // instead of being presented as a runner mismatch and classified as a
-    // non-retryable runner error.
-    let Some(expected_job_id) = record.runner_job_id() else {
+    // Build the canonical run/runner/job identity the controller expects, so
+    // this validator names the same tuple as every other handoff-identity site
+    // (`validate_terminal_child_identity`, `accepted_lab_runner_handoff_identity`,
+    // …). This is a snapshot-scoped check: only the `runner_job_id` field is
+    // compared against the daemon snapshot; the run/runner fields are carried
+    // for diagnostics and mismatch descriptions.
+    let expected = homeboy_core::lab_contract::RunnerJobIdentity::new(
+        record.run_id.as_str(),
+        record.runner_id().unwrap_or_default(),
+        record.runner_job_id().unwrap_or_default(),
+    );
+    // Distinguish "controller job identity not yet established" from a genuine
+    // mismatch. When the controller has never persisted an accepted runner job
+    // id, the job field is empty and comparing a valid runner snapshot UUID
+    // against it would spuriously reject it as a mismatch (issue #9240: "runner
+    // snapshot job <uuid> does not match controller job " — the blank trailing
+    // value is the missing-identity signal, not a mismatch). This is scoped to
+    // the runner-job field alone (matching the pre-migration `runner_job_id()`
+    // guard); callers must bind or propagate the accepted Lab job id before
+    // validation, so the absence is surfaced as its own diagnostic instead of
+    // being presented as a runner mismatch and classified non-retryable.
+    if expected.runner_job_id.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "runner_job_id",
             format!(
@@ -387,15 +398,15 @@ fn validate_runner_job_snapshot(
             Some(record.run_id.clone()),
             None,
         ));
-    };
-    if expected_job_id == snapshot.job.id.to_string() {
+    }
+    if expected.runner_job_id == snapshot.job.id.to_string() {
         return Ok(());
     }
     Err(Error::validation_invalid_argument(
         "runner_job_id",
         format!(
-            "runner snapshot job {} does not match controller job {expected_job_id}",
-            snapshot.job.id
+            "runner snapshot job {} does not match controller job {}",
+            snapshot.job.id, expected.runner_job_id
         ),
         Some(record.run_id.clone()),
         None,
