@@ -731,7 +731,7 @@ fn accepted_handoff_does_not_terminalize_unconfirmed_generation_absence() {
 }
 
 #[test]
-fn preacceptance_snapshot_binds_the_accepted_daemon_job_before_validation() {
+fn preacceptance_snapshot_binds_planned_runner_job_before_validation() {
     with_isolated_home(|_| {
         let run_id = "cook-preacceptance-snapshot";
         let plan = test_plan();
@@ -744,12 +744,9 @@ fn preacceptance_snapshot_binds_the_accepted_daemon_job_before_validation() {
             None,
             Some(&plan),
         )
-        .expect("persist pending controller handoff");
-        assert_eq!(
-            record.lab_handoff.as_ref().expect("pending handoff").state,
-            AgentTaskLabHandoffState::Pending,
-            "the controller must establish typed acceptance authority before a staging snapshot can arrive"
-        );
+        .expect("persist planned controller execution");
+        assert!(record.lab_handoff.is_none());
+        assert_eq!(record.metadata["runner_id"], "homeboy-lab");
         let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
         snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
         snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
@@ -787,7 +784,7 @@ fn preacceptance_snapshot_binds_a_pre_claim_job_without_a_target_runner() {
             None,
             Some(&plan),
         )
-        .expect("persist pending controller handoff");
+        .expect("persist planned controller execution");
         let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
         snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
         snapshot.job.target_runner_id = None;

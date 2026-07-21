@@ -95,7 +95,7 @@ fn lab_cook_child_invocation_consumes_controller_runner_placement() {
 }
 
 #[test]
-fn cook_dispatch_stages_pending_handoff_before_lab_preacceptance() {
+fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
     crate::test_support::with_isolated_home(|_| {
         let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
             "cook-preacceptance-order",
@@ -128,11 +128,12 @@ fn cook_dispatch_stages_pending_handoff_before_lab_preacceptance() {
         assert!(!error.message.is_empty());
         let record = agent_task_lifecycle::status("cook-preacceptance-order")
             .expect("controller record remains inspectable after preacceptance failure");
-        let handoff = record.lab_handoff.expect("pending controller handoff");
-        assert_eq!(handoff.runner_id, "missing-homeboy-lab");
-        let handoff = serde_json::to_value(handoff).expect("serialize typed handoff");
-        assert_eq!(handoff["state"], "pending");
-        assert_eq!(handoff["authority"], "controller");
+        assert!(record.lab_handoff.is_none());
+        assert_eq!(record.metadata["runner_id"], "missing-homeboy-lab");
+        assert_eq!(
+            record.metadata["runner_execution_record"]["status"],
+            "planned"
+        );
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],
             "lab_handoff_preacceptance"
