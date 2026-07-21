@@ -1,9 +1,18 @@
+mod classification;
+mod messages;
+
 use crate::cli_surface::Commands;
 use crate::command_contract::LabCommandPortability;
 use crate::commands::agent_task;
 use crate::runner::runners::LabRunnerReadiness;
 
 use crate::commands::resources::{DoctorOutput, ResourceRecommendation};
+
+use classification::{
+    is_controller_owned_fanout_coordination, is_lab_offloadable_fanout_coordinator,
+    is_local_registry_management, is_plan_only_command, is_read_only_agent_task,
+};
+use messages::{append_local_placement, primary_action, severity_str, warning_message};
 
 // The captured resource-policy context type, its process-wide store, and the
 // runner-placement environment probes moved to `core::resource_policy_context`
@@ -182,14 +191,6 @@ fn runner_selection_context(
     }
 }
 
-fn severity_str(recommendation: ResourceRecommendation) -> &'static str {
-    match recommendation {
-        ResourceRecommendation::Ok => "ok",
-        ResourceRecommendation::Warm => "warm",
-        ResourceRecommendation::Hot => "hot",
-    }
-}
-
 pub fn hot_command(command: &Commands) -> Option<HotCommand> {
     if is_plan_only_command(command)
         || is_controller_owned_fanout_coordination(command)
@@ -270,90 +271,6 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
             Some(HotCommand::local_only(contract.hot_label, Some(reason)))
         }
     }
-}
-
-/// The `cook-batch` fanout coordinator is controller-owned in every mode: it
-/// compiles the plan (default), previews it (`--dry-run`), or runs the batch
-/// coordinator locally (`--run-plan`). In none of these modes may the
-/// coordinator command itself be offloaded to Lab as a single job — the
-/// coordinator owns worktree creation, the durable batch record, and child
-/// dispatch. Only the child cooks it generates are Lab-eligible.
-///
-/// Previously this guard only matched `run_plan: true`, so a default (neither
-/// `--dry-run` nor `--run-plan`) coordinator invocation fell through to being
-/// treated as a portable, offloadable hot command. That allowed the whole
-/// coordinator to be dispatched to Lab, where it timed out before creating its
-/// local batch record/worktrees and stranded the run (#8025).
-fn is_controller_owned_fanout_coordination(command: &Commands) -> bool {
-    matches!(
-        command,
-        Commands::AgentTask(agent_task::AgentTaskArgs {
-            command: agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                command: agent_task::AgentTaskFanoutCommand::CookBatch(_),
-            }),
-        })
-    )
-}
-
-/// The `fanout run-plan` coordinator executes a materialized batch-cook plan:
-/// it owns the durable batch record, worktrees, promotion, gates, and
-/// finalization, but dispatches each independent child provider attempt to a
-/// selected Lab runner (`run_split_placement_fanout`). Unlike `cook-batch`
-/// (which is unconditionally controller-local planning/coordination and is
-/// filtered out earlier so it never refuses), `run-plan` previously fell
-/// through to the generic local-only contract and refused on a warm/hot
-/// controller — stranding a validated batch that a ready Lab runner could
-/// serve (#9375). Recognize it here so its provider attempts can be admitted
-/// under warm-runner coordination.
-fn is_lab_offloadable_fanout_coordinator(command: &Commands) -> bool {
-    matches!(
-        command,
-        Commands::AgentTask(agent_task::AgentTaskArgs {
-            command: agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                command: agent_task::AgentTaskFanoutCommand::RunPlan(_),
-            }),
-        })
-    )
-}
-
-fn is_plan_only_command(command: &Commands) -> bool {
-    matches!(
-        command,
-        Commands::AgentTask(agent_task::AgentTaskArgs {
-            command: agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                command: agent_task::AgentTaskFanoutCommand::CookBatch(
-                    agent_task::AgentTaskFanoutCookBatchArgs { dry_run: true, .. },
-                ),
-            }),
-        })
-    )
-}
-
-fn is_read_only_agent_task(command: &Commands) -> bool {
-    matches!(
-        command,
-        Commands::AgentTask(agent_task::AgentTaskArgs {
-            command: agent_task::AgentTaskCommand::Status(_)
-                | agent_task::AgentTaskCommand::Logs(_)
-                | agent_task::AgentTaskCommand::Artifacts(_)
-                | agent_task::AgentTaskCommand::Review(_),
-        })
-    )
-}
-
-/// Local registry/source-state management (`rig install|update|sync|sources`)
-/// is lightweight controller-local bookkeeping, not a resource-intensive
-/// workload. These commands carry a `LocalOnly` Lab contract only to *explain*
-/// their controller-local boundary when an operator requests unsupported Lab
-/// placement. `hot_command` otherwise converts every command with a Lab
-/// contract — including every explanatory `LocalOnly` one — into a
-/// `HotCommand`, which put rig source management behind warm/hot resource-policy
-/// refusal and forced callers to bypass setup with `--skip-install --skip-sync`
-/// (#9428). Resource policy must gate only genuinely resource-intensive
-/// commands (e.g. `rig up`, `rig check`), so exempt these here while their
-/// portability diagnostics stay intact.
-fn is_local_registry_management(command: &Commands) -> bool {
-    matches!(command, Commands::Rig(args) if args.is_runner_source_management_command())
 }
 
 pub fn evaluate(command: HotCommand, resources: &DoctorOutput) -> Option<ResourcePolicyWarning> {
@@ -477,127 +394,6 @@ pub fn rerun_command(
     rerun.extend(args.iter().skip(1).cloned());
 
     Some(crate::core::engine::shell::quote_args(&rerun))
-}
-
-fn append_local_placement(rerun: &mut Vec<String>, args: &[String]) {
-    if !args
-        .iter()
-        .any(|arg| arg == "--placement" || arg.starts_with("--placement="))
-    {
-        rerun.push("--placement".to_string());
-        rerun.push("local".to_string());
-    }
-}
-
-fn primary_action(warning: &ResourcePolicyWarning, default_runner: Option<&str>) -> String {
-    // A portable command's warning names either a concrete default runner
-    // ("Lab runner `<id>`") or, when none is configured, states Lab offload is
-    // unavailable. Local-only commands say neither. Branch on those facts rather
-    // than inferring Lab availability from placeholder substrings.
-    if let Some(runner_id) = default_runner {
-        if warning.message.contains(&format!("`{runner_id}`")) {
-            return format!(
-                "Homeboy found Lab runner `{runner_id}`; rerun with --runner {runner_id} or let automatic Lab routing handle this portable command."
-            );
-        }
-    }
-    if warning
-        .message
-        .contains("Lab offload is not currently available")
-    {
-        // Portable command, but no Lab runner is configured on this host (#7749):
-        // do not point the operator at nonexistent Lab infrastructure.
-        return "No Homeboy Lab runner is configured on this host, so Lab offload is not available. Defer verification to CI, connect a runner with `homeboy runner connect`, or use the local-hot rerun command only if local execution is explicitly authorized.".to_string();
-    }
-    if warning.message.contains("--runner") {
-        "Pass --runner <id> when Lab offload supports this mode.".to_string()
-    } else {
-        "Lab routing is not offered because this command is currently local-only under resource policy.".to_string()
-    }
-}
-
-fn warning_message(
-    command: HotCommand,
-    recommendation: ResourceRecommendation,
-    resources: &DoctorOutput,
-    lab_readiness: Option<&LabRunnerReadiness>,
-) -> String {
-    let severity = severity_str(recommendation);
-    let reason = primary_reason(resources);
-    if command.lab_offload_supported {
-        if let Some(readiness) = lab_readiness {
-            if let Some(runner_id) = readiness.selected_runner_id.as_deref() {
-                return format!(
-                "Resource policy warning: machine is {severity}; starting `{}` locally may skew results or add pressure. {reason} Homeboy found Lab runner `{runner_id}`; use --runner {runner_id} to route this portable command through Lab offload, or omit local-hot overrides so automatic Lab routing can use it.",
-                command.label
-            );
-            }
-            return format!(
-                "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} Lab runner inventory is {} (available runner IDs: {}). {}",
-                command.label,
-                readiness.state.as_str(),
-                if readiness.available_runner_ids.is_empty() { "none".to_string() } else { readiness.available_runner_ids.join(", ") },
-                readiness.remediation_commands.join("; "),
-            );
-        }
-        return format!(
-            "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} No Homeboy Lab runner is configured on this host, so Lab offload is not currently available; connect a runner (`homeboy runner connect`) to enable it, defer verification to CI, or use --placement local to run locally without this warning.",
-            command.label
-        );
-    }
-
-    let local_only_reason = command.lab_offload_unsupported_reason.unwrap_or(
-        "This resource-pressure command does not have a portable Lab offload contract yet.",
-    );
-    format!(
-        "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} {local_only_reason} Use --placement local to run locally without this warning.",
-        command.label
-    )
-}
-
-fn primary_reason(resources: &DoctorOutput) -> String {
-    if resources.load.recommendation == ResourceRecommendation::Hot
-        || resources.load.recommendation == ResourceRecommendation::Warm
-    {
-        if let Some(one) = resources.load.one {
-            return format!(
-                "Load average is {one:.1} across {} CPU(s).",
-                resources.load.cpu_count
-            );
-        }
-        return "Load average is elevated.".to_string();
-    }
-
-    if let Some(memory) = &resources.memory {
-        if memory.recommendation == ResourceRecommendation::Hot
-            || memory.recommendation == ResourceRecommendation::Warm
-        {
-            return format!(
-                "Memory is {:.1}% used ({} MB available).",
-                memory.used_percent, memory.available_mb
-            );
-        }
-    }
-
-    if resources.processes.recommendation == ResourceRecommendation::Hot
-        || resources.processes.recommendation == ResourceRecommendation::Warm
-    {
-        return format!(
-            "{} relevant Homeboy-adjacent process(es) are already active.",
-            resources.processes.relevant_count
-        );
-    }
-
-    if resources.rig_leases.recommendation == ResourceRecommendation::Hot
-        || resources.rig_leases.recommendation == ResourceRecommendation::Warm
-    {
-        return format!(
-            "{} rig run lease(s) are already active.",
-            resources.rig_leases.active_count
-        );
-    }
-
-    "Run `homeboy self doctor` for details.".to_string()
 }
 
 #[cfg(test)]
