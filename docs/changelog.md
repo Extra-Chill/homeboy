@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.299.2] - 2026-07-21
+
+### Fixed
+- bypass hot policy for source management
+- fix(agent-task): translate Lab run-plan paths
+- align resource admission with the cheap command pressure threshold (#9432)
+- exclude serialized run-plan JSON from remote argv path preflight (#9429)
+- exempt rig source management from resource-policy admission (#9428)
+
 ## [0.299.1] - 2026-07-21
 
 ### Changed
