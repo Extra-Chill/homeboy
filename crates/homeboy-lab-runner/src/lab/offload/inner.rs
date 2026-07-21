@@ -1463,8 +1463,24 @@ pub(crate) fn run_lab_offload_inner(
                 &mut messages,
             );
         }
-        let controller_job_id =
-            crate::lab_staging_controller::submit_detached_staging(run_id, runner_id, &request)?;
+        let controller_job_id = match crate::lab_staging_controller::submit_detached_staging(
+            run_id, runner_id, &request,
+        ) {
+            Ok(controller_job_id) => controller_job_id,
+            Err(error) => {
+                if let Some(durable_plan) = request.durable_agent_task_plan.as_ref() {
+                    let _ = agent_task_lifecycle::record_pre_execution_failure(
+                        run_id,
+                        durable_plan,
+                        "lab_staging_submission",
+                        &error,
+                    );
+                }
+                return Err(
+                    error.with_hint(format!("Retry: homeboy agent-task retry {run_id} --run"))
+                );
+            }
+        };
         let stdout = serde_json::to_string_pretty(&serde_json::json!({
             "success": true,
             "data": {

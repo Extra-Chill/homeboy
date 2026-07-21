@@ -86,6 +86,27 @@ pub(crate) fn hydrate_lab_workspace_dependencies(
     local_path: &str,
     remote_path: &str,
 ) -> Result<LabWorkspaceHydrationOutput> {
+    hydrate_lab_workspace_dependencies_for_run(runner_id, local_path, remote_path, None)
+}
+
+const HYDRATION_RUN_SEGMENT: &str = "-lab-hydration-";
+
+pub(crate) fn hydration_execution_run_id(parent_run_id: &str, index: usize) -> String {
+    format!("{parent_run_id}{HYDRATION_RUN_SEGMENT}{index}")
+}
+
+pub(crate) fn is_hydration_execution_run_id(parent_run_id: &str, candidate: &str) -> bool {
+    candidate
+        .strip_prefix(parent_run_id)
+        .is_some_and(|suffix| suffix.starts_with(HYDRATION_RUN_SEGMENT))
+}
+
+fn hydrate_lab_workspace_dependencies_for_run(
+    runner_id: &str,
+    local_path: &str,
+    remote_path: &str,
+    parent_run_id: Option<&str>,
+) -> Result<LabWorkspaceHydrationOutput> {
     let plan = deps::dependency_install_plan(std::path::Path::new(local_path))?;
     if plan.is_empty() {
         return Ok(LabWorkspaceHydrationOutput::skipped_no_provider(
@@ -94,18 +115,20 @@ pub(crate) fn hydrate_lab_workspace_dependencies(
     }
 
     let mut steps = Vec::new();
-    for plan_step in plan {
+    for (index, plan_step) in plan.into_iter().enumerate() {
         let command = runner_hydration_command(&plan_step.invocation)?;
         let started = std::time::Instant::now();
+        let mut options = RunnerExecOptions::raw_command(command.clone())
+            .with_cwd(remote_path)
+            .without_evidence_mirror();
+        options.run_id = parent_run_id.map(|run_id| hydration_execution_run_id(run_id, index));
         let (output, exit_code) = exec(
             runner_id,
             // The install command is provider-built shell argv, not a
             // Homeboy-routed command, so dispatch it raw exactly as produced.
             // Hydration is a workspace-setup sub-step of the agent-task offload,
             // so do not mirror it as a standalone controller-side run record.
-            RunnerExecOptions::raw_command(command.clone())
-                .with_cwd(remote_path)
-                .without_evidence_mirror(),
+            options,
         )?;
         let step = LabWorkspaceHydrationStep {
             provider_id: plan_step.provider_id.clone(),
@@ -271,12 +294,13 @@ pub(crate) fn hydrate_for_lab_workspace_exec_with_lifecycle(
     plan: HomeboyPlan,
     agent_task_run_id: Option<&str>,
 ) -> Result<RecordedLabDependencyHydration> {
-    let hydration = hydrate_for_lab_workspace_exec(
+    let hydration = hydrate_for_lab_workspace_exec_internal(
         skip_deps_hydration,
         runner_id,
         local_path,
         remote_path,
         plan,
+        agent_task_run_id,
     )?;
     let execution_ids = match &hydration.record {
         LabWorkspaceHydrationRecord::Applied(output) => output
@@ -312,13 +336,32 @@ pub(crate) fn hydrate_for_lab_workspace_exec(
     remote_path: &str,
     plan: HomeboyPlan,
 ) -> Result<LabOffloadDependencyHydration> {
+    hydrate_for_lab_workspace_exec_internal(
+        skip_deps_hydration,
+        runner_id,
+        local_path,
+        remote_path,
+        plan,
+        None,
+    )
+}
+
+fn hydrate_for_lab_workspace_exec_internal(
+    skip_deps_hydration: bool,
+    runner_id: &str,
+    local_path: &str,
+    remote_path: &str,
+    plan: HomeboyPlan,
+    agent_task_run_id: Option<&str>,
+) -> Result<LabOffloadDependencyHydration> {
     let record = if skip_deps_hydration {
         LabWorkspaceHydrationRecord::NotApplied { reason: "opt_out" }
     } else {
-        LabWorkspaceHydrationRecord::Applied(hydrate_lab_workspace_dependencies(
+        LabWorkspaceHydrationRecord::Applied(hydrate_lab_workspace_dependencies_for_run(
             runner_id,
             local_path,
             remote_path,
+            agent_task_run_id,
         )?)
     };
 
@@ -364,6 +407,15 @@ pub(crate) fn dependency_hydration_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hydration_execution_ids_are_parent_scoped_and_discoverable() {
+        let child = hydration_execution_run_id("attempt-1", 2);
+        assert_eq!(child, "attempt-1-lab-hydration-2");
+        assert!(is_hydration_execution_run_id("attempt-1", &child));
+        assert!(!is_hydration_execution_run_id("attempt-2", &child));
+        assert!(!is_hydration_execution_run_id("attempt-1", "attempt-1"));
+    }
 
     /// Holds a temp bin dir containing a fake executable. The runner exec path
     /// uses a curated `PATH` (`local_runner_command_path`), not the process

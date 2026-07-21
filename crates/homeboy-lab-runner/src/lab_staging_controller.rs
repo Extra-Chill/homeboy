@@ -1313,11 +1313,13 @@ trait LabStagingStageOperations: Send + Sync {
         request: &LabStagingExecutionRequest,
         checkpoint: &LabStagingCheckpoint,
         runner_job_id: &str,
+        cancellation: &LabStagingCancellationToken,
     ) -> Result<()>;
     fn recover_admitted_runner_job(
         &self,
         request: &LabStagingExecutionRequest,
     ) -> Result<Option<String>>;
+    fn cancel_active_staging_jobs(&self, request: &LabStagingExecutionRequest) -> Result<usize>;
     fn prove_no_runner_admission(&self, request: &LabStagingExecutionRequest) -> Result<()>;
     fn cancel_and_reconcile_runner_job(
         &self,
@@ -2120,6 +2122,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         request: &LabStagingExecutionRequest,
         checkpoint: &LabStagingCheckpoint,
         runner_job_id: &str,
+        cancellation: &LabStagingCancellationToken,
     ) -> Result<()> {
         let dispatch = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
             DurableLabDispatchReceipt,
@@ -2146,6 +2149,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         ) {
             return receipt.payload.validate(request, checkpoint);
         }
+        Self::check_cancelled(cancellation)?;
         let observed = crate::execution::observe_daemon_job_until_terminal(
             &request.recipe.runner_id,
             runner_job_id,
@@ -2193,6 +2197,45 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             ));
         }
         Ok(Some(runner_job_id))
+    }
+    fn cancel_active_staging_jobs(&self, request: &LabStagingExecutionRequest) -> Result<usize> {
+        let active_jobs = crate::status(&request.recipe.runner_id)?
+            .active_runner_jobs
+            .into_iter()
+            .filter_map(|job| {
+                job.durable_run_id.clone().and_then(|run_id| {
+                    (run_id == request.recipe.run_id
+                        || crate::lab::offload::is_hydration_execution_run_id(
+                            &request.recipe.run_id,
+                            &run_id,
+                        ))
+                    .then_some((job.job_id, run_id))
+                })
+            })
+            .collect::<Vec<_>>();
+        for (job_id, durable_run_id) in &active_jobs {
+            if durable_run_id == &request.recipe.run_id {
+                self.cancel_and_reconcile_runner_job(request, job_id)?;
+                continue;
+            }
+            crate::execution::runner_job_cancel_projection(
+                &request.recipe.runner_id,
+                job_id,
+                durable_run_id,
+            )?;
+            let observed = crate::execution::observe_daemon_job_until_terminal(
+                &request.recipe.runner_id,
+                job_id,
+                None,
+            )?;
+            if observed.job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
+                return Err(Error::internal_unexpected(format!(
+                    "Lab staging child cancellation for runner job `{job_id}` was not authoritative: observed `{}`",
+                    observed.job.status.daemon_status_label(),
+                )));
+            }
+        }
+        Ok(active_jobs.len())
     }
     fn prove_no_runner_admission(&self, request: &LabStagingExecutionRequest) -> Result<()> {
         let status = crate::status(&request.recipe.runner_id)?;
@@ -2322,8 +2365,23 @@ impl StageExecutionAdapter {
                                     "Lab staging observation has no final runner job identity",
                                 )
                             })?;
-                        self.operations
-                            .observe_runner(request, &checkpoint, runner_job_id)?;
+                        loop {
+                            if cancellation.is_cancelled() {
+                                return Err(Self::cancellation_error());
+                            }
+                            match self.operations.observe_runner(
+                                request,
+                                &checkpoint,
+                                runner_job_id,
+                                cancellation,
+                            ) {
+                                Ok(()) => break,
+                                Err(error) if error.retryable == Some(true) => {
+                                    std::thread::sleep(Duration::from_millis(200));
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
                         LabStagingStageEffect::Observe
                     }
                     LabStagingPhase::Completed => return Ok(checkpoint),
@@ -2407,7 +2465,13 @@ impl LabStagingExecutionAdapter for StageExecutionAdapter {
             Some(job_id) => self
                 .operations
                 .cancel_and_reconcile_runner_job(request, &job_id),
-            None => self.operations.prove_no_runner_admission(request),
+            None => {
+                if self.operations.cancel_active_staging_jobs(request)? > 0 {
+                    Ok(())
+                } else {
+                    self.operations.prove_no_runner_admission(request)
+                }
+            }
         }
     }
 }
@@ -2517,11 +2581,9 @@ impl LabStagingDispatchDriver {
         let token = cancellations()
             .lock()
             .expect("Lab staging cancellation lock")
-            .get(&run_id)
-            .cloned()
-            .ok_or_else(|| {
-                Error::internal_unexpected("Lab staging execution has no cancellation ownership")
-            })?;
+            .entry(run_id.clone())
+            .or_default()
+            .clone();
         let _cleanup = CancellationGuard(run_id);
         let result = if resume {
             adapter.resume(&request, checkpoint, token, job.clone())
@@ -2649,11 +2711,9 @@ impl ControllerJobDriver for LabStagingDispatchDriver {
         let token = cancellations()
             .lock()
             .expect("Lab staging cancellation lock")
-            .get(&checkpoint.run_id)
-            .cloned()
-            .ok_or_else(|| {
-                Error::internal_unexpected("Lab staging cancellation has no owned execution token")
-            })?;
+            .entry(checkpoint.run_id.clone())
+            .or_default()
+            .clone();
         let adapter = require_production_adapter()?;
         token.cancel();
         adapter.cancel(&request, &checkpoint)
@@ -2958,6 +3018,8 @@ mod tests {
         fail_hydration: Mutex<bool>,
         cancel_during_hydration: Mutex<bool>,
         recovered_runner_job_id: Mutex<Option<String>>,
+        active_staging_jobs: AtomicUsize,
+        fail_observation: Mutex<bool>,
     }
 
     impl RecordedStageOperations {
@@ -2985,6 +3047,14 @@ mod tests {
                 .recovered_runner_job_id
                 .lock()
                 .expect("runner job lock") = Some(runner_job_id.to_string());
+        }
+
+        fn set_active_staging_jobs(&self, count: usize) {
+            self.active_staging_jobs.store(count, Ordering::SeqCst);
+        }
+
+        fn fail_observation_once(&self) {
+            *self.fail_observation.lock().expect("observation lock") = true;
         }
     }
 
@@ -3087,9 +3157,15 @@ mod tests {
             _request: &LabStagingExecutionRequest,
             _checkpoint: &LabStagingCheckpoint,
             runner_job_id: &str,
+            _cancellation: &LabStagingCancellationToken,
         ) -> Result<()> {
             assert_eq!(runner_job_id, "runner-job-1");
             self.record("observe");
+            if std::mem::take(&mut *self.fail_observation.lock().expect("observation lock")) {
+                let mut error = Error::internal_unexpected("simulated daemon observation outage");
+                error.retryable = Some(true);
+                return Err(error);
+            }
             Ok(())
         }
 
@@ -3108,6 +3184,14 @@ mod tests {
                 .lock()
                 .expect("runner job lock")
                 .clone())
+        }
+
+        fn cancel_active_staging_jobs(
+            &self,
+            _request: &LabStagingExecutionRequest,
+        ) -> Result<usize> {
+            self.record("cancel-active-staging-jobs");
+            Ok(self.active_staging_jobs.swap(0, Ordering::SeqCst))
         }
 
         fn cancel_and_reconcile_runner_job(
@@ -3229,6 +3313,7 @@ mod tests {
             [
                 "validate",
                 "recover-runner-job",
+                "cancel-active-staging-jobs",
                 "prove-no-admission",
                 "validate",
                 "cancel-runner-job"
@@ -3256,6 +3341,29 @@ mod tests {
         assert_eq!(
             operations.calls(),
             ["validate", "recover-runner-job", "cancel-runner-job"]
+        );
+    }
+
+    #[test]
+    fn adapter_cancellation_stops_active_hydration_children() {
+        let operations = Arc::new(RecordedStageOperations::default());
+        operations.set_active_staging_jobs(1);
+        let adapter = StageExecutionAdapter::new(operations.clone());
+
+        adapter
+            .cancel(
+                &execution_request(),
+                &LabStagingCheckpoint::initial(&envelope()),
+            )
+            .expect("cancel active hydration child");
+
+        assert_eq!(
+            operations.calls(),
+            [
+                "validate",
+                "recover-runner-job",
+                "cancel-active-staging-jobs"
+            ]
         );
     }
 
@@ -3292,6 +3400,32 @@ mod tests {
             assert!(persisted[0].stage_intent.is_some());
             assert_eq!(operations.calls(), ["validate", "hydration"]);
         }
+    }
+
+    #[test]
+    fn retryable_observation_outage_keeps_the_original_child_recoverable() {
+        let operations = Arc::new(RecordedStageOperations::default());
+        operations.fail_observation_once();
+        let adapter = StageExecutionAdapter::new(operations.clone());
+        let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+        checkpoint.phase = LabStagingPhase::ObserveRunner;
+        checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
+        checkpoint.workspace_id = Some("workspace-1".to_string());
+        checkpoint.runtime_id = Some("runtime-1".to_string());
+        checkpoint.hydration_id = Some("hydration-1".to_string());
+        checkpoint.final_runner_job_id = Some("runner-job-1".to_string());
+
+        let completed = adapter
+            .execute_with_checkpoint(
+                &execution_request(),
+                checkpoint,
+                &LabStagingCancellationToken::default(),
+                |_| Ok(()),
+            )
+            .expect("retry observation");
+
+        assert_eq!(completed.phase, LabStagingPhase::Completed);
+        assert_eq!(operations.calls(), ["validate", "observe", "observe"]);
     }
 
     #[test]
@@ -3371,11 +3505,10 @@ mod tests {
             checkpoint.runtime_id = Some("runtime-1".to_string());
             checkpoint.hydration_id = Some("hydration-1".to_string());
             checkpoint.final_runner_job_id = Some("runner-job-1".to_string());
-            let token = LabStagingCancellationToken::default();
             cancellations()
                 .lock()
                 .expect("lock")
-                .insert(checkpoint.run_id.clone(), token.clone());
+                .remove(&checkpoint.run_id);
             let cancelled = Arc::new(AtomicUsize::new(0));
             install_production_execution_adapter(Arc::new(CancellationAdapter(Arc::clone(
                 &cancelled,
@@ -3385,7 +3518,12 @@ mod tests {
                 .cancel(&serde_json::to_value(&checkpoint).expect("serialize"))
                 .expect("cancel");
 
-            assert!(token.is_cancelled());
+            assert!(cancellations()
+                .lock()
+                .expect("lock")
+                .get(&checkpoint.run_id)
+                .expect("recreated cancellation token")
+                .is_cancelled());
             assert_eq!(cancelled.load(Ordering::SeqCst), 1);
             *adapter_slot().lock().expect("adapter lock") = None;
             cancellations()
