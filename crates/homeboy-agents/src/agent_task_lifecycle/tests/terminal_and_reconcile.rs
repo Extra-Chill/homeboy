@@ -1522,3 +1522,94 @@ fn post_provider_transport_failure_preserves_the_succeeded_candidate() {
         );
     });
 }
+
+#[test]
+fn status_reconciles_terminal_provider_model_from_aggregate_when_durable_is_null() {
+    with_isolated_home(|_| {
+        let mut plan = test_plan();
+        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.tasks[0].executor.model = None;
+        let mut aggregate = succeeded_aggregate(&plan);
+        // Authoritative: the aggregate outcome recorded the selected model.
+        aggregate.outcomes[0].metadata = json!({ "model": "openai/gpt-5.6-terra" });
+
+        let run_id = "terminal-null-model-9411";
+        let mut record =
+            record_completed_run(&plan, &aggregate, Some(run_id)).expect("terminal record");
+        assert!(record.state.is_terminal());
+
+        // Simulate a record that went terminal BEFORE the #9404/#9405 model
+        // repair: strip the durable model from the task and the lifecycle
+        // provider-runtime projection, then persist that stale terminal state.
+        record.tasks[0].model = None;
+        for runtime in &mut record.lifecycle.provider_runtime {
+            if let Some(object) = runtime.metadata.as_object_mut() {
+                object.insert("model".to_string(), Value::Null);
+                if let Some(executor) = object.get_mut("executor").and_then(Value::as_object_mut) {
+                    executor.insert("model".to_string(), Value::Null);
+                }
+            }
+        }
+        store::write_record(&record).expect("persist stale terminal record");
+
+        // Precondition: durable lifecycle model is null (finalize-pr would reject).
+        let stale = store::read_record(run_id).expect("stale record");
+        assert!(stale.state.is_terminal());
+        assert!(stale
+            .lifecycle
+            .provider_runtime
+            .iter()
+            .all(|runtime| runtime.metadata["model"].is_null()));
+
+        // Read-side reconciliation reprojects the authoritative aggregate model
+        // onto the terminal record and persists it.
+        let reconciled = status(run_id).expect("status reconciles terminal model");
+
+        assert!(reconciled.state.is_terminal(), "terminal state preserved");
+        assert_eq!(
+            reconciled.tasks[0].model.as_deref(),
+            Some("openai/gpt-5.6-terra")
+        );
+        let runtime = reconciled
+            .lifecycle
+            .provider_runtime
+            .first()
+            .expect("provider runtime");
+        assert_eq!(runtime.metadata["model"], "openai/gpt-5.6-terra");
+
+        // Persisted, so finalize-pr's durable read now sees the concrete model.
+        let persisted = store::read_record(run_id).expect("persisted record");
+        assert_eq!(
+            persisted.lifecycle.provider_runtime[0].metadata["model"],
+            "openai/gpt-5.6-terra"
+        );
+    });
+}
+
+#[test]
+fn status_leaves_terminal_record_untouched_when_aggregate_has_no_model() {
+    with_isolated_home(|_| {
+        let mut plan = test_plan();
+        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.tasks[0].executor.model = None;
+        // Aggregate records no model — nothing authoritative to reproject.
+        let aggregate = succeeded_aggregate(&plan);
+
+        let run_id = "terminal-no-model-9411";
+        let record =
+            record_completed_run(&plan, &aggregate, Some(run_id)).expect("terminal record");
+        assert!(record.state.is_terminal());
+
+        let before = store::read_record(run_id).expect("record before");
+        let reconciled = status(run_id).expect("status");
+
+        // No model to reproject: task model stays absent and the run stays terminal.
+        assert!(reconciled.state.is_terminal());
+        assert!(reconciled.tasks[0]
+            .model
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty));
+        assert_eq!(before.tasks[0].model, reconciled.tasks[0].model);
+    });
+}

@@ -687,6 +687,76 @@ pub(crate) fn record_terminal_artifact_projection(
     store::write_record(record)
 }
 
+/// The authoritative model recorded on an aggregate outcome, if any.
+fn aggregate_selected_model(aggregate: &AgentTaskAggregate, task_id: &str) -> Option<String> {
+    aggregate
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.task_id == task_id)
+        .and_then(|outcome| outcome.metadata.get("model"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+}
+
+/// True when a terminal record's durable lifecycle provider model is missing but
+/// the authoritative aggregate outcome recorded a concrete model — the exact
+/// stale-terminal state that blocks `finalize-pr` after the #9404/#9405 repair
+/// (#9411). The nonterminal `status()` path already normalizes this via
+/// `apply_aggregate_to_record`, but a record that went terminal *before* that
+/// repair never gets reprojected on read.
+pub(crate) fn terminal_provider_model_reconciliation_needed(
+    record: &AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+) -> bool {
+    record.tasks.iter().any(|task| {
+        let durable_missing = task
+            .model
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty);
+        durable_missing && aggregate_selected_model(aggregate, &task.task_id).is_some()
+    })
+}
+
+/// Reproject authoritative aggregate model evidence onto a terminal record when
+/// the durable lifecycle model is stale-null (#9411).
+///
+/// Fills only the previously-null provider model — on the run tasks, provider
+/// handles, and the rebuilt lifecycle projection — and persists. Terminal state,
+/// promotion evidence, gates, totals, and artifact projections are preserved:
+/// `set_run_state` re-asserts the existing terminal state and only the
+/// model-bearing lifecycle projection is rebuilt from the record's own tasks.
+pub(crate) fn reconcile_terminal_provider_model(
+    record: &mut AgentTaskRunRecord,
+    plan: &AgentTaskPlan,
+    aggregate: &AgentTaskAggregate,
+) -> Result<()> {
+    let mut changed = false;
+    for task in &mut record.tasks {
+        if task
+            .model
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|model| !model.is_empty())
+        {
+            continue;
+        }
+        if let Some(model) = aggregate_selected_model(aggregate, &task.task_id) {
+            task.model = Some(model);
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    persist_provider_handle_models(&mut record.provider_handles, plan);
+    update_lifecycle_from_record(record, plan);
+    record.updated_at = Some(now_timestamp());
+    store::write_record(record)
+}
+
 /// Recover the runner identity for canonical legacy patch artifacts. Diagnostic
 /// artifacts can share an aggregate without participating in promotion.
 fn runner_id_from_artifact_provenance(aggregate: &AgentTaskAggregate) -> Result<String> {
