@@ -232,11 +232,10 @@ EOF
 
 echo "Setting up WordPress extension..."
 
-# Install PHP dev dependencies (PHPCS, PHPStan, PHPUnit — used for linting
+# Install PHP dev dependencies (PHPCS, PHPStan, PHPUnit - used for linting
 # and the extension's own self-tests, not for running component tests).
 if [ -f "composer.json" ]; then
-    echo "Installing PHP dependencies..."
-    composer install --quiet --no-interaction --prefer-dist
+    bash "${EXTENSION_PATH}/scripts/build/install-composer-dependencies.sh"
 
     if [ -x "vendor/bin/phpcs" ]; then
         echo "Registering PHPCS standards..."
