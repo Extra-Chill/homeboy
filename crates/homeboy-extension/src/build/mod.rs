@@ -561,7 +561,7 @@ fn execute_build_component(
         Vec::new()
     };
 
-    Ok((
+    let result = (
         BuildOutput {
             command: "build.run".to_string(),
             component_id: comp.id.clone(),
@@ -574,7 +574,13 @@ fn execute_build_component(
             success,
         },
         runner_output.exit_code,
-    ))
+    );
+    finish_build_run_dir(&run_dir, success);
+    Ok(result)
+}
+
+fn finish_build_run_dir(run_dir: &RunDir, success: bool) {
+    run_dir.finish(success);
 }
 
 fn build_timeout() -> Duration {
@@ -850,6 +856,24 @@ mod tests {
             build_timeout_from(Some("invalid")),
             Duration::from_secs(30 * 60)
         );
+    }
+
+    #[test]
+    fn build_run_dir_disposes_success_and_failure_explicitly() {
+        let _guard = homeboy_core::test_support::home_env_guard();
+        let root = tempfile::tempdir().expect("runtime root");
+        std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", root.path());
+
+        let success = RunDir::create().expect("success run");
+        let success_path = success.path().to_path_buf();
+        finish_build_run_dir(&success, true);
+        assert!(!success_path.exists());
+
+        let failure = RunDir::create().expect("failure run");
+        let failure_path = failure.path().to_path_buf();
+        finish_build_run_dir(&failure, false);
+        assert!(failure_path.exists());
+        std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
     }
 
     #[test]

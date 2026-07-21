@@ -941,6 +941,24 @@ fn valid_sha256(value: &str) -> bool {
 mod declared_base_tests {
     use super::*;
 
+    #[test]
+    fn promotion_gate_run_dir_disposes_success_and_failure_explicitly() {
+        let _guard = homeboy_core::test_support::home_env_guard();
+        let root = tempfile::tempdir().expect("runtime root");
+        std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", root.path());
+
+        let success = homeboy_core::engine::run_dir::RunDir::create().expect("success run");
+        let success_path = success.path().to_path_buf();
+        finish_promotion_gate_run_dir(&success, true);
+        assert!(!success_path.exists());
+
+        let failure = homeboy_core::engine::run_dir::RunDir::create().expect("failure run");
+        let failure_path = failure.path().to_path_buf();
+        finish_promotion_gate_run_dir(&failure, false);
+        assert!(failure_path.exists());
+        std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
+    }
+
     fn git(path: &Path, args: &[&str]) {
         assert!(Command::new("git")
             .args(args)
@@ -1200,14 +1218,24 @@ fn run_promotion_gate(
         &format!("gate-{index}"),
         1,
     )?;
-    let runtime_tmpdir = match homeboy_core::engine::run_dir::RunDir::create().and_then(|run_dir| {
-        homeboy_core::engine::invocation::InvocationGuard::acquire(
-            &run_dir,
-            &homeboy_core::engine::invocation::InvocationRequirements::default(),
-        )
-    }) {
+    let run_dir = match homeboy_core::engine::run_dir::RunDir::create() {
+        Ok(run_dir) => run_dir,
+        Err(error) => {
+            crate::controller_scratch::release_attempt(
+                &allocation,
+                "verification_runtime_setup_failed",
+                serde_json::json!({ "error": error.message }),
+            )?;
+            return Err(error);
+        }
+    };
+    let runtime_tmpdir = match homeboy_core::engine::invocation::InvocationGuard::acquire(
+        &run_dir,
+        &homeboy_core::engine::invocation::InvocationRequirements::default(),
+    ) {
         Ok(runtime_tmpdir) => runtime_tmpdir,
         Err(error) => {
+            finish_promotion_gate_run_dir(&run_dir, false);
             crate::controller_scratch::release_attempt(
                 &allocation,
                 "verification_runtime_setup_failed",
@@ -1251,7 +1279,15 @@ fn run_promotion_gate(
         Err(_) => "verification_execution_failed",
     };
     crate::controller_scratch::release_attempt(&allocation, reason, evidence)?;
+    finish_promotion_gate_run_dir(
+        &run_dir,
+        matches!(&result, Ok(report) if report.status == AgentTaskGateStatus::Succeeded),
+    );
     result
+}
+
+fn finish_promotion_gate_run_dir(run_dir: &homeboy_core::engine::run_dir::RunDir, success: bool) {
+    run_dir.finish(success);
 }
 
 fn promotion_source(
