@@ -818,7 +818,19 @@ pub(crate) fn exec_lab_context(
     }
 
     if let Some(workspace) = context.materialized_workspace.as_mut() {
-        workspace.set_success(exit_code == 0);
+        // Reap on a clean success only. A provider can exit 0 while its
+        // controller-side candidate projection or handoff still owes follow-up;
+        // reaping then would destroy a preserved candidate's workspace (#9377).
+        // Treat any recorded candidate-preserving follow-up as not-yet-success
+        // so post-mortem/recovery bytes survive on the lab.
+        let owes_candidate_follow_up = context
+            .agent_task_run_id
+            .as_deref()
+            .map(|run_id| {
+                agent_task_lifecycle::run_owes_candidate_follow_up(run_id).unwrap_or(false)
+            })
+            .unwrap_or(false);
+        workspace.set_success(exit_code == 0 && !owes_candidate_follow_up);
     }
     Ok(LabOffloadOutcome::Offloaded {
         plan: context.plan,

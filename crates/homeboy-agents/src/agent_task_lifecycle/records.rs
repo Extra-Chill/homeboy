@@ -260,6 +260,38 @@ impl AgentTaskRunRecord {
         })
     }
 
+    /// Whether this run already carries durable evidence of a *completed*
+    /// provider attempt whose candidate must survive a later transport/handoff
+    /// error. When true, recording a pre-execution failure would overwrite a
+    /// succeeded candidate with a `Failed`, zero-artifact,
+    /// `provider_executions_consumed: 0` terminal record and strand the work
+    /// (#9377).
+    ///
+    /// This deliberately requires *completed-work* evidence, not merely an
+    /// accepted handoff or a claimed runner job id: an accepted job can later be
+    /// confirmed absent/lost with no candidate, and that genuinely-lost case
+    /// must still terminalize (see `terminalize_lost_accepted_runner_job`, which
+    /// only fires when `provider_handles` is empty). The completed-work signals:
+    /// - one or more provider handles (a provider run id was returned), or
+    /// - a successful / recoverable-candidate terminal state (the run produced a
+    ///   candidate), i.e. a terminal state other than a bare `Failed`/`Cancelled`.
+    pub(crate) fn has_recorded_provider_progress(&self) -> bool {
+        !self.provider_handles.is_empty() || self.has_candidate_terminal_state()
+    }
+
+    /// A terminal state that carries a produced candidate (success or a
+    /// recoverable/partial candidate), as opposed to a bare failure/cancellation
+    /// that produced nothing to preserve.
+    fn has_candidate_terminal_state(&self) -> bool {
+        matches!(
+            self.state,
+            AgentTaskRunState::Succeeded
+                | AgentTaskRunState::CandidateRecoverable
+                | AgentTaskRunState::PartialRecoverable
+                | AgentTaskRunState::PartialFailure
+        )
+    }
+
     pub(crate) fn lab_handoff_validation_error(&self) -> Option<&'static str> {
         self.lab_handoff
             .as_ref()

@@ -10,6 +10,19 @@ pub fn record_pre_execution_failure(
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let mut record = store::read_record(&run_id)?;
+
+    // A transport/handoff error that arrives AFTER a provider attempt was
+    // already dispatched (or completed) on a runner is not a pre-execution
+    // failure. Terminalizing it here would overwrite a succeeded candidate with
+    // a `Failed`, zero-artifact, `provider_executions_consumed: 0` record and
+    // strand the work — exactly the loss #9377 describes. Preserve the candidate
+    // and record the follow-up failure as a non-terminal, recoverable marker so
+    // controller reconciliation can adopt the completed candidate without
+    // rerunning the provider.
+    if record.has_recorded_provider_progress() {
+        return record_transport_follow_up_failure(record, phase, error);
+    }
+
     let task_count = plan.tasks.len();
     let failed = task_count;
     let retryable = error.retryable == Some(true);
@@ -81,6 +94,42 @@ pub fn record_pre_execution_failure(
     );
     store::write_record(&failed_record)?;
     Ok(failed_record)
+}
+
+/// Record a post-provider transport/handoff failure without terminalizing a run
+/// that already produced a candidate (#9377). The existing durable record — its
+/// state, aggregate, artifacts, and provider handles — is preserved verbatim;
+/// only a recoverable `transport_follow_up_failure` marker is stamped so
+/// controller reconciliation can adopt the completed candidate rather than
+/// rerunning the provider. The failure stays `retryable` so recovery is
+/// attempted, and never regresses a terminal candidate to `Failed`.
+fn record_transport_follow_up_failure(
+    mut record: AgentTaskRunRecord,
+    phase: &str,
+    error: &Error,
+) -> Result<AgentTaskRunRecord> {
+    let metadata = record.ensure_metadata_object();
+    metadata.insert(
+        "transport_follow_up_failure".to_string(),
+        json!({
+            "schema": super::CANDIDATE_ADOPTION_RECOVERY_SCHEMA,
+            "phase": phase,
+            "reason": "post_provider_transport_failure",
+            "error_code": error.code.as_str(),
+            "message": error.message,
+            "details": error.details.clone(),
+            "hints": error.hints.iter().map(|hint| hint.message.as_str()).collect::<Vec<_>>(),
+            "retryable": true,
+            "candidate_preserved": true,
+            "recorded_at": now_timestamp(),
+        }),
+    );
+    // Preserve the candidate/workspace: a run with recorded provider progress
+    // must not be reaped as a clean success when its follow-up failed.
+    metadata.insert("candidate_preserved".to_string(), json!(true));
+    metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
+    store::write_record(&record)?;
+    Ok(record)
 }
 
 pub(crate) fn build_pre_execution_failure_outcome(

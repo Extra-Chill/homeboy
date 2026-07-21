@@ -1453,3 +1453,72 @@ fn run_status_reports_bridge_envelope_and_cursor_filtered_events() {
         assert_eq!(status.artifact_refs[0].kind, "artifact-bundle");
     });
 }
+
+#[test]
+fn post_provider_transport_failure_preserves_the_succeeded_candidate() {
+    // Reproduces #9377: a Cook attempt completes its provider execution on Lab
+    // (accepted handoff, recorded runner job, succeeded candidate), then a
+    // detached post-provider handoff cannot resolve the controller-only runner
+    // ("runner is not connected to a daemon"). The transport error must NOT be
+    // recorded as a pre-execution failure — doing so would overwrite the
+    // succeeded candidate with a Failed, zero-artifact,
+    // provider_executions_consumed:0 terminal record and strand the work.
+    with_isolated_home(|_| {
+        let run_id = "cook-9377-post-provider-transport";
+        let plan = test_plan();
+
+        // Provider dispatched + succeeded on the runner: accepted handoff with a
+        // recorded runner job and a succeeded aggregate.
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-9377",
+            remote_workspace: "/runner/workspace/wp-build",
+            remote_command: &["agent-task".to_string(), "run-plan".to_string()],
+        })
+        .expect("accepted runner handoff");
+        record_completed_run(&plan, &succeeded_aggregate(&plan), Some(run_id))
+            .expect("succeeded candidate");
+
+        let before = status(run_id).expect("candidate record");
+        assert_eq!(before.state, AgentTaskRunState::Succeeded);
+        assert!(before.has_recorded_provider_progress());
+
+        // The exact failure from the field: post-provider detached handoff
+        // re-resolves the controller-only runner and fails.
+        let transport_error = Error::validation_invalid_argument(
+            "runner",
+            "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` first",
+            Some("homeboy-lab".to_string()),
+            None,
+        );
+        let preserved = record_pre_execution_failure(
+            run_id,
+            &plan,
+            "detached_lab_handoff_preacceptance",
+            &transport_error,
+        )
+        .expect("transport failure recorded without terminalizing the candidate");
+
+        // Candidate preserved: state stays Succeeded, never regressed to Failed,
+        // and the pre-execution failure shape (zero-artifact, consumed:0) is NOT
+        // stamped over it.
+        assert_eq!(preserved.state, AgentTaskRunState::Succeeded);
+        assert!(preserved.metadata.get("pre_execution_failure").is_none());
+        let marker = &preserved.metadata["transport_follow_up_failure"];
+        assert_eq!(marker["reason"], "post_provider_transport_failure");
+        assert_eq!(marker["phase"], "detached_lab_handoff_preacceptance");
+        assert_eq!(marker["candidate_preserved"], true);
+        assert_eq!(marker["retryable"], true);
+        assert_eq!(preserved.metadata["candidate_preserved"], true);
+
+        // The durable record on disk agrees — recovery can adopt this candidate
+        // without rerunning the provider.
+        let reloaded = status(run_id).expect("reloaded candidate");
+        assert_eq!(reloaded.state, AgentTaskRunState::Succeeded);
+        assert_eq!(
+            reloaded.metadata["transport_follow_up_failure"]["reason"],
+            "post_provider_transport_failure"
+        );
+    });
+}
