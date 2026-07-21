@@ -82,6 +82,8 @@ struct InvocationLease {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     invocation_uuid: Option<String>,
     pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    linux_starttime_ticks: Option<u64>,
     started_at: String,
     port_base: Option<u16>,
     port_max: Option<u16>,
@@ -90,6 +92,29 @@ struct InvocationLease {
 }
 
 impl InvocationGuard {
+    fn lease_process_identity_matches(lease: &InvocationLease) -> bool {
+        if !crate::process::pid_is_running(lease.pid) {
+            return false;
+        }
+        match lease.linux_starttime_ticks {
+            Some(expected) => crate::process::linux_process_starttime_ticks(lease.pid)
+                .ok()
+                .flatten()
+                .is_some_and(|actual| actual == expected),
+            None => !cfg!(target_os = "linux"),
+        }
+    }
+
+    pub(crate) fn lease_is_active(invocation_id: &str) -> bool {
+        let Ok(path) = lease_path(invocation_id) else {
+            return false;
+        };
+        let Ok(Some(lease)) = decode_lease_file(&path) else {
+            return false;
+        };
+        lease.invocation_id == invocation_id && Self::lease_process_identity_matches(&lease)
+    }
+
     /// Acquire an isolated invocation environment.
     ///
     /// `run_dir` is retained for API compatibility and pipeline context,
@@ -136,53 +161,54 @@ impl InvocationGuard {
                 .map_err(|e| errors::invocation_dir_create_error(dir, &runtime_root, e))?;
         }
 
-        let needs_lease =
-            requirements.port_range_size.is_some() || !requirements.named_leases.is_empty();
         let mut port_base = None;
         let mut port_max = None;
-        let mut lease_id = None;
+        let _lock = InvocationIndexLock::acquire()?;
+        fs::create_dir_all(invocation_leases_dir()?).map_err(|e| {
+            Error::internal_unexpected(format!(
+                "Failed to create invocation lease directory: {}",
+                e
+            ))
+        })?;
+        let live_leases = refresh_lease_index()?;
+        validate_named_leases(&id, &requirements.named_leases)?;
 
-        if needs_lease {
-            let _lock = InvocationIndexLock::acquire()?;
-            fs::create_dir_all(invocation_leases_dir()?).map_err(|e| {
-                Error::internal_unexpected(format!(
-                    "Failed to create invocation lease directory: {}",
-                    e
-                ))
-            })?;
-            let live_leases = refresh_lease_index()?;
-            validate_named_leases(&id, &requirements.named_leases)?;
+        if let Some(size) = requirements.port_range_size {
+            let (base, max) = allocate_port_range(size, &live_leases)?;
+            port_base = Some(base);
+            port_max = Some(max);
+        }
 
-            if let Some(size) = requirements.port_range_size {
-                let (base, max) = allocate_port_range(size, &live_leases)?;
-                port_base = Some(base);
-                port_max = Some(max);
-            }
-
-            let lease = InvocationLease {
-                invocation_id: id.clone(),
-                invocation_uuid: Some(uuid.to_string()),
-                pid: std::process::id(),
-                started_at: chrono::Utc::now().to_rfc3339(),
-                port_base,
-                port_max,
-                named_leases: requirements.named_leases.clone(),
-            };
-            write_lease(&lease)?;
-            lease_id = Some(id.clone());
+        let lease = InvocationLease {
+            invocation_id: id.clone(),
+            invocation_uuid: Some(uuid.to_string()),
+            pid: std::process::id(),
+            linux_starttime_ticks:
+                crate::process::linux_process_starttime_ticks(std::process::id())
+                    .ok()
+                    .flatten(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            port_base,
+            port_max,
+            named_leases: requirements.named_leases.clone(),
+        };
+        write_lease(&lease)?;
+        if let Err(error) = run_dir.bind_invocation(&id) {
+            let _ = fs::remove_file(lease_path(&id)?);
+            return Err(error);
         }
 
         let cleanup_paths = [state_dir.clone(), artifact_dir.clone(), tmp_dir.clone()];
         Ok(Self {
             env: InvocationEnv {
-                id,
+                id: id.clone(),
                 state_dir,
                 artifact_dir,
                 tmp_dir,
                 port_base,
                 port_max,
             },
-            lease_id,
+            lease_id: Some(id),
             named_leases: requirements.named_leases.clone(),
             cleanup_paths,
         })
@@ -302,7 +328,7 @@ impl Drop for InvocationGuard {
         let Ok(Some(lease)) = decode_lease_file(&path) else {
             return;
         };
-        if lease.pid == std::process::id() {
+        if lease.pid == std::process::id() && Self::lease_process_identity_matches(&lease) {
             let _ = fs::remove_file(path);
         }
     }
@@ -385,7 +411,7 @@ fn refresh_lease_index() -> Result<Vec<InvocationLease>> {
         let Some(lease) = decode_lease_file(&path)? else {
             continue;
         };
-        if crate::process::pid_is_running(lease.pid) {
+        if InvocationGuard::lease_process_identity_matches(&lease) {
             live.push(lease);
         } else {
             remove_stale_invocation_lease(&path)?;

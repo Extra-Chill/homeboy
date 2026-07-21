@@ -60,6 +60,9 @@ pub struct SelfCleanupRuntimeTmpArgs {
     /// Maximum failed runtime run directories retained.
     #[arg(long, default_value_t = 100)]
     pub run_max_count: usize,
+    /// Continue bounded runtime-run inspection from a prior next_cursor.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
@@ -125,6 +128,7 @@ pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
                     limit: args.limit,
                     run_max_bytes: args.run_max_bytes,
                     run_max_count: args.run_max_count,
+                    cursor: args.cursor.as_deref(),
                 },
             )?;
             let json = serde_json::to_value(output)

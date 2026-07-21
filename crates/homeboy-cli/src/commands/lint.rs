@@ -189,6 +189,12 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             Some(runner.run_dir()),
         );
         let active_observation = ActiveObservation::start_best_effort(observation.start_record());
+        let run_id = active_observation
+            .as_ref()
+            .map(|observation| observation.run_id().to_string());
+        if let Some(run_id) = run_id.as_deref() {
+            runner.bind_run_id(run_id)?;
+        }
         let workflow = run_self_check_lint_workflow_with_progress(
             &source_ctx.component,
             &source_ctx.source_path,
@@ -197,12 +203,13 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             Some(runner.run_dir()),
             active_observation.as_ref(),
         );
-        let run_id = active_observation
+        let scratch_succeeded = workflow
             .as_ref()
-            .map(|observation| observation.run_id().to_string());
-        let workflow = runner.finish(
+            .is_ok_and(|workflow| workflow.exit_code == 0);
+        let workflow = runner.finish_with_scratch_outcome(
             active_observation,
             workflow,
+            scratch_succeeded,
             |active, workflow| finish_lint_observation(active, &observation, workflow),
             |active, error| finish_lint_observation_error(active, &observation, error),
         )?;
@@ -243,6 +250,9 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
     let run_id = active_observation
         .as_ref()
         .map(|observation| observation.run_id().to_string());
+    if let Some(run_id) = run_id.as_deref() {
+        runner.bind_run_id(run_id)?;
+    }
     let workflow = run_main_lint_workflow(
         &ctx.component,
         &ctx.source_path,
@@ -269,9 +279,13 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         },
         runner.run_dir(),
     );
-    let workflow = runner.finish(
+    let scratch_succeeded = workflow
+        .as_ref()
+        .is_ok_and(|workflow| workflow.exit_code == 0);
+    let workflow = runner.finish_with_scratch_outcome(
         active_observation,
         workflow,
+        scratch_succeeded,
         |active, workflow| finish_lint_observation(active, &observation, workflow),
         |active, error| finish_lint_observation_error(active, &observation, error),
     )?;

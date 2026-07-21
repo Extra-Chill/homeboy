@@ -154,6 +154,12 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             "self-check",
             Some(runner.run_dir()),
         );
+        let run_id = observation
+            .as_ref()
+            .map(|observation| observation.run_id().to_string());
+        if let Some(run_id) = run_id.as_deref() {
+            runner.bind_run_id(run_id)?;
+        }
         let workflow = run_self_check_test_workflow_with_progress(
             &source_ctx.component,
             &source_ctx.source_path,
@@ -163,12 +169,13 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             observation.as_ref().map(|observation| &observation.active),
         );
 
-        let run_id = observation
+        let scratch_succeeded = workflow
             .as_ref()
-            .map(|observation| observation.run_id().to_string());
-        let workflow = runner.finish(
+            .is_ok_and(|workflow| workflow.exit_code == 0);
+        let workflow = runner.finish_with_scratch_outcome(
             observation,
             workflow,
+            scratch_succeeded,
             |observation, workflow| finish_test_observation(Some(observation), workflow),
             |observation, error| finish_test_observation_error(Some(observation), error),
         )?;
@@ -220,6 +227,12 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         "test",
         Some(runner.run_dir()),
     );
+    let run_id = observation
+        .as_ref()
+        .map(|observation| observation.run_id().to_string());
+    if let Some(run_id) = run_id.as_deref() {
+        runner.bind_run_id(run_id)?;
+    }
     let mut passthrough_args = ci_job_passthrough_args(ci_job.as_ref());
     passthrough_args.extend(cli_passthrough_args);
     let workflow = extension_test::run_main_test_workflow(
@@ -249,12 +262,13 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         },
         runner.run_dir(),
     );
-    let run_id = observation
+    let scratch_succeeded = workflow
         .as_ref()
-        .map(|observation| observation.run_id().to_string());
-    let workflow = runner.finish(
+        .is_ok_and(|workflow| workflow.exit_code == 0);
+    let workflow = runner.finish_with_scratch_outcome(
         observation,
         workflow,
+        scratch_succeeded,
         |observation, workflow| finish_test_observation(Some(observation), workflow),
         |observation, error| finish_test_observation_error(Some(observation), error),
     )?;
