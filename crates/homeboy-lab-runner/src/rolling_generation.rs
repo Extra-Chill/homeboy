@@ -26,6 +26,10 @@ pub struct RollingGenerations<E> {
 pub struct RollingGeneration<E> {
     pub endpoint: E,
     pub active_jobs: usize,
+    /// The most recent count returned by this generation's daemon. `None`
+    /// means the latest reconciliation could not verify the endpoint.
+    #[serde(default)]
+    pub observed_active_jobs: Option<usize>,
     pub drain_state: RollingDrainState,
 }
 
@@ -61,6 +65,7 @@ impl<E> RollingGenerations<E> {
                 RollingGeneration {
                     endpoint,
                     active_jobs: 0,
+                    observed_active_jobs: None,
                     drain_state: RollingDrainState::Admitting,
                 },
             )]),
@@ -83,6 +88,7 @@ impl<E> RollingGenerations<E> {
             RollingGeneration {
                 endpoint,
                 active_jobs: 0,
+                observed_active_jobs: None,
                 drain_state: RollingDrainState::Draining,
             },
         );
