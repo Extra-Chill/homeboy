@@ -1886,7 +1886,23 @@ fn dispatch_claimed_controller_job(
         let _ = start_rx.recv();
         let job = job_store.handle(job_id);
         if job.is_cancelled() {
-            persist_controller_cancellation(&job);
+            if recovery {
+                let checkpoint = state
+                    .checkpoint
+                    .as_ref()
+                    .expect("claimed recovery has checkpoint");
+                match driver.cancel(checkpoint) {
+                    Ok(()) => persist_controller_cancellation(&job),
+                    Err(error) => {
+                        let public = driver.public_error(&error);
+                        persist_controller_cancellation_failure(&job, public.message, public.data);
+                    }
+                }
+            } else {
+                // A fresh job cancelled before prepare has admitted no driver
+                // side effect, so durable cancellation is already sufficient.
+                persist_controller_cancellation(&job);
+            }
             controller_job_runtimes()
                 .lock()
                 .expect("controller runtimes lock")

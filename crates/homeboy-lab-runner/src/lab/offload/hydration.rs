@@ -101,6 +101,21 @@ pub(crate) fn is_hydration_execution_run_id(parent_run_id: &str, candidate: &str
         .is_some_and(|suffix| suffix.starts_with(HYDRATION_RUN_SEGMENT))
 }
 
+fn hydration_runner_exec_options(
+    command: Vec<String>,
+    remote_path: &str,
+    parent_run_id: Option<&str>,
+    index: usize,
+) -> RunnerExecOptions {
+    let mut options = RunnerExecOptions::raw_command(command)
+        .with_cwd(remote_path)
+        .without_evidence_mirror();
+    options.run_id = parent_run_id.map(|run_id| hydration_execution_run_id(run_id, index));
+    // Hydration children are generic runner executions, not agent-task handoffs.
+    options.run_id_owns_generic_exec = options.run_id.is_some();
+    options
+}
+
 fn hydrate_lab_workspace_dependencies_for_run(
     runner_id: &str,
     local_path: &str,
@@ -118,10 +133,8 @@ fn hydrate_lab_workspace_dependencies_for_run(
     for (index, plan_step) in plan.into_iter().enumerate() {
         let command = runner_hydration_command(&plan_step.invocation)?;
         let started = std::time::Instant::now();
-        let mut options = RunnerExecOptions::raw_command(command.clone())
-            .with_cwd(remote_path)
-            .without_evidence_mirror();
-        options.run_id = parent_run_id.map(|run_id| hydration_execution_run_id(run_id, index));
+        let options =
+            hydration_runner_exec_options(command.clone(), remote_path, parent_run_id, index);
         let (output, exit_code) = exec(
             runner_id,
             // The install command is provider-built shell argv, not a
@@ -415,6 +428,28 @@ mod tests {
         assert!(is_hydration_execution_run_id("attempt-1", &child));
         assert!(!is_hydration_execution_run_id("attempt-2", &child));
         assert!(!is_hydration_execution_run_id("attempt-1", "attempt-1"));
+    }
+
+    #[test]
+    fn hydration_execution_ids_own_generic_runner_exec_lifecycles() {
+        let options = hydration_runner_exec_options(
+            vec!["fixture-tool".to_string(), "install".to_string()],
+            "/runner/workspace",
+            Some("attempt-1"),
+            2,
+        );
+
+        assert_eq!(options.run_id.as_deref(), Some("attempt-1-lab-hydration-2"));
+        assert!(options.run_id_owns_generic_exec);
+        assert!(
+            !hydration_runner_exec_options(
+                vec!["fixture-tool".to_string()],
+                "/runner/workspace",
+                None,
+                0,
+            )
+            .run_id_owns_generic_exec
+        );
     }
 
     /// Holds a temp bin dir containing a fake executable. The runner exec path

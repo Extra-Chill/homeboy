@@ -418,9 +418,10 @@ fn post_controller_job_with_retries(
         }
     }
     Err(Error::internal_unexpected(format!(
-        "{operation} did not receive a valid response after {CONTROLLER_SUBMISSION_ATTEMPTS} idempotent attempts; reconcile controller jobs for this run before retrying: {}",
+        "{operation} did not receive a valid response after {CONTROLLER_SUBMISSION_ATTEMPTS} idempotent attempts; the durable request may have been accepted, so retry this same run identity to reconcile it: {}",
         last_failure.unwrap_or_else(|| "unknown transport failure".to_string())
-    )))
+    ))
+    .with_retryable(true))
 }
 
 fn controller_job_from_response(value: &Value, status: u16) -> Result<homeboy_core::api_jobs::Job> {
@@ -2468,6 +2469,12 @@ impl LabStagingExecutionAdapter for StageExecutionAdapter {
             None => {
                 if self.operations.cancel_active_staging_jobs(request)? > 0 {
                     Ok(())
+                } else if checkpoint.phase == LabStagingPhase::DispatchRunner
+                    && checkpoint.stage_intent.is_some()
+                {
+                    Err(Error::internal_unexpected(
+                        "Lab staging cancellation cannot prove that an in-flight dispatch was not accepted; keep the lifecycle uncertain until its immutable run identity is reconciled",
+                    ))
                 } else {
                     self.operations.prove_no_runner_admission(request)
                 }
@@ -2979,6 +2986,36 @@ mod tests {
     }
 
     #[test]
+    fn controller_submission_exhaustion_reports_uncertain_retryable_acceptance() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let endpoint = format!("http://{}", listener.local_addr().expect("address"));
+        let server = std::thread::spawn(move || {
+            for _ in 0..CONTROLLER_SUBMISSION_ATTEMPTS {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let _ = read_http_request(&mut stream);
+            }
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("client");
+
+        let error = post_controller_job_with_retries(
+            &client,
+            format!("{endpoint}/controller/jobs"),
+            Some(json!({ "idempotency_key": "attempt-1" })),
+            "create test controller job",
+        )
+        .expect_err("all accepted responses are lost");
+        server.join().expect("server");
+
+        assert_eq!(error.retryable, Some(true));
+        assert!(error.message.contains("may have been accepted"));
+        assert!(error.message.contains("same run identity"));
+    }
+
+    #[test]
     fn progress_and_result_projections_are_safe() {
         let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
         checkpoint.phase = LabStagingPhase::Completed;
@@ -3341,6 +3378,34 @@ mod tests {
         assert_eq!(
             operations.calls(),
             ["validate", "recover-runner-job", "cancel-runner-job"]
+        );
+    }
+
+    #[test]
+    fn adapter_cancellation_fails_uncertain_for_unreconciled_dispatch_intent() {
+        let operations = Arc::new(RecordedStageOperations::default());
+        let adapter = StageExecutionAdapter::new(operations.clone());
+        let request = execution_request();
+        let mut dispatching = LabStagingCheckpoint::initial(&envelope());
+        dispatching.phase = LabStagingPhase::DispatchRunner;
+        dispatching.source_snapshot_id = Some("snapshot-1".to_string());
+        dispatching.workspace_id = Some("workspace-1".to_string());
+        dispatching.runtime_id = Some("runtime-1".to_string());
+        dispatching.hydration_id = Some("hydration-1".to_string());
+        dispatching.stage_intent = Some(dispatching.intent_for_current_action());
+
+        let error = adapter
+            .cancel(&request, &dispatching)
+            .expect_err("an in-flight dispatch without a child identity is uncertain");
+
+        assert!(error.message.contains("cannot prove"));
+        assert_eq!(
+            operations.calls(),
+            [
+                "validate",
+                "recover-runner-job",
+                "cancel-active-staging-jobs"
+            ]
         );
     }
 

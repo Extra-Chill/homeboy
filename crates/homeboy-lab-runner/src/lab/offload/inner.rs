@@ -1468,13 +1468,18 @@ pub(crate) fn run_lab_offload_inner(
         ) {
             Ok(controller_job_id) => controller_job_id,
             Err(error) => {
-                if let Some(durable_plan) = request.durable_agent_task_plan.as_ref() {
-                    let _ = agent_task_lifecycle::record_pre_execution_failure(
-                        run_id,
-                        durable_plan,
-                        "lab_staging_submission",
-                        &error,
-                    );
+                // A retryable transport failure can follow durable acceptance.
+                // Keep the parent nonterminal so replay can reconcile the same
+                // controller idempotency key instead of contradicting live work.
+                if error.retryable != Some(true) {
+                    if let Some(durable_plan) = request.durable_agent_task_plan.as_ref() {
+                        let _ = agent_task_lifecycle::record_pre_execution_failure(
+                            run_id,
+                            durable_plan,
+                            "lab_staging_submission",
+                            &error,
+                        );
+                    }
                 }
                 return Err(
                     error.with_hint(format!("Retry: homeboy agent-task retry {run_id} --run"))
