@@ -106,12 +106,24 @@ pub(crate) fn run_cook_with_executor_and_dispatcher<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    if !args.gates.has_deterministic_gate() {
+    // Deterministic gates exist to make *publication* safe: a green gate is the
+    // proof a cook may commit, push, and open a PR. A `--no-finalize` cook does
+    // none of those, so a gate is not meaningful there — read-only/exploratory
+    // cooks legitimately have nothing to verify. The promotion lifecycle already
+    // treats an empty gate set as a vacuously-green run
+    // (`run_promotion_gates` -> `PromotionGateRun::without_gates`), so relaxing
+    // the requirement here is safe end to end (#7608). Finalizing cooks still
+    // require a gate, but now say so with a copy-pasteable example instead of a
+    // bare rejection.
+    if !args.gates.has_deterministic_gate() && !args.no_finalize {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "verify",
-            "agent-task cook requires at least one deterministic --verify or --private-verify gate",
+            "agent-task cook requires at least one deterministic --verify or --private-verify gate before it can commit, push, and open a PR",
             None,
-            None,
+            Some(vec![
+                "Provide a gate, e.g. --verify \"cargo test\" (or --private-verify for a secret gate).".to_string(),
+                "For a read-only or exploratory cook with nothing to verify, pass --no-finalize (skips commit, push, and PR); a no-op gate like --verify true also works.".to_string(),
+            ]),
         ));
     }
     if args.dispatch.core.queue_only {

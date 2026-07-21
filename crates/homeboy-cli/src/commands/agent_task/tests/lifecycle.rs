@@ -1594,3 +1594,107 @@ fn run_plan_rejects_component_worktree_without_branch() {
         assert!(message.contains("requires branch"));
     });
 }
+
+/// Build cook args toggling whether a `--verify` gate and `--no-finalize` are
+/// present, so the gate-requirement validation (#7608) can be exercised both
+/// ways. The run id is fixed; callers rely only on the early gate check.
+fn gate_requirement_cook_args(
+    source: &std::path::Path,
+    with_verify: bool,
+    no_finalize: bool,
+) -> AgentTaskCookArgs {
+    let mut args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--prompt".to_string(),
+        "read-only exploration".to_string(),
+        "--cwd".to_string(),
+        source.display().to_string(),
+        "--to-worktree".to_string(),
+        source.display().to_string(),
+        "--backend".to_string(),
+        "fixture".to_string(),
+        "--run-id".to_string(),
+        "cook-gate-requirement".to_string(),
+    ];
+    if with_verify {
+        args.push("--verify".to_string());
+        args.push("true".to_string());
+    }
+    if no_finalize {
+        args.push("--no-finalize".to_string());
+    }
+    let cli = Cli::parse_from(args);
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("agent-task command");
+    };
+    let AgentTaskCommand::Cook(cook) = agent_task.command else {
+        panic!("cook command");
+    };
+    cook
+}
+
+#[test]
+fn cook_without_gate_but_with_no_finalize_passes_the_gate_requirement() {
+    // #7608: a read-only / exploratory `--no-finalize` cook has nothing to
+    // publish, so it must not be rejected for lacking a deterministic gate.
+    // It should get past the gate-requirement check; whatever it fails on
+    // afterwards, it must NOT be the "requires ... --verify" rejection.
+    with_temp_home(|| {
+        let source = tempfile::tempdir().expect("source checkout");
+        init_runtime_component_checkout(source.path());
+
+        let result = run_cook_with_executor(
+            gate_requirement_cook_args(source.path(), false, true),
+            CapturingExecutor::default(),
+        );
+
+        if let Err(error) = result {
+            assert!(
+                !error.message.contains("deterministic") && !error.message.contains("--verify"),
+                "a --no-finalize cook must not be rejected for a missing gate, got: {}",
+                error.message
+            );
+        }
+    });
+}
+
+#[test]
+fn cook_without_gate_and_finalizing_reports_actionable_gate_error() {
+    // #7608: a finalizing cook (no --no-finalize) still requires a gate, but
+    // the rejection must be actionable — naming the flag and giving
+    // copy-pasteable next steps rather than a bare validation stub.
+    with_temp_home(|| {
+        let source = tempfile::tempdir().expect("source checkout");
+        init_runtime_component_checkout(source.path());
+
+        let error = run_cook_with_executor(
+            gate_requirement_cook_args(source.path(), false, false),
+            CapturingExecutor::default(),
+        )
+        .expect_err("finalizing cook without a gate is rejected");
+
+        assert_eq!(error.details["field"], "verify");
+        assert!(
+            error.message.contains("--verify") || error.message.contains("--private-verify"),
+            "error should name the verify flag: {}",
+            error.message
+        );
+        let hints = error.details["tried"]
+            .as_array()
+            .expect("actionable remediation hints");
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.as_str().is_some_and(|hint| hint.contains("--verify"))),
+            "a hint must give a copy-pasteable --verify example: {hints:?}"
+        );
+        assert!(
+            hints.iter().any(|hint| hint
+                .as_str()
+                .is_some_and(|hint| hint.contains("--no-finalize"))),
+            "a hint must point read-only cooks at --no-finalize: {hints:?}"
+        );
+    });
+}
