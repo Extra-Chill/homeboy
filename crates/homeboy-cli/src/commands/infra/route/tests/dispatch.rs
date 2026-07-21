@@ -1012,6 +1012,17 @@ fn controller_owned_run_materializes_plan_for_lab_execution() {
         let handoff = materialize_agent_task_run_handoff(&cli, &args)
             .expect("materialize run handoff")
             .expect("controller-owned handoff");
+        let routed_contract = lab_offload_command_for_materialized_args(&handoff.args)
+            .expect("resolve materialized route contract")
+            .expect("materialized run-plan remains Lab portable");
+        assert_eq!(
+            routed_contract.source_path_mode,
+            homeboy::core::lab_contract::LabSourcePathMode::CwdOrPathFlag
+        );
+        assert_eq!(
+            routed_contract.workspace_mode_policy,
+            homeboy::core::lab_contract::LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot
+        );
         let remote_cli = Cli::try_parse_from(&handoff.args).expect("portable run-plan argv");
         let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
             command: crate::commands::agent_task::AgentTaskCommand::RunPlan(remote),

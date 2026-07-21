@@ -144,6 +144,14 @@ pub fn route_after_parse(
                 .map(|handoff| handoff.args.as_slice())
         })
         .unwrap_or(normalized_args);
+    // A controller-owned `run` becomes a portable `run-plan`. Route according
+    // to that materialized command so Lab stages its workspace and rewrites the
+    // structured plan instead of taking the original runner-resident path.
+    let lab_command = if run_handoff.is_some() {
+        lab_offload_command_for_materialized_args(normalized_args)?
+    } else {
+        lab_command
+    };
     let cook_plan = if lab_command.is_some() && inferred_runner_id.is_some() {
         materialize_agent_task_cook_plan(cli)?
     } else {
@@ -1627,6 +1635,20 @@ fn lab_offload_command(
     Ok(Some(lab_routing::lab_offload_command_from_route_contract(
         route_contract,
     )))
+}
+
+fn lab_offload_command_for_materialized_args(
+    args: &[String],
+) -> homeboy::core::Result<Option<runners::LabOffloadCommand>> {
+    let cli = Cli::try_parse_from(args).map_err(|error| {
+        Error::validation_invalid_argument(
+            "agent-task run",
+            format!("build materialized Lab run-plan: {error}"),
+            None,
+            None,
+        )
+    })?;
+    lab_offload_command(&cli.command)
 }
 
 fn destructive_fuzz_requires_lab(command: &Commands) -> bool {
