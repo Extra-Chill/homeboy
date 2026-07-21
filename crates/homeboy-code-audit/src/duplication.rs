@@ -463,6 +463,7 @@ fn count_body_lines(fp: &FileFingerprint, method_name: &str) -> usize {
 pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     let structural_groups = build_structural_groups(fingerprints);
     let exact_groups = build_groups(fingerprints);
+    let inline_test_methods = inline_test_context_methods(fingerprints);
 
     // Collect exact-duplicate (name, hash) pairs for exclusion
     let exact_duplicate_names: std::collections::HashSet<String> = exact_groups
@@ -481,6 +482,17 @@ pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<F
 
         // Skip if already an exact duplicate
         if exact_duplicate_names.contains(method_name) {
+            continue;
+        }
+
+        // Skip test scaffolding: when every location is test code (a whole test
+        // file or a method inside an inline `#[cfg(test)]` block), structural
+        // similarity across per-module fixtures (`make_fp`, `git_repo`, …) is
+        // expected and not an actionable production near-duplicate.
+        if file_hashes
+            .iter()
+            .all(|(file, _)| is_test_location(method_name, file, &inline_test_methods))
+        {
             continue;
         }
 
