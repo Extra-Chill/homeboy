@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::agent_task_review_dossier::{AgentTaskPublicContract, AgentTaskPublicContractEvidence};
 use homeboy_core::git::GitIdentityProof;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,6 +135,10 @@ pub struct AgentTaskPrEvidence {
         skip_serializing_if = "AgentTaskPrRuntimeGuardrails::is_empty"
     )]
     pub runtime_guardrails: AgentTaskPrRuntimeGuardrails,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_public_contracts: Vec<AgentTaskPublicContract>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_contract_evidence: Option<AgentTaskPublicContractEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<RunLifecycleRecord>,
 }

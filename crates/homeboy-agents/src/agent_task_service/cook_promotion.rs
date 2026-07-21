@@ -587,6 +587,8 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
                     manual_reviewer_check: None,
                 },
                 runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
+                changed_public_contracts: Vec::new(),
+                public_contract_evidence: None,
                 lifecycle: crate::agent_task_lifecycle::status(successful_run_id)
                     .ok()
                     .map(|record| record.lifecycle),
@@ -689,6 +691,8 @@ fn cook_review_dossier(
                 url: None,
             },
         ],
+        changed_public_contracts: Vec::new(),
+        public_contract_evidence: None,
         ai_assistance: AgentTaskReviewAiAssistance {
             used: true,
             tool: options.ai_tool.clone(),

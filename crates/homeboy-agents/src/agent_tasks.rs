@@ -227,11 +227,12 @@ pub mod finalization {
 pub mod review_dossier {
     pub use super::super::agent_task_review_dossier::{
         default_profile, enrich_dossier, render_review_dossier, resolve_review_profile,
-        validate_profile, AgentTaskReviewAdditionalSection, AgentTaskReviewAiAssistance,
-        AgentTaskReviewDossier, AgentTaskReviewEvidence, AgentTaskReviewIssueRelationship,
-        AgentTaskReviewIssueRelationshipKind, AgentTaskReviewOverride,
-        AgentTaskReviewOverrideTarget, AgentTaskReviewProfile, AgentTaskReviewSectionId,
-        AgentTaskReviewTestStep, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
+        validate_profile, AgentTaskExternalUsageEvidence, AgentTaskExternalUsageStatus,
+        AgentTaskPublicContract, AgentTaskPublicContractEvidence, AgentTaskReviewAdditionalSection,
+        AgentTaskReviewAiAssistance, AgentTaskReviewDossier, AgentTaskReviewEvidence,
+        AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind,
+        AgentTaskReviewOverride, AgentTaskReviewOverrideTarget, AgentTaskReviewProfile,
+        AgentTaskReviewSectionId, AgentTaskReviewTestStep, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
     };
 }
 
