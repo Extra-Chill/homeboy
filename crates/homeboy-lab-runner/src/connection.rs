@@ -1267,7 +1267,7 @@ where
         || status
             .session
             .as_ref()
-            .is_none_or(|session| session.mode != RunnerTunnelMode::DirectSsh)
+            .is_some_and(|session| session.mode != RunnerTunnelMode::DirectSsh)
     {
         return Ok(status);
     }

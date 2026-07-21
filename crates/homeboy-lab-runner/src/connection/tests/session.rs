@@ -224,6 +224,64 @@ fn admission_reconnects_a_lost_tunnel_to_the_same_proven_daemon() {
 }
 
 #[test]
+fn admission_reconnects_when_concurrent_rotation_removes_the_session() {
+    let session = direct_ssh_session("lease-current");
+    let mut disconnected = admission_status(&session, false);
+    disconnected.session = None;
+    let connected = admission_status(&session, true);
+    let mut statuses = [disconnected, connected].into_iter();
+    let mut reconnects = 0;
+
+    let admitted = status_for_admission_with(
+        "homeboy-lab",
+        |_| Ok(statuses.next().expect("admission status")),
+        |_| {
+            reconnects += 1;
+            Ok(())
+        },
+    )
+    .expect("admission reconnects after the session disappears");
+
+    assert_eq!(reconnects, 1);
+    assert!(admitted.connected);
+    assert_eq!(
+        admitted
+            .session
+            .as_ref()
+            .and_then(|session| session.remote_daemon_lease_id.as_deref()),
+        Some("lease-current")
+    );
+}
+
+#[test]
+fn admission_does_not_reconnect_a_known_reverse_session() {
+    let mut session = direct_ssh_session("lease-reverse");
+    session.mode = RunnerTunnelMode::Reverse;
+    let status = admission_status(&session, false);
+    let mut reconnects = 0;
+
+    let admitted = status_for_admission_with(
+        "homeboy-lab",
+        |_| Ok(status.clone()),
+        |_| {
+            reconnects += 1;
+            Ok(())
+        },
+    )
+    .expect("known reverse admission remains caller-owned");
+
+    assert_eq!(reconnects, 0);
+    assert!(!admitted.connected);
+    assert_eq!(
+        admitted
+            .session
+            .as_ref()
+            .map(|session| session.mode.clone()),
+        Some(RunnerTunnelMode::Reverse)
+    );
+}
+
+#[test]
 fn admission_refuses_a_lease_mismatch_without_retrying_status() {
     let session = direct_ssh_session("lease-recorded");
     let calls = std::cell::Cell::new(0);
