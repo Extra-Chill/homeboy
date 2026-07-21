@@ -21,7 +21,10 @@ use homeboy_tunnel::{
     ServiceTunnelStatus, ServiceTunnelTarget, ServiceTunnelTunnelBackend, StartServiceTunnelSpec,
 };
 use std::collections::BTreeMap;
+use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use super::{CmdResult, DynamicSetArgs};
 use crate::command_contract::{
@@ -336,6 +339,27 @@ enum TunnelArtifactOriginCommand {
         /// Artifact root to serve. Defaults to Homeboy's configured artifact root.
         #[arg(long)]
         root: Option<PathBuf>,
+
+        /// Preview ingress/broker URL. With --public-host, keeps a durable
+        /// outbound reverse connection open for this artifact origin.
+        #[arg(long, requires = "public_host")]
+        ingress: Option<String>,
+
+        /// Exact public host claimed by the durable artifact origin.
+        #[arg(long, requires = "ingress")]
+        public_host: Option<String>,
+
+        /// Environment variable containing the reverse-client bearer token.
+        #[arg(
+            long,
+            default_value = "HOMEBOY_PREVIEW_TUNNEL_TOKEN",
+            requires = "ingress"
+        )]
+        token_env: String,
+
+        /// Long-poll timeout in seconds for ingress request claims.
+        #[arg(long, default_value_t = 1, requires = "ingress")]
+        poll_timeout: u64,
     },
     /// Print the artifact origin root and public URL mapping without starting a server
     Status {
@@ -445,12 +469,59 @@ pub fn run(args: TunnelArgs, _global: &super::GlobalArgs) -> CmdResult<TunnelOut
 
 fn run_artifact_origin(command: TunnelArtifactOriginCommand) -> CmdResult<TunnelOutput> {
     match command {
-        TunnelArtifactOriginCommand::Serve { bind, root } => {
-            let status = artifacts::status(
-                bind.clone(),
-                root.clone().unwrap_or(homeboy::core::artifacts::root()?),
-            );
-            artifacts::serve(ArtifactOriginServeSpec { bind, root })?;
+        TunnelArtifactOriginCommand::Serve {
+            bind,
+            root,
+            ingress,
+            public_host,
+            token_env,
+            poll_timeout,
+        } => {
+            let root = root.unwrap_or(homeboy::core::artifacts::root()?);
+            let status = artifacts::status(bind.clone(), root.clone());
+            if let (Some(ingress), Some(public_host)) = (ingress, public_host) {
+                let listener = TcpListener::bind(&bind).map_err(|err| {
+                    homeboy::core::Error::internal_io(err.to_string(), Some(bind.clone()))
+                })?;
+                let origin_bind = bind.clone();
+                std::thread::spawn(move || {
+                    if let Err(err) = artifacts::serve_listener(origin_bind, root, listener) {
+                        eprintln!("homeboy durable artifact origin failed: {}", err.message);
+                    }
+                });
+                let stop = Arc::new(AtomicBool::new(false));
+                homeboy::core::process::install_shutdown_handler(
+                    stop.clone(),
+                    "durable artifact origin",
+                )?;
+                let ready = serde_json::json!({
+                    "command": "tunnel.artifact-origin.serve",
+                    "root": status.root,
+                    "origin_bind": bind,
+                    "ingress": ingress,
+                    "public_host": public_host,
+                    "token_env": token_env,
+                    "durable_publication": true,
+                });
+                preview_client::supervise_with_ready(
+                    PreviewClientStartSpec {
+                        ingress,
+                        public_host,
+                        local_origin: format!("http://{bind}"),
+                        session_id: Some("artifact-origin".to_string()),
+                        token_env,
+                        poll_timeout_secs: poll_timeout,
+                        ready_stdout: false,
+                    },
+                    stop,
+                    move || println!("ready {ready}"),
+                )?;
+            } else {
+                artifacts::serve(ArtifactOriginServeSpec {
+                    bind,
+                    root: Some(root),
+                })?;
+            }
             Ok((
                 TunnelOutput {
                     command: "tunnel.artifact_origin.serve".to_string(),

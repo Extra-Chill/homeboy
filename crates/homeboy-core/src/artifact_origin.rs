@@ -56,10 +56,20 @@ pub fn serve(spec: ArtifactOriginServeSpec) -> Result<ArtifactOriginStatus> {
     let root = spec.root.unwrap_or(paths::artifact_root()?);
     let listener = TcpListener::bind(&spec.bind)
         .map_err(|err| Error::internal_io(err.to_string(), Some(spec.bind.clone())))?;
+    serve_listener(spec.bind, root, listener)
+}
+
+/// Serve an already-bound listener so a supervising owner can establish
+/// listener readiness before it opens a reverse connection.
+pub fn serve_listener(
+    bind: String,
+    root: PathBuf,
+    listener: TcpListener,
+) -> Result<ArtifactOriginStatus> {
     eprintln!(
         "homeboy artifact origin serving {} on {}",
         root.display(),
-        spec.bind
+        bind
     );
     for stream in listener.incoming() {
         match stream {
@@ -71,10 +81,10 @@ pub fn serve(spec: ArtifactOriginServeSpec) -> Result<ArtifactOriginStatus> {
                     }
                 });
             }
-            Err(err) => return Err(Error::internal_io(err.to_string(), Some(spec.bind))),
+            Err(err) => return Err(Error::internal_io(err.to_string(), Some(bind))),
         }
     }
-    Ok(status(spec.bind, root))
+    Ok(status(bind, root))
 }
 
 pub fn status(bind: String, root: PathBuf) -> ArtifactOriginStatus {

@@ -31,6 +31,29 @@ use headers::{
 use homeboy_core::{Error, Result};
 
 pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
+    let stop = Arc::new(AtomicBool::new(false));
+    homeboy_core::process::install_shutdown_handler(stop.clone(), "preview client")?;
+    supervise(spec, stop)
+}
+
+/// Keep one reverse client registered until the caller requests shutdown.
+pub fn supervise(
+    spec: PreviewClientStartSpec,
+    stop: Arc<AtomicBool>,
+) -> Result<PreviewClientReport> {
+    supervise_with_ready(spec, stop, || {})
+}
+
+/// Supervise a reverse client and notify its owner after the first successful
+/// registration. Reconnects preserve readiness without emitting it again.
+pub fn supervise_with_ready<F>(
+    spec: PreviewClientStartSpec,
+    stop: Arc<AtomicBool>,
+    on_ready: F,
+) -> Result<PreviewClientReport>
+where
+    F: FnOnce(),
+{
     validate_start_spec(&spec)?;
     let token = std::env::var(&spec.token_env).map_err(|_| {
         Error::validation_invalid_argument(
@@ -49,8 +72,6 @@ pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
         ));
     }
 
-    let stop = Arc::new(AtomicBool::new(false));
-    homeboy_core::process::install_shutdown_handler(stop.clone(), "preview client")?;
     let client = Client::builder()
         .timeout(Duration::from_secs(spec.poll_timeout_secs.max(1) + 5))
         .build()
@@ -63,7 +84,34 @@ pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
     if spec.ready_stdout {
         println!("ready https://{}", spec.public_host);
     }
+    on_ready();
+
+    let mut registered = true;
+    let mut reconnect_delay = Duration::from_millis(250);
     while !stop.load(Ordering::SeqCst) {
+        if !registered {
+            match register_session(&client, &spec, &token) {
+                Ok(()) => {
+                    registered = true;
+                    reconnect_delay = Duration::from_millis(250);
+                }
+                Err(err) => {
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "command": "tunnel.preview_client.start",
+                            "event": "register_failed",
+                            "public_host": spec.public_host,
+                            "error": err.message,
+                            "retry_delay_ms": reconnect_delay.as_millis(),
+                        })
+                    );
+                    sleep_until_cancelled(&stop, reconnect_delay);
+                    reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(10));
+                    continue;
+                }
+            }
+        }
         match poll_next_request(&client, &spec, &token) {
             Ok(Some(request)) => {
                 let response_client = client.clone();
@@ -101,11 +149,25 @@ pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
                         "error": err.message,
                     })
                 );
-                thread::sleep(Duration::from_secs(1));
+                registered = false;
+                sleep_until_cancelled(&stop, reconnect_delay);
+                reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(10));
             }
         }
     }
-    close_session(&client, &spec, &token)?;
+    if registered {
+        if let Err(err) = close_session(&client, &spec, &token) {
+            eprintln!(
+                "{}",
+                json!({
+                    "command": "tunnel.preview_client.start",
+                    "event": "close_failed",
+                    "public_host": spec.public_host,
+                    "error": err.message,
+                })
+            );
+        }
+    }
 
     Ok(PreviewClientReport {
         command: "tunnel.preview_client.start",
@@ -115,6 +177,13 @@ pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
         registered: true,
         stopped: true,
     })
+}
+
+fn sleep_until_cancelled(stop: &AtomicBool, duration: Duration) {
+    let deadline = std::time::Instant::now() + duration;
+    while !stop.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 pub fn diagnose_auth(
