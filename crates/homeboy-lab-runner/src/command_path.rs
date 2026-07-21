@@ -85,11 +85,7 @@ pub fn preflight_remote_argv_path_translation(
         return Ok(());
     }
 
-    let leaked: Vec<String> = command
-        .iter()
-        .filter(|arg| arg_embeds_untranslated_local_path(arg, local_root, remote_cwd))
-        .cloned()
-        .collect();
+    let leaked: Vec<String> = leaked_argv_paths(command, local_root, remote_cwd);
     if leaked.is_empty() {
         return Ok(());
     }
@@ -539,6 +535,40 @@ fn is_path_bearing_flag(flag: &str) -> bool {
 /// True when `arg` embeds the controller-local source root but has not been
 /// translated to the remote workspace path. Arguments that already point at the
 /// remote workspace (or do not reference the local root at all) are accepted.
+/// The value of `agent-task run-plan --plan <json>` is a serialized
+/// `homeboy/agent-task-plan/v1` document, not a raw executable path argument.
+/// Its structured fields (workspace roots, provider plugin paths, runtime
+/// overlay sources, materialization paths) still carry controller-local
+/// provenance because the runner re-materializes and remaps them from the plan
+/// on its own side before execution. Scanning that opaque JSON as if it were a
+/// path-bearing argv argument falsely rejected the supported durable recovery
+/// `agent-task run <run-id> --runner <id>` before provider execution (#9429).
+///
+/// Skip the `--plan` value (both `--plan <json>` and `--plan=<json>` forms)
+/// while still checking every other argument, so a genuinely untranslated raw
+/// path argument continues to fail closed.
+fn leaked_argv_paths(command: &[String], local_root: &str, remote_cwd: &str) -> Vec<String> {
+    let mut leaked = Vec::new();
+    let mut skip_next_plan_value = false;
+    for arg in command {
+        if skip_next_plan_value {
+            skip_next_plan_value = false;
+            continue;
+        }
+        if arg == "--plan" {
+            skip_next_plan_value = true;
+            continue;
+        }
+        if arg.starts_with("--plan=") {
+            continue;
+        }
+        if arg_embeds_untranslated_local_path(arg, local_root, remote_cwd) {
+            leaked.push(arg.clone());
+        }
+    }
+    leaked
+}
+
 fn arg_embeds_untranslated_local_path(arg: &str, local_root: &str, remote_cwd: &str) -> bool {
     if !arg.contains(local_root) {
         return false;
@@ -977,5 +1007,93 @@ mod tests {
             &mappings,
         )
         .expect("remote mapped paths and non-path settings should pass");
+    }
+
+    #[test]
+    fn preflight_allows_controller_paths_inside_the_serialized_plan_argument() {
+        // A durable `agent-task run <id> --runner <id>` recovery hands the runner
+        // a serialized `run-plan --plan <json>` whose structured fields still
+        // carry controller-local provenance paths (workspace roots, plugin paths,
+        // overlay sources). The runner re-materializes and remaps those from the
+        // plan itself, so the opaque JSON must NOT be rejected as an untranslated
+        // argv path (#9429).
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("homeboy");
+        fs::create_dir_all(&source).expect("source");
+        let local_root = source.display().to_string();
+        let plan_json = serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "tasks": [{
+                "workspace": { "root": local_root, "source_checkout": local_root },
+                "executor": { "config": { "workspace_root": local_root } },
+                "provider_plugin_paths": [format!("{local_root}/plugin")],
+                "runtime": { "overlay": { "source": format!("{local_root}/overlay") } },
+            }]
+        })
+        .to_string();
+
+        for command in [
+            vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "run-plan".to_string(),
+                "--plan".to_string(),
+                plan_json.clone(),
+                "--record-run-id".to_string(),
+                "run-9429".to_string(),
+            ],
+            vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "run-plan".to_string(),
+                format!("--plan={plan_json}"),
+                "--record-run-id".to_string(),
+                "run-9429".to_string(),
+            ],
+        ] {
+            preflight_remote_argv_path_translation(
+                "Lab offload",
+                "homeboy-lab",
+                &command,
+                &source,
+                "/home/chubes/Developer",
+            )
+            .expect("serialized plan provenance paths must not fail argv preflight");
+        }
+    }
+
+    #[test]
+    fn preflight_still_rejects_a_raw_untranslated_path_alongside_a_plan_argument() {
+        // Excluding the `--plan` JSON must not disable fail-closed protection for
+        // a genuinely untranslated raw path argument in the same argv (#9429).
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("homeboy");
+        fs::create_dir_all(&source).expect("source");
+        let local_root = source.display().to_string();
+        let plan_json = serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "tasks": [{ "workspace": { "root": local_root } }],
+        })
+        .to_string();
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            plan_json,
+            "--artifact-root".to_string(),
+            format!("{local_root}/artifacts"),
+        ];
+
+        let err = preflight_remote_argv_path_translation(
+            "Lab offload",
+            "homeboy-lab",
+            &command,
+            &source,
+            "/home/chubes/Developer",
+        )
+        .expect_err("a raw untranslated path argument must still fail closed");
+        assert!(err.message.contains("remote argv argument"));
+        assert!(err.details.to_string().contains("artifacts"));
     }
 }
