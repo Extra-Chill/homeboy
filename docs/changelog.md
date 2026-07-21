@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.301.0] - 2026-07-21
+
+### Added
+- feat(agent-task): make the review dossier a composable form the AI fills ([#9537](https://github.com/Extra-Chill/homeboy/pull/9537)) (by Chris Huber)
+
+### Changed
+- Make detached Lab staging daemon-owned and durable ([#9566](https://github.com/Extra-Chill/homeboy/pull/9566)) (by Chris Huber)
+
+### Fixed
+- create the generic run for diagnostic-SSH exec so declared evidence attaches ([#9542](https://github.com/Extra-Chill/homeboy/pull/9542)) (by Chris Huber)
+
 ## [0.300.0] - 2026-07-21
 
 ### Added
