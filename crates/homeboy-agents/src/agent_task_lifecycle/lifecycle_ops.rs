@@ -351,7 +351,8 @@ where
         "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
     });
-    if let Some(runner_id) = execution_runner_id() {
+    let execution_runner_id = execution_runner_id();
+    if let Some(runner_id) = execution_runner_id.as_deref() {
         metadata["runner_id"] = json!(runner_id);
     }
     if let Some(route) = homeboy_core::notification_route::current() {
@@ -378,6 +379,17 @@ where
         adoption_run_id: None,
         metadata,
     };
+    if let Ok(existing) = store::read_record(&run_id) {
+        if execution_runner_id.as_deref() == existing.runner_id() {
+            // A foreground daemon binds its job before launching runner-local
+            // `run-plan`. Keep that transport identity when run-plan replaces
+            // the staged record, or terminal projection cannot join its daemon
+            // snapshot back to the completed agent-task run.
+            if let Some(runner_job_id) = existing.runner_job_id() {
+                record.metadata["runner_job_id"] = json!(runner_job_id);
+            }
+        }
+    }
     store::write_record(&record)?;
 
     // The queue is durable independently of this foreground controller. Status

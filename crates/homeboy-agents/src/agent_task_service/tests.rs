@@ -188,6 +188,15 @@ fn lab_handoff_run_plan_executes_with_runner_provenance_after_transport_is_consu
         std::env::set_var(execution_runner, "homeboy-lab");
         std::env::remove_var(transport_runner);
 
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("lab-handoff-run-plan"))
+            .expect("staged runner record");
+        agent_task_lifecycle::record_runner_job_identity(
+            "lab-handoff-run-plan",
+            "homeboy-lab",
+            "foreground-daemon-job",
+        )
+        .expect("foreground daemon binds its job before run-plan");
+
         let result = run_loaded_plan(
             test_plan(),
             Some("lab-handoff-run-plan"),
@@ -210,6 +219,12 @@ fn lab_handoff_run_plan_executes_with_runner_provenance_after_transport_is_consu
 
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.value.totals.succeeded, 1);
+        assert_eq!(
+            lifecycle_status("lab-handoff-run-plan")
+                .expect("completed runner-local record")
+                .runner_job_id(),
+            Some("foreground-daemon-job")
+        );
     });
 }
 
