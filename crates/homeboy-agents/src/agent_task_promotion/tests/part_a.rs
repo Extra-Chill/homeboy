@@ -822,3 +822,131 @@ fn provider_command_response_supplies_workspace_and_evidence() {
         request
     );
 }
+
+#[test]
+fn promotion_validates_declared_base_before_mutating_the_target_worktree() {
+    // #9400: a nonexistent declared base must fail with no patch applied and no
+    // durable post-apply state recorded, so the same artifact/target can be
+    // retried with a corrected base.
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let worktree_path = temp.path().join("managed-target");
+        std::fs::create_dir(&worktree_path).expect("create target");
+        git(&worktree_path, &["init"]);
+        git(
+            &worktree_path,
+            &["config", "user.email", "test@example.com"],
+        );
+        git(&worktree_path, &["config", "user.name", "Test"]);
+        std::fs::create_dir_all(worktree_path.join("src")).expect("source dir");
+        std::fs::write(worktree_path.join("src/lib.rs"), "old\n").expect("base source");
+        git(&worktree_path, &["add", "."]);
+        git(&worktree_path, &["commit", "-m", "base"]);
+        git(&worktree_path, &["branch", "-M", "main"]);
+        let remote = temp.path().join("origin.git");
+        assert!(Command::new("git")
+            .args(["init", "--bare", remote.to_str().expect("remote path")])
+            .status()
+            .expect("create remote")
+            .success());
+        git(
+            &worktree_path,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path"),
+            ],
+        );
+        git(&worktree_path, &["push", "-u", "origin", "main"]);
+
+        // Register the target as a Homeboy-managed worktree so promotion can
+        // resolve its path before applying (the pre-apply base validation gate).
+        worktree::adopt(WorktreeAdoptOptions {
+            handle: "repo@base-9400".to_string(),
+            path: worktree_path.display().to_string(),
+            kind: None,
+            provenance: None,
+        })
+        .expect("adopt target worktree");
+
+        let (source_path, source) = write_patch_source(&temp);
+        let options = |base: &str| AgentTaskPromotionOptions {
+            source: source.clone(),
+            source_run_id: Some("cook-9400".to_string()),
+            source_path: Some(source_path.clone()),
+            source_worktree_path: None,
+            base_ref: Some(base.to_string()),
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "repo@base-9400".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["true".to_string()],
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
+            },
+            provider_command: None,
+            provider_invocation: None,
+        };
+
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(worktree_path.clone()),
+            apply_to_git: true,
+            ..Default::default()
+        };
+        let mut checkpoints = Vec::new();
+        let error =
+            promote_with_provider_and_checkpoint(options("trunk"), &mut provider, &mut |report| {
+                checkpoints.push(report.clone());
+                Ok(())
+            })
+            .expect_err("nonexistent declared base must fail before apply");
+        assert!(
+            error
+                .message
+                .contains("declared base `trunk` was not found"),
+            "unexpected error: {}",
+            error.message
+        );
+        // Criterion 1 + 2: no patch applied, no durable post-apply checkpoint.
+        assert!(
+            provider.apply_calls.is_empty(),
+            "the target worktree must not be mutated"
+        );
+        assert!(
+            checkpoints.is_empty(),
+            "no post-apply state may be recorded"
+        );
+        assert_eq!(
+            Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&worktree_path)
+                .output()
+                .expect("git status")
+                .stdout,
+            b"",
+            "the working tree must be clean"
+        );
+
+        // Criterion 3: retrying the same artifact/target with a valid base
+        // succeeds.
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(worktree_path.clone()),
+            apply_to_git: true,
+            ..Default::default()
+        };
+        let report =
+            promote_with_provider_and_checkpoint(options("main"), &mut provider, &mut |_| Ok(()))
+                .expect("valid base promotes cleanly");
+        assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(provider.apply_calls.len(), 1);
+        assert_eq!(
+            report.verified_base.as_ref().map(|base| base.base.as_str()),
+            Some("main")
+        );
+    });
+}
