@@ -3,6 +3,7 @@
 mod export_import;
 
 use super::handlers::{artifact_get, artifacts, env, show_run};
+use super::reconcile::{reconcile_runs, RunsReconcileArgs};
 use super::{
     bench_compare, dead_owned_run, findings, latest, list_runs, runs_dossier, RunsArtifactGetArgs,
     RunsListArgs, RunsOutput, HOSTED_BLUEPRINT_VIEWER,
@@ -117,7 +118,7 @@ fn run_list_filters_kind_component_rig_and_status() {
 }
 
 #[test]
-fn run_list_reconciles_owned_dead_running_runs_before_listing() {
+fn run_list_reads_durable_record_without_reconciliation() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();
         let store = ObservationStore::open_initialized().expect("store");
@@ -146,9 +147,43 @@ fn run_list_reconciles_owned_dead_running_runs_before_listing() {
         };
         assert_eq!(output.runs.len(), 1);
         assert_eq!(output.runs[0].id, "dead-owned-run");
-        assert_eq!(output.runs[0].status, "stale");
-        assert!(output.runs[0].finished_at.is_some());
-        assert_eq!(output.runs[0].status_note, None);
+        assert_eq!(output.runs[0].status, "running");
+        assert!(output.runs[0].finished_at.is_none());
+        assert_eq!(
+            output.runs[0].status_note.as_deref(),
+            Some("owner process is not running; run may be stale; run `homeboy runs reconcile`")
+        );
+
+        let stored = store
+            .get_run("dead-owned-run")
+            .expect("get run")
+            .expect("run exists");
+        assert_eq!(stored.status, "running");
+        assert!(stored.metadata_json["homeboy_reconciled"].is_null());
+    });
+}
+
+#[test]
+fn runs_reconcile_explicitly_reconciles_owned_dead_running_runs() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        store
+            .import_run(&dead_owned_run("dead-owned-run"))
+            .expect("import stale fixture");
+
+        let (output, _) = reconcile_runs(RunsReconcileArgs {
+            dry_run: false,
+            limit: 20,
+        })
+        .expect("reconcile");
+
+        let RunsOutput::Reconcile(output) = output else {
+            panic!("expected reconcile output");
+        };
+        assert_eq!(output.reconciled.len(), 1);
+        assert_eq!(output.reconciled[0].id, "dead-owned-run");
+        assert_eq!(output.reconciled[0].status, "stale");
 
         let stored = store
             .get_run("dead-owned-run")

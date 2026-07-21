@@ -4,7 +4,9 @@
 use crate::agent_task_lifecycle;
 use homeboy_core::Result;
 
-use super::discovery::{discover_runs, AgentTaskDiscoveryFilter, AgentTaskLiveness};
+use super::discovery::{
+    discover_runs_with_reconciliation, AgentTaskDiscoveryFilter, AgentTaskLiveness,
+};
 
 /// Report returned by [`reconcile_stale_active_runs`]. Lists every active run
 /// that was classified non-active, and for the reconcilable ones records the
@@ -44,7 +46,7 @@ pub struct AgentTaskReconcileRun {
 /// work) are never touched. With `dry_run`, candidates are reported but no
 /// record is mutated so an operator can preview the blast radius first.
 pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileReport> {
-    let report = discover_runs(AgentTaskDiscoveryFilter::Active)?;
+    let report = discover_runs_with_reconciliation(AgentTaskDiscoveryFilter::Active)?;
 
     let mut runs = Vec::new();
     let mut reconciled = 0usize;

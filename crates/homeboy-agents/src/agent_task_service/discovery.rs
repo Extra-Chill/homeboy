@@ -2,7 +2,7 @@
 //! reporting. Pure move out of the former `agent_task_service.rs` god-file.
 
 use crate::agent_task::{AgentTaskRequest, AgentTaskSourceRef};
-use crate::agent_task_lifecycle::{self, AgentTaskRunRecord};
+use crate::agent_task_lifecycle::{self, AgentTaskRecordHealthSummary, AgentTaskRunRecord};
 use crate::agent_task_scheduler::AgentTaskState;
 use homeboy_core::Result;
 use serde_json::Value;
@@ -220,7 +220,30 @@ pub fn discover_runs_with_options(
     filter: AgentTaskDiscoveryFilter,
     options: AgentTaskDiscoveryOptions,
 ) -> Result<AgentTaskDiscoveryReport> {
-    let (mut records, record_health) = agent_task_lifecycle::list_records_with_health()?;
+    let (records, record_health) = agent_task_lifecycle::read_records_with_health()?;
+    discovery_report(filter, options, records, record_health)
+}
+
+/// Discovery for an operator-requested reconciliation. Unlike ordinary bounded
+/// readers, this refreshes runner-backed records before classifying candidates.
+pub(crate) fn discover_runs_with_reconciliation(
+    filter: AgentTaskDiscoveryFilter,
+) -> Result<AgentTaskDiscoveryReport> {
+    let (records, record_health) = agent_task_lifecycle::list_records_with_health()?;
+    discovery_report(
+        filter,
+        AgentTaskDiscoveryOptions::default(),
+        records,
+        record_health,
+    )
+}
+
+fn discovery_report(
+    filter: AgentTaskDiscoveryFilter,
+    options: AgentTaskDiscoveryOptions,
+    mut records: Vec<AgentTaskRunRecord>,
+    record_health: AgentTaskRecordHealthSummary,
+) -> Result<AgentTaskDiscoveryReport> {
     let is_active = filter == AgentTaskDiscoveryFilter::Active;
     if is_active {
         records.retain(|record| {
