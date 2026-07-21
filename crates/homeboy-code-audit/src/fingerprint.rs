@@ -106,6 +106,11 @@ pub struct FileFingerprint {
     pub aggregate_literals: Vec<homeboy_audit_contract::AggregateLiteral>,
     /// Extension-reported canonical construction seams for aggregate types.
     pub aggregate_construction_seams: Vec<homeboy_audit_contract::AggregateConstructionSeam>,
+    pub aggregate_definitions: Vec<homeboy_audit_contract::AggregateDefinitionFact>,
+    pub field_accesses: Vec<homeboy_audit_contract::FieldAccessFact>,
+    pub aggregate_projections: Vec<homeboy_audit_contract::AggregateProjectionFact>,
+    pub decision_branches: Vec<homeboy_audit_contract::DecisionBranchFact>,
+    pub method_calls: Vec<homeboy_audit_contract::MethodCallFact>,
 }
 
 /// Extract a structural fingerprint from a source file on disk.
@@ -203,6 +208,11 @@ pub(crate) fn fingerprint_extension_content(
         trait_impl_methods: Vec::new(), // Extension scripts don't track this
         aggregate_literals: output.aggregate_literals,
         aggregate_construction_seams: output.aggregate_construction_seams,
+        aggregate_definitions: output.aggregate_definitions,
+        field_accesses: output.field_accesses,
+        aggregate_projections: output.aggregate_projections,
+        decision_branches: output.decision_branches,
+        method_calls: output.method_calls,
     })
 }
 

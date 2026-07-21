@@ -43,7 +43,7 @@ Extension identity is path-derived: Homeboy derives the extension `id` from the 
 - **`id`** (string): Optional compatibility field for external consumers; Homeboy derives the authoritative extension ID from the directory name.
 - **`provides`** (object): File extensions and capabilities this extension handles
 - **`scripts`** (object): Scripts that implement extension capabilities (fingerprint, refactor)
-- **`audit`** (object): Docs audit config — ignore patterns, feature detection, test mapping
+- **`audit`** (object): Audit capability config, including docs, test mapping, and typed detector rules
 - **`deploy`** (object): Deploy lifecycle — verifications, overrides, version patterns
 - **`executable`** (object): Standalone tool runtime and inputs
 - **`platform`** (object): Platform behavior definitions (database, deployment, version patterns)
@@ -420,6 +420,11 @@ Configuration for documentation-reference analysis, feature detection, and struc
       "method_prefix": "test_",
       "inline_tests": true,
       "critical_patterns": ["src/core/"]
+    },
+    "detector_rules": {
+      "policy_flow": {
+        "rules": []
+      }
     }
   }
 }
@@ -433,6 +438,7 @@ Configuration for documentation-reference analysis, feature detection, and struc
 - **`doc_targets`** (object): Maps feature labels to documentation file paths and headings
 - **`feature_context`** (object): Context extraction rules per feature pattern (doc comments, block fields)
 - **`test_mapping`** (object): Test coverage mapping convention
+- **`detector_rules`** (object): Typed extension-owned detector declarations merged into project audit config. See [Policy-flow detector](../../audit/policy-flow.md) for `policy_flow`.
 
 ### Test Mapping Fields
 

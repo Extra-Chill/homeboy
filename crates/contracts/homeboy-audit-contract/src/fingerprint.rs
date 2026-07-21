@@ -2,7 +2,7 @@
 //!
 //! The typed data an extension's fingerprint script emits about a source file —
 //! hook references, unused/ignored parameters, call sites, dead-code markers,
-//! aggregate literals, and construction seams — plus the top-level
+//! aggregate literals, construction seams, and policy-flow facts — plus the top-level
 //! `FingerprintOutput` envelope. Pure serde types with no dependencies. The
 //! `code_audit` engine consumes these; `extension::fingerprint` re-exports them
 //! and owns the script-runner that produces them.
@@ -177,4 +177,19 @@ pub struct FingerprintOutput {
     /// Canonical construction seams reported by an extension.
     #[serde(default)]
     pub aggregate_construction_seams: Vec<AggregateConstructionSeam>,
+    /// Resolved aggregate definitions used by policy-flow analysis.
+    #[serde(default)]
+    pub aggregate_definitions: Vec<crate::policy_flow::AggregateDefinitionFact>,
+    /// Resolved field reads and writes used by policy-flow analysis.
+    #[serde(default)]
+    pub field_accesses: Vec<crate::policy_flow::FieldAccessFact>,
+    /// Resolved aggregate-to-aggregate projection edges.
+    #[serde(default)]
+    pub aggregate_projections: Vec<crate::policy_flow::AggregateProjectionFact>,
+    /// Typed downstream decision branches.
+    #[serde(default)]
+    pub decision_branches: Vec<crate::policy_flow::DecisionBranchFact>,
+    /// Resolved calls used to prove delegation to authoritative policy seams.
+    #[serde(default)]
+    pub method_calls: Vec<crate::policy_flow::MethodCallFact>,
 }

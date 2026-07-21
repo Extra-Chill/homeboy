@@ -9,6 +9,10 @@ pub use homeboy_audit_contract::fingerprint::{
     AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker, FingerprintOutput,
     HookRef, UnusedParam,
 };
+pub use homeboy_audit_contract::policy_flow::{
+    AggregateDefinitionFact, AggregateFieldFact, AggregateProjectionFact, DecisionBranchFact,
+    FactLocation, FieldAccessFact, FieldAccessKind, MethodCallFact, ProjectionFieldFact,
+};
 
 /// Run a extension's fingerprint script on file content.
 ///

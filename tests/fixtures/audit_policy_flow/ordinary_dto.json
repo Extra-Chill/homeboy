@@ -1,0 +1,40 @@
+{
+  "config": {
+    "rules": [
+      {
+        "id": "engagement",
+        "source_type_id": "domain::SourcePolicy",
+        "policy_fields": ["threshold"],
+        "authoritative_method_id": "domain::SourcePolicy::should_engage",
+        "decision_sinks": [
+          {
+            "carrier_type_id": "domain::DecisionCarrier",
+            "callable_id": "domain::decide",
+            "domain_type_id": "domain::Severity"
+          }
+        ]
+      }
+    ]
+  },
+  "files": [
+    {
+      "path": "src/dto.ext",
+      "aggregate_definitions": [
+        {
+          "type_id": "transport::Record",
+          "fields": [{"name": "id", "type_id": "scalar::Id"}],
+          "location": {"line": 1, "column": 1}
+        }
+      ],
+      "aggregate_projections": [
+        {
+          "source_type_id": "transport::Record",
+          "target_type_id": "transport::RecordDto",
+          "callable_id": "transport::to_dto",
+          "field_mappings": [{"source_field": "id", "target_field": "id"}],
+          "location": {"line": 7, "column": 5}
+        }
+      ]
+    }
+  ]
+}
