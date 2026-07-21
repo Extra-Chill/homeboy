@@ -15,6 +15,8 @@ pub enum AgentTaskFanoutCommand {
     Submit(AgentTaskFanoutSubmitArgs),
     SubmitBatch(AgentTaskFanoutSubmitBatchArgs),
     Status(AgentTaskFanoutBatchStatusArgs),
+    /// Resume a durable fanout batch after coordinator loss: idempotently harvest terminal children through gates, commit, push, and PR finalization.
+    Resume(AgentTaskFanoutBatchStatusArgs),
     Artifacts(AgentTaskFanoutBatchStatusArgs),
     RunPlan(AgentTaskFanoutRunPlanArgs),
 }

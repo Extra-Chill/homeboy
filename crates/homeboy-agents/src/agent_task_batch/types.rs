@@ -45,9 +45,26 @@ pub struct AgentTaskBatchStatusReport {
     pub totals: AgentTaskBatchTotals,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unavailable_child_runs: Vec<AgentTaskBatchChildIssue>,
+    /// Terminal children whose provider attempt finished but whose promotion,
+    /// gates, and PR finalization were never completed (typically because the
+    /// synchronous coordinator exited). These can be idempotently harvested with
+    /// `commands.resume` (#9525).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resumable_child_runs: Vec<AgentTaskBatchResumableChild>,
+    /// True when one or more children are resumable and the batch can be carried
+    /// to PR-ready finalization by re-running the coordinator.
+    pub resumable: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<String>,
     pub commands: AgentTaskBatchCommands,
+}
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentTaskBatchResumableChild {
+    pub task_id: String,
+    pub run_id: String,
+    pub state: AgentTaskRunState,
+    /// Why this child is resumable — e.g. terminal with a patch but no PR.
+    pub reason: String,
 }
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct AgentTaskBatchTotals {
@@ -64,6 +81,9 @@ pub struct AgentTaskBatchCommands {
     pub status: String,
     pub artifacts: String,
     pub run_next: String,
+    /// Idempotently harvest terminal-but-unfinalized children through promotion,
+    /// gates, commit, push, and PR finalization after coordinator loss (#9525).
+    pub resume: String,
 }
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct AgentTaskBatchArtifactsReport {

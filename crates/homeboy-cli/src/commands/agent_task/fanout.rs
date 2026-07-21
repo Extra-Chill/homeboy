@@ -40,6 +40,7 @@ pub(super) fn fanout(args: AgentTaskFanoutArgs) -> CmdResult<Value> {
         AgentTaskFanoutCommand::Submit(submit_args) => submit_batch_cook_fanout(submit_args),
         AgentTaskFanoutCommand::SubmitBatch(submit_args) => submit_fanout_batch(submit_args),
         AgentTaskFanoutCommand::Status(status_args) => batch_status(status_args),
+        AgentTaskFanoutCommand::Resume(resume_args) => batch_resume(resume_args),
         AgentTaskFanoutCommand::Artifacts(status_args) => batch_artifacts(status_args),
         AgentTaskFanoutCommand::RunPlan(run_args) => run_batch_cook_fanout(run_args),
     }
@@ -113,6 +114,40 @@ fn submit_fanout_batch(args: AgentTaskFanoutSubmitBatchArgs) -> CmdResult<Value>
 
 fn batch_status(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
     Ok((command_json_value(batch::status(&args.batch_id)?)?, 0))
+}
+
+/// Resume a durable fanout batch after its synchronous coordinator exited.
+/// Idempotently harvests every terminal-but-unfinalized child through its
+/// original promotion, deterministic gates, commit, push, and PR finalization
+/// contract, reconciling per-child state back into the durable batch record so
+/// repeated resume calls converge without duplicate PRs (#9525).
+fn batch_resume(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
+    let result = agent_task_service::resume_cook_batch(
+        &args.batch_id,
+        provider::ExtensionProviderAgentTaskExecutor::discover(),
+        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+    )?;
+    let exit_code = result.exit_code;
+    let report = result.value;
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-cook-batch-resume/v1",
+            "batch_id": report.batch_id,
+            "status": report.status,
+            "summary": {
+                "total": report.total,
+                "succeeded": report.succeeded,
+                "failed": report.failed,
+            },
+            "cooks": report.cooks,
+            "commands": {
+                "status": format!("homeboy agent-task fanout status {}", args.batch_id),
+                "artifacts": format!("homeboy agent-task fanout artifacts {}", args.batch_id),
+                "resume": format!("homeboy agent-task fanout resume {}", args.batch_id),
+            },
+        }),
+        exit_code,
+    ))
 }
 
 fn batch_artifacts(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {

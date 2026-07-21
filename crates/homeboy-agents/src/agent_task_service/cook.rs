@@ -276,6 +276,163 @@ where
     })
 }
 
+/// Resume a persisted cook batch after its original synchronous coordinator
+/// exited or timed out. Each child's durable recipe fully reconstructs its cook
+/// options, so re-running [`run_cook`] idempotently harvests every terminal
+/// child through the SAME promotion, deterministic gates, commit, push, and PR
+/// finalization the original caller owned — without redispatching a completed
+/// provider attempt or duplicating a PR.
+///
+/// A child with no persisted recipe (never reached cook start) or that is still
+/// in flight on a runner daemon is reported as-is rather than forced. The
+/// per-child finalization state is reconciled back into the durable batch record
+/// so repeated resume calls converge instead of re-finalizing (#9525).
+pub fn resume_cook_batch<E, D>(
+    batch_id: &str,
+    executor: E,
+    reconstruct_dispatcher: D,
+) -> Result<AgentTaskRunResult<AgentTaskCookBatchReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+{
+    let batch = crate::agent_task_batch::read_batch_record(batch_id)?;
+    if batch.child_runs.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "batch_id",
+            format!("agent-task fanout batch `{batch_id}` has no child runs to resume"),
+            Some(batch_id.to_string()),
+            None,
+        ));
+    }
+
+    let total = batch.child_runs.len();
+    let mut cells = Vec::with_capacity(total);
+    for child in &batch.child_runs {
+        // The persisted batch child `run_id` is the cook id (`cook-<id>`), which
+        // is exactly the durable recipe key. Reconstruct from that recipe so the
+        // resumed cook re-runs its own gates and finalization contract.
+        let cook_id = child.run_id.clone();
+        let cell = match resume_batch_child(&cook_id, executor.clone(), &reconstruct_dispatcher) {
+            Ok(report) => {
+                let exit_code = cook_report_exit_code(&report);
+                AgentTaskCookBatchCellReport {
+                    cook_id: report.cook_id.clone(),
+                    initial_run_id: cook_id,
+                    exit_code,
+                    result: Some(report),
+                    error: None,
+                }
+            }
+            Err(error) => AgentTaskCookBatchCellReport {
+                cook_id: child.task_id.clone(),
+                initial_run_id: cook_id,
+                exit_code: 1,
+                result: None,
+                error: Some(error.to_string()),
+            },
+        };
+        // Persist each child's finalization outcome as it is harvested so a
+        // repeated resume (or a crash mid-batch) converges idempotently.
+        crate::agent_task_batch::record_child_finalization(
+            batch_id,
+            &cell.initial_run_id,
+            child_finalization_value(&cell),
+        )?;
+        cells.push(cell);
+    }
+
+    let failed = cells.iter().filter(|cell| cell.exit_code != 0).count();
+    Ok(AgentTaskRunResult {
+        exit_code: if failed == 0 { 0 } else { 1 },
+        value: AgentTaskCookBatchReport {
+            schema: "homeboy/agent-task-cook-batch/v1",
+            batch_id: batch.batch_id,
+            status: if failed == 0 {
+                "succeeded".to_string()
+            } else {
+                "failed".to_string()
+            },
+            total,
+            succeeded: total - failed,
+            failed,
+            cooks: cells,
+        },
+    })
+}
+
+/// Reconstruct one batch child's cook from its durable recipe and re-run it.
+/// A missing recipe means the child never reached cook start; surface an
+/// actionable resumability error instead of fabricating a cook.
+fn resume_batch_child<E, D>(
+    cook_id: &str,
+    executor: E,
+    reconstruct_dispatcher: &D,
+) -> Result<AgentTaskCookReport>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+{
+    if !super::recipe_exists(cook_id)? {
+        return Err(Error::validation_invalid_argument(
+            "cook_id",
+            format!(
+                "cook `{cook_id}` has no durable recipe; it never reached cook start and cannot be resumed"
+            ),
+            Some(cook_id.to_string()),
+            Some(vec![format!(
+                "Re-dispatch this cook, or inspect it with `homeboy agent-task status {cook_id}`."
+            )]),
+        ));
+    }
+    let recipe = super::load_recipe(cook_id)?;
+    // Faithfully reconstruct the recipe's transport so re-running `run_cook`
+    // matches the persisted durable inputs (a stripped dispatcher would look
+    // like a conflicting new cook). A terminal child is not re-dispatched — its
+    // `needs_execution` check is false — so the reconstructed transport is only
+    // used to satisfy the recipe contract, never to spend a provider attempt
+    // (#9525).
+    let attempt_dispatcher =
+        reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
+    let options = super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)?;
+    Ok(run_cook(options, executor)?.value)
+}
+
+fn child_finalization_value(cell: &AgentTaskCookBatchCellReport) -> Value {
+    serde_json::json!({
+        "resumed_at": chrono::Utc::now().to_rfc3339(),
+        "exit_code": cell.exit_code,
+        "status": cell
+            .result
+            .as_ref()
+            .map(|report| report.status.clone())
+            .unwrap_or_else(|| "error".to_string()),
+        "error": cell.error,
+    })
+}
+
+fn cook_report_exit_code(report: &AgentTaskCookReport) -> i32 {
+    // A review-ready or already-finalized cook is a success; anything the cook
+    // could not carry to a green, finalized state is a non-zero resume result
+    // the operator must still act on.
+    match report.status.as_str() {
+        "review_ready" | "green_no_finalize" => 0,
+        _ => {
+            if report
+                .finalization
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str)
+                == Some("review_ready")
+            {
+                0
+            } else {
+                1
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentTaskCookAttemptReport {
     pub attempt: u32,
