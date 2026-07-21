@@ -35,8 +35,8 @@ pub use super::artifact_manifest::{
     RUN_ARTIFACT_STATUS_FILE,
 };
 pub use super::artifact_origin::{
-    inspect, serve, status, status_with_command, ArtifactOriginInspect, ArtifactOriginServeSpec,
-    ArtifactOriginStatus,
+    inspect, serve, serve_listener, status, status_with_command, ArtifactOriginInspect,
+    ArtifactOriginServeSpec, ArtifactOriginStatus,
 };
 pub use super::artifact_postprocess::{
     describe_artifact_postprocess_plan, record_artifact_postprocess_outputs,

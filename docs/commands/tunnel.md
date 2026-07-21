@@ -47,12 +47,20 @@ local-only URL such as `localhost` or `127.0.0.1`. Treat filesystem paths and
 local-only URLs as operator notes; mirror the artifact root or route it through a
 reviewer-reachable tunnel before pasting links into PRs, issues, or reports.
 
-Serve the artifact root behind an operator-managed TLS/proxy/tunnel:
+Run the artifact root and its outbound reverse connection as one long-lived service. This is the durable artifact-publication contract for a systemd unit or Homeboy-managed service:
 
 ```sh
-HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.example.com \
-  homeboy tunnel artifact-origin serve --bind 127.0.0.1:7351
+HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://artifacts-tunnel.example.com \
+HOMEBOY_PREVIEW_TUNNEL_TOKEN='<configured-secret>' \
+  homeboy tunnel artifact-origin serve \
+  --root /srv/homeboy-artifacts \
+  --bind 127.0.0.1:7351 \
+  --ingress https://preview-ingress.example.com \
+  --public-host artifacts-tunnel.example.com \
+  --token-env HOMEBOY_PREVIEW_TUNNEL_TOKEN
 ```
+
+The process prints a structured `ready` record containing the artifact root, origin bind, ingress URL, exact public host, and token environment-variable name. It keeps serving while the reverse client reconnects with bounded backoff after a disconnected or restarted ingress. The default one-second long poll bounds service shutdown latency; `--poll-timeout` can tune it.
 
 For Lab-generated Workflow Bench artifacts, publish the bundle under the configured artifact root first, then inspect, then serve:
 

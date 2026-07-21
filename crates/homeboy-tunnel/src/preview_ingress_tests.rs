@@ -1,10 +1,13 @@
 use super::preview_ingress::*;
 use crate::native_preview_token_sha256;
+use crate::preview_client::{self, PreviewClientStartSpec};
 use base64::Engine;
 use homeboy_core::test_support;
 use serde_json::json;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -199,6 +202,112 @@ fn reverse_channel_client_serves_public_request() {
             browser_response.contains("console.log('ok');"),
             "{browser_response}"
         );
+    });
+}
+
+#[test]
+fn durable_reverse_client_reregisters_after_session_disconnect() {
+    test_support::with_isolated_home(|_| {
+        let token = "durable-artifact-token";
+        std::env::set_var("HOMEBOY_TEST_DURABLE_ARTIFACT_TOKEN", token);
+        std::env::set_var(
+            "HOMEBOY_TEST_DURABLE_ARTIFACT_TOKEN_SHA256",
+            native_preview_token_sha256(token),
+        );
+        let origin = TcpListener::bind("127.0.0.1:0").expect("bind artifact origin");
+        let origin_port = origin.local_addr().expect("origin address").port();
+        thread::spawn(move || loop {
+            let (mut stream, _) = origin.accept().expect("accept artifact request");
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).expect("read artifact request");
+            assert!(String::from_utf8_lossy(&request[..read]).contains("/artifacts/proof.png"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 8\r\n\r\nPNGproof")
+                .expect("write artifact");
+        });
+
+        let ingress = TcpListener::bind("127.0.0.1:0").expect("reserve ingress port");
+        let ingress_port = ingress.local_addr().expect("ingress address").port();
+        thread::spawn(move || {
+            serve_listener(
+                PreviewIngressServeSpec {
+                    bind: format!("127.0.0.1:{ingress_port}"),
+                    domain: "example.com".to_string(),
+                    public_host_pattern: "*-tunnel.example.com".to_string(),
+                    token_sha256_env: "HOMEBOY_TEST_DURABLE_ARTIFACT_TOKEN_SHA256".to_string(),
+                },
+                ingress,
+            )
+            .expect("serve ingress");
+        });
+        thread::sleep(Duration::from_millis(100));
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let client_stop = stop.clone();
+        let ready_count = Arc::new(AtomicUsize::new(0));
+        let client_ready_count = ready_count.clone();
+        let client = thread::spawn(move || {
+            preview_client::supervise_with_ready(
+                PreviewClientStartSpec {
+                    ingress: format!("http://127.0.0.1:{ingress_port}"),
+                    public_host: "artifacts-tunnel.example.com".to_string(),
+                    local_origin: format!("http://127.0.0.1:{origin_port}"),
+                    session_id: Some("artifact-origin".to_string()),
+                    token_env: "HOMEBOY_TEST_DURABLE_ARTIFACT_TOKEN".to_string(),
+                    poll_timeout_secs: 1,
+                    ready_stdout: false,
+                },
+                client_stop,
+                move || {
+                    client_ready_count.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+        });
+
+        let artifact_request = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                let browser = thread::spawn(move || {
+                    raw_http_request(
+                        ingress_port,
+                        "GET /artifacts/proof.png HTTP/1.1\r\nHost: artifacts-tunnel.example.com\r\n\r\n",
+                    )
+                });
+                let response = browser.join().expect("artifact response");
+                if !response.contains("missing_session") || std::time::Instant::now() >= deadline {
+                    break response;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+        };
+        let first = artifact_request();
+        assert!(
+            first.contains("200 OK") && first.ends_with("PNGproof"),
+            "{first}"
+        );
+        assert_eq!(ready_count.load(Ordering::SeqCst), 1);
+
+        let closed = http_request(
+            ingress_port,
+            "POST",
+            "/preview/client/close",
+            "homeboy-health-tunnel.example.com",
+            Some(token),
+            json!({ "public_host": "artifacts-tunnel.example.com" }).to_string(),
+        );
+        assert!(closed.contains("200 OK"), "{closed}");
+        let reconnected = artifact_request();
+        assert!(
+            reconnected.contains("200 OK") && reconnected.ends_with("PNGproof"),
+            "{reconnected}"
+        );
+        assert_eq!(ready_count.load(Ordering::SeqCst), 1);
+
+        stop.store(true, Ordering::SeqCst);
+        client
+            .join()
+            .expect("supervisor completed")
+            .expect("clean shutdown");
     });
 }
 
