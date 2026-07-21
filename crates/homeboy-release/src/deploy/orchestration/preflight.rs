@@ -173,6 +173,121 @@ pub(super) fn warn_non_default_branch(
     Ok(())
 }
 
+/// Read a repository's current HEAD commit, or `None` if `dir` is not a git
+/// checkout or the command fails.
+fn head_commit(dir: &str) -> Option<String> {
+    homeboy_core::engine::command::run_in_optional(dir, "git", &["rev-parse", "HEAD"])
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// The absolute `--git-common-dir` for `dir`, which is shared across all linked
+/// worktrees of a repository. Two checkouts with the same common dir are the
+/// same repository (a primary and its worktrees); differing common dirs are
+/// unrelated repositories.
+fn git_common_dir(dir: &str) -> Option<std::path::PathBuf> {
+    let raw = homeboy_core::engine::command::run_in_optional(
+        dir,
+        "git",
+        &["rev-parse", "--git-common-dir"],
+    )?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = std::path::PathBuf::from(raw);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::path::Path::new(dir).join(path)
+    };
+    absolute.canonicalize().ok()
+}
+
+/// Fail closed when a `--head` deploy would build from the registered checkout
+/// while the operator is standing in a *different* checkout of the same
+/// repository at a *different* commit (#7599).
+///
+/// Deploy resolves each component to its registered `local_path` (the primary),
+/// and every `--head` provenance/build read (`built_from_commit`, the deployed
+/// ref) is taken from there. When `homeboy deploy --head` is invoked from a
+/// worktree that has been advanced past the primary, the deploy silently ships
+/// the primary's older SHA while reporting `main (HEAD)` — the wrong artifact
+/// with misleading provenance. Rather than silently choose a checkout, refuse
+/// and tell the operator exactly how to reconcile.
+pub(super) fn guard_head_matches_invocation_checkout(
+    components: &[Component],
+    config: &DeployConfig,
+) -> Result<()> {
+    if config.force {
+        return Ok(());
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return Ok(());
+    };
+    let cwd = cwd.to_string_lossy().to_string();
+    // If the invocation directory is not itself a git checkout there is nothing
+    // to reconcile against — the registered checkout is the only source.
+    let Some(cwd_common_dir) = git_common_dir(&cwd) else {
+        return Ok(());
+    };
+    let Some(cwd_head) = head_commit(&cwd) else {
+        return Ok(());
+    };
+
+    for component in components {
+        if component.is_file_component() {
+            continue;
+        }
+        let registered_path = &component.local_path;
+        // Only compare within the same repository: the invocation checkout must
+        // share the registered checkout's git-common-dir (i.e. be a worktree or
+        // sibling checkout of the same repo), otherwise the operator is simply
+        // standing somewhere unrelated and the registered path is authoritative.
+        let Some(registered_common_dir) = git_common_dir(registered_path) else {
+            continue;
+        };
+        if registered_common_dir != cwd_common_dir {
+            continue;
+        }
+        let Some(registered_head) = head_commit(registered_path) else {
+            continue;
+        };
+        if registered_head == cwd_head {
+            continue;
+        }
+
+        return Err(Error::validation_invalid_argument(
+            "head",
+            format!(
+                "Refusing --head deploy of '{}': the current directory is a different checkout of the same repository at commit {} \
+                 than the registered source at {} (commit {}). --head would build and report the registered checkout's commit, not the one you are standing in.",
+                component.id,
+                short_sha(&cwd_head),
+                registered_path,
+                short_sha(&registered_head),
+            ),
+            Some(component.id.clone()),
+            Some(vec![
+                format!(
+                    "Deploy from the registered checkout: git -C {} checkout <ref> (or point it at this worktree with `homeboy component set {} --local-path {}`).",
+                    registered_path, component.id, cwd
+                ),
+                format!(
+                    "Or fast-forward the registered checkout to this commit: git -C {} merge --ff-only {}.",
+                    registered_path, short_sha(&cwd_head)
+                ),
+                "Use --force to deploy the registered checkout's commit anyway.".to_string(),
+            ]),
+        ));
+    }
+    Ok(())
+}
+
+fn short_sha(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
+}
+
 pub(super) fn check_uncommitted_changes(components: &[Component]) -> Result<()> {
     // Partition components into "non-git local_path" vs "dirty git repo" so we can
     // emit the right diagnostic. Conflating the two leaves users chasing a
@@ -296,7 +411,8 @@ mod tests {
     use std::process::Command;
 
     use super::{
-        guard_local_build_downgrades, guard_local_build_source_freshness, local_build_components,
+        guard_head_matches_invocation_checkout, guard_local_build_downgrades,
+        guard_local_build_source_freshness, local_build_components,
     };
     use crate::deploy::DeployConfig;
     use homeboy_core::component::Component;
@@ -465,6 +581,130 @@ mod tests {
         config.expected_version = Some("1.2.3".to_string());
 
         assert!(local_build_components(&[component], &config).is_empty());
+    }
+
+    // Serialize the #7599 tests: they mutate the process CWD, which is global.
+    fn cwd_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn with_cwd<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let previous = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(dir).expect("set cwd");
+        let result = f();
+        std::env::set_current_dir(previous).expect("restore cwd");
+        result
+    }
+
+    fn init_repo_with_commit(path: &Path) {
+        std::fs::create_dir_all(path).expect("repo dir");
+        git(path, &["init"]);
+        git(path, &["config", "user.email", "test@example.com"]);
+        git(path, &["config", "user.name", "Test"]);
+        std::fs::write(path.join("file.txt"), "a").expect("seed file");
+        git(path, &["add", "."]);
+        git(path, &["commit", "-m", "initial"]);
+        git(path, &["branch", "-M", "main"]);
+    }
+
+    #[test]
+    fn head_deploy_fails_closed_when_invocation_worktree_advanced_past_registered_checkout() {
+        // #7599: registered checkout (primary) is behind the worktree the
+        // operator is standing in. --head would build/report the primary's SHA,
+        // so refuse with an actionable message rather than ship the wrong commit.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let primary = temp.path().join("primary");
+        init_repo_with_commit(&primary);
+        let worktree = temp.path().join("component@feature");
+        git(
+            &primary,
+            &["worktree", "add", worktree.to_str().expect("worktree path")],
+        );
+        // Advance the worktree past the primary.
+        std::fs::write(worktree.join("file.txt"), "b").expect("edit");
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-m", "advance worktree"]);
+
+        let mut cfg = config();
+        cfg.head = true;
+
+        let error = with_cwd(&worktree, || {
+            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
+                .expect_err("advanced invocation worktree must fail closed")
+        });
+        assert_eq!(error.details["field"], "head");
+        assert!(error.to_string().contains("different checkout"));
+    }
+
+    #[test]
+    fn head_deploy_passes_when_invocation_checkout_matches_registered_head() {
+        // Same repo, same HEAD (e.g. invoked from the registered checkout, or a
+        // worktree that has not advanced): nothing to reconcile.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let primary = temp.path().join("primary");
+        init_repo_with_commit(&primary);
+        let worktree = temp.path().join("component@even");
+        git(
+            &primary,
+            &["worktree", "add", worktree.to_str().expect("worktree path")],
+        );
+
+        let mut cfg = config();
+        cfg.head = true;
+
+        with_cwd(&worktree, || {
+            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
+                .expect("matching HEAD passes the guard")
+        });
+    }
+
+    #[test]
+    fn head_deploy_ignores_unrelated_invocation_checkout() {
+        // The operator is standing in a *different* repository (different
+        // git-common-dir). The registered checkout is authoritative; do not
+        // false-positive on an unrelated advanced repo.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let primary = temp.path().join("primary");
+        init_repo_with_commit(&primary);
+        let unrelated = temp.path().join("unrelated");
+        init_repo_with_commit(&unrelated);
+        std::fs::write(unrelated.join("file.txt"), "z").expect("edit");
+        git(&unrelated, &["add", "."]);
+        git(&unrelated, &["commit", "-m", "unrelated advance"]);
+
+        let mut cfg = config();
+        cfg.head = true;
+
+        with_cwd(&unrelated, || {
+            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
+                .expect("an unrelated repo must not trip the same-repo guard")
+        });
+    }
+
+    #[test]
+    fn head_deploy_force_bypasses_the_invocation_checkout_guard() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let primary = temp.path().join("primary");
+        init_repo_with_commit(&primary);
+        let worktree = temp.path().join("component@forced");
+        git(
+            &primary,
+            &["worktree", "add", worktree.to_str().expect("worktree path")],
+        );
+        std::fs::write(worktree.join("file.txt"), "b").expect("edit");
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-m", "advance worktree"]);
+
+        let mut cfg = config();
+        cfg.head = true;
+        cfg.force = true;
+
+        with_cwd(&worktree, || {
+            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
+                .expect("--force bypasses the guard")
+        });
     }
 }
 
