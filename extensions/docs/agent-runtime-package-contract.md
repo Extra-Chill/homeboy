@@ -237,6 +237,17 @@ outcomes and diagnostics. If a runtime adds a secret-bearing metadata key, it
 must add that key to `redacted_metadata_keys`, preferably with
 `extendRedactedMetadataKeys()` from the adapter.
 
+### Persistent Runtime Environment
+
+An extension setup adapter can expose a persistent, non-secret runner resource
+to job-private execution by writing `HOMEBOY_RUNTIME_ENV_<NAME>=<value>` to
+`GITHUB_ENV`. The full-run configuration projects `<NAME>` into `runtime_env`.
+This is for stable paths and similar runner mechanics, not credentials; names
+ending in `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, or `KEY`, and values
+containing line breaks, are rejected. Setup-projected values override matching
+workflow input values because they describe the resource materialized for that
+specific runner job.
+
 ## Capability Declarations
 
 ### Run-scoped scratch

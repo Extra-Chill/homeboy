@@ -6,6 +6,7 @@ EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SOURCE_DIR="${EXTENSION_PATH}/runtime/playwright"
 RUNTIME_DIR="${HOMEBOY_NODEJS_PLAYWRIGHT_RUNTIME_DIR:-${XDG_CACHE_HOME:-${HOME}/.cache}/homeboy/nodejs-playwright}"
 PACKAGE_DIR="${RUNTIME_DIR}/package"
+BROWSER_CACHE_DIR="${RUNTIME_DIR}/browsers"
 NODE_BIN="${HOMEBOY_NODEJS_PLAYWRIGHT_NODE:-node}"
 NPM_BIN="${HOMEBOY_NODEJS_PLAYWRIGHT_NPM:-npm}"
 STAT_BIN="${HOMEBOY_NODEJS_PLAYWRIGHT_STAT:-stat}"
@@ -83,7 +84,7 @@ NODE
 
 browser_state() {
     [ "$1" = ready ] || { printf 'missing'; return; }
-    if "$NODE_BIN" - "$PACKAGE_DIR" <<'NODE' >/dev/null 2>&1
+    if assert_runtime_tree "$BROWSER_CACHE_DIR" && PLAYWRIGHT_BROWSERS_PATH="$BROWSER_CACHE_DIR" "$NODE_BIN" - "$PACKAGE_DIR" <<'NODE' >/dev/null 2>&1
 const { createRequire } = require('node:module'); const { lstatSync } = require('node:fs'); const { spawnSync } = require('node:child_process'); const path = require('node:path');
 try { const p = createRequire(path.join(process.argv[2], 'package.json'))('playwright'); const bin = p.chromium.executablePath(); if (lstatSync(bin).isSymbolicLink()) throw 0; const result = spawnSync(bin, ['--version'], { encoding: 'utf8' }); process.exit(result.status === 0 ? 0 : 1); } catch { process.exit(1); }
 NODE
@@ -95,10 +96,10 @@ status() {
     local hash package browser
     hash="$(hash_sources)"; package="$(package_state "$hash")"; browser="$(browser_state "$package")"
     if [ "${2:-}" = --json ]; then
-        "$NODE_BIN" - "$package" "$browser" "$PACKAGE_DIR" "$(setup_command)" <<'NODE'
-const [packageState, chromiumState, runtimePackageDir, setupCommand] = process.argv.slice(2);
+        "$NODE_BIN" - "$package" "$browser" "$PACKAGE_DIR" "$BROWSER_CACHE_DIR" "$(setup_command)" <<'NODE'
+const [packageState, chromiumState, runtimePackageDir, browserCacheDir, setupCommand] = process.argv.slice(2);
 const reason = (state, kind) => state === 'ready' ? null : state === 'missing' ? `${kind} missing` : `${kind} invalid, corrupt, or version-mismatched`;
-console.log(JSON.stringify({ package: { state: packageState, reason: reason(packageState, 'package') }, chromium: { state: chromiumState, reason: reason(chromiumState, 'Chromium') }, runtime_package_dir: runtimePackageDir, setup_command: setupCommand }));
+console.log(JSON.stringify({ package: { state: packageState, reason: reason(packageState, 'package') }, chromium: { state: chromiumState, reason: reason(chromiumState, 'Chromium') }, runtime_package_dir: runtimePackageDir, browser_cache_dir: browserCacheDir, setup_command: setupCommand }));
 NODE
     else
         printf 'Playwright package: %s\nChromium: %s\n' "$package" "$browser"
@@ -108,6 +109,7 @@ NODE
 
 setup() {
     require_node; assert_safe_path "$RUNTIME_DIR"; mkdir -p "$RUNTIME_DIR"; chmod 700 "$RUNTIME_DIR"; assert_safe_path "$RUNTIME_DIR"
+    mkdir -p "$BROWSER_CACHE_DIR"; chmod 700 "$BROWSER_CACHE_DIR"; assert_runtime_tree "$BROWSER_CACHE_DIR"
     local hash state tmp
     hash="$(hash_sources)"; state="$(package_state "$hash")"
     if [ "$state" != ready ]; then
@@ -119,7 +121,7 @@ setup() {
         PACKAGE_DIR="$installed_package_dir"; rm -rf "${RUNTIME_DIR}/.package.previous"; [ ! -e "$PACKAGE_DIR" ] || mv "$PACKAGE_DIR" "${RUNTIME_DIR}/.package.previous"; mv "$tmp" "$PACKAGE_DIR"; rm -rf "${RUNTIME_DIR}/.package.previous"
     fi
     local package browser; package="$(package_state "$hash")"; browser="$(browser_state "$package")"
-    if [ "$browser" != ready ]; then "$NODE_BIN" "$PACKAGE_DIR/node_modules/playwright/cli.js" install chromium; fi
+    if [ "$browser" != ready ]; then PLAYWRIGHT_BROWSERS_PATH="$BROWSER_CACHE_DIR" "$NODE_BIN" "$PACKAGE_DIR/node_modules/playwright/cli.js" install chromium; fi
     status status
 }
 
@@ -127,7 +129,7 @@ execute() {
     require_node; local module="${1:-}"; shift || true; [ -n "$module" ] || { echo 'usage: playwright.sh execute <module> [args...]' >&2; exit 64; }
     local hash package browser; hash="$(hash_sources)"; package="$(package_state "$hash")"; browser="$(browser_state "$package")"
     [ "$package" = ready ] && [ "$browser" = ready ] || { echo "Playwright utility is not ready. Run: $(setup_command)" >&2; exit 69; }
-    HOMEBOY_NODEJS_PLAYWRIGHT_RUNTIME_PACKAGE_DIR="$PACKAGE_DIR" "$NODE_BIN" --require "$SCRIPT_DIR/playwright-require.cjs" --import "$SCRIPT_DIR/register-playwright-loader.mjs" "$SCRIPT_DIR/execute-playwright-module.mjs" "$module" "$@"
+    PLAYWRIGHT_BROWSERS_PATH="$BROWSER_CACHE_DIR" HOMEBOY_NODEJS_PLAYWRIGHT_RUNTIME_PACKAGE_DIR="$PACKAGE_DIR" "$NODE_BIN" --require "$SCRIPT_DIR/playwright-require.cjs" --import "$SCRIPT_DIR/register-playwright-loader.mjs" "$SCRIPT_DIR/execute-playwright-module.mjs" "$module" "$@"
 }
 
 action_execute() {

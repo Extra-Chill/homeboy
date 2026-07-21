@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { normalizeProviderPlugin } = require('../../../runtime-agent-ci/lib/full-run-inputs.cjs');
 const { resolveDependencyTarget, runtimeDependencyEntries } = require('../../../runtime-agent-ci/lib/materialize-dependencies.cjs');
 
@@ -14,6 +15,9 @@ function setupRuntime({ phase, workspace, env = process.env, run }) {
   // for the wp-codebox runtime regardless of the WordPress-dependency gate.
   if (phase === 'after_commands') {
     exportRuntimeBin(workspace, env);
+    if (fs.existsSync(extensionPlaywrightUtility(workspace))) {
+      setupExtensionBrowserCache({ workspace, env });
+    }
   }
   if (!requiresWordPressDependencies(env)) {
     return;
@@ -26,6 +30,42 @@ function setupRuntime({ phase, workspace, env = process.env, run }) {
   if (phase === 'after_commands') {
     installCheckedOutPhpDependencies({ workspace, env, run });
   }
+}
+
+function setupExtensionBrowserCache({ workspace, env = process.env, spawn = spawnSync }) {
+  const utility = extensionPlaywrightUtility(workspace);
+  if (!fs.existsSync(utility)) {
+    throw new Error(`Node.js extension Playwright utility is missing: ${utility}`);
+  }
+  const setup = spawn('bash', [utility, 'setup'], { encoding: 'utf8', env });
+  if (setup.error || setup.status !== 0) {
+    throw new Error(`Extension Playwright setup failed. Run \`homeboy extension action nodejs browser.playwright.setup\`. ${setup.stderr || setup.error?.message || ''}`.trim());
+  }
+  const status = spawn('bash', [utility, 'status', '--json'], { encoding: 'utf8', env });
+  if (status.error || status.status !== 0) {
+    throw new Error(`Extension Playwright readiness check failed. Run \`homeboy extension action nodejs browser.playwright.setup\`. ${status.stderr || status.error?.message || ''}`.trim());
+  }
+  let readiness;
+  try {
+    readiness = JSON.parse(status.stdout);
+  } catch {
+    throw new Error('Extension Playwright readiness check returned invalid JSON. Run `homeboy extension action nodejs browser.playwright.setup`.');
+  }
+  if (readiness.package?.state !== 'ready' || readiness.chromium?.state !== 'ready' || typeof readiness.browser_cache_dir !== 'string' || /[\r\n]/.test(readiness.browser_cache_dir)) {
+    throw new Error('Extension Playwright package or Chromium is not ready. Run `homeboy extension action nodejs browser.playwright.setup`.');
+  }
+  appendRuntimeEnvironment(env, 'HOMEBOY_RUNTIME_ENV_PLAYWRIGHT_BROWSERS_PATH', readiness.browser_cache_dir);
+}
+
+function extensionPlaywrightUtility(workspace) {
+  return path.join(workspace, '.ci', 'homeboy-extensions', 'nodejs', 'scripts', 'browser', 'playwright.sh');
+}
+
+function appendRuntimeEnvironment(env, name, value) {
+  if (!env.GITHUB_ENV) {
+    return;
+  }
+  fs.appendFileSync(env.GITHUB_ENV, `${name}=${value}\n`);
 }
 
 function installCheckedOutPhpDependencies({ workspace, env = process.env, run }) {
@@ -154,5 +194,6 @@ module.exports = {
   installCheckedOutPhpDependencies,
   requiresWordPressDependencies,
   safeDependencySubdir,
+  setupExtensionBrowserCache,
   setupRuntime,
 };

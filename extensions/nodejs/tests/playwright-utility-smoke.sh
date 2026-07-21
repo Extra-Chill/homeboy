@@ -26,15 +26,18 @@ cat > "$prefix/node_modules/playwright/package.json" <<'PKG'
 PKG
 cat > "$prefix/node_modules/playwright/index.js" <<'JS'
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const browserPath = () => path.join(process.env.PLAYWRIGHT_BROWSERS_PATH || path.join(process.env.HOME, '.cache', 'ms-playwright'), 'chromium-1223', 'chrome-linux', 'chrome');
 exports.chromium = {
-  executablePath: () => path.join(__dirname, 'chromium-ready'),
-  launch: async () => ({ close: async () => {} }),
+  executablePath: browserPath,
+  launch: async () => { const result = spawnSync(browserPath(), ['--version']); if (result.status !== 0) throw new Error('Chromium executable is missing'); return { close: async () => {} }; },
 };
 JS
 cat > "$prefix/node_modules/playwright/cli.js" <<'JS'
 const fs = require('node:fs');
 const path = require('node:path');
-const browser = path.join(__dirname, 'chromium-ready');
+const browser = path.join(process.env.PLAYWRIGHT_BROWSERS_PATH, 'chromium-1223', 'chrome-linux', 'chrome');
+fs.mkdirSync(path.dirname(browser), { recursive: true });
 fs.writeFileSync(browser, '#!/bin/sh\necho Chromium fake\n');
 fs.chmodSync(browser, 0o700);
 fs.appendFileSync(process.env.HOMEBOY_TEST_CLI_LOG, 'install chromium\n');
@@ -97,7 +100,7 @@ PROJECT_DIR="$TMP_DIR/fresh-project"
 mkdir -p "$PROJECT_DIR"
 cat > "$PROJECT_DIR/extension-runtime.mjs" <<'EOF'
 import { chromium } from 'playwright';
-if (!chromium.executablePath().endsWith('chromium-ready')) throw new Error('extension Playwright was not resolved');
+if (!chromium.executablePath().endsWith('chrome')) throw new Error('extension Playwright was not resolved');
 EOF
 HOMEBOY_NODEJS_PLAYWRIGHT_RUNTIME_DIR="$RUNTIME_DIR" bash "$UTILITY" execute "$PROJECT_DIR/extension-runtime.mjs"
 
@@ -112,7 +115,7 @@ HOMEBOY_NODEJS_PLAYWRIGHT_RUNTIME_DIR="$RUNTIME_DIR" bash "$UTILITY" execute "$P
 
 cat > "$PROJECT_DIR/action-runtime.mjs" <<'EOF'
 import { chromium } from 'playwright';
-if (!chromium.executablePath().endsWith('chromium-ready')) throw new Error('action did not use extension runtime');
+if (!chromium.executablePath().endsWith('chrome')) throw new Error('action did not use extension runtime');
 if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(['--literal', 'a b', 'line one\nline two'])) throw new Error(`action args changed: ${JSON.stringify(process.argv)}`);
 EOF
 
@@ -125,9 +128,25 @@ export const chromium = { executablePath: () => 'project-local' };
 EOF
 cat > "$PROJECT_DIR/project-local.mjs" <<'EOF'
 import { chromium } from 'playwright';
-if (!chromium.executablePath().endsWith('chromium-ready')) throw new Error('utility did not force its pinned Playwright runtime');
+if (!chromium.executablePath().endsWith('chrome')) throw new Error('utility did not force its pinned Playwright runtime');
 EOF
 HOMEBOY_NODEJS_PLAYWRIGHT_RUNTIME_DIR="$RUNTIME_DIR" bash "$UTILITY" execute "$PROJECT_DIR/project-local.mjs"
+
+CONSUMER_DIR="$TMP_DIR/composed-consumer"
+mkdir -p "$CONSUMER_DIR/node_modules/playwright"
+cp "$RUNTIME_DIR/package/node_modules/playwright/package.json" "$CONSUMER_DIR/node_modules/playwright/package.json"
+cp "$RUNTIME_DIR/package/node_modules/playwright/index.js" "$CONSUMER_DIR/node_modules/playwright/index.js"
+cat > "$CONSUMER_DIR/launch.mjs" <<'EOF'
+import { chromium } from 'playwright';
+const browser = await chromium.launch();
+await browser.close();
+EOF
+FRESH_HOME="$TMP_DIR/job-private-home"
+if HOME="$FRESH_HOME" node "$CONSUMER_DIR/launch.mjs" >/dev/null 2>&1; then
+    echo 'composed consumer unexpectedly found Chromium in a fresh HOME' >&2
+    exit 1
+fi
+HOME="$FRESH_HOME" PLAYWRIGHT_BROWSERS_PATH="$RUNTIME_DIR/browsers" node "$CONSUMER_DIR/launch.mjs"
 
 HOMEBOY_NODEJS_PLAYWRIGHT_RUNTIME_DIR="$RUNTIME_DIR" \
 HOMEBOY_SETTINGS_JSON="{\"selected\":[{\"module\":\"$PROJECT_DIR/action-runtime.mjs\",\"args\":[\"--literal\",\"a b\",\"line one\\nline two\"]}]}" \
@@ -155,8 +174,8 @@ printf '{"name":"playwright","version":"1.61.1"}\n' > "$MISSING_RUNTIME/package/
 PACKAGE_ONLY_STATUS="$(HOMEBOY_NODEJS_PLAYWRIGHT_RUNTIME_DIR="$MISSING_RUNTIME" bash "$UTILITY" status --json)"
 node -e 'const status = JSON.parse(process.argv[1]); if (status.package.state !== "invalid" || status.chromium.state !== "missing") process.exit(1)' "$PACKAGE_ONLY_STATUS"
 
-printf 'not executable\n' > "$RUNTIME_DIR/package/node_modules/playwright/chromium-ready"
-chmod 600 "$RUNTIME_DIR/package/node_modules/playwright/chromium-ready"
+printf 'not executable\n' > "$RUNTIME_DIR/browsers/chromium-1223/chrome-linux/chrome"
+chmod 600 "$RUNTIME_DIR/browsers/chromium-1223/chrome-linux/chrome"
 INVALID_BROWSER_STATUS="$(HOMEBOY_NODEJS_PLAYWRIGHT_RUNTIME_DIR="$RUNTIME_DIR" bash "$UTILITY" status --json)"
 node -e 'const status = JSON.parse(process.argv[1]); if (status.chromium.state !== "invalid" || !status.chromium.reason) process.exit(1)' "$INVALID_BROWSER_STATUS"
 HOMEBOY_NODEJS_PLAYWRIGHT_RUNTIME_DIR="$RUNTIME_DIR" HOMEBOY_NODEJS_PLAYWRIGHT_NPM="$FAKE_NPM" HOMEBOY_TEST_NPM_LOG="$NPM_LOG" HOMEBOY_TEST_CLI_LOG="$CLI_LOG" bash "$UTILITY" setup >/dev/null
@@ -179,7 +198,7 @@ mv "$RUNTIME_DIR/package/node_modules/playwright-real" "$RUNTIME_DIR/package/nod
 
 cat > "$PROJECT_DIR/commonjs-runtime.cjs" <<'EOF'
 const { chromium } = require('playwright');
-if (!chromium.executablePath().endsWith('chromium-ready')) throw new Error('CommonJS did not use extension runtime');
+if (!chromium.executablePath().endsWith('chrome')) throw new Error('CommonJS did not use extension runtime');
 EOF
 HOMEBOY_NODEJS_PLAYWRIGHT_RUNTIME_DIR="$RUNTIME_DIR" bash "$UTILITY" execute "$PROJECT_DIR/commonjs-runtime.cjs"
 

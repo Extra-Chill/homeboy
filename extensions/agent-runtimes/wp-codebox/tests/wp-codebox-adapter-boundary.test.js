@@ -5,6 +5,7 @@ require('../../../runtime-agent-ci/tests/helpers/runtime-contract-constants-fixt
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 
 process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(__dirname, '..', '..', '..', 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 
@@ -16,6 +17,8 @@ const {
 	wpCodeboxResolveCommand,
 	wpCodeboxSupportsRunAgentTaskCommand,
 } = require('..');
+const { setupExtensionBrowserCache } = require('../lib/runtime-setup.cjs');
+const { runtimeEnvFromHost } = require('../../../runtime-agent-ci/lib/full-run-config.cjs');
 
 const runtimeRoot = path.join(__dirname, '..');
 const descriptorSource = fs.readFileSync(path.join(runtimeRoot, 'lib', 'wp-codebox-adapter-descriptor.js'), 'utf8');
@@ -77,5 +80,26 @@ assert.equal(wpCodeboxSupportsRunAgentTaskCommand({
 		};
 	},
 }), true);
+
+const setupWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-playwright-cache-contract-'));
+const setupUtility = path.join(setupWorkspace, '.ci', 'homeboy-extensions', 'nodejs', 'scripts', 'browser');
+fs.mkdirSync(setupUtility, { recursive: true });
+fs.writeFileSync(path.join(setupUtility, 'playwright.sh'), '#!/usr/bin/env bash\n');
+const runtimeEnvFile = path.join(setupWorkspace, 'runtime.env');
+const invokedActions = [];
+setupExtensionBrowserCache({
+  workspace: setupWorkspace,
+  env: { GITHUB_ENV: runtimeEnvFile },
+  spawn(_command, args) {
+    invokedActions.push(args.slice(1));
+    return args[1] === 'setup'
+      ? { status: 0, stdout: '', stderr: '' }
+      : { status: 0, stdout: JSON.stringify({ package: { state: 'ready' }, chromium: { state: 'ready' }, browser_cache_dir: '/runner/cache/homeboy/nodejs-playwright/browsers' }), stderr: '' };
+  },
+});
+assert.deepEqual(invokedActions, [['setup'], ['status', '--json']]);
+assert.equal(fs.readFileSync(runtimeEnvFile, 'utf8'), 'HOMEBOY_RUNTIME_ENV_PLAYWRIGHT_BROWSERS_PATH=/runner/cache/homeboy/nodejs-playwright/browsers\n');
+assert.deepEqual(runtimeEnvFromHost({ HOMEBOY_RUNTIME_ENV_PLAYWRIGHT_BROWSERS_PATH: '/runner/cache/homeboy/nodejs-playwright/browsers', HOMEBOY_RUNTIME_ENV_TOKEN: 'secret-value' }), { PLAYWRIGHT_BROWSERS_PATH: '/runner/cache/homeboy/nodejs-playwright/browsers' });
+fs.rmSync(setupWorkspace, { recursive: true, force: true });
 
 process.stdout.write('WP Codebox adapter boundary passed\n');

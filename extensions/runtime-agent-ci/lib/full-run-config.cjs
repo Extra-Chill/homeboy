@@ -103,7 +103,10 @@ function buildConfig(env) {
   const runtimeOverlays = normalizePathSources(parseJsonInput('runtime_overlays', env.RUNTIME_OVERLAYS || '[]', 'array', []), workspace);
   const runtimeMounts = normalizePathSources(parseJsonInput('runtime_mounts', env.RUNTIME_MOUNTS || '[]', 'array', []), workspace);
   const componentContracts = parseJsonInput('component_contracts', env.COMPONENT_CONTRACTS || '[]', 'array', []);
-  const runtimeEnv = parseJsonInput('runtime_env', env.RUNTIME_ENV || '{}', 'object', {});
+  const runtimeEnv = {
+    ...parseJsonInput('runtime_env', env.RUNTIME_ENV || '{}', 'object', {}),
+    ...runtimeEnvFromHost(env),
+  };
   const runtimeConfig = parseJsonInput('runtime_config', env.RUNTIME_CONFIG || '{}', 'object', {});
   const pathMaterializationPlan = parsePathMaterializationPlan(env.PATH_MATERIALIZATION_PLAN || '', { workspace });
   const loopPolicy = loopPolicyFromEnv(env, workloadProfile.loop_policy);
@@ -512,6 +515,17 @@ function runtimeFieldsFromProjection(fields, env) {
   }).filter(([, value]) => value !== undefined && value !== ''));
 }
 
+function runtimeEnvFromHost(env = {}) {
+  const prefix = 'HOMEBOY_RUNTIME_ENV_';
+  return Object.fromEntries(Object.entries(env).flatMap(([name, value]) => {
+    if (!name.startsWith(prefix) || typeof value !== 'string' || /[\r\n]/.test(value)) {
+      return [];
+    }
+    const target = name.slice(prefix.length);
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(target) && !/(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|KEY)$/i.test(target) ? [[target, value]] : [];
+  }));
+}
+
 function mergeProjection(base, override) {
   if (!plainObject(override)) {
     return base;
@@ -561,4 +575,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, parseRuntimeWorkloadProfile, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, withoutInternalKeys, writeFullRunConfig };
+module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, parseRuntimeWorkloadProfile, projectRuntimeConfig, providerBenchEnvFromManifest, runtimeEnvFromHost, runtimePathRequired, withoutInternalKeys, writeFullRunConfig };
