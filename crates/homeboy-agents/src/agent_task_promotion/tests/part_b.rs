@@ -800,6 +800,65 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
 }
 
 #[test]
+fn resume_applied_promotion_reruns_gates_for_exact_dirty_candidate() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let target = temp.path().join("target");
+    std::fs::create_dir(&target).expect("target");
+    git(&target, &["init"]);
+    git(&target, &["config", "user.email", "test@example.com"]);
+    git(&target, &["config", "user.name", "Test"]);
+    std::fs::create_dir_all(target.join("src")).expect("src");
+    std::fs::write(target.join("src/lib.rs"), "old\n").expect("base");
+    git(&target, &["add", "."]);
+    git(&target, &["commit", "-m", "base"]);
+    std::fs::write(target.join("src/lib.rs"), "new\n").expect("apply candidate");
+    let candidate =
+        crate::agent_task_promotion::candidate_fingerprint(target.to_string_lossy().as_ref())
+            .expect("candidate fingerprint");
+    let (source_path, source) = write_patch_source(&temp);
+    let options = |rerun_completed_gates| AgentTaskPromotionOptions {
+        source: source.clone(),
+        source_run_id: Some("run-9392".to_string()),
+        source_path: Some(source_path.clone()),
+        source_worktree_path: None,
+        base_ref: None,
+        task_base_sha: None,
+        candidate_ref: None,
+        to_worktree: "repo@fix-9392".to_string(),
+        task_id: None,
+        artifact_id: None,
+        dry_run: false,
+        gates: VerifyGateOptions {
+            verify: vec!["true".to_string()],
+            rerun_completed_gates,
+            ..Default::default()
+        },
+        provider_command: None,
+        provider_invocation: None,
+    };
+    let previous = serde_json::json!({
+        "schema": "homeboy/agent-task-promotion-report/v1",
+        "status": "applied",
+        "source_run_id": "run-9392",
+        "source": { "task_id": "task-1" },
+        "to_worktree": "repo@fix-9392",
+        "target": { "worktree": "repo@fix-9392", "path": target },
+        "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
+        "provenance": { "candidate": candidate },
+    });
+
+    let rejected = resume_promoted_patch(options(false), &target, &previous)
+        .expect_err("applied promotion requires explicit gate rerun");
+    assert!(rejected.message.contains("explicit completed-gate rerun"));
+
+    let report = resume_promoted_patch(options(true), &target, &previous)
+        .expect("exact applied candidate resumes gates");
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(report.gate_results.len(), 1);
+    assert_eq!(report.provenance["resumed_post_apply_promotion"], true);
+}
+
+#[test]
 fn promotion_options_keep_flat_verify_gate_serialized_shape() {
     // #4910: the shared VerifyGateOptions is `#[serde(flatten)]`-embedded so
     // the historical flat `verify` / `private_verify` / `private_gate_reveal`

@@ -172,13 +172,15 @@ fn validate_resume_provenance(
     target_path: &Path,
     previous: &Value,
 ) -> Result<()> {
+    let previous_status = previous.get("status").and_then(Value::as_str);
     if !matches!(
-        previous.get("status").and_then(Value::as_str),
+        previous_status,
         Some("gate_failed" | "verification_pending")
-    ) {
+    ) && !(options.gates.rerun_completed_gates && previous_status == Some("applied"))
+    {
         return Err(Error::validation_invalid_argument(
             "promotion",
-            "promotion resume requires a durable post-apply promotion",
+            "promotion resume requires a durable post-apply promotion or an explicit completed-gate rerun for an applied promotion",
             None,
             None,
         ));
