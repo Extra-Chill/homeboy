@@ -6,11 +6,12 @@
 #![cfg(test)]
 
 use crate::paths::{
-    artifact_root, authorize_remote_artifact_path, expand_tilde_path, join_remote_child,
-    join_remote_path, local_path_is_contained, normalize_local_path, resolve_contained_local_path,
-    resolve_optional_base_path, resolve_path_string, runner_session_file, runner_sessions_dir,
-    set_artifact_root_override, set_config_artifact_root_resolver, RemotePathAuthorizationError,
-    RemotePathRootContainment,
+    artifact_root, authorize_remote_artifact_path, expand_tilde_path, homeboy_data,
+    join_remote_child, join_remote_path, local_path_is_contained, normalize_local_path,
+    resolve_contained_local_path, resolve_optional_base_path, resolve_path_string,
+    runner_session_file, runner_sessions_dir, set_artifact_root_override,
+    set_config_artifact_root_resolver, RemotePathAuthorizationError, RemotePathRootContainment,
+    HOMEBOY_DATA_DIR_ENV,
 };
 use crate::test_support::with_isolated_home;
 use std::path::{Path, PathBuf};
@@ -30,6 +31,18 @@ fn artifact_root_defaults_under_homeboy_data() {
             artifact_root().expect("artifact root"),
             home.path().join(".local/share/homeboy/artifacts")
         );
+    });
+}
+
+#[test]
+fn homeboy_data_honors_explicit_durable_directory() {
+    with_isolated_home(|home| {
+        let durable = home.path().join("durable-homeboy-data");
+        std::env::set_var(HOMEBOY_DATA_DIR_ENV, &durable);
+
+        assert_eq!(homeboy_data().expect("homeboy data"), durable);
+
+        std::env::remove_var(HOMEBOY_DATA_DIR_ENV);
     });
 }
 

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -463,10 +463,40 @@ pub(super) fn apply_runner_process_env(
             }
         }
     }
+    preserve_durable_homeboy_data_dir(command, &plan.env);
     command.envs(plan.env.iter()).env(
         homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
         serde_json::to_string(&plan.source_snapshot).unwrap_or_default(),
     );
+}
+
+fn preserve_durable_homeboy_data_dir(
+    command: &mut std::process::Command,
+    job_env: &HashMap<String, String>,
+) {
+    let data_dir = durable_homeboy_data_dir_for_job(
+        job_env,
+        std::env::var("HOME").ok().as_deref(),
+        homeboy_core::paths::homeboy_data().ok(),
+    );
+    if let Some(data_dir) = data_dir {
+        command.env(homeboy_core::paths::HOMEBOY_DATA_DIR_ENV, data_dir);
+    }
+}
+
+pub(super) fn durable_homeboy_data_dir_for_job(
+    job_env: &HashMap<String, String>,
+    runner_home: Option<&str>,
+    runner_data_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if job_env.contains_key(homeboy_core::paths::HOMEBOY_DATA_DIR_ENV) {
+        return None;
+    }
+    let job_home = job_env.get("HOME")?;
+    if runner_home == Some(job_home) {
+        return None;
+    }
+    runner_data_dir
 }
 
 fn validate_runner_inherited_secret_env(

@@ -4,6 +4,8 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+pub const HOMEBOY_DATA_DIR_ENV: &str = "HOMEBOY_DATA_DIR";
+
 mod locations;
 mod rigs;
 mod runtime;
@@ -98,6 +100,12 @@ pub fn homeboy_json() -> Result<PathBuf> {
 /// Config/spec files remain under `homeboy()` (`~/.config/homeboy`). This
 /// directory is for machine-local observations such as the SQLite store.
 pub fn homeboy_data() -> Result<PathBuf> {
+    if let Ok(path) = env::var(HOMEBOY_DATA_DIR_ENV) {
+        if !path.trim().is_empty() {
+            return Ok(expand_tilde_path(path));
+        }
+    }
+
     #[cfg(windows)]
     {
         let base = env::var("LOCALAPPDATA")
