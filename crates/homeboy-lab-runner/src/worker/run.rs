@@ -629,6 +629,7 @@ fn runner_exec_options_from_envelope(
         detach_after_handoff: false,
         mirror_evidence: true,
         print_handoff: true,
+        read_only_artifact_access: false,
     })
 }
 

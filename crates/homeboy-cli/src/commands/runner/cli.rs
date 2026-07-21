@@ -411,6 +411,14 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         raw: bool,
 
+        /// Treat this exec as a read-only retrieval of evidence the runner
+        /// already retains (for example, hydrating a completed run's artifact).
+        /// Routes to the generation that owns the retained run/artifact and
+        /// never rotates the shared tunnel, so a stale admission daemon does not
+        /// block the read.
+        #[arg(long = "read-only-artifact")]
+        read_only_artifact: bool,
+
         /// Command and arguments to execute on the runner
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,

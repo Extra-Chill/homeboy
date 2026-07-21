@@ -31,6 +31,7 @@ pub(super) fn exec(
     artifact_outputs: Vec<String>,
     artifact_dir_outputs: Vec<String>,
     summary_outputs: Vec<String>,
+    read_only_artifact: bool,
     command: Vec<String>,
 ) -> CmdResult<RunnerExecOutput> {
     let script = script_file
@@ -60,6 +61,20 @@ pub(super) fn exec(
             "runner exec --artifact/--artifact-dir/--summary requires --run-id so evidence can be attached to a persisted run",
             None,
             None,
+        ));
+    }
+
+    // A read-only retrieval hydrates evidence the runner already retains; it
+    // must not declare new artifact outputs or capture a mutation patch, so the
+    // read never rewrites a draining generation (Extra-Chill/homeboy#9420).
+    if read_only_artifact && (has_declared_outputs || capture_patch) {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "read_only_artifact",
+            "runner exec --read-only-artifact is a non-destructive retrieval; it cannot be combined with --capture-patch or --artifact/--artifact-dir/--summary output declarations",
+            None,
+            Some(vec![
+                "Drop --read-only-artifact to run a mutating command, or drop the output/capture flags to retrieve retained evidence non-destructively.".to_string(),
+            ]),
         ));
     }
 
@@ -106,8 +121,12 @@ pub(super) fn exec(
             run_id: validated_run_id.clone(),
             run_id_owns_generic_exec: true,
             detach_after_handoff: false,
-            mirror_evidence: true,
-            print_handoff: true,
+            // A read-only retrieval never rotates the tunnel and mirrors no new
+            // evidence; it hydrates evidence the runner already retains
+            // (Extra-Chill/homeboy#9420).
+            mirror_evidence: !read_only_artifact,
+            print_handoff: !read_only_artifact,
+            read_only_artifact_access: read_only_artifact,
         },
     )?;
     if let Some(run_id) = validated_run_id.as_deref() {

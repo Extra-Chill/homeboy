@@ -301,6 +301,7 @@ fn lab_runner_exec_options(
         detach_after_handoff: context.detach_after_handoff,
         mirror_evidence: context.mirror_evidence,
         print_handoff: context.print_handoff,
+        read_only_artifact_access: false,
     }
 }
 

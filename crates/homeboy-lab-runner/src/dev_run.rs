@@ -270,6 +270,7 @@ pub(crate) fn run_extension_dev_run_with(
             detach_after_handoff: false,
             mirror_evidence: true,
             print_handoff: true,
+            read_only_artifact_access: false,
         },
     )?;
     let install_outcome = extension_dev_run_execution_outcome(&install_workload, &install);
@@ -334,6 +335,7 @@ pub(crate) fn run_extension_dev_run_with(
             detach_after_handoff: false,
             mirror_evidence: true,
             print_handoff: true,
+            read_only_artifact_access: false,
         },
     )?;
     let command_outcome = extension_dev_run_execution_outcome(&command_workload, &command_output);
@@ -599,6 +601,7 @@ fn probe_runner_extension_state(
             detach_after_handoff: false,
             mirror_evidence: false,
             print_handoff: false,
+            read_only_artifact_access: false,
         },
     ) {
         Ok((output, _)) => RunnerExtensionStateProbe {

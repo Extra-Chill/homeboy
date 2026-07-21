@@ -104,6 +104,7 @@ pub(super) fn run_rig_source_management_on_runner(
             detach_after_handoff: false,
             mirror_evidence: true,
             print_handoff: true,
+            read_only_artifact_access: false,
         },
     )?;
 

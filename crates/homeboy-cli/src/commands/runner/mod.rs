@@ -56,6 +56,7 @@ pub fn run_plain_text_raw(
             artifact_outputs,
             artifact_dir_outputs,
             summary_outputs,
+            read_only_artifact,
             json: false,
             raw: false,
             command,
@@ -77,6 +78,7 @@ pub fn run_plain_text_raw(
             artifact_outputs,
             artifact_dir_outputs,
             summary_outputs,
+            read_only_artifact,
             command,
         ),
         _ => super::output_runtime::CommandRun::from_raw_stdout(

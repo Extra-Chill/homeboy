@@ -222,6 +222,46 @@ fn runner_exec_keeps_stale_session_projections_fail_closed_without_fresh_daemon_
 }
 
 #[test]
+fn read_only_artifact_retrieval_is_not_blocked_by_a_stale_admission_daemon() {
+    // A completed run retains its artifact on a generation that is now draining
+    // behind a stale admission daemon. A read-only retrieval routes to that
+    // owner and never rotates the shared tunnel, so it must not be refused
+    // (Extra-Chill/homeboy#9420).
+    let read_only =
+        RunnerExecOptions::raw_command(vec!["node".to_string()]).read_only_artifact_access();
+
+    assert!(!refuses_stale_daemon_execution(
+        &read_only,
+        &stale_direct_daemon_status(),
+    ));
+    // A normal (mutating) exec against the same stale daemon still fails closed.
+    assert!(refuses_stale_daemon_execution(
+        &RunnerExecOptions::raw_command(vec!["node".to_string()]),
+        &stale_direct_daemon_status(),
+    ));
+}
+
+#[test]
+fn read_only_artifact_retrieval_reports_a_non_destructive_resolution_command_when_unrouted() {
+    let status = stale_direct_daemon_status();
+    let error = read_only_artifact_access_unresolved_error("homeboy-lab", &status);
+
+    assert_eq!(error.code, ErrorCode::RunnerLabTransportFailure);
+    assert_eq!(error.retryable, Some(true));
+    assert_eq!(error.details["phase"], "read_only_artifact_access");
+    assert_eq!(error.details["runner_id"], "homeboy-lab");
+    // The resolution command is deterministic and non-destructive: it routes to
+    // the retaining generation without rotating or reconnecting the runner.
+    assert_eq!(
+        error.details["resolution_command"],
+        "homeboy runs artifacts <run-id> --runner homeboy-lab"
+    );
+    // The owning generation is identified from the stale-daemon warning so the
+    // operator can see which generation retains the evidence.
+    assert_eq!(error.details["owning_generation"], "homeboy 0.288.8");
+}
+
+#[test]
 fn generic_runner_exec_rejects_a_mismatched_persisted_run_identity() {
     let error = validate_generic_exec_mirror_run_id(
         true,
@@ -889,6 +929,7 @@ fn worker_local_workload_validation_uses_implicit_command_secret_names() {
                 detach_after_handoff: false,
                 mirror_evidence: true,
                 print_handoff: true,
+                read_only_artifact_access: false,
             },
             |_plan| {
                 Ok(ProcessOutput {
@@ -938,6 +979,7 @@ fn test_exec_runs_local_runner_command() {
                 detach_after_handoff: false,
                 mirror_evidence: true,
                 print_handoff: true,
+                read_only_artifact_access: false,
             },
         )
         .expect("exec local runner");
@@ -1019,6 +1061,7 @@ fn test_exec_does_not_leak_ambient_process_env() {
                 detach_after_handoff: false,
                 mirror_evidence: true,
                 print_handoff: true,
+                read_only_artifact_access: false,
             },
         )
         .expect("exec local runner");
@@ -1064,6 +1107,7 @@ fn test_exec_preserves_explicit_request_env() {
                 detach_after_handoff: false,
                 mirror_evidence: true,
                 print_handoff: true,
+                read_only_artifact_access: false,
             },
         )
         .expect("exec local runner");
@@ -1123,6 +1167,7 @@ fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
                 detach_after_handoff: false,
                 mirror_evidence: true,
                 print_handoff: true,
+                read_only_artifact_access: false,
             },
         )
         .expect("exec local runner");
@@ -1189,6 +1234,7 @@ fn test_exec_rejects_missing_required_local_runner_path() {
                 detach_after_handoff: false,
                 mirror_evidence: true,
                 print_handoff: true,
+                read_only_artifact_access: false,
             },
         )
         .expect_err("missing required path rejects before command");
@@ -1241,6 +1287,7 @@ fn test_exec_reports_required_path_diagnostics() {
                 detach_after_handoff: false,
                 mirror_evidence: true,
                 print_handoff: true,
+                read_only_artifact_access: false,
             },
         )
         .expect("exec with required path");
@@ -1308,6 +1355,7 @@ fn test_exec_rejects_disconnected_ssh_runner_without_diagnostic_fallback() {
                 detach_after_handoff: false,
                 mirror_evidence: true,
                 print_handoff: true,
+                read_only_artifact_access: false,
             },
         )
         .expect_err("disconnected ssh runner needs daemon or diagnostic fallback");
@@ -1355,6 +1403,7 @@ fn explicit_diagnostic_ssh_wins_for_ssh_runners() {
         detach_after_handoff: false,
         mirror_evidence: true,
         print_handoff: true,
+        read_only_artifact_access: false,
     };
 
     assert!(should_force_diagnostic_ssh(&ssh_runner(), &options));

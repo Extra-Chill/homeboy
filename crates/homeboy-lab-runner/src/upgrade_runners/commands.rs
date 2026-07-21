@@ -167,6 +167,7 @@ pub fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecO
         detach_after_handoff: false,
         mirror_evidence: true,
         print_handoff: true,
+        read_only_artifact_access: false,
     }
 }
 

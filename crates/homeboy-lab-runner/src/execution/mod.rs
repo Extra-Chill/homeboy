@@ -146,6 +146,14 @@ pub struct RunnerExecOptions {
     pub detach_after_handoff: bool,
     pub mirror_evidence: bool,
     pub print_handoff: bool,
+    /// This runner exec is a read-only retrieval of evidence that a completed
+    /// run or artifact already retains on the runner (for example, hydrating a
+    /// retained matrix result). It reads through the generation that owns the
+    /// retained run/artifact and must never rotate, disconnect, or rewrite a
+    /// draining generation. When set, a stale admission daemon no longer blocks
+    /// the read: retrieval routes to the retained owner instead of the mutable
+    /// current admission session (Extra-Chill/homeboy#9420).
+    pub read_only_artifact_access: bool,
 }
 
 impl Default for RunnerExecOptions {
@@ -174,6 +182,7 @@ impl Default for RunnerExecOptions {
             detach_after_handoff: false,
             mirror_evidence: true,
             print_handoff: true,
+            read_only_artifact_access: false,
         }
     }
 }
@@ -246,6 +255,18 @@ impl RunnerExecOptions {
     }
 
     pub(crate) fn without_evidence_mirror(mut self) -> Self {
+        self.mirror_evidence = false;
+        self.print_handoff = false;
+        self
+    }
+
+    /// Mark this exec as a read-only retrieval of retained runner evidence. The
+    /// read routes to the generation that still owns the retained run/artifact
+    /// and never rotates the shared admission tunnel, so a stale admission
+    /// daemon does not block hydrating a completed run's artifacts
+    /// (Extra-Chill/homeboy#9420).
+    pub(crate) fn read_only_artifact_access(mut self) -> Self {
+        self.read_only_artifact_access = true;
         self.mirror_evidence = false;
         self.print_handoff = false;
         self
@@ -850,6 +871,21 @@ pub(crate) fn exec_with_status_snapshot(
             )]),
         ));
     }
+    // A read-only retrieval never rotates the shared tunnel, so it is not
+    // blocked by admission-daemon freshness. It must still resolve a daemon
+    // endpoint that can serve the retained evidence; when none is reachable,
+    // return a deterministic, non-destructive retrieval command rather than
+    // silently rotating or reconnecting the runner (Extra-Chill/homeboy#9420).
+    if options.read_only_artifact_access
+        && !matches!(
+            select_runner_transport(&runner, Some(&connected), false),
+            RunnerTransport::DirectDaemon(_) | RunnerTransport::ReverseBroker(_)
+        )
+    {
+        return Err(read_only_artifact_access_unresolved_error(
+            runner_id, &connected,
+        ));
+    }
     let result = match select_runner_transport(&runner, Some(&connected), false) {
         RunnerTransport::DirectDaemon(handle) => {
             run_capability_preflight(&runner)?;
@@ -995,6 +1031,46 @@ fn refuses_stale_daemon_execution(
     status.connected
         && status.stale_daemon.is_some()
         && !allows_idle_stale_daemon_refresh(options, status)
+        // A read-only retrieval routes to the generation that retains the run or
+        // artifact and never rotates the shared tunnel, so admission-daemon
+        // freshness must not block hydrating a completed run's retained evidence
+        // (Extra-Chill/homeboy#9420).
+        && !options.read_only_artifact_access
+}
+
+/// A read-only retrieval could not resolve a daemon endpoint able to serve the
+/// retained evidence. Report a deterministic, non-destructive retrieval command
+/// that identifies the generation owner instead of rotating or reconnecting the
+/// runner (Extra-Chill/homeboy#9420).
+fn read_only_artifact_access_unresolved_error(
+    runner_id: &str,
+    status: &RunnerStatusReport,
+) -> Error {
+    let owning_generation = status
+        .stale_daemon
+        .as_ref()
+        .map(|warning| warning.session_homeboy_version.clone());
+    Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        format!(
+            "runner `{runner_id}` retains the requested evidence, but no daemon generation currently serves a read-only retrieval endpoint"
+        ),
+        json!({
+            "runner_id": runner_id,
+            "phase": "read_only_artifact_access",
+            "owning_generation": owning_generation,
+            "resolution_command": format!(
+                "homeboy runs artifacts <run-id> --runner {runner_id}"
+            ),
+        }),
+    )
+    .with_retryable(true)
+    .with_hint(format!(
+        "Resolve retained runner evidence non-destructively with `homeboy runs artifacts <run-id> --runner {runner_id}`; it routes to the generation that still owns the run without rotating the shared tunnel."
+    ))
+    .with_hint(format!(
+        "Inspect the owning generation with `homeboy runner status {runner_id}` before any refresh; a refresh is not required to read retained evidence."
+    ))
 }
 
 fn validate_generic_exec_mirror_run_id(
