@@ -17,6 +17,7 @@ use super::connection::{
     active_jobs_before_daemon_replacement, disconnect_with_session, rotate_daemon_generation,
 };
 use super::execution::exec_with_status_snapshot;
+use super::execution::reserve_daemon_admission;
 use super::{
     connect_with_orphan_adoption, exec, load, materialize_runner_extension_with_env, merge,
     normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
@@ -33,6 +34,16 @@ const DEFAULT_HOMEBOY_REF: &str = "main";
 const DISCONNECTED_SSH_REFRESH_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const RECONNECT_VERIFICATION_WINDOW: Duration = Duration::from_secs(3);
 const RECONNECT_VERIFICATION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+/// A freshly reconnected daemon reports the right identity a beat before its
+/// `/admissions` endpoint will admit against the new lease: the just-rotated
+/// lease heartbeat is momentarily not fresh and the loopback tunnel can drop a
+/// first request with `error sending request`. A refresh that returns success
+/// here strands the immediately following Lab handoff on a retryable failure
+/// the initiating command never recovers (#9466). Probe `/admissions` for
+/// readiness within a bounded window so the reconnect converges onto the exact
+/// lease the next handoff will use before declaring success.
+const ADMISSION_READINESS_WINDOW: Duration = Duration::from_secs(10);
+const ADMISSION_READINESS_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HomeboyBinaryRefreshMode {
@@ -639,6 +650,56 @@ pub fn refresh_homeboy_binary(
                 reconnect_exit_code,
             ));
         }
+        // Identity verification proves the right daemon answered; the reconnect
+        // is not done until that daemon will actually admit a Lab handoff.
+        // Probe `/admissions` for readiness so an immediately following
+        // runner-pinned handoff converges onto this exact lease instead of
+        // hitting a not-fresh lease or a transport drop the initiating command
+        // never recovers (#9466).
+        if let Some(identity_commit) = identity
+            .get("data")
+            .unwrap_or(&identity)
+            .get("git_commit")
+            .and_then(Value::as_str)
+        {
+            if let Err(readiness_error) =
+                probe_reconnected_admission_readiness(&plan.runner_id, identity_commit)
+            {
+                daemon_refreshed = false;
+                if let Err(rollback_error) = rollback_refreshed_daemon(
+                    &plan.runner_id,
+                    previous_homeboy_path.as_deref(),
+                    options.force,
+                ) {
+                    return Err(reconnect_rollback_error(&report, rollback_error));
+                }
+                return Ok((
+                    HomeboyBinaryRefreshOutput {
+                        variant: "refresh_homeboy",
+                        command: "runner.refresh_homeboy",
+                        runner_id: plan.runner_id.clone(),
+                        dry_run: false,
+                        plan: plan.clone(),
+                        identity: Some(identity),
+                        updated_fields: Vec::new(),
+                        daemon_refreshed: false,
+                        interrupted_job_ids,
+                        selected_binary_path: plan.binary_path.clone(),
+                        reconnect_required: true,
+                        followup_commands: plan.followup_commands.clone(),
+                        reconnect_deferred: None,
+                        failure: Some(refresh_reconnect_failure(
+                            &plan,
+                            &exec_output,
+                            &report,
+                            Some(readiness_error.message.as_str()),
+                        )),
+                        bootstrap_provenance: None,
+                    },
+                    1,
+                ));
+            }
+        }
     } else {
         interrupted_job_ids = Vec::new();
     }
@@ -805,6 +866,109 @@ fn verify_refreshed_daemon_status(
 fn build_identity_commit(identity: &str) -> Option<&str> {
     let (_, commit) = identity.strip_prefix("homeboy ")?.split_once('+')?;
     Some(commit.strip_suffix("-dirty").unwrap_or(commit))
+}
+
+/// Prove the reconnected daemon will admit a Lab handoff before the refresh
+/// reports success. Identity verification confirms the right daemon answered,
+/// but the just-rotated lease can still be momentarily not fresh and the new
+/// loopback tunnel can drop the first admission request — exactly the two
+/// failures an immediately following handoff hit in #9466. This reserves and
+/// immediately releases an admission against the reconnected session's own
+/// lease, so success guarantees the next handoff converges onto the same
+/// endpoint.
+fn probe_reconnected_admission_readiness(runner_id: &str, identity_commit: &str) -> Result<()> {
+    let session = super::connection::status_for_admission(runner_id)?
+        .session
+        .filter(|session| session.mode == super::RunnerTunnelMode::DirectSsh);
+    let Some(session) = session else {
+        // A reverse-broker session admits through the broker, not a direct
+        // loopback `/admissions` endpoint, so there is no local readiness probe
+        // to run. Identity verification already gated this reconnect.
+        return Ok(());
+    };
+    let (Some(local_url), Some(expected_lease_id)) = (
+        session.local_url.as_deref(),
+        session
+            .remote_daemon_lease_id
+            .as_deref()
+            .filter(|lease| !lease.is_empty()),
+    ) else {
+        // No direct endpoint or proven lease means the next handoff resolves
+        // its own coordinates; there is nothing this probe can assert here.
+        return Ok(());
+    };
+    probe_admission_readiness_until_ready(
+        expected_lease_id,
+        Instant::now() + ADMISSION_READINESS_WINDOW,
+        || {
+            reserve_daemon_admission(
+                runner_id,
+                local_url,
+                &format!("runner.refresh_homeboy readiness probe ({identity_commit})"),
+                expected_lease_id,
+                None,
+            )
+            .map(|reservation| {
+                // Drop releases the reservation immediately; readiness is the
+                // only signal we need.
+                drop(reservation);
+            })
+        },
+        || std::thread::sleep(ADMISSION_READINESS_RETRY_INTERVAL),
+    )
+}
+
+/// Retry the admission readiness probe through the transient post-reconnect
+/// window (stale-but-settling lease and dropped first requests) while failing
+/// immediately on an authoritative lease mismatch — that means a different
+/// daemon owns the endpoint and no amount of waiting will converge it.
+fn probe_admission_readiness_until_ready<Reserve, Wait>(
+    expected_lease_id: &str,
+    deadline: Instant,
+    mut reserve: Reserve,
+    mut wait: Wait,
+) -> Result<()>
+where
+    Reserve: FnMut() -> Result<()>,
+    Wait: FnMut(),
+{
+    loop {
+        match reserve() {
+            Ok(()) => return Ok(()),
+            Err(error) if admission_readiness_failure_is_authoritative(&error) => {
+                return Err(error);
+            }
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    return Err(admission_readiness_timeout_error(expected_lease_id, error));
+                }
+                wait();
+            }
+        }
+    }
+}
+
+/// A reservation that bound against a *different* lease proves another daemon
+/// owns the endpoint (identity mismatch), so retrying cannot help. Every other
+/// failure — a not-fresh lease heartbeat or a transport drop — is the transient
+/// post-reconnect window this probe exists to absorb.
+fn admission_readiness_failure_is_authoritative(error: &Error) -> bool {
+    error.details.get("field").and_then(Value::as_str) == Some("expected_daemon_lease_id")
+}
+
+fn admission_readiness_timeout_error(expected_lease_id: &str, source: Error) -> Error {
+    Error::validation_invalid_argument(
+        "reconnect",
+        format!(
+            "refreshed daemon did not become ready to admit Lab handoffs against lease `{expected_lease_id}` within {}s: {}",
+            ADMISSION_READINESS_WINDOW.as_secs(),
+            source.message
+        ),
+        Some(expected_lease_id.to_string()),
+        Some(vec![
+            "re-run `homeboy runner refresh-homeboy <runner> --reconnect` to reconcile the daemon session".to_string(),
+        ]),
+    )
 }
 
 fn refresh_execution_options(

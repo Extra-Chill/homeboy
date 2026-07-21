@@ -2,6 +2,7 @@
 
 mod part_a;
 mod part_b;
+mod part_c;
 
 use super::*;
 use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
