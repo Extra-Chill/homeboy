@@ -80,17 +80,7 @@ pub(crate) fn materialize_verified_lab_snapshot_git_baseline(
             "--initial-branch=homeboy-snapshot-baseline",
         ],
     )?;
-    git(
-        materialized_workspace_path,
-        &[
-            "add",
-            "--all",
-            "--",
-            SYNTHETIC_BASELINE_PATHS[0],
-            SYNTHETIC_BASELINE_PATHS[1],
-            SYNTHETIC_BASELINE_PATHS[2],
-        ],
-    )?;
+    stage_synthetic_baseline(materialized_workspace_path)?;
     let tree = git(materialized_workspace_path, &["write-tree"])?;
     let message = synthetic_snapshot_baseline_message(&provenance);
     let commit = git_with_env(
@@ -793,6 +783,52 @@ fn validate_content_manifest(
         }
     }
     Ok(())
+}
+
+/// Stage the synthetic snapshot baseline, keeping Homeboy-owned runner metadata
+/// (`.homeboy/runner-workspace.json`, `.homeboy/lab-at-files/**`) out of the
+/// committed tree.
+///
+/// When the repository itself gitignores `.homeboy`, the metadata is already
+/// excluded by gitignore — and `git add --all -- . :(exclude).homeboy/...`
+/// fails, because the explicit `.` pathspec makes Git treat the ignored
+/// `.homeboy` directory as an explicit add target and reject it ("The following
+/// paths are ignored by one of your .gitignore files: .homeboy"). That blocked
+/// committed-harvest baseline materialization on any repo that ignores
+/// `.homeboy` (#9399). In that case, stage with a bare `git add --all`, which
+/// respects `.gitignore` silently. Otherwise use the explicit exclude pathspecs
+/// so the metadata is kept out of a repo that does not ignore `.homeboy`.
+fn stage_synthetic_baseline(workspace: &Path) -> std::result::Result<(), String> {
+    if homeboy_metadata_is_gitignored(workspace) {
+        git(workspace, &["add", "--all"])?;
+    } else {
+        git(
+            workspace,
+            &[
+                "add",
+                "--all",
+                "--",
+                SYNTHETIC_BASELINE_PATHS[0],
+                SYNTHETIC_BASELINE_PATHS[1],
+                SYNTHETIC_BASELINE_PATHS[2],
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether the repository's own ignore rules already exclude the `.homeboy`
+/// runner-metadata directory, so `git add --all` will never stage it.
+fn homeboy_metadata_is_gitignored(workspace: &Path) -> bool {
+    // `git check-ignore` exits 0 when the path is ignored, 1 when it is not, and
+    // >1 on error. Treat only a clean "ignored" (0) as gitignored so a
+    // check-ignore failure falls back to the explicit-exclude path.
+    Command::new("git")
+        .args(["check-ignore", "-q", ".homeboy"])
+        .current_dir(workspace)
+        .status()
+        .map(|status| status.code() == Some(0))
+        .unwrap_or(false)
 }
 
 fn git(cwd: &Path, args: &[&str]) -> std::result::Result<String, String> {
@@ -1933,5 +1969,69 @@ mod tests {
         .expect_err("changed snapshot workspace must fail");
         assert!(error.contains("runner workspace sync --mode snapshot"));
         assert!(!error.contains("git status --short"));
+    }
+
+    #[test]
+    fn synthetic_baseline_succeeds_when_the_repository_gitignores_homeboy_metadata() {
+        // A repository that ignores `.homeboy` must remain Cook-able on Lab: the
+        // committed-harvest baseline previously died with "The following paths
+        // are ignored by one of your .gitignore files: .homeboy" because the
+        // explicit `.` add pathspec made Git treat the ignored metadata
+        // directory as an explicit add target (#9399).
+        let workspace = tempfile::tempdir().expect("runner workspace");
+        std::fs::write(workspace.path().join(".gitignore"), ".homeboy/\n")
+            .expect("repository ignores .homeboy");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("snapshot source");
+        std::fs::create_dir_all(workspace.path().join(".homeboy/lab-at-files"))
+            .expect("runner metadata directory");
+        std::fs::write(
+            workspace.path().join(".homeboy/runner-workspace.json"),
+            "runner-owned metadata\n",
+        )
+        .expect("runner metadata");
+        std::fs::write(
+            workspace.path().join(".homeboy/lab-at-files/handoff.json"),
+            "lab @file materialization\n",
+        )
+        .expect("lab at-file metadata");
+
+        let snapshot = snapshot(workspace.path());
+        let lab = lab(workspace.path(), &snapshot);
+        let baseline = materialize_verified_lab_snapshot_git_baseline(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            lab,
+        )
+        .expect("synthetic baseline succeeds despite gitignored .homeboy");
+
+        let tree = git(workspace.path(), &["ls-tree", "-r", "--name-only", "HEAD"])
+            .expect("list baseline tree");
+        // Real, non-ignored source is present; ignored Homeboy metadata is not.
+        assert!(
+            tree.contains("file.txt"),
+            "real source is committed: {tree}"
+        );
+        assert!(
+            !tree.contains(".homeboy"),
+            "ignored Homeboy metadata is absent from the baseline tree: {tree}"
+        );
+
+        // A real, non-ignored provider change is still detectable against the
+        // baseline.
+        std::fs::write(
+            workspace.path().join("provider-edit.txt"),
+            "provider edit\n",
+        )
+        .expect("provider edit");
+        stage_synthetic_baseline(workspace.path()).expect("stage provider delta");
+        let patch = git(
+            workspace.path(),
+            &["diff", "--cached", "--binary", "--full-index", &baseline],
+        )
+        .expect("provider delta");
+        assert!(patch.contains("provider-edit.txt"));
+        assert!(!patch.contains("runner-workspace.json"));
+        assert!(!patch.contains("handoff.json"));
     }
 }
