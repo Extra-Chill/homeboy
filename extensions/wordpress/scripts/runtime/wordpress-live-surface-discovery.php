@@ -289,6 +289,7 @@ function homeboy_wordpress_live_discover_post_types( array &$artifact ) {
 			'label'      => $post_type->label ?? $name,
 			'public'     => ! empty( $post_type->public ),
 			'showUi'     => ! empty( $post_type->show_ui ),
+			'showInRest' => ! empty( $post_type->show_in_rest ),
 			'restBase'   => $post_type->rest_base ?? '',
 			'source'     => 'get_post_types',
 		);
@@ -310,6 +311,7 @@ function homeboy_wordpress_live_discover_taxonomies( array &$artifact ) {
 			'label'      => $taxonomy->label ?? $name,
 			'public'     => ! empty( $taxonomy->public ),
 			'hierarchical' => ! empty( $taxonomy->hierarchical ),
+			'showInRest' => ! empty( $taxonomy->show_in_rest ),
 			'objectTypes' => array_values( (array) ( $taxonomy->object_type ?? array() ) ),
 			'restBase'   => $taxonomy->rest_base ?? '',
 			'source'     => 'get_taxonomies',

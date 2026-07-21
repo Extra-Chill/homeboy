@@ -14,6 +14,7 @@ const path = require('node:path');
 const {
   calculatePublishSet,
   evaluateSideEffectPolicy,
+  finalizeWorkspaceReview,
   preparePublication,
   publicationTemplates,
   publishWorkspace,
@@ -48,6 +49,32 @@ assert.deepEqual(
     accepted_files: ['build/output.txt', 'docs/generated.md'],
   }),
   ['docs/generated.md', 'README.md', 'build/output.txt']
+);
+
+const finalizationEvidencePolicy = {
+  required_evidence: [
+    { id: 'compatibility', reviewer_facing: true, durable_url_required: true, fields: [{ name: 'statement', min_length: 1 }, { name: 'external_consumers', min_length: 1 }] },
+    { id: 'usage-scan', reviewer_facing: true, durable_url_required: true, fields: [{ name: 'status', values: ['completed', 'unavailable_manual_review'] }, { name: 'source', min_length: 1 }, { name: 'limitations', min_length: 1 }] },
+  ],
+  testing_instructions: [{ command: 'npm test -- compatibility' }],
+};
+
+const finalizationFixture = {
+  publication: { values: { run_id: 'fixture-run' }, base: 'trunk', branch: 'fixture-branch', templates: { title: 'Fixture', commitMessage: 'test: fixture' } },
+  delta: { staged: ['docs/generated.md'] },
+};
+assert.throws(
+  () => finalizeWorkspaceReview({ finalization_evidence_policy: finalizationEvidencePolicy }, '/tmp', finalizationFixture.publication, finalizationFixture.delta, { scenario: { metadata: {} } }),
+  /Required finalization evidence is missing: compatibility/,
+);
+assert.throws(
+  () => finalizeWorkspaceReview({ finalization_evidence_policy: finalizationEvidencePolicy }, '/tmp', finalizationFixture.publication, finalizationFixture.delta, {
+    scenario: { metadata: { finalization_evidence: [
+      { id: 'compatibility', statement: 'No external behavior changes.', external_consumers: 'Marketplace extensions.', url: 'file:///tmp/compatibility.md' },
+      { id: 'usage-scan', status: 'completed', source: 'Marketplace search', limitations: 'Keyword search only.', url: 'https://example.com/scan' },
+    ] } },
+  }),
+  /Reviewer-facing finalization evidence must use a durable non-local URL: compatibility/,
 );
 
 const templates = publicationTemplates({
@@ -183,6 +210,7 @@ try {
     model: 'gpt-5.5',
     workload_id: 'fixture-workload',
     finalization_gate_results: [{ id: 'verification_commands', status: 'passed' }],
+    finalization_evidence_policy: finalizationEvidencePolicy,
     runner_workspace: { branch: 'agent-artifacts/{agent_slug}-{run_id}', from: 'origin/trunk' },
     artifact_export: {
       commit_message_template: 'chore: persist {task_id}',
@@ -191,7 +219,13 @@ try {
     },
   }, {}, {
     id: 'fixture-workload',
-    metadata: { job_id: 'job-1' },
+    metadata: {
+      job_id: 'job-1',
+      finalization_evidence: [
+        { id: 'compatibility', statement: 'No external behavior changes.', external_consumers: 'Marketplace extensions.', url: 'https://github.com/owner/repo/pull/1291#compatibility' },
+        { id: 'usage-scan', status: 'unavailable_manual_review', source: 'Marketplace API', limitations: 'The API was unavailable; manual review recorded in the PR.', url: 'https://github.com/owner/repo/pull/1291#usage-scan' },
+      ],
+    },
   }, workspace, ['docs/generated.md'], {
     env: { GITHUB_RUN_ID: '12345' },
     run,
@@ -228,6 +262,9 @@ try {
   assert.equal(finalizationCall.args.includes('verification_commands=passed'), true);
   assert.equal(finalizationCall.args.includes('--changed-file'), true);
   assert.equal(finalizationCall.args.includes('docs/generated.md'), true);
+  assert.equal(finalizationCall.args.some((argument) => argument.startsWith('finalization_evidence=passed')), true);
+  assert.equal(finalizationCall.args.includes('npm test -- compatibility'), true);
+  assert.equal(finalizationCall.args.includes('https://github.com/owner/repo/pull/1291#usage-scan'), true);
   assert.equal(calls.some((call) => call.command === 'gh'), false);
   assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'checkout'), false);
   assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'reset'), false);

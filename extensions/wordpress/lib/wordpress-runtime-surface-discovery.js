@@ -241,6 +241,9 @@ function normalizeRuntimeSurface(surface, index) {
 			source_type: normalizeWordPressCoverageSurfaceType(surface.type || surface.kind || surface.category),
 			execution_tier: 'read_only_executable',
 			value,
+			public: surface.public === true,
+			show_in_rest: surface.show_in_rest === true || surface.showInRest === true,
+			rest_base: stringValue(surface.rest_base || surface.restBase),
 		},
 	};
 }

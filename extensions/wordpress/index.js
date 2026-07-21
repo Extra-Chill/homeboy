@@ -53,6 +53,7 @@ module.exports = {
 	...require('./lib/wordpress-performance-observation-aggregate'),
 	...require('./lib/wordpress-runtime-surface-discovery'),
 	...require('./lib/wordpress-live-surface-discovery'),
+	...require('./lib/woocommerce-public-contract-discovery'),
 	...require('./lib/wordpress-fuzz-plan-from-surfaces'),
 	...require('./lib/wordpress-fuzz-campaign'),
 	...require('./lib/wordpress-dependency-materialization-recipes'),

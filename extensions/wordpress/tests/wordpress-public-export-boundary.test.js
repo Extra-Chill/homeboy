@@ -38,6 +38,8 @@ assert.equal(typeof wordpress.buildWordPressPerformanceObservation, 'function');
 assert.equal(typeof wordpress.normalizeWordPressRuntimeSurfaceDiscovery, 'function');
 assert.equal(typeof wordpress.buildWordPressRuntimeSurfaceCoverageManifest, 'function');
 assert.equal(typeof wordpress.buildWordPressFuzzPlanFromSurfaces, 'function');
+assert.equal(typeof wordpress.discoverWooCommercePublicContracts, 'function');
+assert.equal(wordpress.WOOCOMMERCE_PUBLIC_CONTRACT_DISCOVERY_SCHEMA, 'homeboy/woocommerce-public-contract-discovery/v1');
 assert.equal(typeof wordpress.compileWordPressFuzzCampaign, 'function');
 assert.equal(typeof wordpress.runWordPressFuzzCampaign, 'function');
 assert.equal(typeof wordpress.validateWordPressFuzzCampaignArtifacts, 'function');

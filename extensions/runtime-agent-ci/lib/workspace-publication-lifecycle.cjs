@@ -660,6 +660,64 @@ function finalizationGateArgs(lifecycle = {}) {
   });
 }
 
+function finalizationEvidencePolicy(config = {}, lifecycle = {}) {
+  return plainObject(config.finalization_evidence_policy)
+    ? config.finalization_evidence_policy
+    : (plainObject(lifecycle.scenario?.metadata?.finalization_evidence_policy) ? lifecycle.scenario.metadata.finalization_evidence_policy : null);
+}
+
+function finalizationEvidenceRefs(lifecycle = {}) {
+  const scenario = lifecycle.scenario || {};
+  return [
+    ...(Array.isArray(scenario.finalization_evidence) ? scenario.finalization_evidence : []),
+    ...(Array.isArray(scenario.evidence_refs) ? scenario.evidence_refs : []),
+    ...(Array.isArray(scenario.metadata?.finalization_evidence) ? scenario.metadata.finalization_evidence : []),
+    ...(Array.isArray(scenario.metadata?.evidence_refs) ? scenario.metadata.evidence_refs : []),
+  ].filter(plainObject);
+}
+
+function evaluateFinalizationEvidence(policy, evidence) {
+  if (!plainObject(policy)) {
+    return withLifecycleGateResult('finalization_evidence', { enabled: false, success: true, checks: [] });
+  }
+  const requirements = Array.isArray(policy.required_evidence) ? policy.required_evidence : [];
+  const failures = [];
+  for (const requirement of requirements) {
+    if (!plainObject(requirement) || typeof requirement.id !== 'string' || requirement.id.trim() === '') {
+      failures.push('Finalization evidence policy contains an invalid required_evidence entry');
+      continue;
+    }
+    const ref = evidence.find((entry) => [entry.id, entry.name, entry.role, entry.evidence_id].includes(requirement.id));
+    if (!ref) {
+      failures.push(`Required finalization evidence is missing: ${requirement.id}`);
+      continue;
+    }
+    for (const field of Array.isArray(requirement.fields) ? requirement.fields : []) {
+      const value = ref[field.name];
+      if (typeof value !== 'string' || value.trim() === '' || (field.min_length && value.trim().length < field.min_length) || (Array.isArray(field.values) && !field.values.includes(value))) {
+        failures.push(`Finalization evidence ${requirement.id} has an invalid ${field.name}`);
+      }
+    }
+    if (requirement.reviewer_facing !== false && requirement.durable_url_required === true && !durableEvidenceUrl(ref.url || ref.uri || ref.href || ref.public_url || ref.publicUrl || '')) {
+      failures.push(`Reviewer-facing finalization evidence must use a durable non-local URL: ${requirement.id}`);
+    }
+  }
+  return withLifecycleGateResult('finalization_evidence', {
+    enabled: true,
+    success: failures.length === 0,
+    policy,
+    evidence,
+    failures,
+    error: failures.join('; '),
+  });
+}
+
+function durableEvidenceUrl(value) {
+  return typeof value === 'string'
+    && /^https?:\/\//i.test(value)
+    && !/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)(?::|\/|$)/i.test(value);
+}
+
 function parseHomeboyJsonOutput(stdout) {
   const text = String(stdout || '').trim();
   if (!text) {
@@ -684,11 +742,16 @@ function requireFinalizationEvidenceRef(finalizationOutcome) {
 }
 
 function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycle = {}, hooks = {}) {
+  const evidenceGate = evaluateFinalizationEvidence(finalizationEvidencePolicy(config, lifecycle), finalizationEvidenceRefs(lifecycle));
+  if (evidenceGate.enabled && !evidenceGate.success) {
+    throw new Error(evidenceGate.error);
+  }
   const gateArgs = finalizationGateArgs({
     ...lifecycle,
     gate_results: [
       ...(Array.isArray(lifecycle.gate_results) ? lifecycle.gate_results : []),
       ...(Array.isArray(config.finalization_gate_results) ? config.finalization_gate_results : []),
+      evidenceGate.gate_result,
     ],
   });
   if (gateArgs.length === 0) {
@@ -699,7 +762,12 @@ function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycl
   const homeboyBin = config.homeboy_bin || config.homeboyBin || adapter.env.HOMEBOY_BIN || 'homeboy';
   const metadata = lifecycle.scenario?.metadata || {};
   const runId = publication.values.run_id || metadata.run_id || metadata.job_id || 'run';
-  const verificationCommands = commandList(config, 'verification_commands').map((entry) => entry.command);
+  const verificationCommands = [
+    ...commandList(config, 'verification_commands').map((entry) => entry.command),
+    ...(Array.isArray(evidenceGate.policy?.testing_instructions)
+      ? evidenceGate.policy.testing_instructions.map((instruction) => instruction?.command).filter((command) => typeof command === 'string' && command.trim() !== '')
+      : []),
+  ];
   const args = [
     'agent-task', 'finalize-pr',
     '--run-id', runId,
@@ -726,7 +794,10 @@ function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycl
   for (const ref of config.source_refs || config.sourceRefs || []) {
     args.push('--source-ref', ref);
   }
-  for (const ref of config.artifact_refs || config.artifactRefs || []) {
+  const evidenceArtifactRefs = evidenceGate.enabled
+    ? finalizationEvidenceRefs(lifecycle).map((ref) => ref.url || ref.uri || ref.href || ref.public_url || ref.publicUrl).filter(durableEvidenceUrl)
+    : [];
+  for (const ref of [...(config.artifact_refs || config.artifactRefs || []), ...evidenceArtifactRefs]) {
     args.push('--artifact-ref', ref);
   }
   for (const branch of config.protected_branches || config.protectedBranches || []) {
@@ -949,6 +1020,7 @@ module.exports = {
   captureWorkspaceDelta,
   changedFiles,
   evaluateSideEffectPolicy,
+  evaluateFinalizationEvidence,
   evaluateWritablePaths: validateWritablePaths,
   evaluateWorkspaceContract,
   finalizeWorkspaceReview,
