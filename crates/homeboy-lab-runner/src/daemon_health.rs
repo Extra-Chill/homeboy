@@ -7,7 +7,7 @@ pub(super) struct RunnerDaemonHealthFailure {
     pub job_id: Option<String>,
 }
 
-pub(super) fn runner_daemon_health_failure(err: &Error) -> Option<RunnerDaemonHealthFailure> {
+pub(crate) fn runner_daemon_health_failure(err: &Error) -> Option<RunnerDaemonHealthFailure> {
     if !matches!(
         err.code,
         ErrorCode::InternalUnexpected | ErrorCode::InternalJsonError

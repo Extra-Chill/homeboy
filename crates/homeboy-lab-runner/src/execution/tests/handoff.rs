@@ -463,6 +463,74 @@ fn accepted_job_that_disappears_persists_a_terminal_controller_failure() {
 }
 
 #[test]
+fn transient_daemon_transport_drop_keeps_the_durable_job_recoverable() {
+    // #7928: losing contact with the runner daemon while polling a durable job
+    // is a controller-side transport drop, not a job failure — the remote job
+    // is still executing. The poll failure must stay recoverable (retryable,
+    // "recoverable_followup_required") so a reconnect can resume observing it,
+    // and must NOT persist a terminal mirror or execution record.
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner = ssh_runner();
+        let job = running_job();
+        let job_id = job.id.to_string();
+        let command = vec![
+            "homeboy".to_string(),
+            "runtime".to_string(),
+            "refresh".to_string(),
+        ];
+        let run_id =
+            persist_lab_offload_handoff_run(&runner, "/srv/homeboy/project", &command, &job, None)
+                .expect("accepted handoff mirror");
+
+        // A transport-layer drop: the daemon endpoint became unreachable while
+        // polling. This is the shape `runner_daemon_health_failure` classifies
+        // as a recoverable daemon transport failure.
+        let transport_drop = Error::internal_unexpected(format!(
+            "query runner daemon: error sending request for url (http://127.0.0.1:65201/jobs/{job_id})"
+        ));
+
+        let err = terminal_runner_poll_failure(
+            &runner,
+            "/srv/homeboy/project",
+            &command,
+            &job,
+            "daemon",
+            None,
+            &homeboy_core::source_snapshot::existing_remote(
+                "lab",
+                "/srv/homeboy/project",
+                Some("/srv/homeboy"),
+            ),
+            &[],
+            Some(&run_id),
+            None,
+            transport_drop,
+        );
+
+        assert_eq!(err.code, ErrorCode::RunnerControllerDisconnected);
+        assert_eq!(
+            err.retryable,
+            Some(true),
+            "a transport drop on a durable job must stay retryable"
+        );
+        assert_eq!(err.details["status"], "recoverable_followup_required");
+        assert_ne!(err.details["status"], "terminal_failure");
+
+        // No terminal mirror should have been written — the durable run is not
+        // marked failed by a transport drop.
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run(&run_id)
+            .expect("read mirror")
+            .expect("mirror run exists");
+        assert_ne!(
+            run.status, "fail",
+            "a transient transport drop must not terminalize the durable run"
+        );
+    });
+}
+
+#[test]
 fn daemon_identity_transition_reports_a_restarted_control_plane() {
     let transition = super::super::daemon::daemon_identity_transition(
         Some("homeboy 0.283.1+95ce06c58b95"),
