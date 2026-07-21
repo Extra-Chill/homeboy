@@ -19,6 +19,9 @@ pub(crate) use runner_job_preparation::with_runner_job_preparation;
 pub use runner_job_preparation::{
     register_runner_job_preparation_provider, RunnerJobPreparationProvider,
 };
+pub(crate) use store::ControllerJobStartOutcome;
+pub(crate) use store::ControllerJobState;
+pub(crate) use store::ControllerJobSubmissionOutcome;
 pub(crate) use store::LocalChildStartDiscriminator;
 pub(crate) use store::LocalRunnerJob;
 pub use store::{JobHandle, JobRunner, JobStore, RecoveredTerminalJob};

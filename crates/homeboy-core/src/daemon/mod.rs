@@ -6,12 +6,12 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::api_jobs::{
-    DaemonActiveJobRecoveryEvidence, JobStatus, JobStore, LocalRunnerJob,
+    ControllerJobState, DaemonActiveJobRecoveryEvidence, JobStatus, JobStore, LocalRunnerJob,
     RunnerJobLifecycleMetadata,
 };
 use crate::build_identity;
@@ -31,6 +31,7 @@ mod artifact_download;
 mod broker_config;
 mod completion_tracker;
 mod control;
+pub mod controller_job_driver;
 mod daemon_lease;
 mod patch_capture;
 mod remote_runner;
@@ -56,6 +57,27 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:0";
 
 static DAEMON_JOB_STORE: OnceLock<JobStore> = OnceLock::new();
 static DAEMON_RUNTIME_SNAPSHOT: OnceLock<DaemonRuntimeSnapshot> = OnceLock::new();
+
+/// Process-local ownership for active controller work. Durable state remains the
+/// authority across restart; this registry prevents this daemon from declaring a
+/// cancellation terminal while its owned execute thread is still live.
+struct ControllerJobRuntime {
+    cancel: mpsc::Sender<()>,
+    supervisor: std::thread::JoinHandle<()>,
+}
+
+fn controller_job_runtimes() -> &'static Mutex<HashMap<Uuid, ControllerJobRuntime>> {
+    static RUNTIMES: OnceLock<Mutex<HashMap<Uuid, ControllerJobRuntime>>> = OnceLock::new();
+    RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn controller_job_runtime_count() -> usize {
+    controller_job_runtimes()
+        .lock()
+        .expect("controller runtimes lock")
+        .len()
+}
 
 pub(crate) const DAEMON_LEASE_SCHEMA: &str = "homeboy.daemon.session_lease.v1";
 pub(super) const DAEMON_STARTUP_TOKEN_ENV: &str = "HOMEBOY_DAEMON_STARTUP_TOKEN";
@@ -424,6 +446,15 @@ struct ExecRequest {
     idempotency_key: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ControllerJobRequest {
+    #[serde(rename = "type")]
+    job_type: String,
+    version: u32,
+    idempotency_key: String,
+    request: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct FilePathRequest {
     runner_id: String,
@@ -645,19 +676,38 @@ where
     let owner_lock = acquire_daemon_owner_lock()?;
     let listener = TcpListener::bind(addr)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("bind daemon to {}", addr))))?;
-    serve_listener_with_analysis_runner_locked(listener, analysis_runner, owner_lock)
+    serve_listener_with_analysis_runner_locked(listener, analysis_runner, owner_lock, None)
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn serve_listener(listener: TcpListener) -> Result<DaemonState> {
     let owner_lock = acquire_daemon_owner_lock()?;
-    serve_listener_with_analysis_runner_locked(listener, UnsupportedAnalysisJobRunner, owner_lock)
+    serve_listener_with_analysis_runner_locked(
+        listener,
+        UnsupportedAnalysisJobRunner,
+        owner_lock,
+        None,
+    )
+}
+
+/// Serve a finite number of connections for isolated TCP tests. Returning from
+/// this function releases the daemon owner lock and joins daemon-owned helpers.
+#[cfg(any(test, feature = "test-support"))]
+pub fn serve_listener_for_requests(listener: TcpListener, requests: usize) -> Result<DaemonState> {
+    let owner_lock = acquire_daemon_owner_lock()?;
+    serve_listener_with_analysis_runner_locked(
+        listener,
+        UnsupportedAnalysisJobRunner,
+        owner_lock,
+        Some(requests),
+    )
 }
 
 fn serve_listener_with_analysis_runner_locked<R>(
     listener: TcpListener,
     analysis_runner: R,
     _owner_lock: DaemonOwnerLock,
+    request_limit: Option<usize>,
 ) -> Result<DaemonState>
 where
     R: AnalysisJobRunner,
@@ -672,28 +722,43 @@ where
     // Expire only reservations that never recorded a child identity.
     job_store.reconcile_expired_local_child_reservations()?;
     job_store.reconcile_expired_admissions()?;
+    recover_controller_jobs(&job_store);
     let _ = daemon_runtime_snapshot();
     let loopback_bind = local_addr.ip().is_loopback();
 
-    spawn_local_child_reservation_reconciler(job_store.clone());
-    spawn_completion_notifier();
+    let (local_shutdown_tx, local_shutdown_rx) = mpsc::channel();
+    let (completion_shutdown_tx, completion_shutdown_rx) = mpsc::channel();
+    let local_child_reconciler =
+        spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
+    let completion_notifier = spawn_completion_notifier(completion_shutdown_rx);
 
+    let mut accepted = 0;
+    let mut serve_result = Ok(());
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let _ =
                     handle_connection(stream, &job_store, analysis_runner.clone(), loopback_bind);
+                accepted += 1;
+                if request_limit.is_some_and(|limit| accepted >= limit) {
+                    break;
+                }
             }
             Err(err) => {
-                return Err(Error::internal_io(
+                serve_result = Err(Error::internal_io(
                     err.to_string(),
                     Some("accept daemon connection".to_string()),
                 ));
+                break;
             }
         }
     }
 
-    Ok(state)
+    let _ = local_shutdown_tx.send(());
+    let _ = completion_shutdown_tx.send(());
+    let _ = local_child_reconciler.join();
+    let _ = completion_notifier.join();
+    serve_result.map(|()| state)
 }
 
 /// Environment variable overriding the completion-notifier poll interval in
@@ -704,14 +769,22 @@ const LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS: u64 = 5;
 
 /// Reclaim capacity even when no controller polls the daemon after a failed
 /// handoff. The store owns the fail-closed child-identity check.
-fn spawn_local_child_reservation_reconciler(job_store: JobStore) {
+fn spawn_local_child_reservation_reconciler(
+    job_store: JobStore,
+    shutdown: mpsc::Receiver<()>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || loop {
         let _ = job_store.reconcile_expired_local_child_reservations();
         let _ = job_store.reconcile_expired_admissions();
-        std::thread::sleep(std::time::Duration::from_secs(
-            LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS,
-        ));
-    });
+        if shutdown
+            .recv_timeout(std::time::Duration::from_secs(
+                LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS,
+            ))
+            .is_ok()
+        {
+            return;
+        }
+    })
 }
 
 /// Spawn the background thread that watches in-flight runs and fires a local
@@ -720,13 +793,15 @@ fn spawn_local_child_reservation_reconciler(job_store: JobStore) {
 ///
 /// Delivery is route-driven. Route-less completions are considered only when an
 /// explicit operations default transport is configured.
-fn spawn_completion_notifier() {
+fn spawn_completion_notifier(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
     let interval = std::env::var(COMPLETION_NOTIFY_INTERVAL_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|secs| *secs > 0)
         .unwrap_or(COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS);
-    std::thread::spawn(move || completion_notify_loop(std::time::Duration::from_secs(interval)));
+    std::thread::spawn(move || {
+        completion_notify_loop(std::time::Duration::from_secs(interval), shutdown)
+    })
 }
 
 /// Poll the observation store for in-flight runs and notify on completion.
@@ -734,7 +809,7 @@ fn spawn_completion_notifier() {
 /// Each pass refreshes mirrored runner evidence for currently-running records
 /// (so offloaded runs advance to their terminal state locally), re-reads the
 /// running set, and pings for any run that left it since the previous pass.
-fn completion_notify_loop(interval: std::time::Duration) {
+fn completion_notify_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
     use crate::observation::ObservationStore;
 
     let mut tracker = completion_tracker::CompletionTracker::default();
@@ -764,7 +839,9 @@ fn completion_notify_loop(interval: std::time::Duration) {
                 let _ = crate::notify::dispatch(&event);
             }
         }
-        std::thread::sleep(interval);
+        if shutdown.recv_timeout(interval).is_ok() {
+            return;
+        }
     }
 }
 
@@ -896,6 +973,22 @@ where
             Ok(body) => daemon_endpoint_response("jobs.exec", body),
             Err(err) => error_response(400, err),
         },
+        ("POST", "/controller/jobs") => match enqueue_controller_job(body, job_store) {
+            Ok(body) => daemon_endpoint_response("controller.jobs.create", body),
+            Err(err) => error_response(400, err),
+        },
+        ("POST", path) if path.starts_with("/controller/jobs/") && path.ends_with("/start") => {
+            match start_controller_job(path, job_store) {
+                Ok(body) => daemon_endpoint_response("controller.jobs.start", body),
+                Err(err) => error_response(400, err),
+            }
+        }
+        ("POST", path) if path.starts_with("/controller/jobs/") && path.ends_with("/cancel") => {
+            match cancel_controller_job(path, body, job_store) {
+                Ok(body) => daemon_endpoint_response("controller.jobs.cancel", body),
+                Err(err) => error_response(400, err),
+            }
+        }
         ("POST", "/admissions") => match reserve_admission(body, job_store) {
             Ok(body) => daemon_endpoint_response("admissions.reserve", body),
             Err(err) => error_response(400, err),
@@ -950,13 +1043,24 @@ where
             Ok(body) => daemon_endpoint_response("files.download", body),
             Err(err) => remote_runner::auth_or_bad_request(err),
         },
-        ("GET", "/exec") | ("GET", "/admissions") | ("GET", "/jobs/reconcile-terminal") => {
+        ("GET", path) if path.starts_with("/controller/jobs/") && path.ends_with("/cancel") => {
             HttpResponse {
                 status_code: 405,
                 body: json!({ "error": "method_not_allowed" }),
                 artifact: None,
             }
         }
+        ("GET", path) if path.starts_with("/controller/jobs/") && path.ends_with("/start") => {
+            method_not_allowed()
+        }
+        ("GET", "/exec")
+        | ("GET", "/admissions")
+        | ("GET", "/jobs/reconcile-terminal")
+        | ("GET", "/controller/jobs") => HttpResponse {
+            status_code: 405,
+            body: json!({ "error": "method_not_allowed" }),
+            artifact: None,
+        },
         ("GET", "/lifecycle/stop") => method_not_allowed(),
         ("GET", "/files/mkdir") | ("GET", "/files/upload") | ("GET", "/files/download") => {
             method_not_allowed()
@@ -1597,6 +1701,471 @@ fn enqueue_exec_job(
         },
         "request": summary,
     }))
+}
+
+fn enqueue_controller_job(
+    body: Option<serde_json::Value>,
+    job_store: &JobStore,
+) -> Result<serde_json::Value> {
+    let request: ControllerJobRequest = serde_json::from_value(body.unwrap_or_else(|| json!({})))
+        .map_err(|error| {
+        Error::validation_invalid_argument(
+            "body",
+            format!("invalid controller job request body: {error}"),
+            None,
+            None,
+        )
+    })?;
+    if request.job_type.trim().is_empty() || request.idempotency_key.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "type",
+            "controller jobs require a non-empty type and idempotency_key",
+            None,
+            None,
+        ));
+    }
+    // Resolve before durable admission so an unsupported envelope is never left queued.
+    let driver = controller_job_driver::driver(&request.job_type, request.version)?;
+    driver.validate_secret_references(&request.request)?;
+    let public_request = driver.public_request(&request.request)?;
+    let request_digest = hex_digest(&request.request)?;
+    let controller_job = ControllerJobState {
+        job_type: request.job_type.clone(),
+        version: request.version,
+        request: request.request.clone(),
+        public_request,
+        request_digest,
+        checkpoint: None,
+        cancellation_requested: false,
+        cancellation_reason: None,
+        execution_claim_id: None,
+        recovery_attempted: false,
+    };
+    let outcome = job_store.admit_controller_job(
+        format!("controller.{}", request.job_type),
+        request.idempotency_key.clone(),
+        controller_job,
+    )?;
+    let (job, compacted) = match outcome {
+        crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(job_id) => {
+            (job_store.get(job_id)?, false)
+        }
+        crate::api_jobs::ControllerJobSubmissionOutcome::Existing(job) => {
+            let compacted = job_store.get(job.id).is_err();
+            (job, compacted)
+        }
+    };
+    let job_id = job.id;
+    Ok(json!({
+        "command": "api.controller.jobs.create",
+        "job": job,
+        "terminal_tombstone": if compacted { json!({ "status": "terminal", "compacted": true }) } else { serde_json::Value::Null },
+        "poll": if compacted { json!({ "job": serde_json::Value::Null, "events": serde_json::Value::Null }) } else { json!({ "job": format!("/jobs/{job_id}"), "events": format!("/jobs/{job_id}/events") }) },
+        "start": if compacted { serde_json::Value::Null } else { json!({ "method": "POST", "path": format!("/controller/jobs/{job_id}/start") }) },
+    }))
+}
+
+fn start_controller_job(path: &str, job_store: &JobStore) -> Result<serde_json::Value> {
+    let job_id = controller_job_id_from_path(path, "/start")?;
+    let controller = job_store.controller_job_state(job_id)?;
+    if job_store.get(job_id)?.status != JobStatus::Queued {
+        return Ok(json!({
+            "job": job_store.get(job_id)?,
+            "poll": { "job": format!("/jobs/{job_id}"), "events": format!("/jobs/{job_id}/events") },
+        }));
+    }
+    // Resolve the persisted type/version, not caller-controlled input, before
+    // claiming the job so unsupported work remains queued and recoverable.
+    let _driver = controller_job_driver::driver(&controller.job_type, controller.version)?;
+    if let crate::api_jobs::ControllerJobStartOutcome::Claimed(state) =
+        job_store.start_controller_execution(job_id)?
+    {
+        dispatch_claimed_controller_job(job_store.clone(), job_id, state, false);
+    }
+    Ok(json!({
+        "job": job_store.get(job_id)?,
+        "poll": { "job": format!("/jobs/{job_id}"), "events": format!("/jobs/{job_id}/events") },
+    }))
+}
+
+/// Run work which has already been claimed by either explicit start or startup
+/// recovery. The durable claim is the exactly-once execution authority.
+fn dispatch_claimed_controller_job(
+    job_store: JobStore,
+    job_id: Uuid,
+    state: ControllerJobState,
+    recovery: bool,
+) {
+    let Ok(driver) = controller_job_driver::driver(&state.job_type, state.version) else {
+        let _ = job_store.fail_controller_error(
+            job_id,
+            "controller recovery driver is unavailable".to_string(),
+            json!({ "phase": "recovery_driver_missing" }),
+        );
+        return;
+    };
+    // Cancellation is durable first. This channel only wakes the owner quickly;
+    // every gate below re-reads the durable flag before doing work.
+    let (cancel_tx, cancel_rx) = mpsc::channel();
+    // Register ownership before allowing a fast driver to terminalize itself.
+    let (start_tx, start_rx) = mpsc::channel();
+    let supervisor = std::thread::spawn(move || {
+        let _ = start_rx.recv();
+        let job = job_store.handle(job_id);
+        if job.is_cancelled() {
+            persist_controller_cancellation(&job);
+            controller_job_runtimes()
+                .lock()
+                .expect("controller runtimes lock")
+                .remove(&job_id);
+            return;
+        }
+        let prepared = if recovery {
+            state
+                .checkpoint
+                .clone()
+                .expect("claimed recovery has checkpoint")
+        } else {
+            match driver.prepare(state.request.clone()) {
+                Ok(prepared) => {
+                    if job.record_controller_prepared(prepared.clone()).is_err() {
+                        persist_controller_failure(
+                            &job,
+                            "controller checkpoint could not be persisted".to_string(),
+                            json!({ "phase": "checkpoint_persistence" }),
+                        );
+                        controller_job_runtimes()
+                            .lock()
+                            .expect("controller runtimes lock")
+                            .remove(&job_id);
+                        return;
+                    }
+                    if job.is_cancelled() {
+                        match driver.cancel(&prepared) {
+                            Ok(()) => {
+                                persist_controller_cancellation(&job);
+                            }
+                            Err(error) => {
+                                let public = driver.public_error(&error);
+                                persist_controller_cancellation_failure(
+                                    &job,
+                                    public.message,
+                                    public.data,
+                                );
+                            }
+                        }
+                        controller_job_runtimes()
+                            .lock()
+                            .expect("controller runtimes lock")
+                            .remove(&job_id);
+                        return;
+                    }
+                    prepared
+                }
+                Err(error) => {
+                    let public = driver.public_error(&error);
+                    persist_controller_failure(&job, public.message, public.data);
+                    controller_job_runtimes()
+                        .lock()
+                        .expect("controller runtimes lock")
+                        .remove(&job_id);
+                    return;
+                }
+            }
+        };
+        // The checkpoint write and this durable read form the final gate before
+        // any execute/resume side effect can start.
+        if job.is_cancelled() {
+            match driver.cancel(&prepared) {
+                Ok(()) => {
+                    persist_controller_cancellation(&job);
+                }
+                Err(error) => {
+                    let public = driver.public_error(&error);
+                    persist_controller_cancellation_failure(&job, public.message, public.data);
+                }
+            }
+            controller_job_runtimes()
+                .lock()
+                .expect("controller runtimes lock")
+                .remove(&job_id);
+            return;
+        }
+        let execute_driver = Arc::clone(&driver);
+        let driver_job =
+            controller_job_driver::ControllerJobHandle::new(job.clone(), Arc::clone(&driver));
+        let execute_prepared = prepared.clone();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let execute = std::thread::spawn(move || {
+            let result = if recovery {
+                execute_driver.resume(execute_prepared, driver_job)
+            } else {
+                execute_driver.execute(execute_prepared, driver_job)
+            };
+            let _ = sender.send(result);
+        });
+        let mut cancellation_failed = false;
+        loop {
+            if !cancellation_failed && (job.is_cancelled() || cancel_rx.try_recv().is_ok()) {
+                match driver.cancel(&prepared) {
+                    Ok(()) => {
+                        // A successful driver cancellation is not proof of stop.
+                        // Join the owned execute thread before terminalizing.
+                        let _ = execute.join();
+                        persist_controller_cancellation(&job);
+                    }
+                    Err(error) => {
+                        let public = driver.public_error(&error);
+                        persist_controller_cancellation_failure(&job, public.message, public.data);
+                        // The driver could not confirm stop. Keep this supervisor
+                        // and execute handle live until completion proves it ended;
+                        // the durable Failed job is explicit uncertainty, never a
+                        // false Cancelled terminal.
+                        cancellation_failed = true;
+                        continue;
+                    }
+                }
+                controller_job_runtimes()
+                    .lock()
+                    .expect("controller runtimes lock")
+                    .remove(&job_id);
+                return;
+            }
+            match receiver.recv_timeout(Duration::from_millis(10)) {
+                Ok(Ok(private)) => match driver.public_result(&private) {
+                    Ok(public) => {
+                        // The driver has already produced this result. Retry only
+                        // this projection, never the driver side effect.
+                        if job.is_cancelled() {
+                            continue;
+                        }
+                        if !persist_controller_success_or_uncertainty(&job, public) {
+                            continue;
+                        }
+                        let _ = execute.join();
+                    }
+                    Err(error) => {
+                        let _ = execute.join();
+                        let public = driver.public_error(&error);
+                        persist_controller_failure(&job, public.message, public.data);
+                    }
+                },
+                Ok(Err(error)) => {
+                    let _ = execute.join();
+                    let public = driver.public_error(&error);
+                    persist_controller_failure(&job, public.message, public.data);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = execute.join();
+                    persist_controller_failure(
+                        &job,
+                        "controller driver execution thread disconnected".to_string(),
+                        json!({ "phase": "driver_disconnected" }),
+                    );
+                }
+            }
+            controller_job_runtimes()
+                .lock()
+                .expect("controller runtimes lock")
+                .remove(&job_id);
+            return;
+        }
+    });
+    controller_job_runtimes()
+        .lock()
+        .expect("controller runtimes lock")
+        .insert(
+            job_id,
+            ControllerJobRuntime {
+                cancel: cancel_tx,
+                supervisor,
+            },
+        );
+    let _ = start_tx.send(());
+}
+
+/// A terminal write failure after the driver returns must never turn into a
+/// checkpoint resume. After bounded retries of the same result, persist a
+/// fail-closed terminal uncertainty and keep ownership until that is durable.
+fn persist_controller_success_or_uncertainty(
+    job: &crate::api_jobs::JobHandle,
+    result: serde_json::Value,
+) -> bool {
+    for _ in 0..3 {
+        if job.complete_controller_success(result.clone()).is_ok() {
+            return true;
+        }
+        if job.is_cancelled() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if job.is_cancelled() {
+        return false;
+    }
+    loop {
+        if job
+            .fail_controller_error(
+                "controller result could not be durably terminalized; driver side effect will not be retried"
+                    .to_string(),
+                json!({ "phase": "terminal_persistence_uncertain" }),
+            )
+            .is_ok()
+        {
+            return true;
+        }
+        if job.is_cancelled() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn persist_controller_cancellation(job: &crate::api_jobs::JobHandle) {
+    while job.complete_controller_cancellation().is_err() && !job.is_terminal() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn persist_controller_cancellation_failure(
+    job: &crate::api_jobs::JobHandle,
+    message: String,
+    data: serde_json::Value,
+) {
+    while job
+        .fail_controller_cancellation(message.clone(), data.clone())
+        .is_err()
+        && !job.is_terminal()
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn persist_controller_failure(
+    job: &crate::api_jobs::JobHandle,
+    message: String,
+    data: serde_json::Value,
+) {
+    while job
+        .fail_controller_error(message.clone(), data.clone())
+        .is_err()
+        && !job.is_terminal()
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn recover_controller_jobs(job_store: &JobStore) {
+    for (job_id, state) in job_store.active_controller_jobs() {
+        if state.checkpoint.is_none() || state.recovery_attempted {
+            let _ = job_store.fail_controller_error(
+                job_id,
+                "controller job cannot be resumed after daemon restart".to_string(),
+                json!({ "phase": "recovery_unresolved" }),
+            );
+            continue;
+        }
+        let Ok(state) = job_store.claim_controller_execution(job_id, true) else {
+            continue;
+        };
+        dispatch_claimed_controller_job(job_store.clone(), job_id, state, true);
+    }
+}
+
+fn cancel_controller_job(
+    path: &str,
+    body: Option<serde_json::Value>,
+    job_store: &JobStore,
+) -> Result<serde_json::Value> {
+    let job_id = controller_job_id_from_path(path, "/cancel")?;
+    let controller = job_store.controller_job_state(job_id)?;
+    // Resolve the persisted type/version, not a caller-controlled envelope.
+    let _driver = controller_job_driver::driver(&controller.job_type, controller.version)?;
+    let reason = body
+        .as_ref()
+        .and_then(|value| value.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|reason| !reason.trim().is_empty())
+        .unwrap_or("controller job cancellation requested")
+        .to_string();
+    let job = job_store.request_controller_cancellation(job_id, reason)?;
+    if let Some(runtime) = controller_job_runtimes()
+        .lock()
+        .expect("controller runtimes lock")
+        .get(&job_id)
+    {
+        let _ = runtime.cancel.send(());
+    }
+    if job.status == JobStatus::Cancelled {
+        return Ok(json!({ "job": job }));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let job = job_store.get(job_id)?;
+        match job.status {
+            JobStatus::Cancelled => return Ok(json!({ "job": job })),
+            JobStatus::Failed => {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "controller job cancellation failed; inspect the durable job events",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            JobStatus::Succeeded => {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "controller job completed before cancellation could stop it",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            JobStatus::Queued | JobStatus::Running if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            JobStatus::Queued | JobStatus::Running => {
+                let _ = job_store.append_event(
+                    job_id,
+                    crate::api_jobs::JobEventKind::Error,
+                    Some(
+                        "controller job cancellation did not complete before the daemon timeout"
+                            .to_string(),
+                    ),
+                    Some(json!({ "phase": "cancellation_timeout" })),
+                );
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "controller job cancellation is still pending; inspect the durable job events",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+        }
+    }
+}
+
+fn controller_job_id_from_path(path: &str, suffix: &str) -> Result<Uuid> {
+    let job_id = path
+        .trim_start_matches("/controller/jobs/")
+        .trim_end_matches(suffix)
+        .trim_end_matches('/');
+    Uuid::parse_str(job_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "job_id",
+            format!("invalid controller job ID: {error}"),
+            Some(job_id.to_string()),
+            None,
+        )
+    })
+}
+
+fn hex_digest(value: &serde_json::Value) -> Result<String> {
+    let encoded =
+        serde_json::to_vec(value).map_err(|error| Error::internal_unexpected(error.to_string()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(encoded);
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn exec_request_run_ref_metadata(
@@ -2717,7 +3286,7 @@ where
                         None,
                     ),
                 );
-                return write_http_response(stream, response);
+                return write_http_response(stream, &response);
             }
         }
     };
@@ -2734,7 +3303,7 @@ where
         .transpose();
     let lifecycle_stop = match lifecycle_stop {
         Ok(request) => request,
-        Err(error) => return write_http_response(stream, error_response(400, error)),
+        Err(error) => return write_http_response(stream, &error_response(400, error)),
     };
     let response = route_with_job_store_and_body_and_runner_and_auth(
         method,
@@ -2744,7 +3313,7 @@ where
         analysis_runner,
         broker_auth,
     );
-    write_http_response(stream, response)?;
+    write_http_response(stream, &response)?;
     if let Some(request) = lifecycle_stop {
         // The accepted response reaches the controller before the daemon signals
         // itself. The exact lease and durable-job gate are rechecked under the
@@ -2795,8 +3364,8 @@ fn http_content_length(headers: &str) -> Option<usize> {
     })
 }
 
-fn write_http_response(mut stream: TcpStream, response: HttpResponse) -> std::io::Result<()> {
-    if let Some(artifact) = response.artifact {
+fn write_http_response(mut stream: TcpStream, response: &HttpResponse) -> std::io::Result<()> {
+    if let Some(artifact) = response.artifact.clone() {
         return artifact_download::write_response(stream, response.status_code, artifact);
     }
 
@@ -2826,7 +3395,8 @@ fn write_http_response(mut stream: TcpStream, response: HttpResponse) -> std::io
         status_text,
         body.len(),
         body
-    )
+    )?;
+    stream.flush()
 }
 
 fn terminate_pid(pid: u32) -> Result<()> {

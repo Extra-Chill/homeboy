@@ -180,6 +180,14 @@ pub(super) fn compact_terminal_jobs(
         retained_terminal_bytes -= serialized_len;
     }
     let removed_terminal_jobs = removed_job_ids.len();
+    let removed_controller_jobs = durable
+        .jobs
+        .iter()
+        .filter(|stored| {
+            removed_job_ids.contains(&stored.job.id) && stored.controller_job.is_some()
+        })
+        .map(|stored| (stored.job.id, stored.job.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
     durable
         .jobs
         .retain(|stored| !removed_job_ids.contains(&stored.job.id));
@@ -191,6 +199,23 @@ pub(super) fn compact_terminal_jobs(
             durable.expired_submission_keys.insert(key, submission);
         } else {
             durable.submission_keys.insert(key, submission);
+        }
+    }
+    // Controller keys are permanent once accepted. Their tombstones retain the
+    // canonical fingerprint after terminal-job compaction, preventing a retry
+    // from executing the same logical work a second time.
+    for (key, submission) in std::mem::take(&mut durable.controller_submissions) {
+        if removed_job_ids.contains(&submission.job_id) {
+            let terminal_job = removed_controller_jobs.get(&submission.job_id).cloned();
+            durable.expired_controller_submissions.insert(
+                key,
+                super::store::ControllerJobSubmission {
+                    terminal_job,
+                    ..submission
+                },
+            );
+        } else {
+            durable.controller_submissions.insert(key, submission);
         }
     }
     let evidence = JobStoreCompactionEvidence {

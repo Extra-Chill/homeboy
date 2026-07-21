@@ -583,6 +583,7 @@ impl JobStore {
                 job: job.clone(),
                 events: Vec::new(),
                 admission_idempotency_key: None,
+                controller_job: None,
                 admission_lease: None,
                 remote_runner: Some(StoredRemoteRunnerJob {
                     // Durable broker state intentionally contains only the
@@ -637,6 +638,8 @@ impl JobStore {
                 jobs: inner.jobs.values().cloned().collect(),
                 submission_keys: inner.submission_keys.clone(),
                 expired_submission_keys: inner.expired_submission_keys.clone(),
+                controller_submissions: inner.controller_submissions.clone(),
+                expired_controller_submissions: inner.expired_controller_submissions.clone(),
                 compaction: inner.compaction.clone(),
             };
             if let Err(error) = super::persistence::write_durable_store(&persistence.path, &durable)

@@ -1,14 +1,1161 @@
 use super::*;
 use crate::api_jobs::{JobEventKind, JobStatus, JobStore};
+use crate::daemon::controller_job_driver::{self, ControllerJobDriver};
+use crate::error::Result;
 use crate::observation::{ArtifactRecord, NewRunRecord, ObservationStore};
 use crate::test_support::HomeGuard;
 use base64::Engine;
+use serde_json::Value;
 #[cfg(unix)]
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 
 const DAEMON_TEST_RESPONSE_LIMIT_BYTES: u64 = 64 * 1024;
+
+struct BlockingControllerDriver {
+    job_type: &'static str,
+    started: mpsc::Sender<()>,
+    release: Arc<Mutex<mpsc::Receiver<()>>>,
+    cancellation_release: mpsc::Sender<()>,
+    executions: Arc<AtomicUsize>,
+    cancellations: Arc<AtomicUsize>,
+}
+
+impl ControllerJobDriver for BlockingControllerDriver {
+    fn job_type(&self) -> &'static str {
+        self.job_type
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn public_request(&self, _request: &Value) -> Result<Value> {
+        Ok(serde_json::json!({ "schema": "test/v1" }))
+    }
+    fn public_progress(&self, _progress: &Value) -> Result<Value> {
+        Ok(serde_json::json!({ "progress": "safe" }))
+    }
+    fn public_result(&self, _result: &Value) -> Result<Value> {
+        Ok(serde_json::json!({ "result": "safe" }))
+    }
+    fn public_error(
+        &self,
+        _error: &crate::error::Error,
+    ) -> controller_job_driver::ControllerJobPublicError {
+        controller_job_driver::ControllerJobPublicError {
+            message: "test controller failure".to_string(),
+            data: serde_json::json!({ "classification": "test_failure" }),
+        }
+    }
+    fn validate_secret_references(&self, request: &Value) -> Result<()> {
+        if request.get("inline_secret").is_some() {
+            return Err(crate::error::Error::validation_invalid_argument(
+                "request",
+                "test driver accepts secret references, not inline secrets",
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
+    fn execute(
+        &self,
+        _request: Value,
+        _job: crate::daemon::controller_job_driver::ControllerJobHandle,
+    ) -> Result<Value> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        self.started.send(()).expect("test observes driver start");
+        self.release
+            .lock()
+            .expect("release lock")
+            .recv()
+            .expect("test releases driver");
+        Ok(serde_json::json!({ "completed": true }))
+    }
+    fn cancel(&self, _prepared: &Value) -> Result<()> {
+        self.cancellations.fetch_add(1, Ordering::SeqCst);
+        self.cancellation_release
+            .send(())
+            .expect("cancel releases driver");
+        Ok(())
+    }
+}
+
+struct FailingCancellationControllerDriver {
+    started: mpsc::Sender<()>,
+    release: Arc<Mutex<mpsc::Receiver<()>>>,
+}
+
+struct ImmediateControllerDriver {
+    executions: Arc<AtomicUsize>,
+}
+
+impl ControllerJobDriver for ImmediateControllerDriver {
+    fn job_type(&self) -> &'static str {
+        "test.immediate-compaction"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn public_request(&self, _request: &Value) -> Result<Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn public_progress(&self, _progress: &Value) -> Result<Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn public_result(&self, _result: &Value) -> Result<Value> {
+        Ok(serde_json::json!({ "result": "safe" }))
+    }
+    fn public_error(
+        &self,
+        _error: &crate::error::Error,
+    ) -> controller_job_driver::ControllerJobPublicError {
+        controller_job_driver::ControllerJobPublicError {
+            message: "safe immediate failure".to_string(),
+            data: serde_json::json!({ "classification": "immediate_failure" }),
+        }
+    }
+    fn validate_secret_references(&self, _request: &Value) -> Result<()> {
+        Ok(())
+    }
+    fn execute(
+        &self,
+        _prepared: Value,
+        _job: crate::daemon::controller_job_driver::ControllerJobHandle,
+    ) -> Result<Value> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        Ok(serde_json::json!({}))
+    }
+    fn cancel(&self, _prepared: &Value) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct SecretErrorControllerDriver {
+    started: mpsc::Sender<()>,
+    release: Arc<Mutex<mpsc::Receiver<()>>>,
+}
+
+impl ControllerJobDriver for SecretErrorControllerDriver {
+    fn job_type(&self) -> &'static str {
+        "test.secret-errors"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn public_request(&self, request: &Value) -> Result<Value> {
+        Ok(serde_json::json!({ "mode": request["mode"] }))
+    }
+    fn public_progress(&self, _progress: &Value) -> Result<Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn public_result(&self, _result: &Value) -> Result<Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn public_error(
+        &self,
+        _error: &crate::error::Error,
+    ) -> controller_job_driver::ControllerJobPublicError {
+        controller_job_driver::ControllerJobPublicError {
+            message: "safe driver failure".to_string(),
+            data: serde_json::json!({ "classification": "safe_driver_failure" }),
+        }
+    }
+    fn validate_secret_references(&self, _request: &Value) -> Result<()> {
+        Ok(())
+    }
+    fn prepare(&self, request: Value) -> Result<Value> {
+        if request["mode"] == "prepare" {
+            return Err(crate::error::Error::internal_unexpected(
+                "secret-marker-controller-error",
+            ));
+        }
+        Ok(request)
+    }
+    fn execute(
+        &self,
+        prepared: Value,
+        _job: crate::daemon::controller_job_driver::ControllerJobHandle,
+    ) -> Result<Value> {
+        if prepared["mode"] == "execute" {
+            return Err(crate::error::Error::internal_unexpected(
+                "secret-marker-controller-error",
+            ));
+        }
+        self.started.send(()).expect("test observes driver start");
+        while self
+            .release
+            .lock()
+            .expect("release lock")
+            .try_recv()
+            .is_err()
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Ok(serde_json::json!({}))
+    }
+    fn cancel(&self, _prepared: &Value) -> Result<()> {
+        Err(crate::error::Error::internal_unexpected(
+            "secret-marker-controller-error",
+        ))
+    }
+}
+
+impl ControllerJobDriver for FailingCancellationControllerDriver {
+    fn job_type(&self) -> &'static str {
+        "test.cancellation-fails"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn public_request(&self, _request: &Value) -> Result<Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn public_progress(&self, _progress: &Value) -> Result<Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn public_result(&self, _result: &Value) -> Result<Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn public_error(
+        &self,
+        _error: &crate::error::Error,
+    ) -> controller_job_driver::ControllerJobPublicError {
+        controller_job_driver::ControllerJobPublicError {
+            message: "safe cancellation failure".to_string(),
+            data: serde_json::json!({ "classification": "cancellation_failed" }),
+        }
+    }
+    fn validate_secret_references(&self, _request: &Value) -> Result<()> {
+        Ok(())
+    }
+    fn execute(
+        &self,
+        _prepared: Value,
+        _job: crate::daemon::controller_job_driver::ControllerJobHandle,
+    ) -> Result<Value> {
+        self.started.send(()).expect("test observes driver start");
+        while self
+            .release
+            .lock()
+            .expect("release lock")
+            .try_recv()
+            .is_err()
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Ok(serde_json::json!({ "completed": true }))
+    }
+    fn cancel(&self, _prepared: &Value) -> Result<()> {
+        Err(crate::error::Error::internal_unexpected(
+            "owned work refused cancellation",
+        ))
+    }
+}
+
+#[test]
+fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
+    let _home = HomeGuard::new();
+    let path = crate::paths::daemon_jobs_file().expect("jobs path");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let cancellations = Arc::new(AtomicUsize::new(0));
+    controller_job_driver::register_controller_job_driver(Arc::new(BlockingControllerDriver {
+        job_type: "test.blocking",
+        started: started_tx,
+        release: Arc::new(Mutex::new(release_rx)),
+        cancellation_release: release_tx.clone(),
+        executions: Arc::clone(&executions),
+        cancellations: Arc::clone(&cancellations),
+    }))
+    .expect("register controller driver once");
+    let request = serde_json::json!({
+        "type": "test.blocking", "version": 1, "idempotency_key": "run-9421", "request": { "schema": "test/v1", "private_input": "not-public" }
+    });
+
+    // Admission is phase one: it is durable but cannot execute until start.
+    let submitted = route_with_body("POST", "/controller/jobs", Some(request.clone()), &store);
+    assert_eq!(submitted.status_code, 200);
+    let job_id = uuid::Uuid::parse_str(
+        submitted.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id"),
+    )
+    .expect("valid job id");
+    assert_eq!(
+        store.get(job_id).expect("queued durable job").status,
+        JobStatus::Queued
+    );
+    assert_eq!(
+        submitted.body["body"]["start"]["path"],
+        format!("/controller/jobs/{job_id}/start")
+    );
+    let started = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{job_id}/start"),
+        None,
+        &store,
+    );
+    assert_eq!(started.status_code, 200);
+    let repeated_start = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{job_id}/start"),
+        None,
+        &store,
+    );
+    assert_eq!(repeated_start.status_code, 200);
+    assert_eq!(repeated_start.body["body"]["job"]["id"], job_id.to_string());
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("driver started after acceptance");
+    assert_eq!(store.get(job_id).expect("job").status, JobStatus::Running);
+    assert!(!serialized_contains(&submitted.body, "not-public"));
+    assert!(!serialized_contains(
+        &serde_json::to_value(store.events(job_id).expect("events")).expect("events JSON"),
+        "not-public"
+    ));
+
+    // No submitting-client state is retained: replay returns one daemon job and never executes twice.
+    let duplicate = route_with_body("POST", "/controller/jobs", Some(request), &store);
+    assert_eq!(duplicate.body["body"]["job"]["id"], job_id.to_string());
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    let conflict = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.blocking", "version": 1, "idempotency_key": "run-9421", "request": { "different": true }
+        })),
+        &store,
+    );
+    assert_eq!(conflict.status_code, 400);
+    let inline_secret = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.blocking", "version": 1, "idempotency_key": "run-9421-secret", "request": { "inline_secret": "never-persist" }
+        })),
+        &store,
+    );
+    assert_eq!(inline_secret.status_code, 400);
+
+    release_tx.send(()).expect("release blocked driver");
+    for _ in 0..50 {
+        if store.get(job_id).expect("first job").status.is_terminal() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let cancelled = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.blocking", "version": 1, "idempotency_key": "run-9421-cancel", "request": {}
+        })),
+        &store,
+    );
+    let cancelled_id = uuid::Uuid::parse_str(
+        cancelled.body["body"]["job"]["id"]
+            .as_str()
+            .expect("cancel job id"),
+    )
+    .expect("valid id");
+    let started = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{cancelled_id}/start"),
+        None,
+        &store,
+    );
+    assert_eq!(started.status_code, 200);
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("second driver start");
+    let cancelled = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{cancelled_id}/cancel"),
+        Some(serde_json::json!({ "reason": "caller disappeared" })),
+        &store,
+    );
+    assert_eq!(cancelled.status_code, 200);
+    assert_eq!(cancelled.body["body"]["job"]["status"], "cancelled");
+    assert_eq!(
+        store.get(cancelled_id).expect("cancelled job").status,
+        JobStatus::Cancelled
+    );
+    for _ in 0..50 {
+        if cancellations.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+    let repeated_cancel = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{cancelled_id}/cancel"),
+        Some(serde_json::json!({ "reason": "retry" })),
+        &store,
+    );
+    assert_eq!(repeated_cancel.status_code, 200);
+    assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+    // The driver's release races its normal completion with cancellation. The
+    // durable terminal cancellation wins and no late result is published.
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    assert_eq!(
+        store.get(cancelled_id).expect("cancelled job").status,
+        JobStatus::Cancelled
+    );
+    assert!(!store
+        .events(cancelled_id)
+        .expect("events")
+        .iter()
+        .any(|event| event.kind == JobEventKind::Result));
+    let terminal_duplicate = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.blocking", "version": 1, "idempotency_key": "run-9421-cancel", "request": {}
+        })),
+        &store,
+    );
+    assert_eq!(
+        terminal_duplicate.body["body"]["job"]["id"],
+        cancelled_id.to_string()
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 2);
+
+    // Exercise the production startup helper: a persisted checkpoint resumes
+    // exactly once, while work without one is terminalized fail-closed.
+    let resumable = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.blocking", "version": 1, "idempotency_key": "restart-resume", "request": {}
+        })),
+        &store,
+    );
+    let resumable_id = uuid::Uuid::parse_str(
+        resumable.body["body"]["job"]["id"]
+            .as_str()
+            .expect("resumable ID"),
+    )
+    .expect("valid resumable ID");
+    store
+        .claim_controller_execution(resumable_id, false)
+        .expect("durably claim resumable work");
+    store
+        .handle(resumable_id)
+        .record_controller_prepared(serde_json::json!({ "checkpoint": true }))
+        .expect("persist resume checkpoint");
+    let unresolved = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.blocking", "version": 1, "idempotency_key": "restart-unresolved", "request": {}
+        })),
+        &store,
+    );
+    let unresolved_id = uuid::Uuid::parse_str(
+        unresolved.body["body"]["job"]["id"]
+            .as_str()
+            .expect("unresolved ID"),
+    )
+    .expect("valid unresolved ID");
+    let restarted =
+        JobStore::open_without_reconciliation(&path).expect("restart opens durable store");
+    recover_controller_jobs(&restarted);
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("checkpointed job resumes once");
+    release_tx.send(()).expect("release resumed driver");
+    for _ in 0..100 {
+        if restarted
+            .get(resumable_id)
+            .expect("resumed job")
+            .status
+            .is_terminal()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        restarted.get(resumable_id).expect("resumed job").status,
+        JobStatus::Succeeded
+    );
+    assert_eq!(
+        restarted.get(unresolved_id).expect("unstarted job").status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
+fn cancelling_queued_controller_job_before_start_is_terminal_and_blocks_execution() {
+    let _home = HomeGuard::new();
+    let path = crate::paths::daemon_jobs_file().expect("jobs path");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (_release_tx, release_rx) = mpsc::channel();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let cancellations = Arc::new(AtomicUsize::new(0));
+    let (cancellation_release, _cancellation_rx) = mpsc::channel();
+    controller_job_driver::register_controller_job_driver(Arc::new(BlockingControllerDriver {
+        job_type: "test.queued-cancellation",
+        started: started_tx,
+        release: Arc::new(Mutex::new(release_rx)),
+        cancellation_release,
+        executions: Arc::clone(&executions),
+        cancellations: Arc::clone(&cancellations),
+    }))
+    .expect("register controller driver once");
+
+    let submitted = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.queued-cancellation", "version": 1, "idempotency_key": "queued-cancel-9421", "request": {}
+        })),
+        &store,
+    );
+    let job_id = uuid::Uuid::parse_str(
+        submitted.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id"),
+    )
+    .expect("valid job id");
+    assert_eq!(
+        store.get(job_id).expect("queued job").status,
+        JobStatus::Queued
+    );
+
+    let cancelled = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{job_id}/cancel"),
+        Some(serde_json::json!({ "reason": "response handoff failed" })),
+        &store,
+    );
+    assert_eq!(cancelled.status_code, 200);
+    assert_eq!(cancelled.body["body"]["job"]["status"], "cancelled");
+    assert_eq!(
+        store.get(job_id).expect("cancelled job").status,
+        JobStatus::Cancelled
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert_eq!(cancellations.load(Ordering::SeqCst), 0);
+
+    let repeated = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{job_id}/cancel"),
+        Some(serde_json::json!({ "reason": "retry" })),
+        &store,
+    );
+    assert_eq!(repeated.status_code, 200);
+    assert_eq!(repeated.body["body"]["job"]["status"], "cancelled");
+
+    let start = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{job_id}/start"),
+        None,
+        &store,
+    );
+    assert_eq!(start.status_code, 200);
+    assert!(started_rx
+        .recv_timeout(std::time::Duration::from_millis(100))
+        .is_err());
+    assert_eq!(
+        store.get(job_id).expect("terminal job").status,
+        JobStatus::Cancelled
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert_eq!(cancellations.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn generic_cancel_rejects_running_controller_work_without_touching_its_driver() {
+    let _home = HomeGuard::new();
+    let path = crate::paths::daemon_jobs_file().expect("jobs path");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let cancellations = Arc::new(AtomicUsize::new(0));
+    controller_job_driver::register_controller_job_driver(Arc::new(BlockingControllerDriver {
+        job_type: "test.generic-cancel-bypass",
+        started: started_tx,
+        release: Arc::new(Mutex::new(release_rx)),
+        cancellation_release: release_tx,
+        executions: Arc::clone(&executions),
+        cancellations: Arc::clone(&cancellations),
+    }))
+    .expect("register generic cancellation driver");
+    let submitted = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.generic-cancel-bypass", "version": 1, "idempotency_key": "generic-cancel-bypass", "request": {}
+        })),
+        &store,
+    );
+    let job_id = uuid::Uuid::parse_str(
+        submitted.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id"),
+    )
+    .expect("valid job id");
+    assert_eq!(
+        route_with_body(
+            "POST",
+            &format!("/controller/jobs/{job_id}/start"),
+            None,
+            &store
+        )
+        .status_code,
+        200
+    );
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("driver started");
+
+    let generic = route_with_body("POST", &format!("/jobs/{job_id}/cancel"), None, &store);
+    assert_eq!(generic.status_code, 404);
+    assert!(serialized_contains(&generic.body, "/controller/jobs/"));
+    assert_eq!(
+        store.get(job_id).expect("running job").status,
+        JobStatus::Running
+    );
+    assert_eq!(cancellations.load(Ordering::SeqCst), 0);
+
+    let cancelled = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{job_id}/cancel"),
+        None,
+        &store,
+    );
+    assert_eq!(cancelled.status_code, 200);
+    assert_eq!(
+        store.get(job_id).expect("cancelled job").status,
+        JobStatus::Cancelled
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn controller_terminal_persistence_retries_the_result_without_reexecuting_after_restart() {
+    let _home = HomeGuard::new();
+    let path = crate::paths::daemon_jobs_file().expect("jobs path");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let executions = Arc::new(AtomicUsize::new(0));
+    controller_job_driver::register_controller_job_driver(Arc::new(BlockingControllerDriver {
+        job_type: "test.terminal-persistence-retry",
+        started: started_tx,
+        release: Arc::new(Mutex::new(release_rx)),
+        cancellation_release: release_tx.clone(),
+        executions: Arc::clone(&executions),
+        cancellations: Arc::new(AtomicUsize::new(0)),
+    }))
+    .expect("register terminal persistence driver");
+    let submitted = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.terminal-persistence-retry", "version": 1, "idempotency_key": "terminal-persistence-retry", "request": {}
+        })),
+        &store,
+    );
+    let job_id = uuid::Uuid::parse_str(
+        submitted.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id"),
+    )
+    .expect("valid job id");
+    assert_eq!(
+        route_with_body(
+            "POST",
+            &format!("/controller/jobs/{job_id}/start"),
+            None,
+            &store
+        )
+        .status_code,
+        200
+    );
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("driver started");
+    store.fail_next_controller_terminal_writes(1);
+    release_tx.send(()).expect("release driver");
+    for _ in 0..100 {
+        if store.get(job_id).expect("job").status == JobStatus::Succeeded {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        store.get(job_id).expect("terminal job").status,
+        JobStatus::Succeeded
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    for _ in 0..100 {
+        if controller_job_runtime_count() == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(controller_job_runtime_count(), 0);
+
+    let restarted = JobStore::open_without_reconciliation(&path).expect("reopen durable store");
+    recover_controller_jobs(&restarted);
+    assert_eq!(
+        restarted.get(job_id).expect("durable terminal job").status,
+        JobStatus::Succeeded
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn controller_job_outlives_tcp_client_after_durable_response_handoff() {
+    let _home = HomeGuard::new();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let executions = Arc::new(AtomicUsize::new(0));
+    controller_job_driver::register_controller_job_driver(Arc::new(BlockingControllerDriver {
+        job_type: "test.tcp-client-loss",
+        started: started_tx,
+        release: Arc::new(Mutex::new(release_rx)),
+        cancellation_release: release_tx.clone(),
+        executions: Arc::clone(&executions),
+        cancellations: Arc::new(AtomicUsize::new(0)),
+    }))
+    .expect("register TCP controller driver");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("listener address");
+    // Create, explicit start, terminal poll. The bounded server joins its helpers
+    // before returning, so this test cannot retain the daemon owner lock.
+    let (server_result_tx, server_result_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let result = serve_listener_for_requests(listener, 3);
+        server_result_tx.send(result).expect("report server result");
+    });
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("HTTP client");
+    let submitted: Value = client
+        .post(format!("http://{addr}/controller/jobs"))
+        .json(&serde_json::json!({
+            "type": "test.tcp-client-loss",
+            "version": 1,
+            "idempotency_key": "tcp-client-loss",
+            "request": { "work": "blocked" }
+        }))
+        .send()
+        .expect("submit durable job")
+        .json()
+        .expect("parse durable job response");
+    let job_id = submitted["data"]["body"]["job"]["id"]
+        .as_str()
+        .expect("durable job ID")
+        .to_string();
+    drop(client);
+
+    assert!(started_rx
+        .recv_timeout(std::time::Duration::from_millis(100))
+        .is_err());
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+    let start_client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("start HTTP client");
+    let started: Value = start_client
+        .post(format!("http://{addr}/controller/jobs/{job_id}/start"))
+        .send()
+        .expect("start durable job")
+        .json()
+        .expect("parse start response");
+    assert_eq!(started["data"]["body"]["job"]["status"], "running");
+    drop(start_client);
+
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("daemon-owned driver started after client disconnected");
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+    release_tx.send(()).expect("release daemon-owned driver");
+    let terminal: Value = reqwest::blocking::get(format!("http://{addr}/jobs/{job_id}"))
+        .expect("poll terminal job")
+        .json()
+        .expect("parse terminal job");
+    assert_eq!(terminal["data"]["body"]["job"]["status"], "succeeded");
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+    server.join().expect("join bounded daemon server");
+    server_result_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("bounded daemon server completed")
+        .expect("bounded daemon server succeeded");
+}
+
+#[test]
+fn controller_job_created_by_disconnected_tcp_client_stays_queued_and_cancellable() {
+    let _home = HomeGuard::new();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (_release_tx, release_rx) = mpsc::channel();
+    let executions = Arc::new(AtomicUsize::new(0));
+    controller_job_driver::register_controller_job_driver(Arc::new(BlockingControllerDriver {
+        job_type: "test.tcp-create-client-loss",
+        started: started_tx,
+        release: Arc::new(Mutex::new(release_rx)),
+        cancellation_release: mpsc::channel().0,
+        executions: Arc::clone(&executions),
+        cancellations: Arc::new(AtomicUsize::new(0)),
+    }))
+    .expect("register create-loss controller driver");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("listener address");
+    let (server_result_tx, server_result_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let result = serve_listener_for_requests(listener, 2);
+        server_result_tx.send(result).expect("report server result");
+    });
+    let client = reqwest::blocking::Client::new();
+    let submitted: Value = client
+        .post(format!("http://{addr}/controller/jobs"))
+        .json(&serde_json::json!({
+            "type": "test.tcp-create-client-loss",
+            "version": 1,
+            "idempotency_key": "tcp-create-client-loss",
+            "request": {}
+        }))
+        .send()
+        .expect("create durable job")
+        .json()
+        .expect("parse create response");
+    let job_id = submitted["data"]["body"]["job"]["id"]
+        .as_str()
+        .expect("durable job ID");
+    drop(client);
+    assert!(started_rx
+        .recv_timeout(std::time::Duration::from_millis(100))
+        .is_err());
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+    let cancelled: Value = reqwest::blocking::Client::new()
+        .post(format!("http://{addr}/controller/jobs/{job_id}/cancel"))
+        .json(&serde_json::json!({ "reason": "create client disconnected" }))
+        .send()
+        .expect("cancel queued job")
+        .json()
+        .expect("parse cancellation response");
+    assert_eq!(cancelled["data"]["body"]["job"]["status"], "cancelled");
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    server.join().expect("join bounded daemon server");
+    server_result_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("bounded daemon server completed")
+        .expect("bounded daemon server succeeded");
+}
+
+#[test]
+fn controller_job_cancel_failure_is_diagnostic_and_non_cancelled() {
+    let _home = HomeGuard::new();
+    let path = crate::paths::daemon_jobs_file().expect("jobs path");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    controller_job_driver::register_controller_job_driver(Arc::new(
+        FailingCancellationControllerDriver {
+            started: started_tx,
+            release: Arc::new(Mutex::new(release_rx)),
+        },
+    ))
+    .expect("register failing driver once");
+    let submitted = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.cancellation-fails", "version": 1, "idempotency_key": "cancel-fails", "request": {}
+        })),
+        &store,
+    );
+    let job_id = uuid::Uuid::parse_str(
+        submitted.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id"),
+    )
+    .expect("valid id");
+    let started = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{job_id}/start"),
+        None,
+        &store,
+    );
+    assert_eq!(started.status_code, 200);
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("driver started");
+
+    let cancelled = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{job_id}/cancel"),
+        None,
+        &store,
+    );
+    assert_eq!(cancelled.status_code, 400);
+    assert_eq!(store.get(job_id).expect("job").status, JobStatus::Failed);
+    assert!(store.events(job_id).expect("events").iter().any(|event| {
+        event
+            .data
+            .as_ref()
+            .and_then(|data| data.get("phase"))
+            .and_then(Value::as_str)
+            == Some("cancellation_failed")
+    }));
+    release_tx.send(()).expect("release driver");
+}
+
+#[test]
+fn controller_job_retry_after_compaction_returns_tombstoned_terminal_projection() {
+    let _home = HomeGuard::new();
+    let path = crate::paths::daemon_jobs_file().expect("jobs path");
+    let store =
+        JobStore::open_without_reconciliation_with_retention(&path, 100, 1).expect("durable store");
+    let executions = Arc::new(AtomicUsize::new(0));
+    controller_job_driver::register_controller_job_driver(Arc::new(ImmediateControllerDriver {
+        executions: Arc::clone(&executions),
+    }))
+    .expect("register compaction driver once");
+    let request = serde_json::json!({
+        "type": "test.immediate-compaction", "version": 1, "idempotency_key": "compacted", "request": {}
+    });
+    let first = route_with_body("POST", "/controller/jobs", Some(request.clone()), &store);
+    let first_id = first.body["body"]["job"]["id"]
+        .as_str()
+        .expect("job ID")
+        .to_string();
+    let first_start = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{first_id}/start"),
+        None,
+        &store,
+    );
+    assert_eq!(first_start.status_code, 200);
+    for _ in 0..100 {
+        if store
+            .get(uuid::Uuid::parse_str(&first_id).expect("valid ID"))
+            .expect("job")
+            .status
+            .is_terminal()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let second = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.immediate-compaction", "version": 1, "idempotency_key": "compaction-trigger", "request": {}
+        })),
+        &store,
+    );
+    assert_eq!(second.status_code, 200);
+    let second_id = second.body["body"]["job"]["id"]
+        .as_str()
+        .expect("second ID");
+    let second_start = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{second_id}/start"),
+        None,
+        &store,
+    );
+    assert_eq!(second_start.status_code, 200);
+    for _ in 0..100 {
+        if executions.load(Ordering::SeqCst) == 2
+            && store
+                .get(
+                    uuid::Uuid::parse_str(
+                        second.body["body"]["job"]["id"]
+                            .as_str()
+                            .expect("second ID"),
+                    )
+                    .expect("valid ID"),
+                )
+                .expect("job")
+                .status
+                .is_terminal()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(store
+        .get(uuid::Uuid::parse_str(&first_id).expect("valid ID"))
+        .is_err());
+    for _ in 0..100 {
+        if controller_job_runtime_count() == 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(controller_job_runtime_count(), 0);
+    let executions_before_retry = executions.load(Ordering::SeqCst);
+    let retry = route_with_body("POST", "/controller/jobs", Some(request), &store);
+    assert_eq!(retry.status_code, 200);
+    assert_eq!(retry.body["body"]["job"]["id"], first_id);
+    assert_eq!(retry.body["body"]["job"]["status"], "succeeded");
+    assert_eq!(retry.body["body"]["terminal_tombstone"]["compacted"], true);
+    assert!(retry.body["body"]["poll"]["job"].is_null());
+    assert!(retry.body["body"]["poll"]["events"].is_null());
+    assert_eq!(executions.load(Ordering::SeqCst), executions_before_retry);
+}
+
+#[test]
+fn controller_job_errors_use_driver_safe_public_projection() {
+    let _home = HomeGuard::new();
+    let path = crate::paths::daemon_jobs_file().expect("jobs path");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    controller_job_driver::register_controller_job_driver(Arc::new(SecretErrorControllerDriver {
+        started: started_tx,
+        release: Arc::new(Mutex::new(release_rx)),
+    }))
+    .expect("register secret error driver once");
+    for mode in ["prepare", "execute"] {
+        let submitted = route_with_body(
+            "POST",
+            "/controller/jobs",
+            Some(serde_json::json!({
+                "type": "test.secret-errors", "version": 1, "idempotency_key": format!("secret-{mode}"), "request": { "mode": mode }
+            })),
+            &store,
+        );
+        let job_id = submitted.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job ID");
+        let started = route_with_body(
+            "POST",
+            &format!("/controller/jobs/{job_id}/start"),
+            None,
+            &store,
+        );
+        assert_eq!(started.status_code, 200);
+        for _ in 0..100 {
+            if store
+                .get(uuid::Uuid::parse_str(job_id).expect("valid ID"))
+                .expect("job")
+                .status
+                .is_terminal()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let response = route_with_body("GET", &format!("/jobs/{job_id}"), None, &store);
+        let events = route_with_body("GET", &format!("/jobs/{job_id}/events"), None, &store);
+        let serialized_job = serde_json::to_value(
+            store
+                .get(uuid::Uuid::parse_str(job_id).expect("valid ID"))
+                .expect("job"),
+        )
+        .expect("serialize job");
+        assert!(!serialized_contains(
+            &serialized_job,
+            "secret-marker-controller-error"
+        ));
+        assert!(!serialized_contains(
+            &response.body,
+            "secret-marker-controller-error"
+        ));
+        assert!(!serialized_contains(
+            &events.body,
+            "secret-marker-controller-error"
+        ));
+        assert!(serialized_contains(&events.body, "safe_driver_failure"));
+    }
+    let submitted = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.secret-errors", "version": 1, "idempotency_key": "secret-cancel", "request": { "mode": "cancel" }
+        })),
+        &store,
+    );
+    let job_id = submitted.body["body"]["job"]["id"]
+        .as_str()
+        .expect("job ID");
+    let started = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{job_id}/start"),
+        None,
+        &store,
+    );
+    assert_eq!(started.status_code, 200);
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("driver started");
+    let response = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{job_id}/cancel"),
+        None,
+        &store,
+    );
+    let events = route_with_body("GET", &format!("/jobs/{job_id}/events"), None, &store);
+    assert!(!serialized_contains(
+        &response.body,
+        "secret-marker-controller-error"
+    ));
+    assert!(!serialized_contains(
+        &events.body,
+        "secret-marker-controller-error"
+    ));
+    assert!(serialized_contains(&events.body, "safe_driver_failure"));
+    release_tx.send(()).expect("release driver");
+}
+
+#[test]
+fn controller_job_cancel_rejects_unknown_and_non_controller_jobs() {
+    let _home = HomeGuard::new();
+    let store = JobStore::default();
+    let ordinary = store.create("ordinary.job");
+    let non_controller = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{}/cancel", ordinary.id),
+        None,
+        &store,
+    );
+    assert_eq!(non_controller.status_code, 400);
+    let non_controller_start = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{}/start", ordinary.id),
+        None,
+        &store,
+    );
+    assert_eq!(non_controller_start.status_code, 400);
+    let unknown = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{}/cancel", uuid::Uuid::new_v4()),
+        None,
+        &store,
+    );
+    assert_eq!(unknown.status_code, 400);
+    let unknown_start = route_with_body(
+        "POST",
+        &format!("/controller/jobs/{}/start", uuid::Uuid::new_v4()),
+        None,
+        &store,
+    );
+    assert_eq!(unknown_start.status_code, 400);
+}
 
 fn serialized_contains(value: &serde_json::Value, needle: &str) -> bool {
     serde_json::to_string(value)
