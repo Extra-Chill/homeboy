@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::output::BulkResult;
 
 use super::operation_output::{run_bulk_ids, GitOutput};
-use super::primitives::{is_git_repo, run_git};
+use super::primitives::is_git_repo;
 use super::{execute_git, resolve_target};
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,13 +42,9 @@ pub fn get_repo_snapshot(path: &str) -> Result<RepoSnapshot> {
         "git branch",
     )?;
 
-    let clean = run_git(
-        Path::new(path),
-        &["status", "--porcelain=v1"],
-        "git status --porcelain",
-    )
-    .map(|output| output.is_empty())
-    .unwrap_or(false);
+    let clean = super::status_porcelain(Path::new(path))
+        .map(|output| output.is_empty())
+        .unwrap_or(false);
 
     let (ahead, behind) = crate::engine::command::run_in_optional(
         path,
