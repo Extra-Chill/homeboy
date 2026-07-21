@@ -95,6 +95,52 @@ fn lab_cook_child_invocation_consumes_controller_runner_placement() {
 }
 
 #[test]
+fn cook_dispatch_stages_pending_handoff_before_lab_preacceptance() {
+    crate::test_support::with_isolated_home(|_| {
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            "cook-preacceptance-order",
+            vec![serde_json::from_value(serde_json::json!({
+                "task_id": "task",
+                "executor": { "backend": "fixture" },
+                "instructions": "exercise controller handoff staging"
+            }))
+            .expect("task")],
+        );
+        let dispatcher = LabCookAttemptDispatcher {
+            runner_id: "missing-homeboy-lab".to_string(),
+            allow_local_fallback: false,
+            allow_dirty_lab_workspace: false,
+            skip_deps_hydration: false,
+            detach_after_handoff: false,
+            source_path: None,
+            job_overrides: runners::LabJobOverrides::default(),
+        };
+
+        let error =
+            crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher::dispatch_attempt(
+                &dispatcher,
+                plan,
+                "cook-preacceptance-order",
+                None,
+            )
+            .expect_err("missing Lab target rejects after controller staging");
+
+        assert!(!error.message.is_empty());
+        let record = agent_task_lifecycle::status("cook-preacceptance-order")
+            .expect("controller record remains inspectable after preacceptance failure");
+        let handoff = record.lab_handoff.expect("pending controller handoff");
+        assert_eq!(handoff.runner_id, "missing-homeboy-lab");
+        let handoff = serde_json::to_value(handoff).expect("serialize typed handoff");
+        assert_eq!(handoff["state"], "pending");
+        assert_eq!(handoff["authority"], "controller");
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "lab_handoff_preacceptance"
+        );
+    });
+}
+
+#[test]
 fn non_lab_command_continues_local_dispatch() {
     // route_after_parse mutates the process-global LAB_OFFLOAD_METADATA_ENV,
     // so hold the env lock to serialize against tests that assert on it.
