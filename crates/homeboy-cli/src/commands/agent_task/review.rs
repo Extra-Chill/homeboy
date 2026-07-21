@@ -271,10 +271,7 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
             .and_then(|record| record.metadata.get("latest_promotion").cloned())
     });
     let report = if let Some(previous) = previous_promotion.filter(|previous| {
-        matches!(
-            previous.get("status").and_then(Value::as_str),
-            Some("gate_failed" | "verification_pending")
-        )
+        promotion_is_resumable(previous, promotion_options.gates.rerun_completed_gates)
     }) {
         let target_path = previous
             .pointer("/target/path")
@@ -336,6 +333,14 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     }
 
     Ok((value, exit_code))
+}
+
+pub(crate) fn promotion_is_resumable(previous: &Value, rerun_completed_gates: bool) -> bool {
+    matches!(
+        previous.get("status").and_then(Value::as_str),
+        Some("gate_failed" | "verification_pending")
+    ) || (rerun_completed_gates
+        && previous.get("status").and_then(Value::as_str) == Some("applied"))
 }
 
 pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {

@@ -40,6 +40,16 @@ fn promotion_source_reads_bare_json_file_path() {
 }
 
 #[test]
+fn applied_promotion_resume_requires_explicit_gate_rerun() {
+    let applied = json!({ "status": "applied" });
+    let failed = json!({ "status": "gate_failed" });
+
+    assert!(!review::promotion_is_resumable(&applied, false));
+    assert!(review::promotion_is_resumable(&applied, true));
+    assert!(review::promotion_is_resumable(&failed, false));
+}
+
+#[test]
 fn review_reports_queued_run_without_chat_state() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-review-queued"))
