@@ -24,6 +24,63 @@ struct BlockingControllerDriver {
     cancellations: Arc<AtomicUsize>,
 }
 
+struct RecoveryCancellationControllerDriver {
+    cancelled_checkpoint: mpsc::Sender<Value>,
+    release_cancel: Arc<Mutex<mpsc::Receiver<()>>>,
+    executions: Arc<AtomicUsize>,
+}
+
+impl ControllerJobDriver for RecoveryCancellationControllerDriver {
+    fn job_type(&self) -> &'static str {
+        "test.recovery-cancellation"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn public_request(&self, _request: &Value) -> Result<Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn public_progress(&self, _progress: &Value) -> Result<Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn public_result(&self, _result: &Value) -> Result<Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn public_error(
+        &self,
+        _error: &crate::error::Error,
+    ) -> controller_job_driver::ControllerJobPublicError {
+        controller_job_driver::ControllerJobPublicError {
+            message: "recovery cancellation failed".to_string(),
+            data: serde_json::json!({ "classification": "recovery_cancellation_failed" }),
+        }
+    }
+    fn validate_secret_references(&self, _request: &Value) -> Result<()> {
+        Ok(())
+    }
+    fn execute(
+        &self,
+        _prepared: Value,
+        _job: crate::daemon::controller_job_driver::ControllerJobHandle,
+    ) -> Result<Value> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        Err(crate::error::Error::internal_unexpected(
+            "cancelled recovery resumed execution",
+        ))
+    }
+    fn cancel(&self, prepared: &Value) -> Result<()> {
+        self.cancelled_checkpoint
+            .send(prepared.clone())
+            .expect("test observes recovered checkpoint cancellation");
+        self.release_cancel
+            .lock()
+            .expect("cancel release lock")
+            .recv()
+            .expect("test releases recovered cancellation");
+        Ok(())
+    }
+}
+
 impl ControllerJobDriver for BlockingControllerDriver {
     fn job_type(&self) -> &'static str {
         self.job_type
@@ -446,10 +503,12 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
     store
         .claim_controller_execution(resumable_id, false)
         .expect("durably claim resumable work");
-    store
-        .handle(resumable_id)
-        .record_controller_prepared(serde_json::json!({ "checkpoint": true }))
-        .expect("persist resume checkpoint");
+    crate::daemon::controller_job_driver::ControllerJobHandle::new(
+        store.handle(resumable_id),
+        controller_job_driver::driver("test.blocking", 1).expect("registered driver"),
+    )
+    .checkpoint(serde_json::json!({ "checkpoint": true }))
+    .expect("persist resume checkpoint through driver handle");
     let unresolved = route_with_body(
         "POST",
         "/controller/jobs",
@@ -490,6 +549,89 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
         restarted.get(unresolved_id).expect("unstarted job").status,
         JobStatus::Queued
     );
+}
+
+#[test]
+fn recovered_cancellation_calls_driver_with_checkpoint_before_terminalizing() {
+    let _home = HomeGuard::new();
+    let path = crate::paths::daemon_jobs_file().expect("jobs path");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (cancelled_checkpoint_tx, cancelled_checkpoint_rx) = mpsc::channel();
+    let (release_cancel_tx, release_cancel_rx) = mpsc::channel();
+    let executions = Arc::new(AtomicUsize::new(0));
+    controller_job_driver::register_controller_job_driver(Arc::new(
+        RecoveryCancellationControllerDriver {
+            cancelled_checkpoint: cancelled_checkpoint_tx,
+            release_cancel: Arc::new(Mutex::new(release_cancel_rx)),
+            executions: Arc::clone(&executions),
+        },
+    ))
+    .expect("register recovery cancellation driver once");
+
+    let submitted = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.recovery-cancellation",
+            "version": 1,
+            "idempotency_key": "restart-cancellation-9163",
+            "request": {}
+        })),
+        &store,
+    );
+    let job_id = uuid::Uuid::parse_str(
+        submitted.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id"),
+    )
+    .expect("valid job id");
+    store
+        .claim_controller_execution(job_id, false)
+        .expect("durably claim abandoned work");
+    let checkpoint = serde_json::json!({ "recovery": "checkpoint-9163" });
+    crate::daemon::controller_job_driver::ControllerJobHandle::new(
+        store.handle(job_id),
+        controller_job_driver::driver("test.recovery-cancellation", 1).expect("registered driver"),
+    )
+    .checkpoint(checkpoint.clone())
+    .expect("persist recovery checkpoint");
+    store
+        .request_controller_cancellation(job_id, "daemon crashed".to_string())
+        .expect("persist cancellation intent");
+
+    let restarted = JobStore::open_without_reconciliation(&path).expect("reopen durable store");
+    recover_controller_jobs(&restarted);
+    assert_eq!(
+        cancelled_checkpoint_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("driver cancellation receives checkpoint"),
+        checkpoint
+    );
+    assert_eq!(
+        restarted.get(job_id).expect("recovering job").status,
+        JobStatus::Running
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+    release_cancel_tx
+        .send(())
+        .expect("release recovered cancellation");
+    for _ in 0..100 {
+        if restarted
+            .get(job_id)
+            .expect("recovered job")
+            .status
+            .is_terminal()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        restarted.get(job_id).expect("cancelled job").status,
+        JobStatus::Cancelled
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
 }
 
 #[test]

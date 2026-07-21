@@ -85,6 +85,158 @@ pub(crate) fn ensure_remote_lab_artifact_dir(runner_id: &str, output_file: &str)
     Ok(())
 }
 
+/// Serializable result of the runner-private runtime preparation boundary.
+/// It is shared by synchronous offload and durable staging so the two paths
+/// publish identical rig, extension, and agent-runtime state.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct LabRuntimeMaterializationOutput {
+    pub(crate) remote_cwd: String,
+    pub(crate) plan: HomeboyPlan,
+    pub(crate) synced_rigs: Vec<rig_materialization::LabOffloadRigSync>,
+    pub(crate) rig_registry_root: Option<String>,
+    pub(crate) extension_overlays: serde_json::Value,
+    pub(crate) extension_runtime_root: String,
+    pub(crate) extension_runtime_home: Option<String>,
+    pub(crate) runtime_generation:
+        Option<crate::runtime_materializer::ResolvedAgentRuntimeGeneration>,
+    pub(crate) runtime_env: Vec<(String, String)>,
+    pub(crate) runtime_evidence: Option<crate::runtime_materializer::AgentRuntimeExecutionEvidence>,
+    pub(crate) remapped_args: Vec<String>,
+    pub(crate) command: Vec<String>,
+    pub(crate) remote_command: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn materialize_lab_runtime<F>(
+    runner: &Runner,
+    homeboy_path: &str,
+    remote_cwd: &str,
+    changed_args: &[String],
+    synced_local_path: &str,
+    source_snapshot: &SourceSnapshot,
+    workspace_snapshot_identity: &str,
+    workspace_remaps: &[(String, String)],
+    runner_required_extensions: &[String],
+    agent_task_run_id: Option<&str>,
+    mut plan: HomeboyPlan,
+    mut remapped_args: Vec<String>,
+    mut command: Vec<String>,
+    mut remote_command: Vec<String>,
+    mut check_cancelled: F,
+) -> Result<LabRuntimeMaterializationOutput>
+where
+    F: FnMut() -> Result<()>,
+{
+    check_cancelled()?;
+    ensure_remote_lab_artifact_dir(runner.id.as_str(), &remote_lab_artifact_dir(remote_cwd))?;
+    check_cancelled()?;
+
+    let candidate_rig_registry_root = remote_lab_rig_registry_root(remote_cwd);
+    let synced_rigs = rig_materialization::sync_lab_offload_rigs(
+        runner.id.as_str(),
+        homeboy_path,
+        remote_cwd,
+        &candidate_rig_registry_root,
+        changed_args,
+        rig_materialization::LabOffloadPrimaryRigSource {
+            local_path: synced_local_path,
+            remote_path: remote_cwd,
+            source_snapshot,
+            workspace_snapshot_identity,
+        },
+    )?;
+    check_cancelled()?;
+    if !synced_rigs.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.sync_rigs", "lab.sync_rigs")
+                .inputs(
+                    PlanValues::new()
+                        .json("count", synced_rigs.len())
+                        .string("source_snapshot_remote_path", remote_cwd)
+                        .string("registry_root", &candidate_rig_registry_root)
+                        .json("rigs", &synced_rigs),
+                )
+                .build(),
+        );
+    }
+    let rig_registry_root = (!synced_rigs.is_empty()).then_some(candidate_rig_registry_root);
+
+    let extension_runtime_root =
+        format!("{}/extension-runtime", remote_lab_artifact_dir(remote_cwd));
+    let extension_overlays = crate::materialize_lab_job_extension_overlays(
+        runner,
+        &extension_runtime_root,
+        runner_required_extensions,
+    )?;
+    check_cancelled()?;
+    let extension_runtime_home =
+        (!extension_overlays.is_empty()).then(|| format!("{extension_runtime_root}/home"));
+
+    let mut runtime_operations = RunnerRuntimeMaterializerOperations::new(runner.clone());
+    let resolved_runtime = resolve_lab_agent_runtime(
+        &mut runtime_operations,
+        runner,
+        &remapped_args,
+        workspace_remaps,
+        agent_task_run_id.unwrap_or("lab-offload"),
+    )?;
+    check_cancelled()?;
+    let runtime_generation = resolved_runtime
+        .as_ref()
+        .map(|resolved| resolved.generation.clone());
+    let runtime_env = resolved_runtime
+        .as_ref()
+        .map(|resolved| resolved.env.clone())
+        .unwrap_or_default();
+    if let Some(resolved) = resolved_runtime {
+        let prior_args = remapped_args.clone();
+        remapped_args = resolved.args;
+        rewrite_dispatched_runtime_args(
+            &prior_args,
+            &remapped_args,
+            &mut command,
+            &mut remote_command,
+        );
+        plan = with_step(
+            plan,
+            PlanStep::ready(
+                "lab.materialize_agent_runtime",
+                "lab.materialize_agent_runtime",
+            )
+            .inputs(PlanValues::new().json("generation", &runtime_generation))
+            .build(),
+        );
+    }
+    let runtime_evidence = runtime_generation
+        .as_ref()
+        .map(|generation| {
+            runtime_execution_evidence(generation, &remapped_args, runner.id.as_str())
+        })
+        .transpose()?;
+
+    Ok(LabRuntimeMaterializationOutput {
+        remote_cwd: remote_cwd.to_string(),
+        plan,
+        synced_rigs,
+        rig_registry_root,
+        extension_overlays: serde_json::to_value(extension_overlays).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize Lab extension overlays".to_string()),
+            )
+        })?,
+        extension_runtime_root,
+        extension_runtime_home,
+        runtime_generation,
+        runtime_env,
+        runtime_evidence,
+        remapped_args,
+        command,
+        remote_command,
+    })
+}
+
 pub(crate) fn args_contain_output_file(args: &[String]) -> bool {
     let mut passthrough = false;
     args.iter().any(|arg| {
@@ -1288,10 +1440,79 @@ pub(crate) fn run_lab_offload_inner(
     }
 
     let capability_preflight: Option<RunnerCapabilityPreflight> = capability_plan.map(Into::into);
+    // Detached direct-daemon agent-task work is controller-owned from this point.
+    // It must never fall through to caller-side workspace staging after admission.
+    if request.detach_after_handoff
+        && request.durable_agent_task_plan.is_some()
+        && selection.mode != super::super::super::RunnerTunnelMode::Reverse
+        && capability_preflight.is_some()
+    {
+        let run_id = pre_acceptance_run_id.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+            "run_id",
+            "detached Lab offload requires a durable agent-task attempt before controller staging",
+            None,
+            None,
+        )
+        })?;
+        if request.local_output_file.is_some() {
+            emit_durable_run_id_before_execution(
+                run_id,
+                runner_id,
+                request.local_output_file,
+                &mut messages,
+            );
+        }
+        let controller_job_id = match crate::lab_staging_controller::submit_detached_staging(
+            run_id, runner_id, &request,
+        ) {
+            Ok(controller_job_id) => controller_job_id,
+            Err(error) => {
+                // A retryable transport failure can follow durable acceptance.
+                // Keep the parent nonterminal so replay can reconcile the same
+                // controller idempotency key instead of contradicting live work.
+                if error.retryable != Some(true) {
+                    if let Some(durable_plan) = request.durable_agent_task_plan.as_ref() {
+                        let _ = agent_task_lifecycle::record_pre_execution_failure(
+                            run_id,
+                            durable_plan,
+                            "lab_staging_submission",
+                            &error,
+                        );
+                    }
+                }
+                return Err(
+                    error.with_hint(format!("Retry: homeboy agent-task retry {run_id} --run"))
+                );
+            }
+        };
+        let stdout = serde_json::to_string_pretty(&serde_json::json!({
+            "success": true,
+            "data": {
+                "status": "materializing",
+                "durable_run_id": run_id,
+                "controller_job_id": controller_job_id,
+                "retrieval_commands": {
+                    "status": format!("homeboy agent-task status {run_id}"),
+                    "controller_job": format!("homeboy daemon job {}", controller_job_id),
+                }
+            }
+        }))
+        .unwrap_or_else(|_| {
+            format!("Lab staging controller job {controller_job_id} accepted for {run_id}")
+        });
+        return Ok(LabOffloadOutcome::InFlight {
+            plan,
+            stdout: format!("{stdout}\n"),
+            stderr: format!("Lab staging continues in controller job `{controller_job_id}`.\nNext: homeboy agent-task status {run_id}\n"),
+            exit_code: 0,
+            output_file_content: Some(format!("{stdout}\n")),
+        });
+    }
     let workspace_sync_timer = overhead.phase(LabOffloadPhase::WorkspaceSync);
     let workspace_stage = match prepare_lab_offload_workspace_stage(
         &request,
-        &contract,
+        crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(&contract),
         plan,
         runner_id,
         &source_path,
@@ -1368,53 +1589,6 @@ pub(crate) fn run_lab_offload_inner(
         cleanup_policy,
     );
 
-    ensure_remote_lab_artifact_dir(runner_id, &remote_lab_artifact_dir(&remote_cwd))?;
-
-    let candidate_rig_registry_root = remote_lab_rig_registry_root(&remote_cwd);
-    let synced_rigs = rig_materialization::sync_lab_offload_rigs(
-        runner_id,
-        homeboy_path,
-        &remote_cwd,
-        &candidate_rig_registry_root,
-        &changed_since_preflight.args,
-        rig_materialization::LabOffloadPrimaryRigSource {
-            local_path: &synced.local_path,
-            remote_path: &remote_cwd,
-            source_snapshot: &source_snapshot,
-            workspace_snapshot_identity: &synced.snapshot_identity,
-        },
-    )?;
-    if !synced_rigs.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.sync_rigs", "lab.sync_rigs")
-                .inputs(
-                    PlanValues::new()
-                        .json("count", synced_rigs.len())
-                        .string("source_snapshot_remote_path", &remote_cwd)
-                        .string("registry_root", &candidate_rig_registry_root)
-                        .json("rigs", &synced_rigs),
-                )
-                .build(),
-        );
-    }
-    let rig_registry_root = (!synced_rigs.is_empty()).then_some(candidate_rig_registry_root);
-
-    // Materialize after establishing the owner so a partial extension sync or
-    // any later pre-dispatch failure reaps the complete job-private runtime.
-    let extension_runtime_root =
-        format!("{}/extension-runtime", remote_lab_artifact_dir(&remote_cwd));
-    let extension_overlays = crate::materialize_lab_job_extension_overlays(
-        &runner,
-        &extension_runtime_root,
-        &runner_required_extensions,
-    )?;
-    let extension_runtime_home =
-        (!extension_overlays.is_empty()).then(|| format!("{extension_runtime_root}/home"));
-
-    // Runtime sources have now been synchronized to the runner, but no daemon
-    // admission exists yet. Materialization can therefore fail atomically
-    // without creating a reserved or submitted job.
     let workspace_remaps = workspace_mapping
         .iter()
         .map(|entry| {
@@ -1424,48 +1598,34 @@ pub(crate) fn run_lab_offload_inner(
             )
         })
         .collect::<Vec<_>>();
-    let mut runtime_operations = RunnerRuntimeMaterializerOperations::new(runner.clone());
-    let resolved_runtime = resolve_lab_agent_runtime(
-        &mut runtime_operations,
+    let runtime = materialize_lab_runtime(
         &runner,
-        &remapped_args,
+        homeboy_path,
+        &remote_cwd,
+        &changed_since_preflight.args,
+        &synced.local_path,
+        &source_snapshot,
+        &synced.snapshot_identity,
         &workspace_remaps,
-        agent_task_run_id.as_deref().unwrap_or("lab-offload"),
+        &runner_required_extensions,
+        agent_task_run_id.as_deref(),
+        plan,
+        remapped_args,
+        command,
+        remote_command,
+        || Ok(()),
     )?;
-    let runtime_generation = resolved_runtime
-        .as_ref()
-        .map(|resolved| resolved.generation.clone());
-    let runtime_env = resolved_runtime
-        .as_ref()
-        .map(|resolved| resolved.env.clone())
-        .unwrap_or_default();
-    if let Some(resolved) = resolved_runtime {
-        let prior_args = remapped_args.clone();
-        remapped_args = resolved.args;
-        // The policy is conventionally encoded as
-        // `--resolved-provider-policy=<json>`, not as bare JSON. Replace every
-        // changed argument so both direct and reverse daemon transports execute
-        // the runner-local generation rather than the controller declaration.
-        rewrite_dispatched_runtime_args(
-            &prior_args,
-            &remapped_args,
-            &mut command,
-            &mut remote_command,
-        );
-        plan = with_step(
-            plan,
-            PlanStep::ready(
-                "lab.materialize_agent_runtime",
-                "lab.materialize_agent_runtime",
-            )
-            .inputs(PlanValues::new().json("generation", &runtime_generation))
-            .build(),
-        );
-    }
-    let runtime_evidence = runtime_generation
-        .as_ref()
-        .map(|generation| runtime_execution_evidence(generation, &remapped_args, runner_id))
-        .transpose()?;
+    plan = runtime.plan;
+    let synced_rigs = runtime.synced_rigs;
+    let rig_registry_root = runtime.rig_registry_root;
+    let extension_overlays = runtime.extension_overlays;
+    let extension_runtime_home = runtime.extension_runtime_home;
+    let runtime_generation = runtime.runtime_generation;
+    let runtime_env = runtime.runtime_env;
+    let runtime_evidence = runtime.runtime_evidence;
+    remapped_args = runtime.remapped_args;
+    command = runtime.command;
+    remote_command = runtime.remote_command;
     if let Some(run_id) = agent_task_run_id.as_deref() {
         agent_task_lifecycle::record_lab_offload_phase(
             run_id,
@@ -1478,28 +1638,17 @@ pub(crate) fn run_lab_offload_inner(
         )?;
     }
 
-    let dependency_hydration = hydrate_for_lab_workspace_exec(
+    let recorded_dependency_hydration = hydrate_for_lab_workspace_exec_with_lifecycle(
         request.skip_deps_hydration,
         runner_id,
         &synced.local_path,
         &remote_cwd,
         plan,
+        agent_task_run_id.as_deref(),
     )?;
+    let dependency_hydration = recorded_dependency_hydration.hydration;
     plan = dependency_hydration.plan;
     if let Some(run_id) = agent_task_run_id.as_deref() {
-        let execution_ids = match &dependency_hydration.record {
-            LabWorkspaceHydrationRecord::Applied(output) => output
-                .steps
-                .iter()
-                .filter_map(|step| step.job_id.clone())
-                .collect(),
-            LabWorkspaceHydrationRecord::NotApplied { .. } => Vec::new(),
-        };
-        agent_task_lifecycle::record_lab_offload_phase_executions(
-            run_id,
-            "hydrating",
-            execution_ids,
-        )?;
         agent_task_lifecycle::record_lab_offload_phase(
             run_id,
             runner_id,
@@ -1696,6 +1845,7 @@ pub(crate) fn run_lab_offload_inner(
             &redact_argv_shell_display(&command_prefix.argv),
             expected_daemon_lease_id,
             agent_task_run_id.as_deref(),
+            DaemonAdmissionPolicy::LegacyCompatible,
         )
     })
     .transpose()?;
@@ -1707,7 +1857,9 @@ pub(crate) fn run_lab_offload_inner(
                 .or_else(|| runner_homeboy.get("active_daemon_build_identity")),
         },
         "admission": {
-            "daemon_lease_id": admission.as_ref().map(|reservation| &reservation.daemon_lease_id),
+            "daemon_lease_id": admission
+                .as_ref()
+                .map(|reservation| reservation.authority().daemon_lease_id().to_string()),
             "reservation_job_id": admission.as_ref().map(|reservation| reservation.job_id()),
             "authority": admission.is_none().then_some("reverse_broker"),
         },
@@ -1731,7 +1883,9 @@ pub(crate) fn run_lab_offload_inner(
             },
             "executed": {
                 "argv": &remote_command,
-                "daemon_lease_id": admission.as_ref().map(|reservation| &reservation.daemon_lease_id),
+                "daemon_lease_id": admission
+                    .as_ref()
+                    .map(|reservation| reservation.authority().daemon_lease_id().to_string()),
                 "reservation_job_id": admission.as_ref().map(|reservation| reservation.job_id()),
                 "authority": admission.is_none().then_some("reverse_broker"),
             },

@@ -112,7 +112,7 @@ pub(crate) struct RunnerDependencyCacheKeyFile {
     pub sha256: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct RunnerDependencyCacheSaveRequest {
     pub remote_path: String,
     pub cache_path: String,

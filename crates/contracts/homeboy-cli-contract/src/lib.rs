@@ -6,11 +6,11 @@
 //! would create a `core -> commands` dependency edge).
 
 use clap::ValueEnum;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The requested execution location. This is normalized once at the CLI
 /// boundary and is the only placement input used by routing code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[value(rename_all = "lower")]
 pub enum Placement {
     Auto,

@@ -161,6 +161,10 @@ impl CliRuntime {
         // can prepare and run a runner job as a local child without core
         // depending on runner process-execution behavior.
         crate::runner::register_runner_daemon_exec_driver();
+        // Lab owns its durable staging/dispatch controller-job interpretation;
+        // core only owns the generic daemon lifecycle.
+        crate::runner::register_lab_staging_controller_driver();
+        crate::runner::enable_production_lab_staging();
         // Register the runner workspace-root provider so the daemon file API can
         // resolve a runner's configured workspace_root without core depending on
         // the runner config registry.

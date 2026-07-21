@@ -27,9 +27,9 @@ mod agent_task_bridge;
 mod args_util;
 mod evidence;
 mod fallback;
-mod offload;
+pub(crate) mod offload;
 mod provider_preflight;
-pub(super) mod secrets;
+pub(crate) mod secrets;
 mod trace_fetch_refs;
 mod workspace_plan;
 

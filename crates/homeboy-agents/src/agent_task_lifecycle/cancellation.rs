@@ -94,13 +94,52 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
         ));
     }
 
+    // Staging is controller-local work, not a runner child. Its terminal
+    // confirmation is required before this parent can become Cancelled.
+    let controller_cancelled = if let Some(controller_job_id) = record
+        .metadata
+        .get("lab_staging_controller_job_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+    {
+        // The controller owns every child admitted during staging, including the
+        // final runner job. Never bypass it merely because that child identity
+        // was already projected onto the parent.
+        let controller_job = homeboy_core::daemon::LocalControllerJobClient::connect()?
+            .cancel_and_wait(
+                controller_job_id,
+                reason.unwrap_or("agent-task cancellation requested"),
+            )?;
+        let metadata = record.ensure_metadata_object();
+        metadata.insert(
+            "controller_job_cancellation".to_string(),
+            json!({
+                "controller_job_id": controller_job.id,
+                "status": controller_job.status,
+                "confirmed": true,
+            }),
+        );
+        store::write_record(&record)?;
+        // The controller cancellation projects owned child state. Re-read once
+        // after its terminal confirmation before finalizing this parent.
+        record = store::read_record(&record.run_id)?;
+        if record.state.is_terminal() {
+            return Ok(record);
+        }
+        true
+    } else {
+        false
+    };
+
     // Classify how live cancellation can be performed for this run BEFORE we
     // mutate the durable record, so we can record either a real termination or
     // deterministic operator recovery instructions (acceptance: never force
     // manual process spelunking; always surface pids + safe commands).
     // A runner-backed proxy can have an accepted daemon job while it is still
     // queued before the provider starts. Project cancellation to that job too.
-    let cancellation = if record.state == AgentTaskRunState::Running
+    let cancellation = if controller_cancelled {
+        LiveCancellationOutcome::NotRunning
+    } else if record.state == AgentTaskRunState::Running
         || (record.state == AgentTaskRunState::Queued
             && record.runner_id().is_some()
             && record.runner_job_id().is_some())

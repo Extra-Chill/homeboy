@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -242,10 +243,7 @@ pub(super) fn exec_via_daemon(
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
     let mut daemon_endpoint = local_url.to_string();
-    while !matches!(
-        job.status,
-        JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
-    ) {
+    while !job.status.is_terminal() {
         if Instant::now() >= deadline {
             let events = fetch_daemon_events(&client, &daemon_endpoint, &job.id.to_string())
                 .map(|events| redact_runner_job_events(&events, &env, &secret_env_names))
@@ -292,7 +290,7 @@ pub(super) fn exec_via_daemon(
         Err(err) => {
             return Err(lab_terminal_result_transport_error(
                 runner, &cwd, &command, &job, err,
-            ));
+            ))
         }
     };
     append_agent_task_lifecycle_workload_event(
@@ -437,6 +435,82 @@ pub(super) fn exec_via_daemon(
     ))
 }
 
+/// Selects whether an admission may interoperate with legacy daemon responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DaemonAdmissionPolicy {
+    LegacyCompatible,
+    DurableLeaseRequired,
+}
+
+#[derive(Debug, Default)]
+struct AdmissionRenewalHealth {
+    lease_expires_at_ms: Option<u64>,
+    failure: Option<String>,
+}
+
+/// Token-free proof material a durable dispatcher may retain or serialize.
+/// The admission token remains exclusively inside the RAII reservation.
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct DaemonAdmissionReservationAuthority {
+    daemon_lease_id: String,
+    reservation_job_id: String,
+    token_present: bool,
+    lease_expires_at_ms: u64,
+    #[serde(skip)]
+    renewal_health: Arc<Mutex<AdmissionRenewalHealth>>,
+}
+
+impl std::fmt::Debug for DaemonAdmissionReservationAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DaemonAdmissionReservationAuthority")
+            .field("daemon_lease_id", &self.daemon_lease_id)
+            .field("reservation_job_id", &self.reservation_job_id)
+            .field("token_present", &self.token_present)
+            .field("lease_expires_at_ms", &self.lease_expires_at_ms)
+            .finish()
+    }
+}
+
+impl DaemonAdmissionReservationAuthority {
+    pub(crate) fn daemon_lease_id(&self) -> &str {
+        &self.daemon_lease_id
+    }
+
+    pub(crate) fn reservation_job_id(&self) -> &str {
+        &self.reservation_job_id
+    }
+
+    /// Proves that the daemon, rather than local Drop cleanup, still owns the
+    /// lease expiry/cancellation contract before the dispatcher submits `/exec`.
+    pub(crate) fn prove_server_owned_expiry_or_cancellation_authority(&self) -> Result<()> {
+        if !self.token_present || self.lease_expires_at_ms == 0 {
+            return Err(Error::internal_unexpected(
+                "strict daemon admission has no server-owned lease authority",
+            ));
+        }
+        let health = self
+            .renewal_health
+            .lock()
+            .expect("admission renewal health lock");
+        if let Some(failure) = &health.failure {
+            return Err(Error::internal_unexpected(format!(
+                "strict daemon admission renewal failed before dispatch: {failure}"
+            )));
+        }
+        if health
+            .lease_expires_at_ms
+            .unwrap_or(self.lease_expires_at_ms)
+            == 0
+        {
+            return Err(Error::internal_unexpected(
+                "strict daemon admission has no renewable server lease expiry",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Keeps an admitted Lab offload visible in daemon active-job accounting until
 /// its staged execution reaches a terminal or detached handoff outcome.
 pub(crate) struct DaemonAdmissionReservation {
@@ -445,12 +519,16 @@ pub(crate) struct DaemonAdmissionReservation {
     token: Option<String>,
     renewer_stop: Option<Sender<()>>,
     renewer: Option<std::thread::JoinHandle<()>>,
-    pub(crate) daemon_lease_id: String,
+    authority: DaemonAdmissionReservationAuthority,
 }
 
 impl DaemonAdmissionReservation {
     pub(crate) fn job_id(&self) -> &str {
-        &self.job_id
+        self.authority.reservation_job_id()
+    }
+
+    pub(crate) fn authority(&self) -> DaemonAdmissionReservationAuthority {
+        self.authority.clone()
     }
 }
 
@@ -489,6 +567,7 @@ pub(crate) fn reserve_daemon_admission(
     command: &str,
     expected_daemon_lease_id: &str,
     idempotency_key: Option<&str>,
+    policy: DaemonAdmissionPolicy,
 ) -> Result<DaemonAdmissionReservation> {
     let client = Client::builder()
         .no_proxy()
@@ -557,12 +636,39 @@ pub(crate) fn reserve_daemon_admission(
         .and_then(Value::as_str)
         .filter(|token| !token.is_empty())
         .map(str::to_string);
+    let lease_protocol_confirmed =
+        body.get("admission_lease_protocol").and_then(Value::as_u64) == Some(1);
+    let lease_expires_at_ms = body.pointer("/lease/expires_at_ms").and_then(Value::as_u64);
+    let renewable = body.pointer("/lease/renewable").and_then(Value::as_bool) == Some(true);
+    if policy == DaemonAdmissionPolicy::DurableLeaseRequired
+        && !strict_admission_response_is_complete(
+            lease_protocol_confirmed,
+            token.as_deref(),
+            renewable,
+            lease_expires_at_ms,
+        )
+    {
+        return Err(strict_admission_rejection(
+            &client,
+            runner_id,
+            local_url,
+            &job.id.to_string(),
+            token.as_deref(),
+            lease_protocol_confirmed,
+        ));
+    }
+    let renewal_health = Arc::new(Mutex::new(AdmissionRenewalHealth {
+        lease_expires_at_ms,
+        failure: None,
+    }));
+    let token_present = token.is_some();
     let (renewer_stop, renewer) = match token.as_deref() {
         Some(token) => {
             let (stop, renewer) = spawn_admission_renewer(
                 local_url.to_string(),
                 job.id.to_string(),
                 token.to_string(),
+                renewal_health.clone(),
             );
             (Some(stop), Some(renewer))
         }
@@ -576,8 +682,72 @@ pub(crate) fn reserve_daemon_admission(
         token,
         renewer_stop,
         renewer,
-        daemon_lease_id: daemon_lease_id.to_string(),
+        authority: DaemonAdmissionReservationAuthority {
+            daemon_lease_id: daemon_lease_id.to_string(),
+            reservation_job_id: job.id.to_string(),
+            token_present,
+            lease_expires_at_ms: lease_expires_at_ms.unwrap_or_default(),
+            renewal_health,
+        },
     })
+}
+
+fn strict_admission_response_is_complete(
+    lease_protocol_confirmed: bool,
+    token: Option<&str>,
+    renewable: bool,
+    lease_expires_at_ms: Option<u64>,
+) -> bool {
+    lease_protocol_confirmed
+        && token.is_some_and(|token| !token.trim().is_empty())
+        && renewable
+        && lease_expires_at_ms.is_some_and(|expires_at_ms| expires_at_ms > 0)
+}
+
+fn strict_admission_rejection(
+    client: &Client,
+    runner_id: &str,
+    local_url: &str,
+    job_id: &str,
+    token: Option<&str>,
+    lease_protocol_confirmed: bool,
+) -> Error {
+    let release = daemon_post_json_text(
+        client,
+        local_url,
+        &format!("/admissions/{job_id}/release"),
+        &token
+            .map(|token| json!({ "admission_token": token }))
+            .unwrap_or_else(|| json!({})),
+        DaemonPostOptions::default(),
+    );
+    let released = release
+        .ok()
+        .and_then(|response| serde_json::from_str::<DaemonEnvelope>(&response.body).ok())
+        .and_then(|envelope| envelope.data)
+        .and_then(|data| {
+            canonical_daemon_body(&data, "daemon admission release response")
+                .ok()
+                .cloned()
+        })
+        .and_then(|body| serde_json::from_value::<Job>(body["job"].clone()).ok())
+        .is_some_and(|job| job.status.is_terminal());
+    let cleanup = if released {
+        "the legacy reservation was released and reconciled"
+    } else {
+        "the reservation could not be proven released; reconcile the daemon admission before retrying"
+    };
+    let protocol = if lease_protocol_confirmed {
+        "the daemon lease response omitted required token or expiry authority"
+    } else {
+        "the daemon did not confirm admission lease protocol v1"
+    };
+    Error::validation_invalid_argument(
+        "daemon_admission",
+        format!("runner `{runner_id}` rejected durable dispatch: {protocol}; {cleanup}"),
+        Some(job_id.to_string()),
+        None,
+    )
 }
 
 /// Renew at half the daemon's bounded lease interval while staging keeps the
@@ -586,6 +756,7 @@ fn spawn_admission_renewer(
     local_url: String,
     job_id: String,
     token: String,
+    health: Arc<Mutex<AdmissionRenewalHealth>>,
 ) -> (Sender<()>, std::thread::JoinHandle<()>) {
     let (stop, shutdown) = mpsc::channel();
     let renewer = std::thread::spawn(move || {
@@ -595,18 +766,152 @@ fn spawn_admission_renewer(
                 .timeout(Duration::from_secs(10))
                 .build()
             else {
-                continue;
+                health
+                    .lock()
+                    .expect("admission renewal health lock")
+                    .failure = Some("build daemon renewal client".to_string());
+                return;
             };
-            let _ = daemon_post_json_text(
+            let response = daemon_post_json_text(
                 &client,
                 &local_url,
                 &format!("/admissions/{job_id}/renew"),
                 &json!({ "admission_token": token }),
                 DaemonPostOptions::default(),
             );
+            let expires_at_ms = response
+                .ok()
+                .and_then(|response| serde_json::from_str::<DaemonEnvelope>(&response.body).ok())
+                .and_then(|envelope| envelope.data)
+                .and_then(|data| {
+                    canonical_daemon_body(&data, "daemon admission renewal response")
+                        .ok()
+                        .cloned()
+                })
+                .and_then(|body| body.pointer("/lease/expires_at_ms").and_then(Value::as_u64));
+            match expires_at_ms {
+                Some(expires_at_ms) if expires_at_ms > 0 => {
+                    health
+                        .lock()
+                        .expect("admission renewal health lock")
+                        .lease_expires_at_ms = Some(expires_at_ms);
+                }
+                _ => {
+                    health
+                        .lock()
+                        .expect("admission renewal health lock")
+                        .failure =
+                        Some("daemon did not confirm admission lease renewal".to_string());
+                    return;
+                }
+            }
         }
     });
     (stop, renewer)
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn strict_admission_requires_protocol_token_and_server_expiry() {
+        assert!(strict_admission_response_is_complete(
+            true,
+            Some("opaque-token"),
+            true,
+            Some(42),
+        ));
+        assert!(!strict_admission_response_is_complete(
+            true,
+            None,
+            true,
+            Some(42)
+        ));
+        assert!(!strict_admission_response_is_complete(
+            false,
+            Some("opaque-token"),
+            true,
+            Some(42),
+        ));
+        assert!(!strict_admission_response_is_complete(
+            true,
+            Some("opaque-token"),
+            false,
+            Some(42),
+        ));
+    }
+
+    #[test]
+    fn authority_excludes_token_from_debug_and_serialization() {
+        let authority = DaemonAdmissionReservationAuthority {
+            daemon_lease_id: "lease-a".to_string(),
+            reservation_job_id: "job-a".to_string(),
+            token_present: true,
+            lease_expires_at_ms: 42,
+            renewal_health: Arc::new(Mutex::new(AdmissionRenewalHealth::default())),
+        };
+        let debug = format!("{authority:?}");
+        let serialized = serde_json::to_string(&authority).expect("serialize authority");
+        assert!(!debug.contains("opaque-token"));
+        assert!(!serialized.contains("token\":\""));
+        assert!(authority
+            .prove_server_owned_expiry_or_cancellation_authority()
+            .is_ok());
+    }
+
+    #[test]
+    fn renewal_failure_blocks_strict_dispatch_authority() {
+        let authority = DaemonAdmissionReservationAuthority {
+            daemon_lease_id: "lease-a".to_string(),
+            reservation_job_id: "job-a".to_string(),
+            token_present: true,
+            lease_expires_at_ms: 42,
+            renewal_health: Arc::new(Mutex::new(AdmissionRenewalHealth {
+                lease_expires_at_ms: Some(42),
+                failure: Some("daemon rejected renewal".to_string()),
+            })),
+        };
+        let error = authority
+            .prove_server_owned_expiry_or_cancellation_authority()
+            .expect_err("renewal failure must be observable before dispatch");
+        assert!(error.message.contains("renewal failed"));
+        assert!(!error.message.contains("opaque-token"));
+    }
+
+    #[test]
+    fn renewal_failure_during_exec_is_visible_after_acceptance() {
+        let renewal_health = Arc::new(Mutex::new(AdmissionRenewalHealth {
+            lease_expires_at_ms: Some(42),
+            failure: None,
+        }));
+        let authority = DaemonAdmissionReservationAuthority {
+            daemon_lease_id: "lease-a".to_string(),
+            reservation_job_id: "job-a".to_string(),
+            token_present: true,
+            lease_expires_at_ms: 42,
+            renewal_health: Arc::clone(&renewal_health),
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let renewer_barrier = Arc::clone(&barrier);
+        let renewer = std::thread::spawn(move || {
+            renewer_barrier.wait();
+            renewal_health.lock().expect("renewal health lock").failure =
+                Some("daemon rejected renewal during exec".to_string());
+            renewer_barrier.wait();
+        });
+
+        authority
+            .prove_server_owned_expiry_or_cancellation_authority()
+            .expect("authority before exec");
+        barrier.wait();
+        barrier.wait();
+        renewer.join().expect("renewer");
+        let error = authority
+            .prove_server_owned_expiry_or_cancellation_authority()
+            .expect_err("post-acceptance authority must observe renewal failure");
+        assert!(error.message.contains("renewal failed"));
+    }
 }
 
 /// Recover only a connection that failed before the daemon could answer. A
@@ -873,6 +1178,60 @@ pub(super) fn fetch_daemon_job_resilient(
 ) -> Result<Job> {
     fetch_daemon_job_resilient_with_endpoint_reload(client, local_url, job_id, || Ok(None))
         .map(|(job, _)| job)
+}
+
+/// Authoritative terminal state for a known daemon job. This observer never
+/// submits work, making it safe for foreground waiting and controller resume.
+pub(crate) struct DaemonTerminalObservation {
+    pub(crate) job: Job,
+    pub(crate) events: Vec<JobEvent>,
+}
+
+pub(crate) fn observe_daemon_job_until_terminal(
+    runner_id: &str,
+    runner_job_id: &str,
+    accepted_daemon_identity: Option<&str>,
+) -> Result<DaemonTerminalObservation> {
+    let client = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| {
+            Error::internal_unexpected(format!("build daemon observer client: {error}"))
+        })?;
+    let status = super::super::status(runner_id)?;
+    let session = status.session.filter(|_| status.connected).ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "runner `{runner_id}` has no connected daemon session for observation"
+        ))
+    })?;
+    let mut endpoint = session.local_url.clone().ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "runner `{runner_id}` has no direct daemon endpoint for observation"
+        ))
+    })?;
+    let job = loop {
+        let (job, refreshed_endpoint) = fetch_daemon_job_resilient_with_endpoint_reload(
+            &client,
+            &endpoint,
+            runner_job_id,
+            || refreshed_daemon_endpoint(runner_id, accepted_daemon_identity),
+        )?;
+        endpoint = refreshed_endpoint;
+        if job.status.is_terminal() {
+            break job;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let events = fetch_daemon_events(&client, &endpoint, runner_job_id)?;
+    super::super::generation_store::record_job_artifacts(
+        runner_id,
+        &session,
+        runner_job_id,
+        job.artifacts.iter().map(|artifact| artifact.id.clone()),
+    )?;
+    super::super::generation_store::reconcile(runner_id, Some(&session))?;
+    Ok(DaemonTerminalObservation { job, events })
 }
 
 pub(super) fn fetch_daemon_job_resilient_with_endpoint_reload<Reload>(

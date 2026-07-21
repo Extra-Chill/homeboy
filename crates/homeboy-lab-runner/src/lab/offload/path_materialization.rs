@@ -15,7 +15,7 @@ pub(crate) struct PathMaterializationPlanner {
 impl PathMaterializationPlanner {
     pub(crate) fn plan(
         args: &[String],
-        contract: &LabOffloadCommand,
+        workload: Option<&homeboy_core::lab_contract::LabRigWorkloadArguments>,
         source_path: &Path,
         allow_dirty_lab_workspace: bool,
     ) -> Result<Self> {
@@ -39,7 +39,7 @@ impl PathMaterializationPlanner {
         )?);
         extra_workspaces.extend(rig_declared_path_input_extra_workspaces(
             &args,
-            contract.workload.as_ref(),
+            workload,
             source_path,
         )?);
         extra_workspaces.extend(runtime_refresh_source_extra_workspaces(
@@ -162,8 +162,9 @@ mod tests {
             extension_overrides: Vec::new(),
         });
 
-        let planner = PathMaterializationPlanner::plan(&args, &contract, &primary, false)
-            .expect("materialization plan");
+        let planner =
+            PathMaterializationPlanner::plan(&args, contract.workload.as_ref(), &primary, false)
+                .expect("materialization plan");
         let paths = planner
             .extra_workspaces
             .iter()

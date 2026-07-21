@@ -43,6 +43,7 @@ mod execution;
 mod execution_bundle;
 mod extension_materialization;
 mod generation_store;
+pub mod lab_staging_controller;
 pub fn runner_generation_inventory(runner_id: &str) -> Result<Vec<RunnerDaemonGenerationStatus>> {
     let report = connection::status(runner_id)?;
     generation_store::status_projection(runner_id, report.session.as_ref())
@@ -57,7 +58,7 @@ mod lab_capabilities;
 mod lab_command;
 mod lab_env;
 mod lab_offload_provider;
-mod lab_plan;
+pub(crate) mod lab_plan;
 mod lab_selection;
 mod lab_workspace_provenance_provider;
 mod lab_workspaces;
@@ -172,6 +173,12 @@ pub use lab::{
 pub(crate) use lab_env::build_lab_offload_env;
 pub use lab_offload_provider::register as register_runner_lab_offload_provider;
 pub use lab_selection::prepare_explicit_lab_runner_for_offload;
+pub use lab_staging_controller::enable_production_routing as enable_production_lab_staging;
+pub use lab_staging_controller::register as register_lab_staging_controller_driver;
+pub use lab_staging_controller::{
+    load_lab_staging_recipe, persist_lab_staging_recipe, LabStagingRecipe, LabStagingRecipeRef,
+    LabStagingRequest,
+};
 pub use lab_workspace_provenance_provider::register as register_lab_workspace_provenance_provider;
 pub use offload_changed_since::{
     lab_offload_changed_since_ref, preflight_lab_offload_changed_since,

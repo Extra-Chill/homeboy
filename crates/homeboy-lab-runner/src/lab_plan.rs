@@ -2,7 +2,7 @@ use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep};
 
 use super::LabOffloadCommand;
 
-pub(super) fn base_lab_plan(command: Option<&LabOffloadCommand>) -> HomeboyPlan {
+pub(crate) fn base_lab_plan(command: Option<&LabOffloadCommand>) -> HomeboyPlan {
     let description = command
         .map(|contract| contract.hot_label)
         .unwrap_or("command");

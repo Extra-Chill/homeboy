@@ -33,16 +33,16 @@ const PLAN_PROVIDER_PROVENANCE: &str = "plan:provider";
 const LAB_SECRET_ENV_HANDOFF_SCHEMA: &str = "homeboy/lab-secret-env-handoff/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct LabSecretEnvHandoffPlan {
-    pub(super) env_delta: HashMap<String, String>,
-    pub(super) diagnostics: serde_json::Value,
-    pub(super) entries: Vec<SecretEnvHandoffEntry>,
-    pub(super) secret_env_plan: SecretEnvPlan,
-    pub(super) secret_env_names: Vec<String>,
-    pub(super) runner_deferred_secret_env: Vec<String>,
+pub(crate) struct LabSecretEnvHandoffPlan {
+    pub(crate) env_delta: HashMap<String, String>,
+    pub(crate) diagnostics: serde_json::Value,
+    pub(crate) entries: Vec<SecretEnvHandoffEntry>,
+    pub(crate) secret_env_plan: SecretEnvPlan,
+    pub(crate) secret_env_names: Vec<String>,
+    pub(crate) runner_deferred_secret_env: Vec<String>,
 }
 
-pub(super) fn build_lab_secret_env_handoff_plan(
+pub(crate) fn build_lab_secret_env_handoff_plan(
     secret_env_sources: &[LabSecretEnvSource],
     args: &[String],
     mut env_delta: HashMap<String, String>,
