@@ -518,6 +518,8 @@ fn runner_resident_run_plan_does_not_require_a_second_controller_session() {
     ]);
     let normalized = vec![
         "homeboy".to_string(),
+        "--placement".to_string(),
+        "local".to_string(),
         "agent-task".to_string(),
         "run-plan".to_string(),
         "--plan".to_string(),

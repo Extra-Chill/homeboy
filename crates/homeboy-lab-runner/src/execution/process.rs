@@ -386,6 +386,11 @@ pub(crate) fn prepare_daemon_local_process(
     env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
     env.insert(RUNNER_PLACEMENT_RESOLVED_ENV.to_string(), "1".to_string());
     env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
+    // Execution provenance is distinct from the dispatch markers above. It
+    // survives CLI routing so runner-local agent-task plans do not open a
+    // second controller-to-runner handoff.
+    env.entry(homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV.to_string())
+        .or_insert_with(|| runner.id.clone());
     env.extend(resolve_runner_secret_env_for_plan(
         &runner.secret_env,
         &secret_env_plan,
