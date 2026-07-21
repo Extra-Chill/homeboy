@@ -17,7 +17,7 @@ use super::connection::{
     active_jobs_before_daemon_replacement, disconnect_with_session, rotate_daemon_generation,
 };
 use super::execution::exec_with_status_snapshot;
-use super::execution::reserve_daemon_admission;
+use super::execution::{reserve_daemon_admission, DaemonAdmissionPolicy};
 use super::{
     connect_with_orphan_adoption, exec, load, materialize_runner_extension_with_env, merge,
     normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
@@ -907,6 +907,7 @@ fn probe_reconnected_admission_readiness(runner_id: &str, identity_commit: &str)
                 &format!("runner.refresh_homeboy readiness probe ({identity_commit})"),
                 expected_lease_id,
                 None,
+                DaemonAdmissionPolicy::LegacyCompatible,
             )
             .map(|reservation| {
                 // Drop releases the reservation immediately; readiness is the
