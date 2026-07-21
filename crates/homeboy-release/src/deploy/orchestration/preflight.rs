@@ -1,13 +1,198 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::release::version;
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
+use homeboy_core::project::{DeploymentProvenanceMode, Project};
 
 use super::super::execution::{release_artifact_plan, ReleaseArtifactPlan};
 use super::super::generated_artifacts::uncommitted_file_report_excluding_known_generated;
-use super::super::types::{compare_deployed_versions, ComponentStatus, DeployConfig};
+use super::super::types::{
+    compare_deployed_versions, ComponentStatus, DeployConfig, DeploymentProvenanceEvidence,
+};
+
+/// Enforce an opt-in project source-provenance policy before any source sync,
+/// checkout, dependency install, build, or remote deployment work begins.
+///
+/// The selected source is resolved once here and retained in `config`, so later
+/// materialization cannot silently follow a moved branch or tag. `--force`
+/// never weakens an active policy.
+pub(super) fn guard_deployment_provenance(
+    project: &Project,
+    components: &[Component],
+    config: &mut DeployConfig,
+) -> Result<BTreeMap<String, DeploymentProvenanceEvidence>> {
+    let Some(policy) = project.deployment_provenance.as_ref() else {
+        return Ok(BTreeMap::new());
+    };
+    if policy.mode == DeploymentProvenanceMode::Any {
+        return Ok(BTreeMap::new());
+    }
+    if config.force {
+        return Err(Error::validation_invalid_argument(
+            "force",
+            "--force cannot bypass this project's deployment provenance policy",
+            Some(project.id.clone()),
+            Some(vec![
+                "Remove --force and deploy a preflighted immutable source identity".to_string(),
+            ]),
+        ));
+    }
+    if config.head {
+        return Err(provenance_policy_error(project, "refuses --head"));
+    }
+
+    let mut evidence = BTreeMap::new();
+    for component in components
+        .iter()
+        .filter(|component| !component.is_file_component())
+    {
+        let release_set = config.requested_refs.contains_key(&component.id)
+            && config.preflighted_source_paths.contains_key(&component.id)
+            && config
+                .preflighted_component_identities
+                .contains_key(&component.id);
+        let requested_ref = config.requested_ref_for(&component.id).map(str::to_string);
+        let (requested_ref, resolved_sha, is_release_tag) = match requested_ref {
+            Some(requested_ref) => {
+                let resolved_sha = resolve_policy_ref(component, &requested_ref, config)?;
+                let is_release_tag = !release_set && is_release_tag(component, &requested_ref)?;
+                (requested_ref, resolved_sha, is_release_tag)
+            }
+            None => {
+                let tag = crate::release::latest_component_tag(component)?.ok_or_else(|| {
+                    provenance_policy_error(
+                        project,
+                        &format!("requires a release tag for '{}'", component.id),
+                    )
+                })?;
+                let resolved_sha = resolve_policy_ref(component, &tag, config)?;
+                config
+                    .requested_refs
+                    .insert(component.id.clone(), tag.clone());
+                (tag, resolved_sha, true)
+            }
+        };
+
+        let proof = match policy.mode {
+            DeploymentProvenanceMode::ImmutableRef => DeploymentProvenanceEvidence {
+                policy: "immutable-ref".to_string(),
+                kind: "immutable_ref".to_string(),
+                resolved_sha,
+                requested_ref: Some(requested_ref),
+                forge: None,
+                reference: None,
+            },
+            DeploymentProvenanceMode::Release if is_release_tag => DeploymentProvenanceEvidence {
+                policy: "release".to_string(),
+                kind: "release_tag".to_string(),
+                resolved_sha,
+                requested_ref: Some(requested_ref),
+                forge: None,
+                reference: None,
+            },
+            DeploymentProvenanceMode::AcceptedRef if release_set => DeploymentProvenanceEvidence {
+                policy: "accepted-ref".to_string(),
+                kind: "release_set".to_string(),
+                resolved_sha,
+                requested_ref: Some(requested_ref),
+                forge: None,
+                reference: None,
+            },
+            DeploymentProvenanceMode::AcceptedRef if is_release_tag => {
+                DeploymentProvenanceEvidence {
+                    policy: "accepted-ref".to_string(),
+                    kind: "release_tag".to_string(),
+                    resolved_sha,
+                    requested_ref: Some(requested_ref),
+                    forge: None,
+                    reference: None,
+                }
+            }
+            DeploymentProvenanceMode::AcceptedRef => {
+                let forge = policy
+                    .forge_evidence
+                    .iter()
+                    .find(|entry| entry.sha.eq_ignore_ascii_case(&resolved_sha))
+                    .ok_or_else(|| {
+                        provenance_policy_error(
+                            project,
+                            &format!("cannot verify accepted source for '{}'", component.id),
+                        )
+                    })?;
+                DeploymentProvenanceEvidence {
+                    policy: "accepted-ref".to_string(),
+                    kind: "forge".to_string(),
+                    resolved_sha,
+                    requested_ref: Some(requested_ref),
+                    forge: Some(forge.forge.clone()),
+                    reference: Some(forge.reference.clone()),
+                }
+            }
+            DeploymentProvenanceMode::Release => {
+                return Err(provenance_policy_error(
+                    project,
+                    &format!("requires a release tag for '{}'", component.id),
+                ));
+            }
+            DeploymentProvenanceMode::Any => unreachable!("any policy returns before preflight"),
+        };
+        evidence.insert(component.id.clone(), proof);
+    }
+    Ok(evidence)
+}
+
+fn resolve_policy_ref(
+    component: &Component,
+    requested_ref: &str,
+    config: &mut DeployConfig,
+) -> Result<String> {
+    let resolved_sha = match config.resolved_ref_for(&component.id) {
+        Some(sha) if is_full_git_sha(sha) => sha.to_string(),
+        Some(_) => {
+            return Err(Error::validation_invalid_argument(
+                "deployment_provenance",
+                format!(
+                    "Preflighted source for '{}' is not a full Git SHA",
+                    component.id
+                ),
+                None,
+                None,
+            ));
+        }
+        None => crate::deploy::preflight_exact_ref(component, requested_ref)?,
+    };
+    config
+        .resolved_refs
+        .insert(component.id.clone(), resolved_sha.clone());
+    Ok(resolved_sha)
+}
+
+fn is_release_tag(component: &Component, requested_ref: &str) -> Result<bool> {
+    Ok(crate::release::latest_component_tag(component)?.as_deref() == Some(requested_ref))
+}
+
+fn is_full_git_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn provenance_policy_error(project: &Project, reason: &str) -> Error {
+    Error::validation_invalid_argument(
+        "deployment_provenance",
+        format!(
+            "Project '{}' deployment provenance policy {}",
+            project.id, reason
+        ),
+        Some(project.id.clone()),
+        Some(vec![
+            "Use a release tag, a validated --release-set, or a SHA with configured forge evidence"
+                .to_string(),
+            "The selected ref must resolve to an immutable commit before build or remote mutation"
+                .to_string(),
+        ]),
+    )
+}
 
 /// Return the components whose payload depends on local source or a local artifact.
 /// Downloaded release assets are immutable remote inputs and intentionally bypass
@@ -411,11 +596,14 @@ mod tests {
     use std::process::Command;
 
     use super::{
-        guard_head_matches_invocation_checkout, guard_local_build_downgrades,
-        guard_local_build_source_freshness, local_build_components,
+        guard_deployment_provenance, guard_head_matches_invocation_checkout,
+        guard_local_build_downgrades, guard_local_build_source_freshness, local_build_components,
     };
     use crate::deploy::DeployConfig;
     use homeboy_core::component::Component;
+    use homeboy_core::project::{
+        DeploymentForgeEvidence, DeploymentProvenanceMode, DeploymentProvenancePolicy, Project,
+    };
 
     fn config() -> DeployConfig {
         DeployConfig {
@@ -451,6 +639,111 @@ mod tests {
             local_path: path.to_string_lossy().to_string(),
             ..Component::default()
         }
+    }
+
+    fn accepted_ref_project() -> Project {
+        Project {
+            id: "production".to_string(),
+            deployment_provenance: Some(DeploymentProvenancePolicy {
+                mode: DeploymentProvenanceMode::AcceptedRef,
+                forge_evidence: vec![],
+            }),
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn deployment_provenance_policy_fails_before_mutable_selectors_can_run() {
+        let component = component(Path::new("/unread-source"));
+        let project = accepted_ref_project();
+        let mut config = config();
+        config.head = true;
+        let error = guard_deployment_provenance(&project, &[component], &mut config)
+            .expect_err("HEAD must fail before source work");
+        assert_eq!(error.details["field"], "deployment_provenance");
+    }
+
+    #[test]
+    fn accepted_ref_policy_accepts_validated_release_set_and_refuses_force() {
+        let component = component(Path::new("/unread-source"));
+        let project = accepted_ref_project();
+        let mut config = config();
+        config
+            .requested_refs
+            .insert("example".to_string(), "v1.2.3".to_string());
+        config
+            .resolved_refs
+            .insert("example".to_string(), "a".repeat(40));
+        config
+            .preflighted_source_paths
+            .insert("example".to_string(), "/unread-source".to_string());
+        config
+            .preflighted_component_identities
+            .insert("example".to_string(), "identity".to_string());
+        let evidence = guard_deployment_provenance(&project, &[component.clone()], &mut config)
+            .expect("validated release set is accepted evidence");
+        assert_eq!(evidence["example"].kind, "release_set");
+
+        config.force = true;
+        let error = guard_deployment_provenance(&project, &[component], &mut config)
+            .expect_err("force must not bypass active policy");
+        assert_eq!(error.details["field"], "force");
+    }
+
+    #[test]
+    fn accepted_ref_policy_accepts_release_tag_and_sha_bound_forge_evidence() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        init_repo_with_commit(temp.path());
+        git(temp.path(), &["tag", "v1.2.3"]);
+        let component = component(temp.path());
+        let project = accepted_ref_project();
+
+        let mut tagged = config();
+        let evidence = guard_deployment_provenance(&project, &[component.clone()], &mut tagged)
+            .expect("latest release tag is accepted");
+        assert_eq!(evidence["example"].kind, "release_tag");
+
+        let sha = homeboy_core::git::run_git(temp.path(), &["rev-parse", "HEAD"], "read SHA")
+            .expect("SHA")
+            .trim()
+            .to_string();
+        let mut project = accepted_ref_project();
+        project
+            .deployment_provenance
+            .as_mut()
+            .expect("policy")
+            .forge_evidence = vec![DeploymentForgeEvidence {
+            sha: sha.clone(),
+            forge: "github".to_string(),
+            reference: "https://github.com/acme/example/pull/42".to_string(),
+        }];
+        let mut direct = config();
+        direct.requested_ref = Some(sha);
+        let evidence = guard_deployment_provenance(&project, &[component], &mut direct)
+            .expect("forge evidence for exact SHA is accepted");
+        assert_eq!(evidence["example"].kind, "forge");
+        assert_eq!(evidence["example"].forge.as_deref(), Some("github"));
+    }
+
+    #[test]
+    fn accepted_ref_policy_refuses_unverifiable_ref() {
+        let component = component(Path::new("/unread-source"));
+        let mut config = config();
+        config.requested_ref = Some("unverifiable".to_string());
+        assert!(
+            guard_deployment_provenance(&accepted_ref_project(), &[component], &mut config)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn omitted_deployment_provenance_policy_preserves_force_compatibility() {
+        let component = component(Path::new("/unread-source"));
+        let mut config = config();
+        config.head = true;
+        config.force = true;
+        guard_deployment_provenance(&Project::default(), &[component], &mut config)
+            .expect("projects without a policy retain legacy force semantics");
     }
 
     fn git(path: &Path, args: &[&str]) {

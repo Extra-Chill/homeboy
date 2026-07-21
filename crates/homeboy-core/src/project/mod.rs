@@ -128,6 +128,48 @@ pub struct Project {
     /// that `php -l`/syntax-only checks structurally cannot. See homeboy#5471.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smoke_check: Option<SmokeCheckConfig>,
+
+    /// Optional fail-closed source-provenance policy for deployments.
+    /// Omission preserves the legacy deployment behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_provenance: Option<DeploymentProvenancePolicy>,
+}
+
+/// Project-scoped deployment source policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DeploymentProvenancePolicy {
+    #[serde(default)]
+    pub mode: DeploymentProvenanceMode,
+    /// Forge assertions that bind an accepted commit to review or merge evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forge_evidence: Vec<DeploymentForgeEvidence>,
+}
+
+/// The source proof required before a project may be deployed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeploymentProvenanceMode {
+    /// Preserve legacy selector behavior.
+    #[default]
+    Any,
+    /// Require a ref resolved to a commit during this deploy's preflight.
+    ImmutableRef,
+    /// Require a release tag resolved to a commit during preflight.
+    Release,
+    /// Require a validated release set, release tag, or matching forge evidence.
+    AcceptedRef,
+}
+
+/// Configured, SHA-bound approval evidence supplied by a forge integration.
+///
+/// The contract is intentionally forge-neutral. Callers may use `forge` and
+/// `reference` for a pull request URL, merge record, or another immutable forge
+/// object; policy evaluation only trusts an exact SHA match.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeploymentForgeEvidence {
+    pub sha: String,
+    pub forge: String,
+    pub reference: String,
 }
 
 impl ConfigEntity for Project {

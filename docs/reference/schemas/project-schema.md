@@ -35,7 +35,15 @@ matter when the workflow needs environment context.
   "changelog_next_section_label": "string",
   "changelog_next_section_aliases": [],
   "cli_path": "string",
-  "extensions": {}
+  "extensions": {},
+  "deployment_provenance": {
+    "mode": "accepted-ref",
+    "forge_evidence": [{
+      "sha": "0123456789abcdef0123456789abcdef01234567",
+      "forge": "github",
+      "reference": "https://github.com/acme/component/pull/42"
+    }]
+  }
 }
 ```
 
@@ -86,6 +94,10 @@ matter when the workflow needs environment context.
 - **`extensions`** (object): Extension-specific settings for this project
   - Keys are extension IDs
   - Values are flat extension setting objects; `version` is reserved for extension version constraints
+- **`deployment_provenance`** (object): Optional fail-closed deployment source policy. Omit it to preserve legacy deploy behavior.
+  - **`mode`**: `any` (default), `immutable-ref`, `release`, or `accepted-ref`.
+  - **`forge_evidence`**: Optional SHA-bound forge records (`sha`, `forge`, `reference`). `accepted-ref` accepts a validated release set, a resolved release tag, or an exact SHA matching one of these records.
+  - Policies other than `any` reject `--head` and unverifiable refs before source checkout, dependency installation, build, or remote deployment. `--force` cannot bypass them. The resolved policy evidence is included in every deploy result.
 
 ## Example
 
