@@ -1452,6 +1452,34 @@ pub fn has_accepted_runner_handoff(run_id: &str) -> Result<bool> {
     Ok(is_accepted_runner_handoff(&record))
 }
 
+/// Whether a run already carries durable provider-execution progress, so a
+/// later transport/handoff error must preserve its candidate instead of
+/// terminalizing it as a pre-execution failure (#9377). Returns `false` when no
+/// record exists yet (a genuine pre-execution failure).
+pub fn has_recorded_provider_progress(run_id: &str) -> Result<bool> {
+    match store::read_record(&sanitize_run_id(run_id)) {
+        Ok(record) => Ok(record.has_recorded_provider_progress()),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Whether a run recorded a candidate-preserving post-provider transport
+/// follow-up failure (#9377). The runner uses this to keep a run-scoped
+/// workspace when a provider succeeded but its controller-side candidate
+/// projection or handoff has not — so the preserved candidate remains
+/// recoverable on the lab. Returns `false` when no record exists.
+pub fn run_owes_candidate_follow_up(run_id: &str) -> Result<bool> {
+    match store::read_record(&sanitize_run_id(run_id)) {
+        Ok(record) => Ok(record.metadata.get("transport_follow_up_failure").is_some()
+            || record
+                .metadata
+                .get("candidate_preserved")
+                .and_then(Value::as_bool)
+                == Some(true)),
+        Err(_) => Ok(false),
+    }
+}
+
 /// Pure durable-handoff predicate for callers that already hold the lifecycle
 /// record and must not re-enter the store.
 pub(crate) fn is_accepted_runner_handoff(record: &AgentTaskRunRecord) -> bool {
