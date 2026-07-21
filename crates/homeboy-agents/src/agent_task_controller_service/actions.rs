@@ -309,15 +309,23 @@ pub(super) fn accepted_lab_runner_handoff_identity(execution: &Value) -> Result<
     }
 
     let persisted = lifecycle::status(run_id)?;
-    if !persisted.has_accepted_lab_handoff()
-        || persisted
-            .lab_handoff
-            .as_ref()
-            .is_none_or(|persisted_identity| {
-                persisted_identity.runner_id != runner_id
-                    || persisted_identity.runner_job_id.as_deref() != Some(runner_job_id)
-            })
-    {
+    // The action's declared identity must match the run's persisted accepted
+    // Lab handoff. Route the run/runner/job tuple through the shared
+    // `RunnerJobIdentity` so this agrees with the terminal-projection and
+    // snapshot validators rather than re-deriving the comparison here.
+    let declared = homeboy_core::lab_contract::RunnerJobIdentity::new(
+        run_id, runner_id, runner_job_id,
+    );
+    let persisted_matches = persisted.has_accepted_lab_handoff()
+        && persisted.lab_handoff.as_ref().is_some_and(|handoff| {
+            homeboy_core::lab_contract::RunnerJobIdentity::new(
+                persisted.run_id.as_str(),
+                handoff.runner_id.as_str(),
+                handoff.runner_job_id.clone().unwrap_or_default(),
+            )
+            .matches(&declared)
+        });
+    if !persisted_matches {
         return Err(Error::validation_invalid_argument(
             "controller runner handoff identity",
             "Lab handoff identity does not match the persisted run/runner/job binding",
