@@ -66,7 +66,9 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     // left running on the runner. Preparing intents have no replay request and
     // deliberately do not reach this lookup.
     if record.state == AgentTaskRunState::Queued
-        && super::lifecycle_ops::bind_pending_runner_submission_if_accepted(&record.run_id)?
+        && super::lab_handoff_reconciliation::bind_pending_runner_submission_if_accepted(
+            &record.run_id,
+        )?
     {
         record = store::read_record(&record.run_id)?;
     }
