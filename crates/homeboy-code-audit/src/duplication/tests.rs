@@ -289,6 +289,66 @@ mod near_duplicates {
     }
 
     #[test]
+    fn near_duplicate_skips_inline_test_scaffolding() {
+        // `make_fp` is a structurally-similar fixture inside the inline
+        // `#[cfg(test)]` block of two production files. Per-module test
+        // scaffolding sharing structure is expected — not an actionable
+        // near-duplicate — so no finding is emitted.
+        let content_a = "fn prod() {}\n#[cfg(test)]\nmod tests {\n    fn make_fp() -> Fp {\n        let base = Fp::default();\n        let x = base.with(A);\n        x\n    }\n}\n";
+        let content_b = "fn other() {}\n#[cfg(test)]\nmod tests {\n    fn make_fp() -> Fp {\n        let base = Fp::default();\n        let x = base.with(B);\n        x\n    }\n}\n";
+
+        let fp1 = make_fp_with_content(
+            "src/core/a.rs",
+            content_a,
+            &[("make_fp", "hash_a")],
+            &[("make_fp", "SAME_STRUCT")],
+        );
+        let fp2 = make_fp_with_content(
+            "src/core/b.rs",
+            content_b,
+            &[("make_fp", "hash_b")],
+            &[("make_fp", "SAME_STRUCT")],
+        );
+
+        let findings = detect_near_duplicates(&[&fp1, &fp2]);
+
+        assert!(
+            findings.is_empty(),
+            "inline cfg(test) fixture near-duplication is test scaffolding, got: {:?}",
+            findings.iter().map(|f| &f.description).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn near_duplicate_still_flags_production_structural_twins_alongside_tests() {
+        // A production near-duplicate must still be flagged even though the
+        // scaffolding skip exists — the skip only fires when ALL locations are
+        // test code.
+        let content_a = "fn cache_path() -> Option<PathBuf> {\n    let base = paths::homeboy().ok()?;\n    let file = base.join(CACHE_A);\n    Some(file)\n}\n";
+        let content_b = "fn cache_path() -> Option<PathBuf> {\n    let base = paths::homeboy().ok()?;\n    let file = base.join(CACHE_B);\n    Some(file)\n}\n";
+
+        let fp1 = make_fp_with_content(
+            "src/core/a.rs",
+            content_a,
+            &[("cache_path", "hash_a")],
+            &[("cache_path", "SAME_STRUCT")],
+        );
+        let fp2 = make_fp_with_content(
+            "src/core/b.rs",
+            content_b,
+            &[("cache_path", "hash_b")],
+            &[("cache_path", "SAME_STRUCT")],
+        );
+
+        let findings = detect_near_duplicates(&[&fp1, &fp2]);
+        assert_eq!(
+            findings.len(),
+            2,
+            "production structural twins still flagged"
+        );
+    }
+
+    #[test]
     fn near_duplicate_skips_exact_duplicates() {
         // If exact hashes match, exact-duplicate detector already handles it
         let fp1 = make_fingerprint_with_structural(
