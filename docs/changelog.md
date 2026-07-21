@@ -4,6 +4,78 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.299.0] - 2026-07-21
+
+### Changed
+- extract JSON field-access helpers from controller actions god file
+- match runner terminal events by canonical identity, not raw JSON equality
+- extract contract example builders from god file
+- consolidate Lab runner-job identity into one canonical type
+- refactor(lab-runner): extract workspace listing/snapshots from sync god file
+- extract provider-config assembly from dispatch_plan god file
+- extract prompt-spec parsing from dispatch_plan god file
+- source cross-boundary reachability from Language, not hardcoded
+- Restore formatting gate on main
+- source inline test-region marker from Language, not hardcoded
+- Materialize versioned runner runtime generations
+- Resume Cook promotion after destination movement
+- Bind lab execution to immutable job runtime bundles
+- route promotion lab-offload provenance through the canonical runner-id accessor
+- delegate finalization git_output to canonical run_git
+- single source of truth for the candidate-adoption recovery marker
+- dedup command_wrapper_bypass onto shared walker cfg_test_regions
+- Reconcile idle stale runner generations
+- extract pre-execution failure handling from cook.rs
+
+### Fixed
+- make cook --placement lab rejection actionable (#9373)
+- fix(artifact-origin): return actionable 404 diagnostic for unresolvable paths
+- keep a durable job recoverable when the daemon poll connection drops (#7928)
+- compare source candidate against installed target, not itself
+- resolve finalized promotion artifacts
+- fix(agent-task): admit fanout run-plan child cooks to Lab (#9375)
+- reconcile daemon generation ownership
+- stage Lab handoff before preacceptance
+- resolve and validate the fanout backend before execution (#7717)
+- rotate refresh for retained generations
+- keep recovery readers bounded
+- reconcile draining runtime generations
+- preserve runner provenance for daemon jobs
+- persist verified runner selection
+- reconnect missing admission sessions
+- allow rolling refresh past Cook pins
+- near_duplicate skips all-test-code scaffolding groups
+- bind pending Lab handoff before snapshots
+- prepare cook transport before runtime pin
+- persist configured rotation model on the initial cook attempt (#9013)
+- supervise durable artifact origins
+- preserve accepted Lab handoff during run-plan
+- duplicate_function treats inline cfg(test) fixtures as test code
+- auto-detect bump from conventional commits instead of failing on 'none' (#7598)
+- preserve foreground daemon job binding
+- vacuous_test does not flag tests behind a product glob import
+- constant_bypass_literal only attributes reachable cross-crate constants
+- fail closed when --head deploys a different commit than the invocation checkout (#7599)
+- align lifecycle fixtures with terminal invariants
+- unused_parameter ignores type-path segments misparsed as params
+- preserve job ownership across generation rotation
+- allow read-only agent-task cooks to skip the verify gate (#7608)
+- dead_code recognizes serde/clap attribute helper references
+- command_wrapper_bypass only attributes reachable cross-crate helpers
+- admit runner-pinned cook coordination under CPU load
+- bind foreground Lab handoffs
+- command_wrapper_bypass skips inline #[cfg(test)] blocks
+- constant_bypass_literal skips inline #[cfg(test)] blocks
+- Fix lost Lab job and runner lease reconciliation
+- reconcile runner admission before handoff
+- reconcile retained daemon generations
+- distinguish missing controller job identity from mismatch (#9240)
+- dedup findings by fingerprint and surface fixability in audit issue bodies
+- allow colon-bearing reviewer commands
+- give Lab snapshot job-identity binding a single owner
+- reclaim dead controller admission owners
+- start Lab handoff lease at submission
+
 ## [0.298.1] - 2026-07-20
 
 ### Changed
