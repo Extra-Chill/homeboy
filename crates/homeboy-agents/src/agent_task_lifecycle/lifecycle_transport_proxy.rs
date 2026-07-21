@@ -267,6 +267,14 @@ pub(crate) fn bind_pending_lab_handoff_snapshot(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    if record.state.is_terminal() {
+        // The runner can finish and mirror its aggregate before the controller
+        // projects the daemon snapshot. Preserve that terminal outcome while
+        // attaching the authoritative job identity needed for validation.
+        *record =
+            record_runner_job_identity(&record.run_id, &runner_id, &snapshot.job.id.to_string())?;
+        return Ok(());
+    }
     *record = record_detached_lab_run(DetachedLabRunRecord {
         run_id: &record.run_id,
         runner_id: &runner_id,

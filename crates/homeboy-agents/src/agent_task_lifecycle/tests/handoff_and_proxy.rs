@@ -877,6 +877,44 @@ fn foreground_terminal_projection_binds_a_pending_handoff_before_validation() {
 }
 
 #[test]
+fn terminal_aggregate_binds_runner_job_before_snapshot_validation() {
+    with_isolated_home(|_| {
+        let run_id = "cook-terminal-aggregate-preacceptance-bind";
+        let plan = test_plan();
+        let record = record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "lab_handoff_preacceptance",
+            Some("/runner/workspace/homeboy"),
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("persist planned controller execution");
+        let aggregate = succeeded_aggregate(&plan);
+        store::write_aggregate(run_id, &aggregate).expect("aggregate written");
+        let terminal = status(run_id).expect("aggregate terminalizes the run");
+        assert_eq!(terminal.state, AgentTaskRunState::Succeeded);
+        assert!(terminal.runner_job_id().is_none());
+
+        let mut snapshot = terminal_child_snapshot(&aggregate);
+        let accepted_job_id = snapshot.job.id.to_string();
+        let identity = &mut snapshot.events[0].data.as_mut().expect("event data")["identity"];
+        identity["run_id"] = json!(run_id);
+        identity["persisted_run_id"] = json!(run_id);
+
+        let projected = project_terminal_runner_result(&record.run_id, &snapshot)
+            .expect("terminal run binds the daemon job before validation");
+        assert!(!projected, "the matching aggregate was already projected");
+
+        let bound = status(run_id).expect("bound terminal run");
+        assert_eq!(bound.state, AgentTaskRunState::Succeeded);
+        assert_eq!(bound.runner_id(), Some("homeboy-lab"));
+        assert_eq!(bound.runner_job_id(), Some(accepted_job_id.as_str()));
+    });
+}
+
+#[test]
 fn snapshot_validation_reports_missing_controller_identity_distinctly() {
     // Issue #9240: when the controller has never established an accepted runner
     // job identity and no pending handoff can bind one, snapshot validation must
