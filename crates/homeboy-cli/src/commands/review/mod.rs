@@ -21,7 +21,7 @@ use homeboy::core::plan::PlanStep;
 use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
 use homeboy_extension::lint::LintCommandOutput;
 use homeboy_extension::test::TestCommandOutput;
-use homeboy_release::release::changelog;
+use homeboy_release::release::{changelog, version};
 use homeboy_review::review::{
     self, ReviewArtifactFindings, ReviewCommandOutput, ReviewOutputInput, ReviewService,
     ReviewStage, ReviewStages,
@@ -421,6 +421,11 @@ pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCo
     if let Some(violation) = &manual_changelog_edit {
         top_hints.push(violation.message.clone());
     }
+    let manual_release_owned_mutations =
+        manual_release_owned_mutations(&component, &source_path, &args, &review_context);
+    for violation in &manual_release_owned_mutations {
+        top_hints.push(violation.message.clone());
+    }
 
     let mut audit_stage = None;
     let mut lint_stage = None;
@@ -527,13 +532,14 @@ pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCo
             ci_profile: ci_profile_stage,
         },
     );
-    let overall_exit = if manual_changelog_edit.is_some() {
-        output.summary.passed = false;
-        output.summary.status = "failed".to_string();
-        overall_exit.max(1)
-    } else {
-        overall_exit
-    };
+    let overall_exit =
+        if manual_changelog_edit.is_some() || !manual_release_owned_mutations.is_empty() {
+            output.summary.passed = false;
+            output.summary.status = "failed".to_string();
+            overall_exit.max(1)
+        } else {
+            overall_exit
+        };
     attach_review_actionable(&mut output);
 
     print_human_summary(&output);
@@ -554,6 +560,63 @@ fn manual_changelog_edit(
         component.release.allow_manual_changelog_edits,
         None,
     )
+}
+
+fn manual_release_owned_mutations(
+    component: &homeboy::core::component::Component,
+    source_path: &str,
+    args: &ReviewArgs,
+    review_context: &ReviewExecutionContext,
+) -> Vec<version::ReleaseOwnedMutationViolation> {
+    let Some(changed_files) = review_context.precomputed_changed_files() else {
+        return Vec::new();
+    };
+    let baseline = args
+        .changed_since
+        .as_deref()
+        .or(args.changed_only.then_some("HEAD"));
+    let Some(baseline) = baseline else {
+        return Vec::new();
+    };
+
+    let mutations = changed_files
+        .iter()
+        .filter_map(|file| version_mutation_at(source_path, baseline, file, args.changed_only))
+        .collect::<Vec<_>>();
+    version::detect_manual_release_owned_mutations(component, &mutations, None)
+}
+
+fn version_mutation_at(
+    source_path: &str,
+    baseline: &str,
+    file: &str,
+    dirty_worktree: bool,
+) -> Option<version::VersionMutation> {
+    let before = git_file_at(source_path, baseline, file)?;
+    let after = if dirty_worktree {
+        std::fs::read_to_string(Path::new(source_path).join(file)).ok()?
+    } else {
+        git_file_at(source_path, "HEAD", file)?
+    };
+    Some(version::VersionMutation {
+        file: file.to_string(),
+        before,
+        after,
+    })
+}
+
+fn git_file_at(source_path: &str, revision: &str, file: &str) -> Option<String> {
+    let spec = format!("{revision}:{file}");
+    let output = std::process::Command::new("git")
+        .args(["show", &spec])
+        .current_dir(source_path)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).ok())
+        .flatten()
 }
 
 fn attach_review_actionable(output: &mut ReviewCommandOutput) {

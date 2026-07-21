@@ -73,6 +73,9 @@ fn release_artifacts_from_step(run_id: &str, step: &ReleaseStepResult) -> Vec<Ch
             .into_iter()
             .collect();
     }
+    if step.id == "version" {
+        return version_artifacts_from_step(run_id, step);
+    }
 
     let Some(data) = step.data.as_ref() else {
         return Vec::new();
@@ -117,6 +120,86 @@ fn release_artifacts_from_step(run_id: &str, step: &ReleaseStepResult) -> Vec<Ch
                 approval_scope: None,
                 metadata,
             }
+        })
+        .collect()
+}
+
+fn version_artifacts_from_step(run_id: &str, step: &ReleaseStepResult) -> Vec<ChangeArtifact> {
+    let Some(targets) = step
+        .data
+        .as_ref()
+        .and_then(|data| data.get("targets"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let generated_files = step
+        .data
+        .as_ref()
+        .and_then(|data| data.get("generated_files"))
+        .and_then(serde_json::Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let release_lockfiles = step
+        .data
+        .as_ref()
+        .and_then(|data| data.get("release_lockfiles"))
+        .and_then(serde_json::Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut files = targets
+        .iter()
+        .filter_map(|target| target.get("file").and_then(serde_json::Value::as_str))
+        .flat_map(|file| {
+            let mut files = vec![file.to_string()];
+            files.extend(
+                super::planning_worktree::derived_release_lockfiles(file)
+                    .into_iter()
+                    .filter(|lockfile| generated_files.contains(lockfile.as_str())),
+            );
+            files
+        })
+        .chain(
+            release_lockfiles
+                .iter()
+                .filter(|file| generated_files.contains(*file))
+                .map(|file| (*file).to_string()),
+        )
+        .collect::<Vec<_>>();
+    files.sort();
+    files.dedup();
+
+    files
+        .into_iter()
+        .enumerate()
+        .map(|(index, file)| ChangeArtifact {
+            id: format!("{}.artifact.{}", step.id, index + 1),
+            artifact_type: "generated_file".to_string(),
+            provenance: ChangeArtifactProvenance {
+                source: "release".to_string(),
+                run_id: Some(run_id.to_string()),
+                step_id: Some(step.id.clone()),
+                command: None,
+                captured_at: None,
+            },
+            title: Some("Generated release version metadata".to_string()),
+            summary: Some("Homeboy release-generated version or lockfile mutation".to_string()),
+            path: Some(file.clone()),
+            files: vec![file],
+            diff: None,
+            approval_scope: None,
+            metadata: HashMap::new(),
         })
         .collect()
 }
@@ -259,5 +342,47 @@ mod tests {
                 &artifact.provenance
             ))
         );
+    }
+
+    #[test]
+    fn version_step_projects_version_targets_and_derived_lockfiles() {
+        let release = ReleaseRun {
+            component_id: "component".to_string(),
+            enabled: true,
+            result: ReleaseRunResult {
+                steps: vec![ReleaseStepResult {
+                    id: "version".to_string(),
+                    step_type: "version".to_string(),
+                    status: ReleaseStepStatus::Success,
+                    data: Some(serde_json::json!({
+                        "targets": [{"file": "plugin.php"}, {"file": "package.json"}],
+                        "generated_files": ["plugin.php", "package.json", "package-lock.json"]
+                    })),
+                    ..Default::default()
+                }],
+                status: ReleaseStepStatus::Success,
+                warnings: Vec::new(),
+                summary: None,
+                phase_timings: None,
+            },
+        };
+
+        let execution = ExecutionRun::from(&release);
+        let files = execution
+            .artifacts
+            .iter()
+            .flat_map(|artifact| artifact.files.iter().cloned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            files,
+            vec!["package-lock.json", "package.json", "plugin.php"]
+        );
+        assert!(execution.artifacts.iter().all(|artifact| {
+            super::super::changelog::generated_file_mutation_is_authorized_for(
+                Some(&artifact.provenance),
+                "version",
+            )
+        }));
     }
 }

@@ -124,8 +124,17 @@ pub(crate) fn run_version(
         None,
         state.changelog_validation.as_ref(),
     )?;
-    let data = serde_json::to_value(&result)
+    let mut data = serde_json::to_value(&result)
         .map_err(|e| Error::internal_json(e.to_string(), Some("version output".to_string())))?;
+    // Persist the exact release-generated file set so durable artifacts never
+    // authorize a merely possible derived lockfile mutation.
+    let generated_files = homeboy_core::git::get_uncommitted_changes(&component.local_path)?;
+    data["generated_files"] = serde_json::json!(generated_files
+        .staged
+        .into_iter()
+        .chain(generated_files.unstaged)
+        .collect::<std::collections::BTreeSet<_>>());
+    data["release_lockfiles"] = serde_json::json!(version::release_owned_lockfiles(component));
 
     if let Some(mismatches) = collect_version_target_mismatches(component, &result.new_version) {
         let error_msg = format!(

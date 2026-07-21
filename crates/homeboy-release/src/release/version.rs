@@ -1,4 +1,5 @@
 mod default_pattern_for_file;
+mod guard;
 mod types;
 
 pub(crate) use default_pattern_for_file::{
@@ -10,6 +11,10 @@ use default_pattern_for_file::{
 };
 pub use default_pattern_for_file::{
     default_pattern_for_file, read_component_version, read_version,
+};
+pub use guard::{
+    detect_manual_release_owned_mutations, release_owned_lockfiles, ReleaseOwnedMutationViolation,
+    VersionMutation,
 };
 #[cfg(test)]
 use types::DEFAULT_SINCE_PLACEHOLDER;
