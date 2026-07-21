@@ -161,7 +161,7 @@ pub(super) fn fail_controller_action_with_diagnostics(
     Ok(())
 }
 
-pub(super) fn infer_terminal_outcome(
+fn infer_terminal_outcome(
     action: &AgentTaskLoopPolicyActionRecord,
     execution: &Value,
     exit_code: i32,
@@ -230,7 +230,7 @@ fn fan_out_item_count(entity_ids: &[String], execution: &Value) -> usize {
         .unwrap_or(entity_ids.len())
 }
 
-pub(super) fn gate_terminal_status(result: &Value, exit_code: i32) -> AgentTaskLoopTerminalStatus {
+fn gate_terminal_status(result: &Value, exit_code: i32) -> AgentTaskLoopTerminalStatus {
     if exit_code == 0 {
         return match result.get("status").and_then(Value::as_str) {
             Some("warn") => AgentTaskLoopTerminalStatus::NoPublication,
@@ -251,7 +251,7 @@ pub(super) fn gate_terminal_status(result: &Value, exit_code: i32) -> AgentTaskL
     }
 }
 
-pub(super) fn gate_terminal_reason(status: AgentTaskLoopTerminalStatus) -> String {
+fn gate_terminal_reason(status: AgentTaskLoopTerminalStatus) -> String {
     match status {
         AgentTaskLoopTerminalStatus::Passed => "gate bundle passed".to_string(),
         AgentTaskLoopTerminalStatus::NoPublication => {
@@ -264,7 +264,7 @@ pub(super) fn gate_terminal_reason(status: AgentTaskLoopTerminalStatus) -> Strin
     }
 }
 
-pub(super) fn action_entity_id_for_record(
+fn action_entity_id_for_record(
     record: &AgentTaskLoopControllerRecord,
     action_id: &str,
 ) -> Option<String> {
@@ -275,7 +275,7 @@ pub(super) fn action_entity_id_for_record(
         .and_then(|action| action_entity_id(&action.action))
 }
 
-pub(super) fn set_controller_action_status(
+fn set_controller_action_status(
     record: &mut AgentTaskLoopControllerRecord,
     action_id: &str,
     status: AgentTaskLoopActionStatus,
