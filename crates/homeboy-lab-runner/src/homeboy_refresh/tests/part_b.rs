@@ -592,6 +592,14 @@ fn ssh_bootstrap_identity_mismatch_leaves_config_unchanged() {
 }
 
 #[test]
+fn refresh_rotation_predicate_preserves_owned_generations_without_changing_force_semantics() {
+    assert!(should_rotate_daemon_generation(false, true, false));
+    assert!(should_rotate_daemon_generation(true, false, false));
+    assert!(!should_rotate_daemon_generation(false, false, false));
+    assert!(!should_rotate_daemon_generation(true, true, true));
+}
+
+#[test]
 fn concurrent_runner_config_edit_survives_ssh_bootstrap_promotion() {
     test_support::with_isolated_home(|_| {
         crate::create(r#"{"id":"lab-local","kind":"local","homeboy_path":"/old","env":{"OLD":"1"},"resources":{"dev_sync":{"old":true}}}"#, false).expect("runner");

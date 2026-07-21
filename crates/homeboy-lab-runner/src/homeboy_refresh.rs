@@ -448,7 +448,15 @@ pub fn refresh_homeboy_binary(
     if options.reconnect {
         promotion_lease.assert_generation()?;
         let active_jobs = active_jobs_before_daemon_replacement(&plan.runner_id)?;
-        if !active_jobs.is_empty() && !options.force {
+        let preserve_generations = super::generation_store::requires_generation_preserving_refresh(
+            &plan.runner_id,
+            refresh_session.as_ref(),
+        )?;
+        if should_rotate_daemon_generation(
+            !active_jobs.is_empty(),
+            preserve_generations,
+            options.force,
+        ) {
             let candidate_identity = identity
                 .get("data")
                 .unwrap_or(&identity)
@@ -673,6 +681,14 @@ pub fn refresh_homeboy_binary(
         },
         0,
     ))
+}
+
+fn should_rotate_daemon_generation(
+    has_active_jobs: bool,
+    preserve_generations: bool,
+    force: bool,
+) -> bool {
+    !force && (has_active_jobs || preserve_generations)
 }
 
 fn refresh_owned_lease(session: super::RunnerSession) -> Option<String> {
