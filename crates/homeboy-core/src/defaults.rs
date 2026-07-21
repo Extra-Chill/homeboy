@@ -61,6 +61,13 @@ pub struct HomeboyConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub github_hosts: HashMap<String, crate::component::GithubHostConfig>,
 
+    /// Expected repository-local Git commit identity keyed by remote hostname.
+    ///
+    /// Homeboy checks this policy immediately before publication mutations. The
+    /// hostname comes from the repository's origin URL, keeping this provider-agnostic.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub git_hosts: HashMap<String, GitHostConfig>,
+
     /// Extension and executor settings addressed through `/settings/...`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub settings: HashMap<String, Value>,
@@ -140,6 +147,7 @@ impl Default for HomeboyConfig {
             notifications: NotificationConfig::default(),
             worktree_providers: HashMap::new(),
             github_hosts: HashMap::new(),
+            git_hosts: HashMap::new(),
             settings: HashMap::new(),
             release_gate: ReleaseGateConfig::default(),
             retention: RetentionConfig::default(),
@@ -148,6 +156,12 @@ impl Default for HomeboyConfig {
             resident_services: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct GitHostConfig {
+    pub name: String,
+    pub email: String,
 }
 
 /// Safe default retention windows for resources created by Homeboy commands.

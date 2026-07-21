@@ -3195,6 +3195,17 @@ mod tests {
         fn changed_files(&mut self, _path: &str) -> Result<Vec<String>> {
             Ok(vec!["src/lib.rs".to_string()])
         }
+        fn validate_publication_identity(
+            &mut self,
+            _path: &str,
+        ) -> Result<homeboy_core::git::GitIdentityProof> {
+            Ok(homeboy_core::git::GitIdentityProof {
+                host: "git.example.test".to_string(),
+                name: "Homeboy Bot".to_string(),
+                email: "bot@example.test".to_string(),
+                scope: "repository_local".to_string(),
+            })
+        }
         fn commit_all(&mut self, _path: &str, _message: &str) -> Result<()> {
             self.committed = true;
             Ok(())

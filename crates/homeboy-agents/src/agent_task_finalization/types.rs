@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use homeboy_core::git::GitIdentityProof;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateResult {
@@ -108,6 +109,8 @@ pub struct AgentTaskPublicationProof {
     pub adapter_action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_identity: Option<GitIdentityProof>,
     pub proof: HomeboyProof,
 }
 
@@ -298,6 +301,8 @@ pub trait AgentTaskPrFinalizationBackend {
             AgentTaskPrCandidateState::Dirty { changed_files }
         })
     }
+    /// Validates the host-scoped repository-local identity before publication mutates Git state.
+    fn validate_publication_identity(&mut self, path: &str) -> Result<GitIdentityProof>;
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()>;
     fn push_branch(&mut self, path: &str, head: &str) -> Result<()>;
     fn find_open_pr(

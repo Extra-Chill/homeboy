@@ -31,6 +31,7 @@ struct MockBackend {
     existing_pr: Option<AgentTaskPrRef>,
     create_error: bool,
     push_error: bool,
+    identity_error: bool,
     hydrate_error: bool,
     hydrate_run_id: Option<String>,
     lifecycle: Option<RunLifecycleRecord>,
@@ -150,6 +151,26 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
     fn publication_base_sha(&mut self, _path: &str, _base: &str) -> Result<Option<String>> {
         self.publication_observed_after_pr_lookup = self.pr_lookup_complete;
         Ok(self.publication_base_sha.clone())
+    }
+
+    fn validate_publication_identity(
+        &mut self,
+        _path: &str,
+    ) -> Result<homeboy_core::git::GitIdentityProof> {
+        if self.identity_error {
+            return Err(Error::validation_invalid_argument(
+                "git_identity",
+                "effective repository-local Git identity does not match the origin host policy",
+                None,
+                Some(vec!["configure_repository_local_identity".to_string()]),
+            ));
+        }
+        Ok(homeboy_core::git::GitIdentityProof {
+            host: "git.example.test".to_string(),
+            name: "Homeboy Bot".to_string(),
+            email: "bot@example.test".to_string(),
+            scope: "repository_local".to_string(),
+        })
     }
 
     fn commit_all(&mut self, _path: &str, _message: &str) -> Result<()> {
@@ -281,6 +302,30 @@ fn creates_new_pr_after_green_gates() {
     assert!(report.finalization_outcome.committed);
     assert!(report.finalization_outcome.pushed);
     assert!(report.finalization_outcome.published);
+    assert_eq!(
+        report
+            .publication_proof
+            .git_identity
+            .as_ref()
+            .map(|proof| proof.host.as_str()),
+        Some("git.example.test")
+    );
+}
+
+#[test]
+fn finalization_rejects_identity_mismatch_before_any_publication_mutation() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        identity_error: true,
+        ..Default::default()
+    };
+
+    let error = finalize_pr_with_backend(options(), &mut backend).expect_err("identity mismatch");
+
+    assert!(error.message.contains("repository-local Git identity"));
+    assert!(!backend.committed);
+    assert!(!backend.pushed);
+    assert!(!backend.created);
 }
 
 #[test]

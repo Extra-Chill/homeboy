@@ -169,12 +169,15 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             Some(proof),
             false,
             false,
+            None,
         ));
     }
 
     if !options.manual_finalization {
         backend.validate_candidate(&options)?;
     }
+    // An identity mismatch must not create a commit, push, or PR mutation.
+    let git_identity = backend.validate_publication_identity(&options.path)?;
     if commit_required {
         backend.commit_all(&options.path, &options.commit_message)?;
     }
@@ -234,6 +237,7 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         Some(proof),
         commit_required,
         push_required,
+        Some(git_identity),
     ))
 }
 
@@ -449,6 +453,7 @@ fn publication_proof(
     status: &str,
     adapter_action: &str,
     adapter_ref: Option<String>,
+    git_identity: Option<homeboy_core::git::GitIdentityProof>,
 ) -> AgentTaskPublicationProof {
     let mut target = intent.target.clone();
     target.url = adapter_ref.clone();
@@ -460,6 +465,7 @@ fn publication_proof(
         target,
         adapter_action: (adapter_action != "none").then(|| adapter_action.to_string()),
         adapter_ref,
+        git_identity,
         proof: intent.proof.clone(),
     }
 }
@@ -476,13 +482,19 @@ fn report(
     proof: Option<HomeboyProof>,
     committed: bool,
     pushed: bool,
+    git_identity: Option<homeboy_core::git::GitIdentityProof>,
 ) -> AgentTaskPrFinalizationReport {
     let normalized_gate_results = options.normalized_gate_results.clone();
     let proof =
         proof.unwrap_or_else(|| build_finalization_proof(options, normalized_gate_results.clone()));
     publication_intent.proof = proof.clone();
-    let publication_proof =
-        publication_proof(&publication_intent, status, pr_action, pr_url.clone());
+    let publication_proof = publication_proof(
+        &publication_intent,
+        status,
+        pr_action,
+        pr_url.clone(),
+        git_identity,
+    );
     let finalization_outcome = finalization_outcome(
         &publication_intent,
         &publication_proof,
