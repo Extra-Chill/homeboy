@@ -1448,3 +1448,40 @@ fn run_status_reports_bridge_envelope_and_cursor_filtered_events() {
         assert_eq!(status.artifact_refs[0].kind, "artifact-bundle");
     });
 }
+
+#[test]
+fn tasks_for_aggregate_projects_dynamically_selected_model_when_plan_declares_none() {
+    // #9404: provider rotation can select a concrete model dynamically, so the
+    // plan task has model=None but the authoritative terminal outcome records
+    // the model actually used. The reconciled task must carry that selected
+    // model so canonical provider_runtime metadata is not null and PR
+    // finalization is not spuriously rejected.
+    let plan = test_plan();
+    assert!(
+        plan.tasks[0].executor.model.is_none(),
+        "fixture plan must declare no model to exercise dynamic selection"
+    );
+
+    let mut aggregate = succeeded_aggregate(&plan);
+    aggregate.outcomes[0].metadata = json!({ "model": "openai/gpt-5.6-terra" });
+
+    let tasks = crate::agent_task_lifecycle::conversion::tasks_for_aggregate(&plan, &aggregate);
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].model.as_deref(), Some("openai/gpt-5.6-terra"));
+}
+
+#[test]
+fn tasks_for_aggregate_preserves_declared_plan_model_over_outcome_model() {
+    // A declared plan model is authoritative and must never be overridden by a
+    // divergent outcome model; declared-model behavior stays unchanged.
+    let mut plan = test_plan();
+    plan.tasks[0].executor.model = Some("declared/plan-model".to_string());
+
+    let mut aggregate = succeeded_aggregate(&plan);
+    aggregate.outcomes[0].metadata = json!({ "model": "other/outcome-model" });
+
+    let tasks = crate::agent_task_lifecycle::conversion::tasks_for_aggregate(&plan, &aggregate);
+
+    assert_eq!(tasks[0].model.as_deref(), Some("declared/plan-model"));
+}

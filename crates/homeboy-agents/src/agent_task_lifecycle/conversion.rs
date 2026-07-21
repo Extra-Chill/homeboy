@@ -184,9 +184,41 @@ pub(crate) fn tasks_for_aggregate(
             {
                 task.state = task_state_for_outcome_status(outcome.status);
             }
+            // Provider rotation can select a concrete model dynamically, so the
+            // plan task carries no model but the authoritative terminal outcome
+            // records the one actually used. Project it onto the reconciled task
+            // (declared plan model remains the fallback) so canonical
+            // `lifecycle.provider_runtime[].metadata.model` is not null and PR
+            // finalization does not reject a run that has a real model (#9404).
+            project_selected_model_onto_task(&mut task, request, aggregate);
             task
         })
         .collect()
+}
+
+/// Fill a reconciled task's model from the authoritative terminal outcome when
+/// the plan task declared none (dynamic rotation selection). Only projects a
+/// non-empty outcome model and never overrides an explicitly declared plan
+/// model, so declared-model behavior and persisted schemas are unchanged.
+fn project_selected_model_onto_task(
+    task: &mut AgentTaskRunTask,
+    request: &crate::agent_task::AgentTaskRequest,
+    aggregate: &AgentTaskAggregate,
+) {
+    if request.executor.model.is_some() {
+        return;
+    }
+    if let Some(model) = aggregate
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.task_id == request.task_id)
+        .and_then(|outcome| outcome.metadata.get("model"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        task.model = Some(model.to_string());
+    }
 }
 
 pub(crate) fn task_state_for_outcome_status(status: AgentTaskOutcomeStatus) -> AgentTaskState {
