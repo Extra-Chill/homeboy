@@ -1188,6 +1188,46 @@ impl AgentTaskScheduleSupport {
     /// the dispatch provider-config layering. Also copies the policy-level
     /// liveness limit into the request so the provider runner can enforce it
     /// per attempt.
+    /// Backfill the initial attempt's model from the first rotation entry (#9013).
+    ///
+    /// The first configured rotation entry describes the initial attempt (later
+    /// entries are failover). `apply_rotation_entry` only runs when rotating *to*
+    /// a new entry after a failure, so a cook that relied on a configured
+    /// `rotation.entries` default (no explicit `--model`) executed with no model,
+    /// persisted `provider_model: null`, and then failed finalization *after*
+    /// publishing a PR.
+    ///
+    /// This deliberately only backfills the **model** — not backend, selector,
+    /// provider_config, or adoption. Those fields carry failover-specific
+    /// semantics (e.g. an entry may switch provider or adopt a prior candidate)
+    /// that must not reshape the initial attempt; only the missing model
+    /// identity is needed for durable provenance. An explicit `--model` on the
+    /// request always wins.
+    pub(super) fn apply_initial_rotation_entry_model(
+        request: &mut AgentTaskRequest,
+        entry: &AgentTaskProviderRotationEntry,
+    ) {
+        if request.executor.model.is_some() {
+            return;
+        }
+        // Only backfill from an entry that targets the same backend the initial
+        // attempt will actually run (or a backend-agnostic entry). A failover
+        // entry for a different provider must not lend its model to this backend.
+        if let Some(entry_backend) = entry.backend.as_deref() {
+            if entry_backend != request.executor.backend {
+                return;
+            }
+        }
+        if let Some(model) = &entry.model {
+            request.executor.model = Some(model.clone());
+            if let Some(selection) = request.executor.runtime_selection.as_mut() {
+                if selection.model.is_none() {
+                    selection.model = Some(model.clone());
+                }
+            }
+        }
+    }
+
     pub(super) fn apply_rotation_entry(
         request: &mut AgentTaskRequest,
         entry: &AgentTaskProviderRotationEntry,

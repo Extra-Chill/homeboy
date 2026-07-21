@@ -119,6 +119,15 @@ where
                 request.limits.execution_deadline_unix_ms = execution_deadline_unix_ms;
                 if let Some(policy) = plan_rotation.as_ref() {
                     AgentTaskScheduleSupport::apply_rotation_policy_limits(&mut request, policy);
+                    // Backfill the initial attempt's model from the first entry
+                    // so a configured model default is persisted before the run
+                    // and finalization does not fail after publishing (#9013).
+                    if let Some(entry) = policy.entries.first() {
+                        AgentTaskScheduleSupport::apply_initial_rotation_entry_model(
+                            &mut request,
+                            entry,
+                        );
+                    }
                 }
                 ScheduledTask {
                     workspace_key: AgentTaskScheduleSupport::workspace_key(&request),

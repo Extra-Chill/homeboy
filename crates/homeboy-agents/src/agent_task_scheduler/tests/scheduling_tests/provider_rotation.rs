@@ -474,6 +474,70 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn initial_attempt_applies_the_first_rotation_entry_model() {
+        // #9013: with a configured `rotation.entries` default and no explicit
+        // --model, the first entry describes the initial attempt. Its model must
+        // be applied to the very first request so it is persisted before
+        // execution — otherwise the cook runs with a null model and fails
+        // finalization after publishing a PR.
+        let executor = RotationScriptedExecutor::new(vec![success()]);
+        let observed = Arc::clone(&executor.observed);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        assert!(
+            plan.tasks[0].executor.model.is_none(),
+            "fixture starts with no explicit model"
+        );
+        plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
+            backend: None,
+            selector: None,
+            model: Some("configured-default-model".to_string()),
+            provider_config: json!({}),
+            adoption: None,
+        }]));
+        enable_rotation(&mut plan);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        let observed = observed.lock().expect("observed requests");
+        assert_eq!(
+            observed[0].executor.model.as_deref(),
+            Some("configured-default-model"),
+            "the initial attempt must carry the configured rotation-entry model"
+        );
+    }
+
+    #[test]
+    fn initial_attempt_preserves_an_explicit_model_over_the_first_rotation_entry() {
+        // The initial application only fills gaps: an explicit --model already on
+        // the request wins over the configured entry default.
+        let executor = RotationScriptedExecutor::new(vec![success()]);
+        let observed = Arc::clone(&executor.observed);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].executor.model = Some("explicit-cli-model".to_string());
+        plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
+            backend: None,
+            selector: None,
+            model: Some("configured-default-model".to_string()),
+            provider_config: json!({}),
+            adoption: None,
+        }]));
+        enable_rotation(&mut plan);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        let observed = observed.lock().expect("observed requests");
+        assert_eq!(
+            observed[0].executor.model.as_deref(),
+            Some("explicit-cli-model"),
+            "an explicit model must not be overridden by the rotation-entry default"
+        );
+    }
+
+    #[test]
     fn one_provider_execution_budget_never_rotates() {
         let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
         let calls = Arc::clone(&executor.calls);
