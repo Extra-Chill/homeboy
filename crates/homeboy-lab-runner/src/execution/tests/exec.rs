@@ -8,6 +8,39 @@ use homeboy_core::runner_execution_envelope::{
     PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
 use serde_json::json;
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+#[test]
+fn extension_runtime_home_keeps_homeboy_data_on_the_runner() {
+    let job_env = HashMap::from([("HOME".to_string(), "/job/extension-home".to_string())]);
+    let durable = PathBuf::from("/runner/home/.local/share/homeboy");
+
+    assert_eq!(
+        durable_homeboy_data_dir_for_job(&job_env, Some("/runner/home"), Some(durable.clone())),
+        Some(durable)
+    );
+}
+
+#[test]
+fn explicit_job_data_directory_remains_authoritative() {
+    let job_env = HashMap::from([
+        ("HOME".to_string(), "/job/extension-home".to_string()),
+        (
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV.to_string(),
+            "/job/explicit-data".to_string(),
+        ),
+    ]);
+
+    assert_eq!(
+        durable_homeboy_data_dir_for_job(
+            &job_env,
+            Some("/runner/home"),
+            Some(PathBuf::from("/runner/home/.local/share/homeboy"))
+        ),
+        None
+    );
+}
 
 #[test]
 fn daemon_submission_recovers_a_lost_tunnel_before_resending_to_the_same_lease() {
