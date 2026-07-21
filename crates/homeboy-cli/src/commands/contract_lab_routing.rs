@@ -26,7 +26,7 @@ use crate::command_contract::{
 const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
 pub(crate) const AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON: &str =
-    "agent-task cook is a controller-owned coordinator: it resolves the managed target, ingests provider artifacts, promotes candidates, runs deterministic gates, and finalizes. Offload the materialized agent-task run-plan provider attempt instead.";
+    "agent-task cook is a controller-owned coordinator: it resolves the managed target, ingests provider artifacts, promotes candidates, runs deterministic gates, and finalizes. Its provider attempt is routed to the configured Lab runner automatically, so `--placement lab` is unnecessary; pass `--runner <runner-id>` to pin a specific Lab runner for that attempt.";
 pub(crate) const AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON: &str =
     "agent-task promote with a durable run id is controller-owned: it resolves authoritative lifecycle state and finalized artifact projections on the controller.";
 const AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON: &str =

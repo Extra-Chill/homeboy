@@ -732,11 +732,11 @@ pub(super) fn resolve_lab_runner_selection_from_placement(
     if let Some(runner_id) = explicit_runner {
         if let LabCommandPortability::LocalOnly(reason) = command.portability {
             let message = format!("--runner is unavailable for this hot command. {reason}");
-            return Err(Error::validation_invalid_argument(
+            return Err(local_only_flag_rejection(
                 "runner",
                 message,
                 Some(runner_id.to_string()),
-                Some(vec![resolve_lab_runner_hint().hint]),
+                command.hot_label,
             ));
         }
 
@@ -748,11 +748,22 @@ pub(super) fn resolve_lab_runner_selection_from_placement(
     }
 
     if placement == homeboy_cli_contract::Placement::Lab && !command.is_portable() {
-        return Err(Error::validation_invalid_argument(
+        // Surface the command's own local-only reason rather than a generic
+        // "portable commands are ..." hint. For a controller-owned coordinator
+        // like cook, `--placement lab` is a contradiction the operator should
+        // not have to reverse-engineer: the coordinator stays local by design
+        // while its provider attempt already routes to Lab automatically (#9373).
+        let reason = match command.portability {
+            LabCommandPortability::LocalOnly(reason) => reason,
+            LabCommandPortability::Portable => "this command runs on the controller",
+        };
+        let message =
+            format!("--placement lab is unavailable for this local-only command. {reason}");
+        return Err(local_only_flag_rejection(
             "placement",
-            "--placement lab is unavailable for this local-only command",
+            message,
             None,
-            Some(vec![resolve_lab_runner_hint().hint]),
+            command.hot_label,
         ));
     }
 
@@ -816,6 +827,38 @@ pub(super) fn resolve_lab_runner_selection_from_placement(
         .transpose()
 }
 
+/// Build an actionable rejection when `--placement lab` or `--runner` is passed
+/// to a controller-owned, local-only command.
+///
+/// The generic "portable commands are ..." hint left operators guessing which
+/// spelling was correct (#9373). This surfaces command-specific remediation so
+/// runtime behavior and guidance agree: for a cook/agent-task coordinator it
+/// explains that the coordinator stays local while its provider attempt already
+/// routes to Lab automatically, and points at the real levers
+/// (`--runner <runner-id>` to pin the Lab runner, `fanout` for waves).
+fn local_only_flag_rejection(
+    field: &'static str,
+    message: String,
+    value: Option<String>,
+    hot_label: &str,
+) -> Error {
+    let mut hints = Vec::new();
+    if hot_label.starts_with("agent-task cook") || hot_label.starts_with("agent-task fanout") {
+        hints.push(
+            "The cook coordinator is controller-owned by design; its provider attempt already routes to the configured Lab runner automatically — no --placement lab needed.".to_string(),
+        );
+        hints.push(
+            "To pin a specific Lab runner for the provider attempt, pass `--runner <runner-id>` (not `--placement lab`).".to_string(),
+        );
+        hints.push(
+            "To fan out many independent cooks in one operation, use `homeboy agent-task fanout` so the batch coordinator dispatches each child cook's provider attempt to Lab.".to_string(),
+        );
+    } else {
+        hints.push(resolve_lab_runner_hint().hint);
+    }
+    Error::validation_invalid_argument(field, message, value, Some(hints))
+}
+
 fn fail_if_local_bench_denied(command: &LabOffloadCommand, denied: bool) -> Result<()> {
     if !denied || command.hot_label != "bench" {
         return Ok(());
@@ -869,4 +912,131 @@ pub(super) fn status_tunnel_mode(status: &RunnerStatusReport) -> RunnerTunnelMod
         .session
         .as_ref()
         .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone())
+}
+
+#[cfg(test)]
+mod placement_rejection_tests {
+    use super::*;
+    use homeboy_core::lab_contract::LabCommandContract;
+
+    fn local_only_command(hot_label: &'static str, reason: &'static str) -> LabOffloadCommand {
+        LabOffloadCommand {
+            command: LabCommandContract::local_only(hot_label, reason),
+            required_extensions: Vec::new(),
+            required_capabilities: Vec::new(),
+            workload: None,
+        }
+    }
+
+    fn hints(error: &Error) -> Vec<String> {
+        error
+            .details
+            .get("tried")
+            .and_then(|value| value.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn placement_lab_on_cook_yields_cook_aware_remediation() {
+        // #9373: `--placement lab` on the controller-owned cook coordinator must
+        // not just report a generic "portable commands are ..." hint. It must
+        // explain that the provider attempt already routes to Lab and point at
+        // the correct lever (`--runner`), so guidance and runtime agree.
+        let command = local_only_command(
+            "agent-task cook/run-plan/retry --run",
+            "agent-task cook is a controller-owned coordinator.",
+        );
+
+        let error = resolve_lab_runner_selection_from_placement(
+            &command,
+            None,
+            homeboy_cli_contract::Placement::Lab,
+            false,
+            false,
+            None,
+        )
+        .expect_err("--placement lab must be rejected for a local-only cook");
+
+        assert_eq!(error.details["field"].as_str(), Some("placement"));
+        assert!(
+            error.details["problem"]
+                .as_str()
+                .is_some_and(|problem| problem.contains("controller-owned coordinator")),
+            "problem must carry the command's own reason: {}",
+            error.details["problem"]
+        );
+        let hints = hints(&error);
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.contains("--runner <runner-id>")),
+            "cook remediation must name --runner, got {hints:?}"
+        );
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.contains("routes to the configured Lab runner automatically")),
+            "cook remediation must explain automatic Lab routing, got {hints:?}"
+        );
+        assert!(
+            hints.iter().any(|hint| hint.contains("fanout")),
+            "cook remediation must point at fanout for waves, got {hints:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_runner_on_cook_yields_cook_aware_remediation() {
+        let command = local_only_command(
+            "agent-task cook/run-plan/retry --run",
+            "agent-task cook is a controller-owned coordinator.",
+        );
+
+        let error = resolve_lab_runner_selection_from_placement(
+            &command,
+            Some("homeboy-lab"),
+            homeboy_cli_contract::Placement::Auto,
+            false,
+            false,
+            None,
+        )
+        .expect_err("--runner must be rejected for a local-only cook coordinator");
+
+        assert_eq!(error.details["field"].as_str(), Some("runner"));
+        let hints = hints(&error);
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.contains("--runner <runner-id>")),
+            "cook remediation must name --runner, got {hints:?}"
+        );
+    }
+
+    #[test]
+    fn placement_lab_on_non_cook_local_only_keeps_generic_hint() {
+        // A non-agent-task local-only command must retain the generic
+        // portable-commands hint rather than cook-specific remediation.
+        let command = local_only_command("some-other-command", "this command runs locally.");
+
+        let error = resolve_lab_runner_selection_from_placement(
+            &command,
+            None,
+            homeboy_cli_contract::Placement::Lab,
+            false,
+            false,
+            None,
+        )
+        .expect_err("--placement lab must be rejected for a local-only command");
+
+        let hints = hints(&error);
+        assert!(
+            !hints.iter().any(|hint| hint.contains("fanout")),
+            "non-cook remediation must not mention fanout, got {hints:?}"
+        );
+    }
 }
