@@ -54,6 +54,12 @@ pub struct SelfCleanupRuntimeTmpArgs {
     /// Maximum temp entries to inspect in one invocation.
     #[arg(long, default_value_t = 1000)]
     pub limit: usize,
+    /// Maximum aggregate bytes retained for failed runtime run evidence.
+    #[arg(long, default_value_t = 1024 * 1024 * 1024)]
+    pub run_max_bytes: u64,
+    /// Maximum failed runtime run directories retained.
+    #[arg(long, default_value_t = 100)]
+    pub run_max_count: usize,
 }
 
 pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
@@ -111,11 +117,15 @@ pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
             Ok((json, exit_code))
         }
         SelfCommand::CleanupRuntimeTmp(args) => {
-            let output = engine::temp::cleanup_runtime_tmp(
-                args.apply,
-                args.older_than_days,
-                args.prefix.as_deref(),
-                args.limit,
+            let output = engine::temp::cleanup_runtime_tmp_bounded(
+                engine::temp::RuntimeTempCleanupOptions {
+                    apply: args.apply,
+                    older_than_days: args.older_than_days,
+                    prefix: args.prefix.as_deref(),
+                    limit: args.limit,
+                    run_max_bytes: args.run_max_bytes,
+                    run_max_count: args.run_max_count,
+                },
             )?;
             let json = serde_json::to_value(output)
                 .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;

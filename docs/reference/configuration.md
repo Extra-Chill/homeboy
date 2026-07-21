@@ -61,6 +61,8 @@ variables.
 
 - `terminal_run_days` — Age threshold before terminal persisted-run artifacts are eligible for cleanup (default: 30). Active and unknown run states remain protected.
 - `runtime_tmp_days` — Age threshold for Homeboy runtime temporary entries (default: 7).
+- `runtime_run_max_bytes` — Maximum aggregate failed runtime-run evidence retained (default: 1 GiB).
+- `runtime_run_max_count` — Maximum failed runtime-run directories retained (default: 100).
 - `limit` — Maximum persisted-run artifact records inspected per aggregate cleanup invocation (default: 1000).
 
 ### `TriageConfig`
