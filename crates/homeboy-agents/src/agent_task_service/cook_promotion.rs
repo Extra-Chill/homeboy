@@ -594,7 +594,7 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
                     .map(|record| record.lifecycle),
             },
             ai_used_for: options.ai_used_for.clone(),
-            review_dossier: cook_review_dossier(options, promotion)?,
+            review_dossier: cook_review_dossier(options, promotion, successful_run_id)?,
             review_profile: resolve_review_profile(&path)?,
             manual_finalization: false,
             protected_branches: options.protected_branches.clone(),
@@ -607,6 +607,7 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
 fn cook_review_dossier(
     options: &AgentTaskCookServiceOptions,
     promotion: &AgentTaskPromotionReport,
+    successful_run_id: &str,
 ) -> Result<AgentTaskReviewDossier> {
     let changed_files = promotion.changed_files.join(", ");
     let changed_file_count = promotion.changed_files.len();
@@ -656,28 +657,28 @@ fn cook_review_dossier(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    // The AI-authored form is the sole source of the non-deterministic prose
+    // (summary / what changed / compatibility / used_for). Finalization is only
+    // reached after the cook loop's form gate accepted a valid form, so its
+    // absence here is a hard invariant violation, not a soft fallback. Read it
+    // after the deterministic gate-evidence validations so those failure modes
+    // still surface first.
+    let form = review_form_for_finalization(successful_run_id)?;
     Ok(AgentTaskReviewDossier {
         schema: "homeboy/agent-task-review-dossier/v1".to_string(),
-        summary: options.title.clone(),
-        what_changed: vec![
-            format!("Task objective: {task_summary}"),
-            format!(
-                "Verified candidate changed {changed_file_count} file(s): {changed_files}."
-            ),
-            format!(
-                "Cook completed {gate_count} deterministic verification gate(s) before finalization."
-            ),
-            if adoption {
-                "Candidate adoption provenance: an immutable candidate was adopted through the recorded Cook workflow and passed the recorded gates.".to_string()
-            } else {
-                "Candidate adoption provenance: the candidate was promoted from the recorded Cook task execution.".to_string()
-            },
-        ],
+        // Non-deterministic prose: authored by the AI form.
+        summary: form.summary.clone(),
+        what_changed: form.what_changed.clone(),
         how_to_test,
-        compatibility: format!(
-            "Compatibility impact is unknown from durable task and promotion evidence. The candidate is bounded to {changed_file_count} changed file(s): {changed_files}; review externally consumed interfaces in this scope."
-        ),
+        compatibility: form.compatibility.clone(),
+        // Deterministic evidence: orchestrator-owned. The task objective, scope,
+        // gate count, and adoption provenance are factual records, not prose the
+        // AI restates.
         evidence: vec![
+            AgentTaskReviewEvidence {
+                summary: format!("Task objective: {task_summary}"),
+                url: None,
+            },
             AgentTaskReviewEvidence {
                 summary: format!(
                     "Verified candidate scope: {changed_file_count} changed file(s): {changed_files}."
@@ -690,21 +691,67 @@ fn cook_review_dossier(
                 ),
                 url: None,
             },
+            AgentTaskReviewEvidence {
+                summary: if adoption {
+                    "Candidate adoption provenance: an immutable candidate was adopted through the recorded Cook workflow and passed the recorded gates.".to_string()
+                } else {
+                    "Candidate adoption provenance: the candidate was promoted from the recorded Cook task execution.".to_string()
+                },
+                url: None,
+            },
         ],
         changed_public_contracts: Vec::new(),
         public_contract_evidence: None,
         ai_assistance: AgentTaskReviewAiAssistance {
+            // Deterministic: the orchestrator knows whether/what tool+model ran.
             used: true,
             tool: options.ai_tool.clone(),
             model: options
                 .ai_model
                 .clone()
                 .unwrap_or_else(|| "not recorded".to_string()),
-            used_for: options.ai_used_for.clone(),
+            // Non-deterministic: the AI's self-reflective process description.
+            used_for: form.used_for.clone(),
         },
         source_relationships: Vec::new(),
         overrides: Vec::new(),
     })
+}
+
+/// Load and validate the AI-authored review form for a finalizing run.
+///
+/// The cook loop's review-form gate guarantees a valid form before finalization
+/// is reached; this re-reads it from the terminal outcome as the single source
+/// of the reviewer-facing prose. Its absence/invalidity here is an invariant
+/// violation (the gate would have looped), surfaced as a hard error rather than
+/// silently falling back to machine-templated prose.
+fn review_form_for_finalization(
+    run_id: &str,
+) -> Result<crate::agent_task_review_dossier::AiFilledReviewForm> {
+    let aggregate = crate::agent_task_lifecycle::read_aggregate(run_id)?;
+    let form = aggregate
+        .outcomes
+        .last()
+        .map(|outcome| {
+            crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
+                &outcome.outputs,
+            )
+        })
+        .transpose()?
+        .flatten()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "review_form",
+                format!(
+                    "cook finalization requires an AI-authored review form on run {run_id}; none was recorded. {}",
+                    crate::agent_task_review_dossier::AiFilledReviewForm::requirement_feedback()
+                ),
+                None,
+                None,
+            )
+        })?;
+    form.validate()?;
+    Ok(form)
 }
 
 pub(crate) fn cook_report(

@@ -53,6 +53,21 @@ pub(crate) fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -
         .to_string()
 }
 
+/// Parse the AI-authored review form off the terminal attempt outcome.
+///
+/// The agent emits it under `outputs["review_form"]`; the terminal outcome is
+/// the last one recorded in the aggregate. Returns `Ok(None)` when the agent
+/// emitted no form (the loop treats absence as a gap and nudges a retry). A
+/// present-but-malformed form is a hard error so garbage is never rendered.
+fn review_form_from_aggregate(
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+) -> Result<Option<crate::agent_task_review_dossier::AiFilledReviewForm>> {
+    let Some(outcome) = aggregate.outcomes.last() else {
+        return Ok(None);
+    };
+    crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
+}
+
 /// Executes one provider attempt while cook retains ownership of promotion,
 /// gates, retries, and finalization.
 pub trait AgentTaskCookAttemptDispatcher: Send + Sync + std::fmt::Debug {
@@ -635,6 +650,7 @@ where
             }
         };
 
+        let review_form = review_form_from_aggregate(&aggregate)?;
         let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request,
             promotion_report: promotion.clone(),
@@ -642,6 +658,8 @@ where
             max_attempts,
             source_run_id: Some(run_id.clone()),
             current_diff: gate_feedback_current_diff(&promotion),
+            require_review_form: true,
+            review_form,
             metadata: Value::Null,
         });
         let feedback_status = feedback.status;

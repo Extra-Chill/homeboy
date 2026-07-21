@@ -664,6 +664,8 @@ pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
         max_attempts: args.max_attempts.max(1),
         source_run_id: args.source_run_id,
         current_diff,
+        require_review_form: false,
+        review_form: None,
         metadata: Value::Null,
     });
 

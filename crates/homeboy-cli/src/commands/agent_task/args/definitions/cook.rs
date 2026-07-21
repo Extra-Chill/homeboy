@@ -122,11 +122,12 @@ pub struct AgentTaskCookArgs {
     pub protected_branches: Vec<String>,
     #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
     pub ai_tool: String,
-    #[arg(
-        long,
-        default_value = "Drafted implementation and tests; Chris reviews and owns the change.",
-        value_name = "TEXT"
-    )]
+    /// Legacy AI-usage disclosure. The reviewer-facing "Used for" text is now
+    /// authored by the agent's `review_form.used_for` (a self-reflective process
+    /// description) and validated by the cook loop's review-form gate; this flag
+    /// no longer feeds the PR body. Retained only for recipe back-compatibility
+    /// and defaults empty (no canned platitude).
+    #[arg(long, default_value = "", value_name = "TEXT")]
     pub ai_used_for: String,
 }
 

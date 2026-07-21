@@ -246,11 +246,7 @@ pub struct FinalizePrArgs {
     pub changed_files: Vec<String>,
     #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
     pub protected_branches: Vec<String>,
-    #[arg(
-        long,
-        default_value = "Drafted implementation and tests; Chris reviews and owns the change.",
-        value_name = "TEXT"
-    )]
+    #[arg(long, default_value = "", value_name = "TEXT")]
     pub ai_used_for: String,
     #[arg(long, value_name = "TEXT")]
     pub summary: Option<String>,

@@ -31,6 +31,67 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Barrier, Condvar};
 
+/// Seed a terminal aggregate whose last outcome carries a valid AI-authored
+/// review form under `outputs["review_form"]`, so cook finalization (which now
+/// sources reviewer prose from the form) can proceed.
+/// A valid AI-authored review form, for tests whose cook flow reaches
+/// finalization (which now sources reviewer prose from the form).
+fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
+    crate::agent_task_review_dossier::AiFilledReviewForm {
+        summary: "Close the issue by guarding the reload path.".to_string(),
+        what_changed: vec!["Add a null guard in the render path.".to_string()],
+        compatibility: "Internal-only change; no compatibility impact.".to_string(),
+        used_for: "Reproduced the failure, isolated the reload path, added a guard, and verified with the recorded deterministic gate before finalizing.".to_string(),
+    }
+}
+
+/// The `outputs` object carrying a valid review form under `review_form`.
+fn test_review_form_outputs() -> Value {
+    serde_json::json!({ "review_form": test_review_form() })
+}
+
+fn seed_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
+    use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
+    use crate::agent_task_scheduler::{
+        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
+    };
+    let form = test_review_form();
+    agent_task_lifecycle::record_run_aggregate(
+        run_id,
+        plan,
+        &AgentTaskAggregate {
+            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: plan.plan_id.clone(),
+            status: AgentTaskAggregateStatus::Succeeded,
+            totals: AgentTaskAggregateTotals {
+                succeeded: 1,
+                ..Default::default()
+            },
+            outcomes: vec![AgentTaskOutcome {
+                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: "provider".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("provider dispatched once".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: serde_json::json!({ "review_form": form }),
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        },
+    )
+    .unwrap();
+}
+
 #[test]
 fn cook_service_retry_uses_the_same_passed_context_after_ambient_mutation() {
     let _env_lock = homeboy_core::test_support::env_lock();
@@ -211,7 +272,7 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
                     typed_artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
-                    outputs: Value::Null,
+                    outputs: test_review_form_outputs(),
                     workflow: None,
                     follow_up: None,
                     metadata: Value::Null,
@@ -460,7 +521,7 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
                     typed_artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
-                    outputs: Value::Null,
+                    outputs: test_review_form_outputs(),
                     workflow: None,
                     follow_up: None,
                     metadata: Value::Null,
@@ -2350,6 +2411,7 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             attempt_dispatcher: None,
             harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
         };
+        seed_review_form_aggregate(run_id, &plan);
         let mut backend = CaptureBackend::default();
         finalize_cook_pr_with_backend(&options, run_id, &promotion(run_id), &mut backend).unwrap();
         for section in [
@@ -2361,10 +2423,13 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
                 "## AI assistance",
                 "openai/gpt-5.6-terra",
                 "Verified finalization base: main at verified-base",
-                "Verified candidate changed 1 file(s): src/lib.rs.",
-                "Cook completed 1 deterministic verification gate(s) before finalization.",
+                // AI-authored prose (from the seeded review form).
+                "Close the issue by guarding the reload path.",
+                "Add a null guard in the render path.",
+                "Internal-only change; no compatibility impact.",
+                "Reproduced the failure, isolated the reload path",
+                // Deterministic evidence (orchestrator-owned).
                 "1. Run `cargo test --locked agent_task_promotion --lib`; expect passes as recorded by Cook's deterministic gate.",
-                "Compatibility impact is unknown from durable task and promotion evidence.",
                 "Verified candidate scope: 1 changed file(s): src/lib.rs.",
                 "Cook deterministic verification: 1 gate(s) completed green.",
             ] {

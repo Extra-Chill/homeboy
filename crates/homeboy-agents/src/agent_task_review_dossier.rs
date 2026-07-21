@@ -137,6 +137,135 @@ pub struct AgentTaskReviewOverride {
     pub provenance: String,
 }
 
+/// Schema key the agent emits its review form under inside `AgentTaskOutcome.outputs`.
+pub const AI_REVIEW_FORM_OUTPUT_KEY: &str = "review_form";
+
+/// The single AI-authored "form" — every non-deterministic slot of the review
+/// dossier. The orchestrator owns everything else (AI-assistance tool/model,
+/// evidence, gate labels, how-to-test, source relationships, the section
+/// skeleton). The agent fills this once and returns it via
+/// `AgentTaskOutcome.outputs["review_form"]`; it is the only reviewer-facing
+/// prose the model authors.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AiFilledReviewForm {
+    /// What is changing in this PR and why.
+    pub summary: String,
+    /// Bullet points of the concrete changes.
+    #[serde(default)]
+    pub what_changed: Vec<String>,
+    /// Compatibility / impact assessment.
+    pub compatibility: String,
+    /// Self-reflective, concise description of the *process* the AI took —
+    /// deliberately distinct from `summary` (which describes *what* changed).
+    pub used_for: String,
+}
+
+impl AiFilledReviewForm {
+    /// Parse the form the agent emitted under `outputs["review_form"]`.
+    ///
+    /// Returns `Ok(None)` when the key is absent (the agent did not emit a
+    /// form at all — the loop treats that like a red gate and nudges a retry).
+    /// A present-but-malformed value is a hard parse error so a garbage form
+    /// is never silently rendered.
+    pub fn from_outcome_outputs(outputs: &serde_json::Value) -> Result<Option<Self>> {
+        let Some(value) = outputs.get(AI_REVIEW_FORM_OUTPUT_KEY) else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        let form: Self = serde_json::from_value(value.clone()).map_err(|error| {
+            Error::validation_invalid_argument(
+                "review_form",
+                format!("agent-emitted review_form is malformed: {error}"),
+                None,
+                None,
+            )
+        })?;
+        Ok(Some(form))
+    }
+
+    /// Reviewer-facing feedback describing exactly what a valid form requires.
+    /// Surfaced to the agent when the form is missing or incomplete so the
+    /// nudge loop can converge.
+    pub fn requirement_feedback() -> &'static str {
+        "Emit a `review_form` object in your task outputs with: `summary` (what is changing and why), \
+`what_changed` (a non-empty list of concrete change bullets), `compatibility` (impact/compatibility \
+assessment), and `used_for` (a concise, self-reflective description of the process you took — distinct \
+from the summary of what changed). `used_for` must be a genuine reflection, not a restatement of the summary."
+    }
+
+    /// Validate that the agent filled every required slot with real content.
+    /// `Err` carries actionable, agent-facing feedback for the nudge loop.
+    pub fn validate(&self) -> Result<()> {
+        if self.summary.trim().is_empty() {
+            return Err(review_form_gap("review_form.summary", "summary is empty"));
+        }
+        if self
+            .what_changed
+            .iter()
+            .all(|entry| entry.trim().is_empty())
+        {
+            return Err(review_form_gap(
+                "review_form.what_changed",
+                "what_changed has no non-empty entries",
+            ));
+        }
+        if self.compatibility.trim().is_empty() {
+            return Err(review_form_gap(
+                "review_form.compatibility",
+                "compatibility is empty",
+            ));
+        }
+        if self.used_for.trim().is_empty() {
+            return Err(review_form_gap("review_form.used_for", "used_for is empty"));
+        }
+        if used_for_is_placeholder(&self.used_for) {
+            return Err(review_form_gap(
+                "review_form.used_for",
+                "used_for is a placeholder, not a genuine process reflection",
+            ));
+        }
+        // A used_for that merely restates the summary is not a reflection.
+        if self
+            .used_for
+            .trim()
+            .eq_ignore_ascii_case(self.summary.trim())
+        {
+            return Err(review_form_gap(
+                "review_form.used_for",
+                "used_for must be distinct from summary (it describes the process, not the change)",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn review_form_gap(field: &str, problem: &str) -> Error {
+    Error::validation_invalid_argument(
+        field,
+        format!("{problem}. {}", AiFilledReviewForm::requirement_feedback()),
+        None,
+        None,
+    )
+}
+
+/// Canned/placeholder `used_for` values that must not pass as a genuine
+/// reflection — including the legacy CLI default this refactor retires.
+fn used_for_is_placeholder(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "" | "n/a"
+            | "na"
+            | "none"
+            | "ai-assisted"
+            | "ai assisted"
+            | "implementation"
+            | "drafted implementation and tests; chris reviews and owns the change."
+    )
+}
+
 pub fn default_profile() -> AgentTaskReviewProfile {
     AgentTaskReviewProfile {
         required_sections: vec![
@@ -363,6 +492,23 @@ impl AgentTaskReviewDossier {
     }
 }
 
+/// Reviewer-facing evidence label for a deterministic gate.
+///
+/// Gate `name` is a positional id (`gate-1`, `gate-2`) that is meaningless to a
+/// reviewer. The gate `summary` carries the concrete, reveal-policy-safe
+/// description instead — for a passing command gate it is
+/// `"deterministic gate passed: <command>"`, and for a private/withheld gate it
+/// is already redacted by policy. Prefer that; only fall back to the positional
+/// id when no summary was recorded.
+fn gate_evidence_summary(gate: &HomeboyGateResult) -> String {
+    let summary = gate.summary.trim();
+    if summary.is_empty() {
+        format!("{}: {:?}", gate.name, gate.status)
+    } else {
+        format!("{summary} ({:?})", gate.status)
+    }
+}
+
 pub fn enrich_dossier(
     dossier: &mut AgentTaskReviewDossier,
     source_refs: &[String],
@@ -373,7 +519,7 @@ pub fn enrich_dossier(
 ) {
     for gate in gates {
         dossier.evidence.push(AgentTaskReviewEvidence {
-            summary: format!("{}: {:?}", gate.name, gate.status),
+            summary: gate_evidence_summary(gate),
             url: None,
         });
     }
@@ -781,6 +927,119 @@ mod tests {
             overrides: Vec::new(),
         }
     }
+
+    fn valid_form() -> AiFilledReviewForm {
+        AiFilledReviewForm {
+            summary: "Fix the widget so it renders on reload.".into(),
+            what_changed: vec!["Guard the null path in render().".into()],
+            compatibility: "No compatibility impact; internal only.".into(),
+            used_for: "I traced the null deref to the reload path, added a guard, and verified with a focused test before finalizing.".into(),
+        }
+    }
+
+    #[test]
+    fn valid_review_form_passes_validation() {
+        assert!(valid_form().validate().is_ok());
+    }
+
+    #[test]
+    fn review_form_rejects_empty_required_fields() {
+        for mutate in [
+            (|f: &mut AiFilledReviewForm| f.summary.clear()) as fn(&mut AiFilledReviewForm),
+            |f| f.what_changed.clear(),
+            |f| f.compatibility.clear(),
+            |f| f.used_for.clear(),
+        ] {
+            let mut form = valid_form();
+            mutate(&mut form);
+            assert!(
+                form.validate().is_err(),
+                "expected validation failure for cleared required field"
+            );
+        }
+    }
+
+    #[test]
+    fn review_form_rejects_placeholder_used_for() {
+        let mut form = valid_form();
+        form.used_for =
+            "Drafted implementation and tests; Chris reviews and owns the change.".into();
+        let error = form
+            .validate()
+            .expect_err("legacy canned default must be rejected");
+        assert!(error.message.contains("placeholder"));
+    }
+
+    #[test]
+    fn review_form_rejects_used_for_equal_to_summary() {
+        let mut form = valid_form();
+        form.used_for = form.summary.clone();
+        let error = form
+            .validate()
+            .expect_err("used_for restating summary is not a process reflection");
+        assert!(error.message.contains("distinct from summary"));
+    }
+
+    #[test]
+    fn review_form_parses_from_outcome_outputs() {
+        let outputs = serde_json::json!({ "review_form": valid_form() });
+        let parsed = AiFilledReviewForm::from_outcome_outputs(&outputs)
+            .expect("parse")
+            .expect("present");
+        assert_eq!(parsed, valid_form());
+    }
+
+    #[test]
+    fn absent_review_form_parses_as_none() {
+        assert!(
+            AiFilledReviewForm::from_outcome_outputs(&serde_json::json!({}))
+                .expect("parse")
+                .is_none()
+        );
+        assert!(AiFilledReviewForm::from_outcome_outputs(
+            &serde_json::json!({ "review_form": null })
+        )
+        .expect("parse")
+        .is_none());
+    }
+
+    #[test]
+    fn malformed_review_form_is_a_hard_error() {
+        let outputs = serde_json::json!({ "review_form": { "summary": 42 } });
+        assert!(AiFilledReviewForm::from_outcome_outputs(&outputs).is_err());
+    }
+
+    #[test]
+    fn gate_evidence_summary_uses_command_bearing_summary_not_positional_id() {
+        let gate = HomeboyGateResult::new(
+            "gate-1",
+            "gate-1",
+            homeboy_core::gate::HomeboyGateKind::Command,
+            homeboy_core::gate::HomeboyGateStatus::Passed,
+        )
+        .summary("deterministic gate passed: cargo test widget");
+        let label = gate_evidence_summary(&gate);
+        assert!(
+            label.contains("cargo test widget"),
+            "expected the command in the label, got: {label}"
+        );
+        assert!(
+            !label.starts_with("gate-1"),
+            "must not lead with the positional id"
+        );
+    }
+
+    #[test]
+    fn gate_evidence_summary_falls_back_to_id_when_summary_absent() {
+        let gate = HomeboyGateResult::new(
+            "gate-2",
+            "gate-2",
+            homeboy_core::gate::HomeboyGateKind::Command,
+            homeboy_core::gate::HomeboyGateStatus::Passed,
+        );
+        assert_eq!(gate_evidence_summary(&gate), "gate-2: Passed");
+    }
+
     #[test]
     fn renderer_is_deterministic_and_safe() {
         let body = render_review_dossier(&dossier(), &default_profile());
