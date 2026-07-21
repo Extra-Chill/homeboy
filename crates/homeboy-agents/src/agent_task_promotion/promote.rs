@@ -577,6 +577,31 @@ pub(super) fn promote_with_provider_and_checkpoint(
     let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
     let changed_files = normalized_patch.changed_files.clone();
 
+    // Validate the declared remote base BEFORE mutating the target worktree.
+    // Promotion must be atomic around base validation: a nonexistent declared
+    // base (e.g. `--base trunk` on a repo whose base is `main`) has to fail with
+    // no patch applied and no durable post-apply state recorded, so the same
+    // artifact/target can be retried with a corrected base (#9400).
+    let pre_apply_verified_base = if !options.dry_run {
+        match resolve_promotion_target_path(&options.to_worktree)? {
+            Some(target_path) => capture_declared_base(&target_path, options.base_ref.as_deref())?,
+            // No pre-apply Homeboy-managed target path resolves (e.g. a
+            // provider-owned destination); fall back to validating against the
+            // applied worktree below, preserving prior behavior for that path.
+            None => None,
+        }
+    } else {
+        None
+    };
+    // A declared base with no resolvable pre-apply target path still needs
+    // validation after apply; an empty/absent base has nothing to verify.
+    let base_verified_before_apply = pre_apply_verified_base.is_some()
+        || options
+            .base_ref
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty);
+
     let mut command_evidence = Vec::new();
     let mut applied_worktree_path = None;
     {
@@ -631,7 +656,13 @@ pub(super) fn promote_with_provider_and_checkpoint(
         None
     };
     let verified_base = if let Some(worktree_path) = applied_worktree_path.as_deref() {
-        let verified_base = capture_declared_base(worktree_path, options.base_ref.as_deref())?;
+        // Reuse the base verified before apply; only re-capture when a
+        // provider-owned destination had no resolvable pre-apply target path.
+        let verified_base = if base_verified_before_apply {
+            pre_apply_verified_base
+        } else {
+            capture_declared_base(worktree_path, options.base_ref.as_deref())?
+        };
         (
             run_promotion_gates(&options, provider, worktree_path)?,
             verified_base,
@@ -1237,6 +1268,23 @@ fn promotion_source(
             .as_ref()
             .map(|path| path.display().to_string()),
     }
+}
+
+/// Resolve the Homeboy-managed target worktree path before the patch is
+/// applied, so the declared base can be validated against it without mutating
+/// the working tree (#9400). Returns `None` for a non-Homeboy destination
+/// (provider-owned), where the pre-apply path is not known and validation falls
+/// back to the applied worktree.
+fn resolve_promotion_target_path(to_worktree: &str) -> Result<Option<PathBuf>> {
+    let Some(record) = homeboy_core::worktree::resolve_workspace_ref_if_present(to_worktree)?
+    else {
+        return Ok(None);
+    };
+    if record.state() != &homeboy_core::worktree::TaskWorktreeState::Active {
+        return Ok(None);
+    }
+    let path = PathBuf::from(record.path());
+    Ok(path.is_dir().then_some(path))
 }
 
 fn capture_declared_base(
