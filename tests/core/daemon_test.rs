@@ -446,10 +446,12 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
     store
         .claim_controller_execution(resumable_id, false)
         .expect("durably claim resumable work");
-    store
-        .handle(resumable_id)
-        .record_controller_prepared(serde_json::json!({ "checkpoint": true }))
-        .expect("persist resume checkpoint");
+    crate::daemon::controller_job_driver::ControllerJobHandle::new(
+        store.handle(resumable_id),
+        controller_job_driver::driver("test.blocking", 1).expect("registered driver"),
+    )
+    .checkpoint(serde_json::json!({ "checkpoint": true }))
+    .expect("persist resume checkpoint through driver handle");
     let unresolved = route_with_body(
         "POST",
         "/controller/jobs",

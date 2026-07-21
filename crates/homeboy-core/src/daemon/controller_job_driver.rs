@@ -75,6 +75,12 @@ impl ControllerJobHandle {
             .progress(self.driver.public_progress(&private_progress)?)
             .map(|_| ())
     }
+
+    /// Replace the durable recovery checkpoint after an idempotent phase has
+    /// completed. The daemon resumes from this value after process recovery.
+    pub fn checkpoint(&self, private_checkpoint: Value) -> Result<()> {
+        self.job.record_controller_prepared(private_checkpoint)
+    }
 }
 
 fn drivers() -> &'static Mutex<HashMap<(String, u32), Arc<dyn ControllerJobDriver>>> {
