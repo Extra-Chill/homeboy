@@ -944,6 +944,19 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
         let replacement = agent_task_lifecycle::status(&handoff.run_id).expect("replacement");
         assert_eq!(replacement.metadata["retry_of"], "failed-run");
 
+        stage_retry_lab_handoff_before_preacceptance(Some(&handoff), Some("homeboy-lab"))
+            .expect("stage replacement handoff before Lab preacceptance");
+        let replacement = agent_task_lifecycle::status(&handoff.run_id)
+            .expect("staged replacement remains inspectable");
+        let staged_handoff = replacement
+            .lab_handoff
+            .expect("replacement has pending controller handoff");
+        assert_eq!(staged_handoff.runner_id, "homeboy-lab");
+        let staged_handoff =
+            serde_json::to_value(staged_handoff).expect("serialize staged retry handoff");
+        assert_eq!(staged_handoff["state"], "pending");
+        assert_eq!(staged_handoff["authority"], "controller");
+
         let error = persist_retry_handoff_preacceptance_failure(
             &handoff,
             Error::internal_unexpected("runner preflight rejected the handoff"),
