@@ -36,8 +36,6 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
     }
 
     let store = ObservationStore::open_initialized()?;
-    runs_service::refresh_running_mirrored_daemon_evidence_best_effort(&store);
-    reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
     // `--running` is shorthand for `--status running`; the two are mutually
     // exclusive at the CLI layer so this never overrides an explicit status.
     let status = if args.running {

@@ -1750,7 +1750,7 @@ pub fn list_records() -> Result<Vec<AgentTaskRunRecord>> {
 
 pub fn list_records_with_health() -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)>
 {
-    let (records, health) = store::read_records_with_health()?;
+    let (records, health) = read_records_with_health()?;
     let mut refreshed = Vec::new();
     for record in records {
         if let Ok(record) = status(&record.run_id) {
@@ -1767,6 +1767,24 @@ pub fn list_records_with_health() -> Result<(Vec<AgentTaskRunRecord>, AgentTaskR
             .then_with(|| right.run_id.cmp(&left.run_id))
     });
     Ok((refreshed, health))
+}
+
+/// Read the durable registry snapshot without runner reconciliation. Bounded
+/// recovery readers use this path so disconnected historical runner mirrors
+/// cannot delay access to controller-owned state.
+pub fn read_records_with_health() -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)>
+{
+    let (mut records, health) = store::read_records_with_health()?;
+    records.sort_by(|left, right| {
+        right
+            .updated_at
+            .as_ref()
+            .unwrap_or(&right.submitted_at)
+            .cmp(left.updated_at.as_ref().unwrap_or(&left.submitted_at))
+            .then_with(|| right.submitted_at.cmp(&left.submitted_at))
+            .then_with(|| right.run_id.cmp(&left.run_id))
+    });
+    Ok((records, health))
 }
 
 /// Resolve an aggregate artifact back to its controller-owned durable run.

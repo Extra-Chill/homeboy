@@ -609,7 +609,7 @@ fn discovery_active_filters_to_queued_and_running_runs() {
 }
 
 #[test]
-fn discovery_active_marks_runner_backed_running_run_as_stale_retryable() {
+fn discovery_active_reads_runner_backed_record_without_reconciliation() {
     with_isolated_home(|_| {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-runner-stale"))
             .expect("submitted");
@@ -632,12 +632,10 @@ fn discovery_active_marks_runner_backed_running_run_as_stale_retryable() {
 
         assert_eq!(run.runner_id.as_deref(), Some("homeboy-lab"));
         assert_eq!(run.runner_job_id.as_deref(), Some("job-123"));
-        assert_eq!(run.stale, Some(true));
-        assert_eq!(
-            run.stale_reason.as_deref(),
-            Some("runner_job_unverified_after_daemon_restart")
-        );
-        assert_eq!(run.retryable, Some(true));
+        assert_eq!(run.stale, None);
+        assert_eq!(run.stale_reason, None);
+        assert_eq!(run.retryable, None);
+        assert_eq!(run.liveness, Some(AgentTaskLiveness::Active));
     });
 }
 
