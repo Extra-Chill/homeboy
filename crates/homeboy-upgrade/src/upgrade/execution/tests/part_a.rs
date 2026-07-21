@@ -344,6 +344,47 @@ fn parses_plain_homeboy_version_output_as_build_identity() {
 }
 
 #[test]
+fn parses_build_identity_display_with_commit() {
+    // The installed target's `--version` string is reconstructed so the
+    // source-upgrade decision can compare against it rather than the invoking
+    // candidate (#9371).
+    let identity =
+        parse_build_identity_display("homeboy 0.298.1+4a57291e16d9").expect("parseable identity");
+
+    assert_eq!(identity.version, "0.298.1");
+    assert_eq!(identity.git_commit.as_deref(), Some("4a57291e16d9"));
+    assert_eq!(identity.git_dirty, Some(false));
+    assert_eq!(identity.display, "homeboy 0.298.1+4a57291e16d9");
+}
+
+#[test]
+fn parses_build_identity_display_with_dirty_commit() {
+    let identity =
+        parse_build_identity_display("homeboy 0.298.1+4a57291e16d9-dirty").expect("parseable");
+
+    assert_eq!(identity.version, "0.298.1");
+    assert_eq!(identity.git_commit.as_deref(), Some("4a57291e16d9"));
+    assert_eq!(identity.git_dirty, Some(true));
+}
+
+#[test]
+fn parses_plain_build_identity_display_without_commit() {
+    let identity = parse_build_identity_display("homeboy 0.298.1").expect("parseable");
+
+    assert_eq!(identity.version, "0.298.1");
+    assert_eq!(identity.git_commit, None);
+    assert_eq!(identity.git_dirty, None);
+}
+
+#[test]
+fn rejects_unparseable_build_identity_display() {
+    // A non-semver version cannot participate in the deterministic decision and
+    // must stay on the safe unverifiable path rather than pretend to parse.
+    assert!(parse_build_identity_display("homeboy not-a-version").is_none());
+    assert!(parse_build_identity_display("").is_none());
+}
+
+#[test]
 fn verify_retry_succeeds_after_transient_unreadable_binary() {
     // Issue #3463: the swap succeeded but the first read-back of the new
     // binary returns nothing (racing the just-replaced binary). A later

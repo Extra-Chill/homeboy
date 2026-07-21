@@ -8,7 +8,8 @@ use std::process::Command;
 
 use super::constants::{GITHUB_RELEASES_API, VERSION};
 use super::execution::{
-    execute_upgrade, prepare_source_workspace_for_upgrade, resolve_source_workspace,
+    execute_upgrade, installed_target_build_identity, prepare_source_workspace_for_upgrade,
+    resolve_source_workspace,
 };
 use super::services;
 use super::types::*;
@@ -157,8 +158,6 @@ pub fn run_upgrade_with_method(
             .unwrap_or_else(|| "active controller".to_string()),
     )?;
     let install_method = method_override.unwrap_or_else(detect_install_method);
-    let previous_version = current_version().to_string();
-    let previous_build_identity = Some(build_identity::current().display);
 
     if install_method == InstallMethod::Unknown {
         return Err(Error::validation_invalid_argument(
@@ -180,6 +179,23 @@ pub fn run_upgrade_with_method(
     // Source upgrades converge on the requested build, not merely the latest
     // released semver. A distinct, verifiable source build at the same semver
     // must therefore bypass the release-version no-op path.
+    //
+    // The decision compares the source against the *installed target* binary,
+    // not the invoking candidate's in-process identity. A source-built candidate
+    // invoking itself would otherwise always match its own identity and no-op,
+    // leaving the older installed controller in place — the promotion-policy
+    // bootstrap catch-22 in #9371. When the invoking binary *is* the installed
+    // target (the normal path) the target identity is the current identity, so
+    // this is a no-op for ordinary upgrades.
+    let (target_version, target_identity) = resolve_source_upgrade_target(
+        install_method == InstallMethod::Source && !force && source_path.is_some(),
+        current_version(),
+    );
+    // Report the *replaced* controller as the previous identity, so a candidate
+    // that bootstraps over an older installed target surfaces the target it
+    // superseded rather than its own build.
+    let previous_version = target_version.clone();
+    let previous_build_identity = Some(target_identity.display.clone());
     let source_upgrade_decision =
         (install_method == InstallMethod::Source && !force && source_path.is_some())
             .then(|| {
@@ -190,8 +206,8 @@ pub fn run_upgrade_with_method(
                 // work. A dirty source tree is never an acceptable controller.
                 prepare_source_workspace_for_upgrade(source_path)?;
                 Ok(source_upgrade_decision(
-                    &previous_version,
-                    &build_identity::current(),
+                    &target_version,
+                    &target_identity,
                     source_path,
                 ))
             })
@@ -990,6 +1006,33 @@ impl SourceUpgradeDecision {
     }
 }
 
+/// Resolve the (version, identity) pair the source-upgrade decision compares
+/// against. This is the *installed target* controller, so a candidate binary
+/// invoking itself evaluates replacement of the binary it is trying to promote
+/// over rather than comparing against its own identity (#9371).
+///
+/// Falls back to the in-process identity when the source path is not engaged, or
+/// when the installed target cannot be identified — both keep the existing,
+/// safe behavior. The fallback for an unverifiable target still routes through
+/// the decision's `IdentityUnavailable` no-op rather than promoting blindly.
+fn resolve_source_upgrade_target(
+    source_upgrade_engaged: bool,
+    previous_version: &str,
+) -> (String, build_identity::BuildIdentity) {
+    let current = build_identity::current();
+    if !source_upgrade_engaged {
+        return (previous_version.to_string(), current);
+    }
+
+    match installed_target_build_identity() {
+        Ok(Some(target)) => (target.version.clone(), target),
+        // No verifiable installed target: keep comparing against the in-process
+        // identity. The decision then reports SameIdentity/IdentityUnavailable
+        // and no-ops, which is the safe outcome for an unknown target.
+        Ok(None) | Err(_) => (previous_version.to_string(), current),
+    }
+}
+
 fn source_upgrade_decision(
     active_version: &str,
     active_identity: &build_identity::BuildIdentity,
@@ -1434,6 +1477,56 @@ version = "0.0.0"
             Some(decision),
             false
         ));
+    }
+
+    #[test]
+    fn source_matching_candidate_still_promotes_over_a_different_installed_target() {
+        // #9371 catch-22: a source-built candidate B invoking itself compared
+        // its source against its own in-process identity, reported SameIdentity,
+        // and no-op'd — leaving the older installed target A in place. The
+        // decision must instead compare against the *installed target*.
+        let source = tempdir().expect("source");
+        init_git_source(source.path(), "0.298.1");
+        let candidate_commit = source_build_identity(source.path())
+            .expect("source identity")
+            .git_commit
+            .expect("source commit");
+
+        // Comparing the source against the CANDIDATE's own identity (the buggy
+        // pre-#9371 behavior) is a SameIdentity no-op: the source built this
+        // very binary.
+        let against_candidate = source_upgrade_decision(
+            "0.298.1",
+            &active_identity(&candidate_commit),
+            source.path(),
+        );
+        assert_eq!(against_candidate, SourceUpgradeDecision::SameIdentity);
+        assert!(!against_candidate.upgrades());
+
+        // Comparing against the older INSTALLED TARGET (A, a different commit)
+        // correctly promotes — this is the managed bootstrap path.
+        let against_target = source_upgrade_decision(
+            "0.298.1",
+            &active_identity("installed-target-a"),
+            source.path(),
+        );
+        assert_eq!(against_target, SourceUpgradeDecision::DifferentIdentity);
+        assert!(against_target.upgrades());
+        assert!(controller_replacement_proceeds(
+            false,
+            Some(against_target),
+            false
+        ));
+    }
+
+    #[test]
+    fn resolve_source_upgrade_target_falls_back_to_current_identity_when_not_engaged() {
+        // When source upgrade is not engaged, the target resolution must not
+        // re-exec any binary and simply reports the in-process identity so
+        // ordinary (non-source) upgrades are unchanged.
+        let (version, identity) = resolve_source_upgrade_target(false, "9.9.9");
+        assert_eq!(version, "9.9.9");
+        assert_eq!(identity, build_identity::current());
     }
 
     #[test]

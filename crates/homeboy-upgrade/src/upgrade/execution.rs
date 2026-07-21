@@ -932,6 +932,90 @@ pub(crate) fn active_binary_path() -> Result<PathBuf> {
     })
 }
 
+/// Resolve the build identity of the *installed target* controller binary — the
+/// one `active_binary_path` selects on PATH — rather than the in-process
+/// candidate returned by `build_identity::current()`.
+///
+/// A source-built candidate that invokes *itself* must compare its source
+/// against the installed binary it is trying to replace. Comparing against the
+/// candidate's own identity always reports "same identity" and produces a no-op
+/// upgrade (#9371). This queries the installed target's `--version` so the
+/// source-upgrade decision evaluates the real replacement target.
+///
+/// Returns `None` when the installed target cannot be identified (missing binary,
+/// unverifiable `--version`, or an identity string that does not parse), which
+/// keeps the decision on the safe `IdentityUnavailable` path.
+pub(crate) fn installed_target_build_identity(
+) -> Result<Option<homeboy_core::build_identity::BuildIdentity>> {
+    let target_path = active_binary_path()?;
+    let candidate_path = std::env::current_exe().ok();
+
+    // When the invoking binary *is* the installed target, the in-process
+    // identity is authoritative and needs no re-exec. This also preserves the
+    // normal installed-binary invocation contract unchanged.
+    if let Some(candidate) = candidate_path.as_deref() {
+        if paths_identify_same_binary(candidate, &target_path) {
+            return Ok(Some(homeboy_core::build_identity::current()));
+        }
+    }
+
+    let Some(info) = active_binary_info_at(&target_path)? else {
+        return Ok(None);
+    };
+    Ok(info
+        .build_identity
+        .as_deref()
+        .and_then(parse_build_identity_display))
+}
+
+/// Treat two paths as the same binary when they canonicalize to the same file.
+/// Falls back to a raw comparison when canonicalization fails (e.g. a path that
+/// no longer exists), which biases toward the safe "re-exec the target" branch.
+fn paths_identify_same_binary(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Reconstruct a `BuildIdentity` from a controller `--version` display string of
+/// the form `homeboy <version>[+<commit>[-dirty]]` (the exact format
+/// `homeboy_product_identity` emits). Returns `None` for an unrecognizable
+/// string so callers can fall back to the safe unverifiable-replacement path.
+pub(crate) fn parse_build_identity_display(
+    display: &str,
+) -> Option<homeboy_core::build_identity::BuildIdentity> {
+    let display = display.trim();
+    // Take the last whitespace-delimited token so a leading product name
+    // (`homeboy 0.298.1+abc`) is tolerated without hard-coding it.
+    let token = display.split_whitespace().last()?;
+
+    let (version, commit, dirty) = match token.split_once('+') {
+        Some((version, remainder)) => {
+            let (commit, dirty) = match remainder.strip_suffix("-dirty") {
+                Some(commit) => (commit, Some(true)),
+                None => (remainder, Some(false)),
+            };
+            let commit = (!commit.is_empty()).then(|| commit.to_string());
+            // A `+` with no commit yields no verifiable commit identity.
+            let dirty = commit.as_ref().and(dirty);
+            (version.to_string(), commit, dirty)
+        }
+        None => (token.to_string(), None, None),
+    };
+
+    // Validate the version is semver-parseable; an unparseable version cannot
+    // participate in the deterministic decision and must stay unverifiable.
+    semver::Version::parse(version.trim_start_matches('v')).ok()?;
+
+    Some(homeboy_core::build_identity::BuildIdentity {
+        display: display.to_string(),
+        version,
+        git_commit: commit,
+        git_dirty: dirty,
+    })
+}
+
 pub(crate) fn upgrade_verification_result(
     method: InstallMethod,
     force: bool,
