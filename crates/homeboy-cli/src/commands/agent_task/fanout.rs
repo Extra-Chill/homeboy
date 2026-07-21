@@ -140,10 +140,37 @@ pub(crate) fn run_batch_cook_fanout_with_attempt_dispatcher(
     run_batch_cook_fanout_plan_with_attempt_dispatcher(plan, attempt_dispatcher)
 }
 
+/// Persist the durable batch record before dispatching children so
+/// `fanout status <fanout_id>` can resolve every child run (#9397). Without
+/// this, run-plan admitted children but never wrote
+/// `agent-task-batches/<fanout_id>.json`, so status failed with
+/// `No such file or directory`.
+fn persist_fanout_run_batch_record(plan: &BatchCookFanoutPlan) -> Result<()> {
+    let children = plan
+        .cooks
+        .iter()
+        .map(|cook| batch::FanoutRunBatchChild {
+            task_id: cook.cook_id.clone(),
+            run_id: cook.run_id(),
+        })
+        .collect::<Vec<_>>();
+    batch::persist_fanout_run_batch(
+        &plan.fanout_id,
+        &plan.fanout_id,
+        &children,
+        serde_json::json!({
+            "source": "fanout-run-plan",
+            "durable_child_runs": true,
+        }),
+    )?;
+    Ok(())
+}
+
 fn run_batch_cook_fanout_plan_with_attempt_dispatcher(
     plan: BatchCookFanoutPlan,
     attempt_dispatcher: &CookAttemptDispatcherFactory,
 ) -> CmdResult<Value> {
+    persist_fanout_run_batch_record(&plan)?;
     let result = agent_task_service::run_cook_batch(
         agent_task_service::AgentTaskCookBatchOptions {
             batch_id: plan.fanout_id.clone(),
@@ -171,6 +198,7 @@ fn run_batch_cook_fanout_plan_with_executor<E>(
 where
     E: homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone + Send,
 {
+    persist_fanout_run_batch_record(&plan)?;
     let result = agent_task_service::run_cook_batch(
         agent_task_service::AgentTaskCookBatchOptions {
             batch_id: plan.fanout_id.clone(),
@@ -248,6 +276,10 @@ fn batch_cook_result(
             "status": report.status,
             "summary": { "total": report.total, "succeeded": report.succeeded, "failed": report.failed },
             "cooks": cooks,
+            "commands": {
+                "status": format!("homeboy agent-task fanout status {}", plan.fanout_id),
+                "artifacts": format!("homeboy agent-task fanout artifacts {}", plan.fanout_id),
+            },
         }),
         result.exit_code,
     )

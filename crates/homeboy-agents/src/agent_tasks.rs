@@ -185,11 +185,11 @@ pub mod cook_loop {
 /// Durable batch/fanout lifecycle records built from independent child runs.
 pub mod batch {
     pub use super::super::agent_task_batch::{
-        artifacts, status, submit_plan_batch, AgentTaskBatchArtifactsReport,
-        AgentTaskBatchChildArtifacts, AgentTaskBatchChildRun, AgentTaskBatchCommands,
-        AgentTaskBatchRecord, AgentTaskBatchState, AgentTaskBatchStatusReport,
-        AgentTaskBatchTotals, AGENT_TASK_BATCH_ARTIFACTS_SCHEMA, AGENT_TASK_BATCH_SCHEMA,
-        AGENT_TASK_BATCH_STATUS_SCHEMA,
+        artifacts, persist_fanout_run_batch, status, submit_plan_batch,
+        AgentTaskBatchArtifactsReport, AgentTaskBatchChildArtifacts, AgentTaskBatchChildRun,
+        AgentTaskBatchCommands, AgentTaskBatchRecord, AgentTaskBatchState,
+        AgentTaskBatchStatusReport, AgentTaskBatchTotals, FanoutRunBatchChild,
+        AGENT_TASK_BATCH_ARTIFACTS_SCHEMA, AGENT_TASK_BATCH_SCHEMA, AGENT_TASK_BATCH_STATUS_SCHEMA,
     };
 }
 
