@@ -688,6 +688,11 @@ fn preacceptance_snapshot_binds_the_accepted_daemon_job_before_validation() {
             Some(&plan),
         )
         .expect("persist pending controller handoff");
+        assert_eq!(
+            record.lab_handoff.as_ref().expect("pending handoff").state,
+            AgentTaskLabHandoffState::Pending,
+            "the controller must establish typed acceptance authority before a staging snapshot can arrive"
+        );
         let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
         snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
         snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
