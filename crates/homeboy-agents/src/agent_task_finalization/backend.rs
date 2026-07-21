@@ -5,8 +5,8 @@ use super::{
 use crate::agent_task_promotion::{AgentTaskPromotionCandidate, AgentTaskPromotionReport};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{
-    commit_at, get_uncommitted_changes, pr_create, pr_edit, pr_find, push_at, CommitOptions,
-    PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
+    commit_at, get_uncommitted_changes, pr_create, pr_edit, pr_find, push_at, run_git,
+    CommitOptions, PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
 };
 use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
 use serde::de::DeserializeOwned;
@@ -434,20 +434,18 @@ fn remote_head_is_ancestor_of_candidate(path: &str, remote_head: &str, local_hea
         .unwrap_or(false)
 }
 
+/// Run git and return trimmed stdout. Thin delegation to the canonical
+/// `homeboy_core::git::run_git` so the command spelling and failure handling
+/// live in one place (richer diagnostics: command, cwd, exit code, stderr).
+/// `run_git` returns raw stdout, so trim here to preserve this wrapper's
+/// long-standing trimmed contract for its call sites.
 fn git_output(path: &str, args: &[&str]) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    if !output.status.success() {
-        return Err(Error::git_command_failed(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    run_git(
+        std::path::Path::new(path),
+        args,
+        &format!("git {}", args.join(" ")),
+    )
+    .map(|stdout| stdout.trim().to_string())
 }
 
 fn is_git_object_id(value: &str) -> bool {
