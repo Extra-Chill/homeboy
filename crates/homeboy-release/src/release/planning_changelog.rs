@@ -264,7 +264,7 @@ mod tests {
     };
     use crate::release::scope::ReleaseScope;
     use crate::release::types::ReleaseOptions;
-    use homeboy_core::component::Component;
+    use homeboy_core::component::{CommandScopeConfig, Component, ScopeConfig};
     use homeboy_core::git::{CommitCategory, CommitInfo};
 
     fn commit(subject: &str, category: CommitCategory) -> CommitInfo {
@@ -510,7 +510,7 @@ mod tests {
         run_git(dir, &["config", "user.name", "PHP Author"]);
         commit_file(
             dir,
-            "figma-transformer/src/index.ts",
+            "php-transformer/tools/visual-parity/figma.ts",
             "figma",
             "feat: figma-only change (#912)",
         );
@@ -521,13 +521,17 @@ mod tests {
             "fix: php-only change (#942)",
         );
         std::fs::write(dir.join("php-transformer/src/index.php"), "mixed").unwrap();
-        std::fs::write(dir.join("figma-transformer/src/index.ts"), "mixed").unwrap();
+        std::fs::write(
+            dir.join("php-transformer/tools/visual-parity/figma.ts"),
+            "mixed",
+        )
+        .unwrap();
         run_git(
             dir,
             &[
                 "add",
                 "php-transformer/src/index.php",
-                "figma-transformer/src/index.ts",
+                "php-transformer/tools/visual-parity/figma.ts",
             ],
         );
         run_git(
@@ -544,6 +548,13 @@ mod tests {
             id: "php-transformer".to_string(),
             local_path: dir.join("php-transformer").to_string_lossy().to_string(),
             remote_url: Some("https://github.com/Automattic/blocks-engine.git".to_string()),
+            scopes: Some(ScopeConfig {
+                release: Some(CommandScopeConfig {
+                    include: vec![],
+                    exclude: vec!["tools/visual-parity/**".to_string()],
+                }),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let scope = ReleaseScope::resolve(&component, &component.id).unwrap();
