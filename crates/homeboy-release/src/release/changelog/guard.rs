@@ -39,8 +39,20 @@ pub fn generated_file_mutation_is_authorized(
                 .run_id
                 .as_deref()
                 .is_some_and(|id| !id.trim().is_empty())
-            && provenance.step_id.as_deref() == Some("changelog.finalize")
+            && provenance
+                .step_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
     })
+}
+
+/// Whether durable release provenance identifies the expected producing step.
+pub fn generated_file_mutation_is_authorized_for(
+    provenance: Option<&ChangeArtifactProvenance>,
+    step_id: &str,
+) -> bool {
+    generated_file_mutation_is_authorized(provenance)
+        && provenance.is_some_and(|provenance| provenance.step_id.as_deref() == Some(step_id))
 }
 
 /// Detect whether `changed_files` modifies the configured `changelog_target`.
@@ -89,7 +101,9 @@ pub fn detect_manual_changelog_edit(
     provenance: Option<&ChangeArtifactProvenance>,
 ) -> Option<ChangelogGuardViolation> {
     let violation = detect_changelog_edit(changelog_target, changed_files)?;
-    (!allow_manual_edits && !generated_file_mutation_is_authorized(provenance)).then_some(violation)
+    (!allow_manual_edits
+        && !generated_file_mutation_is_authorized_for(provenance, "changelog.finalize"))
+    .then_some(violation)
 }
 
 /// Build the steering message shown when a changeset hand-edits the changelog.
@@ -270,6 +284,23 @@ mod tests {
         ] {
             assert!(!generated_file_mutation_is_authorized(Some(&provenance)));
         }
+    }
+
+    #[test]
+    fn generated_file_policy_requires_the_expected_producing_step() {
+        let provenance = ChangeArtifactProvenance {
+            source: "release".to_string(),
+            run_id: Some("release.component".to_string()),
+            step_id: Some("version".to_string()),
+            command: None,
+            captured_at: None,
+        };
+
+        assert!(generated_file_mutation_is_authorized(Some(&provenance)));
+        assert!(!generated_file_mutation_is_authorized_for(
+            Some(&provenance),
+            "changelog.finalize"
+        ));
     }
 
     #[test]

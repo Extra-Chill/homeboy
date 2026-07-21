@@ -48,21 +48,7 @@ use std::path::Path;
 pub fn drift_file_paths(component: &Component) -> Vec<String> {
     let mut extras: BTreeSet<String> = BTreeSet::new();
 
-    if let Some(extensions) = component.extensions.as_ref() {
-        for extension_id in extensions.keys() {
-            let Ok(manifest) = crate::extension_store::load_extension(extension_id) else {
-                continue;
-            };
-            let Some(build) = manifest.build.as_ref() else {
-                continue;
-            };
-            for path in &build.lockfile_paths {
-                if let Some(normalized) = normalize_relative_drift_path(path) {
-                    extras.insert(normalized);
-                }
-            }
-        }
-    }
+    extras.extend(extension_declared_lockfile_paths(component));
 
     for path in &component.extra_drift_files {
         if let Some(normalized) = normalize_relative_drift_path(path) {
@@ -74,6 +60,32 @@ pub fn drift_file_paths(component: &Component) -> Vec<String> {
     out.push("homeboy.json".to_string());
     out.extend(extras);
     out
+}
+
+/// Resolve normalized lockfiles declared by the component's enabled extensions.
+/// This is shared by drift and release ownership policy so extension resolution
+/// remains defined in one owning layer.
+pub fn extension_declared_lockfile_paths(component: &Component) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    if let Some(extensions) = component.extensions.as_ref() {
+        for extension_id in extensions.keys() {
+            let Ok(manifest) = crate::extension_store::load_extension(extension_id) else {
+                continue;
+            };
+            let Some(build) = manifest.build.as_ref() else {
+                continue;
+            };
+            paths.extend(normalize_extension_lockfile_paths(&build.lockfile_paths));
+        }
+    }
+    paths.into_iter().collect()
+}
+
+fn normalize_extension_lockfile_paths(paths: &[String]) -> BTreeSet<String> {
+    paths
+        .iter()
+        .filter_map(|path| normalize_relative_drift_path(path))
+        .collect()
 }
 
 /// Normalize a drift path into a repo-root-relative POSIX-style string.
@@ -142,6 +154,21 @@ mod tests {
         assert!(normalize_relative_drift_path("/etc/passwd").is_none());
         assert!(normalize_relative_drift_path("../escape").is_none());
         assert!(normalize_relative_drift_path("").is_none());
+    }
+
+    #[test]
+    fn extension_declared_lockfiles_are_normalized_and_deduplicated() {
+        assert_eq!(
+            normalize_extension_lockfile_paths(&[
+                "./package-lock.json".to_string(),
+                "package-lock.json".to_string(),
+                "nested/pnpm-lock.yaml".to_string(),
+                "../escape.lock".to_string(),
+            ])
+            .into_iter()
+            .collect::<Vec<_>>(),
+            vec!["nested/pnpm-lock.yaml", "package-lock.json"]
+        );
     }
 
     #[test]

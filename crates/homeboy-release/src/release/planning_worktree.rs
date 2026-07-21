@@ -173,7 +173,7 @@ pub(super) fn get_release_allowed_files(
     allowed
 }
 
-fn derived_release_lockfiles(version_target: &str) -> Vec<String> {
+pub(super) fn derived_release_lockfiles(version_target: &str) -> Vec<String> {
     let path = std::path::Path::new(version_target);
     let parent = path
         .parent()

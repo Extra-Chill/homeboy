@@ -237,6 +237,13 @@ pub struct ComponentReleaseConfig {
     /// Disabled by default because configured changelogs are release-generated.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_manual_changelog_edits: bool,
+    /// Configured version-target paths that intentionally receive manual
+    /// maintenance outside a Homeboy release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manual_version_targets: Vec<String>,
+    /// Extension-declared release lockfiles intentionally maintained manually.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manual_release_lockfiles: Vec<String>,
     /// Per-ZIP source-to-archive coverage declarations for transformed packages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub package_coverage: Vec<PackageCoverageConfig>,
@@ -491,5 +498,7 @@ mod tests {
         let value = serde_json::to_value(ComponentReleaseConfig::default()).expect("serialize");
 
         assert!(value.get("allow_manual_changelog_edits").is_none());
+        assert!(value.get("manual_version_targets").is_none());
+        assert!(value.get("manual_release_lockfiles").is_none());
     }
 }

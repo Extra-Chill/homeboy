@@ -7,7 +7,7 @@ mod settings;
 pub use bulk::{show, ShowOutput};
 pub use guard::{
     detect_changelog_edit, detect_manual_changelog_edit, generated_file_mutation_is_authorized,
-    ChangelogGuardViolation,
+    generated_file_mutation_is_authorized_for, ChangelogGuardViolation,
 };
 pub use io::{
     discover_changelog_relative_path, read_component_snapshots, resolve_changelog_path,
