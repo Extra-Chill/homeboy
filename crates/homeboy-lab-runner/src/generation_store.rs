@@ -340,13 +340,25 @@ pub(crate) fn job_session(
     legacy: Option<&RunnerSession>,
 ) -> Result<Option<RunnerSession>> {
     Ok(read(runner_id, legacy)?.and_then(|generations| {
-        generations.job_owner(job_id).and_then(|owner| {
-            generations
-                .generations
-                .get(owner)
-                .map(|generation| generation.endpoint.clone())
-        })
+        generations
+            .job_owner(job_id)
+            .and_then(|owner| owner_session(&generations, owner))
     }))
+}
+
+fn owner_session(
+    generations: &RollingGenerations<RunnerSession>,
+    owner: &str,
+) -> Option<RunnerSession> {
+    generations
+        .generations
+        .get(owner)
+        .or_else(|| {
+            generations.generations.values().find(|generation| {
+                generation.endpoint.remote_daemon_lease_id.as_deref() == Some(owner)
+            })
+        })
+        .map(|generation| generation.endpoint.clone())
 }
 
 /// Resolve every generation-aware endpoint through one persisted ownership
@@ -362,8 +374,7 @@ pub(crate) fn endpoint_session(
     Ok(read(runner_id, legacy)?.and_then(|generations| {
         generations
             .endpoint_owner(job_id, run_id, artifact_id)
-            .and_then(|owner| generations.generations.get(owner))
-            .map(|generation| generation.endpoint.clone())
+            .and_then(|owner| owner_session(&generations, owner))
     }))
 }
 
@@ -619,7 +630,30 @@ pub(crate) fn activate(
         let mut generations = read_locked(runner_id, Some(current))?.unwrap_or_else(|| {
             RollingGenerations::new(legacy_generation(current), current.clone())
         });
-        let draining_owner = legacy_generation(current);
+        let current_lease = current.remote_daemon_lease_id.as_deref();
+        let draining_owner = generations
+            .generations
+            .iter()
+            .find_map(|(generation, entry)| {
+                (current_lease.is_some()
+                    && entry.endpoint.remote_daemon_lease_id.as_deref() == current_lease)
+                    .then(|| generation.clone())
+            })
+            .unwrap_or_else(|| legacy_generation(current));
+        let legacy_owner = legacy_generation(current);
+        if draining_owner != legacy_owner {
+            for owners in [
+                &mut generations.job_owners,
+                &mut generations.run_owners,
+                &mut generations.artifact_owners,
+            ] {
+                for owner in owners.values_mut() {
+                    if owner == &legacy_owner {
+                        *owner = draining_owner.clone();
+                    }
+                }
+            }
+        }
         // Legacy sessions have no ledger yet. Pin authoritative active work before
         // activation because `activate` retires zero-job drains immediately.
         for job_id in draining_job_ids {
@@ -1291,6 +1325,71 @@ mod tests {
             assert_eq!(final_projection.len(), 1);
             assert_eq!(final_projection[0].generation, "build-b");
             assert_eq!(final_projection[0].active_job_count, 1);
+        });
+    }
+
+    #[test]
+    fn second_rotation_keeps_jobs_owned_by_the_named_draining_generation() {
+        test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon-a", Some(101));
+            let b = session("lease-b", "daemon-b", Some(202));
+            let c = session("lease-c", "daemon-c", Some(303));
+
+            activate("runner-a", &a, "build-b".to_string(), b.clone(), &[]).expect("promote B");
+            record_job("runner-a", &b, "job-b").expect("record B job");
+
+            activate(
+                "runner-a",
+                &b,
+                "build-c".to_string(),
+                c.clone(),
+                &["job-b".to_string()],
+            )
+            .expect("promote C");
+
+            let generations = read("runner-a", Some(&c))
+                .expect("read generations")
+                .expect("generation registry");
+            assert_eq!(generations.job_owner("job-b"), Some("build-b"));
+            assert_eq!(
+                job_session("runner-a", "job-b", Some(&c)).expect("route B job"),
+                Some(b)
+            );
+            assert_eq!(generations.generations["build-b"].active_jobs, 1);
+            assert_eq!(generations.admission_owner, "build-c");
+        });
+    }
+
+    #[test]
+    fn persisted_lease_alias_routes_to_its_named_generation() {
+        test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon-a", Some(101));
+            let b = session("lease-b", "daemon-b", Some(202));
+            let mut generations = RollingGenerations::new("build-a", a.clone());
+            generations
+                .generations
+                .get_mut("build-a")
+                .expect("build A generation")
+                .active_jobs = 1;
+            generations
+                .job_owners
+                .insert("job-a".to_string(), "lease-a".to_string());
+            generations
+                .run_owners
+                .insert("run-a".to_string(), "lease-a".to_string());
+            generations.begin("build-b", b.clone());
+            generations.activate("build-b");
+            write("runner-a", &generations).expect("persist lease aliases");
+
+            assert_eq!(
+                job_session("runner-a", "job-a", Some(&b)).expect("route aliased job"),
+                Some(a.clone())
+            );
+            assert_eq!(
+                endpoint_session("runner-a", None, Some("run-a"), None, Some(&b))
+                    .expect("route aliased run"),
+                Some(a)
+            );
         });
     }
 
