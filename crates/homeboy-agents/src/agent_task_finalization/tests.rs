@@ -1770,6 +1770,8 @@ fn options() -> AgentTaskPrFinalizationOptions {
             source_relationship: AgentTaskPrSourceRelationship::default(),
             verification: AgentTaskPrVerification::default(),
             runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
+            changed_public_contracts: Vec::new(),
+            public_contract_evidence: None,
             lifecycle: None,
         },
         ai_used_for: "Drafted implementation and tests; Chris reviews and owns the change."
@@ -1784,6 +1786,8 @@ fn options() -> AgentTaskPrFinalizationOptions {
             }],
             compatibility: "No compatibility impact.".to_string(),
             evidence: Vec::new(),
+            changed_public_contracts: Vec::new(),
+            public_contract_evidence: None,
             ai_assistance: crate::agent_task_review_dossier::AgentTaskReviewAiAssistance {
                 used: true,
                 tool: "OpenCode (GPT-5.5)".to_string(),

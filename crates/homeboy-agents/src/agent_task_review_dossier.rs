@@ -53,6 +53,36 @@ pub struct AgentTaskReviewEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPublicContract {
+    pub id: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskExternalUsageStatus {
+    Completed,
+    UnavailableManualReview,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskExternalUsageEvidence {
+    pub status: AgentTaskExternalUsageStatus,
+    pub source: String,
+    pub limitations: String,
+    pub url: String,
+}
+
+/// Reviewer-facing evidence required when this change declares a public contract.
+/// The contract itself remains generic; callers supply their own ecosystem meaning.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPublicContractEvidence {
+    pub compatibility_impact: String,
+    pub external_consumer_impact: String,
+    pub external_usage: AgentTaskExternalUsageEvidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskReviewDossier {
     #[serde(default = "dossier_schema")]
     pub schema: String,
@@ -62,6 +92,10 @@ pub struct AgentTaskReviewDossier {
     pub compatibility: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<AgentTaskReviewEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_public_contracts: Vec<AgentTaskPublicContract>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_contract_evidence: Option<AgentTaskPublicContractEvidence>,
     pub ai_assistance: AgentTaskReviewAiAssistance,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_relationships: Vec<AgentTaskReviewIssueRelationship>,
@@ -149,6 +183,15 @@ pub fn validate_profile(profile: &AgentTaskReviewProfile) -> Result<()> {
         return invalid(
             "review_profile",
             "required and hidden sections cannot conflict",
+        );
+    }
+    if profile
+        .hidden_sections
+        .contains(&AgentTaskReviewSectionId::HowToTest)
+    {
+        return invalid(
+            "review_profile",
+            "How to test cannot be hidden from generated PRs",
         );
     }
     let mut additional = std::collections::BTreeSet::new();
@@ -244,6 +287,54 @@ impl AgentTaskReviewDossier {
                 validate_reviewer_url(url)?;
             }
         }
+        for contract in &self.changed_public_contracts {
+            scalar("changed_public_contracts.id", &contract.id)?;
+            scalar("changed_public_contracts.summary", &contract.summary)?;
+            if contract.id.trim().is_empty() || contract.summary.trim().is_empty() {
+                return invalid(
+                    "changed_public_contracts",
+                    "each declared public contract needs an identifier and summary",
+                );
+            }
+        }
+        match (&self.changed_public_contracts[..], &self.public_contract_evidence) {
+            ([], Some(_)) => {
+                return invalid(
+                    "public_contract_evidence",
+                    "public-contract evidence requires a declared changed public contract",
+                )
+            }
+            (contracts, None) if !contracts.is_empty() => {
+                return invalid(
+                    "public_contract_evidence",
+                    "declared public contracts require compatibility, external-consumer, and external-usage evidence",
+                )
+            }
+            (_, Some(evidence)) => {
+                scalar(
+                    "public_contract_evidence.compatibility_impact",
+                    &evidence.compatibility_impact,
+                )?;
+                scalar(
+                    "public_contract_evidence.external_consumer_impact",
+                    &evidence.external_consumer_impact,
+                )?;
+                scalar("public_contract_evidence.external_usage.source", &evidence.external_usage.source)?;
+                scalar("public_contract_evidence.external_usage.limitations", &evidence.external_usage.limitations)?;
+                validate_reviewer_url(&evidence.external_usage.url)?;
+                if evidence.compatibility_impact.trim().is_empty()
+                    || evidence.external_consumer_impact.trim().is_empty()
+                    || evidence.external_usage.source.trim().is_empty()
+                    || evidence.external_usage.limitations.trim().is_empty()
+                {
+                    return invalid(
+                        "public_contract_evidence",
+                        "public-contract evidence requires non-empty compatibility impact, external-consumer impact, usage source, and usage limitations",
+                    );
+                }
+            }
+            _ => {}
+        }
         for relationship in &self.source_relationships {
             validate_issue_reference(&relationship.reference)?;
         }
@@ -254,7 +345,7 @@ impl AgentTaskReviewDossier {
         {
             return invalid("what_changed", "what changed is required");
         }
-        if required(profile, AgentTaskReviewSectionId::HowToTest) && self.how_to_test.is_empty() {
+        if self.how_to_test.is_empty() {
             return invalid("how_to_test", "How to test requires --test-step COMMAND=>EXPECTED, a recorded targeted command, or a manual reviewer instruction");
         }
         if required(profile, AgentTaskReviewSectionId::Compatibility)
@@ -341,6 +432,7 @@ pub fn render_review_dossier(
             ))
         }
         AgentTaskReviewSectionId::Compatibility if !dossier.compatibility.is_empty() => Some(("Compatibility", prose(&dossier.compatibility))),
+        AgentTaskReviewSectionId::Evidence if !dossier.changed_public_contracts.is_empty() => Some(("Evidence", format!("{}{}", render_public_contract_evidence(dossier), render_evidence(&dossier.evidence)))),
         AgentTaskReviewSectionId::Evidence if !dossier.evidence.is_empty() => Some(("Evidence", dossier.evidence.iter().map(|item| match &item.url { Some(url) => format!("- {}: {url}", prose(&item.summary)), None => format!("- {}", prose(&item.summary)) }).collect::<Vec<_>>().join("\n"))),
         AgentTaskReviewSectionId::AiAssistance => Some(("AI assistance", format!("- **AI assistance:** {}\n- **Tool(s):** {}\n- **Model:** {}\n- **Used for:** {}", if dossier.ai_assistance.used { "Yes" } else { "No" }, prose(&dossier.ai_assistance.tool), prose(&dossier.ai_assistance.model), prose(&dossier.ai_assistance.used_for)))),
         AgentTaskReviewSectionId::SourceRelationships if !dossier.source_relationships.is_empty() => Some(("Source relationships", dossier.source_relationships.iter().map(|item| format!("- {} {}", match item.kind { AgentTaskReviewIssueRelationshipKind::Closes => "Closes", AgentTaskReviewIssueRelationshipKind::RelatesTo => "Relates to" }, relationship_reference(&item.reference))).collect::<Vec<_>>().join("\n"))), _ => None };
@@ -358,6 +450,40 @@ pub fn render_review_dossier(
         }
     }
     sections.join("\n\n") + "\n"
+}
+fn render_public_contract_evidence(dossier: &AgentTaskReviewDossier) -> String {
+    let contracts = dossier
+        .changed_public_contracts
+        .iter()
+        .map(|contract| format!("- `{}`: {}", code(&contract.id), prose(&contract.summary)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let evidence = dossier
+        .public_contract_evidence
+        .as_ref()
+        .expect("validated before rendering");
+    let status = match &evidence.external_usage.status {
+        AgentTaskExternalUsageStatus::Completed => "completed",
+        AgentTaskExternalUsageStatus::UnavailableManualReview => "unavailable_manual_review",
+    };
+    format!(
+        "**Declared public contracts**\n{contracts}\n\n**Compatibility impact:** {}\n\n**External-consumer impact:** {}\n\n**External usage:** {status}; source: {}; limitations: {}; evidence: {}\n\n",
+        prose(&evidence.compatibility_impact),
+        prose(&evidence.external_consumer_impact),
+        prose(&evidence.external_usage.source),
+        prose(&evidence.external_usage.limitations),
+        evidence.external_usage.url,
+    )
+}
+fn render_evidence(evidence: &[AgentTaskReviewEvidence]) -> String {
+    evidence
+        .iter()
+        .map(|item| match &item.url {
+            Some(url) => format!("- {}: {url}", prose(&item.summary)),
+            None => format!("- {}", prose(&item.summary)),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn ordered_sections(profile: &AgentTaskReviewProfile) -> Vec<AgentTaskReviewSectionId> {
@@ -640,6 +766,8 @@ mod tests {
             }],
             compatibility: "No compatibility impact".into(),
             evidence: Vec::new(),
+            changed_public_contracts: Vec::new(),
+            public_contract_evidence: None,
             ai_assistance: AgentTaskReviewAiAssistance {
                 used: true,
                 tool: "OpenCode".into(),
@@ -715,6 +843,104 @@ mod tests {
             url: Some("https://localhost/a".into()),
         });
         assert!(value.validate(&default_profile()).is_err());
+    }
+
+    fn public_contract_evidence() -> AgentTaskPublicContractEvidence {
+        AgentTaskPublicContractEvidence {
+            compatibility_impact: "Existing callers retain their supported behavior.".into(),
+            external_consumer_impact: "External consumers must review the declared change.".into(),
+            external_usage: AgentTaskExternalUsageEvidence {
+                status: AgentTaskExternalUsageStatus::Completed,
+                source: "Repository-wide usage search".into(),
+                limitations: "Search only covers the indexed source repositories.".into(),
+                url: "https://github.com/example/project/issues/1".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn declared_public_contract_requires_complete_reviewer_evidence() {
+        let mut value = dossier();
+        value
+            .changed_public_contracts
+            .push(AgentTaskPublicContract {
+                id: "api.widget.render".into(),
+                summary: "Changes the rendered result.".into(),
+            });
+        assert!(value.validate(&default_profile()).is_err());
+
+        value.public_contract_evidence = Some(public_contract_evidence());
+        value
+            .validate(&default_profile())
+            .expect("complete evidence");
+        assert!(
+            render_review_dossier(&value, &default_profile()).contains("unavailable_manual_review")
+                == false
+        );
+    }
+
+    #[test]
+    fn public_contract_evidence_rejects_malformed_or_local_only_proof() {
+        let mut value = dossier();
+        value
+            .changed_public_contracts
+            .push(AgentTaskPublicContract {
+                id: "api.widget.render".into(),
+                summary: "Changes the rendered result.".into(),
+            });
+        let mut evidence = public_contract_evidence();
+        evidence.external_usage.source.clear();
+        value.public_contract_evidence = Some(evidence);
+        assert!(value.validate(&default_profile()).is_err());
+
+        let mut evidence = public_contract_evidence();
+        evidence.external_usage.url = "https://localhost/evidence".into();
+        value.public_contract_evidence = Some(evidence);
+        assert!(value.validate(&default_profile()).is_err());
+    }
+
+    #[test]
+    fn unavailable_manual_review_is_accepted_with_durable_evidence() {
+        let mut value = dossier();
+        value
+            .changed_public_contracts
+            .push(AgentTaskPublicContract {
+                id: "api.widget.render".into(),
+                summary: "Changes the rendered result.".into(),
+            });
+        let mut evidence = public_contract_evidence();
+        evidence.external_usage.status = AgentTaskExternalUsageStatus::UnavailableManualReview;
+        value.public_contract_evidence = Some(evidence);
+        value
+            .validate(&default_profile())
+            .expect("manual review outcome");
+        assert!(
+            render_review_dossier(&value, &default_profile()).contains("unavailable_manual_review")
+        );
+    }
+
+    #[test]
+    fn internal_only_changes_do_not_require_public_contract_evidence() {
+        dossier()
+            .validate(&default_profile())
+            .expect("internal-only change");
+    }
+
+    #[test]
+    fn test_instructions_are_required_even_when_profile_does_not_require_them() {
+        let mut value = dossier();
+        value.how_to_test.clear();
+        let profile = AgentTaskReviewProfile {
+            required_sections: vec![AgentTaskReviewSectionId::Summary],
+            ..Default::default()
+        };
+        assert!(value.validate(&profile).is_err());
+
+        let hidden = AgentTaskReviewProfile {
+            hidden_sections: vec![AgentTaskReviewSectionId::HowToTest],
+            ..Default::default()
+        };
+        assert!(validate_profile(&hidden).is_err());
     }
 
     #[test]

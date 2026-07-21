@@ -15,8 +15,9 @@ use homeboy::agents::agent_tasks::provider::{
     AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
-    resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
-    AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind,
+    resolve_review_profile, AgentTaskExternalUsageEvidence, AgentTaskExternalUsageStatus,
+    AgentTaskPublicContract, AgentTaskPublicContractEvidence, AgentTaskReviewAiAssistance,
+    AgentTaskReviewDossier, AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind,
     AgentTaskReviewOverride, AgentTaskReviewOverrideTarget, AgentTaskReviewTestStep,
     AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
 };
@@ -104,11 +105,47 @@ pub struct FinalizePrEvidenceArgs {
     /// Nearby predicate/contract preserved by the runtime fix. Repeatable.
     #[arg(long = "nearby-contract-preserved", value_name = "TEXT")]
     pub nearby_contracts_preserved: Vec<String>,
+
+    /// Declared changed public contract as ID=>SUMMARY. Repeatable.
+    #[arg(long = "changed-public-contract", value_name = "ID=>SUMMARY")]
+    pub changed_public_contracts: Vec<String>,
+
+    /// Compatibility impact for declared public contracts.
+    #[arg(long, value_name = "TEXT")]
+    pub compatibility_impact: Option<String>,
+
+    /// External-consumer impact for declared public contracts.
+    #[arg(long, value_name = "TEXT")]
+    pub external_consumer_impact: Option<String>,
+
+    /// External usage evidence status: completed or unavailable_manual_review.
+    #[arg(long, value_name = "STATUS")]
+    pub external_usage_status: Option<String>,
+
+    /// Source used for external usage evidence.
+    #[arg(long, value_name = "TEXT")]
+    pub external_usage_source: Option<String>,
+
+    /// Limitations of the external usage evidence or manual review.
+    #[arg(long, value_name = "TEXT")]
+    pub external_usage_limitations: Option<String>,
+
+    /// Reviewer-resolvable HTTPS URL for external usage evidence.
+    #[arg(long, value_name = "URL")]
+    pub external_usage_url: Option<String>,
 }
 
-impl From<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
-    fn from(args: FinalizePrEvidenceArgs) -> Self {
-        Self {
+impl TryFrom<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
+    type Error = homeboy::core::Error;
+
+    fn try_from(args: FinalizePrEvidenceArgs) -> homeboy::core::Result<Self> {
+        let changed_public_contracts = args
+            .changed_public_contracts
+            .iter()
+            .map(|raw| parse_public_contract(raw))
+            .collect::<homeboy::core::Result<Vec<_>>>()?;
+        let public_contract_evidence = public_contract_evidence(&args)?;
+        Ok(Self {
             source_refs: args.source_refs,
             artifact_refs: args.artifact_refs,
             attempt_summary: args.attempt_summary,
@@ -132,8 +169,10 @@ impl From<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
                 evidence_discriminators: args.evidence_discriminators,
                 nearby_contracts_preserved: args.nearby_contracts_preserved,
             },
+            changed_public_contracts,
+            public_contract_evidence,
             lifecycle: None,
-        }
+        })
     }
 }
 
@@ -371,7 +410,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         .cloned()
         .map(HomeboyGateResult::from)
         .collect();
-    let evidence: AgentTaskPrEvidence = args.evidence.into();
+    let evidence: AgentTaskPrEvidence = args.evidence.try_into()?;
     let how_to_test = if args.test_steps.is_empty() {
         let legacy_steps: Vec<AgentTaskReviewTestStep> = evidence
             .verification
@@ -415,6 +454,8 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
                 .to_string()
         }),
         evidence: Vec::new(),
+        changed_public_contracts: evidence.changed_public_contracts.clone(),
+        public_contract_evidence: evidence.public_contract_evidence.clone(),
         ai_assistance: AgentTaskReviewAiAssistance {
             used: true,
             tool: evidence.ai_tool.clone(),
@@ -475,6 +516,61 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     value["handoff"] = finalization_handoff(&report.status, report.pr_url.as_deref());
 
     Ok((value, exit_code))
+}
+
+fn parse_public_contract(raw: &str) -> homeboy::core::Result<AgentTaskPublicContract> {
+    let (id, summary) = raw.split_once("=>").ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "changed-public-contract",
+            "expected ID=>SUMMARY",
+            None,
+            None,
+        )
+    })?;
+    Ok(AgentTaskPublicContract {
+        id: id.trim().to_string(),
+        summary: summary.trim().to_string(),
+    })
+}
+
+fn public_contract_evidence(
+    args: &FinalizePrEvidenceArgs,
+) -> homeboy::core::Result<Option<AgentTaskPublicContractEvidence>> {
+    let supplied = [
+        args.compatibility_impact.as_ref(),
+        args.external_consumer_impact.as_ref(),
+        args.external_usage_status.as_ref(),
+        args.external_usage_source.as_ref(),
+        args.external_usage_limitations.as_ref(),
+        args.external_usage_url.as_ref(),
+    ]
+    .iter()
+    .any(Option::is_some);
+    if !supplied {
+        return Ok(None);
+    }
+    let status = match args.external_usage_status.as_deref() {
+        Some("completed") => AgentTaskExternalUsageStatus::Completed,
+        Some("unavailable_manual_review") => AgentTaskExternalUsageStatus::UnavailableManualReview,
+        _ => {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "external-usage-status",
+                "must be completed or unavailable_manual_review",
+                None,
+                None,
+            ))
+        }
+    };
+    Ok(Some(AgentTaskPublicContractEvidence {
+        compatibility_impact: args.compatibility_impact.clone().unwrap_or_default(),
+        external_consumer_impact: args.external_consumer_impact.clone().unwrap_or_default(),
+        external_usage: AgentTaskExternalUsageEvidence {
+            status,
+            source: args.external_usage_source.clone().unwrap_or_default(),
+            limitations: args.external_usage_limitations.clone().unwrap_or_default(),
+            url: args.external_usage_url.clone().unwrap_or_default(),
+        },
+    }))
 }
 
 fn parse_test_step(raw: &str) -> homeboy::core::Result<AgentTaskReviewTestStep> {
