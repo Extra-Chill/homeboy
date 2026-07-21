@@ -25,9 +25,9 @@ mod smoke_check;
 
 use modes::{extension_skipped_results, run_check_mode, run_dry_run_mode};
 use preflight::{
-    check_uncommitted_changes, check_unreleased_commits, guard_local_build_downgrades,
-    guard_local_build_source_freshness, local_build_components, sync_components,
-    verify_expected_version, warn_non_default_branch,
+    check_uncommitted_changes, check_unreleased_commits, guard_head_matches_invocation_checkout,
+    guard_local_build_downgrades, guard_local_build_source_freshness, local_build_components,
+    sync_components, verify_expected_version, warn_non_default_branch,
 };
 use prepared_payloads::prepare_component_deployments;
 use smoke_check::run_post_deploy_smoke;
@@ -233,6 +233,9 @@ pub(super) fn deploy_components(
     // Warn when --head deploys from a non-default branch (safety guardrail)
     if config.head && !config.skip_build {
         warn_non_default_branch(&local_build_components, config)?;
+        // Fail closed when the invocation checkout has advanced past the
+        // registered checkout --head would actually build from (#7599).
+        guard_head_matches_invocation_checkout(&local_build_components, config)?;
     }
 
     if !config.has_requested_refs() && !config.force {
