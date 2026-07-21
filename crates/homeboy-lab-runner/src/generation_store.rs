@@ -403,6 +403,24 @@ pub(crate) fn status_projection(
     )
 }
 
+/// Report whether a refresh must preserve existing daemon endpoints. Current
+/// daemon activity is queried separately; this covers durable ownership that
+/// remains after a producing job has completed.
+pub(crate) fn requires_generation_preserving_refresh(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+) -> Result<bool> {
+    Ok(read(runner_id, legacy)?.is_some_and(|generations| {
+        generations
+            .generations
+            .values()
+            .any(|generation| generation.active_jobs > 0)
+            || !generations.job_owners.is_empty()
+            || !generations.run_owners.is_empty()
+            || !generations.artifact_owners.is_empty()
+    }))
+}
+
 pub(crate) fn live_sessions(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
@@ -1179,6 +1197,35 @@ mod tests {
             assert_eq!(persisted["job_owners"]["job-a"], "lease-a");
             assert_eq!(persisted["run_owners"]["run-a"], "lease-a");
             assert_eq!(persisted["artifact_owners"]["artifact-a"], "lease-a");
+        });
+    }
+
+    #[test]
+    fn completed_result_ownership_requires_generation_preserving_refresh_until_retired() {
+        test_support::with_isolated_home(|_| {
+            let current = session("lease-a", "daemon-a", Some(101));
+            let mut generations = RollingGenerations::new("lease-a", current.clone());
+            generations.admit_job("job-a");
+            assert!(generations.record_run("job-a", "run-a"));
+            assert!(generations.record_artifact("job-a", "artifact-a"));
+            assert!(!generations.complete_job("job-a"));
+            write("runner-a", &generations).expect("persist retained result ownership");
+
+            assert!(
+                requires_generation_preserving_refresh("runner-a", Some(&current))
+                    .expect("inspect retained ownership"),
+                "completed result owners keep their producing generation routable"
+            );
+
+            generations.retire_result_owner(RollingResultOwnerRetirement::Run("run-a"));
+            generations.retire_result_owner(RollingResultOwnerRetirement::Artifact("artifact-a"));
+            write("runner-a", &generations).expect("persist retired result ownership");
+
+            assert!(
+                !requires_generation_preserving_refresh("runner-a", Some(&current))
+                    .expect("inspect idle generation"),
+                "an idle generation can use ordinary disconnect and reconnect"
+            );
         });
     }
 
