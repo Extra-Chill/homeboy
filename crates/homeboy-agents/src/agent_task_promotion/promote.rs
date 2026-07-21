@@ -1761,25 +1761,25 @@ fn resolve_artifact_path(
     source_run_id: Option<&str>,
     source_path: Option<&Path>,
 ) -> Result<PathBuf> {
+    if let Some(run_id) = source_run_id {
+        if let Some(projected) =
+            crate::agent_task_lifecycle::verified_controller_artifact_projection_path(
+                run_id, task_id, artifact,
+            )?
+        {
+            return Ok(projected);
+        }
+    }
     let path = artifact.path.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "artifact.path",
-            "promotion patch artifact must provide a local path",
+            "promotion patch artifact must provide a local path or a verified controller-side artifact projection",
             None,
             None,
         )
     })?;
     let path = PathBuf::from(path);
     if path.is_absolute() {
-        if let Some(run_id) = source_run_id {
-            if let Some(projected) =
-                crate::agent_task_lifecycle::verified_controller_artifact_projection_path(
-                    run_id, task_id, artifact,
-                )?
-            {
-                return Ok(projected);
-            }
-        }
         if !path.is_file() {
             return Err(Error::validation_invalid_argument(
                 "artifact.path",
