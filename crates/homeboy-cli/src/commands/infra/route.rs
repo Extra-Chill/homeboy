@@ -131,6 +131,10 @@ pub fn route_after_parse(
     } else {
         None
     };
+    stage_retry_lab_handoff_before_preacceptance(
+        retry_handoff.as_ref(),
+        inferred_runner_id.as_deref(),
+    )?;
     let normalized_args = run_handoff
         .as_ref()
         .map(|handoff| handoff.args.as_slice())
@@ -728,6 +732,21 @@ fn stage_controller_lab_handoff_before_preacceptance(
         remote_command,
         durable_plan: Some(plan),
     })?;
+    Ok(())
+}
+
+fn stage_retry_lab_handoff_before_preacceptance(
+    handoff: Option<&AgentTaskRetryHandoff>,
+    runner_id: Option<&str>,
+) -> homeboy::core::Result<()> {
+    if let (Some(handoff), Some(runner_id)) = (handoff, runner_id) {
+        stage_controller_lab_handoff_before_preacceptance(
+            &handoff.run_id,
+            runner_id,
+            &handoff.args,
+            &handoff.plan,
+        )?;
+    }
     Ok(())
 }
 
