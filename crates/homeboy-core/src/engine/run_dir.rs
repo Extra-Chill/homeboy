@@ -26,6 +26,7 @@
 
 use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Well-known filenames for step outputs within a run directory.
 pub mod files {
@@ -64,6 +65,19 @@ pub fn run_dir_env() -> String {
 #[derive(Debug, Clone)]
 pub struct RunDir {
     path: PathBuf,
+    _lifecycle: Option<Arc<RunDirLifecycle>>,
+}
+
+#[derive(Debug)]
+struct RunDirLifecycle {
+    path: PathBuf,
+    _pin: super::temp::RuntimeTempPin,
+}
+
+impl Drop for RunDirLifecycle {
+    fn drop(&mut self) {
+        super::temp::retain_failed_run_dir(&self.path);
+    }
 }
 
 impl RunDir {
@@ -73,7 +87,7 @@ impl RunDir {
     /// drops or explicitly cleans it up — homeboy's temp pruner handles
     /// orphans from killed processes.
     pub fn create() -> Result<Self> {
-        let path = super::temp::runtime_temp_dir(
+        let (path, pin) = super::temp::managed_run_temp_dir(
             crate::product_identity::PRODUCT_IDENTITY.run_dir_prefix,
         )?;
         // Create annotations subdirectory
@@ -81,7 +95,10 @@ impl RunDir {
         std::fs::create_dir_all(&annotations).map_err(|e| {
             Error::internal_io(e.to_string(), Some("create annotations dir".to_string()))
         })?;
-        Ok(Self { path })
+        Ok(Self {
+            path: path.clone(),
+            _lifecycle: Some(Arc::new(RunDirLifecycle { path, _pin: pin })),
+        })
     }
 
     /// Wrap an existing directory as a run dir.
@@ -92,7 +109,10 @@ impl RunDir {
                 Some("open run dir".to_string()),
             ));
         }
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            _lifecycle: None,
+        })
     }
 
     /// The root path of this run directory.
@@ -223,6 +243,7 @@ impl RunDir {
 
     /// Clean up the run directory. Called after the pipeline completes.
     pub fn cleanup(&self) {
+        super::temp::mark_run_dir_succeeded(&self.path);
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
@@ -310,6 +331,35 @@ mod tests {
         let path = run_dir.path().to_path_buf();
         run_dir.cleanup();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn drop_retains_failed_run_under_bounded_policy() {
+        let _guard = crate::test_support::home_env_guard();
+        let root = tempfile::tempdir().expect("runtime root");
+        std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", root.path());
+        let run_dir = RunDir::create().expect("run dir");
+        let path = run_dir.path().to_path_buf();
+        std::fs::write(run_dir.step_file(files::TEST_FAILURES), b"failure evidence")
+            .expect("failure evidence");
+
+        drop(run_dir);
+        let output = super::super::temp::cleanup_runtime_tmp_bounded(
+            super::super::temp::RuntimeTempCleanupOptions {
+                apply: true,
+                older_than_days: 7,
+                prefix: Some("homeboy-run"),
+                limit: 10,
+                run_max_bytes: 1024 * 1024,
+                run_max_count: 10,
+            },
+        )
+        .expect("cleanup inventory");
+
+        assert_eq!(output.removed_count, 0);
+        assert_eq!(output.rows[0].owner_state.as_deref(), Some("failed"));
+        assert!(path.exists());
+        std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
     }
 
     #[test]

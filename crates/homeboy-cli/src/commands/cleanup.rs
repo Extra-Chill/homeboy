@@ -349,6 +349,47 @@ fn retained_storage_report(
         });
     }
 
+    let runtime_tmp =
+        engine::temp::cleanup_runtime_tmp_bounded(engine::temp::RuntimeTempCleanupOptions {
+            apply: false,
+            older_than_days: retention.runtime_tmp_days,
+            prefix: None,
+            limit: usize::MAX,
+            run_max_bytes: retention.runtime_run_max_bytes,
+            run_max_count: retention.runtime_run_max_count,
+        })?;
+    for row in runtime_tmp
+        .rows
+        .into_iter()
+        .filter(|row| row.owner_id.is_some())
+    {
+        let liveness = if row
+            .protection_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("is running"))
+        {
+            "active"
+        } else if row.owner_state.as_deref() == Some("active") {
+            "stale"
+        } else {
+            "terminal"
+        };
+        records.push(RetainedStorageRecord {
+            category: "runtime_tmp".to_string(),
+            reason: row.reason,
+            owner: row.owner_id.unwrap_or_else(|| "unknown".to_string()),
+            run_id: None,
+            liveness: liveness.to_string(),
+            age: row
+                .age_seconds
+                .map(age_bucket)
+                .unwrap_or_else(|| "unknown".to_string()),
+            age_seconds: row.age_seconds,
+            size_bytes: row.size_bytes,
+            reference: row.path,
+        });
+    }
+
     let database_path = homeboy::core::observation::store::database_path()?;
     let metadata = std::fs::metadata(&database_path).ok();
     let sqlite = RetainedStorageSqlite {
@@ -423,6 +464,7 @@ fn build_retained_storage_report(
         largest_examples: examples,
         continuation,
         safe_next_commands: vec![
+            "homeboy cleanup --include runtime-tmp".to_string(),
             "homeboy cleanup --include controller-scratch".to_string(),
             "homeboy cleanup --include controller-runtimes".to_string(),
             "homeboy cleanup --include shared-cargo-targets".to_string(),
@@ -483,6 +525,8 @@ pub struct CleanupRetentionManifest {
     pub schema: &'static str,
     pub terminal_run_days: i64,
     pub runtime_tmp_days: u64,
+    pub runtime_run_max_bytes: u64,
+    pub runtime_run_max_count: usize,
     pub shared_store_days: u64,
     pub shared_store_max_bytes: u64,
     pub shared_store_lease_seconds: u64,
@@ -720,12 +764,15 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     }
 
     if selected.includes(CleanupCategoryArg::RuntimeTmp) {
-        let output = engine::temp::cleanup_runtime_tmp(
-            apply,
-            configured.runtime_tmp_days,
-            None,
-            usize::try_from(limit).unwrap_or(usize::MAX),
-        )?;
+        let output =
+            engine::temp::cleanup_runtime_tmp_bounded(engine::temp::RuntimeTempCleanupOptions {
+                apply,
+                older_than_days: configured.runtime_tmp_days,
+                prefix: None,
+                limit: usize::try_from(limit).unwrap_or(usize::MAX),
+                run_max_bytes: configured.runtime_run_max_bytes,
+                run_max_count: configured.runtime_run_max_count,
+            })?;
         categories.push(category_from_output(
             RUNTIME_TMP_METADATA,
             apply,
@@ -844,6 +891,8 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             schema: "homeboy/retention-manifest/v1",
             terminal_run_days,
             runtime_tmp_days: configured.runtime_tmp_days,
+            runtime_run_max_bytes: configured.runtime_run_max_bytes,
+            runtime_run_max_count: configured.runtime_run_max_count,
             shared_store_days: configured.shared_store_days,
             shared_store_max_bytes: configured.shared_store_max_bytes,
             shared_store_lease_seconds: configured.shared_store_lease_seconds,
