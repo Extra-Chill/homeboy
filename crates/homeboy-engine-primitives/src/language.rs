@@ -11,7 +11,9 @@
 //! it as `crate::engine::language`, and `code_audit::conventions` re-exports
 //! `Language` for backward compatibility.
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
     Php,
@@ -228,6 +230,48 @@ impl Language {
             Language::Php | Language::JavaScript | Language::TypeScript | Language::Unknown => &[],
         }
     }
+
+    /// The *reachability boundary* a source file belongs to, derived from its
+    /// path — the unit across which a symbol must be publicly exported to be
+    /// referenced. For Rust that is the Cargo crate (`crates/<crate>/…`).
+    ///
+    /// Returns `None` when the language has no path-derivable boundary (or the
+    /// path does not match its layout). Detectors that attribute a caller's raw
+    /// literal/command to a definition elsewhere use this together with
+    /// [`Self::is_boundary_public_visibility`]: a cross-boundary attribution is
+    /// only valid when the definition is boundary-public. `None` on either side
+    /// means "same boundary" (conservative — do not suppress).
+    ///
+    /// Ecosystem-specific layout lives here in the agnostic language home so
+    /// detectors carry no hardcoded path convention.
+    pub fn module_boundary_of_path<'a>(&self, path: &'a str) -> Option<&'a str> {
+        match self {
+            Language::Rust => {
+                let rest = path.strip_prefix("crates/")?;
+                rest.split('/').next().filter(|s| !s.is_empty())
+            }
+            // PHP autoloads across the whole package; JS/TS resolve via module
+            // paths. Neither has a simple path-derived reachability boundary
+            // that maps to the crate model, so cross-boundary attribution is
+            // not attempted (callers treat this as "same boundary").
+            Language::Php | Language::JavaScript | Language::TypeScript | Language::Unknown => None,
+        }
+    }
+
+    /// Whether a captured visibility prefix makes a symbol reachable *across* a
+    /// [`Self::module_boundary_of_path`] boundary. For Rust only crate-wide
+    /// `pub` qualifies (`pub(crate)`, `pub(super)`, `pub(in …)`, private do
+    /// not). Languages without a crate-style boundary return `false` (their
+    /// cross-boundary attribution is disabled by the `None` boundary above, so
+    /// this is only consulted for Rust in practice).
+    pub fn is_boundary_public_visibility(&self, visibility_prefix: &str) -> bool {
+        match self {
+            Language::Rust => visibility_prefix.trim() == "pub",
+            Language::Php | Language::JavaScript | Language::TypeScript | Language::Unknown => {
+                false
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +284,38 @@ mod tests {
             Language::Rust.inline_test_region_markers(),
             &["#[cfg(test)]"]
         );
+    }
+
+    #[test]
+    fn rust_module_boundary_is_the_cargo_crate() {
+        assert_eq!(
+            Language::Rust.module_boundary_of_path("crates/homeboy-core/src/lib.rs"),
+            Some("homeboy-core")
+        );
+        // Non-workspace layout → no derivable boundary.
+        assert_eq!(Language::Rust.module_boundary_of_path("src/lib.rs"), None);
+    }
+
+    #[test]
+    fn non_rust_languages_have_no_path_boundary() {
+        for lang in [Language::Php, Language::JavaScript, Language::TypeScript] {
+            assert_eq!(
+                lang.module_boundary_of_path("crates/x/src/lib.rs"),
+                None,
+                "{lang:?} has no crate-style path boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_boundary_public_visibility_requires_bare_pub() {
+        assert!(Language::Rust.is_boundary_public_visibility("pub "));
+        assert!(!Language::Rust.is_boundary_public_visibility("pub(crate) "));
+        assert!(!Language::Rust.is_boundary_public_visibility("pub(super) "));
+        assert!(!Language::Rust.is_boundary_public_visibility(""));
+        // Non-crate languages never report boundary-public (cross-boundary
+        // attribution is disabled for them via the None boundary).
+        assert!(!Language::Php.is_boundary_public_visibility("public"));
     }
 
     #[test]

@@ -23,10 +23,7 @@ use regex::Regex;
 use super::super::conventions::AuditFinding;
 use super::super::findings::{Finding, Severity};
 use super::super::fingerprint::FileFingerprint;
-use super::super::walker::{
-    crate_of_path, inline_test_regions, is_test_path, offset_in_test_region,
-    visibility_is_crate_public,
-};
+use super::super::walker::{inline_test_regions, is_test_path, offset_in_test_region};
 
 /// Minimum constant-value length worth flagging. Short values (`"workspace"`,
 /// `"snapshot"`) collide with serde tags, enum spellings, and unrelated
@@ -74,7 +71,7 @@ fn detect_constant_bypass_literals(fingerprints: &[&FileFingerprint]) -> Vec<Fin
         for caps in const_decl_regex().captures_iter(&fp.content) {
             let is_public = caps
                 .get(1)
-                .map(|m| visibility_is_crate_public(m.as_str()))
+                .map(|m| fp.language.is_boundary_public_visibility(m.as_str()))
                 .unwrap_or(false);
             let name = caps[2].to_string();
             let value = caps[3].to_string();
@@ -123,19 +120,20 @@ fn detect_constant_bypass_literals(fingerprints: &[&FileFingerprint]) -> Vec<Fin
                 continue;
             }
             // Only attribute a literal to a constant the site can reach. A
-            // private/`pub(crate)` constant in a DIFFERENT crate is unreachable,
-            // so "reference it instead" is impossible — a false positive. Same
-            // crate is always fine; cross-crate requires `pub`. (mirrors the
+            // non-boundary-public constant in a DIFFERENT module boundary (Rust
+            // crate) is unreachable, so "reference it instead" is impossible — a
+            // false positive. Same boundary is always fine; cross-boundary
+            // requires boundary-public visibility. (mirrors the
             // command_wrapper_bypass reachability rule)
-            let literal_crate = crate_of_path(&fp.relative_path);
-            let def_crate = crate_of_path(&def.file);
-            let cross_crate = match (literal_crate, def_crate) {
+            let literal_boundary = fp.language.module_boundary_of_path(&fp.relative_path);
+            let def_boundary = fp.language.module_boundary_of_path(&def.file);
+            let cross_boundary = match (literal_boundary, def_boundary) {
                 (Some(a), Some(b)) => a != b,
-                // Unknown layout on either side — conservative: treat as same
-                // crate (do not suppress) to preserve prior behavior.
+                // No derivable boundary on either side — conservative: treat as
+                // same boundary (do not suppress) to preserve prior behavior.
                 _ => false,
             };
-            if cross_crate && !def.is_public {
+            if cross_boundary && !def.is_public {
                 continue;
             }
             findings.push(Finding {
