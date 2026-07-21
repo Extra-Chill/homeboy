@@ -296,8 +296,6 @@ pub fn run_cook<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    let _runtime_generation =
-        homeboy_core::runtime_promotion::pin_cook_generation(&options.cook_id)?;
     run_cook_with_finalizer(options, executor, finalize_or_load_cook_pr)
 }
 
@@ -375,6 +373,8 @@ where
             return Err(error);
         }
     }
+    let _runtime_generation =
+        homeboy_core::runtime_promotion::pin_cook_generation(&options.cook_id)?;
     let max_attempts = options.max_attempts.max(1);
     let mut attempts = Vec::new();
     let mut run_id = options.initial_run_id.clone();
@@ -971,7 +971,7 @@ mod tests {
     };
     use sha2::Digest;
     use std::process::Command;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Barrier, Condvar};
 
     #[test]
@@ -1661,6 +1661,47 @@ mod tests {
         connections: Arc<AtomicUsize>,
     }
 
+    #[derive(Debug)]
+    struct PinOrderingDispatcher {
+        observed_pin_during_preparation: Arc<AtomicBool>,
+    }
+
+    impl AgentTaskCookAttemptDispatcher for PinOrderingDispatcher {
+        fn durable_recipe(&self) -> Result<Value> {
+            Ok(serde_json::json!({ "kind": "test-pin-ordering" }))
+        }
+
+        fn prepare_for_cook(&self) -> Result<()> {
+            let pins = homeboy_core::paths::runtime_promotion_dir()?.join("pins");
+            let pin_exists = pins.exists()
+                && std::fs::read_dir(pins)
+                    .map(|entries| entries.flatten().next().is_some())
+                    .unwrap_or(false);
+            self.observed_pin_during_preparation
+                .store(pin_exists, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn dispatch_attempt(
+            &self,
+            plan: AgentTaskPlan,
+            run_id: &str,
+            _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+        ) -> Result<()> {
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+            agent_task_lifecycle::record_detached_lab_run(
+                agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: "fixture-lab",
+                    runner_job_id: "accepted-daemon-job",
+                    remote_workspace: "/runner/workspace",
+                    remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+                },
+            )
+            .map(|_| ())
+        }
+    }
+
     impl AgentTaskCookAttemptDispatcher for FlakyPreparationDispatcher {
         fn durable_recipe(&self) -> Result<Value> {
             Ok(serde_json::json!({ "kind": "test-flaky-preparation" }))
@@ -2331,6 +2372,29 @@ mod tests {
                 .expect("shared transport becomes ready");
         }
         assert_eq!(connections.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cook_prepares_transport_before_pinning_runtime_generation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let observed_pin = Arc::new(AtomicBool::new(false));
+            let mut options = batch_cook_options(
+                "cook-pin-ordering",
+                Arc::new(PinOrderingDispatcher {
+                    observed_pin_during_preparation: Arc::clone(&observed_pin),
+                }),
+            );
+            options.provider_command = Some("fixture-provider".to_string());
+            options.initial_run_id = "cook-pin-ordering-attempt-1".to_string();
+
+            let result = run_cook(options, UnusedExecutor).expect("cook accepts detached handoff");
+
+            assert_eq!(result.value.status, "in_flight");
+            assert!(
+                !observed_pin.load(Ordering::SeqCst),
+                "transport readiness must complete before the cook generation pin can block a reconnect"
+            );
+        });
     }
 
     #[test]
