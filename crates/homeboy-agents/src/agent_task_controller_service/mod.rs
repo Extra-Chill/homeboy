@@ -57,6 +57,7 @@ mod action_state;
 mod actions;
 mod artifacts;
 mod dispatch_defaults;
+mod field_access;
 pub mod loop_spec_validation_provider;
 mod pr_ownership;
 mod proof;

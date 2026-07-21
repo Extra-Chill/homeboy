@@ -1,5 +1,9 @@
 //! Split from `agent_task_controller_service` god file (#5208). Structural move only.
 #![allow(unused_imports)]
+use super::field_access::{
+    find_failure_context, find_string_field, find_value_field, nested_string_field, string_field,
+    FailureContext,
+};
 use super::*;
 use std::fs;
 use std::io::{self, Read};
@@ -313,9 +317,8 @@ pub(super) fn accepted_lab_runner_handoff_identity(execution: &Value) -> Result<
     // Lab handoff. Route the run/runner/job tuple through the shared
     // `RunnerJobIdentity` so this agrees with the terminal-projection and
     // snapshot validators rather than re-deriving the comparison here.
-    let declared = homeboy_core::lab_contract::RunnerJobIdentity::new(
-        run_id, runner_id, runner_job_id,
-    );
+    let declared =
+        homeboy_core::lab_contract::RunnerJobIdentity::new(run_id, runner_id, runner_job_id);
     let persisted_matches = persisted.has_accepted_lab_handoff()
         && persisted.lab_handoff.as_ref().is_some_and(|handoff| {
             homeboy_core::lab_contract::RunnerJobIdentity::new(
@@ -438,108 +441,6 @@ fn first_action_diagnostic_message(
         .diagnostics
         .first()
         .map(|diagnostic| diagnostic.message.clone())
-}
-
-#[derive(Default)]
-struct FailureContext {
-    diagnostic: Option<String>,
-    task_id: Option<String>,
-    provider: Option<String>,
-    failure_phase: Option<String>,
-    runtime_context: Option<Value>,
-    replay_command: Option<String>,
-}
-
-fn find_failure_context(value: &Value) -> Option<FailureContext> {
-    match value {
-        Value::Object(map) => {
-            if let Some(Value::Array(diagnostics)) = map.get("diagnostics") {
-                if let Some(diagnostic) = diagnostics.iter().find_map(Value::as_object) {
-                    let message = diagnostic
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    if message.is_some() {
-                        return Some(FailureContext {
-                            diagnostic: message,
-                            task_id: string_field(value, "task_id"),
-                            provider: diagnostic
-                                .get("provider")
-                                .and_then(Value::as_str)
-                                .map(str::to_string)
-                                .or_else(|| nested_string_field(diagnostic, "data", "provider"))
-                                .or_else(|| nested_string_field(diagnostic, "data", "provider_id")),
-                            failure_phase: diagnostic
-                                .get("phase")
-                                .and_then(Value::as_str)
-                                .map(str::to_string)
-                                .or_else(|| nested_string_field(diagnostic, "data", "phase"))
-                                .or_else(|| {
-                                    diagnostic
-                                        .get("class")
-                                        .and_then(Value::as_str)
-                                        .map(str::to_string)
-                                }),
-                            runtime_context: diagnostic
-                                .get("data")
-                                .and_then(|data| data.get("runtime_context"))
-                                .cloned()
-                                .or_else(|| find_value_field(value, "runtime_context")),
-                            replay_command: diagnostic
-                                .get("data")
-                                .and_then(|data| string_field(data, "replay_command"))
-                                .or_else(|| find_string_field(value, "replay_command")),
-                        });
-                    }
-                }
-            }
-            map.values().find_map(find_failure_context)
-        }
-        Value::Array(items) => items.iter().find_map(find_failure_context),
-        _ => None,
-    }
-}
-
-fn string_field(value: &Value, field: &str) -> Option<String> {
-    value.get(field).and_then(Value::as_str).map(str::to_string)
-}
-
-fn nested_string_field(
-    map: &serde_json::Map<String, Value>,
-    parent: &str,
-    field: &str,
-) -> Option<String> {
-    map.get(parent)?.get(field)?.as_str().map(str::to_string)
-}
-
-fn find_string_field(value: &Value, field: &str) -> Option<String> {
-    match value {
-        Value::Object(map) => map
-            .get(field)
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| {
-                map.values()
-                    .find_map(|value| find_string_field(value, field))
-            }),
-        Value::Array(items) => items
-            .iter()
-            .find_map(|value| find_string_field(value, field)),
-        _ => None,
-    }
-}
-
-fn find_value_field(value: &Value, field: &str) -> Option<Value> {
-    match value {
-        Value::Object(map) => map.get(field).cloned().or_else(|| {
-            map.values()
-                .find_map(|value| find_value_field(value, field))
-        }),
-        Value::Array(items) => items
-            .iter()
-            .find_map(|value| find_value_field(value, field)),
-        _ => None,
-    }
 }
 
 pub(super) fn execute_claimed_controller_action<E, D>(
