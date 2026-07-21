@@ -105,14 +105,42 @@ impl Drop for RuntimeGenerationPinGuard {
 /// and generation. A child process must present the capability explicitly
 /// attached by [`RuntimePromotionLease::authorize_subprocess`].
 pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimePromotionLease> {
-    let target = target.into();
+    acquire_with_pin_policy(operation, target.into(), ForeignPinPolicy::Block)
+}
+
+/// Acquire the global writer lease for a generation-preserving rotation.
+///
+/// The caller must keep existing work routed to its pinned generation while a
+/// validated candidate becomes the owner of future admissions. The writer
+/// lease still serializes concurrent mutations; only the controller Cook pin
+/// barrier is relaxed for this transaction.
+pub fn acquire_for_generation_rotation(
+    operation: &str,
+    target: impl Into<String>,
+) -> Result<RuntimePromotionLease> {
+    acquire_with_pin_policy(operation, target.into(), ForeignPinPolicy::Allow)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForeignPinPolicy {
+    Block,
+    Allow,
+}
+
+fn acquire_with_pin_policy(
+    operation: &str,
+    target: String,
+    foreign_pin_policy: ForeignPinPolicy,
+) -> Result<RuntimePromotionLease> {
     let root = paths::runtime_promotion_dir()?;
     fs::create_dir_all(&root).map_err(io("create runtime promotion directory"))?;
     let path = root.join(LEASE_DIR);
     let pid = std::process::id();
     let generation = current_generation();
     let subprocess_capability = subprocess_capability_from_env();
-    ensure_no_foreign_generation_pin(&root, pid, subprocess_capability.as_ref())?;
+    if foreign_pin_policy == ForeignPinPolicy::Block {
+        ensure_no_foreign_generation_pin(&root, pid, subprocess_capability.as_ref())?;
+    }
 
     match acquire_lease_dir_with_retry(
         || create_lease_dir(&path),
@@ -602,6 +630,44 @@ mod tests {
                 "dropping one duplicate cook guard must retain the other pin"
             );
             assert!(second.path.exists(), "the second guard still owns its pin");
+        });
+    }
+
+    #[test]
+    fn generation_rotation_retains_writer_serialization_without_waiting_for_foreign_cooks() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut foreign_owner = Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("start live foreign pin owner");
+            let pins = paths::runtime_promotion_dir()
+                .expect("runtime promotion directory")
+                .join(PIN_DIR);
+            fs::create_dir_all(&pins).expect("create pin directory");
+            fs::write(
+                pins.join("foreign-cook.json"),
+                serde_json::to_vec_pretty(&RuntimeGenerationPin {
+                    pid: foreign_owner.id(),
+                    cook_id: "foreign-cook".to_string(),
+                    generation: "existing-generation".to_string(),
+                    started_at: now(),
+                })
+                .expect("serialize foreign pin"),
+            )
+            .expect("write foreign pin");
+
+            let blocked = acquire("controller replacement", "controller")
+                .expect_err("ordinary promotion remains blocked by a foreign Cook");
+            assert_eq!(blocked.code, ErrorCode::RuntimePromotionContended);
+
+            let rotation = acquire_for_generation_rotation("runner rotation", "lab")
+                .expect("generation-preserving rotation can acquire the writer lease");
+            let concurrent = acquire_for_generation_rotation("other rotation", "other")
+                .expect_err("the writer lease still serializes generation rotations");
+            assert_eq!(concurrent.code, ErrorCode::RuntimePromotionContended);
+            drop(rotation);
+            foreign_owner.kill().expect("stop foreign pin owner");
+            foreign_owner.wait().expect("reap foreign pin owner");
         });
     }
 
