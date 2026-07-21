@@ -622,10 +622,27 @@ fn replay_runner_terminal_event(
             None,
         )
     })?;
-    let action = record
-        .next_actions
-        .iter()
-        .find(|action| lab_runner_handoff_identity(action).as_ref() == Some(&identity));
+    // Match the terminal event to its controller action by canonical
+    // run/runner/job identity rather than exact JSON equality — the stored and
+    // replayed identity objects can differ in cosmetic fields (extra keys,
+    // handoff_id) while naming the same job. Fall back to raw `Value` equality
+    // only when a side is not a projectable dispatch-identity object.
+    let event_identity =
+        homeboy_core::lab_contract::RunnerJobIdentity::from_dispatch_value(&identity);
+    let action = record.next_actions.iter().find(|action| {
+        let Some(stored) = lab_runner_handoff_identity(action) else {
+            return false;
+        };
+        match (
+            event_identity.as_ref(),
+            homeboy_core::lab_contract::RunnerJobIdentity::from_dispatch_value(&stored),
+        ) {
+            (Some(event_identity), Some(stored_identity)) => {
+                event_identity.matches(&stored_identity)
+            }
+            _ => stored == identity,
+        }
+    });
     let Some(action) = action else {
         return Err(Error::validation_invalid_argument(
             "payload.identity",

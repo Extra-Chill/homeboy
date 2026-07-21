@@ -139,6 +139,29 @@ impl RunnerJobIdentity {
     }
 }
 
+impl RunnerJobIdentity {
+    /// Project a serialized dispatch-identity JSON object onto the canonical
+    /// tuple. Accepts the same field names as [`AgentTaskDispatchIdentity`]
+    /// (`run_id`/`persisted_run_id`, `runner_id`, `runner_job_id`), preferring
+    /// the persisted run id. Returns `None` when the value is not a
+    /// dispatch-identity object. Used to compare handoff identities that are
+    /// still carried as raw JSON without depending on exact `Value` equality.
+    pub fn from_dispatch_value(value: &serde_json::Value) -> Option<RunnerJobIdentity> {
+        let object = value.as_object()?;
+        let string = |key: &str| object.get(key).and_then(serde_json::Value::as_str);
+        let run_id = string("persisted_run_id")
+            .or_else(|| string("run_id"))?
+            .to_string();
+        let runner_id = string("runner_id")?.to_string();
+        let runner_job_id = string("runner_job_id")?.to_string();
+        Some(RunnerJobIdentity {
+            run_id,
+            runner_id,
+            runner_job_id,
+        })
+    }
+}
+
 impl AgentTaskDispatchIdentity {
     /// Project this dispatch identity onto the canonical run/runner/job tuple.
     /// Prefers the persisted run id (the controller's durable run) and falls
@@ -403,5 +426,53 @@ mod runner_job_identity_tests {
             handoff_id: None,
         };
         assert_eq!(identity.runner_job_identity().run_id, "transport-run");
+    }
+
+    #[test]
+    fn from_dispatch_value_projects_the_canonical_tuple() {
+        let value = serde_json::json!({
+            "runner_id": "runner-a",
+            "runner_job_id": "job-1",
+            "persisted_run_id": "persisted-run",
+            "run_id": "transport-run",
+        });
+        let identity = RunnerJobIdentity::from_dispatch_value(&value).expect("projectable");
+        assert_eq!(identity.run_id, "persisted-run");
+        assert_eq!(identity.runner_id, "runner-a");
+        assert_eq!(identity.runner_job_id, "job-1");
+    }
+
+    #[test]
+    fn from_dispatch_value_matches_across_cosmetic_field_differences() {
+        // Two serialized identities that name the same job but differ in
+        // incidental fields (an extra handoff_id, a missing transport run_id)
+        // must still match on the canonical tuple — this is the robustness the
+        // typed comparison buys over brittle raw-`Value` equality.
+        let stored = serde_json::json!({
+            "runner_id": "runner-a",
+            "runner_job_id": "job-1",
+            "persisted_run_id": "persisted-run",
+            "run_id": "persisted-run",
+        });
+        let replayed = serde_json::json!({
+            "runner_id": "runner-a",
+            "runner_job_id": "job-1",
+            "persisted_run_id": "persisted-run",
+            "handoff_id": "handoff-xyz",
+        });
+        assert_ne!(stored, replayed, "raw Value equality would reject this pair");
+        let stored_identity = RunnerJobIdentity::from_dispatch_value(&stored).expect("stored");
+        let replayed_identity = RunnerJobIdentity::from_dispatch_value(&replayed).expect("replayed");
+        assert!(stored_identity.matches(&replayed_identity));
+    }
+
+    #[test]
+    fn from_dispatch_value_rejects_a_non_identity_object() {
+        assert!(RunnerJobIdentity::from_dispatch_value(&serde_json::json!("not-an-object")).is_none());
+        assert!(
+            RunnerJobIdentity::from_dispatch_value(&serde_json::json!({ "runner_id": "a" }))
+                .is_none(),
+            "missing runner_job_id / run_id must not project"
+        );
     }
 }
