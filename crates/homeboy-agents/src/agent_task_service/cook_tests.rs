@@ -2610,3 +2610,199 @@ fn follow_up_baseline_refuses_when_promotion_target_head_has_advanced() {
         error.message
     );
 }
+
+/// Rebuild the batch children's recorded attempt dispatcher from its durable
+/// descriptor, mirroring the production `reconstruct_cook_attempt_dispatcher`
+/// closure the CLI supplies. Resume never dispatches a terminal child, so this
+/// is only exercised to satisfy the recipe transport contract.
+fn test_reconstruct_dispatcher(
+    descriptor: &Value,
+) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>> {
+    match descriptor.get("kind").and_then(Value::as_str) {
+        Some("test-recording-detached") => Ok(Some(Arc::new(RecordingDetachedAttemptDispatcher {
+            dispatches: Arc::new(AtomicUsize::new(0)),
+        }))),
+        Some("local") | None => Ok(None),
+        Some(other) => Err(Error::validation_invalid_argument(
+            "attempt_dispatch.kind",
+            format!("test dispatcher reconstruction does not know kind `{other}`"),
+            None,
+            None,
+        )),
+    }
+}
+
+/// Stage one batch child as if its provider attempt already succeeded on a
+/// runner but the coordinator exited before promotion/finalization: persist the
+/// durable recipe, a terminal Succeeded aggregate, and an applied promotion.
+/// When `pre_finalized` is set, also record a `cook_finalization` so the resume
+/// exercises the idempotent load path (no real PR backend needed).
+fn stage_terminal_batch_child(cook_id: &str, pre_finalized: bool) -> String {
+    let mut options = batch_cook_options(
+        cook_id,
+        Arc::new(RecordingDetachedAttemptDispatcher {
+            dispatches: Arc::new(AtomicUsize::new(0)),
+        }),
+    );
+    // The provider attempt is complete; no dispatcher work should run on resume.
+    options.no_finalize = false;
+    options.provider_command = Some("fixture-provider".to_string());
+    options.gates = VerifyGateOptions {
+        verify: vec!["public gate".to_string()],
+        private_verify: vec!["private gate".to_string()],
+        private_gate_reveal: crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
+        ..Default::default()
+    };
+    // In production the fanout batch child `run_id` equals the cook's recipe key
+    // (both are `cook-<id>`), so the resume path loads the recipe by that id.
+    // Mirror that here so the reconstructed cook resolves.
+    options.initial_run_id = cook_id.to_string();
+    let run_id = options.initial_run_id.clone();
+    super::super::persist_initial_recipe(&options).expect("persist child recipe");
+    agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&run_id)).unwrap();
+    agent_task_lifecycle::record_run_aggregate(
+        &run_id,
+        &options.initial_plan,
+        &crate::agent_task_scheduler::AgentTaskAggregate {
+            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: options.initial_plan.plan_id.clone(),
+            status: crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
+            totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
+                succeeded: 1,
+                ..Default::default()
+            },
+            outcomes: vec![crate::agent_task::AgentTaskOutcome {
+                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: "provider".to_string(),
+                status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("provider dispatched once".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        },
+    )
+    .unwrap();
+    agent_task_lifecycle::record_promotion(
+        &run_id,
+        serde_json::to_value(promotion(&run_id)).unwrap(),
+    )
+    .unwrap();
+    if pre_finalized {
+        agent_task_lifecycle::record_cook_finalization(
+            &run_id,
+            serde_json::json!({ "status": "review_ready", "pr": { "number": 42 } }),
+        )
+        .unwrap();
+    }
+    run_id
+}
+
+#[test]
+fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provider() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        // Two children finished their provider attempt but were never finalized
+        // (the synchronous coordinator exited); a pre-recorded finalization
+        // stands in for the real PR backend so the resume exercises the
+        // idempotent load path deterministically (#9525).
+        let child_a = stage_terminal_batch_child("cook-9525-a", true);
+        let child_b = stage_terminal_batch_child("cook-9525-b", true);
+
+        crate::agent_task_batch::persist_fanout_run_batch(
+            "batch-9525",
+            "batch-9525",
+            &[
+                crate::agent_task_batch::FanoutRunBatchChild {
+                    task_id: "cook-9525-a".to_string(),
+                    run_id: child_a.clone(),
+                },
+                crate::agent_task_batch::FanoutRunBatchChild {
+                    task_id: "cook-9525-b".to_string(),
+                    run_id: child_b.clone(),
+                },
+            ],
+            Value::Null,
+        )
+        .expect("persist batch record");
+
+        // UnusedExecutor asserts the provider is never dispatched again: a
+        // terminal child is harvested straight through gates and finalization.
+        // The dispatcher is reconstructed only to satisfy the recipe contract.
+        let result = resume_cook_batch("batch-9525", UnusedExecutor, test_reconstruct_dispatcher)
+            .expect("resume harvests terminal children");
+
+        assert_eq!(result.exit_code, 0, "both children finalize green");
+        assert_eq!(result.value.total, 2);
+        assert_eq!(result.value.succeeded, 2);
+        assert_eq!(result.value.failed, 0);
+        for cell in &result.value.cooks {
+            assert_eq!(cell.exit_code, 0);
+            assert_eq!(
+                cell.result.as_ref().map(|report| report.status.as_str()),
+                Some("review_ready")
+            );
+        }
+
+        // Per-child finalization state is reconciled into the durable batch
+        // record so the coordinator's progress survives a second exit.
+        let batch = crate::agent_task_batch::read_batch_record("batch-9525")
+            .expect("batch record after resume");
+        let finalizations = batch.metadata["child_finalizations"]
+            .as_object()
+            .expect("child_finalizations recorded");
+        assert!(finalizations.contains_key(&child_a));
+        assert!(finalizations.contains_key(&child_b));
+
+        // Resume is idempotent: a second call still succeeds and does not
+        // redispatch or duplicate a PR (finalization is loaded, not recreated).
+        let second = resume_cook_batch("batch-9525", UnusedExecutor, test_reconstruct_dispatcher)
+            .expect("second resume is idempotent");
+        assert_eq!(second.exit_code, 0);
+        assert_eq!(second.value.succeeded, 2);
+    });
+}
+
+#[test]
+fn resume_cook_batch_reports_a_child_with_no_recipe_as_unresumable() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        // A child that never reached cook start has no durable recipe; resume
+        // must surface an actionable error for it rather than fabricate a cook.
+        crate::agent_task_batch::persist_fanout_run_batch(
+            "batch-9525-missing",
+            "batch-9525-missing",
+            &[crate::agent_task_batch::FanoutRunBatchChild {
+                task_id: "cook-missing".to_string(),
+                run_id: "cook-9525-missing-child".to_string(),
+            }],
+            Value::Null,
+        )
+        .expect("persist batch record");
+
+        let result = resume_cook_batch(
+            "batch-9525-missing",
+            UnusedExecutor,
+            test_reconstruct_dispatcher,
+        )
+        .expect("resume returns a report even when a child cannot resume");
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.failed, 1);
+        let cell = &result.value.cooks[0];
+        assert_eq!(cell.exit_code, 1);
+        assert!(cell
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("no durable recipe")));
+    });
+}

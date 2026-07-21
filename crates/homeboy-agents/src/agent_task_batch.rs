@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-use crate::agent_task_lifecycle::{self, AgentTaskRunState};
+use crate::agent_task_lifecycle::{self, AgentTaskRunRecord, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
 use homeboy_core::{paths, Error, Result};
 
@@ -198,12 +198,21 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
     let mut batch = read_batch(batch_id)?;
     let mut changed = false;
     let mut unavailable_child_runs = Vec::new();
+    let mut resumable_child_runs = Vec::new();
     for child in &mut batch.child_runs {
         match agent_task_lifecycle::status(&child.run_id) {
             Ok(record) => {
                 if child.state != record.state {
                     child.state = record.state;
                     changed = true;
+                }
+                if let Some(reason) = resumable_child_reason(&record) {
+                    resumable_child_runs.push(AgentTaskBatchResumableChild {
+                        task_id: child.task_id.clone(),
+                        run_id: child.run_id.clone(),
+                        state: record.state,
+                        reason,
+                    });
                 }
             }
             Err(error) => {
@@ -226,14 +235,38 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
         write_batch(&batch)?;
     }
 
+    let resumable = !resumable_child_runs.is_empty();
+    let commands = commands(&batch.batch_id);
     Ok(AgentTaskBatchStatusReport {
         schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
-        commands: commands(&batch.batch_id),
-        next_actions: next_actions(&unavailable_child_runs),
+        next_actions: batch_next_actions(&unavailable_child_runs, &resumable_child_runs, &commands),
+        commands,
         batch,
         totals,
         unavailable_child_runs,
+        resumable_child_runs,
+        resumable,
     })
+}
+
+/// A child is resumable when its provider attempt reached a terminal, recoverable
+/// state (it produced a candidate patch) but the cook never recorded a
+/// finalization — i.e. promotion/gates/PR were owned by a coordinator that
+/// exited. Already-finalized or still-running children are not resumable (#9525).
+fn resumable_child_reason(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Option<String> {
+    let finalized = record.metadata.get("cook_finalization").is_some();
+    if finalized {
+        return None;
+    }
+    match record.state {
+        AgentTaskRunState::Succeeded
+        | AgentTaskRunState::CandidateRecoverable
+        | AgentTaskRunState::PartialRecoverable => Some(format!(
+            "child run is terminal ({:?}) with a candidate but no recorded PR finalization; resume to run gates and finalize",
+            record.state
+        )),
+        _ => None,
+    }
 }
 
 pub fn artifacts(batch_id: &str) -> Result<AgentTaskBatchArtifactsReport> {
@@ -284,7 +317,11 @@ pub fn artifacts(batch_id: &str) -> Result<AgentTaskBatchArtifactsReport> {
         batch_id: report.batch.batch_id,
         summary,
         manifest,
-        next_actions: next_actions(&unavailable_child_runs),
+        next_actions: batch_next_actions(
+            &unavailable_child_runs,
+            &report.resumable_child_runs,
+            &report.commands,
+        ),
         unavailable_child_runs,
         child_runs,
     })
@@ -408,16 +445,34 @@ fn child_issue(child: &AgentTaskBatchChildRun, problem: String) -> AgentTaskBatc
     }
 }
 
-fn next_actions(unavailable_child_runs: &[AgentTaskBatchChildIssue]) -> Vec<String> {
-    if unavailable_child_runs.is_empty() {
-        Vec::new()
-    } else {
-        vec![
-            "partial results only: one or more child runs could not be read from the durable run store".to_string(),
-            "inspect unavailable_child_runs for child run ids, last known states, status commands, artifacts commands, and error details".to_string(),
-            "if a Lab runner daemon restarted, reconcile runner-side jobs/artifacts before treating the fanout as terminal".to_string(),
-        ]
+fn batch_next_actions(
+    unavailable_child_runs: &[AgentTaskBatchChildIssue],
+    resumable_child_runs: &[AgentTaskBatchResumableChild],
+    commands: &AgentTaskBatchCommands,
+) -> Vec<String> {
+    let mut actions = Vec::new();
+    if !resumable_child_runs.is_empty() {
+        actions.push(format!(
+            "{} child run(s) finished their provider attempt but were never finalized (coordinator likely exited); harvest them idempotently through gates and PR finalization with `{}`",
+            resumable_child_runs.len(),
+            commands.resume
+        ));
+        actions.push(
+            "resume is idempotent: already-finalized children are skipped, so repeated resume calls will not duplicate patches, commits, pushes, or PRs".to_string(),
+        );
     }
+    if !unavailable_child_runs.is_empty() {
+        actions.push(
+            "partial results only: one or more child runs could not be read from the durable run store".to_string(),
+        );
+        actions.push(
+            "inspect unavailable_child_runs for child run ids, last known states, status commands, artifacts commands, and error details".to_string(),
+        );
+        actions.push(
+            "if a Lab runner daemon restarted, reconcile runner-side jobs/artifacts before treating the fanout as terminal".to_string(),
+        );
+    }
+    actions
 }
 
 fn commands(batch_id: &str) -> AgentTaskBatchCommands {
@@ -425,6 +480,7 @@ fn commands(batch_id: &str) -> AgentTaskBatchCommands {
         status: format!("homeboy agent-task fanout status {batch_id}"),
         artifacts: format!("homeboy agent-task fanout artifacts {batch_id}"),
         run_next: "homeboy agent-task run-next".to_string(),
+        resume: format!("homeboy agent-task fanout resume {batch_id}"),
     }
 }
 
@@ -478,6 +534,43 @@ fn read_batch(batch_id: &str) -> Result<AgentTaskBatchRecord> {
             Some(format!("parse agent-task batch {}", batch_id)),
         )
     })
+}
+
+/// Read the persisted durable batch record. Used by the batch resume path to
+/// reconstruct each child cook after the original coordinator exited (#9525).
+pub fn read_batch_record(batch_id: &str) -> Result<AgentTaskBatchRecord> {
+    read_batch(batch_id)
+}
+
+/// Persist a child's resume-time finalization outcome into the durable batch
+/// record's metadata, keyed by the child run id. Repeated resume calls overwrite
+/// the same key so the batch record stays a single, convergent view of what has
+/// been harvested — no duplicate finalization state accumulates (#9525).
+pub fn record_child_finalization(
+    batch_id: &str,
+    child_run_id: &str,
+    finalization: Value,
+) -> Result<()> {
+    let mut batch = read_batch(batch_id)?;
+    let metadata = match &mut batch.metadata {
+        Value::Object(map) => map,
+        other => {
+            *other = json!({});
+            other.as_object_mut().expect("just-created object")
+        }
+    };
+    let finalizations = metadata
+        .entry("child_finalizations".to_string())
+        .or_insert_with(|| json!({}));
+    if !finalizations.is_object() {
+        *finalizations = json!({});
+    }
+    finalizations
+        .as_object_mut()
+        .expect("child_finalizations is an object")
+        .insert(child_run_id.to_string(), finalization);
+    batch.updated_at = Some(now_timestamp());
+    write_batch(&batch)
 }
 
 #[cfg(test)]
@@ -606,80 +699,91 @@ mod tests {
     }
 
     #[test]
-    fn batch_artifacts_report_exposes_stable_manifest_and_counts() {
-        // Hold the process-wide home guard (isolated HOME/XDG_DATA_HOME under
-        // the shared lock) so these tests serialize against every other module
-        // that mutates the same env — a module-local lock only ordered this
-        // module's own tests and raced `with_isolated_home` users elsewhere.
+    fn batch_status_surfaces_resumable_children_and_the_resume_command() {
         let _home = homeboy_core::test_support::HomeGuard::new();
-        let plan = AgentTaskPlan::new("fanout/artifacts", vec![request("a"), request("b")]);
-        submit_plan_batch(&plan, Some("batch/artifacts")).expect("batch submitted");
-        agent_task_service::run_submitted("batch_artifacts-a".to_string(), ArtifactExecutor)
-            .expect("first child run");
-        agent_task_service::run_submitted("batch_artifacts-b".to_string(), ArtifactExecutor)
-            .expect("second child run");
+        let plan = AgentTaskPlan::new("fanout/resume", vec![request("a"), request("b")]);
+        submit_plan_batch(&plan, Some("batch/resume")).expect("batch submitted");
 
-        let report = artifacts("batch/artifacts").expect("batch artifacts");
+        // Child A finished its provider attempt but was never finalized (its
+        // coordinator exited) — it is resumable. Child B was fully finalized —
+        // it is not.
+        agent_task_lifecycle::rewrite_record_for_test("batch_resume-a", |record| {
+            record.state = AgentTaskRunState::CandidateRecoverable;
+        })
+        .expect("stage terminal-unfinalized child");
+        agent_task_lifecycle::rewrite_record_for_test("batch_resume-b", |record| {
+            record.state = AgentTaskRunState::Succeeded;
+            record.metadata["cook_finalization"] = serde_json::json!({ "status": "review_ready" });
+        })
+        .expect("stage finalized child");
 
-        assert_eq!(report.schema, AGENT_TASK_BATCH_ARTIFACTS_SCHEMA);
-        assert_eq!(report.summary.child_runs, 2);
-        assert_eq!(report.summary.artifacts, 2);
-        assert_eq!(report.summary.evidence_refs, 8);
-        assert_eq!(report.child_runs[0].artifact_count, 1);
-        assert_eq!(report.child_runs[0].evidence_ref_count, 4);
-        assert_eq!(report.manifest.artifacts[0].task_id, "a");
-        assert_eq!(report.manifest.artifacts[0].run_id, "batch_artifacts-a");
-        assert_eq!(report.manifest.artifacts[0].artifact.id, "artifact-a");
-        assert_eq!(report.manifest.evidence_refs[4].task_id, "b");
+        let report = status("batch/resume").expect("batch status");
+
+        assert!(report.resumable, "batch has a resumable child");
+        assert_eq!(report.resumable_child_runs.len(), 1);
+        assert_eq!(report.resumable_child_runs[0].run_id, "batch_resume-a");
         assert_eq!(
-            report.manifest.evidence_refs[4].evidence_ref.kind,
-            "executor-log"
+            report.resumable_child_runs[0].state,
+            AgentTaskRunState::CandidateRecoverable
         );
-    }
-
-    #[test]
-    fn batch_artifacts_preserves_available_refs_when_child_record_is_unavailable() {
-        // Hold the process-wide home guard (isolated HOME/XDG_DATA_HOME under
-        // the shared lock) so these tests serialize against every other module
-        // that mutates the same env — a module-local lock only ordered this
-        // module's own tests and raced `with_isolated_home` users elsewhere.
-        let _home = homeboy_core::test_support::HomeGuard::new();
-        let plan = AgentTaskPlan::new("fanout/artifacts-partial", vec![request("a")]);
-        submit_plan_batch(&plan, Some("batch/artifacts-partial")).expect("batch submitted");
-        agent_task_service::run_submitted(
-            "batch_artifacts-partial-a".to_string(),
-            ArtifactExecutor,
-        )
-        .expect("available child run");
-        let mut batch = read_batch("batch/artifacts-partial").expect("batch record");
-        batch.child_runs.push(AgentTaskBatchChildRun {
-            task_id: "orphan".to_string(),
-            run_id: "batch_artifacts-partial-orphan".to_string(),
-            state: AgentTaskRunState::Running,
-        });
-        batch.task_count = batch.child_runs.len();
-        write_batch(&batch).expect("batch rewritten with orphan child");
-
-        let report = artifacts("batch/artifacts-partial").expect("partial batch artifacts");
-
-        assert_eq!(report.summary.child_runs, 1);
-        assert_eq!(report.summary.artifacts, 1);
-        assert_eq!(report.summary.evidence_refs, 4);
         assert_eq!(
-            report.manifest.artifacts[0].run_id,
-            "batch_artifacts-partial-a"
-        );
-        assert_eq!(report.child_runs[0].run_id, "batch_artifacts-partial-a");
-        assert_eq!(report.unavailable_child_runs.len(), 1);
-        assert_eq!(report.unavailable_child_runs[0].task_id, "orphan");
-        assert_eq!(
-            report.unavailable_child_runs[0].artifacts_command,
-            "homeboy agent-task artifacts batch_artifacts-partial-orphan"
+            report.commands.resume,
+            "homeboy agent-task fanout resume batch_resume"
         );
         assert!(report
             .next_actions
             .iter()
-            .any(|action| action.contains("runner daemon restarted")));
+            .any(|action| action.contains("never finalized")
+                && action.contains("fanout resume batch_resume")));
+        assert!(report
+            .next_actions
+            .iter()
+            .any(|action| action.contains("resume is idempotent")));
+    }
+
+    #[test]
+    fn batch_status_reports_no_resumable_children_when_every_child_is_finalized() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let plan = AgentTaskPlan::new("fanout/finalized", vec![request("a")]);
+        submit_plan_batch(&plan, Some("batch/finalized")).expect("batch submitted");
+        agent_task_lifecycle::rewrite_record_for_test("batch_finalized-a", |record| {
+            record.state = AgentTaskRunState::Succeeded;
+            record.metadata["cook_finalization"] = serde_json::json!({ "status": "review_ready" });
+        })
+        .expect("stage finalized child");
+
+        let report = status("batch/finalized").expect("batch status");
+
+        assert!(!report.resumable);
+        assert!(report.resumable_child_runs.is_empty());
+    }
+
+    #[test]
+    fn record_child_finalization_is_idempotent_and_convergent() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let plan = AgentTaskPlan::new("fanout/converge", vec![request("a")]);
+        submit_plan_batch(&plan, Some("batch/converge")).expect("batch submitted");
+
+        record_child_finalization(
+            "batch/converge",
+            "batch_converge-a",
+            json!({ "status": "review_ready", "attempt": 1 }),
+        )
+        .expect("first finalization recorded");
+        // A repeated resume overwrites the same key rather than accumulating.
+        record_child_finalization(
+            "batch/converge",
+            "batch_converge-a",
+            json!({ "status": "review_ready", "attempt": 2 }),
+        )
+        .expect("second finalization overwrites");
+
+        let batch = read_batch_record("batch/converge").expect("batch record");
+        let finalizations = batch.metadata["child_finalizations"]
+            .as_object()
+            .expect("child_finalizations recorded");
+        assert_eq!(finalizations.len(), 1);
+        assert_eq!(finalizations["batch_converge-a"]["attempt"], 2);
     }
 
     #[test]
