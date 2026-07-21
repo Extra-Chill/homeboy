@@ -56,6 +56,17 @@ pub struct RemoteArtifactDownloadInfo {
 /// runner layer and registered at startup; core calls it without depending on
 /// runner behavior.
 pub trait RunnerEvidenceProvider: Send + Sync {
+    /// Release generation routing claims only after the durable observation
+    /// lifecycle has removed the corresponding run or artifact provenance.
+    /// Optional runner support keeps core retention generic and bounded.
+    fn retire_durable_result_owner(
+        &self,
+        _run: &RunRecord,
+        _artifact_id: Option<&str>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Mirror the run from a connected runner, if one owns it.
     fn mirror_connected_runner_run(&self, run_id: &str) -> Result<Option<RunRecord>>;
 

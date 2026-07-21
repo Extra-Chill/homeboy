@@ -260,6 +260,7 @@ pub fn retain_terminal_runs(
                 continue;
             }
             let records = store.list_artifacts(run_id)?;
+            let run = store.get_run(run_id)?;
             let artifact_root = crate::artifacts::root()?;
             for row in artifacts.rows.iter().filter(|row| row.action == "remove") {
                 let artifact = records
@@ -269,6 +270,11 @@ pub fn retain_terminal_runs(
                         Error::internal_unexpected("retention artifact disappeared before deletion")
                     })?;
                 remove_persisted_artifact_record_bytes(artifact, &artifact_root)?;
+                if let Some(run) = run.as_ref() {
+                    runner_evidence::with_runner_evidence(|provider| {
+                        provider.retire_durable_result_owner(run, Some(&artifact.id))
+                    })?;
+                }
             }
         }
         for directory in &lifecycle_directories {
@@ -295,6 +301,13 @@ pub fn retain_terminal_runs(
             .filter(|run_id| !retained.contains(run_id))
             .cloned()
             .collect::<Vec<_>>();
+        for run_id in &deleted {
+            if let Some(run) = store.get_run(run_id)? {
+                runner_evidence::with_runner_evidence(|provider| {
+                    provider.retire_durable_result_owner(&run, None)
+                })?;
+            }
+        }
         store.delete_terminal_runs(&deleted)?;
     }
     Ok(TerminalRunRetentionOutcome {

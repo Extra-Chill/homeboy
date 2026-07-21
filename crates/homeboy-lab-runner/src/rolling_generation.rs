@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +40,15 @@ pub enum RollingDrainState {
 pub enum RollingStart {
     Start,
     AlreadyActive,
+}
+
+/// A durable result lifecycle has explicitly released its routing claim.
+/// These events are intentionally separate from job completion: terminal jobs
+/// can retain their producing generation until run and artifact retention ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RollingResultOwnerRetirement<'a> {
+    Run(&'a str),
+    Artifact(&'a str),
 }
 
 impl<E> RollingGenerations<E> {
@@ -144,6 +153,36 @@ impl<E> RollingGenerations<E> {
         true
     }
 
+    /// Release one durable result owner only after its owning lifecycle has
+    /// consumed, finalized, or pruned it. The registry reconciler decides whether
+    /// the now-unowned endpoint can safely stop and retire.
+    pub fn retire_result_owner(&mut self, retirement: RollingResultOwnerRetirement<'_>) -> bool {
+        let removed = match retirement {
+            RollingResultOwnerRetirement::Run(id) => self.run_owners.remove(id),
+            RollingResultOwnerRetirement::Artifact(id) => self.artifact_owners.remove(id),
+        };
+        removed.is_some()
+    }
+
+    /// Bounded stale-retention reconciliation only removes result owners whose
+    /// durable records are absent from the supplied authoritative retention set.
+    /// A caller controls the bound by passing at most one retention page.
+    pub fn reconcile_result_owners(
+        &mut self,
+        retained_run_ids: &BTreeSet<String>,
+        retained_artifact_ids: &BTreeSet<String>,
+    ) -> bool {
+        let runs_before = self.run_owners.len();
+        let artifacts_before = self.artifact_owners.len();
+        self.run_owners
+            .retain(|id, _| retained_run_ids.contains(id));
+        self.artifact_owners
+            .retain(|id, _| retained_artifact_ids.contains(id));
+        let released =
+            runs_before != self.run_owners.len() || artifacts_before != self.artifact_owners.len();
+        released
+    }
+
     pub fn endpoint_owner(
         &self,
         job_id: Option<&str>,
@@ -154,6 +193,16 @@ impl<E> RollingGenerations<E> {
             .and_then(|id| self.job_owner(id))
             .or_else(|| run_id.and_then(|id| self.run_owners.get(id).map(String::as_str)))
             .or_else(|| artifact_id.and_then(|id| self.artifact_owners.get(id).map(String::as_str)))
+    }
+
+    /// A drained daemon remains routable while durable run or artifact evidence
+    /// still identifies it as the producing generation.
+    pub fn has_result_owners(&self, generation: &str) -> bool {
+        self.run_owners.values().any(|owner| owner == generation)
+            || self
+                .artifact_owners
+                .values()
+                .any(|owner| owner == generation)
     }
 
     /// Returns true if the completion retired a drained generation.
@@ -194,10 +243,17 @@ impl<E> RollingGenerations<E> {
 
     fn retire_drained(&mut self) -> bool {
         let before = self.generations.len();
+        let admission_owner = self.admission_owner.clone();
+        let result_owners = self
+            .run_owners
+            .values()
+            .chain(self.artifact_owners.values())
+            .collect::<BTreeSet<_>>();
         self.generations.retain(|generation, entry| {
-            generation == &self.admission_owner
+            generation == &admission_owner
                 || entry.drain_state != RollingDrainState::Draining
                 || entry.active_jobs != 0
+                || result_owners.contains(generation)
         });
         self.generations.len() != before
     }
@@ -314,6 +370,43 @@ mod tests {
             restored.endpoint_owner(None, None, Some("artifact-a")),
             Some("A")
         );
+    }
+
+    #[test]
+    fn result_owners_retain_until_each_explicit_lifecycle_retirement() {
+        let mut generations = RollingGenerations::new("A", "endpoint-a");
+        generations.admit_job("job-a");
+        assert!(generations.record_run("job-a", "run-a"));
+        assert!(generations.record_artifact("job-a", "artifact-a"));
+        generations.begin("B", "endpoint-b");
+        generations.activate("B");
+        assert!(!generations.complete_job("job-a"));
+        assert!(generations.generations.contains_key("A"));
+
+        assert!(generations.retire_result_owner(RollingResultOwnerRetirement::Run("run-a")));
+        assert!(generations.generations.contains_key("A"));
+        assert!(
+            generations.retire_result_owner(RollingResultOwnerRetirement::Artifact("artifact-a"))
+        );
+        assert!(generations.generations.contains_key("A"));
+    }
+
+    #[test]
+    fn bounded_retention_reconciliation_releases_only_missing_owners() {
+        let mut generations = RollingGenerations::new("A", "endpoint-a");
+        generations.admit_job("job-a");
+        assert!(generations.record_run("job-a", "run-a"));
+        assert!(generations.record_artifact("job-a", "artifact-a"));
+        generations.begin("B", "endpoint-b");
+        generations.activate("B");
+        assert!(!generations.complete_job("job-a"));
+
+        assert!(generations
+            .reconcile_result_owners(&BTreeSet::from(["run-a".to_string()]), &BTreeSet::new(),));
+        assert!(generations.artifact_owners.is_empty());
+        assert!(generations.generations.contains_key("A"));
+        assert!(generations.reconcile_result_owners(&BTreeSet::new(), &BTreeSet::new()));
+        assert!(generations.generations.contains_key("A"));
     }
 
     #[test]

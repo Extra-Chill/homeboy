@@ -75,6 +75,7 @@ mod resource_metrics;
 mod rig_materialization;
 mod rolling_generation;
 mod runtime_materialization_status;
+pub mod runtime_materializer;
 mod runtime_overlay_freshness;
 mod session;
 mod source_materialization;

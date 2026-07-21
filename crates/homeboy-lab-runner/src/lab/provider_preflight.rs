@@ -49,7 +49,7 @@ pub(super) fn preflight_agent_task_provider_on_runner(
         return Ok(());
     };
     if let Some(identity) = selection.runtime_identity.as_ref() {
-        return validate_controller_runtime_identity(identity, &selection);
+        validate_controller_runtime_identity(identity, &selection)?;
     }
 
     let mut command = command_prefix.to_vec();
@@ -129,8 +129,15 @@ pub(super) fn preflight_agent_task_provider_on_runner(
     // (`resolve_provider_for_backend`) that execution-time selection uses. This
     // guarantees discovery and preflight can never disagree about whether a
     // listed provider is selectable for the requested backend/selector.
-    let mut runner_unavailable_reason =
-        runner_provider_unavailable_reason(&runner_providers, &selection);
+    let mut runner_unavailable_reason = selection
+        .runtime_identity
+        .as_ref()
+        .and_then(|identity| {
+            (!resolved_materialized_runtime(identity))
+                .then(|| exact_runtime_requirement_reason(&runner_providers, identity))
+                .flatten()
+        })
+        .or_else(|| runner_provider_unavailable_reason(&runner_providers, &selection));
     let mut refresh_result = None;
 
     if local_available
@@ -160,8 +167,15 @@ pub(super) fn preflight_agent_task_provider_on_runner(
             )?;
             if probe.exit_code == 0 {
                 if let Ok(providers) = parse_agent_task_providers_output(&probe.stdout) {
-                    runner_unavailable_reason =
-                        runner_provider_unavailable_reason(&providers, &selection);
+                    runner_unavailable_reason = selection
+                        .runtime_identity
+                        .as_ref()
+                        .and_then(|identity| {
+                            (!resolved_materialized_runtime(identity))
+                                .then(|| exact_runtime_requirement_reason(&providers, identity))
+                                .flatten()
+                        })
+                        .or_else(|| runner_provider_unavailable_reason(&providers, &selection));
                 }
             }
         }
@@ -182,6 +196,59 @@ pub(super) fn preflight_agent_task_provider_on_runner(
     }
 
     Ok(())
+}
+
+/// A v2 plan that Lab has rewritten to its immutable generation is already
+/// source-revision validated by the materializer. Requiring discovery to
+/// advertise that new path would incorrectly reject the job-scoped provider
+/// copy; legacy plans retain the exact advertised-runtime requirement.
+fn resolved_materialized_runtime(
+    identity: &homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity,
+) -> bool {
+    let Ok(plan) = serde_json::from_value::<
+        homeboy_core::agent_runtime_manifest::AgentRuntimeMaterializationPlan,
+    >(identity.materialization_plan.clone()) else {
+        return false;
+    };
+    plan.schema == "homeboy/agent-runtime-materialization-plan/v2"
+        && plan.runtime_path.is_some()
+        && plan.source_revision.as_deref() == Some(identity.source_revision.as_str())
+}
+
+/// A controller pin is only compatible when the runner advertises the same
+/// provider and immutable materialization revision. Provider availability alone
+/// cannot prove that a runner will execute the controller-selected runtime.
+fn exact_runtime_requirement_reason(
+    providers: &[AgentTaskExecutorProvider],
+    identity: &homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity,
+) -> Option<String> {
+    let Some(provider) = providers
+        .iter()
+        .find(|provider| provider.id == identity.provider_id)
+    else {
+        return Some(format!(
+            "runner does not advertise controller-selected provider `{}`",
+            identity.provider_id
+        ));
+    };
+    let Some(plan) = provider.extra.get("runtime_materialization_plan") else {
+        return Some(format!(
+            "runner provider `{}` has no runtime materialization declaration; it cannot prove the required runtime revision `{}`",
+            identity.provider_id, identity.source_revision
+        ));
+    };
+    let runner_revision = plan
+        .get("source_revision")
+        .and_then(serde_json::Value::as_str);
+    if runner_revision == Some(identity.source_revision.as_str()) {
+        return None;
+    }
+    Some(format!(
+        "runner provider `{}` does not advertise required runtime revision `{}` (advertised `{}`); materialize the controller-selected runtime before retrying",
+        identity.provider_id,
+        identity.source_revision,
+        runner_revision.unwrap_or("missing")
+    ))
 }
 
 /// Resolve the requested backend/selector against the runner-reported provider
@@ -463,6 +530,49 @@ fn validate_controller_runtime_identity(
             )),
             None,
         ));
+    }
+    // Older controller policies did not carry the v2 declaration. They remain
+    // usable only through the exact runner-advertised revision check above.
+    let Some(plan) = serde_json::from_value::<
+        homeboy_core::agent_runtime_manifest::AgentRuntimeMaterializationPlan,
+    >(identity.materialization_plan.clone())
+    .ok() else {
+        return Ok(());
+    };
+    if plan.runtime_sources.is_empty() {
+        return Ok(());
+    }
+    homeboy_core::agent_runtime_manifest::validate_runtime_materialization_plan(&plan)?;
+    // A published v2 generation has already verified and rewritten its source
+    // locators on the selected runner. Re-checking those paths on the
+    // controller would both be wrong and reintroduce controller-path coupling.
+    if plan.runtime_path.is_some() {
+        return Ok(());
+    }
+    for source in &plan.runtime_sources {
+        if let homeboy_core::agent_runtime_manifest::AgentRuntimeSourceLocator::LocalPath { path } =
+            &source.locator
+        {
+            let source_path = Path::new(path);
+            if !source_path.is_dir() {
+                return Err(Error::validation_invalid_argument(
+                    "resolved-provider-policy",
+                    "controller runtime source is unavailable before Lab submission",
+                    Some(path.clone()),
+                    None,
+                ));
+            }
+            if homeboy_core::git::head_sha(source_path).as_deref()
+                != Some(source.content_identity.as_str())
+            {
+                return Err(Error::validation_invalid_argument(
+                    "resolved-provider-policy",
+                    "controller runtime source no longer matches its declared content identity",
+                    Some(source.id.clone()),
+                    None,
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -890,6 +1000,41 @@ mod tests {
         assert!(error
             .message
             .contains("does not match the requested provider"));
+    }
+
+    #[test]
+    fn exact_runtime_requirement_accepts_only_the_controller_revision() {
+        let identity = homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity {
+            runtime_id: "runtime".to_string(),
+            provider_id: "provider".to_string(),
+            source_selector: "extension:provider".to_string(),
+            source_revision: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            freshness: homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Pinned,
+            provider: serde_json::Value::Null,
+            materialization_plan: serde_json::Value::Null,
+        };
+        let mut provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "provider",
+            "backend": "test",
+            "argv": ["provider"],
+        }))
+        .expect("provider");
+        provider.extra.insert(
+            "runtime_materialization_plan".to_string(),
+            serde_json::json!({ "source_revision": identity.source_revision }),
+        );
+        assert_eq!(
+            exact_runtime_requirement_reason(&[provider.clone()], &identity),
+            None
+        );
+
+        provider.extra.insert(
+            "runtime_materialization_plan".to_string(),
+            serde_json::json!({ "source_revision": "ffffffffffffffffffffffffffffffffffffffff" }),
+        );
+        let error = exact_runtime_requirement_reason(&[provider], &identity)
+            .expect("stale runner runtime rejects before submission");
+        assert!(error.contains("controller-selected runtime"));
     }
 
     #[test]
