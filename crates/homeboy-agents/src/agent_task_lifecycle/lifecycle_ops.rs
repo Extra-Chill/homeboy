@@ -2244,6 +2244,15 @@ fn record_lab_offload_proxy(
     if record.state.is_terminal() {
         return Ok(record);
     }
+    if record.lab_handoff.is_none() {
+        let now = chrono::Utc::now();
+        record.lab_handoff = Some(AgentTaskLabHandoff::pending(
+            runner_id,
+            now.to_rfc3339(),
+            (now + chrono::Duration::seconds(lab_handoff_acceptance_timeout_seconds()))
+                .to_rfc3339(),
+        ));
+    }
     let metadata = record.ensure_metadata_object();
     metadata.insert("kind".to_string(), json!("lab_offload_controller_proxy"));
     // This record is the controller's durable projection of a runner handoff.
