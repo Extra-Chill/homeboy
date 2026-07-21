@@ -9,17 +9,15 @@
 use serde_json::Value;
 
 use crate::agent_task::{
-    AgentTaskComponentContract, AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy,
-    AgentTaskRequest, AgentTaskRuntimeSelection, AgentTaskSourceRef, AgentTaskWorkspace,
-    AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
+    AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest,
+    AgentTaskRuntimeSelection, AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode,
+    AGENT_TASK_REQUEST_SCHEMA,
 };
-use crate::agent_task_config_materialization::materialize_provider_config_refs;
-use crate::agent_task_prompts;
 use crate::agent_task_provider::provider_requires_cwd_git_checkout;
 use crate::agent_task_runtime_dependency_graph;
 use crate::agent_task_scheduler::{AgentTaskExecutionBudget, AgentTaskPlan, AgentTaskRetryPolicy};
 use crate::agent_task_secrets::validate_secret_env;
-use homeboy_core::{config, defaults, worktree, worktree_providers, Error, Result};
+use homeboy_core::{defaults, worktree, worktree_providers, Error, Result};
 
 use super::agent_task_dispatch_service::AgentTaskDispatchRequest;
 
@@ -27,6 +25,12 @@ mod prompt_spec;
 use prompt_spec::{
     dispatch_task_id, explicit_dispatch_task_id, read_dispatch_tasks_json, read_prompt_spec,
     read_text_spec, DispatchPromptSpec,
+};
+
+mod provider_config;
+use provider_config::{
+    dispatch_component_contracts, dispatch_provider_config, dispatch_request_inputs,
+    dispatch_secret_env, promote_component_contracts_to_provider_config,
 };
 
 pub fn build_dispatch_plan(request: &AgentTaskDispatchRequest) -> Result<AgentTaskPlan> {
@@ -488,14 +492,14 @@ fn resolve_dispatch_workspace(
 }
 
 #[derive(Debug, Clone)]
-struct DispatchWorkspaceTarget {
-    root: std::path::PathBuf,
+pub(crate) struct DispatchWorkspaceTarget {
+    pub(crate) root: std::path::PathBuf,
     slug: Option<String>,
     kind: Option<String>,
     component_id: Option<String>,
     branch: Option<String>,
     base_ref: Option<String>,
-    metadata: Value,
+    pub(crate) metadata: Value,
 }
 
 impl DispatchWorkspaceTarget {
@@ -627,169 +631,6 @@ fn dispatch_client_context(request: &AgentTaskDispatchRequest) -> Result<Value> 
     }
 
     Ok(context)
-}
-
-/// Error returned when a resolved provider config is not a JSON object. Shared
-/// by the explicit-spec and post-default validation paths so both surface an
-/// identical message (#5091).
-fn provider_config_must_be_object_error() -> Error {
-    Error::validation_invalid_argument(
-        "provider-config",
-        "agent-task cook --provider-config must resolve to a JSON object",
-        None,
-        None,
-    )
-}
-
-fn dispatch_provider_config(
-    request: &AgentTaskDispatchRequest,
-    repo: &Option<String>,
-    workspace: Option<&DispatchWorkspaceTarget>,
-    client_context: &Value,
-) -> Result<Value> {
-    let mut config = Value::Object(defaults::load_config().settings.into_iter().collect());
-    if let Some(spec) = &request.core.provider_config {
-        let raw = read_text_spec(spec, "provider-config")?;
-        let explicit = serde_json::from_str::<Value>(&raw).map_err(|error| {
-            Error::validation_invalid_json(
-                error,
-                Some("agent-task cook provider config".to_string()),
-                Some(raw),
-            )
-        })?;
-
-        if !explicit.is_object() {
-            return Err(provider_config_must_be_object_error());
-        }
-
-        let map = config.as_object_mut().expect("global settings object");
-        map.extend(
-            explicit
-                .as_object()
-                .expect("explicit provider config object")
-                .clone(),
-        );
-    }
-
-    if !config.is_object() {
-        return Err(provider_config_must_be_object_error());
-    }
-
-    let mut config = materialize_provider_config_refs(config)?;
-    if !config.is_object() {
-        return Err(Error::validation_invalid_argument(
-            "provider-config",
-            "agent-task cook --provider-config root must remain a JSON object after materializing configured refs",
-            None,
-            None,
-        ));
-    }
-    let map = config.as_object_mut().expect("provider config object");
-    map.entry("repo".to_string())
-        .or_insert_with(|| serde_json::json!(repo));
-    map.entry("workspace".to_string())
-        .or_insert_with(|| serde_json::json!(workspace.map(|target| target.metadata.clone())));
-    map.entry("workspace_required".to_string())
-        .or_insert_with(|| serde_json::json!(workspace.is_some()));
-    map.entry("workspace_root".to_string()).or_insert_with(|| {
-        serde_json::json!(workspace.map(|target| target.root.display().to_string()))
-    });
-    map.entry("client_context".to_string())
-        .or_insert_with(|| client_context.clone());
-    if let Some(artifact_dependencies) = client_context.get("artifact_dependencies") {
-        map.entry("artifact_dependencies".to_string())
-            .or_insert_with(|| artifact_dependencies.clone());
-    }
-    map.entry("task_url".to_string())
-        .or_insert_with(|| serde_json::json!(request.task_url));
-
-    Ok(config)
-}
-
-fn dispatch_component_contracts(
-    provider_config: &Value,
-    client_context: &Value,
-) -> Result<Vec<AgentTaskComponentContract>> {
-    let mut contracts = Vec::new();
-    collect_component_contracts_from_value(provider_config, "provider-config", &mut contracts)?;
-    collect_component_contracts_from_value(client_context, "client-context", &mut contracts)?;
-    if let Some(inputs) = client_context.get("inputs") {
-        collect_component_contracts_from_value(inputs, "client-context.inputs", &mut contracts)?;
-    }
-    Ok(contracts)
-}
-
-fn dispatch_request_inputs(client_context: &Value) -> Value {
-    client_context.get("inputs").cloned().unwrap_or(Value::Null)
-}
-
-fn collect_component_contracts_from_value(
-    value: &Value,
-    label: &str,
-    contracts: &mut Vec<AgentTaskComponentContract>,
-) -> Result<()> {
-    for key in ["component_contracts", "runtime_component_contracts"] {
-        let Some(raw) = value.get(key) else {
-            continue;
-        };
-        let mut parsed: Vec<AgentTaskComponentContract> = serde_json::from_value(raw.clone())
-            .map_err(|error| {
-                Error::validation_invalid_argument(
-                    format!("{label}.{key}"),
-                    format!("agent-task cook {label}.{key} must be an array of component contracts: {error}"),
-                    Some(raw.to_string()),
-                    None,
-                )
-            })?;
-        contracts.append(&mut parsed);
-    }
-    Ok(())
-}
-
-fn promote_component_contracts_to_provider_config(
-    provider_config: &mut Value,
-    component_contracts: &[AgentTaskComponentContract],
-) {
-    if component_contracts.is_empty() {
-        return;
-    }
-    let Some(map) = provider_config.as_object_mut() else {
-        return;
-    };
-    map.entry("component_contracts".to_string())
-        .or_insert_with(|| serde_json::to_value(component_contracts).unwrap_or(Value::Null));
-}
-
-fn dispatch_secret_env(request: &AgentTaskDispatchRequest, provider_config: &Value) -> Vec<String> {
-    let mut names = request.secret_env.clone();
-    names.extend(provider_config_secret_env(provider_config));
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn provider_config_secret_env(provider_config: &Value) -> Vec<String> {
-    let Some(config) = provider_config.as_object() else {
-        return Vec::new();
-    };
-
-    let mut names = Vec::new();
-    for key in ["secret_env", "secretEnv"] {
-        match config.get(key) {
-            Some(Value::Array(items)) => {
-                names.extend(
-                    items
-                        .iter()
-                        .filter_map(|item| item.as_str().map(str::to_string)),
-                );
-            }
-            Some(Value::String(name)) => names.push(name.clone()),
-            _ => {}
-        }
-    }
-    names.sort();
-    names.dedup();
-    names
 }
 
 #[cfg(test)]
