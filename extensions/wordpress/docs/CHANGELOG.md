@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.28.1] - 2026-07-21
+
+### Changed
+- emit generic contract evidence
+
 ## [3.28.0] - 2026-07-21
 
 ### Added
