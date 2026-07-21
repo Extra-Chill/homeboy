@@ -233,6 +233,18 @@ pub(crate) fn analyze_dead_code_with_config(
                     continue;
                 }
 
+                // serde/clap invoke helpers by name from inside an attribute
+                // string (`#[serde(deserialize_with = "foo")]`,
+                // `skip_serializing_if = "is_zero"`, `default = "bar"`,
+                // `value_parser = "baz"`). Those are real macro-resolved
+                // references, not calls, so the `foo(` patterns above miss them.
+                // Scanned against raw content because multi-line attributes put
+                // the reference on a continuation line that `blank_comments_…`
+                // would otherwise blank.
+                if references_helper_in_attribute(&fp.content, method) {
+                    continue;
+                }
+
                 findings.push(Finding {
                     convention: "dead_code".to_string(),
                     severity: Severity::Warning,
@@ -252,6 +264,36 @@ pub(crate) fn analyze_dead_code_with_config(
     // Sort by file path for deterministic output
     findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
     findings
+}
+
+/// Whether `method` is referenced by name inside a macro-attribute string —
+/// e.g. `deserialize_with = "method"`, `serialize_with = "method"`,
+/// `skip_serializing_if = "method"`, `default = "method"`,
+/// `with = "method"`, or a clap `value_parser = "method"`.
+///
+/// serde/clap resolve these helpers by name at macro-expansion time, so they
+/// are real references even though no `method(` call appears. Matches the
+/// `<known-attr-key> = "method"` shape in raw content, which also covers
+/// multi-line attributes (where the reference sits on a continuation line).
+fn references_helper_in_attribute(content: &str, method: &str) -> bool {
+    /// Attribute keys that name a function to invoke. Kept narrow so an
+    /// unrelated string literal `foo = "method"` in ordinary code does not
+    /// mask a genuinely dead function.
+    const HELPER_ATTR_KEYS: &[&str] = &[
+        "deserialize_with",
+        "serialize_with",
+        "skip_serializing_if",
+        "default",
+        "with",
+        "value_parser",
+        "getter",
+    ];
+    let quoted = format!("\"{}\"", method);
+    HELPER_ATTR_KEYS.iter().any(|key| {
+        let needle = format!("{} = {}", key, quoted);
+        let needle_tight = format!("{}={}", key, quoted);
+        content.contains(&needle) || content.contains(&needle_tight)
+    })
 }
 
 fn dead_code_finding(
@@ -886,6 +928,88 @@ mod tests {
             findings.iter().any(|f| f.kind == AuditFinding::OrphanedInternal
                 && f.description.contains("dead_helper")),
             "dead_helper is only mentioned in a comment/string, so it must still be flagged as orphaned"
+        );
+    }
+
+    #[test]
+    fn serde_helper_referenced_by_single_line_attribute_not_flagged() {
+        // `is_zero` is used only via `#[serde(skip_serializing_if = "is_zero")]`
+        // — a real macro-resolved reference, never a `is_zero(` call. It must
+        // NOT be flagged as orphaned.
+        let mut fp = make_fingerprint(
+            "src/foo.rs",
+            vec!["public_fn", "is_zero"],
+            vec!["public_fn"],
+            vec!["public_fn"], // is_zero NOT in internal_calls
+            vec![("is_zero", "private")],
+        );
+        // Content omits the `is_zero(` definition so the same-file call
+        // fallback cannot self-match — the ONLY reference is the attribute.
+        fp.content =
+            "struct S {\n    #[serde(skip_serializing_if = \"is_zero\")]\n    n: usize,\n}\n"
+                .to_string();
+
+        let findings = analyze_dead_code(&[&fp], &[]);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == AuditFinding::OrphanedInternal
+                    && f.description.contains("is_zero")),
+            "is_zero is referenced by a serde attribute — not dead"
+        );
+    }
+
+    #[test]
+    fn serde_helper_referenced_by_multi_line_attribute_not_flagged() {
+        // The reference sits on a continuation line of a multi-line attribute,
+        // which the string-blanking view would blank — so the fix scans raw
+        // content.
+        let mut fp = make_fingerprint(
+            "src/foo.rs",
+            vec!["public_fn", "deserialize_budget_findings"],
+            vec!["public_fn"],
+            vec!["public_fn"],
+            vec![("deserialize_budget_findings", "private")],
+        );
+        // Omit the `deserialize_budget_findings(` definition so the same-file
+        // call fallback cannot self-match — the reference is the multi-line
+        // attribute only.
+        fp.content = "struct S {\n    #[serde(\n        default,\n        \
+             deserialize_with = \"deserialize_budget_findings\",\n        \
+             skip_serializing_if = \"Vec::is_empty\"\n    )]\n    v: Vec<u8>,\n}\n"
+            .to_string();
+
+        let findings = analyze_dead_code(&[&fp], &[]);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == AuditFinding::OrphanedInternal
+                    && f.description.contains("deserialize_budget_findings")),
+            "multi-line serde deserialize_with reference must count — not dead"
+        );
+    }
+
+    #[test]
+    fn non_helper_attribute_key_does_not_count_as_a_reference() {
+        // `rename = "dead_helper"` names a serialized FIELD, not a helper
+        // function, so it must NOT be treated as a reference — `dead_helper`
+        // stays flagged. (Content deliberately omits a `dead_helper()`
+        // definition so the same-file call fallback doesn't self-match.)
+        let mut fp = make_fingerprint(
+            "src/foo.rs",
+            vec!["public_fn", "dead_helper"],
+            vec!["public_fn"],
+            vec!["public_fn"],
+            vec![("dead_helper", "private")],
+        );
+        fp.content =
+            "struct S {\n    #[serde(rename = \"dead_helper\")]\n    field: u8,\n}\n".to_string();
+
+        let findings = analyze_dead_code(&[&fp], &[]);
+        assert!(
+            findings.iter().any(|f| f.kind == AuditFinding::OrphanedInternal
+                && f.description.contains("dead_helper")),
+            "`rename` is a field-name attribute, not a helper invocation — dead_helper is still dead"
         );
     }
 
