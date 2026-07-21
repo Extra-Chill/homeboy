@@ -114,10 +114,11 @@ impl CliRuntime {
         homeboy_extension::component_script::register_component_script_runner();
         homeboy_extension::build::register_component_build_runner();
         homeboy_extension::lifecycle::register_component_install_runner();
-        // Register the fingerprint-script provider so code_audit can fall back to
-        // extension fingerprint scripts (for files the core grammar engine can't
-        // handle) without depending on the extension script runner.
+        // Register extension-backed audit providers so code_audit can load
+        // grammars and run fallback fingerprint scripts without depending on the
+        // extension registry or script runner.
         homeboy_extension::audit_fingerprint_script_provider::register();
+        homeboy_extension::audit_grammar_source_provider::register();
         // Register the audit recorded-artifact provider so the artifact-portability
         // detector can read past runs' artifacts from the observation store without
         // code_audit depending on observation — the last seam before audit becomes
@@ -1258,6 +1259,59 @@ mod tests {
             .expect("extension command docs");
     }
 
+    #[cfg(unix)]
+    fn write_audit_extension(home: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let extension_dir = home.join(".config/homeboy/extensions/sample-audit");
+        let scripts_dir = extension_dir.join("scripts");
+        std::fs::create_dir_all(&scripts_dir).expect("audit extension scripts dir");
+        std::fs::write(
+            extension_dir.join("sample-audit.json"),
+            serde_json::json!({
+                "name": "Sample Audit",
+                "version": "0.0.0",
+                "provides": {
+                    "file_extensions": ["sample"],
+                    "capabilities": ["fingerprint"]
+                },
+                "scripts": { "fingerprint": "scripts/fingerprint.sh" }
+            })
+            .to_string(),
+        )
+        .expect("audit extension manifest");
+        std::fs::write(
+            extension_dir.join("grammar.json"),
+            serde_json::json!({
+                "language": { "id": "sample", "extensions": ["sample"] },
+                "comments": { "line": ["//"], "block": [], "doc": [] },
+                "strings": { "quotes": ["\""], "escape": "\\", "multiline": [] },
+                "patterns": {
+                    "function": {
+                        "regex": "fn\\s+(\\w+)\\s*\\(([^)]*)\\)",
+                        "captures": { "name": 1, "params": 2 },
+                        "context": "any",
+                        "skip_comments": true,
+                        "skip_strings": true
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("audit extension grammar");
+        let script = scripts_dir.join("fingerprint.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' '{\"aggregate_literals\":[{\"type_name\":\"Policy\",\"fields\":[\"allow\"],\"line\":1}]}'\n",
+        )
+        .expect("audit fingerprint script");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("audit fingerprint script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(script, permissions).expect("executable audit fingerprint script");
+    }
+
     #[test]
     fn output_format_names_are_rejected_as_global_output_paths() {
         let err = output_runtime::validate_output_file_path("json")
@@ -1305,6 +1359,33 @@ mod tests {
             startup_fast_path(&args(&["homeboy", "sample-cli", "--help"])),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_startup_registers_both_extension_audit_providers() {
+        crate::test_support::with_isolated_home(|home| {
+            write_audit_extension(home.path());
+
+            let exit = CliRuntime::new()
+                .run_from_args(vec!["homeboy".to_string(), "--version".to_string()]);
+
+            assert_eq!(exit, std::process::ExitCode::SUCCESS);
+            let grammar = crate::core::code_audit::core_fingerprint::load_grammar_for_ext("sample")
+                .expect("CLI startup should make the extension grammar provider reachable");
+            assert_eq!(grammar.language.id, "sample");
+
+            let source = home.path().join("policy.sample");
+            let fingerprint = crate::core::code_audit::fingerprint::fingerprint_content(
+                &source,
+                home.path(),
+                "fn decide() {}",
+            )
+            .expect("CLI startup should make both audit providers reachable");
+            assert_eq!(fingerprint.methods, vec!["decide"]);
+            assert_eq!(fingerprint.aggregate_literals.len(), 1);
+            assert_eq!(fingerprint.aggregate_literals[0].type_name, "Policy");
+        });
     }
 
     #[test]
