@@ -267,7 +267,7 @@ pub fn plan_homeboy_binary_refresh(
 pub fn refresh_homeboy_binary(
     options: HomeboyBinaryRefreshOptions,
 ) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
-    let promotion_lease = homeboy_core::runtime_promotion::acquire(
+    let promotion_lease = homeboy_core::runtime_promotion::acquire_for_generation_rotation(
         "runner binary promotion",
         options.runner_id.clone(),
     )?;
