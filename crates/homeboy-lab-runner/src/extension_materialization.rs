@@ -58,6 +58,128 @@ pub struct RunnerExtensionMaterializationPlan {
     pub content_hash: String,
 }
 
+/// A source snapshot resolved into one Lab job's private extension registry.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct LabJobExtensionOverlay {
+    pub(crate) id: String,
+    pub(crate) source_path: String,
+    pub(crate) remote_path: String,
+    pub(crate) source_revision: Option<String>,
+    pub(crate) content_hash: String,
+}
+
+pub(crate) fn materialize_lab_job_extension_overlays(
+    runner: &Runner,
+    runtime_root: &str,
+    extension_ids: &[String],
+) -> Result<Vec<LabJobExtensionOverlay>> {
+    let mut overlays = Vec::new();
+    for id in extension_ids {
+        let manifest = homeboy_core::extension_store::load_extension(id)?;
+        let source_path = manifest.extension_path.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "extensions",
+                format!("Lab extension `{id}` has no source path"),
+                Some(id.clone()),
+                None,
+            )
+        })?;
+        let source = PathBuf::from(&source_path);
+        let content_hash = extension_source_content_hash(&source)?;
+        let remote_path = format!(
+            "{}/extensions/{}/{}",
+            runtime_root.trim_end_matches('/'),
+            sanitize_ref(id),
+            &content_hash[..16]
+        );
+        sync_controller_snapshot(
+            runner,
+            &RunnerExtensionMaterializationPlan {
+                id: id.clone(),
+                source_path: source_path.clone(),
+                synced_source_path: remote_path.clone(),
+                content_hash: content_hash.clone(),
+            },
+        )?;
+        overlays.push(LabJobExtensionOverlay {
+            id: id.clone(),
+            source_path,
+            remote_path,
+            source_revision: git_revision(&source),
+            content_hash,
+        });
+    }
+    if overlays.is_empty() {
+        return Ok(overlays);
+    }
+    let command = lab_job_extension_overlay_command(runtime_root, &overlays);
+    let (_, exit_code) = exec(&runner.id, RunnerExecOptions::diagnostic_raw_shell(command))?;
+    if exit_code != 0 {
+        return Err(Error::validation_invalid_argument(
+            "extensions",
+            "failed to create the job-scoped Homeboy extension overlay on the runner",
+            Some(runtime_root.to_string()),
+            None,
+        ));
+    }
+    Ok(overlays)
+}
+
+fn lab_job_extension_overlay_command(
+    runtime_root: &str,
+    overlays: &[LabJobExtensionOverlay],
+) -> String {
+    let links = overlays
+        .iter()
+        .map(|overlay| {
+            format!(
+                "rm -rf {target}; ln -s {source} {target}",
+                target = shell::quote_path(&format!(
+                    "{}/home/.config/homeboy/extensions/{}",
+                    runtime_root.trim_end_matches('/'),
+                    overlay.id
+                )),
+                source = shell::quote_path(&overlay.remote_path),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "set -eu\nruntime={runtime}\n# A job gets only its declared extensions; runner-global config may contain mutable links.\nmkdir -p \"$runtime/home/.config/homeboy/extensions\"\n{links}\n",
+        runtime = shell::quote_path(runtime_root),
+    )
+}
+
+#[cfg(test)]
+mod lab_job_overlay_tests {
+    use super::*;
+
+    fn overlay(id: &str, root: &str, hash: &str) -> LabJobExtensionOverlay {
+        LabJobExtensionOverlay {
+            id: id.to_string(),
+            source_path: format!("/controller/{id}"),
+            remote_path: format!("{root}/extensions/{id}/{hash}"),
+            source_revision: Some(hash.to_string()),
+            content_hash: hash.to_string(),
+        }
+    }
+
+    #[test]
+    fn concurrent_extension_snapshots_build_private_content_addressed_registries() {
+        let first = overlay("fixture", "/runner/jobs/a", "aaaaaaaaaaaaaaaa");
+        let second = overlay("fixture", "/runner/jobs/b", "bbbbbbbbbbbbbbbb");
+        let first_command = lab_job_extension_overlay_command("/runner/jobs/a", &[first.clone()]);
+        let second_command = lab_job_extension_overlay_command("/runner/jobs/b", &[second.clone()]);
+
+        assert_ne!(first.remote_path, second.remote_path);
+        assert!(first_command.contains(&first.remote_path));
+        assert!(second_command.contains(&second.remote_path));
+        assert!(!first_command.contains("$HOME/.config/homeboy"));
+        assert!(!second_command.contains("$HOME/.config/homeboy"));
+        assert!(!first_command.contains("cp -a"));
+    }
+}
+
 pub(crate) fn plan_controller_snapshot_extension(
     workspace_root: &str,
     id: &str,
@@ -656,6 +778,7 @@ fn shell_arg(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::Runner;
+    use std::sync::{Arc, Barrier};
 
     fn runner() -> Runner {
         Runner {
@@ -894,5 +1017,86 @@ mod tests {
             Some("/usr/local/bin:/usr/bin")
         );
         assert_eq!(captured_env.get("HOMEBOY_COMMAND"), None);
+    }
+
+    #[test]
+    fn concurrent_job_snapshots_keep_distinct_extension_revisions_after_global_source_changes() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let runner_root = tempfile::tempdir().expect("runner root");
+            crate::create(
+                &format!(
+                    r#"{{"id":"lab-extension-isolation","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let source = home.path().join(".config/homeboy/extensions/fixture");
+            fs::create_dir_all(&source).expect("extension source");
+            fs::write(
+                source.join("fixture.json"),
+                r#"{"id":"fixture","name":"Fixture","version":"1.0.0"}"#,
+            )
+            .expect("extension manifest");
+            fs::write(source.join("catalog"), "revision-a\n").expect("first catalog");
+
+            let runner = crate::load("lab-extension-isolation").expect("runner");
+            let first_root = runner_root
+                .path()
+                .join("_lab_workspaces/job-a-homeboy-artifacts/runtime");
+            let first = materialize_lab_job_extension_overlays(
+                &runner,
+                &first_root.display().to_string(),
+                &["fixture".to_string()],
+            )
+            .expect("materialize first snapshot");
+
+            // The controller's administrative default changes while A remains
+            // admitted. B must get the new source without rewriting A's link.
+            fs::write(source.join("catalog"), "revision-b\n").expect("second catalog");
+            let second_root = runner_root
+                .path()
+                .join("_lab_workspaces/job-b-homeboy-artifacts/runtime");
+            let second = materialize_lab_job_extension_overlays(
+                &runner,
+                &second_root.display().to_string(),
+                &["fixture".to_string()],
+            )
+            .expect("materialize second snapshot");
+
+            assert_ne!(first[0].content_hash, second[0].content_hash);
+            assert_eq!(
+                fs::read_to_string(source.join("catalog")).expect("global source"),
+                "revision-b\n"
+            );
+            let barrier = Arc::new(Barrier::new(2));
+            let jobs = [
+                (first_root.join("home"), "revision-a\n"),
+                (second_root.join("home"), "revision-b\n"),
+            ];
+            let handles = jobs
+                .into_iter()
+                .map(|(home, expected)| {
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        let output = Command::new("sh")
+                            .arg("-c")
+                            .arg("cat \"$HOME/.config/homeboy/extensions/fixture/catalog\"")
+                            .env("HOME", home)
+                            .output()
+                            .expect("read private extension catalog");
+                        assert!(output.status.success());
+                        assert_eq!(
+                            String::from_utf8(output.stdout).expect("catalog utf8"),
+                            expected
+                        );
+                    })
+                })
+                .collect::<Vec<_>>();
+            for handle in handles {
+                handle.join().expect("extension job");
+            }
+        });
     }
 }

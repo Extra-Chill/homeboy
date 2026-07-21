@@ -24,7 +24,6 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) command: Vec<String>,
     pub(crate) remote_command: Vec<String>,
     pub(crate) remote_output_file: Option<String>,
-    pub(crate) synced_rigs: Vec<rig_materialization::LabOffloadRigSync>,
     pub(crate) rig_component_path_overrides: Vec<(String, String)>,
     pub(crate) dependency_cache_saves: Vec<RunnerDependencyCacheSaveRequest>,
     /// Env-var overrides surfacing synced runtime-overlay remote paths to the
@@ -32,8 +31,6 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) runtime_overlay_env: Vec<(String, String)>,
     /// Offload-evidence metadata for the synced runtime overlays.
     pub(crate) runtime_overlay_metadata: serde_json::Value,
-    /// Per-job runner root for mutable rig registry state.
-    pub(crate) rig_registry_root: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -43,7 +40,6 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
     plan: HomeboyPlan,
     runner_id: &str,
     source_path: &Path,
-    homeboy_path: &str,
     command_prefix_argv: &[String],
     runner_workspace_root: Option<&str>,
     run_isolation_token: Option<String>,
@@ -68,7 +64,6 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
         plan,
         runner_id,
         source_path,
-        homeboy_path,
         command_prefix_argv,
         runner_workspace_root,
         run_isolation_token,
@@ -85,7 +80,6 @@ fn prepare_lab_offload_workspace_stage_inner(
     mut plan: HomeboyPlan,
     runner_id: &str,
     source_path: &Path,
-    homeboy_path: &str,
     command_prefix_argv: &[String],
     runner_workspace_root: Option<&str>,
     run_isolation_token: Option<String>,
@@ -337,36 +331,6 @@ fn prepare_lab_offload_workspace_stage_inner(
         );
     }
 
-    let candidate_rig_registry_root = remote_lab_rig_registry_root(&remote_cwd);
-    let synced_rigs = rig_materialization::sync_lab_offload_rigs(
-        runner_id,
-        homeboy_path,
-        &remote_cwd,
-        &candidate_rig_registry_root,
-        &changed_since_preflight.args,
-        rig_materialization::LabOffloadPrimaryRigSource {
-            local_path: &synced.local_path,
-            remote_path: &remote_cwd,
-            source_snapshot: &source_snapshot,
-            workspace_snapshot_identity: &synced.snapshot_identity,
-        },
-    )?;
-    if !synced_rigs.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.sync_rigs", "lab.sync_rigs")
-                .inputs(
-                    PlanValues::new()
-                        .json("count", synced_rigs.len())
-                        .string("source_snapshot_remote_path", &remote_cwd)
-                        .string("registry_root", &candidate_rig_registry_root)
-                        .json("rigs", &synced_rigs),
-                )
-                .build(),
-        );
-    }
-    let rig_registry_root = (!synced_rigs.is_empty()).then_some(candidate_rig_registry_root);
-
     let rig_component_sync = rig_materialization::sync_lab_offload_rig_component_dependencies(
         runner_id,
         &changed_since_preflight.args,
@@ -506,12 +470,10 @@ fn prepare_lab_offload_workspace_stage_inner(
         command,
         remote_command,
         remote_output_file,
-        synced_rigs,
         rig_component_path_overrides,
         dependency_cache_saves,
         runtime_overlay_env,
         runtime_overlay_metadata,
-        rig_registry_root,
     })
 }
 
@@ -2221,7 +2183,6 @@ mod tests {
                 crate::lab_plan::base_lab_plan(Some(&contract)),
                 "lab-controller-bundle-stage",
                 source.path(),
-                "homeboy",
                 &["homeboy".to_string()],
                 Some(&runner_workspace_root),
                 None,
@@ -2374,7 +2335,6 @@ mod tests {
                 crate::lab_plan::base_lab_plan(Some(&contract)),
                 "lab-managed-worktree-stage",
                 &source,
-                "homeboy",
                 &["homeboy".to_string()],
                 Some(&runner_workspace_root),
                 Some("cook-8009".to_string()),

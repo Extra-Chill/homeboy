@@ -778,24 +778,30 @@ pub(crate) fn exec_with_status_snapshot(
         )?)
     };
 
-    let extension_parity_plan = plan_extension_parity(
-        runner_id,
-        &runner,
-        &cwd,
+    if !crate::execution_bundle::validate_bundle_env(
+        &request_env,
+        &options.command,
         &required_extensions,
-        &requested_setting_keys,
-        &accepted_extension_settings,
-    )?;
-    ensure_extension_materialized(&extension_parity_plan)?;
-    let runner = super::load(runner_id)?;
-    validate_extension_ready(
-        runner_id,
-        &runner,
-        &cwd,
-        &required_extensions,
-        &requested_setting_keys,
-        &accepted_extension_settings,
-    )?;
+    ) {
+        let extension_parity_plan = plan_extension_parity(
+            runner_id,
+            &runner,
+            &cwd,
+            &required_extensions,
+            &requested_setting_keys,
+            &accepted_extension_settings,
+        )?;
+        ensure_extension_materialized(&extension_parity_plan)?;
+        let runner = super::load(runner_id)?;
+        validate_extension_ready(
+            runner_id,
+            &runner,
+            &cwd,
+            &required_extensions,
+            &requested_setting_keys,
+            &accepted_extension_settings,
+        )?;
+    }
 
     preflight_remote_argv(
         runner_id,
