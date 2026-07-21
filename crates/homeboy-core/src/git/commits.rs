@@ -245,6 +245,9 @@ fn is_release_commit(lower: &str) -> bool {
 // but are compiled once for use in the hot path of classify_commit().
 use std::sync::LazyLock;
 
+use crate::component::{resolve_component_scope, Component, ScopeCommand};
+use crate::git::primitives::{get_component_path_prefix, get_git_root};
+
 /// Matches a subject that is just a version number: "v0.2.3", "0.2.3"
 static BARE_VERSION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^v?\d+\.\d+(?:\.\d+)?$").expect("Invalid regex"));
@@ -600,6 +603,86 @@ pub fn get_commits_since_tag_for_paths(
     let stdout = command::run_in(path, "git", &args_refs, "git log")?;
 
     Ok(parse_commit_records(&stdout))
+}
+
+/// Collect the authoritative component change set for a release range.
+///
+/// A commit is included once when it touches any configured release-scope path.
+/// Consequently, a commit shared by two components is represented once in each
+/// relevant component release, while sibling-only commits are excluded.
+pub fn get_component_changes_since_tag(
+    component: &Component,
+    tag: Option<&str>,
+) -> Result<Vec<CommitInfo>> {
+    let git_root =
+        get_git_root(&component.local_path).unwrap_or_else(|_| component.local_path.clone());
+    let component_prefix = get_component_path_prefix(&component.local_path);
+    let scope = resolve_component_scope(component, ScopeCommand::Release);
+    let mut prefixes: Vec<String> = scope
+        .include
+        .iter()
+        .filter_map(|path| normalize_component_change_path(path))
+        .collect();
+
+    if prefixes.is_empty() {
+        if let Some(prefix) = component_prefix.clone() {
+            prefixes.push(prefix);
+        } else if let Some(prefix) = inferred_component_change_prefix(component) {
+            prefixes.push(prefix);
+        }
+    }
+
+    if let Some(component_prefix) = component_prefix {
+        let component_prefix = component_prefix.trim_end_matches('/');
+        for prefix in &mut prefixes {
+            if prefix != component_prefix && !prefix.starts_with(&format!("{component_prefix}/")) {
+                *prefix = format!("{component_prefix}/{prefix}");
+            }
+        }
+    }
+
+    prefixes.sort();
+    prefixes.dedup();
+    let prefixes: Vec<&str> = prefixes.iter().map(String::as_str).collect();
+    get_commits_since_tag_for_paths(&git_root, tag, &prefixes)
+}
+
+fn normalize_component_change_path(path: &str) -> Option<String> {
+    let mut path = path.trim().trim_start_matches("./").trim_matches('/');
+    if let Some(wildcard) = path.find('*') {
+        path = path[..wildcard].trim_end_matches('/');
+    }
+    (!path.is_empty() && path != ".").then(|| path.to_string())
+}
+
+fn inferred_component_change_prefix(component: &Component) -> Option<String> {
+    let mut paths: Vec<String> = component
+        .version_targets
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .filter_map(|target| normalize_component_change_path(&target.file))
+        .collect();
+    if let Some(target) = component.changelog_target.as_deref() {
+        if let Some(path) = normalize_component_change_path(target) {
+            paths.push(path);
+        }
+    }
+
+    let first = paths.first()?;
+    let mut prefix: Vec<&str> = first.split('/').collect();
+    prefix.pop()?;
+    for path in &paths[1..] {
+        let mut directories: Vec<&str> = path.split('/').collect();
+        directories.pop()?;
+        let shared = prefix
+            .iter()
+            .zip(&directories)
+            .take_while(|(left, right)| left == right)
+            .count();
+        prefix.truncate(shared);
+    }
+    (!prefix.is_empty()).then(|| prefix.join("/"))
 }
 
 /// List the commits reachable from `tip` but not from `base` (the `base..tip`
