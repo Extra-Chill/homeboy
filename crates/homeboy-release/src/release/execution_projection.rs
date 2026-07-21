@@ -7,6 +7,7 @@ use homeboy_core::execution::{
 use homeboy_core::plan::PlanSubject;
 
 use super::types::{ReleaseArtifact, ReleaseRun, ReleaseStepResult, ReleaseStepStatus};
+use super::version::ChangelogValidationResult;
 
 impl From<&ReleaseRun> for ExecutionRun {
     fn from(run: &ReleaseRun) -> Self {
@@ -67,6 +68,12 @@ fn release_artifacts_from_run(run_id: &str, steps: &[ReleaseStepResult]) -> Vec<
 }
 
 fn release_artifacts_from_step(run_id: &str, step: &ReleaseStepResult) -> Vec<ChangeArtifact> {
+    if step.id == "changelog.finalize" {
+        return changelog_artifact_from_step(run_id, step)
+            .into_iter()
+            .collect();
+    }
+
     let Some(data) = step.data.as_ref() else {
         return Vec::new();
     };
@@ -112,6 +119,35 @@ fn release_artifacts_from_step(run_id: &str, step: &ReleaseStepResult) -> Vec<Ch
             }
         })
         .collect()
+}
+
+/// Project the release-owned generated file from the changelog lifecycle step.
+/// This makes its origin available after the release process exits through the
+/// durable execution artifact contract, rather than an in-memory guard value.
+fn changelog_artifact_from_step(run_id: &str, step: &ReleaseStepResult) -> Option<ChangeArtifact> {
+    let result = serde_json::from_value::<ChangelogValidationResult>(step.data.clone()?).ok()?;
+    if !result.changelog_changed {
+        return None;
+    }
+
+    Some(ChangeArtifact {
+        id: format!("{}.artifact.1", step.id),
+        artifact_type: "generated_file".to_string(),
+        provenance: ChangeArtifactProvenance {
+            source: "release".to_string(),
+            run_id: Some(run_id.to_string()),
+            step_id: Some(step.id.clone()),
+            command: None,
+            captured_at: None,
+        },
+        title: Some("Generated changelog".to_string()),
+        summary: Some("Homeboy release-generated changelog mutation".to_string()),
+        path: Some(result.changelog_path.clone()),
+        files: vec![result.changelog_path],
+        diff: None,
+        approval_scope: None,
+        metadata: HashMap::new(),
+    })
 }
 
 fn release_artifact_ids(step_id: &str, data: Option<&serde_json::Value>) -> Vec<String> {
@@ -177,5 +213,51 @@ mod tests {
         );
         assert_eq!(execution.artifacts[0].provenance.source, "release");
         assert_eq!(execution.warnings, vec!["signed artifact missing"]);
+    }
+
+    #[test]
+    fn changelog_finalize_projects_durable_generated_file_provenance() {
+        let release = ReleaseRun {
+            component_id: "homeboy".to_string(),
+            enabled: true,
+            result: ReleaseRunResult {
+                steps: vec![ReleaseStepResult {
+                    id: "changelog.finalize".to_string(),
+                    step_type: "changelog.finalize".to_string(),
+                    status: ReleaseStepStatus::Success,
+                    data: Some(serde_json::json!({
+                        "changelog_path": "CHANGELOG.md",
+                        "changelog_finalized": true,
+                        "changelog_changed": true
+                    })),
+                    ..Default::default()
+                }],
+                status: ReleaseStepStatus::Success,
+                warnings: Vec::new(),
+                summary: None,
+                phase_timings: None,
+            },
+        };
+
+        let execution = ExecutionRun::from(&release);
+
+        assert_eq!(execution.artifacts.len(), 1);
+        let artifact = &execution.artifacts[0];
+        assert_eq!(artifact.artifact_type, "generated_file");
+        assert_eq!(artifact.files, vec!["CHANGELOG.md"]);
+        assert_eq!(artifact.provenance.source, "release");
+        assert_eq!(
+            artifact.provenance.run_id.as_deref(),
+            Some("release.homeboy")
+        );
+        assert_eq!(
+            artifact.provenance.step_id.as_deref(),
+            Some("changelog.finalize")
+        );
+        assert!(
+            super::super::changelog::generated_file_mutation_is_authorized(Some(
+                &artifact.provenance
+            ))
+        );
     }
 }
