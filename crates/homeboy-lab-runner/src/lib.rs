@@ -173,6 +173,7 @@ pub use lab::{
 pub(crate) use lab_env::build_lab_offload_env;
 pub use lab_offload_provider::register as register_runner_lab_offload_provider;
 pub use lab_selection::prepare_explicit_lab_runner_for_offload;
+pub use lab_staging_controller::enable_production_routing as enable_production_lab_staging;
 pub use lab_staging_controller::register as register_lab_staging_controller_driver;
 pub use lab_staging_controller::{
     load_lab_staging_recipe, persist_lab_staging_recipe, LabStagingRecipe, LabStagingRecipeRef,

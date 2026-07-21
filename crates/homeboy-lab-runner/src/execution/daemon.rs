@@ -878,6 +878,40 @@ mod admission_tests {
         assert!(error.message.contains("renewal failed"));
         assert!(!error.message.contains("opaque-token"));
     }
+
+    #[test]
+    fn renewal_failure_during_exec_is_visible_after_acceptance() {
+        let renewal_health = Arc::new(Mutex::new(AdmissionRenewalHealth {
+            lease_expires_at_ms: Some(42),
+            failure: None,
+        }));
+        let authority = DaemonAdmissionReservationAuthority {
+            daemon_lease_id: "lease-a".to_string(),
+            reservation_job_id: "job-a".to_string(),
+            token_present: true,
+            lease_expires_at_ms: 42,
+            renewal_health: Arc::clone(&renewal_health),
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let renewer_barrier = Arc::clone(&barrier);
+        let renewer = std::thread::spawn(move || {
+            renewer_barrier.wait();
+            renewal_health.lock().expect("renewal health lock").failure =
+                Some("daemon rejected renewal during exec".to_string());
+            renewer_barrier.wait();
+        });
+
+        authority
+            .prove_server_owned_expiry_or_cancellation_authority()
+            .expect("authority before exec");
+        barrier.wait();
+        barrier.wait();
+        renewer.join().expect("renewer");
+        let error = authority
+            .prove_server_owned_expiry_or_cancellation_authority()
+            .expect_err("post-acceptance authority must observe renewal failure");
+        assert!(error.message.contains("renewal failed"));
+    }
 }
 
 /// Recover only a connection that failed before the daemon could answer. A

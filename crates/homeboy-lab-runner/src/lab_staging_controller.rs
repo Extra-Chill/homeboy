@@ -1,7 +1,7 @@
 //! Durable controller-job contract for Lab staging and final dispatch.
 //!
-//! Routing deliberately does not submit this job yet. Phase 2 will construct an
-//! envelope after the agent-task attempt exists and before workspace staging.
+//! Detached direct-daemon routing constructs this job after the agent-task
+//! attempt exists and before workspace staging begins.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -1335,10 +1335,8 @@ enum LabStagingStageEffect {
     Observe,
 }
 
-/// Production implementation deliberately exposes only the first durable
-/// boundary. Registering it makes workspace recovery testable, not routable:
-/// every later remote effect remains unavailable until it has equivalent
-/// durable input/output ownership.
+/// Production implementation of the durable staging boundaries. Each remote
+/// effect persists an immutable receipt before the next phase can begin.
 struct ProductionLabStagingOperations;
 
 impl ProductionLabStagingOperations {
@@ -1350,12 +1348,6 @@ impl ProductionLabStagingOperations {
             &request.recipe.run_id,
             DURABLE_LAB_WORKSPACE_STAGE_ATTACHMENT_KIND,
         )
-    }
-
-    fn unavailable(stage: &str) -> Error {
-        Error::internal_unexpected(format!(
-            "Lab staging {stage} is unavailable: durable runtime, hydration, and dispatch boundaries are not implemented"
-        ))
     }
 
     fn durable_runtime(
@@ -2425,8 +2417,7 @@ fn adapter_slot() -> &'static Mutex<Option<Arc<dyn LabStagingExecutionAdapter>>>
     ADAPTER.get_or_init(|| Mutex::new(None))
 }
 
-/// Phase 2 installs the adapter which delegates to existing Lab offload stages.
-/// Registration alone never makes controller-job submission/recovery safe.
+/// Install an execution adapter after its owner has registered the driver.
 pub(crate) fn install_production_execution_adapter(adapter: Arc<dyn LabStagingExecutionAdapter>) {
     *adapter_slot().lock().expect("Lab staging adapter lock") = Some(adapter);
 }
@@ -2450,6 +2441,15 @@ pub(crate) fn routing_ready() -> bool {
         .lock()
         .expect("Lab staging adapter lock")
         .is_some()
+}
+
+/// Enable the production staging implementation after generic driver
+/// registration. Keeping this explicit prevents partial embedders from routing
+/// detached work before they initialize the Lab runtime.
+pub fn enable_production_routing() {
+    install_production_execution_adapter(Arc::new(StageExecutionAdapter::new(Arc::new(
+        ProductionLabStagingOperations,
+    ))));
 }
 
 fn cancellations() -> &'static Mutex<HashMap<String, LabStagingCancellationToken>> {
@@ -3605,6 +3605,16 @@ mod tests {
         *adapter_slot().lock().expect("adapter lock") = None;
         register();
         assert!(!routing_ready());
+    }
+
+    #[test]
+    fn production_enablement_installs_the_staging_adapter() {
+        let _serial = global_state_lock().lock().expect("lock");
+        *adapter_slot().lock().expect("adapter lock") = None;
+        register();
+        enable_production_routing();
+        assert!(routing_ready());
+        *adapter_slot().lock().expect("adapter lock") = None;
     }
 
     #[test]
