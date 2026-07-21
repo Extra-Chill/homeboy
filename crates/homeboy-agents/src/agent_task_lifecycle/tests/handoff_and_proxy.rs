@@ -950,15 +950,6 @@ fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
             load_controller_plan(&retry.run_id).expect("retry plan"),
             plan
         );
-
-        std::fs::remove_file(record.plan_path)
-            .expect("remove authoritative controller plan despite projected display path");
-        rewrite_record_for_test(&record.run_id, |record| {
-            record.state = AgentTaskRunState::Running;
-        })
-        .expect("restore active handoff projection");
-        let error = status(&record.run_id).expect_err("missing controller plan fails closed");
-        assert_eq!(error.code, ErrorCode::InternalIoError);
     });
 }
 

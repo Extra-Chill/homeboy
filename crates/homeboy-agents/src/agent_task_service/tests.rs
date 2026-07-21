@@ -20,7 +20,40 @@ use homeboy_core::worktree;
 use serde_json::Value;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier, Mutex, MutexGuard, OnceLock};
+
+static LAB_EXECUTION_RUNNER_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct LabExecutionRunnerEnvGuard {
+    previous: Option<std::ffi::OsString>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl LabExecutionRunnerEnvGuard {
+    fn set(runner_id: &str) -> Self {
+        let lock = LAB_EXECUTION_RUNNER_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let name = homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV;
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, runner_id);
+        Self {
+            previous,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for LabExecutionRunnerEnvGuard {
+    fn drop(&mut self) {
+        let name = homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV;
+        match &self.previous {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+}
 
 #[test]
 fn cook_usage_reads_scheduler_rotation_metadata_and_decrements_budget() {
@@ -210,6 +243,39 @@ fn lab_handoff_run_plan_executes_with_runner_provenance_after_transport_is_consu
 
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.value.totals.succeeded, 1);
+    });
+}
+
+#[test]
+fn runner_local_run_plan_preserves_the_accepted_outer_daemon_job_identity() {
+    with_isolated_home(|_| {
+        let run_id = "lab-handoff-preserved-job";
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+        ];
+        agent_task_lifecycle::record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "accepted-daemon-job",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("daemon accepts the outer Lab handoff");
+
+        let _execution_runner = LabExecutionRunnerEnvGuard::set("homeboy-lab");
+        let result = run_loaded_plan(test_plan(), Some(run_id), SucceedingExecutor)
+            .expect("runner-local plan executes without replacing its outer handoff");
+
+        assert_eq!(result.exit_code, 0);
+        let record = lifecycle_status(run_id).expect("runner lifecycle record");
+        assert_eq!(record.runner_job_id(), Some("accepted-daemon-job"));
+        assert_eq!(record.metadata["runner_job_id"], "accepted-daemon-job");
+        assert_eq!(
+            record.lab_handoff.expect("accepted outer handoff").state,
+            agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
+        );
     });
 }
 

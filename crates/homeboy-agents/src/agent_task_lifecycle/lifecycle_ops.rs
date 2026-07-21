@@ -378,6 +378,26 @@ where
         adoption_run_id: None,
         metadata,
     };
+    let execution_runner_id = execution_runner_id();
+    if let Ok(existing) = store::read_record(&run_id) {
+        if existing.lab_handoff.as_ref().is_some_and(|handoff| {
+            handoff.state == AgentTaskLabHandoffState::Accepted
+                && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
+                && execution_runner_id.as_deref() == Some(handoff.runner_id.as_str())
+        }) {
+            // A runner daemon accepts the outer job before its runner-local
+            // `run-plan` replaces the synthetic handoff plan. Keep that accepted
+            // binding: recreating this record would erase the daemon job identity
+            // and make subsequent snapshot validation look like a nested handoff.
+            record.state = existing.state;
+            record.submitted_at = existing.submitted_at;
+            record.updated_at = existing.updated_at;
+            record.lab_handoff = existing.lab_handoff;
+            record.metadata = existing.metadata;
+            record.metadata["task_count"] = json!(plan.tasks.len());
+            record.metadata["max_concurrency"] = json!(plan.options.max_concurrency);
+        }
+    }
     store::write_record(&record)?;
 
     // The queue is durable independently of this foreground controller. Status
