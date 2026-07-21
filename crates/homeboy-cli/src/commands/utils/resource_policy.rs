@@ -24,6 +24,12 @@ pub struct HotCommand {
     pub lab_offload_supported: bool,
     pub lab_offload_unsupported_reason: Option<&'static str>,
     pub allows_warm_runner_coordination: bool,
+    /// Mirrors the command's `LabRoutingPolicy::offload_only_when_hot`: a cheap
+    /// portable command whose pressure threshold is `hot`, not `warm`. Resource
+    /// admission must use the same threshold as Lab routing, so a `.cheap()`
+    /// command is not warned/refused merely because the controller is `warm`
+    /// (#9432).
+    pub offload_only_when_hot: bool,
 }
 
 impl HotCommand {
@@ -33,6 +39,7 @@ impl HotCommand {
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: false,
+            offload_only_when_hot: false,
         }
     }
 
@@ -42,6 +49,19 @@ impl HotCommand {
             lab_offload_supported: false,
             lab_offload_unsupported_reason: reason,
             allows_warm_runner_coordination: false,
+            offload_only_when_hot: false,
+        }
+    }
+
+    /// The controller-side pressure threshold at or above which this command is
+    /// warned/refused, matching `LabRoutingPolicy::should_pressure_offload`.
+    /// Cheap commands only engage at `hot`; everything else engages once the
+    /// machine leaves `ok` (i.e. at `warm`).
+    fn engages_resource_admission(&self, recommendation: ResourceRecommendation) -> bool {
+        match recommendation {
+            ResourceRecommendation::Ok => false,
+            ResourceRecommendation::Warm => !self.offload_only_when_hot,
+            ResourceRecommendation::Hot => true,
         }
     }
 }
@@ -207,6 +227,7 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: true,
+            offload_only_when_hot: false,
         });
     }
 
@@ -225,13 +246,22 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: true,
+            offload_only_when_hot: false,
         });
     }
 
     let contract = command.lab_contract()?;
 
     match contract.portability {
-        LabCommandPortability::Portable => Some(HotCommand::lab_supported(contract.hot_label)),
+        LabCommandPortability::Portable => {
+            let mut hot = HotCommand::lab_supported(contract.hot_label);
+            // Adopt the command's own routing threshold so resource admission
+            // agrees with Lab routing: a `.cheap()` portable command stays local
+            // (no warn/refuse) on a merely `warm` controller, engaging only at
+            // `hot` (#9432).
+            hot.offload_only_when_hot = contract.routing_policy.offload_only_when_hot;
+            Some(hot)
+        }
         LabCommandPortability::LocalOnly(reason) => {
             Some(HotCommand::local_only(contract.hot_label, Some(reason)))
         }
@@ -331,14 +361,19 @@ pub fn evaluate_with_runner_hint(
     resources: &DoctorOutput,
     lab_readiness: Option<&LabRunnerReadiness>,
 ) -> Option<ResourcePolicyWarning> {
-    match resources.recommendation {
-        ResourceRecommendation::Ok => None,
-        recommendation => Some(ResourcePolicyWarning {
-            command: command.label,
-            recommendation,
-            message: warning_message(command, recommendation, resources, lab_readiness),
-        }),
+    let recommendation = resources.recommendation;
+    // Resource admission uses the same pressure threshold as Lab routing: a
+    // `.cheap()` command engages only at `hot`, so a merely `warm` controller
+    // neither warns nor refuses it (#9432). Everything else engages once the
+    // machine leaves `ok`.
+    if !command.engages_resource_admission(recommendation) {
+        return None;
     }
+    Some(ResourcePolicyWarning {
+        command: command.label,
+        recommendation,
+        message: warning_message(command, recommendation, resources, lab_readiness),
+    })
 }
 
 /// Cook keeps durable coordination, promotion, and gates on the controller,
@@ -566,6 +601,7 @@ mod tests {
     use super::*;
     use crate::cli_surface::Cli;
     use crate::commands::resources::{LoadSummary, MemorySummary, ProcessSummary, RigLeaseSummary};
+    use crate::test_support::with_isolated_home;
     use clap::Parser;
     fn resources(recommendation: ResourceRecommendation) -> DoctorOutput {
         DoctorOutput {
@@ -600,6 +636,7 @@ mod tests {
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: false,
+            offload_only_when_hot: false,
         }
     }
 
@@ -626,6 +663,7 @@ mod tests {
             lab_offload_supported: false,
             lab_offload_unsupported_reason: Some(reason),
             allows_warm_runner_coordination: false,
+            offload_only_when_hot: false,
         }
     }
 
@@ -649,6 +687,57 @@ mod tests {
             &resources(ResourceRecommendation::Warm)
         )
         .is_some());
+    }
+
+    fn cheap_hot(label: &'static str) -> HotCommand {
+        HotCommand {
+            offload_only_when_hot: true,
+            ..lab_supported_hot(label)
+        }
+    }
+
+    #[test]
+    fn cheap_command_is_not_warned_or_refused_on_a_warm_controller() {
+        // A `.cheap()` portable command (e.g. `agent-task promote --dry-run`)
+        // shares Lab routing's pressure threshold: it stays local without warning
+        // or refusal on a merely `warm` controller (#9432).
+        assert!(evaluate(
+            cheap_hot("agent-task promote"),
+            &resources(ResourceRecommendation::Warm),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn cheap_command_remains_resource_managed_on_a_hot_controller() {
+        // Cheap only defers the threshold to `hot`; genuine hot pressure still
+        // warns/refuses (#9432).
+        assert!(evaluate(
+            cheap_hot("agent-task promote"),
+            &resources(ResourceRecommendation::Hot),
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn portable_promotion_dry_run_carries_the_cheap_pressure_threshold() {
+        // The portable promotion contract calls `.cheap()`; `hot_command` must
+        // propagate that threshold so resource admission agrees with Lab routing.
+        with_isolated_home(|_| {
+            let cli = Cli::parse_from([
+                "homeboy",
+                "agent-task",
+                "promote",
+                "candidate-source",
+                "--to-worktree",
+                "homeboy@promote-9432",
+                "--dry-run",
+            ]);
+            let command = hot_command(&cli.command).expect("promotion is resource managed");
+            assert!(command.offload_only_when_hot, "portable promotion is cheap");
+            assert!(evaluate(command, &resources(ResourceRecommendation::Warm)).is_none());
+            assert!(evaluate(command, &resources(ResourceRecommendation::Hot)).is_some());
+        });
     }
 
     #[test]
@@ -994,6 +1083,7 @@ mod tests {
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: true,
+            offload_only_when_hot: false,
         };
         let ready = ready_lab();
         let mut resources = coordination_resources();
