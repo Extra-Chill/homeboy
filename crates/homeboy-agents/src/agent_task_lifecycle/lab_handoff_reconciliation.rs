@@ -63,7 +63,12 @@ pub(crate) fn has_expired_pending_runner_submission_intent(
     record: &AgentTaskRunRecord,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    has_complete_pending_runner_submission_intent(record)
+    record.state == AgentTaskRunState::Queued
+        && record.runner_job_id().is_none()
+        && record.lab_handoff.as_ref().is_some_and(|handoff| {
+            handoff.state == AgentTaskLabHandoffState::Pending
+                && handoff.authority == AgentTaskLabHandoffAuthority::Controller
+        })
         && record.has_expired_pending_lab_handoff(now)
 }
 
