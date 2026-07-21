@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.28.2] - 2026-07-21
+
+### Fixed
+- preserve WP Codebox source identity
+
 ## [3.28.1] - 2026-07-21
 
 ### Changed
