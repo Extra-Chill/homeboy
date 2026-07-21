@@ -84,24 +84,30 @@ pub(super) fn exec_worker_local_with_process_output(
     );
     let requested_setting_keys = requested_setting_keys_for_command(&options.command);
     let accepted_extension_settings = options.accepted_extension_settings.clone();
-    let extension_parity_plan = plan_extension_parity(
-        runner_id,
-        &plan.runner,
-        &plan.cwd,
+    if !crate::execution_bundle::validate_bundle_env(
+        &plan.env,
+        &options.command,
         &required_extensions,
-        &requested_setting_keys,
-        &accepted_extension_settings,
-    )?;
-    ensure_extension_materialized(&extension_parity_plan)?;
-    let runner = load(runner_id)?;
-    validate_extension_ready(
-        runner_id,
-        &runner,
-        &plan.cwd,
-        &required_extensions,
-        &requested_setting_keys,
-        &accepted_extension_settings,
-    )?;
+    ) {
+        let extension_parity_plan = plan_extension_parity(
+            runner_id,
+            &plan.runner,
+            &plan.cwd,
+            &required_extensions,
+            &requested_setting_keys,
+            &accepted_extension_settings,
+        )?;
+        ensure_extension_materialized(&extension_parity_plan)?;
+        let runner = load(runner_id)?;
+        validate_extension_ready(
+            runner_id,
+            &runner,
+            &plan.cwd,
+            &required_extensions,
+            &requested_setting_keys,
+            &accepted_extension_settings,
+        )?;
+    }
     validate_runner_policy(
         &plan.runner,
         &plan.cwd,

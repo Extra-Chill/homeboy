@@ -20,6 +20,9 @@ use super::sync::reap_run_workspace;
 /// Teardown policy for a run-owned materialized workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceCleanupPolicy {
+    /// Reap every terminal outcome. Use this for job-private runtime state that
+    /// must never survive a completed or cancelled offload.
+    DeleteAlways,
     /// Reap the workspace when the run succeeds; preserve it on failure so
     /// post-mortem evidence survives on the lab. Default — chosen to avoid
     /// behavior shock (failed runs keep their evidence as before) while still
@@ -94,6 +97,7 @@ impl MaterializedWorkspace {
             return false;
         }
         match self.policy {
+            WorkspaceCleanupPolicy::DeleteAlways => true,
             WorkspaceCleanupPolicy::PreserveAlways => false,
             WorkspaceCleanupPolicy::PreserveOnFailure => self.succeeded,
         }

@@ -66,6 +66,7 @@ fn subprocess_lab_offload_metadata(lab_metadata: &serde_json::Value) -> serde_js
         "remote_workspace": lab_metadata.get("remote_workspace"),
         "sync_mode": lab_metadata.get("sync_mode"),
         "source_snapshot": lab_metadata.get("source_snapshot"),
+        "execution_bundle": lab_metadata.get("execution_bundle"),
         "workspace_cleanliness": {
             "allow_dirty_lab_workspace": lab_metadata.pointer("/workspace_cleanliness/allow_dirty_lab_workspace"),
         },

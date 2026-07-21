@@ -40,6 +40,7 @@ mod daemon_health;
 mod daemon_http_get;
 mod evidence;
 mod execution;
+mod execution_bundle;
 mod extension_materialization;
 mod generation_store;
 pub fn runner_generation_inventory(runner_id: &str) -> Result<Vec<RunnerDaemonGenerationStatus>> {
@@ -85,6 +86,7 @@ pub mod runners;
 mod worker;
 pub(crate) mod workload;
 mod workspace;
+pub(crate) use extension_materialization::materialize_lab_job_extension_overlays;
 pub(crate) use workspace::copy_snapshot_to_directory;
 pub use workspace::register_workspace_snapshot_provider;
 // Only test code (extension::trace::canonicality) still calls verify_lab_workspace

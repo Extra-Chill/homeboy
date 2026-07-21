@@ -261,6 +261,21 @@ fn lab_runner_exec_options(
         homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV.to_string(),
         context.runner_id.to_string(),
     );
+    if let Some(bundle) = context.lab_metadata.get("execution_bundle") {
+        env.extend(crate::execution_bundle::bundle_env(bundle));
+        if let Some(path) = bundle
+            .pointer("/binary/path")
+            .and_then(serde_json::Value::as_str)
+        {
+            env.insert("HOMEBOY_COMMAND".to_string(), path.to_string());
+        }
+        if let Some(home) = bundle
+            .get("extension_runtime_home")
+            .and_then(serde_json::Value::as_str)
+        {
+            env.insert("HOME".to_string(), home.to_string());
+        }
+    }
     env.extend(lab_rig_registry_env(context.rig_registry_root.as_deref()));
     RunnerExecOptions {
         cwd: Some(context.remote_cwd.clone()),
@@ -338,6 +353,22 @@ pub(crate) fn exec_lab_context(
     env.extend(context.secret_env_handoff.env_delta.clone());
     for (name, value) in &request.job_overrides.env {
         env.insert(name.clone(), value.clone());
+    }
+    // Reassert immutable authority after untrusted per-job overrides.
+    if let Some(bundle) = context.lab_metadata.get("execution_bundle") {
+        env.extend(crate::execution_bundle::bundle_env(bundle));
+        if let Some(path) = bundle
+            .pointer("/binary/path")
+            .and_then(serde_json::Value::as_str)
+        {
+            env.insert("HOMEBOY_COMMAND".to_string(), path.to_string());
+        }
+        if let Some(home) = bundle
+            .get("extension_runtime_home")
+            .and_then(serde_json::Value::as_str)
+        {
+            env.insert("HOME".to_string(), home.to_string());
+        }
     }
     let mut secret_env_names = context
         .secret_env_handoff
@@ -461,11 +492,11 @@ pub(crate) fn exec_lab_context(
     let (exec_output, exit_code) = match exec_result {
         Ok(output) => output,
         Err(err) => {
-            if let Some(workspace) = context.materialized_workspace.as_mut() {
-                workspace.preserve();
-            }
             if let Some(run_id) = context.agent_task_run_id.as_deref() {
                 if let Some(job_id) = accepted_runner_job_id(runner_id, run_id) {
+                    if let Some(workspace) = context.materialized_workspace.as_mut() {
+                        workspace.preserve();
+                    }
                     return in_flight_daemon_disconnect_outcome(
                         context.plan,
                         runner_id,
@@ -507,6 +538,9 @@ pub(crate) fn exec_lab_context(
                 );
                 if let Some(job_id) = in_flight_job_id.as_deref() {
                     if let Some(run_id) = context.agent_task_run_id.as_deref() {
+                        if let Some(workspace) = context.materialized_workspace.as_mut() {
+                            workspace.preserve();
+                        }
                         return in_flight_daemon_disconnect_outcome(
                             context.plan,
                             runner_id,
@@ -569,6 +603,9 @@ pub(crate) fn exec_lab_context(
             }
             if let Some(job_id) = in_flight_job_id.as_deref() {
                 if let Some(run_id) = context.agent_task_run_id.as_deref() {
+                    if let Some(workspace) = context.materialized_workspace.as_mut() {
+                        workspace.preserve();
+                    }
                     return in_flight_daemon_disconnect_outcome(
                         context.plan,
                         runner_id,
@@ -1260,7 +1297,6 @@ pub(crate) fn run_lab_offload_inner(
         plan,
         runner_id,
         &source_path,
-        homeboy_path,
         &command_prefix.argv,
         Some(&runner_workspace_root),
         run_isolation_token,
@@ -1309,12 +1345,10 @@ pub(crate) fn run_lab_offload_inner(
         command,
         remote_command,
         remote_output_file,
-        synced_rigs,
         rig_component_path_overrides,
         dependency_cache_saves,
         runtime_overlay_env,
         runtime_overlay_metadata,
-        rig_registry_root,
     } = workspace_stage;
     plan = next_plan;
     if agent_task_run_id != pre_acceptance_run_id {
@@ -1322,6 +1356,64 @@ pub(crate) fn run_lab_offload_inner(
             "Lab workspace staging changed the pre-acceptance agent-task lifecycle identity",
         ));
     }
+    // This workspace owns the admitted rig and extension snapshots. Every
+    // terminal result, including failure and cancellation, must release them.
+    // Detached and uncertain in-flight work explicitly relinquishes ownership.
+    let cleanup_policy = WorkspaceCleanupPolicy::DeleteAlways;
+    let mut workspace_resource_lifecycle = synced.resource_lifecycle.clone();
+    workspace_resource_lifecycle.cleanup_policy =
+        homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnTerminal;
+    let materialized_workspace = MaterializedWorkspace::new(
+        runner_id.to_string(),
+        remote_cwd.clone(),
+        Some(remote_lab_artifact_dir(&remote_cwd)),
+        cleanup_policy,
+    );
+
+    ensure_remote_lab_artifact_dir(runner_id, &remote_lab_artifact_dir(&remote_cwd))?;
+
+    let candidate_rig_registry_root = remote_lab_rig_registry_root(&remote_cwd);
+    let synced_rigs = rig_materialization::sync_lab_offload_rigs(
+        runner_id,
+        homeboy_path,
+        &remote_cwd,
+        &candidate_rig_registry_root,
+        &changed_since_preflight.args,
+        rig_materialization::LabOffloadPrimaryRigSource {
+            local_path: &synced.local_path,
+            remote_path: &remote_cwd,
+            source_snapshot: &source_snapshot,
+            workspace_snapshot_identity: &synced.snapshot_identity,
+        },
+    )?;
+    if !synced_rigs.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.sync_rigs", "lab.sync_rigs")
+                .inputs(
+                    PlanValues::new()
+                        .json("count", synced_rigs.len())
+                        .string("source_snapshot_remote_path", &remote_cwd)
+                        .string("registry_root", &candidate_rig_registry_root)
+                        .json("rigs", &synced_rigs),
+                )
+                .build(),
+        );
+    }
+    let rig_registry_root = (!synced_rigs.is_empty()).then_some(candidate_rig_registry_root);
+
+    // Materialize after establishing the owner so a partial extension sync or
+    // any later pre-dispatch failure reaps the complete job-private runtime.
+    let extension_runtime_root =
+        format!("{}/extension-runtime", remote_lab_artifact_dir(&remote_cwd));
+    let extension_overlays = crate::materialize_lab_job_extension_overlays(
+        &runner,
+        &extension_runtime_root,
+        &runner_required_extensions,
+    )?;
+    let extension_runtime_home =
+        (!extension_overlays.is_empty()).then(|| format!("{extension_runtime_root}/home"));
+
     if let Some(run_id) = agent_task_run_id.as_deref() {
         agent_task_lifecycle::record_lab_offload_phase(
             run_id,
@@ -1332,31 +1424,6 @@ pub(crate) fn run_lab_offload_inner(
             Some(&provider_rotation),
             request.durable_agent_task_plan,
         )?;
-    }
-    let cleanup_policy = if agent_task_run_id.is_some() {
-        WorkspaceCleanupPolicy::PreserveAlways
-    } else {
-        WorkspaceCleanupPolicy::PreserveOnFailure
-    };
-    let mut workspace_resource_lifecycle = synced.resource_lifecycle.clone();
-    workspace_resource_lifecycle.cleanup_policy = if agent_task_run_id.is_some() {
-        homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::Preserve
-    } else {
-        homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnSuccess
-    };
-    let materialized_workspace = MaterializedWorkspace::new(
-        runner_id.to_string(),
-        remote_cwd.clone(),
-        (remote_output_file.is_some() || rig_registry_root.is_some())
-            .then(|| remote_lab_artifact_dir(&remote_cwd)),
-        cleanup_policy,
-    );
-
-    if let Some(artifact_path) = remote_output_file
-        .as_deref()
-        .or(rig_registry_root.as_deref())
-    {
-        ensure_remote_lab_artifact_dir(runner_id, artifact_path)?;
     }
 
     let dependency_hydration = hydrate_for_lab_workspace_exec(
@@ -1478,6 +1545,44 @@ pub(crate) fn run_lab_offload_inner(
     }
     let env_delta_before_secret_handoff = env_delta.clone();
     lab_metadata["runtime_overlays"] = runtime_overlay_metadata;
+    lab_metadata["execution_bundle"] = serde_json::json!({
+        "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
+        "binary": {
+            "path": homeboy_path,
+            "build_identity": runner_homeboy.get("job_command_binary_build_identity")
+                .or_else(|| runner_homeboy.get("active_daemon_build_identity")),
+        },
+        "admission": {
+            "daemon_lease_id": admission.as_ref().map(|reservation| &reservation.daemon_lease_id),
+            "reservation_job_id": admission.as_ref().map(|reservation| reservation.job_id()),
+            "authority": admission.is_none().then_some("reverse_broker"),
+        },
+        "rig_registry_root": rig_registry_root,
+        "rigs": synced_rigs,
+        "extensions": extension_overlays,
+        "extension_runtime_home": extension_runtime_home,
+        "workspace_mapping": workspace_mapping_metadata,
+        "identities": {
+            "requested": {
+                "runner_id": runner_id,
+                "extensions": contract.required_extensions,
+                "command": request.normalized_args,
+            },
+            "resolved": {
+                "binary": homeboy_path,
+                "rig_registry_root": rig_registry_root,
+                "rigs": &synced_rigs,
+                "extensions": &extension_overlays,
+                "workspace_mapping": &workspace_mapping_metadata,
+            },
+            "executed": {
+                "argv": &remote_command,
+                "daemon_lease_id": admission.as_ref().map(|reservation| &reservation.daemon_lease_id),
+                "reservation_job_id": admission.as_ref().map(|reservation| reservation.job_id()),
+                "authority": admission.is_none().then_some("reverse_broker"),
+            },
+        },
+    });
     let secret_env_handoff = build_lab_secret_env_handoff_plan(
         &contract.secret_env_sources,
         &changed_since_preflight.args,
@@ -1884,6 +1989,84 @@ mod tests {
     use crate::{
         RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning, RunnerTunnelMode,
     };
+    use std::sync::{Arc, Barrier, Mutex};
+
+    #[test]
+    fn concurrent_same_id_rigs_dispatch_from_their_admitted_registry_after_promotion() {
+        let root = tempfile::tempdir().expect("runner root");
+        let prepared = Arc::new(Barrier::new(3));
+        let dispatch = Arc::new(Barrier::new(3));
+        let runner_default = Arc::new(Mutex::new("/runner/homeboy-a".to_string()));
+        let jobs = [
+            ("a", "catalog-a", "/runner/homeboy-a", "lease-a"),
+            ("b", "catalog-b", "/runner/homeboy-b", "lease-b"),
+        ];
+        let handles = jobs
+            .into_iter()
+            .map(|(job, catalog, binary, lease)| {
+                let prepared = Arc::clone(&prepared);
+                let dispatch = Arc::clone(&dispatch);
+                let runner_default = Arc::clone(&runner_default);
+                let registry_root = root.path().join(format!("{job}-homeboy-artifacts/rig-registry"));
+                std::thread::spawn(move || {
+                    // Fake runner install operation: it receives the same env
+                    // shape as the real rig install and writes only there.
+                    let install_env = lab_rig_registry_env(Some(&registry_root.display().to_string()));
+                    let installed_root = install_env
+                        .get(homeboy_core::paths::RIG_REGISTRY_ROOT_ENV)
+                        .expect("admitted registry root")
+                        .to_string();
+                    let catalog_path = std::path::Path::new(&installed_root)
+                        .join("rigs/same-id/catalog");
+                    std::fs::create_dir_all(catalog_path.parent().expect("rig parent"))
+                        .expect("private rig registry");
+                    std::fs::write(&catalog_path, format!("{catalog}\n")).expect("rig catalog");
+
+                    prepared.wait();
+                    // Promotion/reconnect changes the administrative default
+                    // between admission and dispatch. The bound command and
+                    // lease must remain authoritative for this job.
+                    dispatch.wait();
+                    assert_eq!(
+                        runner_default.lock().expect("default lock").as_str(),
+                        "/runner/homeboy-promoted"
+                    );
+                    let output = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg("cat \"$HOMEBOY_RIG_REGISTRY_ROOT/rigs/same-id/catalog\"")
+                        .envs(install_env)
+                        .output()
+                        .expect("final rig dispatch");
+                    assert!(output.status.success());
+                    assert_eq!(
+                        String::from_utf8(output.stdout).expect("catalog utf8"),
+                        format!("{catalog}\n")
+                    );
+                    let bundle = serde_json::json!({
+                        "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
+                        "binary": { "path": binary, "build_identity": format!("build-{job}") },
+                        "admission": { "daemon_lease_id": lease, "reservation_job_id": format!("job-{job}") },
+                        "rig_registry_root": installed_root,
+                        "rigs": [{ "rig_id": "same-id", "workload_hashes": { "source_snapshot_hash": catalog } }],
+                        "extensions": []
+                    });
+                    let env = crate::execution_bundle::bundle_env(&bundle);
+                    assert!(crate::execution_bundle::validate_bundle_env(
+                        &env,
+                        &[binary.to_string(), "fuzz".to_string()],
+                        &[]
+                    ));
+                })
+            })
+            .collect::<Vec<_>>();
+
+        prepared.wait();
+        *runner_default.lock().expect("default lock") = "/runner/homeboy-promoted".to_string();
+        dispatch.wait();
+        for handle in handles {
+            handle.join().expect("rig job");
+        }
+    }
 
     #[test]
     fn final_dispatch_reasserts_the_admitted_rig_registry_root() {
@@ -1909,10 +2092,17 @@ mod tests {
             require_controller_git_bundle: false,
             reuse_compatible_snapshot: false,
             job_overrides: LabJobOverrides {
-                env: std::collections::HashMap::from([(
-                    homeboy_core::paths::RIG_REGISTRY_ROOT_ENV.to_string(),
-                    "/caller/conflict".to_string(),
-                )]),
+                env: std::collections::HashMap::from([
+                    (
+                        homeboy_core::paths::RIG_REGISTRY_ROOT_ENV.to_string(),
+                        "/caller/conflict".to_string(),
+                    ),
+                    (
+                        "HOMEBOY_COMMAND".to_string(),
+                        "/caller/new-homeboy".to_string(),
+                    ),
+                    ("HOME".to_string(), "/caller/home".to_string()),
+                ]),
                 ..Default::default()
             },
         };
@@ -1928,7 +2118,7 @@ mod tests {
                 true,
                 &[],
             ),
-            required_extensions: Vec::new(),
+            required_extensions: vec!["fixture".to_string()],
             required_capabilities: Vec::new(),
             workload: None,
         };
@@ -1944,14 +2134,24 @@ mod tests {
             runner_status: &runner_status,
             source_path: std::path::PathBuf::from("/controller/app"),
             remote_cwd: "/runner/app".to_string(),
-            command: vec!["homeboy".to_string(), "bench".to_string()],
+            command: vec!["/runner/admitted-homeboy".to_string(), "bench".to_string()],
             remote_command: Vec::new(),
             remapped_args: Vec::new(),
             accepted_extension_settings: Vec::new(),
             secret_preflight_args: Vec::new(),
             agent_task_run_id: None,
             lab_runner_workload: None,
-            lab_metadata: serde_json::json!({}),
+            lab_metadata: serde_json::json!({
+                "execution_bundle": {
+                    "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
+                    "binary": { "path": "/runner/admitted-homeboy" },
+                    "admission": { "daemon_lease_id": "lease-before-promotion", "reservation_job_id": "job-a" },
+                    "rig_registry_root": root,
+                    "rigs": [{ "rig_id": "same-id", "workload_hashes": { "source_snapshot_hash": "catalog-a" } }],
+                    "extensions": [{ "id": "fixture", "remote_path": "/runner/job/extensions/fixture/aaaaaaaaaaaaaaaa", "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }],
+                    "extension_runtime_home": "/runner/job/home",
+                }
+            }),
             rig_registry_root: Some(root.clone()),
             env_resolution_layers: Vec::new(),
             secret_env_handoff,
@@ -1980,6 +2180,19 @@ mod tests {
             options.env.get(homeboy_core::paths::RIG_REGISTRY_ROOT_ENV),
             Some(&root)
         );
+        assert_eq!(
+            options.env.get("HOMEBOY_COMMAND"),
+            Some(&"/runner/admitted-homeboy".to_string())
+        );
+        assert_eq!(
+            options.env.get("HOME"),
+            Some(&"/runner/job/home".to_string())
+        );
+        assert!(crate::execution_bundle::validate_bundle_env(
+            &options.env,
+            &options.command,
+            &contract.required_extensions,
+        ));
     }
 
     #[test]

@@ -186,3 +186,49 @@ fn materialized_workspace_preserve_always_policy_never_reaps() {
         );
     });
 }
+
+#[test]
+fn job_runtime_cleanup_reaps_success_failure_and_cancellation_without_touching_runner_defaults() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let defaults = runner_root
+            .path()
+            .join(".config/homeboy/extensions/default");
+        fs::create_dir_all(defaults.parent().expect("default parent")).expect("default parent");
+        fs::write(&defaults, "runner default").expect("runner default");
+
+        for outcome in ["success", "failure", "cancelled"] {
+            let runner_id = format!("lab-local-terminal-{outcome}");
+            let remote_path = sync_local_workspace(&runner_id, runner_root.path());
+            let artifact_dir = format!("{remote_path}-homeboy-artifacts");
+            fs::create_dir_all(format!("{artifact_dir}/rig-registry/same-id")).expect("rig state");
+            fs::create_dir_all(format!(
+                "{artifact_dir}/extension-runtime/home/.config/homeboy/extensions"
+            ))
+            .expect("extension state");
+
+            {
+                let mut handle = MaterializedWorkspace::new(
+                    runner_id,
+                    remote_path.clone(),
+                    Some(artifact_dir.clone()),
+                    WorkspaceCleanupPolicy::DeleteAlways,
+                );
+                handle.set_success(outcome == "success");
+            }
+
+            assert!(
+                !Path::new(&remote_path).exists(),
+                "{outcome} checkout was not reaped"
+            );
+            assert!(
+                !Path::new(&artifact_dir).exists(),
+                "{outcome} job runtime was not reaped"
+            );
+            assert_eq!(
+                fs::read_to_string(&defaults).expect("runner default survives"),
+                "runner default"
+            );
+        }
+    });
+}
