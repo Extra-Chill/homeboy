@@ -470,7 +470,7 @@ fn validate_preflighted_component_identities(
         let Some(expected_path) = config.preflighted_source_paths.get(&component.id) else {
             continue;
         };
-        let actual_identity = component.canonical_identity().map_err(|error| {
+        let actual_identity = component.canonical_attachment_identity().map_err(|error| {
             Error::internal_io(
                 format!(
                     "Failed to encode effective component '{}': {error}",
@@ -1421,7 +1421,7 @@ mod tests {
         config.preflighted_component_identities = std::collections::BTreeMap::from([(
             "fixture".to_string(),
             preflighted
-                .canonical_identity()
+                .canonical_attachment_identity()
                 .expect("preflight identity"),
         )]);
 
@@ -1452,7 +1452,9 @@ mod tests {
         )]);
         config.preflighted_component_identities = std::collections::BTreeMap::from([(
             "fixture".to_string(),
-            component.canonical_identity().expect("preflight identity"),
+            component
+                .canonical_attachment_identity()
+                .expect("preflight identity"),
         )]);
 
         let mut changed_path = component.clone();
@@ -1465,6 +1467,64 @@ mod tests {
         changed_config.remote_path = "wp-content/plugins/changed".to_string();
         let err = validate_preflighted_component_identities(&[changed_config], &config)
             .expect_err("config drift must fail before dry-run planning");
+        assert!(err.message.contains("changed after release-set preflight"));
+    }
+
+    #[test]
+    fn release_set_preflight_ignores_execution_resolved_build_artifact() {
+        // Regression for #9205: deploy planning resolves `build_artifact` to an
+        // absolute path (`resolve_path_string`) after preflight captured the
+        // pre-resolution component, so the raw serialization reported a clean
+        // attachment as "changed after release-set preflight". The drift guard
+        // must ignore this deterministic, execution-only derivation.
+        let component = artifact_component("agents-api", "/source/agents-api", "dist/plugin.zip");
+        let mut config = base_deploy_config();
+        config.dry_run = true;
+        config.preflighted_source_paths = std::collections::BTreeMap::from([(
+            "agents-api".to_string(),
+            component.local_path.clone(),
+        )]);
+        // Preflight captured the component BEFORE build_artifact resolution.
+        config.preflighted_component_identities = std::collections::BTreeMap::from([(
+            "agents-api".to_string(),
+            component
+                .canonical_attachment_identity()
+                .expect("preflight identity"),
+        )]);
+
+        // Execution loads the same attachment, then resolves build_artifact to an
+        // absolute path — the only field deploy planning mutates post-resolution.
+        let mut executed = component.clone();
+        executed.build_artifact = Some("/source/agents-api/dist/plugin.zip".to_string());
+
+        validate_preflighted_component_identities(&[executed], &config).expect(
+            "a build_artifact resolved only during execution must not count as attachment drift",
+        );
+    }
+
+    #[test]
+    fn release_set_preflight_still_fails_on_real_config_drift_despite_ignoring_build_artifact() {
+        // The build_artifact exclusion must not weaken the guard: a genuine
+        // config change (a different *configured* artifact) still drifts because
+        // it changes other fields, and any non-derived field change is caught.
+        let component = artifact_component("agents-api", "/source/agents-api", "dist/plugin.zip");
+        let mut config = base_deploy_config();
+        config.dry_run = true;
+        config.preflighted_source_paths = std::collections::BTreeMap::from([(
+            "agents-api".to_string(),
+            component.local_path.clone(),
+        )]);
+        config.preflighted_component_identities = std::collections::BTreeMap::from([(
+            "agents-api".to_string(),
+            component
+                .canonical_attachment_identity()
+                .expect("preflight identity"),
+        )]);
+
+        let mut drifted = component;
+        drifted.extract_command = Some("tar xzf {artifact}".to_string());
+        let err = validate_preflighted_component_identities(&[drifted], &config)
+            .expect_err("real config drift must still fail closed");
         assert!(err.message.contains("changed after release-set preflight"));
     }
 

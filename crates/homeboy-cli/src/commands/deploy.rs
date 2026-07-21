@@ -395,7 +395,7 @@ fn apply_release_set(
         .iter()
         .map(|(entry, component)| {
             component
-                .canonical_identity()
+                .canonical_attachment_identity()
                 .map(|identity| (entry.id.clone(), identity))
                 .map_err(|error| homeboy::core::Error::internal_io(
                     format!("Failed to encode release-set component '{}': {error}", entry.id),
