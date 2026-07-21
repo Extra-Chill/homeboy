@@ -26,7 +26,10 @@ use regex::Regex;
 use super::super::conventions::AuditFinding;
 use super::super::findings::{Finding, Severity};
 use super::super::fingerprint::FileFingerprint;
-use super::super::walker::{cfg_test_regions, is_test_path, offset_in_cfg_test_region};
+use super::super::walker::{
+    cfg_test_regions, crate_of_path, is_test_path, offset_in_cfg_test_region,
+    visibility_is_crate_public,
+};
 
 /// Minimum arg-vector length to consider. Single-element commands (`["init"]`,
 /// `["fetch"]`) are too generic to attribute to one wrapper.
@@ -58,22 +61,6 @@ fn fn_decl_regex() -> &'static Regex {
             .expect("valid fn regex")
     });
     &RE
-}
-
-/// A wrapper is *reachable* from another crate only if it is `pub` (crate-wide
-/// `pub` — a helper visible outside its own crate). `pub(crate)`, `pub(super)`,
-/// `pub(in …)`, and private helpers are unreachable across a crate boundary, so
-/// attributing a cross-crate raw command to them is a false positive.
-fn visibility_is_crate_public(vis_prefix: &str) -> bool {
-    let vis = vis_prefix.trim();
-    vis == "pub"
-}
-
-/// The crate name for a `crates/<crate>/…` path, else `None` (non-workspace
-/// layout — fall back to conservative behavior).
-fn crate_of_path(path: &str) -> Option<&str> {
-    let rest = path.strip_prefix("crates/")?;
-    rest.split('/').next().filter(|s| !s.is_empty())
 }
 
 /// Parse the inner string elements of an arg-vector match into a canonical key.

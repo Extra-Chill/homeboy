@@ -23,7 +23,10 @@ use regex::Regex;
 use super::super::conventions::AuditFinding;
 use super::super::findings::{Finding, Severity};
 use super::super::fingerprint::FileFingerprint;
-use super::super::walker::{cfg_test_regions, is_test_path, offset_in_cfg_test_region};
+use super::super::walker::{
+    cfg_test_regions, crate_of_path, is_test_path, offset_in_cfg_test_region,
+    visibility_is_crate_public,
+};
 
 /// Minimum constant-value length worth flagging. Short values (`"workspace"`,
 /// `"snapshot"`) collide with serde tags, enum spellings, and unrelated
@@ -36,11 +39,12 @@ pub(crate) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
 }
 
 /// `const NAME: &str = "value";` and `const NAME = "value";` (and `static`).
-/// Captures the constant name (1) and its string value (2).
+/// Captures the visibility prefix (1, `pub`/`pub(...)`/empty), the constant
+/// name (2), and its string value (3).
 fn const_decl_regex() -> &'static Regex {
     static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(
-            r#"(?m)\b(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+([A-Z][A-Z0-9_]+)\s*(?::\s*&(?:'static\s+)?str\s*)?=\s*"([^"\\]{4,})"\s*;"#,
+            r#"(?m)\b(pub(?:\([^)]*\))?\s+)?(?:const|static)\s+([A-Z][A-Z0-9_]+)\s*(?::\s*&(?:'static\s+)?str\s*)?=\s*"([^"\\]{4,})"\s*;"#,
         )
         .expect("valid const-decl regex")
     });
@@ -53,6 +57,10 @@ struct ConstDef {
     file: String,
     /// 1-indexed line of the definition, so we never flag the definition itself.
     line: usize,
+    /// Whether the constant is crate-`pub` — required to attribute a bypass from
+    /// a different crate. A private/`pub(crate)` constant is unreachable
+    /// cross-crate, so flagging a literal there is a false positive.
+    is_public: bool,
 }
 
 fn detect_constant_bypass_literals(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
@@ -64,8 +72,12 @@ fn detect_constant_bypass_literals(fingerprints: &[&FileFingerprint]) -> Vec<Fin
             continue;
         }
         for caps in const_decl_regex().captures_iter(&fp.content) {
-            let name = caps[1].to_string();
-            let value = caps[2].to_string();
+            let is_public = caps
+                .get(1)
+                .map(|m| visibility_is_crate_public(m.as_str()))
+                .unwrap_or(false);
+            let name = caps[2].to_string();
+            let value = caps[3].to_string();
             if value.len() < MIN_VALUE_LEN {
                 continue;
             }
@@ -74,6 +86,7 @@ fn detect_constant_bypass_literals(fingerprints: &[&FileFingerprint]) -> Vec<Fin
                 name,
                 file: fp.relative_path.clone(),
                 line,
+                is_public,
             });
         }
     }
@@ -106,6 +119,22 @@ fn detect_constant_bypass_literals(fingerprints: &[&FileFingerprint]) -> Vec<Fin
             // Skip the const-declaration line itself in any file (a re-export
             // `const OTHER: &str = SAME_VALUE;` is legitimate, though rare).
             if is_const_decl_line(&fp.content, offset) {
+                continue;
+            }
+            // Only attribute a literal to a constant the site can reach. A
+            // private/`pub(crate)` constant in a DIFFERENT crate is unreachable,
+            // so "reference it instead" is impossible — a false positive. Same
+            // crate is always fine; cross-crate requires `pub`. (mirrors the
+            // command_wrapper_bypass reachability rule)
+            let literal_crate = crate_of_path(&fp.relative_path);
+            let def_crate = crate_of_path(&def.file);
+            let cross_crate = match (literal_crate, def_crate) {
+                (Some(a), Some(b)) => a != b,
+                // Unknown layout on either side — conservative: treat as same
+                // crate (do not suppress) to preserve prior behavior.
+                _ => false,
+            };
+            if cross_crate && !def.is_public {
                 continue;
             }
             findings.push(Finding {

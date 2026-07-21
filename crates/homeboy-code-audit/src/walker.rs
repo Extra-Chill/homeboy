@@ -187,3 +187,22 @@ pub(crate) fn offset_in_cfg_test_region(offset: usize, regions: &[(usize, usize)
         .iter()
         .any(|(start, end)| offset >= *start && offset <= *end)
 }
+
+/// The crate name for a `crates/<crate>/…` path, else `None` (non-workspace
+/// layout — callers fall back to conservative behavior).
+///
+/// Used by content-scanning detectors that attribute a caller's raw literal or
+/// command to a canonical definition elsewhere: a cross-crate attribution is
+/// only valid when the definition is reachable from the caller's crate.
+pub(crate) fn crate_of_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("crates/")?;
+    rest.split('/').next().filter(|s| !s.is_empty())
+}
+
+/// Whether a `pub`/`pub(...)` visibility prefix makes a definition reachable
+/// from *another* crate. Only crate-wide `pub` qualifies — `pub(crate)`,
+/// `pub(super)`, `pub(in …)`, and private are unreachable across a crate
+/// boundary, so attributing a cross-crate reference to them is a false positive.
+pub(crate) fn visibility_is_crate_public(vis_prefix: &str) -> bool {
+    vis_prefix.trim() == "pub"
+}

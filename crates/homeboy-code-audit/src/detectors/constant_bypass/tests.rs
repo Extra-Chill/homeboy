@@ -119,3 +119,62 @@ fn still_flags_production_literal_alongside_an_inline_test_block() {
     );
     assert_eq!(findings[0].file, "src/route.rs");
 }
+
+#[test]
+fn does_not_flag_cross_crate_literal_of_a_private_constant() {
+    // A private constant in one crate is unreachable from another, so a raw
+    // literal there is not a fixable bypass.
+    let def = fp(
+        "crates/homeboy-cli/src/response.rs",
+        r#"const ACTIONABLE_METADATA_KEY: &str = "_homeboy_actionable";"#,
+    );
+    let user = fp(
+        "crates/homeboy-agents/src/lint.rs",
+        "fn f() {\n    let k = \"_homeboy_actionable\";\n}\n",
+    );
+    assert!(
+        detect_constant_bypass_literals(&[&def, &user]).is_empty(),
+        "a private constant in another crate is unreachable — not a bypass"
+    );
+}
+
+#[test]
+fn flags_cross_crate_literal_of_a_public_constant() {
+    // A `pub` constant in a foundational crate IS reachable, so the raw literal
+    // is a real bypass.
+    let def = fp(
+        "crates/homeboy-engine-primitives/src/template.rs",
+        r#"    pub const COMPONENT_ID: &str = "component_identifier";"#,
+    );
+    let user = fp(
+        "crates/homeboy-agents/src/promotion.rs",
+        "fn f() {\n    let k = \"component_identifier\";\n}\n",
+    );
+    let findings = detect_constant_bypass_literals(&[&def, &user]);
+    assert_eq!(
+        findings.len(),
+        1,
+        "public cross-crate constant is reachable"
+    );
+    assert!(findings[0].description.contains("COMPONENT_ID"));
+}
+
+#[test]
+fn flags_same_crate_literal_of_a_private_constant() {
+    // Within the same crate a private constant is reachable, so the raw literal
+    // is still a bypass.
+    let def = fp(
+        "crates/homeboy-agents/src/keys.rs",
+        r#"const SESSION_META_KEY: &str = "agent_session_metadata";"#,
+    );
+    let user = fp(
+        "crates/homeboy-agents/src/promotion.rs",
+        "fn f() {\n    let k = \"agent_session_metadata\";\n}\n",
+    );
+    let findings = detect_constant_bypass_literals(&[&def, &user]);
+    assert_eq!(
+        findings.len(),
+        1,
+        "same-crate private constant is reachable — still a bypass"
+    );
+}
