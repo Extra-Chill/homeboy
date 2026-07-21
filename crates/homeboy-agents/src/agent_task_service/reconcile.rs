@@ -4,9 +4,7 @@
 use crate::agent_task_lifecycle;
 use homeboy_core::Result;
 
-use super::discovery::{
-    discover_runs_with_reconciliation, AgentTaskDiscoveryFilter, AgentTaskLiveness,
-};
+use super::discovery::{discover_runs, AgentTaskDiscoveryFilter, AgentTaskLiveness};
 
 /// Report returned by [`reconcile_stale_active_runs`]. Lists every active run
 /// that was classified non-active, and for the reconcilable ones records the
@@ -46,7 +44,11 @@ pub struct AgentTaskReconcileRun {
 /// work) are never touched. With `dry_run`, candidates are reported but no
 /// record is mutated so an operator can preview the blast radius first.
 pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileReport> {
-    let report = discover_runs_with_reconciliation(AgentTaskDiscoveryFilter::Active)?;
+    // Read the durable snapshot first so an expired controller handoff remains
+    // visible to this managed recovery command. `status` also converges expiry,
+    // but would otherwise terminalize it before this report can record the
+    // actionable retry outcome.
+    let report = discover_runs(AgentTaskDiscoveryFilter::Active)?;
 
     let mut runs = Vec::new();
     let mut reconciled = 0usize;
@@ -60,6 +62,8 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
             continue;
         }
 
+        let expired_handoff =
+            agent_task_lifecycle::has_expired_unaccepted_lab_handoff(&run.run_id)?;
         if dry_run {
             runs.push(AgentTaskReconcileRun {
                 run_id: run.run_id,
@@ -76,7 +80,12 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
             .stale_reason
             .clone()
             .unwrap_or_else(|| format!("reconciled stale-{} run", liveness.as_str()));
-        match agent_task_lifecycle::cancel_run(&run.run_id, Some(&reason)) {
+        let result = if expired_handoff {
+            agent_task_lifecycle::expire_unaccepted_lab_handoff(&run.run_id).map(|_| ())
+        } else {
+            agent_task_lifecycle::cancel_run(&run.run_id, Some(&reason)).map(|_| ())
+        };
+        match result {
             Ok(_) => {
                 reconciled += 1;
                 runs.push(AgentTaskReconcileRun {

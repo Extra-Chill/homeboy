@@ -54,19 +54,12 @@ pub fn apply(
         format!("homeboy runner disconnect {id}"),
         format!("homeboy runner connect {id}"),
     ];
-    let disconnected = runner::disconnect(id);
-    if let Err(err) = disconnected {
-        report.repairs.push(RunnerRepair {
-            id: "repair.daemon".to_string(),
-            status: RunnerDoctorStatus::Error,
-            message: format!("Could not disconnect stale Lab daemon: {}", err.message),
-            commands,
-        });
-        return;
-    }
-
+    let disconnect_error = runner::disconnect(id).err();
+    // Connect owns lease-safe dead-daemon adoption. A failed disconnect must not
+    // force operators through repeated stop/adopt cycles when its authoritative
+    // probe has already established that the recorded owner is gone.
     match runner::connect(id) {
-        Ok(_) => {
+        Ok((_, 0)) => {
             report.checks.retain(|check| check.id != "daemon.exec");
             let workspace_root = runner_config.workspace_root.as_deref().unwrap_or(".");
             report
@@ -75,8 +68,31 @@ pub fn apply(
             report.repairs.push(RunnerRepair {
                 id: "repair.daemon".to_string(),
                 status: RunnerDoctorStatus::Ok,
-                message: "Reconnected the Lab runner daemon and reran the daemon exec probe"
-                    .to_string(),
+                message: match disconnect_error {
+                    Some(error) => format!(
+                        "Recovered the Lab runner daemon after bounded disconnect failed ({}) and reran the daemon exec probe",
+                        error.message
+                    ),
+                    None => "Reconnected the Lab runner daemon and reran the daemon exec probe"
+                        .to_string(),
+                },
+                commands,
+            });
+        }
+        Ok((connect_report, exit_code)) => {
+            let failure = connect_report
+                .failure_message
+                .unwrap_or_else(|| format!("runner connect exited with code {exit_code}"));
+            report.repairs.push(RunnerRepair {
+                id: "repair.daemon".to_string(),
+                status: RunnerDoctorStatus::Error,
+                message: match disconnect_error {
+                    Some(disconnect_error) => format!(
+                        "Could not recover Lab daemon after bounded disconnect failed ({}): {}",
+                        disconnect_error.message, failure
+                    ),
+                    None => format!("Could not reconnect Lab daemon: {failure}"),
+                },
                 commands,
             });
         }
@@ -84,7 +100,13 @@ pub fn apply(
             report.repairs.push(RunnerRepair {
                 id: "repair.daemon".to_string(),
                 status: RunnerDoctorStatus::Error,
-                message: format!("Could not reconnect Lab daemon: {}", err.message),
+                message: match disconnect_error {
+                    Some(disconnect_error) => format!(
+                        "Could not recover Lab daemon after bounded disconnect failed ({}): {}",
+                        disconnect_error.message, err.message
+                    ),
+                    None => format!("Could not reconnect Lab daemon: {}", err.message),
+                },
                 commands,
             });
         }

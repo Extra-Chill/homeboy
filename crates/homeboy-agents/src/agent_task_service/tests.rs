@@ -944,12 +944,11 @@ fn reconcile_terminalizes_an_unaccepted_controller_handoff_after_its_deadline() 
         let reconciliation = reconcile_stale_active_runs(false).expect("reconciled");
         assert_eq!(reconciliation.reconciled, 1);
         assert_eq!(reconciliation.runs[0].action, "reconciled");
-        assert_eq!(
-            lifecycle_status("controller-handoff-unaccepted")
-                .expect("terminal controller record")
-                .state,
-            AgentTaskRunState::Cancelled
-        );
+        let terminal =
+            lifecycle_status("controller-handoff-unaccepted").expect("terminal controller record");
+        assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
+        assert_eq!(terminal.metadata["provider_executions_consumed"], 0);
+        assert_eq!(terminal.metadata["retryable"], true);
     });
 }
 

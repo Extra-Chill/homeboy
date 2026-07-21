@@ -63,8 +63,23 @@ pub(crate) fn has_expired_pending_runner_submission_intent(
     record: &AgentTaskRunRecord,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    has_complete_pending_runner_submission_intent(record)
+    record.state == AgentTaskRunState::Queued
+        && record.runner_job_id().is_none()
+        && record.lab_handoff.as_ref().is_some_and(|handoff| {
+            handoff.state == AgentTaskLabHandoffState::Pending
+                && handoff.authority == AgentTaskLabHandoffAuthority::Controller
+        })
         && record.has_expired_pending_lab_handoff(now)
+}
+
+/// Check whether a controller-owned Lab handoff remains unaccepted after its
+/// durable deadline. Terminalization rechecks this predicate under the handoff
+/// lock before mutating the record.
+pub(crate) fn has_expired_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
+    Ok(has_expired_pending_runner_submission_intent(
+        &store::read_record(&sanitize_run_id(run_id))?,
+        chrono::Utc::now(),
+    ))
 }
 
 fn has_complete_pending_runner_submission_intent(record: &AgentTaskRunRecord) -> bool {
