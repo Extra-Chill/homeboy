@@ -107,7 +107,7 @@ impl RigArgs {
             ));
         }
         if self.is_runner_source_management_command() {
-            return CommandPortabilityContract::lab(LabCommandContract::local_only(
+            return CommandPortabilityContract::lightweight_lab(LabCommandContract::local_only(
                 RIG_SOURCE_MANAGEMENT_LAB_LABEL,
                 RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON,
             ));
