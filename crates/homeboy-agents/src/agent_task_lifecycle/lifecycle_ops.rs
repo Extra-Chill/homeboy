@@ -1078,6 +1078,9 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     }
     if record.state.is_terminal() {
         if let Ok(aggregate) = store::read_aggregate(&record.run_id) {
+            if reconcile_terminal_provider_models(&mut record, &aggregate) {
+                store::write_record(&record)?;
+            }
             if !crate::agent_task_lifecycle::terminal_artifact_projection_is_verified(
                 &record, &aggregate,
             )? {

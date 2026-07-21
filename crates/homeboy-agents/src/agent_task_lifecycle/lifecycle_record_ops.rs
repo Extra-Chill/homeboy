@@ -128,6 +128,98 @@ pub(crate) fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan
     };
 }
 
+pub(crate) fn reconcile_terminal_provider_models(
+    record: &mut AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+) -> bool {
+    let mut changed = false;
+    for outcome in &aggregate.outcomes {
+        let Some(model) = outcome
+            .metadata
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+        else {
+            continue;
+        };
+
+        if let Some(task) = record
+            .tasks
+            .iter_mut()
+            .find(|task| task.task_id == outcome.task_id)
+        {
+            changed |= replace_model(&mut task.model, model);
+        }
+        for handle in record
+            .provider_handles
+            .iter_mut()
+            .filter(|handle| handle.task_id == outcome.task_id)
+        {
+            changed |= replace_metadata_model(&mut handle.metadata, model);
+        }
+        for runtime in record
+            .lifecycle
+            .provider_runtime
+            .iter_mut()
+            .filter(|runtime| runtime.task_id == outcome.task_id)
+        {
+            changed |= replace_metadata_model(&mut runtime.metadata, model);
+            if let Some(executor) = runtime
+                .metadata
+                .get_mut("executor")
+                .and_then(Value::as_object_mut)
+            {
+                changed |= replace_json_model(executor, model);
+            }
+        }
+        if let Some(executions) = record
+            .metadata
+            .get_mut("provider_executions")
+            .and_then(Value::as_array_mut)
+        {
+            for execution in executions.iter_mut().filter(|execution| {
+                execution["task_id"] == outcome.task_id && execution["state"] == "succeeded"
+            }) {
+                if let Some(metadata) = execution.as_object_mut() {
+                    changed |= replace_json_model(metadata, model);
+                }
+            }
+        }
+    }
+    if changed {
+        let timestamp = now_timestamp();
+        record.updated_at = Some(timestamp.clone());
+        record.lifecycle.updated_at = Some(timestamp);
+    }
+    changed
+}
+
+fn replace_model(current: &mut Option<String>, model: &str) -> bool {
+    if current.as_deref() == Some(model) {
+        return false;
+    }
+    *current = Some(model.to_string());
+    true
+}
+
+fn replace_metadata_model(metadata: &mut Value, model: &str) -> bool {
+    if !metadata.is_object() {
+        *metadata = json!({});
+    }
+    replace_json_model(
+        metadata.as_object_mut().expect("provider metadata object"),
+        model,
+    )
+}
+
+fn replace_json_model(metadata: &mut serde_json::Map<String, Value>, model: &str) -> bool {
+    if metadata.get("model").and_then(Value::as_str) == Some(model) {
+        return false;
+    }
+    metadata.insert("model".to_string(), json!(model));
+    true
+}
+
 fn provider_executions_for_task(
     record: &AgentTaskRunRecord,
     task_id: &str,

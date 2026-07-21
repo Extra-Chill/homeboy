@@ -1235,6 +1235,66 @@ fn completed_generic_executor_outcome_preserves_runtime_evidence_without_provide
 }
 
 #[test]
+fn status_repairs_terminal_provider_model_from_aggregate_idempotently() {
+    with_isolated_home(|_| {
+        let mut plan = test_plan();
+        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.tasks[0].executor.model = None;
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.outcomes[0].metadata = json!({ "model": "openai/gpt-5.6-terra" });
+        record_completed_run(&plan, &aggregate, Some("terminal-model-repair")).expect("recorded");
+
+        let mut stale = store::read_record("terminal-model-repair").expect("record loaded");
+        stale.tasks[0].model = None;
+        stale.lifecycle.provider_runtime[0].metadata["model"] = Value::Null;
+        stale.lifecycle.provider_runtime[0].metadata["executor"]["model"] = Value::Null;
+        stale.metadata["latest_promotion"] = json!({ "status": "applied" });
+        stale.metadata["provider_executions"] = json!([
+            {
+                "task_id": "task-a",
+                "state": "failed",
+                "model": "openai/failed-attempt"
+            },
+            {
+                "task_id": "task-a",
+                "state": "succeeded",
+                "model": null
+            }
+        ]);
+        store::write_record(&stale).expect("stale terminal record stored");
+
+        let repaired = status("terminal-model-repair").expect("status repaired model");
+
+        assert_eq!(repaired.state, AgentTaskRunState::Succeeded);
+        assert_eq!(repaired.metadata["latest_promotion"]["status"], "applied");
+        assert_eq!(
+            repaired.tasks[0].model.as_deref(),
+            Some("openai/gpt-5.6-terra")
+        );
+        assert_eq!(
+            repaired.lifecycle.provider_runtime[0].metadata["model"],
+            "openai/gpt-5.6-terra"
+        );
+        assert_eq!(
+            repaired.lifecycle.provider_runtime[0].metadata["executor"]["model"],
+            "openai/gpt-5.6-terra"
+        );
+        assert_eq!(
+            repaired.metadata["provider_executions"][0]["model"],
+            "openai/failed-attempt"
+        );
+        assert_eq!(
+            repaired.metadata["provider_executions"][1]["model"],
+            "openai/gpt-5.6-terra"
+        );
+
+        let repeated = status("terminal-model-repair").expect("repeat status");
+        assert_eq!(repeated.updated_at, repaired.updated_at);
+        assert_eq!(repeated.lifecycle, repaired.lifecycle);
+    });
+}
+
+#[test]
 fn cancel_keeps_run_state_and_execution_state_paired() {
     with_isolated_home(|_| {
         let plan = test_plan();
