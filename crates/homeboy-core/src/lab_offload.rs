@@ -21,7 +21,7 @@ use crate::lab_contract::{
 use crate::plan::HomeboyPlan;
 
 /// Per-job overrides carried into a Lab offload.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabJobOverrides {
     pub env: HashMap<String, String>,
     pub secret_env_names: Vec<String>,
@@ -29,7 +29,7 @@ pub struct LabJobOverrides {
 }
 
 /// A resolved Lab command with its required extensions/capabilities/workload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LabOffloadCommand {
     pub command: LabCommandContract,
     pub required_extensions: Vec<String>,

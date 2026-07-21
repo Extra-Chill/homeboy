@@ -70,6 +70,12 @@ impl ControllerJobHandle {
         self.job.is_cancelled()
     }
 
+    /// Durable identity for domain projections which need to link their parent
+    /// record to this generic controller job.
+    pub fn job_id(&self) -> String {
+        self.job.job_id().to_string()
+    }
+
     pub fn progress(&self, private_progress: Value) -> Result<()> {
         self.job
             .progress(self.driver.public_progress(&private_progress)?)

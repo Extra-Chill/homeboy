@@ -242,7 +242,7 @@ pub(crate) fn hydration_failure_error(
 /// Hydration outcome as recorded by the offload orchestrator. `NotApplied`
 /// captures why hydration was skipped (explicit opt-out); `Applied` carries the
 /// per-provider results.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) enum LabWorkspaceHydrationRecord {
     NotApplied { reason: &'static str },
     Applied(LabWorkspaceHydrationOutput),
@@ -253,6 +253,50 @@ pub(crate) enum LabWorkspaceHydrationRecord {
 pub(crate) struct LabOffloadDependencyHydration {
     pub(crate) plan: HomeboyPlan,
     pub(crate) record: LabWorkspaceHydrationRecord,
+}
+
+/// Hydration plus the runner execution identities durably recorded against an
+/// agent-task attempt. Both synchronous offload and controller staging use this
+/// boundary so recovery observes the same lifecycle authority.
+pub(crate) struct RecordedLabDependencyHydration {
+    pub(crate) hydration: LabOffloadDependencyHydration,
+    pub(crate) execution_ids: Vec<String>,
+}
+
+pub(crate) fn hydrate_for_lab_workspace_exec_with_lifecycle(
+    skip_deps_hydration: bool,
+    runner_id: &str,
+    local_path: &str,
+    remote_path: &str,
+    plan: HomeboyPlan,
+    agent_task_run_id: Option<&str>,
+) -> Result<RecordedLabDependencyHydration> {
+    let hydration = hydrate_for_lab_workspace_exec(
+        skip_deps_hydration,
+        runner_id,
+        local_path,
+        remote_path,
+        plan,
+    )?;
+    let execution_ids = match &hydration.record {
+        LabWorkspaceHydrationRecord::Applied(output) => output
+            .steps
+            .iter()
+            .filter_map(|step| step.job_id.clone())
+            .collect(),
+        LabWorkspaceHydrationRecord::NotApplied { .. } => Vec::new(),
+    };
+    if let Some(run_id) = agent_task_run_id {
+        agent_task_lifecycle::record_lab_offload_phase_executions(
+            run_id,
+            "hydrating",
+            execution_ids.clone(),
+        )?;
+    }
+    Ok(RecordedLabDependencyHydration {
+        hydration,
+        execution_ids,
+    })
 }
 
 /// Decide whether to hydrate and, when applicable, run hydration for a
@@ -410,6 +454,28 @@ mod tests {
         assert_eq!(output.status, "skipped_no_provider");
         assert!(output.is_empty());
         assert_eq!(output.schema, HYDRATION_SCHEMA);
+    }
+
+    #[test]
+    fn explicit_skip_is_a_completed_no_op_without_runner_access() {
+        let hydration = hydrate_for_lab_workspace_exec(
+            true,
+            "unreachable-runner",
+            "/missing/controller-workspace",
+            "/missing/runner-workspace",
+            HomeboyPlan::for_description(homeboy_core::plan::PlanKind::LabOffload, "hydration"),
+        )
+        .expect("skip does not detect or execute dependencies");
+
+        assert!(matches!(
+            hydration.record,
+            LabWorkspaceHydrationRecord::NotApplied { reason: "opt_out" }
+        ));
+        assert!(hydration.plan.steps.is_empty());
+        assert_eq!(
+            dependency_hydration_metadata(&hydration.record)["status"],
+            "not_applied"
+        );
     }
 
     #[test]

@@ -380,6 +380,7 @@ pub(super) fn succeeded_aggregate(plan: &AgentTaskPlan) -> AgentTaskAggregate {
 }
 
 mod handoff_and_proxy;
+mod private_attachment;
 mod status_and_recovery;
 mod submit_and_persist;
 mod terminal_and_reconcile;

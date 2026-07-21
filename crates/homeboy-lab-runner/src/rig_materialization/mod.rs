@@ -34,7 +34,7 @@ pub(super) struct RigComponentDependency {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(super) struct LabOffloadRigSync {
+pub(crate) struct LabOffloadRigSync {
     pub rig_id: String,
     pub source: String,
     pub source_kind: LabOffloadRigSyncSource,

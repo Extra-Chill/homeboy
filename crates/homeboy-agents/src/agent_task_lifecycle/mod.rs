@@ -43,6 +43,7 @@ mod lifecycle_ops;
 mod lifecycle_record_ops;
 mod lifecycle_runner_projection;
 mod lifecycle_transport_proxy;
+mod private_attachment;
 mod records;
 pub mod runner_continuation;
 
@@ -57,6 +58,7 @@ pub use lifecycle_ops::*;
 pub use lifecycle_record_ops::cook_attempt_run_id;
 pub use lifecycle_runner_projection::*;
 pub use lifecycle_transport_proxy::*;
+pub use private_attachment::*;
 pub use records::*;
 #[cfg(any(test, feature = "test-support"))]
 pub use runner_continuation::{

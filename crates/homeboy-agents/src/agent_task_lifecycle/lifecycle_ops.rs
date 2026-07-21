@@ -1437,6 +1437,57 @@ pub fn record_lab_offload_phase_executions(
     Ok(record)
 }
 
+/// Bind the controller-owned staging job separately from the eventual runner job.
+pub fn record_lab_staging_controller_job(
+    run_id: &str,
+    runner_id: &str,
+    controller_job_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if record.state.is_terminal() {
+        return Ok(record);
+    }
+    record.updated_at = Some(now_timestamp());
+    let started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
+    let metadata = record.ensure_metadata_object();
+    record_lab_offload_phase_metadata(metadata, "materializing", &started_at);
+    metadata.insert(
+        "lab_staging_controller_job_id".to_string(),
+        json!(controller_job_id),
+    );
+    metadata.insert(
+        "lab_staging_controller_runner_id".to_string(),
+        json!(runner_id),
+    );
+    metadata.insert("materialization_owner".to_string(), json!("controller_job"));
+    store::write_record(&record)?;
+    Ok(record)
+}
+
+/// Preserve the controller-stage terminal context on the durable parent after
+/// its generic controller job has failed.
+pub fn record_lab_staging_controller_failure(
+    run_id: &str,
+    phase: &str,
+    controller_job_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let metadata = record.ensure_metadata_object();
+    metadata.insert(
+        "lab_staging_controller_failure".to_string(),
+        json!({
+            "phase": phase,
+            "controller_job_id": controller_job_id,
+            "classification": "lab_staging",
+            "retry_command": format!("homeboy agent-task retry {run_id}"),
+            "cleanup_status": "controller-owned cleanup pending terminal confirmation",
+        }),
+    );
+    record.updated_at = Some(now_timestamp());
+    store::write_record(&record)?;
+    Ok(record)
+}
+
 fn record_lab_offload_phase_metadata(
     metadata: &mut serde_json::Map<String, Value>,
     phase: &str,

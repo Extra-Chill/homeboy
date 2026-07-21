@@ -55,6 +55,76 @@ use runner_files::{create_runner_file_directory, download_runner_file, upload_ru
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:0";
 
+/// Generic client for controller-local daemon jobs. Domain crates use this
+/// rather than carrying daemon HTTP or controller-job semantics themselves.
+pub struct LocalControllerJobClient {
+    endpoint: String,
+    client: reqwest::blocking::Client,
+}
+
+impl LocalControllerJobClient {
+    pub fn connect() -> Result<Self> {
+        let daemon = ensure_running(DEFAULT_ADDR)?;
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|error| {
+                Error::internal_unexpected(format!("build local controller-job client: {error}"))
+            })?;
+        Ok(Self {
+            endpoint: format!("http://{}", daemon.address),
+            client,
+        })
+    }
+
+    /// Requests cancellation and returns only after the daemon confirms the
+    /// owned controller work reached `Cancelled`.
+    pub fn cancel_and_wait(&self, job_id: &str, reason: &str) -> Result<crate::api_jobs::Job> {
+        let response = self
+            .client
+            .post(format!("{}/controller/jobs/{job_id}/cancel", self.endpoint))
+            .json(&json!({ "reason": reason }))
+            .send()
+            .map_err(|error| {
+                Error::internal_unexpected(format!(
+                    "cancel local controller job `{job_id}`: {error}"
+                ))
+            })?;
+        let status = response.status();
+        let value: serde_json::Value = response.json().map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse local controller-job cancellation response".to_string()),
+            )
+        })?;
+        if !status.is_success()
+            || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
+        {
+            return Err(Error::internal_unexpected(format!(
+                "local controller job `{job_id}` cancellation was not confirmed: {value}"
+            )));
+        }
+        let job: crate::api_jobs::Job =
+            serde_json::from_value(value.pointer("/data/job").cloned().ok_or_else(|| {
+                Error::internal_unexpected("local controller-job cancellation response has no job")
+            })?)
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("parse local controller job".to_string()),
+                )
+            })?;
+        if job.status != JobStatus::Cancelled {
+            return Err(Error::internal_unexpected(format!(
+                "local controller job `{job_id}` remains {} after cancellation",
+                job.status.daemon_status_label()
+            )));
+        }
+        Ok(job)
+    }
+}
+
 static DAEMON_JOB_STORE: OnceLock<JobStore> = OnceLock::new();
 static DAEMON_RUNTIME_SNAPSHOT: OnceLock<DaemonRuntimeSnapshot> = OnceLock::new();
 
@@ -1182,6 +1252,9 @@ fn reserve_admission(
         "job": reservation.job,
         "daemon_lease_id": daemon_lease.lease_id,
         "idempotent_resubmission": !reservation.created,
+        // A strict controller must receive an explicit server acknowledgement;
+        // a token-shaped legacy response alone is not sufficient authority.
+        "admission_lease_protocol": 1,
         "admission_token": reservation.token,
         "lease": {
             "expires_at_ms": reservation.expires_at_ms,
@@ -2383,6 +2456,8 @@ mod tests {
                 .as_str()
                 .expect("admission identity")
                 .to_string();
+            assert_eq!(reservation["admission_lease_protocol"], 1);
+            assert!(reservation["admission_token"].as_str().is_some());
 
             let accepted = enqueue_exec_job(
                 Some(json!({

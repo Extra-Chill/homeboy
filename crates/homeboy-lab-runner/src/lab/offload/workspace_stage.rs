@@ -8,6 +8,48 @@ use homeboy_core::runner_execution_envelope::{
 };
 use homeboy_rig;
 
+/// Owned command facts consumed while materializing a workspace. This keeps the
+/// durable controller path bounded by the request lifetime rather than forcing
+/// persisted strings into a static command contract.
+pub(crate) struct LabWorkspaceStageCommand {
+    pub(crate) workspace_mode_policy: LabOffloadWorkspaceModePolicy,
+    pub(crate) requires_extension_parity: bool,
+    pub(crate) workload: Option<homeboy_core::lab_contract::LabRigWorkloadArguments>,
+    pub(crate) required_extensions: Vec<String>,
+    pub(crate) secret_env_sources: Vec<homeboy_core::lab_contract::LabSecretEnvSource>,
+}
+
+impl From<&LabOffloadCommand> for LabWorkspaceStageCommand {
+    fn from(command: &LabOffloadCommand) -> Self {
+        Self {
+            workspace_mode_policy: command.workspace_mode_policy,
+            requires_extension_parity: command.routing_policy.requires_extension_parity,
+            workload: command.workload.clone(),
+            required_extensions: command.required_extensions.clone(),
+            secret_env_sources: command.secret_env_sources.to_vec(),
+        }
+    }
+}
+
+impl From<&crate::lab_staging_controller::LabStagingCommand> for LabWorkspaceStageCommand {
+    fn from(command: &crate::lab_staging_controller::LabStagingCommand) -> Self {
+        Self {
+            workspace_mode_policy: command.workspace_mode_policy,
+            requires_extension_parity: command.routing_policy.requires_extension_parity,
+            workload: command.workload.as_ref().map(|workload| {
+                homeboy_core::lab_contract::LabRigWorkloadArguments {
+                    kind: workload.kind,
+                    rig_ids: workload.rig_ids.clone(),
+                    component: workload.component.clone(),
+                    extension_overrides: workload.extension_overrides.clone(),
+                }
+            }),
+            required_extensions: command.required_extensions.clone(),
+            secret_env_sources: command.secret_env_sources.clone(),
+        }
+    }
+}
+
 pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) plan: HomeboyPlan,
     pub(crate) sync_mode: RunnerWorkspaceSyncMode,
@@ -33,10 +75,63 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) runtime_overlay_metadata: serde_json::Value,
 }
 
+/// The subset of workspace-stage output consumed by runtime publication. It is
+/// fully deserializable so durable recovery never re-runs workspace sync.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DurableLabRuntimeWorkspaceInput {
+    pub(crate) synced_local_path: String,
+    pub(crate) workspace_snapshot_identity: String,
+    pub(crate) source_snapshot: SourceSnapshot,
+    pub(crate) workspace_remaps: Vec<(String, String)>,
+}
+
+/// Owner-only durable representation of all workspace-stage outputs consumed by
+/// the remaining Lab stages. Keep this projection data-only: it is persisted
+/// before a controller checkpoint can advance and must never contain secret
+/// values (the staging recipe carries secret names only).
+pub(crate) fn durable_workspace_stage_projection(
+    stage: &LabOffloadWorkspaceStage,
+) -> serde_json::Value {
+    serde_json::json!({
+        "remote_cwd": stage.remote_cwd,
+        "sync_mode": stage.sync_mode,
+        "sync": stage.synced,
+        "changed_since": {
+            "args": stage.changed_since_preflight.args,
+            "requested_ref": stage.changed_since_preflight.requested_ref,
+            "resolved_base": stage.changed_since_preflight.resolved_base,
+            "git_fetch_refs": stage.changed_since_preflight.git_fetch_refs,
+        },
+        "workspace_mapping": stage.workspace_mapping,
+        "path_materialization_plan": stage.path_materialization_plan,
+        "source_snapshot": stage.source_snapshot,
+        "remapped_args": stage.remapped_args,
+        "agent_task_run_id": stage.agent_task_run_id,
+        "runner_required_extensions": stage.runner_required_extensions,
+        "accepted_extension_settings": stage.accepted_extension_settings,
+        "command": stage.command,
+        "remote_command": stage.remote_command,
+        "remote_output_file": stage.remote_output_file,
+        "rig_component_path_overrides": stage.rig_component_path_overrides,
+        "dependency_cache_saves": stage.dependency_cache_saves,
+        "runtime_overlay_env": stage.runtime_overlay_env,
+        "runtime_overlay_metadata": stage.runtime_overlay_metadata,
+        "plan": stage.plan,
+        "runtime_input": DurableLabRuntimeWorkspaceInput {
+            synced_local_path: stage.synced.local_path.clone(),
+            workspace_snapshot_identity: stage.synced.snapshot_identity.clone(),
+            source_snapshot: stage.source_snapshot.clone(),
+            workspace_remaps: stage.workspace_mapping.iter().map(|entry| (
+                entry.local_path().to_string(), entry.remote_path().to_string()
+            )).collect(),
+        },
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_lab_offload_workspace_stage(
     request: &LabOffloadRequest<'_>,
-    contract: &LabOffloadCommand,
+    contract: LabWorkspaceStageCommand,
     plan: HomeboyPlan,
     runner_id: &str,
     source_path: &Path,
@@ -60,7 +155,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
 
     prepare_lab_offload_workspace_stage_inner(
         request,
-        contract,
+        &contract,
         plan,
         runner_id,
         source_path,
@@ -76,7 +171,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
 #[allow(clippy::too_many_arguments)]
 fn prepare_lab_offload_workspace_stage_inner(
     request: &LabOffloadRequest<'_>,
-    contract: &LabOffloadCommand,
+    contract: &LabWorkspaceStageCommand,
     mut plan: HomeboyPlan,
     runner_id: &str,
     source_path: &Path,
@@ -128,7 +223,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     )?;
     let materialization_planner = PathMaterializationPlanner::plan(
         &offload_args,
-        contract,
+        contract.workload.as_ref(),
         source_path,
         request.allow_dirty_lab_workspace,
     )?;
@@ -324,7 +419,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     source_snapshot.synthetic_checkout_tree =
         synced.current_workspace.synthetic_checkout_tree.clone();
     validate_lab_source_snapshot_handoff(source_path, &synced, &source_snapshot)?;
-    if contract.routing_policy.requires_extension_parity {
+    if contract.requires_extension_parity {
         plan = with_step(
             plan,
             PlanStep::ready("lab.extension_parity", "lab.extension_parity").build(),
@@ -513,7 +608,7 @@ pub(crate) fn path_remaps_from_materialization_plan(
 }
 
 fn preflight_agent_task_secret_env_before_workspace_stage(
-    contract: &LabOffloadCommand,
+    contract: &LabWorkspaceStageCommand,
     runner_id: &str,
     runner: &crate::Runner,
     args: &[String],
@@ -606,7 +701,7 @@ pub(crate) fn validate_lab_source_snapshot_handoff(
 }
 
 fn lab_path_materialization_mode(
-    contract: &LabOffloadCommand,
+    contract: &LabWorkspaceStageCommand,
     sync_mode: RunnerWorkspaceSyncMode,
 ) -> String {
     if matches!(
@@ -1931,7 +2026,10 @@ mod tests {
         let plan = workspace_path_materialization_plan(
             &workspace_mapping,
             PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
-            lab_path_materialization_mode(&contract, RunnerWorkspaceSyncMode::Git),
+            lab_path_materialization_mode(
+                &LabWorkspaceStageCommand::from(&contract),
+                RunnerWorkspaceSyncMode::Git,
+            ),
         );
 
         assert_eq!(plan.entries.len(), 1);
@@ -1999,7 +2097,10 @@ mod tests {
         let plan = workspace_path_materialization_plan(
             &workspace_mapping,
             PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-            lab_path_materialization_mode(&contract, RunnerWorkspaceSyncMode::Git),
+            lab_path_materialization_mode(
+                &LabWorkspaceStageCommand::from(&contract),
+                RunnerWorkspaceSyncMode::Git,
+            ),
         );
 
         assert_eq!(plan.entries[0].materialization_mode, "git");
@@ -2022,7 +2123,10 @@ mod tests {
         ];
 
         let err = preflight_agent_task_secret_env_before_workspace_stage(
-            &contract, "lab", &runner, &args,
+            &LabWorkspaceStageCommand::from(&contract),
+            "lab",
+            &runner,
+            &args,
         )
         .expect_err("missing controller-forwarded secret should fail before workspace sync");
 
@@ -2179,7 +2283,7 @@ mod tests {
             let runner_workspace_root = runner_root.path().display().to_string();
             let stage = prepare_lab_offload_workspace_stage(
                 &request,
-                &contract,
+                LabWorkspaceStageCommand::from(&contract),
                 crate::lab_plan::base_lab_plan(Some(&contract)),
                 "lab-controller-bundle-stage",
                 source.path(),
@@ -2331,7 +2435,7 @@ mod tests {
             let runner_workspace_root = runner_root.path().display().to_string();
             let stage = prepare_lab_offload_workspace_stage(
                 &request,
-                &contract,
+                LabWorkspaceStageCommand::from(&contract),
                 crate::lab_plan::base_lab_plan(Some(&contract)),
                 "lab-managed-worktree-stage",
                 &source,

@@ -80,13 +80,13 @@ pub struct LabRigWorkloadArguments {
     pub extension_overrides: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum LabRigWorkloadKind {
     Bench,
     Fuzz,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum LabSecretEnvSource {
     AgentTask,
     Trace,
@@ -157,13 +157,13 @@ pub enum LabCommandPortability {
     LocalOnly(&'static str),
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum LabSourcePathMode {
     CwdOrPathFlag,
     RunnerResident,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum LabWorkspaceModePolicy {
     ChangedSinceGitElseSnapshot,
     Git,
