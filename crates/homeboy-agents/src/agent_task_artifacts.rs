@@ -16,7 +16,7 @@ pub(crate) fn reviewer_facing_artifact(artifact: &AgentTaskArtifact) -> AgentTas
     artifact
 }
 
-pub(crate) fn reviewer_facing_artifacts(artifacts: &[AgentTaskArtifact]) -> Vec<AgentTaskArtifact> {
+fn reviewer_facing_artifacts(artifacts: &[AgentTaskArtifact]) -> Vec<AgentTaskArtifact> {
     artifacts.iter().map(reviewer_facing_artifact).collect()
 }
 
@@ -41,7 +41,7 @@ pub fn reviewer_facing_aggregate(aggregate: &AgentTaskAggregate) -> AgentTaskAgg
     aggregate
 }
 
-pub(crate) fn reviewer_facing_typed_artifact(
+fn reviewer_facing_typed_artifact(
     typed_artifact: &AgentTaskTypedArtifact,
 ) -> AgentTaskTypedArtifact {
     let mut typed_artifact = typed_artifact.clone();
@@ -52,7 +52,7 @@ pub(crate) fn reviewer_facing_typed_artifact(
     typed_artifact
 }
 
-pub(crate) fn reviewer_facing_binding(
+fn reviewer_facing_binding(
     mut binding: AgentTaskArtifactRunBinding,
 ) -> AgentTaskArtifactRunBinding {
     binding.path = reviewer_facing_path(binding.path.as_deref());
