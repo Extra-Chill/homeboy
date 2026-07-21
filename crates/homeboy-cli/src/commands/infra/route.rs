@@ -620,6 +620,12 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
         // Stage the controller-owned identity before Lab preflight. A rejected
         // handoff can then terminalize this record with a retryable diagnosis.
         agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+        stage_controller_lab_handoff_before_preacceptance(
+            run_id,
+            &self.runner_id,
+            &provider_args,
+            &plan,
+        )?;
         let outcome = match lab_routing::dispatch_lab_offload(
             LabRoutingRequest {
                 command: lab_offload_command(&provider_cli.command)?,
@@ -702,6 +708,27 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
             LabRouteOutcome::InFlight(_) => Ok(()),
         }
     }
+}
+
+/// Establish controller authority before Lab routing can reconcile a runner
+/// snapshot. Lab source staging and preflight may observe an accepted daemon
+/// job before the offload executor reaches its later proxy-recording step.
+fn stage_controller_lab_handoff_before_preacceptance(
+    run_id: &str,
+    runner_id: &str,
+    remote_command: &[String],
+    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+) -> homeboy::core::Result<()> {
+    agent_task_lifecycle::record_lab_offload_planned(agent_task_lifecycle::LabOffloadProxyPlan {
+        run_id,
+        runner_id,
+        // Lab replaces this controller-side placeholder with its materialized
+        // workspace once it reaches the executor.
+        remote_workspace: "pending",
+        remote_command,
+        durable_plan: Some(plan),
+    })?;
+    Ok(())
 }
 
 fn attach_verified_cook_baseline(
