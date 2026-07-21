@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.29.0] - 2026-07-21
+
+### Added
+- emit policy-flow fingerprints
+
 ## [1.27.0] - 2026-07-20
 
 ### Added

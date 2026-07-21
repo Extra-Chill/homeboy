@@ -1,6 +1,6 @@
 {
   "name": "Rust",
-  "version": "1.28.2",
+  "version": "1.29.0",
   "icon": "gearshape.2.fill",
   "description": "Cargo CLI integration for Rust components",
   "author": "Extra Chill",
