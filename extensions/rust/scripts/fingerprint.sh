@@ -9,7 +9,10 @@
 #    "registrations": [], "namespace": "...", "imports": [...],
 #    "method_hashes": {...}, "structural_hashes": {...},
 #    "unused_parameters": [...], "dead_code_markers": [...],
-#    "internal_calls": [...], "public_api": [...]}
+#    "internal_calls": [...], "public_api": [...],
+#    "aggregate_definitions": [...], "field_accesses": [...],
+#    "aggregate_projections": [...], "decision_branches": [...],
+#    "method_calls": [...]}
 #
 # Extracts structural information from Rust source files using text matching.
 # Handles methods inside impl blocks and test methods inside #[cfg(test)] modules.
@@ -520,6 +523,505 @@ for line_num, line in enumerate(lines, 1):
                     })
                 break
 
+# ============================================================================
+# Policy-flow facts
+# ============================================================================
+
+def module_id_for_path(path):
+    path = path.replace('\\', '/').removeprefix('./')
+    parts = path.split('/')
+    if parts and parts[0] == 'src':
+        parts = parts[1:]
+    if not parts:
+        return 'crate'
+    leaf = parts[-1]
+    if leaf in {'lib.rs', 'main.rs', 'mod.rs'}:
+        parts = parts[:-1]
+    elif leaf.endswith('.rs'):
+        parts[-1] = leaf[:-3]
+    return 'crate' + (f"::{'::'.join(parts)}" if parts else '')
+
+
+module_id = module_id_for_path(file_path)
+line_offsets = []
+offset = 0
+for source_line in lines:
+    line_offsets.append(offset)
+    offset += len(source_line) + 1
+
+
+def location_at(offset):
+    line = content.count('\n', 0, offset) + 1
+    line_start = content.rfind('\n', 0, offset) + 1
+    return {'line': line, 'column': offset - line_start + 1}
+
+
+def mask_rust(text):
+    """Mask comments and literals while preserving offsets and newlines."""
+    chars = list(text)
+    i = 0
+    block_depth = 0
+    while i < len(chars):
+        if block_depth:
+            if text.startswith('/*', i):
+                chars[i:i + 2] = '  '
+                block_depth += 1
+                i += 2
+            elif text.startswith('*/', i):
+                chars[i:i + 2] = '  '
+                block_depth -= 1
+                i += 2
+            else:
+                if chars[i] != '\n':
+                    chars[i] = ' '
+                i += 1
+            continue
+        if text.startswith('//', i):
+            end = text.find('\n', i)
+            end = len(text) if end < 0 else end
+            chars[i:end] = ' ' * (end - i)
+            i = end
+            continue
+        if text.startswith('/*', i):
+            chars[i:i + 2] = '  '
+            block_depth = 1
+            i += 2
+            continue
+        if chars[i] in {'"', "'"}:
+            # A single quote before an identifier is a lifetime, not a char.
+            if chars[i] == "'" and i + 1 < len(chars) and re.match(r'[A-Za-z_]', chars[i + 1]):
+                lifetime = re.match(r"'[A-Za-z_]\w*", text[i:])
+                if lifetime:
+                    i += len(lifetime.group(0))
+                    continue
+            quote = chars[i]
+            chars[i] = ' '
+            i += 1
+            while i < len(chars):
+                if chars[i] == '\\':
+                    chars[i] = ' '
+                    if i + 1 < len(chars) and chars[i + 1] != '\n':
+                        chars[i + 1] = ' '
+                    i += 2
+                    continue
+                end_quote = chars[i] == quote
+                if chars[i] != '\n':
+                    chars[i] = ' '
+                i += 1
+                if end_quote:
+                    break
+            continue
+        i += 1
+    return ''.join(chars)
+
+
+masked_content = mask_rust(content)
+
+
+def matching_delimiter(text, opening, left='{', right='}'):
+    depth = 0
+    for pos in range(opening, len(text)):
+        if text[pos] == left:
+            depth += 1
+        elif text[pos] == right:
+            depth -= 1
+            if depth == 0:
+                return pos
+    return None
+
+
+inline_test_module_ranges = []
+inline_test_module_pattern = re.compile(
+    r'#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]'
+    r'(?:\s*#\s*\[[^]]*\])*'
+    r'\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{'
+)
+for test_module_match in inline_test_module_pattern.finditer(masked_content):
+    opening = masked_content.rfind('{', test_module_match.start(), test_module_match.end())
+    closing = matching_delimiter(masked_content, opening)
+    if closing is not None:
+        inline_test_module_ranges.append((test_module_match.start(), closing + 1))
+
+# Keep source offsets stable while excluding test-only declarations from the
+# production aggregate type table and definition scan.
+aggregate_source_chars = list(masked_content)
+for start, end in inline_test_module_ranges:
+    for pos in range(start, end):
+        if aggregate_source_chars[pos] != '\n':
+            aggregate_source_chars[pos] = ' '
+aggregate_source = ''.join(aggregate_source_chars)
+
+
+def split_top_level_spans(text, delimiter=','):
+    spans = []
+    start = 0
+    depths = {'(': 0, '[': 0, '{': 0, '<': 0}
+    closing = {')': '(', ']': '[', '}': '{', '>': '<'}
+    for pos, ch in enumerate(text):
+        if ch in depths:
+            depths[ch] += 1
+        elif ch in closing and depths[closing[ch]]:
+            depths[closing[ch]] -= 1
+        elif ch == delimiter and not any(depths.values()):
+            spans.append((start, pos))
+            start = pos + 1
+    spans.append((start, len(text)))
+    return spans
+
+
+type_declarations = {}
+struct_fields = {}
+aggregate_definitions = []
+
+for type_match in re.finditer(r'\b(?:pub(?:\([^)]*\))?\s+)?(struct|enum)\s+([A-Z][A-Za-z0-9_]*)\b', aggregate_source):
+    type_declarations[type_match.group(2)] = f'{module_id}::{type_match.group(2)}'
+
+primitive_types = {
+    'bool', 'char', 'str', 'String', 'usize', 'isize', 'u8', 'u16', 'u32',
+    'u64', 'u128', 'i8', 'i16', 'i32', 'i64', 'i128', 'f32', 'f64',
+}
+
+
+def strip_generic_arguments(type_text):
+    match = re.fullmatch(r'((?:crate|self|super|[A-Za-z_]\w*)(?:::(?:super|self|[A-Za-z_]\w*))*)(?:::)?\s*<.*>', type_text, re.S)
+    return match.group(1) if match else type_text
+
+
+def canonical_type_path(path):
+    path = re.sub(r'\s*::\s*', '::', path.strip())
+    segments = path.split('::')
+    if not segments or any(not re.fullmatch(r'[A-Za-z_]\w*', segment) for segment in segments):
+        return None
+    if segments[0] == 'crate':
+        resolved = ['crate']
+        segments = segments[1:]
+    elif segments[0] == 'self':
+        resolved = module_id.split('::')
+        segments = segments[1:]
+    elif segments[0] == 'super':
+        resolved = module_id.split('::')
+    else:
+        return None
+    for segment in segments:
+        if segment == 'self':
+            continue
+        if segment == 'super':
+            if len(resolved) == 1:
+                return None
+            resolved.pop()
+        else:
+            resolved.append(segment)
+    return '::'.join(resolved)
+
+
+imports_by_name = {}
+for import_match in re.finditer(r'\buse\s+((?:crate|self|super)(?:::\w+)+)\s*;', masked_content):
+    imported = canonical_type_path(import_match.group(1))
+    if imported:
+        imports_by_name[imported.rsplit('::', 1)[-1]] = imported
+
+
+def resolve_type(type_text, impl_type=None):
+    value = re.sub(r'\b(?:mut|const|dyn)\b', '', type_text).strip()
+    while value.startswith('&'):
+        value = re.sub(r"^&\s*(?:'[A-Za-z_]\w*\s+)?(?:mut\s+)?", '', value).strip()
+    value = strip_generic_arguments(value)
+    if value == 'Self' and impl_type:
+        return type_declarations.get(impl_type)
+    if value in primitive_types:
+        return value
+    if value.startswith(('crate::', 'self::', 'super::')):
+        return canonical_type_path(value)
+    if value in type_declarations:
+        return type_declarations[value]
+    if value in imports_by_name:
+        return imports_by_name[value]
+    return None
+
+
+named_struct_pattern = re.compile(
+    r'\b(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Z][A-Za-z0-9_]*)'
+    r'(?:\s*<[^>{;]*>)?(?:\s+where\b[^{};]*)?\s*\{'
+)
+for struct_match in named_struct_pattern.finditer(aggregate_source):
+    name = struct_match.group(1)
+    opening = aggregate_source.find('{', struct_match.start(), struct_match.end())
+    closing = matching_delimiter(aggregate_source, opening)
+    if closing is None:
+        continue
+    body = aggregate_source[opening + 1:closing]
+    fields = []
+    field_names = set()
+    for start, end in split_top_level_spans(body):
+        chunk = re.sub(r'#\s*\[[^]]*\]', ' ', body[start:end]).strip()
+        field_match = re.match(r'(?:pub(?:\([^)]*\))?\s+)?([a-z_][A-Za-z0-9_]*)\s*:\s*(.+)', chunk, re.S)
+        if not field_match:
+            continue
+        field = {'name': field_match.group(1)}
+        field_type = resolve_type(field_match.group(2).strip())
+        if field_type:
+            field['type_id'] = field_type
+        fields.append(field)
+        field_names.add(field['name'])
+    fields.sort(key=lambda item: (item['name'], item.get('type_id', '')))
+    struct_fields[type_declarations[name]] = field_names
+    aggregate_definitions.append({
+        'type_id': type_declarations[name],
+        'fields': fields,
+        'location': location_at(struct_match.start(1)),
+    })
+
+
+def function_id(fn):
+    if fn.impl_type and fn.impl_type in type_declarations:
+        return f'{type_declarations[fn.impl_type]}::{fn.name}'
+    return f'{module_id}::{fn.name}'
+
+
+def signature_details(fn):
+    signature = '\n'.join(fn.signature_lines)
+    params_start = signature.find('(')
+    params_end = matching_delimiter(signature, params_start, '(', ')') if params_start >= 0 else None
+    params = signature[params_start + 1:params_end] if params_end is not None else ''
+    suffix = signature[params_end + 1:] if params_end is not None else ''
+    return_match = re.search(r'->\s*([^\{;]+)', suffix, re.S)
+    return params, return_match.group(1).strip() if return_match else None
+
+
+function_returns = {}
+for fn in functions:
+    _, return_text = signature_details(fn)
+    resolved_return = resolve_type(return_text, fn.impl_type) if return_text else None
+    function_returns[function_id(fn)] = resolved_return
+
+
+def expression_type(expression, variable_types):
+    expression = expression.strip().lstrip('&').strip()
+    variable_match = re.fullmatch(r'(?:\*\s*)?([a-z_][A-Za-z0-9_]*)', expression)
+    if variable_match:
+        return variable_types.get(variable_match.group(1))
+    call_match = re.fullmatch(r'([a-z_][A-Za-z0-9_]*|self)\s*\.\s*([a-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*\??', expression, re.S)
+    if call_match:
+        receiver_type = variable_types.get(call_match.group(1))
+        if receiver_type:
+            return function_returns.get(f"{receiver_type}::{call_match.group(2)}")
+    literal_match = re.match(r'([A-Z][A-Za-z0-9_]*)(?:::)?(?:\s*<[^>{;]*>)?\s*\{', expression)
+    if literal_match:
+        return resolve_type(literal_match.group(1))
+    return None
+
+
+def discriminant_id(pattern, domain_type):
+    normalized = re.sub(r'\s+', '', pattern)
+    normalized = re.sub(r'\([^)]*\)|\{[^}]*\}', '', normalized)
+    normalized = normalized.lstrip('&')
+    if '::' in normalized:
+        variant = normalized.rsplit('::', 1)[-1]
+        return f'{domain_type}::{variant}'
+    if re.fullmatch(r'[A-Z][A-Za-z0-9_]*', normalized):
+        return f'{domain_type}::{normalized}'
+    return normalized or '_'
+
+
+field_accesses = []
+aggregate_projections = []
+decision_branches = []
+method_calls = []
+
+for fn in functions:
+    if fn.is_test or fn.is_test_helper or not fn.body_lines:
+        continue
+    callable_id = function_id(fn)
+    body_text = '\n'.join(fn.body_lines)
+    body_masked = mask_rust(body_text)
+    body_offset = line_offsets[fn.line_num - 1]
+    params_text, return_text = signature_details(fn)
+    return_type = resolve_type(return_text, fn.impl_type) if return_text else None
+    variable_types = {}
+    field_origins = {}
+    if fn.impl_type in type_declarations and re.search(r'(?:^|,)\s*&?\s*(?:mut\s+)?self\b', params_text):
+        variable_types['self'] = type_declarations[fn.impl_type]
+    for start, end in split_top_level_spans(params_text):
+        param_match = re.match(r'\s*(?:mut\s+)?([a-z_][A-Za-z0-9_]*)\s*:\s*(.+)', params_text[start:end], re.S)
+        if param_match:
+            param_type = resolve_type(param_match.group(2).strip(), fn.impl_type)
+            if param_type:
+                variable_types[param_match.group(1)] = param_type
+
+    # Resolve explicit locals first, then simple constructor/method assignments.
+    for local_match in re.finditer(r'\blet\s+(?:mut\s+)?([a-z_][A-Za-z0-9_]*)\s*:\s*([^=;]+)', body_masked):
+        local_type = resolve_type(local_match.group(2).strip(), fn.impl_type)
+        if local_type:
+            variable_types[local_match.group(1)] = local_type
+    for _ in range(2):
+        for local_match in re.finditer(r'\blet\s+(?:mut\s+)?([a-z_][A-Za-z0-9_]*)(?:\s*:\s*[^=;]+)?\s*=\s*([^;]+)', body_masked, re.S):
+            name, expression = local_match.group(1), local_match.group(2).strip()
+            inferred = expression_type(expression, variable_types)
+            if inferred:
+                variable_types[name] = inferred
+            origin_match = re.fullmatch(r'([a-z_][A-Za-z0-9_]*|self)\s*\.\s*([a-z_][A-Za-z0-9_]*)', expression)
+            if origin_match and variable_types.get(origin_match.group(1)):
+                field_origins[name] = (origin_match.group(1), origin_match.group(2))
+
+    for access_match in re.finditer(r'\b([a-z_][A-Za-z0-9_]*|self)\s*\.\s*([a-z_][A-Za-z0-9_]*)\b(?!\s*\()', body_masked):
+        receiver, field = access_match.group(1), access_match.group(2)
+        owner_type = variable_types.get(receiver)
+        if not owner_type or owner_type in primitive_types:
+            continue
+        if owner_type in struct_fields and field not in struct_fields[owner_type]:
+            continue
+        following = body_masked[access_match.end():access_match.end() + 12]
+        write = bool(re.match(r'\s*(?:[+\-*/%&|^]?=)(?!=|>)', following))
+        field_accesses.append({
+            'owner_type_id': owner_type,
+            'field': field,
+            'callable_id': callable_id,
+            'access': 'write' if write else 'read',
+            'location': location_at(body_offset + access_match.start(2)),
+        })
+
+    for literal_match in re.finditer(r'\b([A-Z][A-Za-z0-9_]*)(?:::)?(?:\s*<[^>{;]*>)?\s*\{', body_masked):
+        target_type = resolve_type(literal_match.group(1), fn.impl_type)
+        if not target_type or target_type in primitive_types:
+            continue
+        opening = body_masked.find('{', literal_match.start(), literal_match.end())
+        closing = matching_delimiter(body_masked, opening)
+        if closing is None:
+            continue
+        literal_body = body_masked[opening + 1:closing]
+        mappings_by_source = {}
+        literal_items = [literal_body[start:end].strip() for start, end in split_top_level_spans(literal_body)]
+        initialized_fields = {
+            explicit.group(1)
+            for item in literal_items
+            if not item.startswith('..')
+            for explicit in [re.match(r'([a-z_][A-Za-z0-9_]*)(?:\s*:|\s*$)', item)]
+            if explicit
+        }
+        for item in literal_items:
+            update_match = re.fullmatch(r'\.\.\s*([a-z_][A-Za-z0-9_]*)', item)
+            if update_match:
+                source = update_match.group(1)
+                source_type = variable_types.get(source)
+                if source_type and source_type in struct_fields:
+                    common = (struct_fields[source_type] & struct_fields[target_type]) - initialized_fields
+                    mappings_by_source.setdefault(source_type, set()).update((field, field) for field in common)
+                continue
+            explicit = re.match(r'([a-z_][A-Za-z0-9_]*)\s*:\s*([a-z_][A-Za-z0-9_]*|self)\s*\.\s*([a-z_][A-Za-z0-9_]*)\s*$', item)
+            if explicit:
+                target_field, source, source_field = explicit.groups()
+                source_type = variable_types.get(source)
+                target_valid = target_type not in struct_fields or target_field in struct_fields[target_type]
+                source_valid = source_type not in struct_fields or source_field in struct_fields[source_type]
+                if source_type and source_type not in primitive_types and target_valid and source_valid:
+                    mappings_by_source.setdefault(source_type, set()).add((source_field, target_field))
+                continue
+            shorthand = re.fullmatch(r'([a-z_][A-Za-z0-9_]*)', item)
+            if shorthand and shorthand.group(1) in field_origins:
+                source, source_field = field_origins[shorthand.group(1)]
+                source_type = variable_types.get(source)
+                target_field = shorthand.group(1)
+                target_valid = target_type not in struct_fields or target_field in struct_fields[target_type]
+                source_valid = source_type not in struct_fields or source_field in struct_fields[source_type]
+                if source_type and source_type not in primitive_types and target_valid and source_valid:
+                    mappings_by_source.setdefault(source_type, set()).add((source_field, target_field))
+        for source_type, mappings in mappings_by_source.items():
+            aggregate_projections.append({
+                'source_type_id': source_type,
+                'target_type_id': target_type,
+                'callable_id': callable_id,
+                'field_mappings': [
+                    {'source_field': source, 'target_field': target}
+                    for source, target in sorted(mappings)
+                ],
+                'location': location_at(body_offset + literal_match.start(1)),
+            })
+
+    for call_match in re.finditer(r'\b([a-z_][A-Za-z0-9_]*|self)\s*\.\s*([a-z_][A-Za-z0-9_]*)\s*\([^()]*\)', body_masked):
+        receiver, method = call_match.group(1), call_match.group(2)
+        receiver_type = variable_types.get(receiver)
+        if not receiver_type:
+            continue
+        target_method = f'{receiver_type}::{method}'
+        before = body_masked[:call_match.start()]
+        statement_start = max(before.rfind(';'), before.rfind('{'), before.rfind('}')) + 1
+        prefix = re.sub(r'\s+', ' ', before[statement_start:]).strip()
+        direct_control = bool(re.search(r'(?:^|\b)(?:if|while|match)(?:\s+let\s+.+?=\s*)?$', prefix))
+        direct_return = bool(re.search(r'(?:^|\b)return\s*$', prefix))
+        remainder = body_masked[call_match.end():].strip()
+        tail_return = bool(re.fullmatch(r'\??\s*}', remainder))
+        decision = direct_control or direct_return or tail_return
+        call_return = function_returns.get(target_method)
+        decision_domain = call_return if direct_control else (return_type if direct_return or tail_return else None)
+        fact = {
+            'caller_id': callable_id,
+            'target_method_id': target_method,
+            'receiver_type_id': receiver_type,
+            'result_used_as_decision': decision,
+            'location': location_at(body_offset + call_match.start(2)),
+        }
+        if decision and decision_domain:
+            fact['decision_domain_type_id'] = decision_domain
+        method_calls.append(fact)
+
+    for branch_match in re.finditer(r'\b(?:if|while)\s+let\s+(.+?)\s*=\s*([^\{]+)\{', body_masked, re.S):
+        pattern = branch_match.group(1).strip()
+        domain = expression_type(branch_match.group(2).strip(), variable_types)
+        if domain:
+            pattern_offset = branch_match.start(1) + len(branch_match.group(1)) - len(branch_match.group(1).lstrip())
+            decision_branches.append({
+                'callable_id': callable_id,
+                'domain_type_id': domain,
+                'discriminant_id': discriminant_id(pattern, domain),
+                'location': location_at(body_offset + pattern_offset),
+            })
+
+    for match_match in re.finditer(r'\bmatch\s+([^\{]+)\{', body_masked, re.S):
+        domain = expression_type(match_match.group(1).strip(), variable_types)
+        opening = body_masked.find('{', match_match.start(), match_match.end())
+        closing = matching_delimiter(body_masked, opening)
+        if not domain or closing is None:
+            continue
+        arms = body_masked[opening + 1:closing]
+        for start, end in split_top_level_spans(arms):
+            arm = arms[start:end]
+            arrow = arm.find('=>')
+            if arrow < 0:
+                continue
+            pattern = arm[:arrow].strip()
+            if not pattern:
+                continue
+            pattern_start = start + len(arm[:arrow]) - len(arm[:arrow].lstrip())
+            decision_branches.append({
+                'callable_id': callable_id,
+                'domain_type_id': domain,
+                'discriminant_id': discriminant_id(pattern, domain),
+                'location': location_at(body_offset + opening + 1 + pattern_start),
+            })
+
+
+def stable_unique(items, key):
+    unique = {}
+    for item in items:
+        unique[json.dumps(item, sort_keys=True, separators=(',', ':'))] = item
+    return sorted(unique.values(), key=key)
+
+
+aggregate_definitions = stable_unique(aggregate_definitions, lambda item: (
+    item['type_id'], item['location']['line'], item['location']['column']))
+field_accesses = stable_unique(field_accesses, lambda item: (
+    item['owner_type_id'], item['field'], item['callable_id'], item['access'],
+    item['location']['line'], item['location']['column']))
+aggregate_projections = stable_unique(aggregate_projections, lambda item: (
+    item['source_type_id'], item['target_type_id'], item['callable_id'],
+    item['location']['line'], item['location']['column']))
+decision_branches = stable_unique(decision_branches, lambda item: (
+    item['callable_id'], item['domain_type_id'], item['discriminant_id'],
+    item['location']['line'], item['location']['column']))
+method_calls = stable_unique(method_calls, lambda item: (
+    item['caller_id'], item['target_method_id'], item.get('receiver_type_id', ''),
+    item['location']['line'], item['location']['column']))
+
 # --- Aggregate construction facts ---
 # Rust-specific syntax recognition lives in the Rust extension. Homeboy core
 # consumes these as generic aggregate construction facts.
@@ -604,6 +1106,11 @@ result = {
     'public_api': public_api,
     'aggregate_literals': aggregate_literals,
     'aggregate_construction_seams': aggregate_construction_seams,
+    'aggregate_definitions': aggregate_definitions,
+    'field_accesses': field_accesses,
+    'aggregate_projections': aggregate_projections,
+    'decision_branches': decision_branches,
+    'method_calls': method_calls,
 }
 
 print(json.dumps(result))
