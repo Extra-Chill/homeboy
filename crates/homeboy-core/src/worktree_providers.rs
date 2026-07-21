@@ -394,16 +394,23 @@ fn map_provider_list_result(
                 handle: required_string(provider_id, index, "handle", &mapping.handle, item)?,
                 path: required_string(provider_id, index, "path", &mapping.path, item)?,
                 branch: required_string(provider_id, index, "branch", &mapping.branch, item)?,
+                // Safety flags are advisory hints a provider raises to BLOCK an
+                // unsafe destination (dirty/unpushed/primary => refuse). A
+                // provider that does not report one is making no claim of
+                // unsafety, so an absent value defaults to `false` (permissive)
+                // rather than failing the whole cook closed — the DMC worktree
+                // provider legitimately omits `safety.dirty` (#7886). A value
+                // that IS present but not a boolean is still a contract error.
                 safety: WorktreeProviderHandleSafety {
-                    dirty: required_bool(provider_id, index, "dirty", &mapping.dirty, item)?,
-                    unpushed: required_bool(
+                    dirty: optional_bool(provider_id, index, "dirty", &mapping.dirty, item)?,
+                    unpushed: optional_bool(
                         provider_id,
                         index,
                         "unpushed",
                         &mapping.unpushed,
                         item,
                     )?,
-                    primary: required_bool(provider_id, index, "primary", &mapping.primary, item)?,
+                    primary: optional_bool(provider_id, index, "primary", &mapping.primary, item)?,
                 },
             })
         })
@@ -435,12 +442,44 @@ fn required_bool(
         .ok_or_else(|| mapping_error(provider_id, field, path, "must resolve to a boolean"))
 }
 
+/// Resolve an advisory boolean safety flag. An absent value defaults to `false`
+/// (the provider makes no claim of unsafety), so a provider that omits the field
+/// does not block the cook (#7886). A value that resolves but is not a boolean
+/// remains a contract error.
+fn optional_bool(
+    provider_id: &str,
+    index: usize,
+    field: &str,
+    path: &str,
+    item: &Value,
+) -> Result<bool> {
+    match optional_jsonpath_value(provider_id, &format!("items[{index}].{field}"), path, item)? {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| mapping_error(provider_id, field, path, "must resolve to a boolean")),
+    }
+}
+
 fn required_jsonpath_value<'a>(
     provider_id: &str,
     field: &str,
     expression: &str,
     value: &'a Value,
 ) -> Result<&'a Value> {
+    optional_jsonpath_value(provider_id, field, expression, value)?
+        .ok_or_else(|| mapping_error(provider_id, field, expression, "did not resolve a value"))
+}
+
+/// Resolve a JSONPath to at most one value: `Ok(None)` when it resolves nothing,
+/// `Ok(Some(value))` for exactly one, and an error only for invalid JSONPath or
+/// an ambiguous multi-match.
+fn optional_jsonpath_value<'a>(
+    provider_id: &str,
+    field: &str,
+    expression: &str,
+    value: &'a Value,
+) -> Result<Option<&'a Value>> {
     let path = serde_json_path::JsonPath::parse(expression).map_err(|error| {
         mapping_error(
             provider_id,
@@ -451,13 +490,8 @@ fn required_jsonpath_value<'a>(
     })?;
     let matches = path.query(value).all();
     match matches.as_slice() {
-        [value] => Ok(*value),
-        [] => Err(mapping_error(
-            provider_id,
-            field,
-            expression,
-            "did not resolve a value",
-        )),
+        [value] => Ok(Some(*value)),
+        [] => Ok(None),
         _ => Err(mapping_error(
             provider_id,
             field,
@@ -1468,6 +1502,59 @@ mod tests {
             .expect_err("invalid mapping must fail closed");
             assert!(err.message.contains(expected), "{}", err.message);
         }
+    }
+
+    #[test]
+    fn absent_safety_flags_default_to_permissive_instead_of_failing_the_cook() {
+        // The DMC worktree provider omits `safety.dirty` (and can omit the whole
+        // `safety` object). A missing advisory safety flag is not a claim of
+        // unsafety, so it must default to `false` and not reject the cook
+        // pre-dispatch (#7886).
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+
+        // Response omits `safety.dirty` (only reports unpushed/primary).
+        let partial_safety = json!({ "worktrees": [{
+            "handle": "fixture@cook-target", "path": workspace.path(), "branch": "cook-target",
+            "safety": { "unpushed": false, "primary": false }
+        }]});
+        // Response omits the `safety` object entirely.
+        let no_safety = json!({ "worktrees": [{
+            "handle": "fixture@cook-target", "path": workspace.path(), "branch": "cook-target"
+        }]});
+
+        for payload in [partial_safety, no_safety] {
+            let handle = resolve_worktree_provider_handle_from_config(
+                "fixture@cook-target",
+                &config_with_provider(list_provider(
+                    fake_list_provider_script(payload),
+                    worktrees_mapping(),
+                )),
+            )
+            .expect("absent safety flags resolve without failing the cook");
+            assert!(!handle.safety.dirty);
+            assert!(!handle.safety.unpushed);
+            assert!(!handle.safety.primary);
+        }
+
+        // A present-but-non-boolean safety value is still a contract error.
+        let wrong_type = json!({ "worktrees": [{
+            "handle": "fixture@cook-target", "path": workspace.path(), "branch": "cook-target",
+            "safety": { "dirty": "yes", "unpushed": false, "primary": false }
+        }]});
+        let err = resolve_worktree_provider_handle_from_config(
+            "fixture@cook-target",
+            &config_with_provider(list_provider(
+                fake_list_provider_script(wrong_type),
+                worktrees_mapping(),
+            )),
+        )
+        .expect_err("a non-boolean safety value is still rejected");
+        assert!(
+            err.message.contains("must resolve to a boolean"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
