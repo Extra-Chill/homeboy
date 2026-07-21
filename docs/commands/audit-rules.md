@@ -36,6 +36,21 @@ Use one of:
 
 These findings participate in baseline comparisons like any other audit finding.
 
+## Policy flow
+
+`audit.policy_flow.rules` declares authoritative policy owners and typed decision
+sinks for the language-neutral lossy-projection detector. Extensions can provide
+the same declarations under `audit.detector_rules.policy_flow`; extension
+fingerprint scripts provide resolved aggregate, projection, decision, and call
+facts. See [Policy-flow detector](../audit/policy-flow.md) for the declaration and
+producer schemas.
+
+Finding output:
+
+- `kind`: `lossy_policy_projection`
+- `convention`: stable seam identity prefixed by the configured convention
+- severity: configured `warning` or `info`
+
 ## Thin Command Adapters
 
 `audit.thin_command_adapter` enforces the command/core boundary:

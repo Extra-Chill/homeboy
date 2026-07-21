@@ -69,8 +69,10 @@ pub use execution::{
     ExtensionStepFilter,
 };
 pub use fingerprint::{
-    run_fingerprint_script, AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker,
-    FingerprintOutput, HookRef, UnusedParam,
+    run_fingerprint_script, AggregateConstructionSeam, AggregateDefinitionFact, AggregateFieldFact,
+    AggregateLiteral, AggregateProjectionFact, CallSite, DeadCodeMarker, DecisionBranchFact,
+    FactLocation, FieldAccessFact, FieldAccessKind, FingerprintOutput, HookRef, MethodCallFact,
+    ProjectionFieldFact, UnusedParam,
 };
 pub use homeboy_core::extension_invocation_context::ResolvedExtensionInvocationContext;
 pub use homeboy_core::extension_scope::ExtensionScope;

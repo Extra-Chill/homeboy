@@ -6,7 +6,13 @@ pub use finding::{finding_confidence, Finding, FindingConfidence, Severity};
 pub use finding_kind::AuditFinding;
 pub mod fingerprint;
 pub mod phase_timing;
+pub mod policy_flow;
 pub use phase_timing::ExtensionPhaseTiming;
+pub use policy_flow::{
+    AggregateDefinitionFact, AggregateFieldFact, AggregateProjectionFact, DecisionBranchFact,
+    FactLocation, FieldAccessFact, FieldAccessKind, MethodCallFact, PolicyDecisionSink,
+    PolicyFlowConfig, PolicyFlowRule, ProjectionFieldFact,
+};
 pub mod result;
 pub mod test_mapping;
 pub use fingerprint::{
@@ -146,6 +152,9 @@ pub struct AuditConfig {
     /// adapters over core services.
     #[serde(default, skip_serializing_if = "ThinCommandAdapterConfig::is_empty")]
     pub thin_command_adapter: ThinCommandAdapterConfig,
+    /// Project- or extension-owned declarations for generic policy-flow analysis.
+    #[serde(default, skip_serializing_if = "PolicyFlowConfig::is_empty")]
+    pub policy_flow: PolicyFlowConfig,
 }
 
 impl AuditConfig {
@@ -172,6 +181,7 @@ impl AuditConfig {
             && self.test_wiring.is_empty()
             && self.detector_profile.is_empty()
             && self.thin_command_adapter.is_empty()
+            && self.policy_flow.is_empty()
     }
 
     pub fn merge(&mut self, other: &AuditConfig) {
@@ -210,6 +220,7 @@ impl AuditConfig {
         self.artifact_portability.merge(&other.artifact_portability);
         self.detector_profile.merge(&other.detector_profile);
         self.thin_command_adapter.merge(&other.thin_command_adapter);
+        self.policy_flow.merge(&other.policy_flow);
         for rule in &other.source_policies {
             if !self
                 .source_policies

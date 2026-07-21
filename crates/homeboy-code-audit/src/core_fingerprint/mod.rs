@@ -276,6 +276,11 @@ pub fn fingerprint_from_grammar(
         trait_impl_methods,
         aggregate_literals,
         aggregate_construction_seams,
+        aggregate_definitions: Vec::new(),
+        field_accesses: Vec::new(),
+        aggregate_projections: Vec::new(),
+        decision_branches: Vec::new(),
+        method_calls: Vec::new(),
     })
 }
 
@@ -1480,4 +1485,4 @@ fn count_call_args(text: &str) -> Option<usize> {
 // ============================================================================
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

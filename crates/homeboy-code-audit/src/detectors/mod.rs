@@ -12,6 +12,7 @@ pub(super) mod global_env_guard;
 pub(super) mod layer_ownership;
 pub(super) mod mutating_resource_access;
 pub(super) mod parallel_runner_setup;
+pub(super) mod policy_flow;
 pub(super) mod public_registry_exposure;
 pub(super) mod redirect_validation;
 pub(super) mod remote_execution_preflight;

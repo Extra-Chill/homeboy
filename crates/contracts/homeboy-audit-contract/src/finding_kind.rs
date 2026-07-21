@@ -212,6 +212,9 @@ pub enum AuditFinding {
     /// formatting); orchestration density beyond the configured threshold is a
     /// boundary violation.
     ThinCommandAdapterViolation,
+    /// Policy-bearing state is dropped by an aggregate projection and a
+    /// downstream decision reimplements the authoritative policy seam.
+    LossyPolicyProjection,
 }
 
 impl AuditFinding {
@@ -288,6 +291,7 @@ impl AuditFinding {
             "command_status_contract_violation",
             "command_status_fixture_missing",
             "thin_command_adapter_violation",
+            "lossy_policy_projection",
         ]
     }
 }

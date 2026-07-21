@@ -205,7 +205,8 @@ pub fn finding_confidence(finding: &AuditFinding) -> FindingConfidence {
             | AuditFinding::LayerOwnershipViolation
             | AuditFinding::DeprecationAge
             | AuditFinding::DeadGuard
-            | AuditFinding::MutatingResourceAccess => FindingConfidence::Graph,
+            | AuditFinding::MutatingResourceAccess
+            | AuditFinding::LossyPolicyProjection => FindingConfidence::Graph,
 
             // Convention, naming, body-shape, and similarity findings require judgment.
             _ => FindingConfidence::Heuristic,

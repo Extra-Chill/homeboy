@@ -112,6 +112,7 @@ pub(crate) enum FingerprintDetectorRunner {
     CommandWrapperBypass,
     SharedScaffolding,
     AggregateConstruction,
+    PolicyFlow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -488,6 +489,15 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         log_summary: "direct literals bypass construction seams",
     },
     DetectorDescriptor {
+        id: "policy_flow",
+        findings: &[AuditFinding::LossyPolicyProjection],
+        access: DetectorAccess::Discovery,
+        runtime: DetectorRuntime::Fingerprint(FingerprintDetectorRunner::PolicyFlow),
+        timing_id: "detector.policy_flow",
+        log_label: "Policy flow",
+        log_summary: "lossy policy projections with divergent decisions",
+    },
+    DetectorDescriptor {
         id: "public_registry_exposure",
         findings: &[AuditFinding::PublicRegistryExposure],
         access: DetectorAccess::Discovery,
@@ -740,6 +750,27 @@ mod tests {
 
         assert!(plan.detector_enabled("comment_hygiene"));
         assert!(!plan.detector_enabled("dead_code"));
+    }
+
+    #[test]
+    fn policy_flow_uses_normal_fingerprint_execution() {
+        let descriptor = AuditExecutionPlan::descriptors()
+            .iter()
+            .find(|descriptor| descriptor.id == "policy_flow")
+            .expect("policy-flow descriptor");
+        assert_eq!(
+            descriptor.runtime,
+            DetectorRuntime::Fingerprint(FingerprintDetectorRunner::PolicyFlow)
+        );
+        assert_eq!(descriptor.timing_id, "detector.policy_flow");
+
+        let only = AuditExecutionPlan::from_filters(&[AuditFinding::LossyPolicyProjection], &[]);
+        assert!(only.detector_enabled("policy_flow"));
+        assert!(!only.detector_enabled("aggregate_construction"));
+
+        let excluded =
+            AuditExecutionPlan::from_filters(&[], &[AuditFinding::LossyPolicyProjection]);
+        assert!(!excluded.detector_enabled("policy_flow"));
     }
 
     #[test]

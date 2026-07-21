@@ -280,6 +280,11 @@ mod tests {
             trait_impl_methods: vec![],
             aggregate_literals: vec![],
             aggregate_construction_seams: vec![],
+            aggregate_definitions: vec![],
+            field_accesses: vec![],
+            aggregate_projections: vec![],
+            decision_branches: vec![],
+            method_calls: vec![],
         }
     }
 

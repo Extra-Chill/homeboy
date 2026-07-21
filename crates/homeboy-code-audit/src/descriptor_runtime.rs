@@ -2,10 +2,10 @@ use super::detectors::layer_ownership::run as run_layer_ownership;
 use super::detectors::{
     aggregate_construction, command_status_contracts, command_wrapper_bypass, config_key_usage,
     constant_bypass, dead_guard, deprecation_age, enum_dispatch_contracts, facade_passthrough,
-    global_env_guard, mutating_resource_access, parallel_runner_setup, public_registry_exposure,
-    redirect_validation, remote_execution_preflight, repeated_literal_shape, requested_detectors,
-    shared_scaffolding, source_policy, test_coverage, test_topology, test_wiring,
-    thin_command_adapter, unbounded_output_capture, wrapper_inference,
+    global_env_guard, mutating_resource_access, parallel_runner_setup, policy_flow,
+    public_registry_exposure, redirect_validation, remote_execution_preflight,
+    repeated_literal_shape, requested_detectors, shared_scaffolding, source_policy, test_coverage,
+    test_topology, test_wiring, thin_command_adapter, unbounded_output_capture, wrapper_inference,
 };
 use super::doc_drift::detect_doc_drift;
 use super::reference::{fingerprint_component_reference_files, fingerprint_reference_paths};
@@ -65,6 +65,9 @@ fn run_fingerprint_descriptor(
         }
         FingerprintDetectorRunner::AggregateConstruction => {
             aggregate_construction::run(context.all_fingerprints)
+        }
+        FingerprintDetectorRunner::PolicyFlow => {
+            policy_flow::run(context.all_fingerprints, &context.audit_config.policy_flow)
         }
     }
 }
@@ -264,6 +267,10 @@ pub(super) fn run_descriptor_detectors(
 mod tests {
     use super::*;
     use crate::AuditProfile;
+    use homeboy_audit_contract::{
+        AggregateDefinitionFact, AggregateFieldFact, AggregateProjectionFact, DecisionBranchFact,
+        FactLocation, PolicyDecisionSink, PolicyFlowConfig, PolicyFlowRule, ProjectionFieldFact,
+    };
 
     /// Only the three hand-sequenced families remain `Manual`; every other
     /// detector is dispatched through the data-driven runtime. This guards
@@ -346,6 +353,100 @@ mod tests {
                 .any(|span| span.id == "detector.structural" && span.status == "ok"),
             "dispatch should record the structural timing span"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn policy_flow_runs_via_data_driven_dispatch() {
+        let dir = std::env::temp_dir().join(format!(
+            "homeboy_policy_flow_descriptor_dispatch_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let source = fingerprint::FileFingerprint {
+            relative_path: "src/policy.ext".to_string(),
+            aggregate_definitions: vec![AggregateDefinitionFact {
+                type_id: "domain::Policy".to_string(),
+                fields: vec![AggregateFieldFact {
+                    name: "threshold".to_string(),
+                    type_id: None,
+                }],
+                location: FactLocation { line: 1, column: 1 },
+            }],
+            ..Default::default()
+        };
+        let projection = fingerprint::FileFingerprint {
+            relative_path: "src/project.ext".to_string(),
+            aggregate_projections: vec![AggregateProjectionFact {
+                source_type_id: "domain::Policy".to_string(),
+                target_type_id: "domain::Carrier".to_string(),
+                callable_id: "domain::project".to_string(),
+                field_mappings: vec![ProjectionFieldFact {
+                    source_field: "id".to_string(),
+                    target_field: "id".to_string(),
+                }],
+                location: FactLocation { line: 4, column: 1 },
+            }],
+            ..Default::default()
+        };
+        let decision = fingerprint::FileFingerprint {
+            relative_path: "src/decide.ext".to_string(),
+            decision_branches: vec![DecisionBranchFact {
+                callable_id: "domain::decide".to_string(),
+                domain_type_id: "domain::Severity".to_string(),
+                discriminant_id: "severity".to_string(),
+                location: FactLocation { line: 7, column: 1 },
+            }],
+            ..Default::default()
+        };
+        let fingerprints = [&source, &projection, &decision];
+        let audit_config = AuditConfig {
+            policy_flow: PolicyFlowConfig {
+                rules: vec![PolicyFlowRule {
+                    id: "policy".to_string(),
+                    source_type_id: "domain::Policy".to_string(),
+                    policy_fields: vec!["threshold".to_string()],
+                    authoritative_method_id: "domain::Policy::allows".to_string(),
+                    decision_sinks: vec![PolicyDecisionSink {
+                        carrier_type_id: "domain::Carrier".to_string(),
+                        callable_id: "domain::decide".to_string(),
+                        domain_type_id: "domain::Severity".to_string(),
+                    }],
+                    convention: "policy_flow".to_string(),
+                    severity: "warning".to_string(),
+                }],
+            },
+            ..Default::default()
+        };
+        let context = DetectorRunContext {
+            root: &dir,
+            component_id: "fixture-component",
+            audit_config: &audit_config,
+            all_fingerprints: &fingerprints,
+            per_file_fingerprints: &fingerprints,
+            source_snapshot: None,
+            reference_paths: &[],
+        };
+        let plan = AuditExecutionPlan::from_profile_and_filters(AuditProfile::Full, &[], &[]);
+        let mut timing = AuditTiming::default();
+        let mut findings = Vec::new();
+
+        run_descriptor_detectors(
+            &plan,
+            &mut timing,
+            &mut findings,
+            &context,
+            Some(&["policy_flow"]),
+        );
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, crate::AuditFinding::LossyPolicyProjection);
+        assert!(timing
+            .spans
+            .iter()
+            .any(|span| span.id == "detector.policy_flow" && span.status == "ok"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1108,4 +1108,30 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(Path::new(&result_initial.source_path));
     }
+
+    #[test]
+    fn policy_flow_baseline_identity_is_stable_and_seam_specific() {
+        let convention = "policy_flow/rule/domain%3A%3APolicy/domain%3A%3ACarrier/domain%3A%3Aproject/domain%3A%3Adecide/domain%3A%3ASeverity";
+        let first = make_finding_with_kind(
+            convention,
+            "src/project.rs",
+            "Policy source at src/policy.rs:3, projection at src/project.rs:8, sink at src/decide.rs:21",
+            AuditFinding::LossyPolicyProjection,
+        );
+        let moved = make_finding_with_kind(
+            convention,
+            "src/project.rs",
+            "Policy source at src/policy.rs:30, projection at src/project.rs:80, sink at src/decide.rs:210",
+            AuditFinding::LossyPolicyProjection,
+        );
+
+        assert_eq!(
+            finding_baseline_fingerprint(&first),
+            finding_baseline_fingerprint(&moved)
+        );
+        assert_eq!(
+            finding_baseline_fingerprint(&first),
+            format!("{convention}::src/project.rs::LossyPolicyProjection")
+        );
+    }
 }

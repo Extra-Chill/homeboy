@@ -1,0 +1,64 @@
+{
+  "config": {
+    "rules": [
+      {
+        "id": "engagement",
+        "source_type_id": "domain::SourcePolicy",
+        "policy_fields": ["threshold"],
+        "authoritative_method_id": "domain::SourcePolicy::should_engage",
+        "decision_sinks": [
+          {
+            "carrier_type_id": "domain::DecisionCarrier",
+            "callable_id": "domain::decide",
+            "domain_type_id": "domain::Severity"
+          }
+        ]
+      }
+    ]
+  },
+  "files": [
+    {
+      "path": "src/policy.ext",
+      "aggregate_definitions": [
+        {
+          "type_id": "domain::SourcePolicy",
+          "fields": [{"name": "threshold", "type_id": "domain::Threshold"}],
+          "location": {"line": 3, "column": 1}
+        }
+      ]
+    },
+    {
+      "path": "src/project.ext",
+      "aggregate_projections": [
+        {
+          "source_type_id": "domain::SourcePolicy",
+          "target_type_id": "domain::DecisionCarrier",
+          "callable_id": "domain::project",
+          "field_mappings": [{"source_field": "label", "target_field": "label"}],
+          "location": {"line": 8, "column": 5}
+        }
+      ]
+    },
+    {
+      "path": "src/decide.ext",
+      "decision_branches": [
+        {
+          "callable_id": "domain::decide",
+          "domain_type_id": "domain::Severity",
+          "discriminant_id": "severity",
+          "location": {"line": 21, "column": 5}
+        }
+      ],
+      "method_calls": [
+        {
+          "caller_id": "domain::decide",
+          "target_method_id": "domain::SourcePolicy::should_engage",
+          "receiver_type_id": "domain::SourcePolicy",
+          "result_used_as_decision": true,
+          "decision_domain_type_id": "domain::Severity",
+          "location": {"line": 22, "column": 9}
+        }
+      ]
+    }
+  ]
+}
