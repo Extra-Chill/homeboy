@@ -310,7 +310,7 @@ mod hydration {
         ids
     }
 
-    pub fn append_artifact_dependency_ids(ids: &mut Vec<String>, value: Option<&Value>) {
+    fn append_artifact_dependency_ids(ids: &mut Vec<String>, value: Option<&Value>) {
         let Some(values) = value.and_then(Value::as_array) else {
             return;
         };
@@ -323,7 +323,7 @@ mod hydration {
         }));
     }
 
-    pub fn append_string_array(ids: &mut Vec<String>, value: Option<&Value>) {
+    fn append_string_array(ids: &mut Vec<String>, value: Option<&Value>) {
         let Some(values) = value.and_then(Value::as_array) else {
             return;
         };
@@ -353,7 +353,7 @@ mod hydration {
         None
     }
 
-    pub fn artifact_from_outputs(outputs: &Value, artifact_id: &str) -> Option<Value> {
+    fn artifact_from_outputs(outputs: &Value, artifact_id: &str) -> Option<Value> {
         outputs
             .get("artifacts")
             .and_then(|artifacts| artifacts.get(artifact_id))
@@ -365,7 +365,7 @@ mod hydration {
             .cloned()
     }
 
-    pub fn artifact_from_history_payload(payload: &Value, artifact_id: &str) -> Option<Value> {
+    fn artifact_from_history_payload(payload: &Value, artifact_id: &str) -> Option<Value> {
         let result = payload.get("execution")?.get("result")?;
         if let Some(artifact) = artifact_from_outputs(result, artifact_id) {
             return Some(artifact);
@@ -1000,7 +1000,7 @@ mod evidence_index {
         })
     }
 
-    pub fn artifact_ref_from_artifact(artifact: &AgentTaskArtifact) -> AgentTaskLoopArtifactRef {
+    fn artifact_ref_from_artifact(artifact: &AgentTaskArtifact) -> AgentTaskLoopArtifactRef {
         AgentTaskLoopArtifactRef {
             uri: artifact
                 .url
@@ -1014,7 +1014,7 @@ mod evidence_index {
         }
     }
 
-    pub fn artifact_ref_from_evidence_ref(
+    fn artifact_ref_from_evidence_ref(
         evidence_ref: &AgentTaskEvidenceRef,
     ) -> AgentTaskLoopArtifactRef {
         AgentTaskLoopArtifactRef {
@@ -1026,7 +1026,7 @@ mod evidence_index {
         }
     }
 
-    pub fn artifact_ref_from_typed_artifact(
+    fn artifact_ref_from_typed_artifact(
         task_id: &str,
         typed_artifact: &AgentTaskTypedArtifact,
     ) -> AgentTaskLoopArtifactRef {
