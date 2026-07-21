@@ -223,6 +223,7 @@ pub fn run(
             artifact_outputs,
             artifact_dir_outputs,
             summary_outputs,
+            read_only_artifact,
             json: _,
             raw: _,
             command,
@@ -244,6 +245,7 @@ pub fn run(
             artifact_outputs,
             artifact_dir_outputs,
             summary_outputs,
+            read_only_artifact,
             command,
         )),
         RunnerCommand::Env { id } => map_env(env_mod::env(&id)),
@@ -319,6 +321,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             artifact_outputs,
             artifact_dir_outputs,
             summary_outputs,
+            read_only_artifact,
             json: true,
             raw: false,
             command,
@@ -340,6 +343,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             artifact_outputs,
             artifact_dir_outputs,
             summary_outputs,
+            read_only_artifact,
             command,
         ),
         RunnerCommand::Exec {
@@ -360,6 +364,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             artifact_outputs,
             artifact_dir_outputs,
             summary_outputs,
+            read_only_artifact,
             raw: true,
             json: false,
             command,
@@ -381,6 +386,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             artifact_outputs,
             artifact_dir_outputs,
             summary_outputs,
+            read_only_artifact,
             command,
         ),
         RunnerCommand::Exec {
@@ -401,6 +407,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             artifact_outputs,
             artifact_dir_outputs,
             summary_outputs,
+            read_only_artifact,
             raw: false,
             json: false,
             command,
@@ -422,6 +429,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             artifact_outputs,
             artifact_dir_outputs,
             summary_outputs,
+            read_only_artifact,
             command,
         ),
         command => {
@@ -454,6 +462,7 @@ fn run_json_exec(
     artifact_outputs: Vec<String>,
     artifact_dir_outputs: Vec<String>,
     summary_outputs: Vec<String>,
+    read_only_artifact: bool,
     command: Vec<String>,
 ) -> CommandRun {
     let (stdout_result, exit_code) = crate::commands::utils::response::map_cmd_result_to_json(
@@ -475,6 +484,7 @@ fn run_json_exec(
             artifact_outputs,
             artifact_dir_outputs,
             summary_outputs,
+            read_only_artifact,
             command,
         )
         .map(|(output, exit_code)| {
@@ -506,6 +516,7 @@ fn run_raw_exec(
     artifact_outputs: Vec<String>,
     artifact_dir_outputs: Vec<String>,
     summary_outputs: Vec<String>,
+    read_only_artifact: bool,
     command: Vec<String>,
 ) -> CommandRun {
     match exec(
@@ -526,6 +537,7 @@ fn run_raw_exec(
         artifact_outputs,
         artifact_dir_outputs,
         summary_outputs,
+        read_only_artifact,
         command,
     ) {
         Ok((output, exit_code)) => raw_exec_command_run(output, exit_code),
@@ -558,6 +570,7 @@ fn run_compact_exec_json(
     artifact_outputs: Vec<String>,
     artifact_dir_outputs: Vec<String>,
     summary_outputs: Vec<String>,
+    read_only_artifact: bool,
     command: Vec<String>,
 ) -> CommandRun {
     let raw_run = run_compact_exec(
@@ -578,6 +591,7 @@ fn run_compact_exec_json(
         artifact_outputs,
         artifact_dir_outputs,
         summary_outputs,
+        read_only_artifact,
         command,
     );
     let presentation_stdout = raw_run
@@ -611,6 +625,7 @@ pub(super) fn run_compact_exec(
     artifact_outputs: Vec<String>,
     artifact_dir_outputs: Vec<String>,
     summary_outputs: Vec<String>,
+    read_only_artifact: bool,
     command: Vec<String>,
 ) -> CommandRun {
     match exec(
@@ -631,6 +646,7 @@ pub(super) fn run_compact_exec(
         artifact_outputs,
         artifact_dir_outputs,
         summary_outputs,
+        read_only_artifact,
         command,
     ) {
         Ok((output, exit_code)) => compact_exec_command_run(output, exit_code),

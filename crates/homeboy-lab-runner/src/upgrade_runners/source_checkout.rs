@@ -130,6 +130,7 @@ pub fn runner_source_checkout_prepare_options(
         detach_after_handoff: false,
         mirror_evidence: true,
         print_handoff: true,
+        read_only_artifact_access: false,
     }
 }
 

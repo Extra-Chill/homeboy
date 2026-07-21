@@ -204,6 +204,13 @@ pub(crate) fn missing_run_guidance_for_runner_ids(
 ) -> Vec<String> {
     let mut hints = Vec::new();
     for runner_id in runner_ids {
+        // Prefer the controller-side, generation-owner-routed retrieval. It
+        // reads runner-owned run/artifact provenance without rotating the shared
+        // tunnel, so it works even while a stale admission daemon is draining
+        // (Extra-Chill/homeboy#9420).
+        hints.push(format!(
+            "Resolve runner-owned artifacts non-destructively from the controller: `homeboy runs artifacts {run_id} --runner {runner_id}` (routes to the generation that retains the run without rotating the shared tunnel)."
+        ));
         hints.push(format!(
             "Check runner `{runner_id}` from the controller: `homeboy runs list --runner {runner_id} --limit 100`."
         ));
@@ -212,6 +219,13 @@ pub(crate) fn missing_run_guidance_for_runner_ids(
         ));
         hints.push(format!(
             "List artifacts for run `{run_id}` directly on runner `{runner_id}`: `homeboy runner exec {runner_id} -- homeboy runs artifacts {run_id}`."
+        ));
+        // A retained artifact must be readable even while the admission daemon is
+        // stale. --read-only-artifact routes the exec to the retaining
+        // generation instead of the mutable current admission session
+        // (Extra-Chill/homeboy#9420).
+        hints.push(format!(
+            "If the admission daemon is stale, read retained evidence without a refresh: `homeboy runner exec {runner_id} --read-only-artifact -- homeboy runs artifacts {run_id}`."
         ));
         hints.push(format!(
             "Export run `{run_id}` directly on runner `{runner_id}`: `homeboy runner exec {runner_id} -- homeboy runs export --run {run_id} --output <dir>`."
@@ -354,6 +368,29 @@ fn finish_stale_runner_child_run(store: &ObservationStore, job: &StaleRunnerJobI
         );
     }
     let _ = store.finish_run(run_id, RunStatus::Stale, Some(metadata));
+}
+
+#[cfg(test)]
+mod guidance_tests {
+    use super::*;
+
+    #[test]
+    fn runner_owned_guidance_offers_non_destructive_controller_and_read_only_retrieval() {
+        let hints = missing_run_guidance_for_runner_ids("run-42", vec!["homeboy-lab".to_string()]);
+
+        // The controller-side, generation-owner-routed retrieval is offered
+        // first: it resolves runner-owned artifacts without rotating the tunnel
+        // (Extra-Chill/homeboy#9420).
+        assert!(hints
+            .iter()
+            .any(|hint| hint.contains("homeboy runs artifacts run-42 --runner homeboy-lab")));
+        // A stale admission daemon must not block reading retained evidence:
+        // --read-only-artifact routes to the retaining generation.
+        assert!(hints.iter().any(|hint| {
+            hint.contains("--read-only-artifact")
+                && hint.contains("homeboy runner exec homeboy-lab")
+        }));
+    }
 }
 
 #[cfg(test)]

@@ -49,6 +49,7 @@ fn test_runner_policy_denies_raw_ssh_exec_by_default() {
         detach_after_handoff: false,
         mirror_evidence: true,
         print_handoff: true,
+        read_only_artifact_access: false,
     };
 
     let err = validate_runner_policy(&runner, "/srv/homeboy/project", policy_request(&options))
@@ -94,6 +95,7 @@ fn test_runner_policy_enforces_projects_commands_workspace_and_artifacts() {
         detach_after_handoff: false,
         mirror_evidence: true,
         print_handoff: true,
+        read_only_artifact_access: false,
     };
     validate_runner_policy(
         &runner,

@@ -327,6 +327,7 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
             vec!["out.txt".to_string(), "reports".to_string()],
             Vec::new(),
             Vec::new(),
+            false,
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
@@ -404,6 +405,7 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
             Vec::new(),
             Vec::new(),
             vec!["summary.json".to_string()],
+            false,
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
@@ -484,6 +486,7 @@ fn runner_exec_structured_summary_is_independent_of_large_stdout() {
             Vec::new(),
             Vec::new(),
             vec!["summary.json".to_string()],
+            false,
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
@@ -892,12 +895,81 @@ fn runner_exec_rejects_artifacts_without_run_id() {
         vec!["out.txt".to_string()],
         Vec::new(),
         Vec::new(),
+        false,
         vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
     )
     .expect_err("artifact requires run id");
 
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
     assert_eq!(err.details["field"], "run_id");
+}
+
+#[test]
+fn read_only_artifact_exec_rejects_capture_patch() {
+    // A read-only retrieval must never rewrite a draining generation, so it
+    // cannot capture a mutation patch (Extra-Chill/homeboy#9420).
+    let err = exec(
+        "lab-local",
+        None,
+        None,
+        None,
+        false,
+        true, // capture_patch
+        Vec::new(),
+        None,
+        Vec::new(),
+        Vec::new(),
+        None,
+        None,
+        false,
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        true, // read_only_artifact
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "cat result.json".to_string(),
+        ],
+    )
+    .expect_err("read-only retrieval cannot capture a patch");
+
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert_eq!(err.details["field"], "read_only_artifact");
+}
+
+#[test]
+fn read_only_artifact_exec_rejects_declared_outputs() {
+    let err = exec(
+        "lab-local",
+        None,
+        None,
+        None,
+        false,
+        false,
+        Vec::new(),
+        None,
+        Vec::new(),
+        Vec::new(),
+        None,
+        None,
+        false,
+        Some("run-1".to_string()),
+        vec!["out.txt".to_string()], // artifact output declaration
+        Vec::new(),
+        Vec::new(),
+        true, // read_only_artifact
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "cat result.json".to_string(),
+        ],
+    )
+    .expect_err("read-only retrieval cannot declare new artifact outputs");
+
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert_eq!(err.details["field"], "read_only_artifact");
 }
 
 fn runner_exec_output(runner_id: &str, mode: RunnerExecMode, remote_cwd: &str) -> RunnerExecOutput {
@@ -952,6 +1024,7 @@ fn runner_exec_rejects_summaries_without_run_id() {
         Vec::new(),
         Vec::new(),
         vec!["summary.json".to_string()],
+        false,
         vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
     )
     .expect_err("summary requires run id");
