@@ -41,7 +41,9 @@ run_fuzz() {
     local project_dir="$1"
     local results_file="$2"
     local workload_path="${3:-}"
-    HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+    local runner="${4:-$RUNNER}"
+    local extension_dir="${5:-$EXTENSION_DIR}"
+    HOMEBOY_EXTENSION_PATH="$extension_dir" \
     HOMEBOY_COMPONENT_PATH="$project_dir" \
     HOMEBOY_COMPONENT_ID="node-fuzz-smoke" \
     HOMEBOY_FUZZ_RESULTS_FILE="$results_file" \
@@ -49,7 +51,7 @@ run_fuzz() {
     HOMEBOY_FUZZ_WORKLOAD_PATH="$workload_path" \
     HOMEBOY_RUNTIME_BASH_PREFLIGHT="$BASH_PREFLIGHT_HELPER" \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
-        bash "$RUNNER" --flag
+        bash "$runner" --flag
 }
 
 node - "$MANIFEST" "$RUNNER" <<'NODE'
@@ -88,6 +90,19 @@ assert_json "$SCRIPT_RESULTS" '
 if (data.schema !== "homeboy/fuzz-campaign/v1") throw new Error("script workload schema missing");
 if (data.source !== "script-workload") throw new Error("script workload did not run");
 if (data.args.join(",") !== "--flag") throw new Error(`script args not forwarded: ${data.args.join(",")}`);
+'
+
+ISOLATED_EXTENSION="$TMP_DIR/isolated/nodejs"
+mkdir -p "$ISOLATED_EXTENSION/scripts/fuzz" "$ISOLATED_EXTENSION/scripts/lib"
+cp "$RUNNER" "$ISOLATED_EXTENSION/scripts/fuzz/fuzz-runner.sh"
+cp "$EXTENSION_DIR/scripts/lib/node-helpers.sh" "$ISOLATED_EXTENSION/scripts/lib/node-helpers.sh"
+ISOLATED_RESULTS="$TMP_DIR/isolated-results.json"
+HOMEBOY_RUNTIME_SETTINGS_HELPER="$EXTENSION_DIR/../scripts/lib/settings.sh" \
+HOMEBOY_RUNTIME_PROJECT_SCRIPTS="$EXTENSION_DIR/../scripts/lib/project-scripts.sh" \
+    run_fuzz "$SCRIPT_PROJECT" "$ISOLATED_RESULTS" "$WORKLOAD_SCRIPT" \
+        "$ISOLATED_EXTENSION/scripts/fuzz/fuzz-runner.sh" "$ISOLATED_EXTENSION" >/dev/null
+assert_json "$ISOLATED_RESULTS" '
+if (data.source !== "script-workload") throw new Error("isolated extension script workload did not run");
 '
 
 PACKAGE_PROJECT="$(make_project package-script)"
