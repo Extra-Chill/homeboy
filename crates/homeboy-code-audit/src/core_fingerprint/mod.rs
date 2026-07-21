@@ -1485,4 +1485,4 @@ fn count_call_args(text: &str) -> Option<usize> {
 // ============================================================================
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

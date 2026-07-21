@@ -125,9 +125,10 @@ pub fn fingerprint_file(path: &Path, root: &Path) -> Option<FileFingerprint> {
 
 /// Extract a structural fingerprint from already-loaded file content.
 ///
-/// Tries the grammar-driven core engine first (no subprocess, faster, testable).
-/// Falls back to the extension fingerprint script if no grammar is available
-/// or the core engine can't handle the file.
+/// Tries the grammar-driven core engine first. When it succeeds, language-owned
+/// semantic facts from the extension script are composed into the grammar
+/// fingerprint. Falls back to the extension fingerprint wholesale if no
+/// grammar is available or the core engine can't handle the file.
 ///
 /// This is the content-taking primitive used by [`FingerprintIndex::from_snapshot`]
 /// to avoid re-reading every file from disk after a [`CodebaseSnapshot`] has
@@ -141,11 +142,15 @@ pub fn fingerprint_content(path: &Path, root: &Path, content: &str) -> Option<Fi
         .to_string_lossy()
         .to_string();
 
-    // Try core grammar engine first
+    // Prefer grammar-owned structural facts, while still allowing extensions to
+    // contribute semantic facts that generic grammar parsing cannot resolve.
     if let Some(grammar) = super::core_fingerprint::load_grammar_for_ext(ext) {
-        if let Some(fp) =
+        if let Some(mut fp) =
             super::core_fingerprint::fingerprint_from_grammar(content, &grammar, &relative_path)
         {
+            if let Some(extension_fp) = fingerprint_via_extension(ext, content, &relative_path) {
+                fp.compose_semantic_facts(extension_fp);
+            }
             return Some(fp);
         }
     }
@@ -171,9 +176,23 @@ pub(crate) fn fingerprint_extension_content(
     let output =
         super::fingerprint_script_provider::fingerprint_via_script(ext, relative_path, content)?;
 
+    Some(fingerprint_from_extension_output(
+        ext,
+        relative_path,
+        content,
+        output,
+    ))
+}
+
+fn fingerprint_from_extension_output(
+    ext: &str,
+    relative_path: &str,
+    content: &str,
+    output: homeboy_audit_contract::FingerprintOutput,
+) -> FileFingerprint {
     let language = Language::from_extension(ext);
 
-    Some(FileFingerprint {
+    FileFingerprint {
         relative_path: relative_path.to_string(),
         language,
         methods: output.methods,
@@ -213,7 +232,38 @@ pub(crate) fn fingerprint_extension_content(
         aggregate_projections: output.aggregate_projections,
         decision_branches: output.decision_branches,
         method_calls: output.method_calls,
-    })
+    }
+}
+
+impl FileFingerprint {
+    /// Compose facts whose syntax and type resolution remain extension-owned.
+    /// Grammar facts stay first so composition is stable across runs.
+    fn compose_semantic_facts(&mut self, extension: Self) {
+        append_facts(&mut self.aggregate_literals, extension.aggregate_literals);
+        append_facts(
+            &mut self.aggregate_construction_seams,
+            extension.aggregate_construction_seams,
+        );
+        append_facts(
+            &mut self.aggregate_definitions,
+            extension.aggregate_definitions,
+        );
+        append_facts(&mut self.field_accesses, extension.field_accesses);
+        append_facts(
+            &mut self.aggregate_projections,
+            extension.aggregate_projections,
+        );
+        append_facts(&mut self.decision_branches, extension.decision_branches);
+        append_facts(&mut self.method_calls, extension.method_calls);
+    }
+}
+
+fn append_facts<T: PartialEq>(target: &mut Vec<T>, extension: Vec<T>) {
+    for fact in extension {
+        if !target.contains(&fact) {
+            target.push(fact);
+        }
+    }
 }
 
 pub(crate) fn normalize_convention_tags(tags: Vec<String>) -> Vec<String> {
@@ -292,7 +342,24 @@ impl FingerprintIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fingerprint_script_provider::FingerprintScriptProvider;
+    use homeboy_audit_contract::FingerprintOutput;
     use homeboy_engine_primitives::codebase_scan::ScanConfig;
+
+    struct FakeSemanticProvider {
+        output: FingerprintOutput,
+    }
+
+    impl FingerprintScriptProvider for FakeSemanticProvider {
+        fn fingerprint(
+            &self,
+            _file_extension: &str,
+            _relative_path: &str,
+            _content: &str,
+        ) -> Option<FingerprintOutput> {
+            Some(self.output.clone())
+        }
+    }
 
     /// Sort a slice of strings into an owned Vec for set-equivalence asserts.
     /// Used because some fingerprint vector fields come from HashMap iteration
@@ -370,6 +437,89 @@ mod tests {
             "content"
         )
         .is_none());
+    }
+
+    #[test]
+    fn grammar_fingerprint_composes_provider_semantic_facts() {
+        let grammar = super::super::core_fingerprint::tests::rust_aggregate_grammar();
+        let content = r#"pub struct GrammarOwned { left: usize, right: usize }
+impl GrammarOwned {
+    pub fn new(left: usize, right: usize) -> Self { Self { left, right } }
+}
+pub fn build_other() -> Other { Other { x: 1, y: 2 } }
+"#;
+        let mut fingerprint = super::super::core_fingerprint::fingerprint_from_grammar(
+            content,
+            &grammar,
+            "src/policy.rs",
+        )
+        .expect("grammar fingerprint");
+        let provider = FakeSemanticProvider {
+            output: serde_json::from_value(serde_json::json!({
+                "aggregate_literals": [
+                    {"type_name": "Other", "fields": ["x", "y"], "line": 5},
+                    {"type_name": "ScriptOnly", "fields": ["a", "b"], "line": 9}
+                ],
+                "aggregate_construction_seams": [
+                    {"type_name": "GrammarOwned", "method": "new", "line": 3},
+                    {"type_name": "ScriptOnly", "method": "create", "line": 3}
+                ],
+                "aggregate_definitions": [{
+                    "type_id": "domain::Policy",
+                    "fields": [{"name": "threshold"}],
+                    "location": {"line": 1, "column": 1}
+                }],
+                "field_accesses": [{
+                    "owner_type_id": "domain::Policy",
+                    "field": "threshold",
+                    "callable_id": "domain::Policy::allows",
+                    "access": "read"
+                }],
+                "aggregate_projections": [{
+                    "source_type_id": "domain::Policy",
+                    "target_type_id": "domain::Carrier",
+                    "callable_id": "domain::project"
+                }],
+                "decision_branches": [{
+                    "callable_id": "domain::decide",
+                    "domain_type_id": "domain::Severity",
+                    "discriminant_id": "severity"
+                }],
+                "method_calls": [{
+                    "caller_id": "domain::decide",
+                    "target_method_id": "domain::Policy::allows",
+                    "receiver_type_id": "domain::Policy",
+                    "result_used_as_decision": true,
+                    "decision_domain_type_id": "domain::Severity"
+                }]
+            }))
+            .expect("fake extension output"),
+        };
+        let output = provider
+            .fingerprint("rs", "src/policy.rs", content)
+            .expect("provider output");
+        let extension = fingerprint_from_extension_output("rs", "src/policy.rs", content, output);
+
+        fingerprint.compose_semantic_facts(extension);
+
+        assert!(fingerprint.methods.contains(&"new".to_string()));
+        assert_eq!(fingerprint.aggregate_construction_seams.len(), 2);
+        assert_eq!(
+            fingerprint.aggregate_construction_seams[0].type_name,
+            "GrammarOwned"
+        );
+        assert_eq!(
+            fingerprint.aggregate_construction_seams[1].type_name,
+            "ScriptOnly"
+        );
+        assert_eq!(fingerprint.aggregate_literals.len(), 2);
+        assert_eq!(fingerprint.aggregate_literals[0].type_name, "Other");
+        assert_eq!(fingerprint.aggregate_literals[1].type_name, "ScriptOnly");
+        assert_eq!(fingerprint.aggregate_definitions.len(), 1);
+        assert_eq!(fingerprint.field_accesses.len(), 1);
+        assert_eq!(fingerprint.aggregate_projections.len(), 1);
+        assert_eq!(fingerprint.decision_branches.len(), 1);
+        assert_eq!(fingerprint.method_calls.len(), 1);
     }
 
     #[test]

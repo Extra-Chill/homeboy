@@ -918,7 +918,7 @@ mod tests {
 
 /// Rust grammar extended with the construction-seam + aggregate-literal policy
 /// the reference Rust fingerprint script encodes.
-fn rust_aggregate_grammar() -> Grammar {
+pub(crate) fn rust_aggregate_grammar() -> Grammar {
     let mut grammar = rust_grammar();
     grammar.fingerprint.aggregate_seams = Some(AggregateSeamConfig {
         method_names: vec![

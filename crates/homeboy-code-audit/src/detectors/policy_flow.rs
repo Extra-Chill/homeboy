@@ -182,11 +182,7 @@ fn find_rule_findings(
                     && item.fact.result_used_as_decision
                     && item.fact.decision_domain_type_id.as_deref()
                         == Some(sink.domain_type_id.as_str())
-                    && item
-                        .fact
-                        .receiver_type_id
-                        .as_deref()
-                        .is_none_or(|receiver| receiver == rule.source_type_id)
+                    && item.fact.receiver_type_id.as_deref() == Some(rule.source_type_id.as_str())
             }) {
                 continue;
             }
@@ -376,6 +372,28 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_receiver_does_not_prove_authoritative_delegation() {
+        let (config, mut files) = fixture(include_str!(
+            "../../../../tests/fixtures/audit_policy_flow/clean_delegation.json"
+        ));
+        files[2].method_calls[0].receiver_type_id = None;
+        let refs = files.iter().collect::<Vec<_>>();
+
+        assert_eq!(run(&refs, &config).len(), 1);
+    }
+
+    #[test]
+    fn wrong_receiver_does_not_prove_authoritative_delegation() {
+        let (config, mut files) = fixture(include_str!(
+            "../../../../tests/fixtures/audit_policy_flow/clean_delegation.json"
+        ));
+        files[2].method_calls[0].receiver_type_id = Some("domain::OtherPolicy".to_string());
+        let refs = files.iter().collect::<Vec<_>>();
+
+        assert_eq!(run(&refs, &config).len(), 1);
+    }
+
+    #[test]
     fn distinct_decision_domains_have_distinct_findings() {
         let (mut config, mut files) = fixture(include_str!(
             "../../../../tests/fixtures/audit_policy_flow/lossy_projection.json"
@@ -463,6 +481,19 @@ mod tests {
             "../../../../tests/fixtures/audit_policy_flow/lossy_projection.json"
         ));
         files[1].aggregate_projections.clear();
+        let refs = files.iter().collect::<Vec<_>>();
+
+        assert!(run(&refs, &config).is_empty());
+    }
+
+    #[test]
+    fn facts_from_test_paths_are_ignored() {
+        let (config, mut files) = fixture(include_str!(
+            "../../../../tests/fixtures/audit_policy_flow/lossy_projection.json"
+        ));
+        for file in &mut files {
+            file.relative_path = format!("tests/{}", file.relative_path);
+        }
         let refs = files.iter().collect::<Vec<_>>();
 
         assert!(run(&refs, &config).is_empty());

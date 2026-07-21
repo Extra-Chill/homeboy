@@ -6,6 +6,11 @@
 //! `FingerprintOutput` envelope. Pure serde types with no dependencies. The
 //! `code_audit` engine consumes these; `extension::fingerprint` re-exports them
 //! and owns the script-runner that produces them.
+//!
+//! Semantic-fact producers must omit facts located in inline test regions.
+//! Core intentionally does not infer language-specific inline-test syntax. It
+//! separately ignores every fact from files whose paths are recognized as test
+//! paths.
 
 /// A hook reference extracted from source code (do_action / apply_filters).
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -58,7 +63,7 @@ pub struct DeadCodeMarker {
 ///
 /// Language extensions own syntax recognition; core only groups these generic
 /// facts to detect repeated inline construction where a canonical seam exists.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct AggregateLiteral {
     /// Aggregate type name, e.g. a struct/class/interface-backed record.
     pub type_name: String,
@@ -71,7 +76,7 @@ pub struct AggregateLiteral {
 }
 
 /// Extension-reported canonical construction seam for an aggregate type.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct AggregateConstructionSeam {
     /// Aggregate type name this seam constructs.
     pub type_name: String,
@@ -172,24 +177,31 @@ pub struct FingerprintOutput {
     #[serde(default)]
     pub convention_tags: Vec<String>,
     /// Direct aggregate literal construction sites reported by an extension.
+    /// Producers omit sites in inline test regions.
     #[serde(default)]
     pub aggregate_literals: Vec<AggregateLiteral>,
-    /// Canonical construction seams reported by an extension.
+    /// Canonical construction seams reported by an extension. Producers omit
+    /// seams in inline test regions.
     #[serde(default)]
     pub aggregate_construction_seams: Vec<AggregateConstructionSeam>,
-    /// Resolved aggregate definitions used by policy-flow analysis.
+    /// Resolved aggregate definitions used by policy-flow analysis. Producers
+    /// omit definitions in inline test regions.
     #[serde(default)]
     pub aggregate_definitions: Vec<crate::policy_flow::AggregateDefinitionFact>,
-    /// Resolved field reads and writes used by policy-flow analysis.
+    /// Resolved field reads and writes used by policy-flow analysis. Producers
+    /// omit accesses in inline test regions.
     #[serde(default)]
     pub field_accesses: Vec<crate::policy_flow::FieldAccessFact>,
-    /// Resolved aggregate-to-aggregate projection edges.
+    /// Resolved aggregate-to-aggregate projection edges. Producers omit edges
+    /// in inline test regions.
     #[serde(default)]
     pub aggregate_projections: Vec<crate::policy_flow::AggregateProjectionFact>,
-    /// Typed downstream decision branches.
+    /// Typed downstream decision branches. Producers omit branches in inline
+    /// test regions.
     #[serde(default)]
     pub decision_branches: Vec<crate::policy_flow::DecisionBranchFact>,
     /// Resolved calls used to prove delegation to authoritative policy seams.
+    /// Producers omit calls in inline test regions.
     #[serde(default)]
     pub method_calls: Vec<crate::policy_flow::MethodCallFact>,
 }
