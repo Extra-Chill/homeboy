@@ -184,11 +184,7 @@ pub(crate) fn tasks_for_aggregate(
             } else if let Some(outcome) = outcome {
                 task.state = task_state_for_outcome_status(outcome.status);
             }
-            if let Some(model) = outcome
-                .and_then(|outcome| outcome.metadata.get("model"))
-                .and_then(Value::as_str)
-                .filter(|model| !model.trim().is_empty())
-            {
+            if let Some(model) = outcome.and_then(|outcome| outcome.selected_model()) {
                 task.model = Some(model.to_string());
             }
             task
@@ -490,7 +486,7 @@ pub(crate) fn run_provider_handle(
 ) -> AgentTaskRunProviderHandle {
     let mut metadata = handle.metadata;
     if metadata.get("model").and_then(Value::as_str).is_none() {
-        if let Some(model) = outcome.metadata.get("model").and_then(Value::as_str) {
+        if let Some(model) = outcome.selected_model() {
             if !metadata.is_object() {
                 metadata = json!({});
             }
