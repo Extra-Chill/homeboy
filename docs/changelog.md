@@ -4,6 +4,46 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.300.0] - 2026-07-21
+
+### Added
+- feat(agent-task): resume durable cook-batch finalization after coordinator exit ([#9532](https://github.com/Extra-Chill/homeboy/pull/9532)) (by Chris Huber)
+- detect lossy policy projections ([#9530](https://github.com/Extra-Chill/homeboy/pull/9530)) (by Chris Huber)
+- enforce public contract evidence ([#9456](https://github.com/Extra-Chill/homeboy/pull/9456)) (by Chris Huber)
+- enforce accepted source provenance ([#9446](https://github.com/Extra-Chill/homeboy/pull/9446)) (by Chris Huber)
+
+### Changed
+- narrow same-scope-only artifact helpers to private (dead_code) ([#9535](https://github.com/Extra-Chill/homeboy/pull/9535)) (by Chris Huber)
+- route git status --porcelain emptiness check onto status_porcelain helper ([#9529](https://github.com/Extra-Chill/homeboy/pull/9529)) (by Chris Huber)
+- narrow same-file-only action_state helpers to private (dead_code) ([#9531](https://github.com/Extra-Chill/homeboy/pull/9531)) (by Chris Huber)
+- route genuine git-toplevel/short-HEAD bypasses onto canonical helpers ([#9527](https://github.com/Extra-Chill/homeboy/pull/9527)) (by Chris Huber)
+- consolidate provider-model resolution behind AgentTaskOutcome::selected_model ([#9460](https://github.com/Extra-Chill/homeboy/pull/9460)) (by Chris Huber)
+- route accepted-handoff idempotency guard through canonical RunnerJobIdentity ([#9458](https://github.com/Extra-Chill/homeboy/pull/9458)) (by Chris Huber)
+- Add durable controller daemon jobs ([#9457](https://github.com/Extra-Chill/homeboy/pull/9457)) (by Chris Huber)
+- route validate_runner_job_snapshot through canonical RunnerJobIdentity ([#9452](https://github.com/Extra-Chill/homeboy/pull/9452)) (by Chris Huber)
+- move cook test module to sibling file via #[path] ([#9449](https://github.com/Extra-Chill/homeboy/pull/9449)) (by Chris Huber)
+- Reconcile stale runner generations and timed-out handoffs ([#9448](https://github.com/Extra-Chill/homeboy/pull/9448)) (by Chris Huber)
+- extract lab-handoff reconciliation from lifecycle_ops god file ([#9441](https://github.com/Extra-Chill/homeboy/pull/9441)) (by Chris Huber)
+- extract resource-policy classification and messages from god file ([#9279](https://github.com/Extra-Chill/homeboy/pull/9279)) ([#9439](https://github.com/Extra-Chill/homeboy/pull/9439)) (by Chris Huber)
+
+### Fixed
+- start Lab handoff lease at submission ([#9536](https://github.com/Extra-Chill/homeboy/pull/9536)) (by Chris Huber)
+- close remaining run retention gaps ([#9528](https://github.com/Extra-Chill/homeboy/pull/9528)) (by Chris Huber)
+- command_wrapper_bypass exempts sibling thin wrappers with different return contracts ([#9526](https://github.com/Extra-Chill/homeboy/pull/9526)) (by Chris Huber)
+- stop parsing generic runner-exec stdout as an agent-task run-plan ([#9524](https://github.com/Extra-Chill/homeboy/pull/9524)) (by Chris Huber)
+- let read-only retrieval read retained evidence past a stale admission daemon ([#9490](https://github.com/Extra-Chill/homeboy/pull/9490)) (by Chris Huber)
+- finish remaining run directory callers ([#9489](https://github.com/Extra-Chill/homeboy/pull/9489)) (by Chris Huber)
+- probe admission readiness before refresh reports success ([#9488](https://github.com/Extra-Chill/homeboy/pull/9488)) (by Chris Huber)
+- close retained run lifecycle races ([#9461](https://github.com/Extra-Chill/homeboy/pull/9461)) (by Chris Huber)
+- harden retained run ownership ([#9453](https://github.com/Extra-Chill/homeboy/pull/9453)) (by Chris Huber)
+- default absent worktree-provider safety flags to permissive ([#7886](https://github.com/Extra-Chill/homeboy/pull/7886)) ([#9454](https://github.com/Extra-Chill/homeboy/pull/9454)) (by Chris Huber)
+- reject manual release-owned version changes ([#9455](https://github.com/Extra-Chill/homeboy/pull/9455)) (by Chris Huber)
+- validate the declared base before mutating the target worktree ([#9400](https://github.com/Extra-Chill/homeboy/pull/9400)) ([#9445](https://github.com/Extra-Chill/homeboy/pull/9445)) (by Chris Huber)
+- enforce changelog provenance ([#9447](https://github.com/Extra-Chill/homeboy/pull/9447)) (by Chris Huber)
+- honor component scope exclusions ([#9444](https://github.com/Extra-Chill/homeboy/pull/9444)) (by Chris Huber)
+- preserve scoped GitHub attribution ([#9440](https://github.com/Extra-Chill/homeboy/pull/9440)) (by Chris Huber)
+- bound retained run directories ([#9438](https://github.com/Extra-Chill/homeboy/pull/9438)) (by Chris Huber)
+
 ## [0.299.2] - 2026-07-21
 
 ### Fixed
