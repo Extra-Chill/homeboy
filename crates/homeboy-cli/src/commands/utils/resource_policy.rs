@@ -174,6 +174,7 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
     if is_plan_only_command(command)
         || is_controller_owned_fanout_coordination(command)
         || is_read_only_agent_task(command)
+        || is_local_registry_management(command)
     {
         return None;
     }
@@ -304,6 +305,21 @@ fn is_read_only_agent_task(command: &Commands) -> bool {
                 | agent_task::AgentTaskCommand::Review(_),
         })
     )
+}
+
+/// Local registry/source-state management (`rig install|update|sync|sources`)
+/// is lightweight controller-local bookkeeping, not a resource-intensive
+/// workload. These commands carry a `LocalOnly` Lab contract only to *explain*
+/// their controller-local boundary when an operator requests unsupported Lab
+/// placement. `hot_command` otherwise converts every command with a Lab
+/// contract — including every explanatory `LocalOnly` one — into a
+/// `HotCommand`, which put rig source management behind warm/hot resource-policy
+/// refusal and forced callers to bypass setup with `--skip-install --skip-sync`
+/// (#9428). Resource policy must gate only genuinely resource-intensive
+/// commands (e.g. `rig up`, `rig check`), so exempt these here while their
+/// portability diagnostics stay intact.
+fn is_local_registry_management(command: &Commands) -> bool {
+    matches!(command, Commands::Rig(args) if args.is_runner_source_management_command())
 }
 
 pub fn evaluate(command: HotCommand, resources: &DoctorOutput) -> Option<ResourcePolicyWarning> {
@@ -755,6 +771,59 @@ mod tests {
         ]);
 
         assert!(hot_command(&cli.command).is_none());
+    }
+
+    #[test]
+    fn rig_source_management_commands_bypass_hot_resource_admission() {
+        // Rig registry/source-state management is lightweight controller-local
+        // bookkeeping, not a resource-intensive workload, so it must never be
+        // refused by warm/hot resource policy (#9428).
+        for args in [
+            [
+                "homeboy",
+                "rig",
+                "install",
+                "https://example.invalid/rig.git",
+            ]
+            .as_slice(),
+            ["homeboy", "rig", "update"].as_slice(),
+            ["homeboy", "rig", "update", "--all"].as_slice(),
+            ["homeboy", "rig", "sync", "example-rig"].as_slice(),
+            ["homeboy", "rig", "sources"].as_slice(),
+        ] {
+            let cli = Cli::parse_from(args);
+            assert!(
+                hot_command(&cli.command).is_none(),
+                "rig source management must not be resource-managed: {args:?}"
+            );
+            // The explanatory local-only Lab portability contract is preserved so
+            // an explicit unsupported Lab placement still gets a clear diagnostic.
+            let contract = cli
+                .command
+                .lab_contract()
+                .expect("rig source management keeps a Lab portability contract");
+            assert!(matches!(
+                contract.portability,
+                crate::command_contract::LabCommandPortability::LocalOnly(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn rig_up_and_check_remain_resource_managed() {
+        // Genuinely resource-intensive rig commands keep their resource-policy
+        // classification (#9428).
+        let up = Cli::parse_from(["homeboy", "rig", "up", "example-rig"]);
+        assert!(
+            hot_command(&up.command).is_some(),
+            "rig up remains resource-managed"
+        );
+
+        let check = Cli::parse_from(["homeboy", "rig", "check", "example-rig"]);
+        assert!(
+            hot_command(&check.command).is_some(),
+            "rig check remains resource-managed"
+        );
     }
 
     #[test]
