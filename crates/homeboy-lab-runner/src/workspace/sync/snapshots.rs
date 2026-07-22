@@ -272,10 +272,7 @@ fn workspace_snapshots_ssh(
 )> {
     let (_server, mut client) = ssh_client_for_runner(runner)?;
     client.env.extend(runner.env.clone());
-    // Enumerate paths separately from their metadata. A root can hold many
-    // large manifests; projecting all of them through one SSH stdout capture
-    // corrupts the entire scan when that capture reaches its bound.
-    let command = workspace_snapshot_paths_command(root);
+    let command = workspace_snapshot_scan_command(root);
     let output = client.execute(&command);
     if !output.success {
         return Err(Error::internal_unexpected(format!(
@@ -285,19 +282,14 @@ fn workspace_snapshots_ssh(
     }
     let mut snapshots = Vec::new();
     let mut skipped_invalid_metadata = Vec::new();
-    for path in output
-        .stdout
-        .lines()
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-    {
-        let output = client.execute(&workspace_snapshot_metadata_command(path));
-        if !output.success || output.stdout.trim().is_empty() {
+    for line in output.stdout.lines() {
+        let parts = line.splitn(2, '\t').collect::<Vec<_>>();
+        if parts.len() != 2 {
             continue;
         }
         let decoded = base64::engine::general_purpose::STANDARD
-            .decode(output.stdout.trim())
-            .map_err(|error| invalid_workspace_metadata(path, error));
+            .decode(parts[1])
+            .map_err(|error| invalid_workspace_metadata(parts[0], error));
         let Ok(decoded) = decoded else {
             skipped_invalid_metadata.push(decoded.expect_err("base64 decode failed"));
             continue;
@@ -305,7 +297,7 @@ fn workspace_snapshots_ssh(
         let metadata: RunnerWorkspaceMetadata = match serde_json::from_slice(&decoded) {
             Ok(metadata) => metadata,
             Err(error) => {
-                skipped_invalid_metadata.push(invalid_workspace_metadata(path, error));
+                skipped_invalid_metadata.push(invalid_workspace_metadata(parts[0], error));
                 continue;
             }
         };
@@ -412,21 +404,6 @@ pub(crate) fn workspace_snapshot_scan_command(root: &str) -> String {
         "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then for dir in \"$root\"/*; do [ -d \"$dir\" ] || continue; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; encoded=$(base64 < \"$meta\" 2>/dev/null) || continue; encoded=$(printf '%s' \"$encoded\" | tr -d '\\n'); printf \"%s\\t%s\\n\" \"$dir\" \"$encoded\"; done; [ -d \"$root\" ] || {{ printf '%s\\n' \"runner workspace snapshot root disappeared during scan: $root\" >&2; exit 1; }}; fi",
         root = shell::quote_arg(root),
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
-    )
-}
-
-fn workspace_snapshot_paths_command(root: &str) -> String {
-    format!(
-        "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then for dir in \"$root\"/*; do [ -f \"$dir/$meta_rel\" ] && printf '%s\\n' \"$dir\"; done; [ -d \"$root\" ] || {{ printf '%s\\n' \"runner workspace snapshot root disappeared during scan: $root\" >&2; exit 1; }}; fi",
-        root = shell::quote_arg(root),
-        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
-    )
-}
-
-fn workspace_snapshot_metadata_command(path: &str) -> String {
-    format!(
-        "meta={}; [ -f \"$meta\" ] && base64 < \"$meta\" 2>/dev/null | tr -d '\\n'",
-        shell::quote_arg(&format!("{path}/{WORKSPACE_METADATA_FILE}")),
     )
 }
 
