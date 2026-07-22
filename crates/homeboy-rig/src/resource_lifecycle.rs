@@ -127,6 +127,7 @@ mod tests {
         assert_eq!(index.resources[1].path, "/tmp/homeboy-rig");
         assert_eq!(index.resources[2].path, "tcp://localhost:9981");
         assert_eq!(index.resources[3].path, "process-pattern:homeboy fixture");
+        assert_eq!(index.resources[0].runner_id, None);
         assert_eq!(
             index.resources[0].cleanup_policy,
             ResourceCleanupPolicy::Manual
