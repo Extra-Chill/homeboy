@@ -261,6 +261,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
                 None,
                 result.stop_reason,
                 exit_code,
+                None,
             ));
         }
         let promotion = persisted_promotion_for_attempt(&record.run_id)?.ok_or_else(|| {
@@ -302,6 +303,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
             finalization,
             Some("reused the completed candidate adoption result; set rerun_completed_gates to rerun its gates".to_string()),
             if status == "review_ready" || status == "green_no_finalize" { 0 } else { 1 },
+            Some(record.run_id.as_str()),
         ));
     }
     let attempt_dispatcher =
@@ -468,6 +470,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
                         .to_string(),
                 ),
                 1,
+                Some(record.run_id.as_str()),
             );
             persist_adoption_terminal_result(&record.run_id, &report.value)?;
             return Ok(report);
@@ -550,6 +553,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
                         "provider execution stopped because {reason} was exhausted"
                     )),
                     1,
+                    Some(record.run_id.as_str()),
                 );
                 persist_adoption_terminal_result(&record.run_id, &report.value)?;
                 agent_task_lifecycle::finish_candidate_adoption(
@@ -566,6 +570,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
                     None,
                     Some(reason.clone()),
                     1,
+                    Some(record.run_id.as_str()),
                 );
                 persist_adoption_terminal_result(&record.run_id, &report.value)?;
                 agent_task_lifecycle::finish_candidate_adoption(&record.run_id, Some(reason))?;
@@ -585,6 +590,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
             None,
             Some("adopted candidate did not pass the original deterministic gates".to_string()),
             1,
+            Some(record.run_id.as_str()),
         ));
     }
     if options.no_finalize {
@@ -599,6 +605,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
                     .to_string(),
             ),
             0,
+            Some(record.run_id.as_str()),
         ));
     }
     agent_task_lifecycle::checkpoint_candidate_adoption(
@@ -634,6 +641,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
         Some(finalization),
         None,
         exit_code,
+        Some(record.run_id.as_str()),
     ))
 }
 
