@@ -41,11 +41,40 @@ fn fallback_release_notes_falls_back_to_minimal_body_when_empty() {
 #[test]
 fn component_scoped_release_body_uses_changelog_fallback() {
     let temp = git_repo();
+    let root = temp.path();
     let component_dir = temp.path().join("packages/wordpress");
     std::fs::create_dir_all(&component_dir).expect("create component dir");
+    std::fs::write(root.join("README.md"), "initial").expect("write initial file");
+    super::run_git(root, &["add", "README.md"]);
+    super::run_git(root, &["commit", "-q", "-m", "chore: initial"]);
+    super::run_git(root, &["tag", "wordpress-v1.2.2"]);
+    std::fs::write(component_dir.join("release.md"), "release").expect("write release file");
+    super::run_git(root, &["add", "packages/wordpress/release.md"]);
+    super::run_git(
+        root,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "fix: bound homeboy activity latency with a reconcile-free runner view (#9522)",
+        ],
+    );
+    std::fs::write(component_dir.join("workspace.md"), "workspace").expect("write workspace file");
+    super::run_git(root, &["add", "packages/wordpress/workspace.md"]);
+    super::run_git(
+        root,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "fix: preserve the prepared workspace on retryable admission failure (#9469)",
+        ],
+    );
+    super::run_git(root, &["tag", "wordpress-v1.2.3"]);
     let component = homeboy_core::component::Component {
         id: "wordpress".to_string(),
         local_path: component_dir.to_string_lossy().to_string(),
+        remote_url: Some("https://github.com/example-org/studio-web.git".to_string()),
         ..Default::default()
     };
     let state = ReleaseState {
@@ -64,7 +93,13 @@ fn component_scoped_release_body_uses_changelog_fallback() {
 
     assert!(!body.generated_notes_ok);
     assert_eq!(body.source_label(), "changelog-fallback");
-    assert!(body.body.contains("- Fix scoped release notes"));
+    assert!(body.body.contains(
+        "- bound homeboy activity latency with a reconcile-free runner view ([#9522](https://github.com/example-org/studio-web/pull/9522)) (by Homeboy Test)"
+    ));
+    assert!(body.body.contains(
+        "- preserve the prepared workspace on retryable admission failure ([#9469](https://github.com/example-org/studio-web/pull/9469)) (by Homeboy Test)"
+    ));
+    assert!(!body.body.contains("- Fix scoped release notes"));
     assert!(body.body.contains("packages/wordpress/CHANGELOG.md"));
 }
 
