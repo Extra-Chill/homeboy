@@ -463,6 +463,16 @@ pub struct RunnerConnectReport {
     pub failure_message: Option<String>,
 }
 
+/// A read-only indexed snapshot of one runner's persisted active jobs, built
+/// without reconciling (polling) the generation ledger. Used by latency-bounded
+/// callers like `homeboy activity` (#9522).
+#[derive(Debug, Clone)]
+pub struct RunnerActiveJobsSnapshot {
+    pub runner_id: String,
+    pub connected: bool,
+    pub active_jobs: Vec<ActiveRunnerJobSummary>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RunnerStatusReport {
     pub runner_id: String,
