@@ -727,8 +727,8 @@ fn lab_runner_homeboy_refresh_commands(runner_id: &str) -> Vec<String> {
     let runner_arg = shell_arg(runner_id);
     vec![
         format!(
-            "homeboy runner refresh-homeboy {runner_arg} --ref v{} --reconnect",
-            homeboy_product_identity::product_version()
+            "homeboy runner refresh-homeboy {runner_arg} --ref {} --reconnect",
+            controller_refresh_ref()
         ),
         format!("homeboy runner disconnect {runner_arg}"),
         format!("homeboy runner connect {runner_arg}"),
@@ -750,8 +750,8 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
         LabFollowup {
             label: "refresh_homeboy".to_string(),
             command: format!(
-                "homeboy runner refresh-homeboy {runner_arg} --ref v{} --reconnect",
-                homeboy_product_identity::product_version()
+                "homeboy runner refresh-homeboy {runner_arg} --ref {} --reconnect",
+                controller_refresh_ref()
             ),
             purpose: "Materialize a clean runner-side Homeboy binary, select it for Lab jobs, and refresh the daemon session.".to_string(),
         },
@@ -800,6 +800,12 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
         });
     }
     followups
+}
+
+fn controller_refresh_ref() -> String {
+    homeboy_product_identity::build_identity()
+        .git_commit
+        .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
 }
 
 pub(crate) fn declared_run_followups(
@@ -1169,8 +1175,10 @@ mod tests {
         assert!(hint.contains("job command binary"));
         assert!(hint.contains("homeboy 0.262.0+binary"));
         let job_binary_refresh = format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-            homeboy_product_identity::product_version()
+            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+            homeboy_product_identity::build_identity()
+                .git_commit
+                .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
         );
         assert!(hint.contains(&job_binary_refresh));
 
@@ -1182,6 +1190,26 @@ mod tests {
         assert!(refresh
             .description
             .contains("configured job command binary"));
+    }
+
+    #[test]
+    fn active_refresh_guidance_uses_the_controller_commit_when_known() {
+        let expected = controller_refresh_ref();
+        let commands = lab_runner_homeboy_refresh_commands("homeboy-lab");
+        let followups = runner_followups(Some("homeboy-lab"));
+
+        assert_eq!(
+            commands[0],
+            format!("homeboy runner refresh-homeboy homeboy-lab --ref {expected} --reconnect")
+        );
+        assert_eq!(
+            followups
+                .iter()
+                .find(|followup| followup.label == "refresh_homeboy")
+                .expect("refresh followup")
+                .command,
+            commands[0]
+        );
     }
 
     fn stale_daemon_report() -> RunnerStatusReport {

@@ -176,6 +176,7 @@ pub fn run(
             target_dir,
             reconnect,
             force,
+            allow_downgrade,
             dry_run,
         } => map_refresh_homeboy(runner::refresh_homeboy_binary(
             runner::HomeboyBinaryRefreshOptions {
@@ -189,6 +190,7 @@ pub fn run(
                 target_dir,
                 reconnect,
                 force,
+                allow_downgrade,
                 dry_run,
             },
         )),

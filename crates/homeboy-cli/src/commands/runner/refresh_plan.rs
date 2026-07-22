@@ -377,6 +377,10 @@ fn lab_homeboy_provenance_from_parts(
         purpose: "configured runner executable used for runner jobs and daemon refresh operations",
     };
 
+    let controller_refresh_ref = controller_identity
+        .git_commit
+        .clone()
+        .unwrap_or_else(|| format!("v{}", controller_identity.version));
     let mut diagnostics = Vec::new();
     if controller_identity.git_dirty == Some(true) {
         diagnostics.push(LabHomeboyProvenanceDiagnostic {
@@ -412,7 +416,7 @@ fn lab_homeboy_provenance_from_parts(
                         "refresh-homeboy",
                         runner_id,
                         "--ref",
-                        &format!("v{}", controller_identity.version),
+                        &controller_refresh_ref,
                         "--reconnect"
                     ]),
                     shell_join(&[
@@ -449,7 +453,7 @@ fn lab_homeboy_provenance_from_parts(
                         "refresh-homeboy",
                         runner_id,
                         "--ref",
-                        &format!("v{}", controller_identity.version),
+                        &controller_refresh_ref,
                         "--reconnect"
                     ])
                 ),
@@ -1157,7 +1161,7 @@ mod tests {
             .contains("executes the runner job"));
         assert!(provenance.diagnostics[1]
             .action
-            .contains("homeboy runner refresh-homeboy lab-runner --ref v0.265.0 --reconnect"));
+            .contains("homeboy runner refresh-homeboy lab-runner --ref controller123 --reconnect"));
         assert!(provenance.diagnostics[1]
             .action
             .contains("homeboy runner doctor lab-runner --scope lab-offload"));
@@ -1200,7 +1204,7 @@ mod tests {
             .contains("origin/main-style runner builds"));
         assert!(provenance.diagnostics[0]
             .action
-            .contains("homeboy runner refresh-homeboy lab-runner --ref v0.265.0 --reconnect"));
+            .contains("homeboy runner refresh-homeboy lab-runner --ref controller123 --reconnect"));
     }
 
     #[test]

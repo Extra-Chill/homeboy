@@ -303,6 +303,10 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         force: bool,
 
+        /// Permit replacing a newer managed runner build with an older Git revision
+        #[arg(long)]
+        allow_downgrade: bool,
+
         /// Print the plan without executing it or changing runner config
         #[arg(long)]
         dry_run: bool,

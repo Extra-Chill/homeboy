@@ -155,13 +155,16 @@ pub fn homeboy_version_skew_check(
         remote_build_identity.to_string(),
     );
     let quoted_runner_id = shell::quote_arg(runner_id);
+    let refresh_ref = homeboy_product_identity::build_identity()
+        .git_commit
+        .unwrap_or_else(|| format!("v{local_version}"));
     Some(warning_with_details(
         "homeboy.version_skew",
         format!(
             "Local Homeboy {local_build_identity} differs from remote runner Homeboy {remote_build_identity}"
         ),
         Some(format!(
-            "Align runner `{runner_id}` to this controller with `homeboy runner refresh-homeboy {quoted_runner_id} --ref v{local_version} --reconnect`; if that fails, inspect the remote runner with `homeboy ssh {server_id} -- homeboy --version`"
+            "Align runner `{runner_id}` to this controller with `homeboy runner refresh-homeboy {quoted_runner_id} --ref {refresh_ref} --reconnect`; if that fails, inspect the remote runner with `homeboy ssh {server_id} -- homeboy --version`"
         )),
         details,
     ))

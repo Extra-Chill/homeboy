@@ -168,9 +168,15 @@ fn homeboy_version_skew_check_warns_for_different_build_identities() {
         check.details.get("remote_version").map(String::as_str),
         Some("0.290.0+differentbuild")
     );
-    assert!(check.remediation.as_deref().is_some_and(
-        |value| value.contains("homeboy runner refresh-homeboy lab --ref v0.290.0 --reconnect")
-    ));
+    let expected_ref = homeboy_product_identity::build_identity()
+        .git_commit
+        .unwrap_or_else(|| "v0.290.0".to_string());
+    assert!(check
+        .remediation
+        .as_deref()
+        .is_some_and(|value| value.contains(&format!(
+            "homeboy runner refresh-homeboy lab --ref {expected_ref} --reconnect"
+        ))));
 }
 
 #[test]

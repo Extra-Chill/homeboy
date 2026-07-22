@@ -3,6 +3,7 @@
 use super::*;
 use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::test_support;
+use std::time::{Duration, Instant};
 
 #[test]
 fn materialized_identity_rejects_dirty_display_when_state_is_unknown() {
@@ -397,7 +398,9 @@ fn ssh_bootstrap_success_promotes_verified_exact_sha_with_provenance() {
         let result = ssh_bootstrap_promote_with(
             &plan,
             || Ok(verified_bootstrap_output("abc123")),
-            |path| promote_verified_runner_binary("lab-local", path),
+            |path, _| {
+                promote_verified_runner_binary("lab-local", path).map(|fields| (fields, None))
+            },
         )
         .expect("verified bootstrap promotes");
         assert_eq!(result.source_sha.as_deref(), Some("abc123"));
@@ -448,9 +451,14 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
     test_support::with_isolated_home(|_| {
         let fixture = tempfile::tempdir().expect("fixture");
         let binary = fixture.path().join("homeboy");
+        let commit = homeboy_product_identity::build_identity()
+            .git_commit
+            .unwrap_or_else(|| "exact-remote-sha".to_string());
         std::fs::write(
             &binary,
-            "#!/bin/sh\nprintf '%s\\n' '{\"data\":{\"git_commit\":\"exact-remote-sha\",\"git_dirty\":false}}'\n",
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"git_commit\":\"{commit}\",\"git_dirty\":false}}}}'\n"
+            ),
         )
         .expect("write selected binary");
         let status = Command::new("chmod")
@@ -473,6 +481,7 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
             target_dir: None,
             reconnect: false,
             force: false,
+            allow_downgrade: true,
             dry_run: false,
         };
 
@@ -500,6 +509,214 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
 }
 
 #[test]
+fn select_without_source_rejects_implicit_downgrade_before_selection_or_reconnect() {
+    test_support::with_isolated_home(|_| {
+        let controller_commit = homeboy_product_identity::build_identity()
+            .git_commit
+            .expect("test build has an immutable controller commit");
+        let fixture = tempfile::tempdir().expect("fixture");
+        let binary = fixture.path().join("older-homeboy");
+        let older = "0000000000000000000000000000000000000000";
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"git_commit\":\"{older}\",\"git_dirty\":false}}}}'\n"
+            ),
+        )
+        .expect("write selected binary");
+        assert!(Command::new("chmod")
+            .args(["0755", binary.to_str().expect("binary path")])
+            .status()
+            .expect("make selected binary executable")
+            .success());
+        crate::create(
+            r#"{"id":"lab-local","kind":"local","homeboy_path":"/old/homeboy"}"#,
+            false,
+        )
+        .expect("runner");
+        let options = HomeboyBinaryRefreshOptions {
+            runner_id: "lab-local".to_string(),
+            mode: HomeboyBinaryRefreshMode::Select {
+                binary_path: binary.display().to_string(),
+            },
+            source: None,
+            git_ref: Some("rollback-request".to_string()),
+            target_dir: None,
+            reconnect: true,
+            force: false,
+            allow_downgrade: false,
+            dry_run: false,
+        };
+
+        let (rejected, exit_code) =
+            refresh_homeboy_binary(options.clone()).expect("rejection output");
+        assert_eq!(exit_code, 1);
+        assert!(rejected
+            .failure
+            .expect("failure")
+            .verification
+            .unwrap()
+            .contains("allow-downgrade"));
+        assert_eq!(
+            crate::load("lab-local")
+                .expect("reload")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            Some("/old/homeboy")
+        );
+
+        let (rolled_back, exit_code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
+            allow_downgrade: true,
+            reconnect: false,
+            ..options
+        })
+        .expect("explicit rollback");
+        assert_eq!(exit_code, 0);
+        let rollback = rolled_back.rollback.expect("structured rollback evidence");
+        assert!(rollback
+            .unproven
+            .iter()
+            .any(|authority| authority.contains(&controller_commit)));
+        assert!(rollback.previous.is_empty());
+        assert_eq!(rollback.requested, None, "select mode has no requested ref");
+        assert_eq!(rollback.resolved, older);
+        assert_eq!(rollback.selected, older);
+    });
+}
+
+#[test]
+fn contending_refreshes_cannot_let_an_old_materialized_request_replace_new_selection() {
+    test_support::with_isolated_home(|_| {
+        let fixture = tempfile::tempdir().expect("git fixture");
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "homeboy@example.test"],
+            vec!["config", "user.name", "Homeboy Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(fixture.path())
+                .status()
+                .expect("git")
+                .success());
+        }
+        std::fs::write(fixture.path().join("release"), "old\n").expect("old");
+        for args in [vec!["add", "."], vec!["commit", "-m", "old"]] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(fixture.path())
+                .status()
+                .expect("commit old")
+                .success());
+        }
+        let revision = || {
+            String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(fixture.path())
+                    .output()
+                    .expect("revision")
+                    .stdout,
+            )
+            .expect("utf8")
+            .trim()
+            .to_string()
+        };
+        let old = revision();
+        std::fs::write(fixture.path().join("release"), "new\n").expect("new");
+        assert!(Command::new("git")
+            .args(["commit", "-am", "new"])
+            .current_dir(fixture.path())
+            .status()
+            .expect("commit new")
+            .success());
+        let new = revision();
+        let marker = fixture.path().join("old-materialized");
+        let old_binary = fixture.path().join("old-homeboy");
+        let new_binary = fixture.path().join("new-homeboy");
+        std::fs::write(
+            &old_binary,
+            format!(
+                "#!/bin/sh\ntouch {}\nsleep 1\nprintf '%s\\n' '{{\"data\":{{\"git_commit\":\"{old}\",\"git_dirty\":false}}}}'\n",
+                marker.display()
+            ),
+        )
+        .expect("old binary");
+        std::fs::write(
+            &new_binary,
+            format!("#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"git_commit\":\"{new}\",\"git_dirty\":false}}}}'\n"),
+        )
+        .expect("new binary");
+        for binary in [&old_binary, &new_binary] {
+            assert!(Command::new("chmod")
+                .args(["0755", binary.to_str().expect("binary")])
+                .status()
+                .expect("chmod")
+                .success());
+        }
+        crate::create(
+            r#"{"id":"lab-local","kind":"local","homeboy_path":"/stable/homeboy"}"#,
+            false,
+        )
+        .expect("runner");
+        let old_options = HomeboyBinaryRefreshOptions {
+            runner_id: "lab-local".to_string(),
+            mode: HomeboyBinaryRefreshMode::Select {
+                binary_path: old_binary.display().to_string(),
+            },
+            source: None,
+            git_ref: Some("old".to_string()),
+            target_dir: Some(fixture.path().display().to_string()),
+            reconnect: false,
+            force: false,
+            allow_downgrade: false,
+            dry_run: false,
+        };
+        let old_refresh = std::thread::spawn(move || refresh_homeboy_binary(old_options));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.exists(), "old request materialized before selection");
+        let (new_output, new_code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
+            runner_id: "lab-local".to_string(),
+            mode: HomeboyBinaryRefreshMode::Select {
+                binary_path: new_binary.display().to_string(),
+            },
+            source: None,
+            git_ref: Some("new".to_string()),
+            target_dir: Some(fixture.path().display().to_string()),
+            reconnect: false,
+            force: false,
+            allow_downgrade: true,
+            dry_run: false,
+        })
+        .expect("new refresh");
+        assert_eq!(new_code, 0);
+        let (old_output, old_code) = old_refresh
+            .join()
+            .expect("old refresh thread")
+            .expect("old refresh");
+        assert_eq!(old_code, 1);
+        assert!(old_output.failure.is_some());
+        assert!(!old_output.daemon_refreshed);
+        assert_eq!(
+            crate::load("lab-local")
+                .expect("reload")
+                .settings
+                .homeboy_path
+                .as_deref(),
+            new_binary.to_str()
+        );
+        assert!(!new_output.daemon_refreshed);
+        assert!(crate::connection::recorded_session("lab-local")
+            .expect("session")
+            .is_none());
+    });
+}
+
+#[test]
 fn ssh_bootstrap_select_promotes_without_materialized_source_sha() {
     test_support::with_isolated_home(|_| {
         crate::create(
@@ -515,12 +732,12 @@ fn ssh_bootstrap_select_promotes_without_materialized_source_sha() {
         let result = ssh_bootstrap_promote_with(
             &plan,
             || Ok(r#"{"data":{"git_commit":"abc123","git_dirty":false}}"#.to_string()),
-            |path| {
+            |path, _| {
                 homeboy_core::config::with_config_lock(|| {
                     let patch = refreshed_runner_patch("lab-local", path)?;
                     match merge(Some("lab-local"), &patch.to_string(), &[])? {
-                        MergeOutput::Single(result) => Ok(result.updated_fields),
-                        MergeOutput::Bulk(_) => Ok(Vec::new()),
+                        MergeOutput::Single(result) => Ok((result.updated_fields, None)),
+                        MergeOutput::Bulk(_) => Ok((Vec::new(), None)),
                     }
                 })
             },
@@ -550,7 +767,7 @@ fn ssh_bootstrap_transport_failure_leaves_config_unchanged() {
         let result = ssh_bootstrap_promote_with(
             &ssh_bootstrap_plan(),
             || Err(Error::internal_io("transport failed".to_string(), None)),
-            |_| panic!("must not promote"),
+            |_, _| panic!("must not promote"),
         );
         assert!(result.is_err());
         assert_eq!(
@@ -577,7 +794,7 @@ fn ssh_bootstrap_identity_mismatch_leaves_config_unchanged() {
             || {
                 Ok("HOMEBOY_REFRESH_SOURCE_SHA=abc123\n{\"data\":{\"git_commit\":\"other\",\"git_dirty\":false}}".to_string())
             },
-            |_| panic!("must not promote"),
+            |_, _| panic!("must not promote"),
         );
         assert!(result.is_err());
         assert_eq!(
@@ -623,12 +840,12 @@ fn concurrent_runner_config_edit_survives_ssh_bootstrap_promotion() {
                 release_rx.recv().expect("writer completed");
                 Ok(verified_bootstrap_output("abc123"))
             },
-            |path| {
+            |path, _| {
                 homeboy_core::config::with_config_lock(|| {
                     let patch = refreshed_runner_patch("lab-local", path)?;
                     match merge(Some("lab-local"), &patch.to_string(), &[])? {
-                        MergeOutput::Single(result) => Ok(result.updated_fields),
-                        MergeOutput::Bulk(_) => Ok(Vec::new()),
+                        MergeOutput::Single(result) => Ok((result.updated_fields, None)),
+                        MergeOutput::Bulk(_) => Ok((Vec::new(), None)),
                     }
                 })
             },

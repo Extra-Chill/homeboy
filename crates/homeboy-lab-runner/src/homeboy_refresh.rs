@@ -14,7 +14,8 @@ use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::output::MergeOutput;
 
 use super::connection::{
-    active_jobs_before_daemon_replacement, disconnect_with_session, rotate_daemon_generation,
+    active_jobs_before_daemon_replacement, configured_runner_homeboy_build_identity,
+    disconnect_with_session, rotate_daemon_generation,
 };
 use super::execution::exec_with_status_snapshot;
 use super::execution::{reserve_daemon_admission, DaemonAdmissionPolicy};
@@ -60,6 +61,7 @@ pub struct HomeboyBinaryRefreshOptions {
     pub target_dir: Option<String>,
     pub reconnect: bool,
     pub force: bool,
+    pub allow_downgrade: bool,
     pub dry_run: bool,
 }
 
@@ -99,6 +101,20 @@ pub struct HomeboyBinaryRefreshOutput {
     pub failure: Option<HomeboyBinaryRefreshFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bootstrap_provenance: Option<HomeboyBootstrapProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<HomeboyBinaryRefreshRollback>,
+}
+
+/// Evidence for an explicitly authorized rollback. `previous` names only
+/// authorities proven to be newer descendants than the selected candidate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyBinaryRefreshRollback {
+    pub previous: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unproven: Vec<String>,
+    pub requested: Option<String>,
+    pub resolved: String,
+    pub selected: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,7 +275,13 @@ pub fn plan_homeboy_binary_refresh(
                 "{}/target/release/homeboy",
                 target_dir.trim_end_matches('/')
             );
-            let script = materialize_script(source, git_ref, &target_dir, &binary_path);
+            let script = materialize_script(
+                source,
+                git_ref,
+                &target_dir,
+                &binary_path,
+                options.allow_downgrade,
+            );
             Ok(HomeboyBinaryRefreshPlan {
                 runner_id: runner_id.clone(),
                 mode: "materialize".to_string(),
@@ -278,20 +300,7 @@ pub fn plan_homeboy_binary_refresh(
 pub fn refresh_homeboy_binary(
     options: HomeboyBinaryRefreshOptions,
 ) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
-    let promotion_lease = homeboy_core::runtime_promotion::acquire_for_generation_rotation(
-        "runner binary promotion",
-        options.runner_id.clone(),
-    )?;
     let plan = plan_homeboy_binary_refresh(&options)?;
-    // A refresh owns the lease it observed before changing the runner binary.
-    // If its local session disappears during that transition, reconnect can
-    // explicitly reconcile only that exact proven-dead lease.
-    let refresh_session = options
-        .reconnect
-        .then(|| super::connection::recorded_session(&plan.runner_id))
-        .transpose()?
-        .flatten();
-    let refresh_owned_lease = refresh_session.clone().and_then(refresh_owned_lease);
     if options.dry_run {
         return Ok((
             HomeboyBinaryRefreshOutput {
@@ -309,6 +318,7 @@ pub fn refresh_homeboy_binary(
                 reconnect_deferred: None,
                 failure: None,
                 bootstrap_provenance: None,
+                rollback: None,
                 plan,
             },
             0,
@@ -322,14 +332,16 @@ pub fn refresh_homeboy_binary(
         HomeboyBinaryRefreshMode::Select { .. } => vec!["bash".to_string()],
     };
 
-    promotion_lease.assert_generation()?;
     let runner = load(&plan.runner_id)?;
     let previous_homeboy_path = runner.settings.homeboy_path.clone();
     let connection_status = super::status(&plan.runner_id)?;
     let disconnected_ssh = runner.kind == RunnerKind::Ssh && !connection_status.connected;
     let exec_options = refresh_execution_options(&plan, required_commands, disconnected_ssh);
-    let (exec_output, exit_code) =
-        exec_with_status_snapshot(&plan.runner_id, exec_options, Some(connection_status))?;
+    let (exec_output, exit_code) = exec_with_status_snapshot(
+        &plan.runner_id,
+        exec_options,
+        Some(connection_status.clone()),
+    )?;
     if exit_code != 0 {
         return Ok((
             HomeboyBinaryRefreshOutput {
@@ -347,6 +359,7 @@ pub fn refresh_homeboy_binary(
                 reconnect_deferred: None,
                 failure: Some(refresh_failure(&plan, exec_output, exit_code)),
                 bootstrap_provenance: None,
+                rollback: None,
                 plan,
             },
             exit_code,
@@ -389,12 +402,21 @@ pub fn refresh_homeboy_binary(
                 }),
                 failure: None,
                 bootstrap_provenance: None,
+                rollback: None,
             },
             1,
         ));
     }
 
+    let promotion_lease = homeboy_core::runtime_promotion::acquire_for_generation_rotation(
+        "runner binary promotion",
+        options.runner_id.clone(),
+    )?;
+    // Materialization may have waited behind a newer refresh. Re-read every
+    // authority while holding the promotion lease so an old candidate cannot
+    // overwrite a newer controller selection or reconnect over its daemon.
     promotion_lease.assert_generation()?;
+    let promotion_authorities = refresh_promotion_authorities(&plan.runner_id)?;
     // Selection belongs to the controller-owned runner registry. It must be
     // persisted after the candidate has been verified, whether or not this
     // invocation also replaces the active daemon.
@@ -402,24 +424,47 @@ pub fn refresh_homeboy_binary(
         ssh_bootstrap_promote_with(
             &plan,
             || Ok(exec_output.stdout.clone()),
-            |homeboy_path| promote_verified_runner_binary(&plan.runner_id, homeboy_path),
+            |homeboy_path, identity| {
+                let rollback = validate_refresh_promotion(
+                    &plan,
+                    identity,
+                    options.allow_downgrade,
+                    &promotion_authorities,
+                )?;
+                Ok((
+                    promote_verified_runner_binary(&plan.runner_id, homeboy_path)?,
+                    rollback,
+                ))
+            },
         )
     } else {
-        let identity = parse_identity(&exec_output.stdout)?;
-        verify_materialized_identity(&plan, &exec_output.stdout, &identity).map_err(|message| {
-            Error::validation_invalid_argument(
-                "identity",
-                message,
-                Some(plan.runner_id.clone()),
-                None,
-            )
-        })?;
-        let updated_fields = promote_verified_runner_binary(&plan.runner_id, &plan.binary_path)?;
-        Ok(SshBootstrapPromotion {
-            identity,
-            source_sha: source_sha_from_output(&exec_output.stdout),
-            updated_fields,
-        })
+        (|| {
+            let identity = parse_identity(&exec_output.stdout)?;
+            verify_materialized_identity(&plan, &exec_output.stdout, &identity).map_err(
+                |message| {
+                    Error::validation_invalid_argument(
+                        "identity",
+                        message,
+                        Some(plan.runner_id.clone()),
+                        None,
+                    )
+                },
+            )?;
+            let rollback = validate_refresh_promotion(
+                &plan,
+                &identity,
+                options.allow_downgrade,
+                &promotion_authorities,
+            )?;
+            let updated_fields =
+                promote_verified_runner_binary(&plan.runner_id, &plan.binary_path)?;
+            Ok(SshBootstrapPromotion {
+                identity,
+                source_sha: source_sha_from_output(&exec_output.stdout),
+                updated_fields,
+                rollback,
+            })
+        })()
     };
     let bootstrap = match bootstrap {
         Ok(bootstrap) => bootstrap,
@@ -445,6 +490,7 @@ pub fn refresh_homeboy_binary(
                         verification,
                     )),
                     bootstrap_provenance: None,
+                    rollback: None,
                     plan,
                 },
                 1,
@@ -453,6 +499,16 @@ pub fn refresh_homeboy_binary(
     };
     let identity = bootstrap.identity;
     let updated_fields = bootstrap.updated_fields;
+    let rollback = bootstrap.rollback;
+
+    // Re-read the session after selection as well. The pre-materialization
+    // record is not safe to use for a reconnect after a queued promotion.
+    let refresh_session = options
+        .reconnect
+        .then(|| super::connection::recorded_session(&plan.runner_id))
+        .transpose()?
+        .flatten();
+    let refresh_owned_lease = refresh_session.clone().and_then(refresh_owned_lease);
 
     let mut daemon_refreshed = false;
     let interrupted_job_ids;
@@ -509,6 +565,7 @@ pub fn refresh_homeboy_binary(
                     reconnect_deferred: None,
                     failure: None,
                     bootstrap_provenance: None,
+                    rollback: rollback.clone(),
                 },
                 0,
             ));
@@ -543,6 +600,7 @@ pub fn refresh_homeboy_binary(
                         reconnect_deferred: Some(deferred),
                         failure: None,
                         bootstrap_provenance: None,
+                        rollback: rollback.clone(),
                     },
                     1,
                 ));
@@ -646,6 +704,7 @@ pub fn refresh_homeboy_binary(
                         daemon_identity_verification.err().as_deref(),
                     )),
                     bootstrap_provenance: None,
+                    rollback: rollback.clone(),
                 },
                 reconnect_exit_code,
             ));
@@ -695,6 +754,7 @@ pub fn refresh_homeboy_binary(
                             Some(readiness_error.message.as_str()),
                         )),
                         bootstrap_provenance: None,
+                        rollback: rollback.clone(),
                     },
                     1,
                 ));
@@ -739,6 +799,7 @@ pub fn refresh_homeboy_binary(
                     .then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT.as_millis()),
                 config_fields_changed: updated_fields.clone(),
             }),
+            rollback,
         },
         0,
     ))
@@ -1000,6 +1061,7 @@ struct SshBootstrapPromotion {
     identity: Value,
     source_sha: Option<String>,
     updated_fields: Vec<String>,
+    rollback: Option<HomeboyBinaryRefreshRollback>,
 }
 
 /// Own the disconnected bootstrap boundary so transport and config mutation are
@@ -1012,7 +1074,7 @@ fn ssh_bootstrap_promote_with<Execute, Promote>(
 ) -> Result<SshBootstrapPromotion>
 where
     Execute: FnOnce() -> Result<String>,
-    Promote: FnOnce(&str) -> Result<Vec<String>>,
+    Promote: FnOnce(&str, &Value) -> Result<(Vec<String>, Option<HomeboyBinaryRefreshRollback>)>,
 {
     let stdout = execute()?;
     let identity = parse_identity(&stdout)?;
@@ -1020,11 +1082,12 @@ where
         Error::validation_invalid_argument("identity", message, Some(plan.runner_id.clone()), None)
     })?;
     let source_sha = source_sha_from_output(&stdout);
-    let updated_fields = promote(&plan.binary_path)?;
+    let (updated_fields, rollback) = promote(&plan.binary_path, &identity)?;
     Ok(SshBootstrapPromotion {
         identity,
         source_sha,
         updated_fields,
+        rollback,
     })
 }
 
@@ -1069,6 +1132,148 @@ fn verify_materialized_identity(
         }
     }
     Ok(())
+}
+
+struct RefreshPromotionAuthorities {
+    controller: Option<String>,
+    active_daemon: Option<String>,
+    configured_selected: Option<String>,
+}
+
+fn refresh_promotion_authorities(runner_id: &str) -> Result<RefreshPromotionAuthorities> {
+    let runner = load(runner_id)?;
+    let status = super::status(runner_id)?;
+    let configured_selected = runner
+        .settings
+        .homeboy_path
+        .as_deref()
+        .map(|path| configured_runner_homeboy_build_identity(&runner, path))
+        .transpose()?
+        .flatten()
+        .and_then(|identity| build_identity_commit(&identity).map(str::to_string));
+    Ok(RefreshPromotionAuthorities {
+        controller: homeboy_product_identity::build_identity().git_commit,
+        active_daemon: status
+            .session
+            .as_ref()
+            .and_then(|session| session.homeboy_build_identity.as_deref())
+            .and_then(build_identity_commit)
+            .map(str::to_string),
+        configured_selected,
+    })
+}
+
+fn validate_refresh_promotion(
+    plan: &HomeboyBinaryRefreshPlan,
+    candidate: &Value,
+    allow_downgrade: bool,
+    authorities: &RefreshPromotionAuthorities,
+) -> Result<Option<HomeboyBinaryRefreshRollback>> {
+    let candidate_commit = identity_commit(candidate).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "identity",
+            "selected Homeboy binary did not report an immutable git_commit",
+            Some(plan.runner_id.clone()),
+            None,
+        )
+    })?;
+    let authorities = [
+        ("controller", authorities.controller.as_deref()),
+        ("active daemon", authorities.active_daemon.as_deref()),
+        (
+            "configured selected binary",
+            authorities.configured_selected.as_deref(),
+        ),
+    ];
+    let mut previous = Vec::new();
+    let mut unproven = Vec::new();
+    for (name, authority) in authorities {
+        let Some(authority) = authority.filter(|authority| *authority != candidate_commit) else {
+            continue;
+        };
+        match commits_are_ancestral(plan, &candidate_commit, authority) {
+            Ok(true) => previous.push(format!("{name}:{authority}")),
+            Ok(false) => {}
+            Err(_) if allow_downgrade => unproven.push(format!("{name}:{authority}")),
+            Err(error) => {
+                return Err(Error::validation_invalid_argument(
+                    "allow_downgrade",
+                    format!(
+                        "cannot prove selected Homeboy binary is not a downgrade ({error}); pass --allow-downgrade only for an intentional rollback"
+                    ),
+                    Some(plan.runner_id.clone()),
+                    None,
+                ));
+            }
+        }
+    }
+    if previous.is_empty() && unproven.is_empty() {
+        return Ok(None);
+    }
+    let rollback = HomeboyBinaryRefreshRollback {
+        previous,
+        unproven,
+        requested: plan.git_ref.clone(),
+        resolved: candidate_commit.clone(),
+        selected: candidate_commit,
+    };
+    if !allow_downgrade {
+        return Err(Error::validation_invalid_argument(
+            "allow_downgrade",
+            "refusing Homeboy runner downgrade; pass --allow-downgrade only for an intentional rollback",
+            Some(plan.runner_id.clone()),
+            Some(vec![serde_json::to_string(&rollback).unwrap_or_default()]),
+        ));
+    }
+    Ok(Some(rollback))
+}
+
+fn identity_commit(identity: &Value) -> Option<String> {
+    identity
+        .get("data")
+        .unwrap_or(identity)
+        .get("git_commit")
+        .and_then(Value::as_str)
+        .filter(|commit| !commit.is_empty())
+        .map(str::to_string)
+}
+
+fn commits_are_ancestral(
+    plan: &HomeboyBinaryRefreshPlan,
+    older: &str,
+    newer: &str,
+) -> Result<bool> {
+    let repository = plan.target_dir.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "allow_downgrade",
+            "no authoritative source repository is available to compare selected Homeboy commits",
+            Some(plan.runner_id.clone()),
+            None,
+        )
+    })?;
+    let status = Command::new("git")
+        .args([
+            "-C",
+            repository,
+            "merge-base",
+            "--is-ancestor",
+            older,
+            newer,
+        ])
+        .status()
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some("run git merge-base".to_string()))
+        })?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(Error::validation_invalid_argument(
+            "allow_downgrade",
+            "authoritative source repository cannot compare selected Homeboy commits",
+            Some(plan.runner_id.clone()),
+            None,
+        )),
+    }
 }
 
 pub fn plan_runner_dev_sync(options: &RunnerDevSyncOptions) -> Result<RunnerDevSyncPlan> {
@@ -1181,6 +1386,7 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
             target_dir: None,
             reconnect: options.reconnect,
             force: false,
+            allow_downgrade: false,
             dry_run: false,
         })?;
         if exit_code != 0 {
@@ -1403,13 +1609,20 @@ fn installed_homeboy_env(
     env
 }
 
-fn materialize_script(source: &str, git_ref: &str, target_dir: &str, binary_path: &str) -> String {
+fn materialize_script(
+    source: &str,
+    git_ref: &str,
+    target_dir: &str,
+    binary_path: &str,
+    allow_downgrade: bool,
+) -> String {
     format!(
-        "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nmkdir -p \"$(dirname \"$dir\")\"\nif [ ! -d \"$dir/.git\" ]; then\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\nrequested=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$requested\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"${{requested}}^{{commit}}\")\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\n\"$binary\" self identity\n",
+        "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nallow_downgrade={}\nmkdir -p \"$(dirname \"$dir\")\"\nif [ ! -d \"$dir/.git\" ]; then\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\nrequested=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$requested\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"${{requested}}^{{commit}}\")\ncurrent=$(git -C \"$dir\" rev-parse --verify --quiet HEAD || true)\nif [ -n \"$current\" ] && [ \"$current\" != \"$target\" ] && git -C \"$dir\" merge-base --is-ancestor \"$target\" \"$current\"; then\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n  if [ \"$allow_downgrade\" != true ]; then\n    echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n    exit 1\n  fi\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\n\"$binary\" self identity\n",
         quote_path(source),
         quote_path(git_ref),
         quote_path(target_dir),
         quote_path(binary_path),
+        allow_downgrade,
     )
 }
 
@@ -1841,11 +2054,17 @@ fn dev_sync_next_actions(runner_id: &str, options: &RunnerDevSyncOptions) -> Vec
 
     let mut actions = refresh_followups(runner_id, options.reconnect);
     actions.push(format!(
-        "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
+        "homeboy runner refresh-homeboy {} --ref {} --reconnect",
         shell_arg(runner_id),
-        homeboy_product_identity::product_version()
+        controller_refresh_ref()
     ));
     actions
+}
+
+fn controller_refresh_ref() -> String {
+    homeboy_product_identity::build_identity()
+        .git_commit
+        .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
 }
 
 fn default_target_dir(workspace_root: &str, git_ref: &str) -> String {

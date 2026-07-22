@@ -987,10 +987,13 @@ impl RunnerStaleDaemonWarning {
         session_homeboy_build_identity: Option<String>,
         current_homeboy_build_identity: Option<String>,
     ) -> Self {
+        let recovery_ref = homeboy_product_identity::build_identity()
+            .git_commit
+            .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()));
         let recovery_commands = vec![format!(
-            "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
+            "homeboy runner refresh-homeboy {} --ref {} --reconnect",
             shell::quote_arg(runner_id),
-            homeboy_product_identity::product_version()
+            recovery_ref,
         )];
         let message = if !same_homeboy_version(&session_homeboy_version, &current_homeboy_version) {
             format!(
@@ -1069,11 +1072,10 @@ impl RunnerStaleDaemonWarning {
                 "connected runner daemon runtime paths are stale: {}; run recovery_commands after active jobs are drained to replace the active daemon with the configured runtime paths",
                 stale_paths.chain(changed_paths).collect::<Vec<_>>().join("; ")
             );
-            self.recovery_commands = vec![format!(
-                "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
-                shell::quote_arg(runner_id),
-                homeboy_product_identity::product_version()
-            )];
+            // Keep the exact immutable recovery reference established by
+            // `new`; runtime-path drift must not silently turn it into a
+            // mutable semver tag.
+            let _ = runner_id;
         }
         self
     }

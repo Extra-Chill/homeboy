@@ -801,10 +801,16 @@ pub(crate) fn runner_homeboy_refresh_commands(
 
 pub(crate) fn runner_homeboy_align_to_controller_command(runner_id: &str) -> String {
     format!(
-        "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
+        "homeboy runner refresh-homeboy {} --ref {} --reconnect",
         shell::quote_arg(runner_id),
-        homeboy_product_identity::product_version()
+        controller_refresh_ref()
     )
+}
+
+fn controller_refresh_ref() -> String {
+    homeboy_product_identity::build_identity()
+        .git_commit
+        .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
 }
 
 pub(crate) fn runner_session_homeboy_display(
