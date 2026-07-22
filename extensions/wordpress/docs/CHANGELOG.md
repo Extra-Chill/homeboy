@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.29.0] - 2026-07-22
+
+### Added
+- feat(wp-codebox): declare immutable runtime overlay profiles ([#2346](https://github.com/Extra-Chill/homeboy-extensions/pull/2346)) (by Chris Huber)
+
 ## [3.28.2] - 2026-07-21
 
 ### Fixed
