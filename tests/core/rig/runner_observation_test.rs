@@ -189,6 +189,88 @@ fn test_run_check_persists_failing_observation() {
 }
 
 #[test]
+fn test_successful_nested_command_retains_registered_file() {
+    with_isolated_home(|home| {
+        let _xdg = XdgDataHomeGuard::unset();
+        let artifact = home.path().join("wp-codebox-result.json");
+        let script = home.path().join("register-success.sh");
+        write_registration_script(&script, &artifact, "file", 0);
+        let mut rig = observation_spec("observed-command-artifact-success");
+        rig.pipeline.insert(
+            "check".to_string(),
+            vec![command_step(format!(
+                "sh {} {}",
+                script.display(),
+                artifact.display()
+            ))],
+        );
+
+        let report = run_check(&rig).expect("check report");
+        assert!(report.success);
+        let run_id = report.run_id.as_deref().expect("run id");
+        let store = ObservationStore::open_initialized().expect("store");
+        let artifacts = store.list_artifacts(run_id).expect("artifacts");
+        let result = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "wp_codebox_result")
+            .expect("registered result");
+
+        assert_eq!(result.artifact_type, "file");
+        assert_eq!(result.metadata_json["source"], "rig_command_registration");
+        assert_eq!(std::fs::read_to_string(&result.path).unwrap(), "{}");
+        assert!(report
+            .artifact_index
+            .as_ref()
+            .unwrap()
+            .registered_artifact_refs
+            .iter()
+            .any(|artifact| artifact.id == result.id));
+    });
+}
+
+#[test]
+fn test_failed_nested_wp_codebox_command_retains_registered_bundle() {
+    with_isolated_home(|home| {
+        let _xdg = XdgDataHomeGuard::unset();
+        let bundle = home.path().join("wp-codebox-failed-bundle");
+        let script = home.path().join("register-failure.sh");
+        write_registration_script(&script, &bundle, "directory", 23);
+        let mut rig = observation_spec("observed-command-artifact-failure");
+        rig.pipeline.insert(
+            "check".to_string(),
+            vec![command_step(format!(
+                "sh {} {}",
+                script.display(),
+                bundle.display()
+            ))],
+        );
+
+        let report = run_check(&rig).expect("failed check report");
+        assert!(!report.success);
+        let run_id = report.run_id.as_deref().expect("run id");
+        let store = ObservationStore::open_initialized().expect("store");
+        let artifacts = store.list_artifacts(run_id).expect("artifacts");
+        let retained = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "wp_codebox_bundle")
+            .expect("failed bundle retained");
+
+        assert_eq!(retained.artifact_type, "directory");
+        assert!(std::path::Path::new(&retained.path)
+            .join("failure.json")
+            .is_file());
+        assert_eq!(retained.metadata_json["registration_index"], 0);
+        assert!(report
+            .artifact_index
+            .as_ref()
+            .unwrap()
+            .registered_artifact_refs
+            .iter()
+            .any(|artifact| artifact.id == retained.id));
+    });
+}
+
+#[test]
 fn test_run_up_persists_step_order_source_and_component_snapshot() {
     with_isolated_home(|home| {
         let _xdg = XdgDataHomeGuard::unset();
@@ -317,6 +399,47 @@ fn test_observation_store_failure_does_not_fail_rig_check() {
             Some("pass")
         );
     });
+}
+
+fn command_step(cmd: String) -> PipelineStep {
+    PipelineStep::Command {
+        step_id: None,
+        depends_on: Vec::new(),
+        cmd,
+        cwd: None,
+        env: HashMap::new(),
+        requires_capabilities: Vec::new(),
+        requires_providers: Vec::new(),
+        provides_capabilities: Vec::new(),
+        provides_providers: Vec::new(),
+        label: Some("nested WP Codebox run".to_string()),
+    }
+}
+
+fn write_registration_script(
+    script: &std::path::Path,
+    artifact: &std::path::Path,
+    artifact_type: &str,
+    exit_code: i32,
+) {
+    let create = if artifact_type == "directory" {
+        "mkdir -p \"$1\"\nprintf '{}' > \"$1/failure.json\"\n"
+    } else {
+        "printf '{}' > \"$1\"\n"
+    };
+    let kind = if artifact_type == "directory" {
+        "wp_codebox_bundle"
+    } else {
+        "wp_codebox_result"
+    };
+    std::fs::write(
+        script,
+        format!(
+            "#!/bin/sh\n{create}printf '{{\"schema\":\"homeboy/rig-command-artifacts/v1\",\"run_id\":\"%s\",\"artifacts\":[{{\"kind\":\"{kind}\",\"artifact_type\":\"{artifact_type}\",\"path\":\"{}\"}}]}}\\n' \"$HOMEBOY_ACTIVE_RUN_ID\" > \"$HOMEBOY_RIG_ARTIFACT_MANIFEST\"\nexit {exit_code}\n",
+            artifact.display(),
+        ),
+    )
+    .expect("registration script");
 }
 
 fn git(repo: &std::path::Path, args: &[&str]) {

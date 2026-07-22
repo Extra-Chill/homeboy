@@ -27,8 +27,16 @@ pub enum RigCommandOutput {
     Update(RigUpdateOutput),
     Sources(RigSourcesOutput),
     App(RigAppOutput),
+    ArtifactRegister(RigArtifactRegisterOutput),
     ReleaseLock(RigReleaseLockOutput),
     Run(RigRunOutput),
+}
+
+#[derive(Serialize)]
+pub struct RigArtifactRegisterOutput {
+    pub command: &'static str,
+    #[serde(flatten)]
+    pub registration: rig::LocalArtifactRegistration,
 }
 
 #[derive(Serialize)]

@@ -18,6 +18,8 @@ pub struct RigRunArtifactIndex {
     pub evidence_commands: RunEvidenceCommands,
     pub export_command: String,
     pub retrieval_commands: Vec<String>,
+    #[serde(default)]
+    pub registered_artifact_refs: Vec<RigRunArtifactRef>,
     pub key_report_refs: Vec<RigRunArtifactRef>,
     pub failed_step_refs: Vec<RigRunFailedStepRef>,
 }
@@ -121,6 +123,17 @@ fn build(
         .filter(|artifact| artifact_is_key_report_ref(artifact))
         .map(artifact_ref)
         .collect::<Vec<_>>();
+    let registered_artifact_refs = artifacts
+        .iter()
+        .filter(|artifact| {
+            artifact
+                .metadata_json
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                == Some("rig_command_registration")
+        })
+        .map(artifact_ref)
+        .collect::<Vec<_>>();
     RigRunArtifactIndex {
         run_id: run_id.to_string(),
         rig_id: rig_id.to_string(),
@@ -134,6 +147,7 @@ fn build(
         },
         export_command: export_command.clone(),
         retrieval_commands: vec![artifacts_command, evidence_command, export_command],
+        registered_artifact_refs,
         key_report_refs,
         failed_step_refs,
     }

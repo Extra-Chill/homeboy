@@ -12,10 +12,11 @@ use homeboy::rig;
 use homeboy::runner::runners;
 
 use self::output::{
-    RigAppOutput, RigCheckOutput, RigDownOutput, RigInstallOutput, RigInstalledStackSummary,
-    RigInstalledSummary, RigListOutput, RigMaterializeOutput, RigReleaseLockOutput,
-    RigRepairOutput, RigRunOutput, RigShowOutput, RigSourceSummary, RigStatusOutput, RigSummary,
-    RigSyncOutput, RigUpOutput, RigUpPlanOutput, RigUpPlanStep, RigUpdateOutput,
+    RigAppOutput, RigArtifactRegisterOutput, RigCheckOutput, RigDownOutput, RigInstallOutput,
+    RigInstalledStackSummary, RigInstalledSummary, RigListOutput, RigMaterializeOutput,
+    RigReleaseLockOutput, RigRepairOutput, RigRunOutput, RigShowOutput, RigSourceSummary,
+    RigStatusOutput, RigSummary, RigSyncOutput, RigUpOutput, RigUpPlanOutput, RigUpPlanStep,
+    RigUpdateOutput,
 };
 use super::bench::RigRunBenchOptions;
 use super::utils::args::SettingArgs;
@@ -256,6 +257,24 @@ enum RigCommand {
         #[command(subcommand)]
         command: RigAppCommand,
     },
+    /// Register local command-step evidence with the enclosing rig run.
+    Artifact {
+        #[command(subcommand)]
+        command: RigArtifactCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RigArtifactCommand {
+    /// Register an existing local file or directory with the current rig run.
+    Register {
+        /// Stable artifact kind used by run artifact readers.
+        #[arg(long)]
+        kind: String,
+        /// Existing local file or directory to retain.
+        #[arg(long)]
+        path: std::path::PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -388,6 +407,19 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Update { rig_id, all } => update(rig_id.as_deref(), all),
         RigCommand::Sources { command } => sources::run(command),
         RigCommand::App { command } => app(command),
+        RigCommand::Artifact { command } => artifact(command),
+    }
+}
+
+fn artifact(command: RigArtifactCommand) -> CmdResult<RigCommandOutput> {
+    match command {
+        RigArtifactCommand::Register { kind, path } => Ok((
+            RigCommandOutput::ArtifactRegister(RigArtifactRegisterOutput {
+                command: "rig.artifact.register",
+                registration: rig::register_current_run_artifact(&kind, path)?,
+            }),
+            0,
+        )),
     }
 }
 
@@ -1068,6 +1100,29 @@ mod tests {
             panic!("expected rig sources command");
         };
         assert!(command.is_none());
+    }
+
+    #[test]
+    fn parses_local_artifact_registration() {
+        let cli = TestCli::try_parse_from([
+            "homeboy",
+            "artifact",
+            "register",
+            "--kind",
+            "wp_codebox_bundle",
+            "--path",
+            "/tmp/wp-codebox-bundle",
+        ])
+        .expect("rig artifact registration should parse");
+
+        let RigCommand::Artifact {
+            command: RigArtifactCommand::Register { kind, path },
+        } = cli.rig.command
+        else {
+            panic!("expected rig artifact register command");
+        };
+        assert_eq!(kind, "wp_codebox_bundle");
+        assert_eq!(path, std::path::Path::new("/tmp/wp-codebox-bundle"));
     }
 
     #[test]

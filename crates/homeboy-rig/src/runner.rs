@@ -157,7 +157,7 @@ pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
     let _lease = acquire_active_run_lease(rig, "up")?;
     let observer = RigRunObserver::start(rig, "up");
 
-    let mut result = (|| {
+    let execute = || {
         let outcome = run_pipeline(rig, "up", true)?;
 
         if outcome.is_success() {
@@ -181,7 +181,11 @@ pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
             pipeline: outcome,
             artifact_index: None,
         })
-    })();
+    };
+    let mut result = match observer.as_ref() {
+        Some(observer) => observer.with_command_context(execute),
+        None => execute(),
+    };
 
     let artifact_index = RigRunObserver::finish(
         observer.as_ref(),
@@ -210,7 +214,7 @@ pub fn run_check_with_settings(
 ) -> Result<CheckReport> {
     let observer = RigRunObserver::start(rig, "check");
 
-    let mut result = (|| {
+    let execute = || {
         let requirements = evaluate_requirements(rig);
         let package_lint = run_package_lint(rig)?;
         let check_outcome = run_pipeline_with_settings(rig, "check", false, settings)?;
@@ -229,7 +233,11 @@ pub fn run_check_with_settings(
             pipeline: outcome,
             artifact_index: None,
         })
-    })();
+    };
+    let mut result = match observer.as_ref() {
+        Some(observer) => observer.with_command_context(execute),
+        None => execute(),
+    };
 
     let artifact_index = RigRunObserver::finish(
         observer.as_ref(),
@@ -907,11 +915,13 @@ struct RigRunObserver {
     store: ObservationStore,
     run_id: String,
     command: String,
+    artifact_manifest: tempfile::NamedTempFile,
 }
 
 impl RigRunObserver {
     fn start(rig: &RigSpec, command: &str) -> Option<Self> {
         let store = ObservationStore::open_initialized().ok()?;
+        let artifact_manifest = tempfile::NamedTempFile::new().ok()?;
         let cwd = std::env::current_dir().ok();
         let run = store
             .start_run(
@@ -929,7 +939,16 @@ impl RigRunObserver {
             store,
             run_id: run.id,
             command: command.to_string(),
+            artifact_manifest,
         })
+    }
+
+    fn with_command_context<T>(&self, operation: impl FnOnce() -> T) -> T {
+        crate::local_artifact::with_registration_context(
+            &self.run_id,
+            self.artifact_manifest.path(),
+            operation,
+        )
     }
 
     fn finish<T>(
@@ -948,6 +967,7 @@ impl RigRunObserver {
         let state = RigState::load(&rig.id).ok();
         let metadata =
             rig_observation_metadata(rig, &observer.command, state, pipeline, error.as_deref());
+        observer.record_registered_artifacts();
         let _ = observer
             .store
             .finish_run(&observer.run_id, status, Some(metadata));
@@ -959,6 +979,37 @@ impl RigRunObserver {
             status.as_str(),
             pipeline,
         )
+    }
+
+    fn record_registered_artifacts(&self) {
+        let Ok(artifacts) =
+            crate::local_artifact::read_registrations(&self.run_id, self.artifact_manifest.path())
+        else {
+            return;
+        };
+        for (registration_index, artifact) in artifacts.into_iter().enumerate() {
+            let metadata = serde_json::json!({
+                "source": "rig_command_registration",
+                "source_path": artifact.path,
+                "source_type": artifact.artifact_type,
+                "registration_index": registration_index,
+            });
+            if artifact.artifact_type == "directory" {
+                let _ = self.store.record_directory_artifact_with_metadata(
+                    &self.run_id,
+                    &artifact.kind,
+                    &artifact.path,
+                    metadata,
+                );
+            } else {
+                let _ = self.store.record_artifact_with_metadata(
+                    &self.run_id,
+                    &artifact.kind,
+                    &artifact.path,
+                    metadata,
+                );
+            }
+        }
     }
 
     fn record_resource_lifecycle_index(
