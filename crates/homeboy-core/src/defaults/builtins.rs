@@ -33,7 +33,9 @@ fn load_extension_provided_defaults() -> ExtensionProvidedDefaults {
 }
 
 fn load_external_extension_provided_defaults() -> Option<ExtensionProvidedDefaults> {
-    let path = std::env::var(["HOMEBOY", "EXTENSION_DEFAULTS_PATH"].join("_")).ok()?;
+    let path =
+        std::env::var(crate::product_identity::PRODUCT_IDENTITY.env_var("EXTENSION_DEFAULTS_PATH"))
+            .ok()?;
     let content = fs::read_to_string(path).ok()?;
 
     Some(parse_extension_provided_defaults(&content))
@@ -170,7 +172,7 @@ mod tests {
 
         // No PHP `Test.php` convention baked into core; generic JS/TS/Rust
         // suffixes remain.
-        assert!(!suffixes.contains(&["Test.", "p", "hp"].concat()));
+        assert!(!suffixes.contains(&"Test.php".to_string()));
         assert!(suffixes.contains(&".test.js".to_string()));
         assert!(suffixes.contains(&".spec.tsx".to_string()));
         assert!(suffixes.contains(&"_test.rs".to_string()));
