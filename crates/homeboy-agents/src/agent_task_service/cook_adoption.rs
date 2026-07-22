@@ -67,8 +67,13 @@ fn persist_adoption_terminal_result(run_id: &str, report: &AgentTaskCookReport) 
 /// re-triggers the review-form gate exactly as it would for a fresh cook.
 fn adopted_review_form(
     run_id: &str,
+    allow_missing_aggregate: bool,
 ) -> Result<Option<crate::agent_task_review_dossier::AiFilledReviewForm>> {
-    let aggregate = agent_task_lifecycle::read_aggregate(run_id)?;
+    let aggregate = match agent_task_lifecycle::read_aggregate(run_id) {
+        Ok(aggregate) => aggregate,
+        Err(_) if allow_missing_aggregate => return Ok(None),
+        Err(error) => return Err(error),
+    };
     aggregate
         .outcomes
         .last()
@@ -274,7 +279,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
             source_run_id: Some(record.run_id.clone()),
             current_diff: String::new(),
             require_review_form: true,
-            review_form: adopted_review_form(&record.run_id)?,
+            review_form: adopted_review_form(&record.run_id, recovery.is_some())?,
             metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
         });
         let finalization = record.metadata.get("cook_finalization").cloned();
@@ -433,7 +438,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
         source_run_id: Some(record.run_id.clone()),
         current_diff: gate_feedback_current_diff(&promotion),
         require_review_form: true,
-        review_form: adopted_review_form(&record.run_id)?,
+        review_form: adopted_review_form(&record.run_id, recovery.is_some())?,
         metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
     });
     let attempt = AgentTaskCookAttemptReport {
@@ -474,7 +479,25 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
         follow_up_request.executor.model = Some(adoption_ai_model.clone());
         let budget = plan.options.execution_budget.clone();
         let mut remediation_usage = Default::default();
-        let aggregate = agent_task_lifecycle::read_aggregate(&record.run_id)?;
+        let aggregate = match agent_task_lifecycle::read_aggregate(&record.run_id) {
+            Ok(aggregate) => aggregate,
+            Err(_) if recovery.is_some() => crate::agent_task_scheduler::AgentTaskAggregate {
+                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed,
+                totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
+                    failed: 1,
+                    ..Default::default()
+                },
+                outcomes: Vec::new(),
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            },
+            Err(error) => return Err(error),
+        };
         let dispatch = dispatch_cook_follow_up(
             &options,
             executor.clone(),
@@ -491,8 +514,22 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
             &mut remediation_usage,
         )?;
         return match dispatch {
-            CookFollowUpDispatch::Dispatched { .. } => {
+            CookFollowUpDispatch::Dispatched { run_id } => {
                 agent_task_lifecycle::finish_candidate_adoption(&record.run_id, None)?;
+                options.initial_plan = super::load_recipe(cook_id)?
+                    .attempts
+                    .into_iter()
+                    .find(|attempt| attempt.run_id == run_id)
+                    .map(|attempt| attempt.plan)
+                    .ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "cook_recipe.attempts",
+                            "dispatched candidate remediation is missing from the durable cook recipe",
+                            Some(run_id.clone()),
+                            None,
+                        )
+                    })?;
+                options.initial_run_id = run_id;
                 let mut result = super::cook::run_cook_with_finalizer(
                     options,
                     executor,

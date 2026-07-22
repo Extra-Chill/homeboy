@@ -587,15 +587,23 @@ where
 fn adopted_attempt_is_ready_for_cook_continuation(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<Option<String>> {
-    let Some(adoption) = record.candidate_adoption.as_ref() else {
+    let Some(promotion) = persisted_promotion_for_attempt(&record.run_id)? else {
+        return Ok(None);
+    };
+    let source_record = promotion.provenance["cook_follow_up"]["source_run_id"]
+        .as_str()
+        .map(agent_task_lifecycle::status)
+        .transpose()?;
+    let adoption = record
+        .candidate_adoption
+        .as_ref()
+        .or_else(|| source_record.as_ref()?.candidate_adoption.as_ref());
+    let Some(adoption) = adoption else {
         return Ok(None);
     };
     if adoption.state != "completed" {
         return Ok(None);
     }
-    let Some(promotion) = persisted_promotion_for_attempt(&record.run_id)? else {
-        return Ok(None);
-    };
     let provenance = &promotion.provenance["adoption"];
     if provenance["candidate_ref"].as_str() == Some(adoption.candidate_sha.as_str())
         && provenance["ai_model"].as_str() == Some(adoption.ai_model.as_str())
@@ -664,19 +672,26 @@ where
     }
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
+    let adopted_model = agent_task_lifecycle::status(&options.initial_run_id)
+        .ok()
+        .map(|record| adopted_attempt_is_ready_for_cook_continuation(&record))
+        .transpose()?
+        .flatten();
     let existing_recipe = super::recipe_exists(&options.cook_id)?;
-    let recipe = if existing_recipe {
-        super::load_recipe(&options.cook_id)?
-    } else {
-        super::persist_initial_recipe(&options)?
-    };
+    let recipe = super::persist_initial_recipe(&options)?;
     // A recipe can survive an interruption before its first lifecycle record.
     // Resume from the validated durable inputs so ambient transport state cannot
     // turn replay into a conflicting new cook.
     let requested_run_id = options.initial_run_id.clone();
     let mut options = if existing_recipe {
-        let mut reconstructed =
-            super::reconstruct_options_with_dispatcher(&recipe, options.attempt_dispatcher)?;
+        let mut reconstructed = if adopted_model.is_some() {
+            super::reconstruct_adoption_options_with_dispatcher(
+                &recipe,
+                options.attempt_dispatcher,
+            )?
+        } else {
+            super::reconstruct_options_with_dispatcher(&recipe, options.attempt_dispatcher)?
+        };
         if let Some(attempt) = recipe
             .attempts
             .iter()
@@ -692,12 +707,7 @@ where
     // Candidate adoption records the concrete external model on the lifecycle
     // attempt. Reuse it only when the persisted promotion authenticates the
     // same candidate/model pair, including after a detached continuation.
-    if let Some(model) = agent_task_lifecycle::status(&options.initial_run_id)
-        .ok()
-        .map(|record| adopted_attempt_is_ready_for_cook_continuation(&record))
-        .transpose()?
-        .flatten()
-    {
+    if let Some(model) = adopted_model {
         options.ai_model = Some(model);
     }
     materialize_initial_cook_attempt(&options)?;
@@ -722,10 +732,23 @@ where
     // A retry may already be durably dispatched when this controller resumes.
     // Continue from that exact recorded attempt rather than re-entering the
     // original attempt and re-binding its immutable recipe identity.
+    let requested_attempt = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == options.initial_run_id)
+        .map(|attempt| attempt.attempt)
+        .unwrap_or(1);
     let resumed_run_id = agent_task_lifecycle::cook_index(&options.cook_id)
         .ok()
         .map(|index| index.latest_run_id)
-        .filter(|run_id| run_id != &options.initial_run_id);
+        .filter(|run_id| run_id != &options.initial_run_id)
+        .filter(|run_id| {
+            recipe
+                .attempts
+                .iter()
+                .find(|attempt| attempt.run_id == *run_id)
+                .is_some_and(|attempt| attempt.attempt >= requested_attempt)
+        });
     let mut run_id = resumed_run_id
         .clone()
         .unwrap_or_else(|| options.initial_run_id.clone());
