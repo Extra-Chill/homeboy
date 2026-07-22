@@ -295,6 +295,52 @@ homeboy_wordpress_is_configured_phpunit_file() {
     esac
 }
 
+homeboy_wordpress_full_suite_phpunit_root() {
+    local configured_root
+    local resolved_root
+
+    configured_root="$(homeboy_setting wp_codebox_phpunit_test_root '.wp_codebox_phpunit_test_root' '')"
+    if [ -z "$configured_root" ]; then
+        printf '%s\n' "${PLUGIN_PATH}/tests"
+        return 0
+    fi
+
+    resolved_root="$(homeboy_wordpress_resolve_wp_codebox_sandbox_path "$configured_root" || true)"
+    [ -n "$resolved_root" ] || return 1
+    printf '%s\n' "$resolved_root"
+}
+
+homeboy_wordpress_has_phpunit_tests() {
+    local test_root="$1"
+    local test_file
+
+    [ -d "$test_root" ] || return 1
+    if ! test_file="$(find "$test_root" -type f \( -name '*Test.php' -o -name 'test-*.php' \) -print -quit)"; then
+        return 2
+    fi
+    [ -n "$test_file" ]
+}
+
+homeboy_wordpress_handle_no_phpunit_tests() {
+    local policy
+    policy="$(homeboy_setting phpunit_no_tests '.phpunit_no_tests' 'skipped')"
+
+    case "$policy" in
+        skip|skipped)
+            echo "Skipping PHPUnit: no canonical test files were discovered."
+            return 0
+            ;;
+        fail)
+            echo "ERROR: no canonical PHPUnit test files were discovered." >&2
+            return 1
+            ;;
+        *)
+            echo "ERROR: unsupported phpunit_no_tests policy: ${policy}" >&2
+            return 2
+            ;;
+    esac
+}
+
 homeboy_wordpress_run_js_smoke_files() {
     local smoke_files_raw="$1"
     local node_bin="${HOMEBOY_NODE_BIN:-node}"
@@ -564,5 +610,17 @@ fi
 # Full-suite run (no --file, no changed-file scope): run the canonical PHPUnit
 # backend only. Ad hoc PHP smoke scripts are intentionally not release gates;
 # rerun one explicitly with --host-smoke-file or --file when diagnosing it.
+full_suite_phpunit_root="$(homeboy_wordpress_full_suite_phpunit_root || true)"
+if [ -n "$full_suite_phpunit_root" ]; then
+    full_suite_phpunit_status=0
+    homeboy_wordpress_has_phpunit_tests "$full_suite_phpunit_root" || full_suite_phpunit_status=$?
+    if [ "$full_suite_phpunit_status" -eq 1 ]; then
+        homeboy_wordpress_handle_no_phpunit_tests
+        exit $?
+    elif [ "$full_suite_phpunit_status" -ne 0 ]; then
+        echo "ERROR: unable to inspect PHPUnit test root: ${full_suite_phpunit_root}" >&2
+        exit "$full_suite_phpunit_status"
+    fi
+fi
 WORDPRESS_RUNTIME_RUNNER="$(homeboy_wordpress_runtime_runner)" || exit $?
 exec bash "$WORDPRESS_RUNTIME_RUNNER" "${PASSTHROUGH_ARGS[@]}"
