@@ -743,8 +743,10 @@ where
             return Err(error);
         }
     }
+    // The initial attempt is the durable status/activity owner. Pin it rather
+    // than the stable cook ID, which may not itself name a lifecycle record.
     let _runtime_generation =
-        homeboy_core::runtime_promotion::pin_cook_generation(&options.cook_id)?;
+        homeboy_core::runtime_promotion::pin_cook_generation(&options.initial_run_id)?;
     let max_attempts = options.max_attempts.max(1);
     let mut attempts = Vec::new();
     // A retry may already be durably dispatched when this controller resumes.
