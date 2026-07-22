@@ -272,6 +272,8 @@ mod tests {
             git_sha: Some("abc".to_string()),
             dirty: false,
             workspace_snapshot_identity: Some("snapshot".to_string()),
+            prepared_workspace_original_snapshot_identity: None,
+            prepared_workspace_update_lineage: Vec::new(),
             synthetic_checkout_commit: None,
             synthetic_checkout_ref: None,
             synthetic_checkout_tree: None,
