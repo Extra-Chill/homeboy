@@ -127,10 +127,31 @@ mod tests {
         assert_eq!(index.resources[1].path, "/tmp/homeboy-rig");
         assert_eq!(index.resources[2].path, "tcp://localhost:9981");
         assert_eq!(index.resources[3].path, "process-pattern:homeboy fixture");
+        assert_eq!(index.resources[0].runner_id, None);
         assert_eq!(
             index.resources[0].cleanup_policy,
             ResourceCleanupPolicy::Manual
         );
+    }
+
+    #[test]
+    fn propagates_runner_id_to_resource_records() {
+        let resources = RigResourcesSpec {
+            exclusive: vec!["runtime".to_string()],
+            paths: vec!["/tmp/homeboy-rig".to_string()],
+            ports: vec![9981],
+            process_patterns: vec!["homeboy fixture".to_string()],
+        };
+
+        let mut options =
+            RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active);
+        options.runner_id = Some("runner-abc".to_string());
+
+        let index = rig_resource_lifecycle_index("fixture-rig", &resources, options);
+
+        for record in &index.resources {
+            assert_eq!(record.runner_id.as_deref(), Some("runner-abc"));
+        }
     }
 
     #[test]
