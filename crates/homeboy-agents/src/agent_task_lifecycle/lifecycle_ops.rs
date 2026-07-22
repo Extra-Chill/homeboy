@@ -337,6 +337,24 @@ where
     F: FnOnce(&str) -> Result<A>,
     A: RuntimeAdmissionEvidence,
 {
+    submit_plan_with_runtime_admission_on_runner(
+        plan,
+        requested_run_id,
+        execution_runner_id(),
+        admit_runtime,
+    )
+}
+
+pub(crate) fn submit_plan_with_runtime_admission_on_runner<F, A>(
+    plan: &AgentTaskPlan,
+    requested_run_id: Option<&str>,
+    execution_runner_id: Option<String>,
+    admit_runtime: F,
+) -> Result<AgentTaskRunRecord>
+where
+    F: FnOnce(&str) -> Result<A>,
+    A: RuntimeAdmissionEvidence,
+{
     let run_id = requested_run_id
         .map(sanitize_run_id)
         .unwrap_or_else(default_run_id);
@@ -351,7 +369,6 @@ where
         "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
     });
-    let execution_runner_id = execution_runner_id();
     if let Some(runner_id) = execution_runner_id.as_deref() {
         metadata["runner_id"] = json!(runner_id);
     }
@@ -379,6 +396,7 @@ where
         adoption_run_id: None,
         metadata,
     };
+    let mut preserved_controller_runtime = None;
     if let Ok(existing) = store::read_record(&run_id) {
         if execution_runner_id.as_deref() == existing.runner_id() {
             // A foreground daemon binds its job before launching runner-local
@@ -392,6 +410,10 @@ where
                 handoff.state == AgentTaskLabHandoffState::Accepted
                     && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
             }) {
+                preserved_controller_runtime = Some(controller_runtime_for_runner_execution(
+                    &existing,
+                    execution_runner_id.as_deref(),
+                )?);
                 record.lab_handoff = existing.lab_handoff;
             }
         }
@@ -415,8 +437,19 @@ where
                     return Ok(cancelled);
                 }
             }
-            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
-                admission.runtime();
+            if let Some(controller_runtime) = preserved_controller_runtime {
+                // The runner executes the portable plan, but the durable run
+                // remains owned by the controller that admitted the handoff.
+                // Keep their immutable pins distinct across host boundaries.
+                record.metadata
+                    [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
+                    controller_runtime;
+                record.metadata["runner_execution_runtime"] = admission.runtime();
+            } else {
+                record.metadata
+                    [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
+                    admission.runtime();
+            }
             store::write_record(&record)?;
         }
         Err(error) => {
@@ -435,6 +468,34 @@ where
         }
     }
     Ok(record)
+}
+
+pub(crate) fn controller_runtime_for_runner_execution(
+    existing: &AgentTaskRunRecord,
+    execution_runner_id: Option<&str>,
+) -> Result<Value> {
+    if execution_runner_id != existing.runner_id()
+        || !existing.lab_handoff.as_ref().is_some_and(|handoff| {
+            handoff.state == AgentTaskLabHandoffState::Accepted
+                && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
+        })
+    {
+        return Err(Error::internal_unexpected(
+            "runner execution identity was requested for a non-accepted Lab handoff",
+        ));
+    }
+    existing
+        .metadata
+        .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+        .cloned()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller_runtime",
+                "accepted Lab handoff has no controller runtime pin",
+                Some(existing.run_id.clone()),
+                None,
+            )
+        })
 }
 
 pub(crate) fn execution_runner_id() -> Option<String> {
