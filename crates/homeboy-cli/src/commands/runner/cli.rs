@@ -261,6 +261,13 @@ pub(super) enum RunnerCommand {
     Status {
         /// Runner ID. Omit to show all runner session states.
         id: Option<String>,
+
+        /// Include the full historical draining-generation inventory. By
+        /// default status leads with the compact authoritative admission
+        /// summary and omits the expanded per-generation ledger, which can run
+        /// to thousands of lines on a long-lived runner.
+        #[arg(long)]
+        generations: bool,
     },
     /// Close a runner tunnel and remove its persisted session state
     Disconnect {

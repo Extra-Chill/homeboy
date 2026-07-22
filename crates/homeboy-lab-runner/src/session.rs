@@ -511,6 +511,16 @@ impl Serialize for RunnerStatusReport {
         let generations =
             crate::generation_store::status_projection(&self.runner_id, self.session.as_ref())
                 .unwrap_or_default();
+        // Bound the embedded generation view: emit a compact summary
+        // (authoritative selected daemon + a count-only breakdown of draining
+        // generations) rather than expanding every historical per-generation
+        // record (#9478/#9522). On a long-lived runner the full ledger runs to
+        // thousands of lines and its non-authoritative per-generation counts
+        // make old ownership look like current load. The full inventory remains
+        // available through `runner status --generations`, which surfaces the
+        // complete `generation_inventory` list. Nothing deserializes this
+        // report, so trimming the serialized shape is display-only.
+        let generation_summary = RunnerGenerationLedgerSummary::from_projection(&generations);
         let mut state = serializer.serialize_struct("RunnerStatusReport", 17)?;
         state.serialize_field("runner_id", &self.runner_id)?;
         state.serialize_field("connected", &self.connected)?;
@@ -518,7 +528,7 @@ impl Serialize for RunnerStatusReport {
         if let Some(session) = &self.session {
             state.serialize_field("session", session)?;
         }
-        state.serialize_field("generations", &generations)?;
+        state.serialize_field("generations", &generation_summary)?;
         if let Some(stale_daemon) = &self.stale_daemon {
             state.serialize_field("stale_daemon", stale_daemon)?;
         }
@@ -548,6 +558,42 @@ impl Serialize for RunnerStatusReport {
         }
         state.serialize_field("session_path", &self.session_path)?;
         state.end()
+    }
+}
+
+/// A bounded, count-only summary of the daemon generation ledger for status
+/// output. Replaces the full per-generation expansion that dominated `runner
+/// status` (#9478/#9522): it names the authoritative admission-owner generation
+/// and reports how many generations exist and how many are draining, without
+/// ever emitting the non-authoritative per-generation `active_job_count` values
+/// that made stale ownership look like current load.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerGenerationLedgerSummary {
+    /// Total number of tracked daemon generations.
+    pub total: usize,
+    /// The generation that currently owns admission, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission_owner: Option<String>,
+    /// Number of generations that are draining (retiring, not accepting new
+    /// admission). Reported as a count, never expanded.
+    pub draining: usize,
+}
+
+impl RunnerGenerationLedgerSummary {
+    fn from_projection(generations: &[RunnerDaemonGenerationStatus]) -> Self {
+        let admission_owner = generations
+            .iter()
+            .find(|generation| generation.admission_owner)
+            .map(|generation| generation.generation.clone());
+        let draining = generations
+            .iter()
+            .filter(|generation| generation.drain_state == crate::RollingDrainState::Draining)
+            .count();
+        Self {
+            total: generations.len(),
+            admission_owner,
+            draining,
+        }
     }
 }
 
@@ -698,7 +744,73 @@ mod status_serialization_tests {
         ] {
             assert!(value.get(field).is_none(), "{field} must be omitted");
         }
-        assert_eq!(value["generations"], serde_json::json!([]));
+        // Generations serialize as a bounded count-only summary, not the full
+        // per-generation expansion (#9478/#9522). With no generations it is a
+        // zero summary.
+        assert_eq!(
+            value["generations"],
+            serde_json::json!({ "total": 0, "draining": 0 })
+        );
+    }
+
+    #[test]
+    fn generation_ledger_summary_counts_without_expanding_or_exposing_active_load() {
+        fn gen(
+            name: &str,
+            admission_owner: bool,
+            drain: crate::RollingDrainState,
+            noisy_count: usize,
+        ) -> RunnerDaemonGenerationStatus {
+            RunnerDaemonGenerationStatus {
+                generation: name.to_string(),
+                admission_owner,
+                drain_state: drain,
+                // A deliberately large NON-authoritative count: the summary must
+                // never surface it as active load (the #9522 confusion).
+                active_job_count: noisy_count,
+                observed_active_job_count: None,
+                active_job_count_authoritative: false,
+                job_owner_count: noisy_count,
+                run_owner_count: 0,
+                artifact_owner_count: 0,
+                homeboy_build_identity: None,
+                remote_daemon_lease_id: None,
+                remote_daemon_address: None,
+                local_url: None,
+            }
+        }
+
+        let projection = vec![
+            gen(
+                "build-current",
+                true,
+                crate::RollingDrainState::Admitting,
+                0,
+            ),
+            gen(
+                "build-old-1",
+                false,
+                crate::RollingDrainState::Draining,
+                160,
+            ),
+            gen("build-old-2", false, crate::RollingDrainState::Draining, 82),
+        ];
+
+        let summary = RunnerGenerationLedgerSummary::from_projection(&projection);
+        assert_eq!(summary.total, 3);
+        assert_eq!(summary.admission_owner.as_deref(), Some("build-current"));
+        assert_eq!(summary.draining, 2);
+
+        // The serialized summary is a compact object — no per-generation array,
+        // no active_job_count fields leaking historical ownership as load.
+        let value = serde_json::to_value(&summary).expect("serialize summary");
+        assert!(value.get("total").is_some());
+        assert!(
+            value
+                .as_object()
+                .is_some_and(|o| !o.contains_key("active_job_count")),
+            "summary must never carry a per-generation active_job_count: {value}"
+        );
     }
 
     fn base_report() -> RunnerStatusReport {
