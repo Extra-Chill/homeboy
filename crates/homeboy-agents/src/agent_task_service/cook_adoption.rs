@@ -721,6 +721,7 @@ fn compare_adoption_gate_failures_to_base(
                     gate.reveal_policy,
                     &baseline_runtime.context().tmp_dir,
                     std::time::Duration::from_secs(5 * 60),
+                    &gate.environment.replay_policy(),
                 )
             })() {
                 Ok(baseline) => baseline,

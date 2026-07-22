@@ -1254,6 +1254,7 @@ fn run_promotion_gate(
             reveal_policy,
             Some(&runtime_tmpdir.context().tmp_dir),
             Some(supervision),
+            &options.gates.gate_environment,
         )
     } else {
         provider.verify_with_runtime_tmpdir(
@@ -1263,6 +1264,7 @@ fn run_promotion_gate(
             visibility,
             reveal_policy,
             &runtime_tmpdir.context().tmp_dir,
+            &options.gates.gate_environment,
         )
     };
     let evidence = match &result {

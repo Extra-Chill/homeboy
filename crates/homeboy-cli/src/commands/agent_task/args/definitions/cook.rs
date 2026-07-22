@@ -1,5 +1,10 @@
 use clap::{Args, Subcommand};
-use homeboy::agents::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
+use std::collections::BTreeMap;
+
+use homeboy::agents::agent_tasks::gate::{
+    AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateRevealPolicy,
+    VerifyGateOptions,
+};
 
 use super::super::super::super::agent_task_dispatch::DispatchArgs;
 use super::super::super::review;
@@ -26,6 +31,27 @@ pub struct VerifyGateArgs {
     pub gate_heartbeat_interval_seconds: u64,
     #[arg(long = "rerun-completed-gates")]
     pub rerun_completed_gates: bool,
+    #[arg(
+        long = "gate-environment-mode",
+        default_value = "inherit",
+        value_name = "MODE"
+    )]
+    #[arg(value_parser = ["inherit", "replace"])]
+    pub gate_environment_mode: String,
+    #[arg(long = "gate-env", value_name = "NAME=VALUE", value_parser = parse_gate_environment)]
+    pub gate_environment: Vec<(String, String)>,
+    #[arg(
+        long = "isolate-gate-home",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub isolate_gate_home: bool,
+    #[arg(
+        long = "isolate-gate-xdg",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub isolate_gate_xdg: bool,
 }
 impl VerifyGateArgs {
     pub fn has_deterministic_gate(&self) -> bool {
@@ -41,8 +67,30 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
             gate_timeout_seconds: args.gate_timeout_seconds,
             gate_heartbeat_interval_seconds: args.gate_heartbeat_interval_seconds,
             rerun_completed_gates: args.rerun_completed_gates,
+            gate_environment: AgentTaskGateEnvironmentPolicy {
+                mode: match args.gate_environment_mode.as_str() {
+                    "replace" => AgentTaskGateEnvironmentMode::Replace,
+                    _ => AgentTaskGateEnvironmentMode::Inherit,
+                },
+                variables: args
+                    .gate_environment
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>(),
+                isolate_home: args.isolate_gate_home,
+                isolate_xdg: args.isolate_gate_xdg,
+            },
         }
     }
+}
+
+fn parse_gate_environment(value: &str) -> Result<(String, String), String> {
+    let (name, value) = value
+        .split_once('=')
+        .ok_or_else(|| "expected NAME=VALUE".to_string())?;
+    if name.is_empty() || name.contains('=') {
+        return Err("environment variable name must not be empty or contain '='".to_string());
+    }
+    Ok((name.to_string(), value.to_string()))
 }
 
 #[cfg(test)]
@@ -81,6 +129,37 @@ mod tests {
         assert_eq!(options.gate_timeout_seconds, 42);
         assert_eq!(options.gate_heartbeat_interval_seconds, 7);
         assert!(options.rerun_completed_gates);
+        assert!(options.gate_environment.isolate_home);
+        assert!(options.gate_environment.isolate_xdg);
+
+        let options: VerifyGateOptions = TestCli::try_parse_from([
+            "homeboy",
+            "--gate-environment-mode",
+            "replace",
+            "--gate-env",
+            "FEATURE=enabled",
+        ])
+        .expect("parse gate environment")
+        .gates
+        .into();
+        assert_eq!(
+            options.gate_environment.mode,
+            AgentTaskGateEnvironmentMode::Replace
+        );
+        assert_eq!(options.gate_environment.variables["FEATURE"], "enabled");
+
+        let options: VerifyGateOptions = TestCli::try_parse_from([
+            "homeboy",
+            "--isolate-gate-home",
+            "false",
+            "--isolate-gate-xdg",
+            "false",
+        ])
+        .expect("parse gate isolation opt-outs")
+        .gates
+        .into();
+        assert!(!options.gate_environment.isolate_home);
+        assert!(!options.gate_environment.isolate_xdg);
     }
 }
 
