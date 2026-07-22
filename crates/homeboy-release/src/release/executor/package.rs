@@ -40,17 +40,6 @@ pub(crate) fn run_package(
         .filter(|m| m.actions.iter().any(|a| a.id == "release.package"))
         .collect();
 
-    if package_extensions.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "release.package",
-            "No extension provides release.package action",
-            None,
-            Some(vec![
-                "Add an extension with a release.package action to the component".to_string(),
-            ]),
-        ));
-    }
-
     let declared_artifact_built =
         build_declared_component_artifact(component, declared_build_artifact)?;
     if declared_artifact_built {
@@ -60,6 +49,29 @@ pub(crate) fn run_package(
             component_id,
             component_local_path,
         )?;
+    }
+
+    if package_extensions.is_empty() {
+        if declared_artifact_built {
+            return Ok(step_success(
+                "package",
+                "package",
+                Some(serde_json::json!({
+                    "action": "scripts.build",
+                    "artifact": declared_build_artifact,
+                })),
+                Vec::new(),
+            ));
+        }
+
+        return Err(Error::validation_invalid_argument(
+            "release.package",
+            "No extension provides release.package action and the component has no scripts.build + build_artifact contract",
+            None,
+            Some(vec![
+                "Add an extension with a release.package action or configure scripts.build and build_artifact on the component".to_string(),
+            ]),
+        ));
     }
 
     let extra_config = package_build_config(skip_build_validation);

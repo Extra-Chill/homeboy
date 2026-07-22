@@ -54,6 +54,7 @@ pub(crate) use homeboy_lab_runner_contract::is_internal_control_env;
 
 mod artifact_promotion;
 mod broker;
+pub(crate) use broker::reverse_broker_submission_key;
 mod daemon;
 mod daemon_api;
 mod extension_parity;
@@ -93,7 +94,7 @@ use secrets::*;
 // lab_env, lab/offload) and re-exported by the parent `runner` module.
 pub(crate) use daemon::{
     observe_daemon_job_until_terminal, reserve_daemon_admission, result_event_data,
-    DaemonAdmissionPolicy, DaemonAdmissionReservation, DaemonAdmissionReservationAuthority,
+    DaemonAdmissionPolicy, DaemonAdmissionReservation,
 };
 pub use daemon_api::{canonical_daemon_body, daemon_api_get};
 pub(crate) use failure::{

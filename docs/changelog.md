@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.301.2] - 2026-07-22
+
+### Fixed
+- materialize shared extension assets ([#9580](https://github.com/Extra-Chill/homeboy/pull/9580)) (by Chris Huber)
+- filter internal reviewer evidence refs ([#9576](https://github.com/Extra-Chill/homeboy/pull/9576)) (by Chris Huber)
+
 ## [0.301.1] - 2026-07-21
 
 ### Fixed

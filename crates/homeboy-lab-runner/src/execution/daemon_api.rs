@@ -52,6 +52,10 @@ pub fn canonical_daemon_body<'a>(data: &'a Value, context: &str) -> Result<&'a V
         .ok_or_else(|| Error::internal_unexpected(format!("{context} missing canonical data.body")))
 }
 
+fn reverse_broker_daemon_data(body: Value) -> Value {
+    json!({ "body": body })
+}
+
 pub(super) fn daemon_transport_error(
     kind: DaemonHttpErrorKind,
     path: &str,
@@ -152,7 +156,7 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
             ));
         };
         let broker_token = homeboy_core::broker_auth::broker_submit_token_for_runner(runner_id)?;
-        return match method {
+        let body = match method {
             "GET" => broker_http::get_json(
                 &client,
                 broker_url,
@@ -169,7 +173,12 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
                 broker_token.as_deref(),
             ),
             _ => Err(unsupported_daemon_api_method(method)),
-        };
+        }?;
+        // Broker helpers validate and extract their canonical `data.body`, while
+        // daemon API consumers intentionally parse the daemon `data` object.
+        // Restore that shared shape so direct and reverse transports are
+        // interchangeable for status, logs, artifacts, and cancellation.
+        return Ok(reverse_broker_daemon_data(body));
     }
     Err(Error::validation_invalid_argument(
         "runner",
@@ -260,6 +269,13 @@ mod tests {
                 b
             );
         });
+    }
+
+    #[test]
+    fn reverse_broker_body_normalizes_to_daemon_data_contract() {
+        let data = reverse_broker_daemon_data(json!({ "job": { "id": "job-1" } }));
+        let body = canonical_daemon_body(&data, "reverse broker job").expect("canonical body");
+        assert_eq!(body["job"]["id"], "job-1");
     }
 }
 

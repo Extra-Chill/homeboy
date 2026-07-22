@@ -18,6 +18,10 @@ use super::super::{Runner, RunnerJob};
 #[allow(unused_imports)]
 use super::*;
 
+pub(crate) fn reverse_broker_submission_key(runner_id: &str, run_id: &str) -> String {
+    format!("agent-task:v1:{runner_id}:{run_id}")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn exec_via_reverse_broker(
     runner: &Runner,
@@ -93,7 +97,7 @@ pub(super) fn exec_via_reverse_broker(
             let mut metadata = runner_exec_request_metadata(run_id.as_deref(), "reverse_broker");
             if let Some(run_id) = run_id.as_deref() {
                 metadata["submission_key"] =
-                    serde_json::json!(format!("agent-task:v1:{}:{run_id}", runner.id));
+                    serde_json::json!(reverse_broker_submission_key(&runner.id, run_id));
             }
             metadata
         }),
