@@ -1117,12 +1117,15 @@ where
                     promotion: None,
                     feedback: None,
                 });
+                let recovery = format!(
+                    "promotion provider response was rejected: {error}. The successful candidate remains durable on run {run_id}; inspect it and generate a corrected apply-provider retry with `homeboy agent-task review {run_id} --to-worktree <handle>`. To replace it with an externally prepared candidate, use `homeboy agent-task adopt {cook_id} --candidate-ref <sha> --ai-model <model>`.",
+                );
                 return Ok(cook_report(
                     cook_id,
                     "policy_failure",
                     attempts,
                     None,
-                    Some(error.to_string()),
+                    Some(recovery),
                     1,
                     Some(&run_id),
                 ));

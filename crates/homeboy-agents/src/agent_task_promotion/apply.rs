@@ -799,6 +799,45 @@ pub(crate) fn run_provider_command(
         .get("data")
         .cloned()
         .unwrap_or(response_value);
+    // Check the envelope discriminator before decoding response-specific fields.
+    // This keeps a provider that accidentally returns a different known contract
+    // from being reported as a missing field on this contract.
+    let schema = match response_value.get("schema") {
+        Some(serde_json::Value::String(schema)) => schema,
+        Some(actual) => {
+            return Err(Error::validation_invalid_argument(
+                "promotion_provider.response.schema",
+                format!(
+                    "expected {}, got {}",
+                    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA, actual
+                ),
+                None,
+                None,
+            ));
+        }
+        None => {
+            return Err(Error::validation_invalid_argument(
+                "promotion_provider.response.schema",
+                format!(
+                    "expected {}, got missing schema",
+                    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA
+                ),
+                None,
+                None,
+            ));
+        }
+    };
+    if schema != AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA {
+        return Err(Error::validation_invalid_argument(
+            "promotion_provider.response.schema",
+            format!(
+                "expected {}, got {}",
+                AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA, schema
+            ),
+            None,
+            None,
+        ));
+    }
     let response: AgentTaskPromotionApplyResponse = serde_json::from_value(response_value)
         .map_err(|error| {
             Error::validation_invalid_json(
@@ -807,18 +846,6 @@ pub(crate) fn run_provider_command(
                 Some(report.stdout.clone()),
             )
         })?;
-    if !response.schema.is_empty() && response.schema != AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA
-    {
-        return Err(Error::validation_invalid_argument(
-            "promotion_provider.response.schema",
-            format!(
-                "expected {}, got {}",
-                AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA, response.schema
-            ),
-            None,
-            None,
-        ));
-    }
     if response.workspace_path.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "promotion_provider.response.workspace_path",
