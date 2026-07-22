@@ -1161,7 +1161,7 @@ mod tests {
             .contains("executes the runner job"));
         assert!(provenance.diagnostics[1]
             .action
-            .contains("homeboy runner refresh-homeboy lab-runner --ref v0.265.0 --reconnect"));
+            .contains("homeboy runner refresh-homeboy lab-runner --ref controller123 --reconnect"));
         assert!(provenance.diagnostics[1]
             .action
             .contains("homeboy runner doctor lab-runner --scope lab-offload"));
@@ -1204,7 +1204,7 @@ mod tests {
             .contains("origin/main-style runner builds"));
         assert!(provenance.diagnostics[0]
             .action
-            .contains("homeboy runner refresh-homeboy lab-runner --ref v0.265.0 --reconnect"));
+            .contains("homeboy runner refresh-homeboy lab-runner --ref controller123 --reconnect"));
     }
 
     #[test]
