@@ -5,6 +5,7 @@ mod prune;
 mod reap;
 mod snapshot;
 mod snapshots;
+mod update;
 
 use std::path::Path;
 use std::process::Command;

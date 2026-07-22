@@ -89,6 +89,14 @@ pub struct SourceSnapshot {
     pub sync_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_snapshot_identity: Option<String>,
+    /// Original immutable source snapshot for a prepared workspace whose
+    /// retained execution state has received one or more source deltas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_workspace_original_snapshot_identity: Option<String>,
+    /// Ordered source snapshot identities applied after the original prepared
+    /// snapshot. This is runner metadata, never a caller-supplied lease.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepared_workspace_update_lineage: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synthetic_checkout_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

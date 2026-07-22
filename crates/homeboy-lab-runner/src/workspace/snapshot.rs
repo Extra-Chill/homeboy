@@ -14,7 +14,8 @@ use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializ
 use super::types::{ByteFileCounts, SnapshotStats, SnapshotTransferStats};
 use super::util::{
     git_output, hex_prefix, owner_capture_shell, owner_restore_shell, parent_remote_path,
-    run_shell_capture, run_shell_command, ssh_args, ssh_client_for_runner, tar_exclude_args,
+    run_shell_capture, run_shell_command, shell_command_for_runner, ssh_args,
+    ssh_client_for_runner, tar_exclude_args,
 };
 
 const RUNNER_WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
@@ -907,6 +908,208 @@ pub(crate) fn materialize_snapshot_incremental(
     result.map(|_| delta.transfer.clone())
 }
 
+/// Stage a delta over a prepared workspace while retaining paths outside the
+/// included source manifest, such as dependencies and generated runtime assets.
+pub(crate) fn materialize_prepared_workspace_update(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    delta: &SnapshotManifestDelta,
+    expected_lease: &str,
+    metadata_json: &str,
+) -> Result<SnapshotTransferStats> {
+    let temporary = format!("{}.tmp-{}", remote_path, uuid::Uuid::new_v4());
+    let backup = format!("{}.previous-{}", remote_path, uuid::Uuid::new_v4());
+    let lock = format!("{}.update-lock", remote_path);
+    // `mkdir` is an atomic filesystem primitive on the local runner and over
+    // SSH. Holding this directory across all phases gives a runner-neutral CAS
+    // boundary without relying on controller-local advisory locks.
+    let acquire_lock = format!("mkdir {}", shell::quote_arg(&lock));
+    let release_lock = format!("rmdir {}", shell::quote_arg(&lock));
+    run_shell_command(
+        &shell_command_for_runner(runner, &acquire_lock)?,
+        "acquire prepared workspace update lock",
+    )?;
+    let removals = delta
+        .deleted_paths
+        .iter()
+        .chain(delta.replaced_paths.iter())
+        .chain(delta.changed_file_paths.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut removal_list = tempfile::NamedTempFile::new().map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("stage prepared workspace removals".to_string()),
+        )
+    })?;
+    for path in &removals {
+        removal_list
+            .write_all(path.as_bytes())
+            .and_then(|_| removal_list.write_all(&[0]))
+            .map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some("stage prepared workspace removals".to_string()),
+                )
+            })?;
+    }
+    let removal_path = format!("{temporary}/.homeboy/update-removals");
+    let metadata_path = format!("{temporary}/{RUNNER_WORKSPACE_METADATA_FILE}");
+    let prepare = format!(
+        "rm -rf {temporary} {backup} && mkdir -p {temporary} && {seed} && mkdir -p {metadata_parent}",
+        temporary = shell::quote_arg(&temporary),
+        backup = shell::quote_arg(&backup),
+        seed = seed_snapshot_command(remote_path, &temporary),
+        metadata_parent = shell::quote_arg(&format!("{temporary}/.homeboy")),
+    );
+    let finalize = format!(
+        "grep -qF -- {lease} {live_metadata} && mv {remote} {backup} && if mv {temporary} {remote}; then rm -rf {backup} || true; else if mv {backup} {remote}; then exit 1; else printf '%s\\n' 'prepared workspace promotion failed; original remains at {backup}' >&2; exit 2; fi; fi",
+        lease = shell::quote_arg(&format!("\"workspace_lease\": \"{expected_lease}\"")),
+        live_metadata = shell::quote_arg(&format!("{remote_path}/{RUNNER_WORKSPACE_METADATA_FILE}")),
+        remote = shell::quote_arg(remote_path), temporary = shell::quote_arg(&temporary), backup = shell::quote_arg(&backup),
+    );
+    let remove = format!(
+        "cd {} && xargs -0 -n 1 rm -rf -- < {} && rm -f {}",
+        shell::quote_arg(&temporary),
+        shell::quote_arg(&removal_path),
+        shell::quote_arg(&removal_path),
+    );
+    let result = match runner.kind {
+        RunnerKind::Local => {
+            let result = run_shell_command(&prepare, "update prepared local workspace")
+                .and_then(|_| {
+                    fs::copy(removal_list.path(), &removal_path)
+                        .map(|_| ())
+                        .map_err(|err| {
+                            Error::internal_io(
+                                err.to_string(),
+                                Some("stage prepared workspace removals".to_string()),
+                            )
+                        })
+                })
+                .and_then(|_| {
+                    fs::write(&metadata_path, metadata_json).map_err(|err| {
+                        Error::internal_io(
+                            err.to_string(),
+                            Some("stage prepared workspace metadata".to_string()),
+                        )
+                    })
+                })
+                .and_then(|_| run_shell_command(&remove, "update prepared local workspace"))
+                .and_then(|_| {
+                    materialize_changed_paths(
+                        local_path,
+                        &local_extract_command(&temporary),
+                        &delta.changed_paths,
+                        "update prepared local workspace",
+                    )
+                })
+                .and_then(|_| run_shell_command(&finalize, "update prepared local workspace"));
+            result
+        }
+        RunnerKind::Ssh => {
+            let (_server, client) = ssh_client_for_runner(runner)?;
+            if client.is_local {
+                run_shell_command(&prepare, "update prepared local workspace")
+                    .and_then(|_| {
+                        fs::copy(removal_list.path(), &removal_path)
+                            .map(|_| ())
+                            .map_err(|err| {
+                                Error::internal_io(
+                                    err.to_string(),
+                                    Some("stage prepared workspace removals".to_string()),
+                                )
+                            })
+                    })
+                    .and_then(|_| {
+                        fs::write(&metadata_path, metadata_json).map_err(|err| {
+                            Error::internal_io(
+                                err.to_string(),
+                                Some("stage prepared workspace metadata".to_string()),
+                            )
+                        })
+                    })
+                    .and_then(|_| run_shell_command(&remove, "update prepared local workspace"))
+                    .and_then(|_| {
+                        materialize_changed_paths(
+                            local_path,
+                            &local_extract_command(&temporary),
+                            &delta.changed_paths,
+                            "update prepared local workspace",
+                        )
+                    })
+                    .and_then(|_| run_shell_command(&finalize, "update prepared local workspace"))
+            } else {
+                let remote = format!("{}@{}", client.user, client.host);
+                let remote_shell = |script: &str| {
+                    format!(
+                        "ssh {} {} {}",
+                        ssh_args(&client),
+                        shell::quote_arg(&remote),
+                        shell::quote_arg(script)
+                    )
+                };
+                run_shell_command(&remote_shell(&prepare), "update prepared SSH workspace")
+                    .and_then(|_| {
+                        let output = client
+                            .upload_file(&removal_list.path().display().to_string(), &removal_path);
+                        output.success.then_some(()).ok_or_else(|| {
+                            Error::internal_unexpected(format!(
+                                "stage prepared workspace removals failed: {}",
+                                output.stderr.trim()
+                            ))
+                        })
+                    })
+                    .and_then(|_| {
+                        let metadata = tempfile::NamedTempFile::new().map_err(|err| {
+                            Error::internal_io(
+                                err.to_string(),
+                                Some("stage prepared workspace metadata".to_string()),
+                            )
+                        })?;
+                        fs::write(metadata.path(), metadata_json).map_err(|err| {
+                            Error::internal_io(
+                                err.to_string(),
+                                Some("stage prepared workspace metadata".to_string()),
+                            )
+                        })?;
+                        let output = client
+                            .upload_file(&metadata.path().display().to_string(), &metadata_path);
+                        output.success.then_some(()).ok_or_else(|| {
+                            Error::internal_unexpected(format!(
+                                "stage prepared workspace metadata failed: {}",
+                                output.stderr.trim()
+                            ))
+                        })
+                    })
+                    .and_then(|_| {
+                        run_shell_command(&remote_shell(&remove), "update prepared SSH workspace")
+                    })
+                    .and_then(|_| {
+                        materialize_changed_paths(
+                            local_path,
+                            &remote_extract_command(&client, &remote, &temporary),
+                            &delta.changed_paths,
+                            "update prepared SSH workspace",
+                        )
+                    })
+                    .and_then(|_| {
+                        run_shell_command(&remote_shell(&finalize), "update prepared SSH workspace")
+                    })
+            }
+        }
+    };
+    if result.is_err() {
+        cleanup_incremental_temporary(runner, &temporary);
+    }
+    let release_result = run_shell_command(
+        &shell_command_for_runner(runner, &release_lock)?,
+        "release prepared workspace update lock",
+    );
+    result.and(release_result).map(|_| delta.transfer.clone())
+}
+
 fn saturating_shell_quote_upper_bound(value: &str) -> usize {
     // `quote_arg` can render each apostrophe as `'\\''` and add delimiters.
     const SHELL_META: &[char] = &[
@@ -1062,7 +1265,7 @@ fn seed_snapshot_command(seed_path: &str, destination: &str) -> String {
     format!(
         "(cp -al {seed}/. {destination}/ 2>/dev/null || cp -a {seed}/. {destination}/) && rm -f {destination}/{metadata}",
         seed = shell::quote_arg(seed_path),
-        destination = destination,
+        destination = shell::quote_arg(destination),
         metadata = shell::quote_arg(RUNNER_WORKSPACE_METADATA_FILE),
     )
 }

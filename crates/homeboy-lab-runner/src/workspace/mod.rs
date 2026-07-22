@@ -18,13 +18,13 @@ mod types;
 mod util;
 
 pub use pull::{plan_workspace_pull, pull_workspace};
-pub use sync::sync_workspace;
 #[cfg(test)]
 pub(crate) use sync::workspace_resource_lifecycle;
 pub use sync::{
-    list_workspaces, prune_workspaces, reap_run_workspace, reuse_compatible_snapshot_workspace,
-    workspace_snapshots,
+    hydrate_prepared_workspace_source_snapshot, list_workspaces, prune_workspaces,
+    reap_run_workspace, reuse_compatible_snapshot_workspace, workspace_snapshots,
 };
+pub use sync::{sync_workspace, update_workspace};
 pub use types::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
     RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationContract,
@@ -33,7 +33,8 @@ pub use types::{
     RunnerWorkspacePullOptions, RunnerWorkspacePullOutput, RunnerWorkspacePullPlan,
     RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceUpdateOptions,
+    RunnerWorkspaceUpdateOutput,
 };
 
 pub(crate) use materialized::{MaterializedWorkspace, WorkspaceCleanupPolicy};

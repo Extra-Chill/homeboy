@@ -36,8 +36,9 @@ pub use crate::{
 pub use crate::{
     connect_reverse, disconnect, download_remote_artifact,
     evaluate_lab_runner_capabilities_for_runner, exec, execute_lab_offload,
-    is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
-    is_retrievable_runner_artifact, lab_offload_changed_since_ref, lab_offload_metadata,
+    hydrate_prepared_workspace_source_snapshot, is_remote_runner_artifact_path,
+    is_reportable_artifact_evidence_path, is_retrievable_runner_artifact,
+    lab_offload_changed_since_ref, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, lab_runner_readiness, list_workspaces,
     mirror_connected_runner_run, mirrored_runner_job_identity, plan_homeboy_binary_refresh,
     plan_managed_runner_source_sync, plan_managed_runner_source_syncs, plan_workspace_pull,
@@ -49,7 +50,7 @@ pub use crate::{
     reportable_artifact_evidence_path, resolve_default_lab_runner, run_reverse_worker,
     runner_artifact_store_token, runner_dev_sync, runner_exec_failure_error,
     runner_exec_structured_summary, runner_generation_inventory, runner_homeboy_path_for_command,
-    runner_job_cancel, runner_job_log_snapshot, status, statuses, sync_workspace,
+    runner_job_cancel, runner_job_log_snapshot, status, statuses, sync_workspace, update_workspace,
     workspace_snapshots, HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions,
     HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan, LabJobOverrides, LabOffloadCommand,
     LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
@@ -73,7 +74,8 @@ pub use crate::{
     RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions, RunnerWorkspacePullOutput,
     RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RuntimeMaterializationStatus,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceUpdateOptions,
+    RunnerWorkspaceUpdateOutput, RuntimeMaterializationStatus,
 };
 
 // Registry CRUD entry points (re-exported at the root for ergonomics; also

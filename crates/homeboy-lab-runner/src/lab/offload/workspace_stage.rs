@@ -2574,6 +2574,7 @@ mod tests {
             ),
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             snapshot_identity: "snapshot:primary".to_string(),
+            prepared_workspace_lease: None,
             counts: crate::ByteFileCounts::default(),
             excludes: Vec::new(),
             includes: Vec::new(),

@@ -442,6 +442,10 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.operator_mutating("materializes a local worktree into runner workspace state");
             metadata.dangerous_flags = vec!["--allow-dirty-lab-workspace"];
         }
+        ["runner", "workspace", "update"] => {
+            metadata
+                .operator_mutating("advances a prepared runner workspace from its snapshot lease");
+        }
         ["runner", "workspace", "pull"] => {
             metadata.operator_mutating(
                 "copies selected files from runner workspace state to a local destination",

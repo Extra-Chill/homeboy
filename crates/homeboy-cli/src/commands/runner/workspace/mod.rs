@@ -5,6 +5,7 @@ use homeboy::runner::runners::{
     self as runner, RunnerWorkspaceApplyOutput, RunnerWorkspaceListOutput,
     RunnerWorkspacePruneOutput, RunnerWorkspacePullOutput, RunnerWorkspaceSnapshotFilters,
     RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput,
+    RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput,
 };
 
 use super::CmdResult;
@@ -15,6 +16,7 @@ pub enum RunnerWorkspaceOutput {
     List(RunnerWorkspaceListOutput),
     Snapshots(RunnerWorkspaceSnapshotsOutput),
     Sync(RunnerWorkspaceSyncOutput),
+    Update(RunnerWorkspaceUpdateOutput),
     Pull(RunnerWorkspacePullOutput),
     Apply(RunnerWorkspaceApplyOutput),
     Prune(RunnerWorkspacePruneOutput),
@@ -72,6 +74,19 @@ pub(super) enum RunnerWorkspaceCommand {
         /// Permit git sync to overwrite a dirty runner-side workspace.
         #[arg(long)]
         allow_dirty_lab_workspace: bool,
+    },
+    /// Apply a source delta to a prepared workspace selected by its snapshot lease
+    Update {
+        /// Runner ID
+        runner_id: String,
+
+        /// Local worktree containing the updated source
+        #[arg(long)]
+        path: String,
+
+        /// Opaque prepared-workspace lease returned by workspace sync or a previous update
+        #[arg(long)]
+        lease: String,
     },
     /// Copy selected files from a runner workspace back to the controller
     Pull {
@@ -165,6 +180,12 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
             allow_dirty_lab_workspace,
         } => sync(&runner_id, path, mode, allow_dirty_lab_workspace)
             .map(|(output, exit_code)| (RunnerWorkspaceOutput::Sync(output), exit_code)),
+        RunnerWorkspaceCommand::Update {
+            runner_id,
+            path,
+            lease,
+        } => runner::update_workspace(&runner_id, RunnerWorkspaceUpdateOptions { path, lease })
+            .map(|(output, exit_code)| (RunnerWorkspaceOutput::Update(output), exit_code)),
         RunnerWorkspaceCommand::Pull {
             runner_id,
             remote_path,
