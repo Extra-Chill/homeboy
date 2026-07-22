@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.305.0] - 2026-07-22
+
+### Added
+- resolve {extension_path} in notification transport command argv
+
+### Changed
+- move test module to end of lib.rs for readable ordering
+- move test module to end of lib.rs for readable top-to-bottom ordering
+
+### Fixed
+- resolve release version identity once and keep it atomic
+- make source install/verify bounded and fail-closed instead of respawning homeboy
+- re-materialize a reaped cook follow-up baseline worktree instead of failing the provider preflight
+
 ## [0.304.1] - 2026-07-22
 
 ### Changed
