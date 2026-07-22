@@ -9,7 +9,9 @@ use homeboy::agents::agent_tasks::batch;
 use homeboy::agents::agent_tasks::dispatch_service::{
     AgentTaskDispatchCommand, DispatchCoreInputs,
 };
-use homeboy::agents::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
+use homeboy::agents::agent_tasks::gate::{
+    AgentTaskGateEnvironmentPolicy, AgentTaskGateRevealPolicy, VerifyGateOptions,
+};
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::provider::{self, AgentTaskProviderCatalog};
 use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
@@ -607,6 +609,8 @@ struct BatchCookSpec {
     gate_heartbeat_interval_seconds: u64,
     #[serde(default)]
     rerun_completed_gates: bool,
+    #[serde(default)]
+    gate_environment: AgentTaskGateEnvironmentPolicy,
     #[serde(default = "default_max_attempts")]
     max_attempts: u32,
     #[serde(default)]
@@ -749,6 +753,7 @@ impl BatchCookSpec {
                     gate_timeout_seconds: self.gate_timeout_seconds,
                     gate_heartbeat_interval_seconds: self.gate_heartbeat_interval_seconds,
                     rerun_completed_gates: self.rerun_completed_gates,
+                    gate_environment: self.gate_environment.clone(),
                 },
                 max_attempts: self.max_attempts,
                 no_finalize: self.no_finalize,
@@ -885,6 +890,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             gate_timeout_seconds: args.gates.gate_timeout_seconds,
             gate_heartbeat_interval_seconds: args.gates.gate_heartbeat_interval_seconds,
             rerun_completed_gates: args.gates.rerun_completed_gates,
+            gate_environment: VerifyGateOptions::from(args.gates.clone()).gate_environment,
             max_attempts: default_max_attempts(),
             no_finalize: false,
             base: args.base.clone(),
@@ -1531,6 +1537,10 @@ mod tests {
                 gate_timeout_seconds: 30 * 60,
                 gate_heartbeat_interval_seconds: 5,
                 rerun_completed_gates: false,
+                gate_environment_mode: "inherit".to_string(),
+                gate_environment: Vec::new(),
+                isolate_gate_home: true,
+                isolate_gate_xdg: true,
             },
             dry_run: true,
             run_plan: false,

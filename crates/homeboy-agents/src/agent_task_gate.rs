@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +16,13 @@ use homeboy_core::plan::{PlanStep, PlanStepStatus, PlanValues};
 use homeboy_core::{Error, Result};
 
 pub const AGENT_TASK_GATE_REPORT_SCHEMA: &str = "homeboy/agent-task-gate-report/v1";
-const TASK_AFFECTING_ENV_VARS: &[&str] = &["STUDIO_RUNTIME"];
+const XDG_ENV_VARS: &[&str] = &[
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_RUNTIME_DIR",
+];
 
 pub type AgentTaskGateVisibility = HomeboyGateVisibility;
 pub type AgentTaskGateRevealPolicy = HomeboyGateRevealPolicy;
@@ -55,6 +63,43 @@ pub struct VerifyGateOptions {
     /// rerunning them after restart.
     #[serde(default)]
     pub rerun_completed_gates: bool,
+    /// Declarative, non-secret process environment policy for every gate.
+    #[serde(default)]
+    pub gate_environment: AgentTaskGateEnvironmentPolicy,
+}
+
+/// Whether a gate starts with the caller's environment or an empty one.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskGateEnvironmentMode {
+    #[default]
+    Inherit,
+    Replace,
+}
+
+/// A portable gate environment contract. `variables` are deliberate non-secret
+/// inputs; secrets remain outside reports and this policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateEnvironmentPolicy {
+    #[serde(default)]
+    pub mode: AgentTaskGateEnvironmentMode,
+    #[serde(default)]
+    pub variables: BTreeMap<String, String>,
+    #[serde(default)]
+    pub isolate_home: bool,
+    #[serde(default)]
+    pub isolate_xdg: bool,
+}
+
+impl Default for AgentTaskGateEnvironmentPolicy {
+    fn default() -> Self {
+        Self {
+            mode: AgentTaskGateEnvironmentMode::Inherit,
+            variables: BTreeMap::new(),
+            isolate_home: true,
+            isolate_xdg: true,
+        }
+    }
 }
 
 fn default_private_gate_reveal() -> AgentTaskGateRevealPolicy {
@@ -87,6 +132,7 @@ impl Default for VerifyGateOptions {
             gate_timeout_seconds: default_gate_timeout_seconds(),
             gate_heartbeat_interval_seconds: default_gate_heartbeat_interval_seconds(),
             rerun_completed_gates: false,
+            gate_environment: AgentTaskGateEnvironmentPolicy::default(),
         }
     }
 }
@@ -129,6 +175,8 @@ pub struct AgentTaskGateBaselineComparison {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateEnvironment {
+    #[serde(default)]
+    pub mode: AgentTaskGateEnvironmentMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inherited: Vec<AgentTaskGateEnvironmentVariable>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -143,7 +191,29 @@ pub struct AgentTaskGateEnvironmentVariable {
 
 impl AgentTaskGateEnvironment {
     fn is_empty(&self) -> bool {
-        self.inherited.is_empty() && self.sanitized.is_empty()
+        self.mode == AgentTaskGateEnvironmentMode::Inherit
+            && self.inherited.is_empty()
+            && self.sanitized.is_empty()
+    }
+
+    pub(crate) fn replay_policy(&self) -> AgentTaskGateEnvironmentPolicy {
+        let variables = self
+            .inherited
+            .iter()
+            .map(|variable| (variable.name.clone(), variable.value.clone()))
+            .collect();
+        AgentTaskGateEnvironmentPolicy {
+            mode: self.mode,
+            variables,
+            isolate_home: self
+                .sanitized
+                .iter()
+                .any(|variable| variable.name == "HOME"),
+            isolate_xdg: self
+                .sanitized
+                .iter()
+                .any(|variable| XDG_ENV_VARS.contains(&variable.name.as_str())),
+        }
     }
 }
 
@@ -280,8 +350,8 @@ pub(crate) fn failure_fingerprint(stdout: &str, stderr: &str) -> String {
 #[cfg(test)]
 mod baseline_tests {
     use super::{
-        failure_fingerprint, run_gate_command_with_timeout, AgentTaskGateRevealPolicy,
-        AgentTaskGateStatus, AgentTaskGateVisibility,
+        failure_fingerprint, run_gate_command_with_timeout, AgentTaskGateEnvironmentPolicy,
+        AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility,
     };
     use std::time::Duration;
 
@@ -307,6 +377,7 @@ mod baseline_tests {
             AgentTaskGateRevealPolicy::FullEvidence,
             temp.path(),
             Duration::from_millis(20),
+            &AgentTaskGateEnvironmentPolicy::default(),
         )
         .expect("bounded gate report");
 
@@ -330,6 +401,7 @@ mod baseline_tests {
             AgentTaskGateRevealPolicy::FullEvidence,
             temp.path(),
             Duration::from_millis(20),
+            &AgentTaskGateEnvironmentPolicy::default(),
         )
         .expect("bounded gate report");
 
@@ -378,6 +450,26 @@ pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir(
     reveal_policy: AgentTaskGateRevealPolicy,
     runtime_tmpdir: Option<&Path>,
 ) -> Result<AgentTaskGateReport> {
+    run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+        cwd,
+        index,
+        command,
+        visibility,
+        reveal_policy,
+        runtime_tmpdir,
+        &AgentTaskGateEnvironmentPolicy::default(),
+    )
+}
+
+pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+    cwd: &Path,
+    index: usize,
+    command: &str,
+    visibility: AgentTaskGateVisibility,
+    reveal_policy: AgentTaskGateRevealPolicy,
+    runtime_tmpdir: Option<&Path>,
+    gate_environment: &AgentTaskGateEnvironmentPolicy,
+) -> Result<AgentTaskGateReport> {
     run_gate_command_with_supervision(
         cwd,
         index,
@@ -386,6 +478,7 @@ pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir(
         reveal_policy,
         runtime_tmpdir,
         None,
+        gate_environment,
     )
 }
 
@@ -397,6 +490,7 @@ pub(crate) fn run_gate_command_with_supervision(
     reveal_policy: AgentTaskGateRevealPolicy,
     runtime_tmpdir: Option<&Path>,
     supervision: Option<&GateSupervision>,
+    gate_environment: &AgentTaskGateEnvironmentPolicy,
 ) -> Result<AgentTaskGateReport> {
     let command_vec = vec!["sh".to_string(), "-lc".to_string(), command.to_string()];
     let mut process = Command::new(&command_vec[0]);
@@ -405,15 +499,13 @@ pub(crate) fn run_gate_command_with_supervision(
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let selected_environment = selected_gate_environment(gate_environment, runtime_tmpdir)?;
+    selected_environment.apply(&mut process);
     if let Some(runtime_tmpdir) = runtime_tmpdir {
         process
             .env("TMPDIR", runtime_tmpdir)
             .env("TEMP", runtime_tmpdir)
             .env("TMP", runtime_tmpdir);
-    }
-    let environment = selected_gate_environment(command);
-    for variable in &environment.sanitized {
-        process.env_remove(&variable.name);
     }
     if supervision.is_some() {
         if !homeboy_core::engine::command::supports_process_tree_isolation() {
@@ -502,7 +594,7 @@ pub(crate) fn run_gate_command_with_supervision(
         failure_evidence,
         visibility,
         reveal_policy,
-        environment,
+        selected_environment.report,
     ))
 }
 
@@ -517,22 +609,21 @@ pub(crate) fn run_gate_command_with_timeout(
     reveal_policy: AgentTaskGateRevealPolicy,
     runtime_tmpdir: &Path,
     timeout: Duration,
+    gate_environment: &AgentTaskGateEnvironmentPolicy,
 ) -> Result<AgentTaskGateReport> {
     let command_vec = vec!["sh".to_string(), "-lc".to_string(), command.to_string()];
-    let environment = selected_gate_environment(command);
     let mut process = Command::new("sh");
     process
         .args(["-lc", command])
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let selected_environment = selected_gate_environment(gate_environment, Some(runtime_tmpdir))?;
+    selected_environment.apply(&mut process);
     process
         .env("TMPDIR", runtime_tmpdir)
         .env("TEMP", runtime_tmpdir)
         .env("TMP", runtime_tmpdir);
-    for variable in &environment.sanitized {
-        process.env_remove(&variable.name);
-    }
     homeboy_core::engine::command::isolate_process_tree(&mut process);
     let mut child = process.spawn().map_err(|error| {
         Error::internal_io(
@@ -578,31 +669,99 @@ pub(crate) fn run_gate_command_with_timeout(
         failure_evidence,
         visibility,
         reveal_policy,
-        environment,
+        selected_environment.report,
     ))
 }
 
-fn selected_gate_environment(command: &str) -> AgentTaskGateEnvironment {
-    let mut environment = AgentTaskGateEnvironment::default();
-    for name in TASK_AFFECTING_ENV_VARS {
-        let Ok(value) = std::env::var(name) else {
-            continue;
-        };
-        let variable = AgentTaskGateEnvironmentVariable {
-            name: (*name).to_string(),
-            value,
-        };
-        if command_mentions_env(command, name) {
-            environment.inherited.push(variable);
-        } else {
-            environment.sanitized.push(variable);
-        }
-    }
-    environment
+struct SelectedGateEnvironment {
+    report: AgentTaskGateEnvironment,
+    values: BTreeMap<String, String>,
+    _scratch: Option<tempfile::TempDir>,
 }
 
-fn command_mentions_env(command: &str, name: &str) -> bool {
-    command.contains(&format!("{name}="))
+impl SelectedGateEnvironment {
+    fn apply(&self, process: &mut Command) {
+        if self.report.mode == AgentTaskGateEnvironmentMode::Replace {
+            process.env_clear();
+        }
+        for variable in &self.report.sanitized {
+            process.env_remove(&variable.name);
+        }
+        process.envs(&self.values);
+    }
+}
+
+fn selected_gate_environment(
+    policy: &AgentTaskGateEnvironmentPolicy,
+    runtime_tmpdir: Option<&Path>,
+) -> Result<SelectedGateEnvironment> {
+    let mut report = AgentTaskGateEnvironment {
+        mode: policy.mode,
+        ..AgentTaskGateEnvironment::default()
+    };
+    let mut values = policy.variables.clone();
+    for (name, value) in &policy.variables {
+        report.inherited.push(AgentTaskGateEnvironmentVariable {
+            name: name.clone(),
+            value: value.clone(),
+        });
+    }
+
+    let needs_scratch = policy.isolate_home || policy.isolate_xdg;
+    let scratch = if needs_scratch && runtime_tmpdir.is_none() {
+        Some(tempfile::tempdir().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("create isolated gate environment".to_string()),
+            )
+        })?)
+    } else {
+        None
+    };
+    let root = runtime_tmpdir.or_else(|| scratch.as_ref().map(|dir| dir.path()));
+    if policy.isolate_home {
+        let root = root.expect("isolated gate environment scratch root");
+        let home = root.join("gate-home");
+        fs::create_dir_all(&home).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("create {}", home.display())),
+            )
+        })?;
+        set_isolated_environment_variable(&mut report, &mut values, "HOME", home);
+    }
+    if policy.isolate_xdg {
+        let root = root.expect("isolated gate environment scratch root");
+        for name in XDG_ENV_VARS {
+            let path = root.join("gate-xdg").join(name.to_ascii_lowercase());
+            fs::create_dir_all(&path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("create {}", path.display())),
+                )
+            })?;
+            set_isolated_environment_variable(&mut report, &mut values, name, path);
+        }
+    }
+    Ok(SelectedGateEnvironment {
+        report,
+        values,
+        _scratch: scratch,
+    })
+}
+
+fn set_isolated_environment_variable(
+    report: &mut AgentTaskGateEnvironment,
+    values: &mut BTreeMap<String, String>,
+    name: &str,
+    path: PathBuf,
+) {
+    let value = path.display().to_string();
+    values.insert(name.to_string(), value.clone());
+    report.sanitized.push(AgentTaskGateEnvironmentVariable {
+        name: name.to_string(),
+        value,
+    });
 }
 
 fn gate_report_schema() -> String {
@@ -791,6 +950,7 @@ mod tests {
             AgentTaskGateRevealPolicy::FullEvidence,
             None,
             Some(&supervision),
+            &AgentTaskGateEnvironmentPolicy::default(),
         )
         .is_err());
         let pid = child_pid
@@ -826,6 +986,7 @@ mod tests {
             AgentTaskGateRevealPolicy::FullEvidence,
             None,
             Some(&supervision),
+            &AgentTaskGateEnvironmentPolicy::default(),
         )
         .expect("gate");
         assert!(tails
@@ -861,6 +1022,7 @@ mod tests {
             AgentTaskGateRevealPolicy::FullEvidence,
             None,
             Some(&supervision),
+            &AgentTaskGateEnvironmentPolicy::default(),
         )
         .expect("private gate");
         let tails = tails.lock().expect("tails");
@@ -1074,39 +1236,76 @@ mod tests {
     }
 
     #[test]
-    fn gate_command_sanitizes_inherited_runtime_selectors_by_default() {
+    fn isolated_gate_does_not_observe_ambient_durable_recipes_runs_or_runtime_liveness() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::env::set_var("STUDIO_RUNTIME", "runtime-a");
+        let worktree = tempfile::tempdir().expect("worktree");
+        let ambient = tempfile::tempdir().expect("ambient state");
+        let home = ambient.path().join("home");
+        let xdg_state = ambient.path().join("state");
+        let xdg_runtime = ambient.path().join("runtime");
+        fs::create_dir_all(home.join(".homeboy/recipes")).expect("ambient recipe directory");
+        fs::create_dir_all(xdg_state.join("runs/active")).expect("ambient run directory");
+        fs::create_dir_all(xdg_runtime.join("homeboy-live")).expect("ambient runtime directory");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("XDG_STATE_HOME", &xdg_state);
+        std::env::set_var("XDG_RUNTIME_DIR", &xdg_runtime);
 
-        let report = run_gate_command(temp.path(), 7, "printf \"%s\" \"${STUDIO_RUNTIME:-unset}\"")
-            .expect("gate report");
+        let report = run_gate_command(
+            worktree.path(),
+            7,
+            "test ! -e \"$HOME/.homeboy/recipes\" && test ! -e \"$XDG_STATE_HOME/runs/active\" && test ! -e \"$XDG_RUNTIME_DIR/homeboy-live\"",
+        )
+        .expect("isolated gate report");
 
-        std::env::remove_var("STUDIO_RUNTIME");
+        std::env::remove_var("HOME");
+        std::env::remove_var("XDG_STATE_HOME");
+        std::env::remove_var("XDG_RUNTIME_DIR");
 
-        assert_eq!(report.stdout, "unset");
-        assert_eq!(report.environment.sanitized.len(), 1);
-        assert_eq!(report.environment.sanitized[0].name, "STUDIO_RUNTIME");
-        assert_eq!(report.environment.sanitized[0].value, "runtime-a");
+        assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+        assert!(report
+            .environment
+            .sanitized
+            .iter()
+            .any(|variable| variable.name == "HOME"));
+        assert!(report
+            .environment
+            .sanitized
+            .iter()
+            .any(|variable| variable.name == "XDG_STATE_HOME"));
+        assert!(report
+            .environment
+            .sanitized
+            .iter()
+            .any(|variable| variable.name == "XDG_RUNTIME_DIR"));
     }
 
     #[test]
-    fn gate_command_preserves_runtime_selector_when_command_requests_it() {
-        let _guard = ENV_MUTEX.lock().expect("env lock");
+    fn replacing_gate_environment_preserves_declared_variables_and_reports_policy() {
         let temp = tempfile::tempdir().expect("tempdir");
-        std::env::set_var("STUDIO_RUNTIME", "runtime-a");
-
-        let report = run_gate_command(
+        let policy = AgentTaskGateEnvironmentPolicy {
+            mode: AgentTaskGateEnvironmentMode::Replace,
+            variables: BTreeMap::from([("DECLARED_INPUT".to_string(), "kept".to_string())]),
+            isolate_home: false,
+            isolate_xdg: false,
+        };
+        let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
             temp.path(),
             8,
-            "STUDIO_RUNTIME=runtime-a; printf \"%s\" \"$STUDIO_RUNTIME\"",
+            "test \"$DECLARED_INPUT\" = kept && test -z \"${HOME:-}\"",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            &policy,
         )
         .expect("gate report");
 
-        std::env::remove_var("STUDIO_RUNTIME");
-
-        assert_eq!(report.stdout, "runtime-a");
+        assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+        assert_eq!(
+            report.environment.mode,
+            AgentTaskGateEnvironmentMode::Replace
+        );
         assert_eq!(report.environment.inherited.len(), 1);
-        assert_eq!(report.environment.inherited[0].name, "STUDIO_RUNTIME");
+        assert_eq!(report.environment.inherited[0].name, "DECLARED_INPUT");
+        assert_eq!(report.environment.inherited[0].value, "kept");
     }
 }

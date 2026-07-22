@@ -8,9 +8,8 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 use crate::agent_task_gate::{
-    run_gate_command, run_gate_command_with_policy,
-    run_gate_command_with_policy_and_runtime_tmpdir, AgentTaskGateReport,
-    AgentTaskGateRevealPolicy, AgentTaskGateVisibility,
+    run_gate_command, run_gate_command_with_policy, AgentTaskGateReport, AgentTaskGateRevealPolicy,
+    AgentTaskGateVisibility,
 };
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::git::output_allow_empty;
@@ -367,6 +366,7 @@ pub(crate) trait AgentTaskPromotionWorkspaceProvider {
         visibility: AgentTaskGateVisibility,
         reveal_policy: AgentTaskGateRevealPolicy,
         _runtime_tmpdir: &Path,
+        _gate_environment: &crate::agent_task_gate::AgentTaskGateEnvironmentPolicy,
     ) -> Result<AgentTaskGateReport> {
         self.verify(cwd, index, command, visibility, reveal_policy)
     }
@@ -578,14 +578,16 @@ impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider 
         visibility: AgentTaskGateVisibility,
         reveal_policy: AgentTaskGateRevealPolicy,
         runtime_tmpdir: &Path,
+        gate_environment: &crate::agent_task_gate::AgentTaskGateEnvironmentPolicy,
     ) -> Result<AgentTaskGateReport> {
-        run_gate_command_with_policy_and_runtime_tmpdir(
+        crate::agent_task_gate::run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
             cwd,
             index,
             command,
             visibility,
             reveal_policy,
             Some(runtime_tmpdir),
+            gate_environment,
         )
     }
 }
