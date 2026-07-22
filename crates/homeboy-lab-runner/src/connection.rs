@@ -40,9 +40,8 @@ const REMOTE_LEASELESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOTE_LEASELESS_RECOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
-use connection_daemon::{
-    connect_remote_daemon, daemon_http_freshness, daemon_http_version, versions_match,
-};
+pub(crate) use connection_daemon::versions_match;
+use connection_daemon::{connect_remote_daemon, daemon_http_freshness, daemon_http_version};
 use connection_daemon::{daemon_http_identity, normalize_homeboy_version_owned};
 use connection_daemon::{daemon_http_runtime_loaded_paths, daemon_http_runtime_stale_paths};
 

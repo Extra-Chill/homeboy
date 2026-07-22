@@ -38,6 +38,8 @@ pub fn runner_upgrade_failure_entry(
         extensions_skipped: Vec::new(),
         extensions_failed: Vec::new(),
         stale_daemon: None,
+        daemon_previous_version: None,
+        daemon_new_version: None,
         exit_code,
         detail,
     }

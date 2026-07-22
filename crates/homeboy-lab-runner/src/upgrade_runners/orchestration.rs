@@ -226,7 +226,7 @@ pub fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconn
     extension_updates: &[ExtensionUpgradeEntry],
     exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
     status: impl Fn(&str) -> Result<RunnerStatusReport>,
-    reconnect_stale_daemon: impl FnMut(&str) -> Result<String>,
+    reconnect_stale_daemon: impl FnMut(&str) -> Result<(String, Option<String>)>,
     materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
     update_homeboy_path: impl FnMut(&str, &str) -> Result<()>,
 ) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
@@ -254,7 +254,7 @@ fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconnecto
     extension_updates: &[ExtensionUpgradeEntry],
     mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
     status: impl Fn(&str) -> Result<RunnerStatusReport>,
-    mut reconnect_stale_daemon: impl FnMut(&str) -> Result<String>,
+    mut reconnect_stale_daemon: impl FnMut(&str) -> Result<(String, Option<String>)>,
     mut materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
     mut update_homeboy_path: impl FnMut(&str, &str) -> Result<()>,
     expected_controller_identity: Option<&str>,
@@ -301,7 +301,7 @@ pub fn upgrade_runner_with_executor(
     extension_updates: &[ExtensionUpgradeEntry],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
     status: &impl Fn(&str) -> Result<RunnerStatusReport>,
-    reconnect_stale_daemon: &mut impl FnMut(&str) -> Result<String>,
+    reconnect_stale_daemon: &mut impl FnMut(&str) -> Result<(String, Option<String>)>,
     materialize_source_path: &mut impl FnMut(&Runner, &Path) -> Result<String>,
     update_homeboy_path: &mut impl FnMut(&str, &str) -> Result<()>,
     expected_controller_identity: Option<&str>,
@@ -610,11 +610,33 @@ pub fn upgrade_runner_with_executor(
     );
     let mut stale_daemon_repair_detail = None;
     let mut stale_daemon = runner_stale_daemon(runner, status);
+    let mut daemon_previous_version = None;
+    let mut daemon_new_version = None;
     if stale_daemon.is_some() && path_drift.is_none() {
+        let daemon_before = stale_daemon
+            .as_ref()
+            .map(|daemon| daemon.session_homeboy_version.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        daemon_previous_version = Some(daemon_before.clone());
         match reconnect_stale_daemon(&runner.id) {
-            Ok(detail) => {
-                stale_daemon = None;
-                stale_daemon_repair_detail = Some(detail);
+            Ok((detail, observed_version)) => {
+                daemon_new_version = observed_version.clone();
+                let daemon_after = observed_version.as_deref().unwrap_or("unknown");
+                if matches!(
+                    (observed_version.as_deref(), new_version.as_deref()),
+                    (Some(observed), Some(expected))
+                        if crate::connection::versions_match(observed, expected)
+                ) {
+                    stale_daemon = None;
+                    stale_daemon_repair_detail = Some(format!(
+                        "runner daemon identity: {daemon_before} -> {daemon_after}; {detail}"
+                    ));
+                } else {
+                    stale_daemon_repair_detail = Some(format!(
+                        "runner daemon reconnect did not converge: expected {}, observed {daemon_after}; {detail}",
+                        new_version.as_deref().unwrap_or("the configured runner version")
+                    ));
+                }
             }
             Err(err) => {
                 stale_daemon_repair_detail = Some(format!(
@@ -661,6 +683,8 @@ pub fn upgrade_runner_with_executor(
         extensions_skipped,
         extensions_failed,
         stale_daemon,
+        daemon_previous_version,
+        daemon_new_version,
         exit_code,
         detail,
     }

@@ -186,7 +186,7 @@ fn open_daemon_tunnel(
     ))
 }
 
-pub(super) fn versions_match(left: &str, right: &str) -> bool {
+pub(crate) fn versions_match(left: &str, right: &str) -> bool {
     normalize_homeboy_version(left) == normalize_homeboy_version(right)
 }
 
