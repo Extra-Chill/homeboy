@@ -347,6 +347,66 @@ impl ObservationStore {
         collect_rows(rows, "collect recent run records")
     }
 
+    /// Atomically mark a run's notification as delivered.
+    ///
+    /// Sets `notification_delivered` in the run's `metadata_json` **only if**
+    /// it is not already present. Returns `Ok(true)` if the marker was newly
+    /// set (this caller won the exactly-once race) or `Ok(false)` if the run
+    /// was already marked (another caller dispatched first).
+    ///
+    /// This is the single coordination point that prevents duplicate
+    /// notifications when both the runner-direct path and the controller
+    /// backstop observe a terminal run.
+    pub fn mark_notification_delivered(&self, run_id: &str, delivered_by: &str) -> Result<bool> {
+        validate_required("run_id", run_id)?;
+        let marker = serde_json::json!({
+            "at": chrono::Utc::now().to_rfc3339(),
+            "by": delivered_by,
+        });
+        let marker_str = serde_json::to_string(&marker).map_err(|e| {
+            Error::internal_json(
+                e.to_string(),
+                Some("serialize notification marker".to_string()),
+            )
+        })?;
+        let rows = execute_with_retry("mark notification delivered", || {
+            self.connection.execute(
+                r#"
+                UPDATE runs
+                SET metadata_json = json_set(
+                    COALESCE(metadata_json, '{}'),
+                    '$.notification_delivered',
+                    json(?1)
+                )
+                WHERE id = ?2
+                  AND json_extract(COALESCE(metadata_json, '{}'), '$.notification_delivered') IS NULL
+                "#,
+                params![marker_str, run_id],
+            )
+        })?;
+        Ok(rows > 0)
+    }
+
+    /// Check whether a run's notification has already been delivered.
+    pub fn is_notification_delivered(&self, run_id: &str) -> Result<bool> {
+        validate_required("run_id", run_id)?;
+        let result: bool = self
+            .connection
+            .query_row(
+                r#"
+                SELECT json_extract(COALESCE(metadata_json, '{}'), '$.notification_delivered') IS NOT NULL
+                FROM runs
+                WHERE id = ?1
+                "#,
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_error("check notification delivered"))?
+            .unwrap_or(false);
+        Ok(result)
+    }
+
     pub fn import_run(&self, run: &RunRecord) -> Result<()> {
         validate_required("run.id", &run.id)?;
         let metadata_json = serialize_metadata(&run.metadata_json)?;

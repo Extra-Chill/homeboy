@@ -1265,3 +1265,36 @@ fn should_force_diagnostic_ssh(runner: &Runner, options: &RunnerExecOptions) -> 
     select_runner_transport(runner, None, options.allow_diagnostic_ssh)
         == RunnerTransport::DiagnosticSsh
 }
+
+/// Fire a run-completion notification directly from the runner, bypassing the
+/// controller poll loop.  The exactly-once delivered marker in `metadata_json`
+/// ensures the controller backstop does not duplicate the notification.
+///
+/// Best-effort: notification dispatch and marker persistence are non-fatal.
+pub(super) fn fire_runner_direct_notification(
+    run_id: Option<&str>,
+    job: &Job,
+    notification_route: Option<&homeboy_core::notification_route::NotificationRoute>,
+) {
+    let Some(run_id) = run_id else {
+        return;
+    };
+    let Some(route) = notification_route else {
+        return;
+    };
+    let status = job.status.daemon_status_label();
+    let store = match homeboy_core::observation::ObservationStore::open_initialized() {
+        Ok(store) => store,
+        Err(_) => return,
+    };
+    let already_delivered = store.is_notification_delivered(run_id).unwrap_or(true);
+    if already_delivered {
+        return;
+    }
+    let event =
+        homeboy_core::notify::NotifyEvent::run_completed_with_route(run_id, status, Some(route));
+    let outcome = homeboy_core::notify::dispatch(&event);
+    if outcome.delivered {
+        let _ = store.mark_notification_delivered(run_id, "runner-direct");
+    }
+}
