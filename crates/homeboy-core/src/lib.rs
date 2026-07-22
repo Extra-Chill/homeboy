@@ -128,6 +128,7 @@ pub mod loop_lifecycle;
 pub mod markdown;
 pub mod matrix_artifact_summary;
 pub use homeboy_lab_contract::notification_route;
+pub mod kimaki_route;
 pub mod notify;
 pub mod observation;
 // output moved to the internal `homeboy-output` crate. Re-exported so existing

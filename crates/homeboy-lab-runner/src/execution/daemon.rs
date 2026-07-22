@@ -341,6 +341,13 @@ pub(super) fn exec_via_daemon(
             },
         )?;
     }
+    fire_runner_direct_notification(
+        run_id.as_deref(),
+        &job,
+        lab_runner_workload
+            .as_ref()
+            .and_then(|workload| workload.notification_route.as_ref()),
+    );
     let artifacts = job.artifacts.clone();
     if let Some(session) = accepted_session.as_ref() {
         super::super::generation_store::record_job_artifacts(

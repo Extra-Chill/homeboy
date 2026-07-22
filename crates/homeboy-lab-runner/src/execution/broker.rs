@@ -297,6 +297,13 @@ pub(super) fn exec_via_reverse_broker(
         run_id.as_deref(),
         mirror_run_id.as_deref(),
     )?;
+    fire_runner_direct_notification(
+        run_id.as_deref(),
+        &job,
+        lab_runner_workload
+            .as_ref()
+            .and_then(|workload| workload.notification_route.as_ref()),
+    );
     let artifacts = job.artifacts.clone();
     let mutation_artifacts = mutation_artifacts_from_job(&job, &result);
 

@@ -344,7 +344,7 @@ impl CliRuntime {
             cli.notification_transport.as_deref(),
             cli.notification_route.as_deref(),
         ) {
-            Ok(route) => route,
+            Ok(route) => route.or_else(crate::core::kimaki_route::resolve_origin_route),
             Err(err) => {
                 output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
                 return std::process::ExitCode::from(2);
