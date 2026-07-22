@@ -1,7 +1,7 @@
 {
   "name": "Discord Notifications",
   "id": "discord",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "icon": "message.circle",
   "description": "Outbound Discord run-completion notification delivery for Homeboy",
   "author": "Extra Chill",
@@ -15,14 +15,9 @@
   },
   "notification_transports": [
     {
-      "schema": "homeboy/notification-transport-command/v1",
+      "schema": "homeboy/notification-transport/v1",
       "id": "discord.run-completion",
-      "command": "node {{extension_path}}/scripts/notify.mjs --run-id {run_id} --status {status} --title {title} --body {body} --route={route}",
-      "contract": {
-        "event": "homeboy/run-completion/v1",
-        "outbound_only": true,
-        "owns_orchestration_lifecycle": false
-      }
+      "command": ["node", "{extension_path}/scripts/notify.mjs"]
     }
   ]
 }
