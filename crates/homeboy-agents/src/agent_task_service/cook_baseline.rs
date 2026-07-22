@@ -321,7 +321,16 @@ pub(crate) fn materialize_follow_up_baseline(
             None,
         )
     })?;
-    let normalized = normalize_promotion_patch(artifact, &promotion.to_worktree)?;
+    // A provider patch is relative to an adopted dirty candidate, while the
+    // retry checkout starts at the clean target HEAD. Reconstruct from the
+    // controller-recorded complete candidate diff when available.
+    let complete_candidate = promotion
+        .provenance
+        .pointer("/gate_feedback_baseline/current_diff")
+        .and_then(Value::as_str)
+        .filter(|diff| !diff.trim().is_empty())
+        .unwrap_or(artifact);
+    let normalized = normalize_promotion_patch(complete_candidate, &promotion.to_worktree)?;
     let index = tempfile::NamedTempFile::new().map_err(|error| {
         Error::internal_io(
             error.to_string(),

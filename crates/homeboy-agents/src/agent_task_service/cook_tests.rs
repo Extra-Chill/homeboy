@@ -3262,6 +3262,88 @@ fn follow_up_baseline_is_clean_and_preserves_binary_mode_and_untracked_candidate
 }
 
 #[test]
+fn follow_up_baseline_combines_adopted_candidate_with_overlapping_provider_delta() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = &temp.path().join("repo");
+    std::fs::create_dir(root).unwrap();
+    for args in [
+        vec!["init"],
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "test@example.com"],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::write(root.join("candidate.txt"), "base\n").unwrap();
+    assert!(Command::new("git")
+        .args(["add", "."])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "base"])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    let target_head = git_output(root, &["rev-parse", "HEAD"]).unwrap();
+
+    std::fs::write(root.join("candidate.txt"), "adopted candidate\n").unwrap();
+    assert!(Command::new("git")
+        .args(["add", "candidate.txt"])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(
+        root.join("candidate.txt"),
+        "adopted candidate\nprovider delta\n",
+    )
+    .unwrap();
+    let provider_patch = Command::new("git")
+        .args(["diff", "--binary", "--full-index", "--find-renames"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(provider_patch.status.success());
+    let complete_candidate = Command::new("git")
+        .args(["diff", "--binary", "--full-index", "--find-renames", "HEAD"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(complete_candidate.status.success());
+    let patch_path = temp.path().join("provider.patch");
+    std::fs::write(&patch_path, provider_patch.stdout).unwrap();
+    let complete_candidate = String::from_utf8(complete_candidate.stdout).unwrap();
+    let report: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+        "schema":"homeboy/agent-task-promotion-report/v1", "status":"applied",
+        "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
+        "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":target_head},
+        "patch_artifact":{"id":"provider-delta","kind":"patch","path":patch_path},
+        "changed_files":["candidate.txt"], "command_evidence":[], "deterministic_gates":[], "gate_results":[],
+        "provenance":{"worktree_path":root, "gate_feedback_baseline":{"current_diff":complete_candidate}},
+        "operator_notification":{"status":"completed","message":"applied"}
+    }))
+    .unwrap();
+
+    let baseline =
+        materialize_follow_up_baseline(&report, "first-run", "candidate-task").expect("baseline");
+
+    assert!(git_output(&baseline.path, &["status", "--porcelain"])
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        std::fs::read_to_string(baseline.path.join("candidate.txt")).unwrap(),
+        "adopted candidate\nprovider delta\n"
+    );
+}
+
+#[test]
 fn follow_up_baseline_refuses_when_promotion_target_head_has_advanced() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path().join("repo");
