@@ -45,6 +45,7 @@ use homeboy_core::engine::shell;
 use homeboy_core::server::{is_transient_ssh_error, CommandOutput};
 
 mod snapshots;
+use snapshots::workspace_snapshot_for_lease;
 #[cfg(test)]
 pub(crate) use snapshots::workspace_snapshot_scan_command;
 pub use snapshots::{list_workspaces, workspace_snapshots};
@@ -431,25 +432,28 @@ pub fn update_workspace(
 ) -> Result<(RunnerWorkspaceUpdateOutput, i32)> {
     let runner = load(runner_id)?;
     let local_path = canonical_workspace_path(&options.path)?;
-    let (snapshots, _) = workspace_snapshots(
-        runner_id,
-        RunnerWorkspaceSnapshotFilters {
-            limit: usize::MAX,
-            ..Default::default()
-        },
-    )?;
-    let snapshot = snapshots
-        .snapshots
-        .into_iter()
-        .find(|entry| entry.workspace_lease.as_deref() == Some(options.lease.as_str()))
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "lease",
-                "workspace update requires a current opaque workspace lease for this runner",
-                Some(options.lease.clone()),
-                None,
-            )
-        })?;
+    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_root",
+            "runner workspace update requires workspace_root",
+            Some(runner.id.clone()),
+            None,
+        )
+    })?;
+    validate_absolute_path("workspace_root", workspace_root)?;
+    let snapshot = workspace_snapshot_for_lease(
+        &runner,
+        &format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/')),
+        &options.lease,
+    )?
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "lease",
+            "workspace update requires a current opaque workspace lease for this runner",
+            Some(options.lease.clone()),
+            None,
+        )
+    })?;
     let state = local_git_state(&local_path);
     if snapshot.local_path != local_path.display().to_string()
         || snapshot.source_remote_url != state.remote_url

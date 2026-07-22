@@ -81,6 +81,81 @@ fn prepared_workspace_update_applies_delta_retains_assets_and_rotates_lease() {
 }
 
 #[test]
+fn ssh_prepared_workspace_update_resolves_fresh_lease_without_projecting_large_root() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_ssh_runner("prepared-update-ssh", runner_root.path());
+        let source = tempfile::tempdir().expect("source");
+        fs::write(source.path().join("file.txt"), "before\n").expect("source");
+        let (synced, _) =
+            sync_workspace("prepared-update-ssh", sync_options(source.path())).expect("sync");
+        let lease = synced.prepared_workspace_lease.expect("lease");
+
+        let root = runner_root.path().join("_lab_workspaces");
+        let metadata_path = Path::new(&synced.remote_path).join(".homeboy/runner-workspace.json");
+        let metadata = fs::read_to_string(&metadata_path).expect("metadata");
+        let metadata_value: serde_json::Value =
+            serde_json::from_str(&metadata).expect("valid metadata");
+        fs::write(
+            &metadata_path,
+            serde_json::to_string(&metadata_value).expect("compact metadata"),
+        )
+        .expect("write compact metadata");
+        for index in 0..24 {
+            let path = root.join(format!("stale-large-{index:02}/.homeboy"));
+            fs::create_dir_all(&path).expect("stale workspace");
+            let oversized = metadata.replacen(
+                "\n}",
+                &format!(
+                    ",\n  \"ignored_large_manifest_{index}\": \"{}\"\n}}",
+                    "x".repeat(256 * 1024)
+                ),
+                1,
+            );
+            fs::write(path.join("runner-workspace.json"), oversized).expect("stale metadata");
+        }
+
+        fs::write(source.path().join("file.txt"), "after\n").expect("update source");
+        let (updated, _) = update_workspace(
+            "prepared-update-ssh",
+            RunnerWorkspaceUpdateOptions {
+                path: source.path().display().to_string(),
+                lease,
+            },
+        )
+        .expect("fresh lease update despite oversized aggregate metadata");
+
+        assert_eq!(
+            fs::read_to_string(Path::new(&updated.remote_path).join("file.txt")).unwrap(),
+            "after\n"
+        );
+    });
+}
+
+#[test]
+fn prepared_workspace_update_rejects_relative_runner_root() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"relative-update","kind":"local","workspace_root":"relative"}"#,
+            false,
+        )
+        .expect("create runner");
+        let source = tempfile::tempdir().expect("source");
+
+        let error = update_workspace(
+            "relative-update",
+            RunnerWorkspaceUpdateOptions {
+                path: source.path().display().to_string(),
+                lease: "workspace:unused".to_string(),
+            },
+        )
+        .expect_err("relative workspace root must be rejected");
+
+        assert!(error.message.contains("absolute path"));
+    });
+}
+
+#[test]
 fn duplicate_snapshot_identities_target_their_own_opaque_workspace_lease() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
@@ -314,6 +389,22 @@ fn create_local_runner(id: &str, workspace_root: &Path) {
         false,
     )
     .expect("create runner");
+}
+
+fn create_ssh_runner(id: &str, workspace_root: &Path) {
+    homeboy_core::server::create(
+        &format!(r#"{{"id":"{id}","host":"localhost","user":"test"}}"#),
+        false,
+    )
+    .expect("create localhost server");
+    crate::create(
+        &format!(
+            r#"{{"id":"{id}","kind":"ssh","server_id":"{id}","workspace_root":"{}"}}"#,
+            workspace_root.display()
+        ),
+        false,
+    )
+    .expect("create SSH runner");
 }
 
 fn sync_options(path: &Path) -> RunnerWorkspaceSyncOptions {

@@ -233,6 +233,54 @@ fn stale_truncated_metadata_does_not_block_current_workspace_sync() {
 }
 
 #[test]
+fn ssh_snapshot_listing_preserves_entries_and_isolates_invalid_metadata() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_ssh_runner("lab-ssh-snapshots", runner_root.path());
+        let source = tempfile::tempdir().expect("source");
+        fs::write(source.path().join("file.txt"), "source\n").expect("source");
+        let (synced, _) = sync_workspace(
+            "lab-ssh-snapshots",
+            sync_options(
+                source.path().display().to_string(),
+                Some("ssh-run".to_string()),
+            ),
+        )
+        .expect("sync");
+        let invalid = runner_root
+            .path()
+            .join("_lab_workspaces/invalid/.homeboy/runner-workspace.json");
+        fs::create_dir_all(invalid.parent().expect("invalid parent")).expect("invalid workspace");
+        fs::write(&invalid, "{\"workspace_lease\":").expect("invalid metadata");
+
+        let (output, _) = workspace_snapshots(
+            "lab-ssh-snapshots",
+            RunnerWorkspaceSnapshotFilters {
+                run_id: Some("ssh-run".to_string()),
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .expect("SSH snapshot listing");
+
+        assert_eq!(output.variant, "workspace_snapshots");
+        assert_eq!(output.snapshots.len(), 1);
+        assert_eq!(output.snapshots[0].remote_path, synced.remote_path);
+        assert_eq!(output.skipped_invalid_metadata.len(), 1);
+        assert_eq!(
+            output.skipped_invalid_metadata[0].source,
+            invalid
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .display()
+                .to_string()
+        );
+    });
+}
+
+#[test]
 fn workspace_snapshots_filters_by_repo_ref_commit_and_run() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -661,6 +709,22 @@ fn create_local_runner(id: &str, workspace_root: &std::path::Path) {
         false,
     )
     .expect("create runner");
+}
+
+fn create_ssh_runner(id: &str, workspace_root: &std::path::Path) {
+    homeboy_core::server::create(
+        &format!(r#"{{"id":"{id}","host":"localhost","user":"test"}}"#),
+        false,
+    )
+    .expect("create localhost server");
+    crate::create(
+        &format!(
+            r#"{{"id":"{id}","kind":"ssh","server_id":"{id}","workspace_root":"{}"}}"#,
+            workspace_root.display()
+        ),
+        false,
+    )
+    .expect("create SSH runner");
 }
 
 fn sync_options(path: String, run_id: Option<String>) -> RunnerWorkspaceSyncOptions {

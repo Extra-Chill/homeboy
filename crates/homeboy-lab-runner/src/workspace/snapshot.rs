@@ -964,8 +964,8 @@ pub(crate) fn materialize_prepared_workspace_update(
         metadata_parent = shell::quote_arg(&format!("{temporary}/.homeboy")),
     );
     let finalize = format!(
-        "grep -qF -- {lease} {live_metadata} && mv {remote} {backup} && if mv {temporary} {remote}; then rm -rf {backup} || true; else if mv {backup} {remote}; then exit 1; else printf '%s\\n' 'prepared workspace promotion failed; original remains at {backup}' >&2; exit 2; fi; fi",
-        lease = shell::quote_arg(&format!("\"workspace_lease\": \"{expected_lease}\"")),
+        "tr -d '[:space:]' < {live_metadata} | grep -qF -- {lease} && mv {remote} {backup} && if mv {temporary} {remote}; then rm -rf {backup} || true; else if mv {backup} {remote}; then exit 1; else printf '%s\\n' 'prepared workspace promotion failed; original remains at {backup}' >&2; exit 2; fi; fi",
+        lease = shell::quote_arg(&format!("\"workspace_lease\":\"{expected_lease}\"")),
         live_metadata = shell::quote_arg(&format!("{remote_path}/{RUNNER_WORKSPACE_METADATA_FILE}")),
         remote = shell::quote_arg(remote_path), temporary = shell::quote_arg(&temporary), backup = shell::quote_arg(&backup),
     );
