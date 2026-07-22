@@ -3441,7 +3441,11 @@ fn test_reconstruct_dispatcher(
 /// durable recipe, a terminal Succeeded aggregate, and an applied promotion.
 /// When `pre_finalized` is set, also record a `cook_finalization` so the resume
 /// exercises the idempotent load path (no real PR backend needed).
-fn stage_terminal_batch_child(cook_id: &str, pre_finalized: bool) -> String {
+fn stage_terminal_batch_child(
+    cook_id: &str,
+    status: crate::agent_task_scheduler::AgentTaskAggregateStatus,
+    pre_finalized: bool,
+) -> String {
     let mut options = batch_cook_options(
         cook_id,
         Arc::new(RecordingDetachedAttemptDispatcher {
@@ -3470,7 +3474,7 @@ fn stage_terminal_batch_child(cook_id: &str, pre_finalized: bool) -> String {
         &crate::agent_task_scheduler::AgentTaskAggregate {
             schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: options.initial_plan.plan_id.clone(),
-            status: crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
+            status,
             totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
                 succeeded: 1,
                 ..Default::default()
@@ -3520,8 +3524,21 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
         // (the synchronous coordinator exited); a pre-recorded finalization
         // stands in for the real PR backend so the resume exercises the
         // idempotent load path deterministically (#9525).
-        let child_a = stage_terminal_batch_child("cook-9525-a", true);
-        let child_b = stage_terminal_batch_child("cook-9525-b", true);
+        let child_a = stage_terminal_batch_child(
+            "cook-9525-a",
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
+            true,
+        );
+        let child_b = stage_terminal_batch_child(
+            "cook-9525-b",
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
+            true,
+        );
+        let child_partial = stage_terminal_batch_child(
+            "cook-9525-partial",
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable,
+            true,
+        );
 
         crate::agent_task_batch::persist_fanout_run_batch(
             "batch-9525",
@@ -3535,6 +3552,10 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
                     task_id: "cook-9525-b".to_string(),
                     run_id: child_b.clone(),
                 },
+                crate::agent_task_batch::FanoutRunBatchChild {
+                    task_id: "cook-9525-partial".to_string(),
+                    run_id: child_partial.clone(),
+                },
             ],
             Value::Null,
         )
@@ -3547,8 +3568,8 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
             .expect("resume harvests terminal children");
 
         assert_eq!(result.exit_code, 0, "both children finalize green");
-        assert_eq!(result.value.total, 2);
-        assert_eq!(result.value.succeeded, 2);
+        assert_eq!(result.value.total, 3);
+        assert_eq!(result.value.succeeded, 3);
         assert_eq!(result.value.failed, 0);
         for cell in &result.value.cooks {
             assert_eq!(cell.exit_code, 0);
@@ -3567,13 +3588,14 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
             .expect("child_finalizations recorded");
         assert!(finalizations.contains_key(&child_a));
         assert!(finalizations.contains_key(&child_b));
+        assert!(finalizations.contains_key(&child_partial));
 
         // Resume is idempotent: a second call still succeeds and does not
         // redispatch or duplicate a PR (finalization is loaded, not recreated).
         let second = resume_cook_batch("batch-9525", UnusedExecutor, test_reconstruct_dispatcher)
             .expect("second resume is idempotent");
         assert_eq!(second.exit_code, 0);
-        assert_eq!(second.value.succeeded, 2);
+        assert_eq!(second.value.succeeded, 3);
     });
 }
 

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-use crate::agent_task_lifecycle::{self, AgentTaskRunRecord, AgentTaskRunState};
+use crate::agent_task_lifecycle::{self, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
 use homeboy_core::{paths, Error, Result};
 
@@ -459,7 +459,9 @@ fn projection_pending_child(
     child: &AgentTaskBatchChildRun,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<Option<AgentTaskBatchProjectionPendingChild>> {
-    let Some(reason) = agent_task_lifecycle::terminal_artifact_projection_readiness(&record.run_id)? else {
+    let Some(reason) =
+        agent_task_lifecycle::terminal_artifact_projection_readiness(&record.run_id)?
+    else {
         return Ok(None);
     };
     Ok(Some(AgentTaskBatchProjectionPendingChild {
@@ -614,8 +616,10 @@ mod tests {
         AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
         AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
-    use crate::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
-    use crate::agent_task_service;
+    use crate::agent_task_scheduler::{
+        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
+        AgentTaskExecutionContext, AgentTaskExecutorAdapter,
+    };
     use std::collections::HashMap;
 
     #[test]
@@ -796,14 +800,62 @@ mod tests {
         let _home = homeboy_core::test_support::HomeGuard::new();
         let plan = AgentTaskPlan::new("fanout/projection", vec![request("a")]);
         submit_plan_batch(&plan, Some("batch/projection")).expect("batch submitted");
-        agent_task_lifecycle::rewrite_record_for_test("batch_projection-a", |record| {
-            record.state = AgentTaskRunState::CandidateRecoverable;
-            record.metadata["artifact_projection"] = serde_json::json!({
-                "status": "pending",
-                "error": "runner artifact mirror is unreachable",
-            });
-        })
-        .expect("stage unprojected child");
+        let child_plan = child_plan(&plan, plan.tasks[0].clone(), "batch_projection");
+        let patch_sha = "a".repeat(64);
+        let aggregate = AgentTaskAggregate {
+            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: child_plan.plan_id.clone(),
+            status: AgentTaskAggregateStatus::Succeeded,
+            totals: AgentTaskAggregateTotals {
+                succeeded: 1,
+                ..Default::default()
+            },
+            outcomes: vec![AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: "a".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("runner produced a patch".to_string()),
+                failure_classification: None,
+                artifacts: vec![AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "candidate.patch".to_string(),
+                    kind: "patch".to_string(),
+                    name: Some("candidate.patch".to_string()),
+                    label: Some("Candidate patch".to_string()),
+                    role: None,
+                    semantic_key: None,
+                    path: Some("/runner/private/candidate.patch".to_string()),
+                    url: None,
+                    mime: Some("text/x-patch".to_string()),
+                    size_bytes: Some(1),
+                    sha256: Some(patch_sha),
+                    metadata: json!({
+                        "executor_artifact_finalized": true,
+                        "source_provenance": { "runner_id": "homeboy-lab" },
+                    }),
+                }],
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        };
+        agent_task_lifecycle::record_runner_job_identity(
+            "batch_projection-a",
+            "homeboy-lab",
+            "job-1",
+        )
+        .expect("record runner identity");
+        agent_task_lifecycle::record_run_aggregate("batch_projection-a", &child_plan, &aggregate)
+            .expect("stage unprojected child");
 
         let report = status("batch/projection").expect("batch status");
 
@@ -816,7 +868,7 @@ mod tests {
             pending.repair_command,
             "homeboy agent-task status batch_projection-a"
         );
-        assert!(pending.reason.contains("mirror is unreachable"));
+        assert!(!pending.reason.is_empty());
         assert!(report
             .next_actions
             .iter()

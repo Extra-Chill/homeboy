@@ -823,7 +823,10 @@ pub(crate) fn terminal_artifact_projection_is_verified(
     for outcome in &aggregate.outcomes {
         for artifact in &outcome.artifacts {
             if crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact) {
-                if artifact.path.is_none() || artifact.size_bytes.is_none() || artifact.sha256.is_none() {
+                if artifact.path.is_none()
+                    || artifact.size_bytes.is_none()
+                    || artifact.sha256.is_none()
+                {
                     return Ok(false);
                 }
                 if verified_controller_artifact_projection_path(
