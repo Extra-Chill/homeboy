@@ -98,6 +98,65 @@ pub(crate) fn step_skipped(
 // Core steps
 // ---------------------------------------------------------------------------
 
+/// The release version identity resolved once at planning time, carried into
+/// the `version` step so on-disk mutation, the artifact, and the tag/GitHub
+/// Release cannot diverge (issue #9695).
+///
+/// `from` is the on-disk source version the plan was built against; `to` is the
+/// plan-resolved target version (floor-aware — it accounts for release tags that
+/// are ahead of the source). The version step verifies `from` still matches the
+/// working tree before mutating, then bumps exactly to `to`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PlannedReleaseVersion<'a> {
+    pub(crate) from: &'a str,
+    pub(crate) to: &'a str,
+}
+
+/// Fail closed when the on-disk source version no longer matches the version the
+/// plan was built against.
+///
+/// The planner resolves the release identity (version + tag) once, accounting
+/// for release tags that are ahead of the source (issue #9695). If the working
+/// tree's source version drifted between planning and execution — for example a
+/// concurrent bump, a partially-applied earlier attempt, or a stale checkout —
+/// proceeding would mutate files and build an artifact against a version the
+/// plan never validated, producing the mixed-identity release this guard exists
+/// to prevent. Stop before any mutation and direct the operator to replan or
+/// recover instead of silently shipping an inconsistent release.
+fn guard_planned_version_identity(
+    component: &Component,
+    planned: &PlannedReleaseVersion<'_>,
+) -> Result<Option<ReleaseStepResult>> {
+    let current = version::read_component_version(component)?.version;
+    if current == planned.from {
+        return Ok(None);
+    }
+
+    let error = format!(
+        "Release identity drift: the plan was built against source version {} but the working tree now reports {}. \
+         Refusing to bump to the planned {} on top of an unexpected source version — this is how a retry ships a mixed release \
+         (version/artifact at one version while the tag/GitHub Release advance to another). See issue #9695.",
+        planned.from, current, planned.to,
+    );
+
+    Ok(Some(step_failed(
+        "version",
+        "version",
+        Some(serde_json::json!({
+            "planned_from": planned.from,
+            "planned_to": planned.to,
+            "actual_source_version": current,
+        })),
+        Some(error),
+        vec![homeboy_core::error::Hint {
+            message: format!(
+                "Replan against the current tree: `homeboy release {} --dry-run` to see the freshly-resolved identity, then rerun. If a previous attempt left partial state, finish it with `homeboy release {} --recover`.",
+                component.id, component.id
+            ),
+        }],
+    )))
+}
+
 /// Bump the version file(s) on disk and, if any changelog entries were
 /// auto-generated from commits, finalize them into the new version section.
 ///
@@ -117,10 +176,33 @@ pub(crate) fn run_version(
     component: &Component,
     state: &mut ReleaseState,
     bump_type: &str,
+    planned: Option<PlannedReleaseVersion<'_>>,
 ) -> Result<ReleaseStepResult> {
+    // Release identity must be resolved once at planning time and stay atomic
+    // across version mutation, changelog, commit, artifact, tag, GitHub Release,
+    // and publisher expectations (issue #9695). The planner resolves the target
+    // version with `release_version_floor_base`, which accounts for release tags
+    // that are ahead of the on-disk source (e.g. a tag that was pushed
+    // asynchronously after a timed-out push). Recomputing the bump from the raw
+    // on-disk source here — floor-unaware — is what let a retry write version
+    // `1.3.3` and build a `1.3.3` artifact while the plan/tag/GitHub Release
+    // advanced to `1.3.4`. Honor the plan's authoritative target instead, and
+    // fail closed if the source drifted from what the plan was built against so
+    // the operator replans/recovers rather than shipping a mixed release.
+    let effective_bump = if let Some(planned) = planned.as_ref() {
+        if let Some(failure) = guard_planned_version_identity(component, planned)? {
+            return Ok(failure);
+        }
+        // Drive the bump to the plan-resolved target exactly (explicit version),
+        // not a floor-unaware recomputation off the on-disk source.
+        planned.to.to_string()
+    } else {
+        bump_type.to_string()
+    };
+
     let result = version::bump_component_version_with_changelog(
         component,
-        bump_type,
+        &effective_bump,
         None,
         state.changelog_validation.as_ref(),
     )?;
@@ -1774,6 +1856,133 @@ mod tests {
             homeboy_core::git::tag_exists_locally(&component.local_path, "v0.6.13")
                 .unwrap_or(false),
             "tag should have been created on HEAD"
+        );
+    }
+
+    // ----- Atomic release identity regression coverage (issue #9695) -----
+
+    use super::{run_version, PlannedReleaseVersion};
+
+    /// Like [`plugin_repo_at`], but also writes and commits a `CHANGELOG.md` and
+    /// configures the component's `changelog_target`, so the full `run_version`
+    /// path (which finalizes the changelog) can run end-to-end.
+    fn plugin_repo_with_changelog_at(committed_version: &str) -> (tempfile::TempDir, Component) {
+        let (temp, mut component) = plugin_repo_at(committed_version);
+        let dir = std::path::Path::new(&component.local_path).to_path_buf();
+        std::fs::write(
+            dir.join("CHANGELOG.md"),
+            "# Changelog\n\n## Unreleased\n\n- Atomic identity fixture\n",
+        )
+        .expect("write changelog");
+        run_in(&dir, &["git", "add", "CHANGELOG.md"]);
+        run_in(&dir, &["git", "commit", "-q", "-m", "docs: changelog"]);
+        component.changelog_target = Some("CHANGELOG.md".to_string());
+        (temp, component)
+    }
+
+    /// Issue #9695: when a prior release attempt pushed tag `v1.3.3` remotely
+    /// (asynchronously after a timed-out push) but the on-disk source is still
+    /// `1.3.2`, the planner floors past the existing tag and resolves the target
+    /// to `1.3.4`. The version step must honor that plan-resolved target exactly
+    /// — writing `1.3.4` to disk and setting `state.version`/`state.tag` to the
+    /// same `1.3.4` — instead of recomputing a floor-unaware `patch` bump that
+    /// would write `1.3.3` while the tag/GitHub Release advance to `1.3.4`.
+    #[test]
+    fn version_step_writes_the_plan_resolved_target_not_a_floor_unaware_bump() {
+        let (_temp, component) = plugin_repo_with_changelog_at("1.3.2");
+        let mut state = ReleaseState::default();
+
+        // The plan was built with the floor-aware target: source 1.3.2, but the
+        // latest tag is v1.3.3, so the next release is 1.3.4. `bump` is still the
+        // raw "patch" that a floor-unaware recompute would (wrongly) apply.
+        let planned = PlannedReleaseVersion {
+            from: "1.3.2",
+            to: "1.3.4",
+        };
+        let result = run_version(&component, &mut state, "patch", Some(planned))
+            .expect("version step should return a result");
+
+        assert_eq!(
+            result.status,
+            ReleaseStepStatus::Success,
+            "version step should succeed: {:?}",
+            result.error
+        );
+
+        // On-disk source, in-memory version, and tag all agree on 1.3.4 — the
+        // artifact built from this tree will match the tag/GitHub Release.
+        assert_eq!(
+            super::version::read_component_version(&component)
+                .expect("read version")
+                .version,
+            "1.3.4",
+            "the version file must be written to the plan-resolved target, not 1.3.3"
+        );
+        assert_eq!(state.version.as_deref(), Some("1.3.4"));
+        assert_eq!(state.tag.as_deref(), Some("v1.3.4"));
+    }
+
+    /// Issue #9695: without a planned identity (legacy path), the version step
+    /// falls back to the raw bump type and computes the next version from the
+    /// on-disk source — preserving prior behavior for callers that do not thread
+    /// the plan-resolved target.
+    #[test]
+    fn version_step_without_planned_identity_uses_the_raw_bump() {
+        let (_temp, component) = plugin_repo_with_changelog_at("1.3.2");
+        let mut state = ReleaseState::default();
+
+        let result = run_version(&component, &mut state, "patch", None)
+            .expect("version step should return a result");
+
+        assert_eq!(result.status, ReleaseStepStatus::Success);
+        assert_eq!(state.version.as_deref(), Some("1.3.3"));
+        assert_eq!(state.tag.as_deref(), Some("v1.3.3"));
+    }
+
+    /// Issue #9695: if the on-disk source drifted from the version the plan was
+    /// built against, the version step must fail closed BEFORE mutating any
+    /// files — never silently bump a tree the plan never validated. The operator
+    /// is directed to replan or recover.
+    #[test]
+    fn version_step_fails_closed_when_source_drifted_from_the_plan() {
+        // Plan was built against 1.3.2, but the working tree now reports 1.3.5.
+        let (_temp, component) = plugin_repo_at("1.3.5");
+        let mut state = ReleaseState::default();
+
+        let planned = PlannedReleaseVersion {
+            from: "1.3.2",
+            to: "1.3.4",
+        };
+        let result = run_version(&component, &mut state, "patch", Some(planned))
+            .expect("version step should return a failed result, not propagate Err");
+
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        let err = result.error.expect("expected drift error");
+        assert!(
+            err.contains("issue #9695") || err.contains("#9695"),
+            "expected #9695 reference in error, got: {err}"
+        );
+        assert!(
+            err.contains("1.3.2") && err.contains("1.3.5"),
+            "error should name both the planned-from and the drifted source, got: {err}"
+        );
+
+        // No mutation happened — the working tree still reads the drifted value,
+        // and no in-memory identity was advanced.
+        assert_eq!(
+            super::version::read_component_version(&component)
+                .expect("read version")
+                .version,
+            "1.3.5",
+            "the version file must be untouched when the step fails closed"
+        );
+        assert!(state.version.is_none());
+        assert!(state.tag.is_none());
+        assert!(
+            result.hints.iter().any(
+                |hint| hint.message.contains("--recover") || hint.message.contains("--dry-run")
+            ),
+            "expected replan/recover guidance in hints"
         );
     }
 }
