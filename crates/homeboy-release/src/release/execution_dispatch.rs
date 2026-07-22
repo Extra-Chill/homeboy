@@ -83,15 +83,26 @@ pub(super) fn execute_release_plan_step(
             executor::changelog::run_changelog_finalize(step, context.component, &mut context.state)
                 .map(Some)
         }
-        "version" => executor::run_version(
-            context.component,
-            &mut context.state,
-            step.inputs
+        "version" => {
+            let bump = step
+                .inputs
                 .get("bump")
                 .and_then(|value| value.as_str())
-                .unwrap_or(&context.options.bump_type),
-        )
-        .map(Some),
+                .unwrap_or(&context.options.bump_type);
+            // The plan carries the authoritative, floor-aware release identity in
+            // the version step's `from`/`to` config. Thread it through so the
+            // version step mutates exactly to the planned target instead of
+            // recomputing floor-unaware from the on-disk source (issue #9695).
+            let planned_from = step.inputs.get("from").and_then(|value| value.as_str());
+            let planned_to = step.inputs.get("to").and_then(|value| value.as_str());
+            let planned = match (planned_from, planned_to) {
+                (Some(from), Some(to)) if !from.is_empty() && !to.is_empty() => {
+                    Some(executor::PlannedReleaseVersion { from, to })
+                }
+                _ => None,
+            };
+            executor::run_version(context.component, &mut context.state, bump, planned).map(Some)
+        }
         "release.prepare" => Ok(Some(
             executor::prepare::run_prepare(
                 context.extensions,
@@ -1567,6 +1578,8 @@ mod tests {
     #[test]
     fn version_step_uses_planned_bump_input() {
         let temp = tempfile::tempdir().expect("tempdir");
+        run_in(temp.path(), &["git", "init", "-q"]);
+        configure_git_user(temp.path());
         std::fs::write(
             temp.path().join("plugin.php"),
             "<?php\n/*\nPlugin Name: Fixture\nVersion: 0.6.12\n*/\n",
@@ -1577,6 +1590,8 @@ mod tests {
             "# Changelog\n\n## Unreleased\n\n- Planned bump fixture\n",
         )
         .expect("write changelog");
+        run_in(temp.path(), &["git", "add", "."]);
+        run_in(temp.path(), &["git", "commit", "-q", "-m", "initial"]);
         let component = Component {
             id: "fixture".to_string(),
             local_path: temp.path().to_string_lossy().to_string(),
