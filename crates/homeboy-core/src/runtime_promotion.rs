@@ -3,6 +3,7 @@
 //! convention, while the JSON record makes a blocked writer actionable.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,8 +16,10 @@ use crate::paths;
 
 const LEASE_DIR: &str = "promotion.lock";
 const LEASE_FILE: &str = "lease.json";
+const ADMISSION_LOCK_FILE: &str = "admission.lock";
 const PIN_DIR: &str = "pins";
 const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
+const PIN_DRAIN_POLL: Duration = Duration::from_millis(100);
 const SUBPROCESS_LEASE_ENV: &str = "HOMEBOY_RUNTIME_PROMOTION_LEASE";
 const ACQUIRE_DISAPPEARED_LEASE_RETRIES: usize = 1;
 
@@ -59,6 +62,10 @@ pub struct RuntimePromotionLease {
     target: String,
     owner_pid: u32,
     capability: String,
+    // Held from reservation through promotion completion. Pin creation takes a
+    // shared lock on this inode, so no old-generation cook can slip in while
+    // this promotion waits for already-pinned work to drain.
+    admission_lock: Option<fs::File>,
 }
 
 /// Pins the generation required by a cook until its lifecycle finalizes.
@@ -138,11 +145,7 @@ fn acquire_with_pin_policy(
     let pid = std::process::id();
     let generation = current_generation();
     let subprocess_capability = subprocess_capability_from_env();
-    if foreign_pin_policy == ForeignPinPolicy::Block {
-        ensure_no_foreign_generation_pin(&root, pid, subprocess_capability.as_ref())?;
-    }
-
-    match acquire_lease_dir_with_retry(
+    let mut lease = match acquire_lease_dir_with_retry(
         || create_lease_dir(&path),
         || read_record_for_acquisition(&path),
     )? {
@@ -160,14 +163,15 @@ fn acquire_with_pin_policy(
                     capability: capability.clone(),
                 },
             )?;
-            Ok(RuntimePromotionLease {
+            RuntimePromotionLease {
                 path,
                 primary: true,
                 generation,
                 target,
                 owner_pid: pid,
                 capability,
-            })
+                admission_lock: None,
+            }
         }
         Some(held) => {
             let same_transaction = held.target == target && held.generation == generation;
@@ -179,6 +183,7 @@ fn acquire_with_pin_policy(
                     target,
                     owner_pid: held.pid,
                     capability: held.capability,
+                    admission_lock: None,
                 });
             }
             if subprocess_capability.as_ref().is_some_and(|capability| {
@@ -191,14 +196,25 @@ fn acquire_with_pin_policy(
                     target,
                     owner_pid: held.pid,
                     capability: held.capability,
+                    admission_lock: None,
                 });
             }
             if reclaimable(&held) {
                 return Err(blocked_error(&held, true));
             }
-            Err(blocked_error(&held, false))
+            return Err(blocked_error(&held, false));
         }
+    };
+
+    if foreign_pin_policy == ForeignPinPolicy::Block && lease.primary {
+        let admission_lock = open_admission_lock(&root)?;
+        admission_lock
+            .lock_exclusive()
+            .map_err(io("reserve runtime promotion admission"))?;
+        wait_for_foreign_generation_pins(&root, pid, subprocess_capability.as_ref())?;
+        lease.admission_lock = Some(admission_lock);
     }
+    Ok(lease)
 }
 
 /// Create the lease directory or return its existing record. A previous owner
@@ -280,7 +296,13 @@ impl RuntimePromotionLease {
 /// Pin the current generation for the complete cook lifecycle. Promotion is
 /// deliberately conservative: any live pin blocks a writer until finalization.
 pub fn pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
-    let root = paths::runtime_promotion_dir()?.join(PIN_DIR);
+    let promotion_root = paths::runtime_promotion_dir()?;
+    fs::create_dir_all(&promotion_root).map_err(io("create runtime promotion directory"))?;
+    let admission_lock = open_admission_lock(&promotion_root)?;
+    admission_lock
+        .lock_shared()
+        .map_err(io("join runtime promotion admission"))?;
+    let root = promotion_root.join(PIN_DIR);
     fs::create_dir_all(&root).map_err(io("create runtime generation pin directory"))?;
     prune_pins(&root)?;
     let pid = std::process::id();
@@ -302,6 +324,15 @@ pub fn pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
     )
     .map_err(io("write runtime generation pin"))?;
     Ok(RuntimeGenerationPinGuard { path })
+}
+
+fn open_admission_lock(root: &Path) -> Result<fs::File> {
+    fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(root.join(ADMISSION_LOCK_FILE))
+        .map_err(io("open runtime promotion admission"))
 }
 
 /// Archive, rather than delete, a proven dead or expired promotion lease. This
@@ -444,10 +475,10 @@ fn prune_pins(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A running Cook pins its controller generation so a concurrent refresh cannot
-/// replace the configured job binary while that Cook is selecting a generation.
-/// The owning process may still acquire nested leases for its own handoff.
-fn ensure_no_foreign_generation_pin(
+/// A pending promotion holds exclusive admission while existing pins drain.
+/// Cooks take the shared side before publishing a pin, so once this scan finds
+/// no foreign pin the promotion is ahead of all later cook admission.
+fn wait_for_foreign_generation_pins(
     root: &Path,
     pid: u32,
     subprocess_capability: Option<&SubprocessLeaseCapability>,
@@ -456,33 +487,24 @@ fn ensure_no_foreign_generation_pin(
     if !pins.exists() {
         return Ok(());
     }
-    prune_pins(&pins)?;
-    for entry in fs::read_dir(&pins).map_err(io("read runtime generation pins"))? {
-        let path = entry.map_err(io("read runtime generation pin"))?.path();
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(pin) = serde_json::from_str::<RuntimeGenerationPin>(&content) else {
-            continue;
-        };
-        if pin.pid != pid
-            && !subprocess_capability.is_some_and(|capability| capability.owner_pid == pin.pid)
-        {
-            return Err(Error::new(
-                ErrorCode::RuntimePromotionContended,
-                format!(
-                    "runtime promotion is blocked by active Cook `{}` on generation `{}`",
-                    pin.cook_id, pin.generation
-                ),
-                serde_json::json!({
-                    "cook_id": pin.cook_id,
-                    "generation": pin.generation,
-                    "holder_pid": pin.pid,
-                }),
-            ));
+    loop {
+        prune_pins(&pins)?;
+        let foreign_pin = fs::read_dir(&pins)
+            .map_err(io("read runtime generation pins"))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter_map(|path| fs::read_to_string(path).ok())
+            .filter_map(|content| serde_json::from_str::<RuntimeGenerationPin>(&content).ok())
+            .any(|pin| {
+                pin.pid != pid
+                    && !subprocess_capability
+                        .is_some_and(|capability| capability.owner_pid == pin.pid)
+            });
+        if !foreign_pin {
+            return Ok(());
         }
+        std::thread::sleep(PIN_DRAIN_POLL);
     }
-    Ok(())
 }
 
 fn current_generation() -> String {
@@ -656,10 +678,6 @@ mod tests {
             )
             .expect("write foreign pin");
 
-            let blocked = acquire("controller replacement", "controller")
-                .expect_err("ordinary promotion remains blocked by a foreign Cook");
-            assert_eq!(blocked.code, ErrorCode::RuntimePromotionContended);
-
             let rotation = acquire_for_generation_rotation("runner rotation", "lab")
                 .expect("generation-preserving rotation can acquire the writer lease");
             let concurrent = acquire_for_generation_rotation("other rotation", "other")
@@ -668,6 +686,103 @@ mod tests {
             drop(rotation);
             foreign_owner.kill().expect("stop foreign pin owner");
             foreign_owner.wait().expect("reap foreign pin owner");
+        });
+    }
+
+    #[test]
+    fn pending_promotion_drains_existing_pins_before_admitting_new_cooks() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut existing_owner = Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("start existing cook owner");
+            let pins = paths::runtime_promotion_dir()
+                .expect("runtime promotion directory")
+                .join(PIN_DIR);
+            fs::create_dir_all(&pins).expect("create pin directory");
+            fs::write(
+                pins.join("existing-cook.json"),
+                serde_json::to_vec_pretty(&RuntimeGenerationPin {
+                    pid: existing_owner.id(),
+                    cook_id: "existing-attempt".to_string(),
+                    generation: "existing-generation".to_string(),
+                    started_at: now(),
+                })
+                .expect("serialize existing pin"),
+            )
+            .expect("write existing pin");
+
+            let (promotion_ready, promotion_ready_result) = std::sync::mpsc::channel();
+            let (release_promotion, release_promotion_result) = std::sync::mpsc::channel();
+            let promotion = std::thread::spawn(move || {
+                let lease = acquire("controller replacement", "controller")
+                    .expect("promotion waits for existing pin");
+                promotion_ready
+                    .send(())
+                    .expect("report promotion admission");
+                release_promotion_result
+                    .recv()
+                    .expect("wait to release promotion");
+                drop(lease);
+            });
+
+            let admission = paths::runtime_promotion_dir()
+                .expect("runtime promotion directory")
+                .join(ADMISSION_LOCK_FILE);
+            for _ in 0..40 {
+                if admission.exists() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            assert!(
+                admission.exists(),
+                "promotion reserves cook admission before draining"
+            );
+
+            let (new_cook_admitted, new_cook_admitted_result) = std::sync::mpsc::channel();
+            let new_cooks = (0..3)
+                .map(|attempt| {
+                    let new_cook_admitted = new_cook_admitted.clone();
+                    std::thread::spawn(move || {
+                        let _pin = pin_cook_generation(&format!("new-attempt-{attempt}"))
+                            .expect("queue new cook pin");
+                        new_cook_admitted
+                            .send(())
+                            .expect("report new cook admission");
+                    })
+                })
+                .collect::<Vec<_>>();
+            drop(new_cook_admitted);
+            assert!(
+                new_cook_admitted_result
+                    .recv_timeout(Duration::from_millis(250))
+                    .is_err(),
+                "continuous new cook admission stays queued behind the pending promotion"
+            );
+
+            existing_owner.kill().expect("stop existing cook owner");
+            existing_owner.wait().expect("reap existing cook owner");
+            promotion_ready_result
+                .recv_timeout(Duration::from_secs(5))
+                .expect("promotion proceeds after old-generation work drains");
+            assert!(
+                new_cook_admitted_result.try_recv().is_err(),
+                "promotion owns admission before the queued cook"
+            );
+
+            release_promotion
+                .send(())
+                .expect("release promotion admission");
+            promotion.join().expect("promotion exits");
+            for _ in 0..3 {
+                new_cook_admitted_result
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("queued cook admits after promotion");
+            }
+            for new_cook in new_cooks {
+                new_cook.join().expect("new cook exits");
+            }
         });
     }
 
@@ -768,6 +883,7 @@ mod tests {
             target: record.target.clone(),
             owner_pid: record.pid,
             capability: record.capability.clone(),
+            admission_lock: None,
         };
         record.capability = "replacement-capability".to_string();
         write_record(&path, &record).expect("replace lease record");
