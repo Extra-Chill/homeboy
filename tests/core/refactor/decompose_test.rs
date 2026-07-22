@@ -20,6 +20,13 @@ fn test_build_plan() {
 }
 
 #[test]
+fn test_build_plan_missing_file_errors() {
+    let root = support::temp_dir("decompose-build-plan-missing");
+    let result = refactor::build_plan("src/missing.rs", root.path(), "grouped", true);
+    assert!(result.is_err());
+}
+
+#[test]
 fn test_apply_plan_skeletons() {
     let root = support::temp_dir("decompose-apply-skeletons");
 
