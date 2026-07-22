@@ -32,6 +32,7 @@ pub(super) fn exec(
     artifact_dir_outputs: Vec<String>,
     summary_outputs: Vec<String>,
     read_only_artifact: bool,
+    raw: bool,
     command: Vec<String>,
 ) -> CmdResult<RunnerExecOutput> {
     let script = script_file
@@ -125,7 +126,7 @@ pub(super) fn exec(
             // evidence; it hydrates evidence the runner already retains
             // (Extra-Chill/homeboy#9420).
             mirror_evidence: !read_only_artifact,
-            print_handoff: !read_only_artifact,
+            print_handoff: should_print_handoff(raw, read_only_artifact),
             read_only_artifact_access: read_only_artifact,
         },
     )?;
@@ -158,6 +159,10 @@ pub(super) fn exec(
         output.promoted_outputs.extend(promoted_summaries);
     }
     Ok((output, exit_code))
+}
+
+pub(super) fn should_print_handoff(raw: bool, read_only_artifact: bool) -> bool {
+    !raw && !read_only_artifact
 }
 
 pub(super) fn exec_workspace_context(
