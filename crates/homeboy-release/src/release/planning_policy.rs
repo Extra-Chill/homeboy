@@ -331,6 +331,7 @@ mod tests {
             requested_bump: requested.to_string(),
             is_underbump: false,
             reasons: vec![],
+            bump_policy: None,
         }
     }
 }

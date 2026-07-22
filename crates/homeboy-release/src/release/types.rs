@@ -136,6 +136,23 @@ pub struct ReleaseSemverRecommendation {
     pub requested_bump: String,
     pub is_underbump: bool,
     pub reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bump_policy: Option<ReleaseBumpPolicy>,
+}
+
+/// Structured evidence for a release bump policy decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseBumpPolicy {
+    pub policy: String,
+    pub signals: Vec<ReleaseBumpPolicySignal>,
+    pub override_used: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseBumpPolicySignal {
+    pub name: String,
+    pub observed: usize,
+    pub threshold: usize,
 }
 
 /// Explicit changelog contract carried by the release plan.
@@ -596,6 +613,7 @@ mod tests {
             requested_bump: "minor".to_string(),
             is_underbump: false,
             reasons: Vec::new(),
+            bump_policy: None,
         };
         let plan = ReleasePlan::new(
             "demo",

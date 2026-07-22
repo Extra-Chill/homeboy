@@ -16,7 +16,8 @@ use super::planning_semver::{
 use super::planning_worktree::validate_release_worktree;
 use super::scope::ReleaseScope;
 use super::types::{
-    ReleaseChangelogPlan, ReleaseOptions, ReleasePlan, ReleaseSemverRecommendation,
+    ReleaseBumpPolicy, ReleaseBumpPolicySignal, ReleaseChangelogPlan, ReleaseOptions, ReleasePlan,
+    ReleaseSemverRecommendation,
 };
 
 pub(super) const OVERSIZED_PATCH_RELEASE_ITEM_THRESHOLD: usize = 50;
@@ -178,9 +179,13 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
 
     let mut hints = Vec::new();
     let changelog_plan = build_changelog_plan(&component, options, pending_entries)?;
-    if let Some(warning) =
-        apply_oversized_patch_release_policy(&mut semver_recommendation, &changelog_plan)
-    {
+    if let Some(warning) = apply_oversized_patch_release_policy(
+        &mut semver_recommendation,
+        &changelog_plan,
+        &options.bump_type,
+        &version_info.version,
+        options.bump_policy.force_lower_bump,
+    ) {
         warnings.push(warning);
     }
 
@@ -249,34 +254,78 @@ fn guard_stale_primary_at_head(component_id: &str, git_root: &str, tag: &str) ->
 fn apply_oversized_patch_release_policy(
     semver_recommendation: &mut Option<ReleaseSemverRecommendation>,
     changelog_plan: &ReleaseChangelogPlan,
+    requested_bump: &str,
+    current_version: &str,
+    force_lower_bump: bool,
 ) -> Option<String> {
     let semver_recommendation = semver_recommendation.as_mut()?;
-    if semver_recommendation.requested_bump != "patch" {
+    if !is_explicit_patch_bump(requested_bump, current_version) {
         return None;
     }
     if semver_recommendation.recommended_bump.as_deref() != Some("patch") {
         return None;
     }
 
-    let commit_count = semver_recommendation.commits.len();
+    let releasable_commit_count = semver_recommendation
+        .commits
+        .iter()
+        .filter(|commit| {
+            matches!(
+                commit.commit_type.as_str(),
+                "breaking" | "feature" | "fix" | "other"
+            )
+        })
+        .count();
     let changelog_entry_count = changelog_plan.entry_count;
-    if oversized_patch_release_bump("patch", commit_count) == "patch"
-        && oversized_patch_release_bump("patch", changelog_entry_count) == "patch"
-    {
+    let signals = [
+        ("releasable_commit_count", releasable_commit_count),
+        ("changelog_entry_count", changelog_entry_count),
+    ]
+    .into_iter()
+    .filter(|(_, observed)| *observed >= OVERSIZED_PATCH_RELEASE_ITEM_THRESHOLD)
+    .map(|(name, observed)| ReleaseBumpPolicySignal {
+        name: name.to_string(),
+        observed,
+        threshold: OVERSIZED_PATCH_RELEASE_ITEM_THRESHOLD,
+    })
+    .collect::<Vec<_>>();
+    if signals.is_empty() {
         return None;
     }
 
     semver_recommendation.recommended_bump = Some("minor".to_string());
     semver_recommendation.is_underbump = true;
+    semver_recommendation.bump_policy = Some(ReleaseBumpPolicy {
+        policy: "oversized-explicit-patch-range".to_string(),
+        signals,
+        override_used: force_lower_bump,
+    });
     semver_recommendation.reasons.push(format!(
-        "release range has {} commits and {} changelog entries; release-train-sized patch ranges require a minor bump",
-        commit_count, changelog_entry_count
+        "release range has {} releasable commits and {} changelog entries; release-train-sized patch ranges require a minor bump",
+        releasable_commit_count, changelog_entry_count
     ));
 
     Some(format!(
-        "Patch release range is large ({} commits, {} changelog entries). Consider `--bump minor` for release-train-sized changes, or confirm the patch scope before releasing.",
-        commit_count, changelog_entry_count
+        "Patch release range is large ({} releasable commits, {} changelog entries). Consider `--bump minor` for release-train-sized changes, or confirm the patch scope before releasing.",
+        releasable_commit_count, changelog_entry_count
     ))
+}
+
+fn is_explicit_patch_bump(requested_bump: &str, current_version: &str) -> bool {
+    if requested_bump == "patch" {
+        return true;
+    }
+
+    let Ok(current) = semver::Version::parse(current_version) else {
+        return false;
+    };
+    let Ok(requested) = semver::Version::parse(requested_bump) else {
+        return false;
+    };
+
+    requested.major == current.major
+        && requested.minor == current.minor
+        && requested.patch > current.patch
 }
 
 #[cfg(test)]
@@ -342,13 +391,18 @@ mod tests {
     #[test]
     fn oversized_patch_release_warning_reports_large_patch_scope() {
         let mut recommendation = Some(semver_recommendation("patch", 206));
-        let warning =
-            apply_oversized_patch_release_policy(&mut recommendation, &changelog_plan(206))
-                .expect("large patch release should warn");
+        let warning = apply_oversized_patch_release_policy(
+            &mut recommendation,
+            &changelog_plan(206),
+            "patch",
+            "1.2.3",
+            false,
+        )
+        .expect("large patch release should warn");
         let recommendation = recommendation.expect("recommendation remains available");
 
         assert!(warning.contains("Patch release range is large"));
-        assert!(warning.contains("206 commits"));
+        assert!(warning.contains("206 releasable commits"));
         assert!(warning.contains("206 changelog entries"));
         assert!(warning.contains("--bump minor"));
         assert_eq!(recommendation.recommended_bump.as_deref(), Some("minor"));
@@ -356,6 +410,11 @@ mod tests {
         assert!(recommendation.reasons.iter().any(|reason| {
             reason.contains("release-train-sized patch ranges require a minor bump")
         }));
+        let policy = recommendation
+            .bump_policy
+            .expect("policy signals are structured");
+        assert!(!policy.override_used);
+        assert_eq!(policy.signals.len(), 2);
     }
 
     #[test]
@@ -368,7 +427,13 @@ mod tests {
     #[test]
     fn oversized_patch_release_warning_is_quiet_for_small_patch_scope() {
         let mut recommendation = Some(semver_recommendation("patch", 3));
-        let warning = apply_oversized_patch_release_policy(&mut recommendation, &changelog_plan(3));
+        let warning = apply_oversized_patch_release_policy(
+            &mut recommendation,
+            &changelog_plan(3),
+            "patch",
+            "1.2.3",
+            false,
+        );
 
         assert!(warning.is_none());
         let recommendation = recommendation.expect("recommendation remains available");
@@ -379,7 +444,13 @@ mod tests {
     #[test]
     fn oversized_patch_release_policy_requires_minor_when_commit_range_is_large() {
         let mut recommendation = Some(semver_recommendation("patch", 61));
-        let warning = apply_oversized_patch_release_policy(&mut recommendation, &changelog_plan(1));
+        let warning = apply_oversized_patch_release_policy(
+            &mut recommendation,
+            &changelog_plan(1),
+            "patch",
+            "1.2.3",
+            false,
+        );
 
         assert!(warning.is_some());
         let recommendation = recommendation.expect("recommendation remains available");
@@ -390,13 +461,71 @@ mod tests {
     #[test]
     fn oversized_patch_release_policy_requires_minor_when_changelog_range_is_large() {
         let mut recommendation = Some(semver_recommendation("patch", 1));
-        let warning =
-            apply_oversized_patch_release_policy(&mut recommendation, &changelog_plan(61));
+        let warning = apply_oversized_patch_release_policy(
+            &mut recommendation,
+            &changelog_plan(61),
+            "patch",
+            "1.2.3",
+            false,
+        );
 
         assert!(warning.is_some());
         let recommendation = recommendation.expect("recommendation remains available");
         assert_eq!(recommendation.recommended_bump.as_deref(), Some("minor"));
         assert!(recommendation.is_underbump);
+    }
+
+    #[test]
+    fn oversized_patch_release_policy_catches_explicit_patch_version() {
+        let mut recommendation = Some(semver_recommendation("0.1.3", 61));
+        let warning = apply_oversized_patch_release_policy(
+            &mut recommendation,
+            &changelog_plan(1),
+            "0.1.3",
+            "0.1.2",
+            false,
+        );
+
+        assert!(warning.is_some());
+        let recommendation = recommendation.expect("recommendation remains available");
+        assert!(recommendation.is_underbump);
+        assert_eq!(recommendation.recommended_bump.as_deref(), Some("minor"));
+    }
+
+    #[test]
+    fn oversized_patch_release_policy_leaves_automatic_patches_unaffected() {
+        let mut recommendation = Some(semver_recommendation("patch", 61));
+        let warning = apply_oversized_patch_release_policy(
+            &mut recommendation,
+            &changelog_plan(1),
+            "none",
+            "1.2.3",
+            false,
+        );
+
+        assert!(warning.is_none());
+        let recommendation = recommendation.expect("recommendation remains available");
+        assert!(!recommendation.is_underbump);
+        assert_eq!(recommendation.recommended_bump.as_deref(), Some("patch"));
+        assert!(recommendation.bump_policy.is_none());
+    }
+
+    #[test]
+    fn oversized_patch_release_policy_records_force_lower_bump_override() {
+        let mut recommendation = Some(semver_recommendation("patch", 61));
+        apply_oversized_patch_release_policy(
+            &mut recommendation,
+            &changelog_plan(1),
+            "patch",
+            "1.2.3",
+            true,
+        );
+
+        let policy = recommendation
+            .expect("recommendation remains available")
+            .bump_policy
+            .expect("policy is recorded");
+        assert!(policy.override_used);
     }
 
     fn semver_recommendation(
@@ -418,6 +547,7 @@ mod tests {
             requested_bump: requested_bump.to_string(),
             is_underbump: false,
             reasons: Vec::new(),
+            bump_policy: None,
         }
     }
 
