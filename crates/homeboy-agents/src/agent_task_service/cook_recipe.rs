@@ -105,6 +105,51 @@ pub trait AgentTaskCookContinuationScheduler {
 pub fn persist_initial_recipe(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<AgentTaskCookRecipe> {
+    let recipe = initial_recipe(options)?;
+    if let Some(existing) = compatible_existing_recipe(&recipe)? {
+        return Ok(existing);
+    }
+    write_recipe(&recipe)?;
+    Ok(recipe)
+}
+
+/// Validate a Cook recipe against durable state without writing it. Fanout
+/// uses this before creating worktrees so incompatible replays fail before any
+/// lifecycle resources are mutated.
+pub fn validate_initial_recipe_compatibility(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    compatible_existing_recipe(&initial_recipe(options)?)?;
+    Ok(())
+}
+
+/// Fail before worktree creation when a generated Cook identity is already
+/// bound to different source inputs, runtime, or dispatch transport.
+pub fn validate_recipe_source_identity(
+    cook_id: &str,
+    source_identity: &str,
+    attempt_dispatch: &Value,
+) -> Result<()> {
+    if !recipe_exists(cook_id)? {
+        return Ok(());
+    }
+    let existing = load_recipe(cook_id)?;
+    let compatible = existing
+        .source_refs
+        .iter()
+        .any(|source_ref| source_ref == source_identity)
+        && existing.runtime_generation == homeboy_core::build_identity::current().display
+        && existing.promotion_transport["attempt_dispatch"] == *attempt_dispatch;
+    if compatible {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "cook_recipe",
+        "durable cook recipe already exists with different execution inputs",
+        Some(cook_id.to_string()),
+        None,
+    ))
+}
+
+fn initial_recipe(options: &AgentTaskCookServiceOptions) -> Result<AgentTaskCookRecipe> {
     let attempt_dispatch = options
         .attempt_dispatcher
         .as_ref()
@@ -151,6 +196,10 @@ pub fn persist_initial_recipe(
         harvest_context: options.harvest_context.clone(),
     };
     validate_recipe(&recipe)?;
+    Ok(recipe)
+}
+
+fn compatible_existing_recipe(recipe: &AgentTaskCookRecipe) -> Result<Option<AgentTaskCookRecipe>> {
     if recipe_exists(&recipe.cook_id)? {
         let existing = load_recipe(&recipe.cook_id)?;
         let mut expected = recipe.clone();
@@ -190,10 +239,9 @@ pub fn persist_initial_recipe(
                 None,
             ));
         }
-        return Ok(existing);
+        return Ok(Some(existing));
     }
-    write_recipe(&recipe)?;
-    Ok(recipe)
+    Ok(None)
 }
 
 /// `homeboy_plan` is a derived execution projection rebuilt by each controller
@@ -1314,6 +1362,37 @@ mod tests {
             let mut conflicting = retry_plan;
             conflicting.plan_id = "different".to_string();
             assert!(record_recipe_attempt("cook", 2, "run-2", &conflicting).is_err());
+        });
+    }
+
+    #[test]
+    fn recipe_compatibility_preflight_is_read_only_and_rejects_changed_inputs() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let options = reconstruct_options(&recipe()).expect("canonical options");
+
+            validate_initial_recipe_compatibility(&options).expect("new recipe is compatible");
+            assert!(!recipe_exists(&options.cook_id).expect("recipe existence"));
+
+            persist_initial_recipe(&options).expect("persist canonical recipe");
+            validate_initial_recipe_compatibility(&options).expect("exact replay is compatible");
+            validate_recipe_source_identity(
+                &options.cook_id,
+                "issue",
+                &serde_json::json!({ "kind": "local" }),
+            )
+            .expect("source identity and transport match");
+            assert!(validate_recipe_source_identity(
+                &options.cook_id,
+                "different-source",
+                &serde_json::json!({ "kind": "local" }),
+            )
+            .is_err());
+
+            let mut changed = options;
+            changed.title = "different title".to_string();
+            let error = validate_initial_recipe_compatibility(&changed)
+                .expect_err("changed execution inputs conflict");
+            assert!(error.message.contains("different execution inputs"));
         });
     }
 

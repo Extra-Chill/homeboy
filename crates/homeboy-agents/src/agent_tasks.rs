@@ -388,6 +388,7 @@ pub mod service {
         reconcile_terminal_artifact_projection, resume, resume_cook_batch, retry, run_cook,
         run_cook_batch, run_loaded_plan, run_next, run_next_with_cook_dispatcher, run_status,
         run_submitted, run_submitted_with_timeout, source_worktree_path, status, submit_plan_spec,
+        validate_initial_recipe_compatibility, validate_recipe_source_identity,
         AgentTaskCandidateAdoptionOptions, AgentTaskCookAttemptReport,
         AgentTaskCookBatchCellReport, AgentTaskCookBatchOptions, AgentTaskCookBatchReport,
         AgentTaskCookReport, AgentTaskCookServiceOptions, AgentTaskDiscoveryCommands,
