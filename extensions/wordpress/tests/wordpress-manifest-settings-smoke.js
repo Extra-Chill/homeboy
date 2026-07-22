@@ -15,7 +15,7 @@ assert.ok(
 	'wordpress manifest declares wp_codebox_bin so --setting wp_codebox_bin is accepted'
 );
 
-for (const settingId of ['package_artifacts', 'package_excludes']) {
+for (const settingId of ['package_artifacts', 'package_excludes', 'wp_codebox_extra_themes', 'wordpress_runtime_php_version']) {
 	assert.ok(settingIds.has(settingId), `wordpress manifest declares ${settingId}`);
 }
 

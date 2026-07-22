@@ -47,12 +47,18 @@ settings. Consumers do not edit the rig:
 - `wordpress_runtime_blueprint` adds ordinary WordPress blueprint setup while
   the rig ensures `enableMultisite` remains present.
 - `wp_codebox_extra_plugins` mounts consumer plugins/components.
+- `wp_codebox_extra_themes` mounts immutable local theme checkouts readonly.
+  Entries use `{source,slug,activate?,metadata?}`; sources must be absolute paths
+  to directories with a valid `style.css` `Theme Name` header. At most one theme
+  may be active, and supplied metadata remains in WP Codebox recipe evidence.
 - `wordpress_runtime_prepare_steps` adds seed/setup recipe steps.
 - `wordpress_runtime_workloads` runs consumer workloads through
   `wordpress.bench` after network setup.
 - `wp_codebox_scenario_manifests` adds inline or file-backed browser journeys.
 - `wordpress_runtime_post_steps` adds final assertions or evidence steps.
 - `wordpress_runtime_version` pins the disposable WordPress version.
+- `wordpress_runtime_php_version` pins the rig's WP Codebox PHP runtime using a
+  supported `major.minor` value such as `8.4`.
 
 Example:
 
@@ -61,6 +67,15 @@ HOMEBOY_SETTINGS_JSON='{
   "wp_codebox_extra_plugins": [
     {"source":"/absolute/path/to/plugin","slug":"plugin-under-test","activate":true}
   ],
+  "wp_codebox_extra_themes": [
+    {
+      "source":"/absolute/path/to/theme",
+      "slug":"theme-under-test",
+      "activate":true,
+      "metadata":{"provenance":{"revision":"full-immutable-revision"}}
+    }
+  ],
+  "wordpress_runtime_php_version":"8.4",
   "wordpress_runtime_prepare_steps": [
     {"command":"wordpress.wp-cli","args":["command=option update fixture_ready yes --url=http://localhost/alpha/"]}
   ],
@@ -71,6 +86,11 @@ HOMEBOY_SETTINGS_JSON='{
 Use absolute consumer paths when a package is installed from another checkout.
 WP Codebox validates and executes all supplied recipe steps with its normal
 runtime policy and artifact handling.
+
+The active theme becomes `WP_DEFAULT_THEME` for sites created later in the
+workflow, and the rig switches all sites that exist after its network seed. This
+contract is specific to `wordpress-multisite-e2e`: the canonical WP Codebox bench
+builder does not currently expose PHP runtime selection.
 
 ## Boundary
 
