@@ -6,7 +6,7 @@ use crate::release::types::{
     ReleaseBumpPolicyOptions, ReleaseChangelogPlan, ReleaseOptions, ReleasePipelineOptions,
     ReleaseSemverRecommendation,
 };
-use homeboy_core::component::{Component, ScopedExtensionConfig};
+use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
 use homeboy_core::plan::PlanStepStatus;
 use homeboy_extension::ExtensionManifest;
 
@@ -617,6 +617,79 @@ fn head_skip_publish_with_package_provider_still_packages_before_github_release(
     let steps = build_release_steps(
         &component,
         &[extension],
+        "1.0.1",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &options,
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("steps");
+
+    let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+    assert_eq!(ids, vec!["package", "github.release"]);
+    assert_eq!(steps[1].needs, vec!["package"]);
+}
+
+#[test]
+fn component_build_artifact_packages_before_github_release_without_extension() {
+    let mut component = github_fixture_component();
+    component.build_artifact = Some("build/fixture.zip".to_string());
+    component.scripts = Some(ComponentScriptsConfig {
+        build: vec!["build-fixture".to_string()],
+        ..Default::default()
+    });
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let options = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        ..Default::default()
+    };
+
+    let steps = build_release_steps(
+        &component,
+        &[],
+        "1.0.0",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &options,
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("steps");
+
+    let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+    assert!(step_index(&ids, "preflight.package") < step_index(&ids, "package"));
+    assert!(step_index(&ids, "package") < step_index(&ids, "github.release"));
+    assert_eq!(steps[step_index(&ids, "git.tag")].needs, vec!["package"]);
+}
+
+#[test]
+fn head_component_build_artifact_packages_before_github_release_without_extension() {
+    let mut component = github_fixture_component();
+    component.build_artifact = Some("build/fixture.zip".to_string());
+    component.scripts = Some(ComponentScriptsConfig {
+        build: vec!["build-fixture".to_string()],
+        ..Default::default()
+    });
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let options = ReleaseOptions {
+        bump_type: "head".to_string(),
+        pipeline: ReleasePipelineOptions {
+            head: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let steps = build_release_steps(
+        &component,
+        &[],
         "1.0.1",
         "1.0.1",
         &fixture_changelog_plan(),

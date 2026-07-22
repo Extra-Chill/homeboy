@@ -9,7 +9,7 @@ use crate::release::types::{ReleaseChangelogPlan, ReleaseOptions};
 use homeboy_core::component::Component;
 use homeboy_core::plan::PlanStep;
 use homeboy_core::Result;
-use homeboy_extension::ExtensionManifest;
+use homeboy_extension::{ExtensionCapability, ExtensionManifest};
 
 /// Build all release steps: core steps (non-configurable) + publish steps (extension-derived).
 #[allow(clippy::too_many_arguments)]
@@ -52,11 +52,17 @@ pub(in crate::release) fn build_release_steps(
     }
 
     let github_release_needed = github_release_needed(component, options);
-    let package_step_needed =
-        package_step_needed(extensions, &publish_targets, options, github_release_needed);
+    let package_step_needed = package_step_needed(
+        component,
+        extensions,
+        &publish_targets,
+        options,
+        github_release_needed,
+    );
 
     let package_preflight_step_id = add_package_preflight_step(
         &mut steps,
+        component,
         extensions,
         &publish_targets,
         options,
@@ -375,13 +381,20 @@ fn build_head_release_steps(
 
 fn add_package_preflight_step(
     steps: &mut Vec<PlanStep>,
+    component: &Component,
     extensions: &[ExtensionManifest],
     publish_targets: &[String],
     options: &ReleaseOptions,
     github_release_needed: bool,
     needs: &str,
 ) -> Option<String> {
-    if !package_step_needed(extensions, publish_targets, options, github_release_needed) {
+    if !package_step_needed(
+        component,
+        extensions,
+        publish_targets,
+        options,
+        github_release_needed,
+    ) {
         return None;
     }
 
@@ -401,12 +414,13 @@ fn github_release_needed(component: &Component, options: &ReleaseOptions) -> boo
 }
 
 fn package_step_needed(
+    component: &Component,
     extensions: &[ExtensionManifest],
     publish_targets: &[String],
     options: &ReleaseOptions,
     github_release_needed: bool,
 ) -> bool {
-    has_package_capability(extensions)
+    (has_package_capability(extensions) || has_component_package_contract(component))
         && ((!publish_targets.is_empty() && !options.pipeline.skip_publish)
             || github_release_needed)
 }
@@ -417,9 +431,17 @@ fn head_package_step_needed(
     publish_targets: &[String],
     options: &ReleaseOptions,
 ) -> bool {
-    has_package_capability(extensions)
+    (has_package_capability(extensions) || has_component_package_contract(component))
         && ((!publish_targets.is_empty() && !options.pipeline.skip_publish)
             || github_release_needed(component, options))
+}
+
+fn has_component_package_contract(component: &Component) -> bool {
+    component
+        .build_artifact
+        .as_deref()
+        .is_some_and(|path| !path.trim().is_empty())
+        && component.has_script(ExtensionCapability::Build)
 }
 
 fn add_release_extension_diagnostics(
