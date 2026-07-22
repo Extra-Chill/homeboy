@@ -2148,16 +2148,28 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 )
             })
         };
-        let runtime_input: crate::lab::offload::DurableLabRuntimeWorkspaceInput =
-            serde_json::from_value(field("runtime_input")?).map_err(|_| {
+        // Decode a required workspace-stage field into a typed value, mapping a
+        // deserialization failure to a uniform tamper error. `invalid_message`
+        // is the exact operator-facing message for the failure.
+        fn decode_workspace_field<T: serde::de::DeserializeOwned>(
+            value: Value,
+            invalid_message: &'static str,
+        ) -> Result<T> {
+            serde_json::from_value(value).map_err(|_| {
                 Error::validation_invalid_argument(
                     "durable_workspace_stage",
-                    "Lab staging runtime workspace input is invalid",
+                    invalid_message,
                     None,
                     None,
                 )
-            })?;
-        let changed_args: Vec<String> = serde_json::from_value(
+            })
+        }
+        let runtime_input: crate::lab::offload::DurableLabRuntimeWorkspaceInput =
+            decode_workspace_field(
+                field("runtime_input")?,
+                "Lab staging runtime workspace input is invalid",
+            )?;
+        let changed_args: Vec<String> = decode_workspace_field(
             workspace
                 .stage
                 .pointer("/changed_since/args")
@@ -2170,68 +2182,28 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                         None,
                     )
                 })?,
-        )
-        .map_err(|_| {
-            Error::validation_invalid_argument(
-                "durable_workspace_stage",
-                "Lab staging changed arguments are invalid",
-                None,
-                None,
-            )
-        })?;
-        let required_extensions: Vec<String> =
-            serde_json::from_value(field("runner_required_extensions")?).map_err(|_| {
-                Error::validation_invalid_argument(
-                    "durable_workspace_stage",
-                    "Lab staging required extensions are invalid",
-                    None,
-                    None,
-                )
-            })?;
-        let remapped_args: Vec<String> =
-            serde_json::from_value(field("remapped_args")?).map_err(|_| {
-                Error::validation_invalid_argument(
-                    "durable_workspace_stage",
-                    "Lab staging remapped arguments are invalid",
-                    None,
-                    None,
-                )
-            })?;
-        let command: Vec<String> = serde_json::from_value(field("command")?).map_err(|_| {
-            Error::validation_invalid_argument(
-                "durable_workspace_stage",
-                "Lab staging command is invalid",
-                None,
-                None,
-            )
-        })?;
-        let remote_command: Vec<String> = serde_json::from_value(field("remote_command")?)
-            .map_err(|_| {
-                Error::validation_invalid_argument(
-                    "durable_workspace_stage",
-                    "Lab staging remote command is invalid",
-                    None,
-                    None,
-                )
-            })?;
-        let agent_task_run_id: Option<String> = serde_json::from_value(field("agent_task_run_id")?)
-            .map_err(|_| {
-                Error::validation_invalid_argument(
-                    "durable_workspace_stage",
-                    "Lab staging agent-task identity is invalid",
-                    None,
-                    None,
-                )
-            })?;
-        let plan: homeboy_core::plan::HomeboyPlan = serde_json::from_value(field("plan")?)
-            .map_err(|_| {
-                Error::validation_invalid_argument(
-                    "durable_workspace_stage",
-                    "Lab staging plan is invalid",
-                    None,
-                    None,
-                )
-            })?;
+            "Lab staging changed arguments are invalid",
+        )?;
+        let required_extensions: Vec<String> = decode_workspace_field(
+            field("runner_required_extensions")?,
+            "Lab staging required extensions are invalid",
+        )?;
+        let remapped_args: Vec<String> = decode_workspace_field(
+            field("remapped_args")?,
+            "Lab staging remapped arguments are invalid",
+        )?;
+        let command: Vec<String> =
+            decode_workspace_field(field("command")?, "Lab staging command is invalid")?;
+        let remote_command: Vec<String> = decode_workspace_field(
+            field("remote_command")?,
+            "Lab staging remote command is invalid",
+        )?;
+        let agent_task_run_id: Option<String> = decode_workspace_field(
+            field("agent_task_run_id")?,
+            "Lab staging agent-task identity is invalid",
+        )?;
+        let plan: homeboy_core::plan::HomeboyPlan =
+            decode_workspace_field(field("plan")?, "Lab staging plan is invalid")?;
         let runner = crate::load(&request.recipe.runner_id)?;
         let homeboy_path =
             crate::remote_runner_homeboy_path(&runner, "durable Lab runtime materialization")?;
