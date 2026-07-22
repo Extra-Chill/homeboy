@@ -10,7 +10,7 @@ exclude = ["crates/contracts"]
 
 [package]
 name = "homeboy"
-version = "0.301.2"
+version = "0.302.0"
 edition = "2021"
 default-run = "homeboy"
 license = "MIT"
