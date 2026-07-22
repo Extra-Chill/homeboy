@@ -21,6 +21,39 @@ use super::types::InstallMethod;
 const UPGRADE_CAPTURE_LIMIT_BYTES: usize = 65_536;
 const SOURCE_UPGRADE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
+/// Environment variable set in the shell child's environment and checked at the
+/// start of `execute_upgrade` to prevent nested / re-entrant source upgrades.
+/// A custom upgrade command that indirectly spawns `homeboy upgrade` would
+/// otherwise loop indefinitely (#9686).
+const REENTRANCY_GUARD_ENV: &str = "HOMEBOY_UPGRADE_IN_PROGRESS";
+
+/// RAII guard that removes a temporary file on drop, guaranteeing cleanup
+/// even when the caller returns early via `?`, panics, or is interrupted by a
+/// signal. This prevents stale `.homeboy-upgrade.*.tmp` files from accumulating
+/// in the bin directory after failed or killed source installs (#9686).
+struct TempFileGuard {
+    path: PathBuf,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// Consume the guard without deleting the file, indicating the caller has
+    /// taken ownership of the file (e.g. via a successful rename).
+    fn into_owned(self) {
+        // Leak the path so Drop does not remove it.
+        let _ = std::mem::ManuallyDrop::new(self);
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActiveBinaryInfo {
     pub version: Option<String>,
@@ -88,6 +121,17 @@ pub(crate) fn execute_upgrade(
             })?
         }
         InstallMethod::Source => {
+            if env::var_os(REENTRANCY_GUARD_ENV).is_some() {
+                return Err(Error::internal_unexpected(
+                    "nested source upgrade detected (HOMEBOY_UPGRADE_IN_PROGRESS is set); \
+                     refusing to recurse to prevent an upgrade loop (#9686)",
+                )
+                .with_hint(
+                    "A custom upgrade command appears to have spawned another \
+                     `homeboy upgrade` invocation. Check the source upgrade \
+                     command for indirect invocations.",
+                ));
+            }
             let workspace_root = resolve_source_workspace(source_path)?;
             let source_revision = prepare_source_workspace_for_upgrade(&workspace_root)?;
             let built_binary = source_built_binary_path(&workspace_root);
@@ -223,6 +267,7 @@ fn complete_source_upgrade(
         Some(&workspace_root),
         Some(&built_binary),
         Some(replacement_target),
+        previous_build_identity,
     ) {
         return Err(error);
     }
@@ -245,6 +290,7 @@ fn run_source_upgrade_command(
     child_command
         .args(["-c", command])
         .current_dir(workspace_root)
+        .env(REENTRANCY_GUARD_ENV, "1")
         .stdin(Stdio::null());
     #[cfg(unix)]
     {
@@ -310,6 +356,7 @@ fn source_swap_failure(
     source_workspace: Option<&Path>,
     built_binary: Option<&Path>,
     replacement_target: Option<&Path>,
+    built_binary_identity: Option<&str>,
 ) -> Option<Error> {
     if method != InstallMethod::Source || success {
         return None;
@@ -319,8 +366,13 @@ fn source_swap_failure(
         .or(new_version)
         .unwrap_or("an unverifiable version");
 
-    let diagnostics =
-        source_swap_failure_diagnostics(source_workspace, built_binary, replacement_target);
+    let diagnostics = source_swap_failure_diagnostics(
+        source_workspace,
+        built_binary,
+        replacement_target,
+        built_binary_identity,
+        new_build_identity,
+    );
     let mut error = Error::internal_unexpected(format!(
         "source upgrade command exited successfully but the active binary was not replaced (still {observed})"
     ))
@@ -334,7 +386,11 @@ fn source_swap_failure(
         "Replacement target path: {}",
         diagnostics.replacement_path
     ))
-    .with_hint(format!("Permissions: {}", diagnostics.permissions));
+    .with_hint(format!("Permissions: {}", diagnostics.permissions))
+    .with_hint(format!(
+        "Built identity: {} | Installed identity: {}",
+        diagnostics.built_identity, diagnostics.installed_identity
+    ));
 
     if let Some(command) = diagnostics.built_binary_command {
         error = error.with_hint(format!("Retry through just-built Homeboy: {command}"));
@@ -355,12 +411,16 @@ struct SourceSwapFailureDiagnostics {
     permissions: String,
     copy_command: Option<String>,
     built_binary_command: Option<String>,
+    built_identity: String,
+    installed_identity: String,
 }
 
 fn source_swap_failure_diagnostics(
     source_workspace: Option<&Path>,
     built_binary: Option<&Path>,
     replacement_target: Option<&Path>,
+    built_identity: Option<&str>,
+    installed_identity: Option<&str>,
 ) -> SourceSwapFailureDiagnostics {
     let active_path = replacement_target
         .map(Path::to_path_buf)
@@ -369,6 +429,8 @@ fn source_swap_failure_diagnostics(
         source_workspace,
         built_binary,
         active_path.as_deref(),
+        built_identity,
+        installed_identity,
     )
 }
 
@@ -376,6 +438,8 @@ fn source_swap_failure_diagnostics_for_paths(
     source_workspace: Option<&Path>,
     built_binary: Option<&Path>,
     active_path: Option<&Path>,
+    built_identity: Option<&str>,
+    installed_identity: Option<&str>,
 ) -> SourceSwapFailureDiagnostics {
     let active_path_text = active_path.map(display_path).unwrap_or_else(|| {
         "unresolved (command -v homeboy and current executable unavailable)".to_string()
@@ -420,6 +484,8 @@ fn source_swap_failure_diagnostics_for_paths(
         permissions,
         copy_command,
         built_binary_command,
+        built_identity: built_identity.unwrap_or("unknown").to_string(),
+        installed_identity: installed_identity.unwrap_or("unknown").to_string(),
     }
 }
 
@@ -487,6 +553,7 @@ fn install_source_built_binary(built_binary: &Path, replacement_target: &Path) -
         )
     })?;
     let temp_target = parent.join(format!(".homeboy-upgrade.{}.tmp", std::process::id()));
+    let guard = TempFileGuard::new(temp_target.clone());
 
     std::fs::copy(built_binary, &temp_target).map_err(|e| {
         Error::internal_io(
@@ -500,14 +567,10 @@ fn install_source_built_binary(built_binary: &Path, replacement_target: &Path) -
         )
     })?;
 
-    if let Err(err) = make_source_install_executable(&temp_target) {
-        let _ = std::fs::remove_file(&temp_target);
-        return Err(err);
-    }
+    make_source_install_executable(&temp_target)?;
 
-    if let Err(err) = std::fs::rename(&temp_target, replacement_target) {
-        let _ = std::fs::remove_file(&temp_target);
-        return Err(Error::internal_io(
+    std::fs::rename(&temp_target, replacement_target).map_err(|err| {
+        Error::internal_io(
             format!(
                 "rename {} to {} failed: {}",
                 temp_target.display(),
@@ -515,9 +578,12 @@ fn install_source_built_binary(built_binary: &Path, replacement_target: &Path) -
                 err
             ),
             Some("install source-built binary".to_string()),
-        ));
-    }
+        )
+    })?;
 
+    // Rename succeeded; the file is at its final path. Prevent the guard from
+    // deleting it on drop.
+    guard.into_owned();
     Ok(())
 }
 

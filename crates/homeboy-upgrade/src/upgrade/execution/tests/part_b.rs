@@ -41,6 +41,7 @@ fn source_swap_failure_errors_when_active_binary_unchanged() {
         Some(Path::new("/src/homeboy")),
         Some(Path::new("/src/homeboy/target/release/homeboy")),
         Some(Path::new("/active/homeboy")),
+        Some("homeboy 0.247.5+new"),
     )
     .expect("unverified source swap must surface an error");
 
@@ -65,6 +66,13 @@ fn source_swap_failure_errors_when_active_binary_unchanged() {
         .hints
         .iter()
         .any(|hint| hint.message.contains("Permissions:")));
+    assert!(err
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("Built identity: homeboy 0.247.5+new")));
+    assert!(err.hints.iter().any(|hint| hint
+        .message
+        .contains("Installed identity: homeboy 0.247.5+old")));
 }
 
 #[test]
@@ -76,6 +84,7 @@ fn source_swap_failure_reports_version_when_no_build_identity() {
         None,
         Some(Path::new("/src/homeboy")),
         Some(Path::new("/src/homeboy/target/release/homeboy")),
+        None,
         None,
     )
     .expect("unverified source swap must surface an error");
@@ -93,6 +102,7 @@ fn source_swap_failure_reports_placeholder_when_version_unverifiable() {
         Some(Path::new("/src/homeboy")),
         Some(Path::new("/src/homeboy/target/release/homeboy")),
         None,
+        None,
     )
     .expect("unverified source swap must surface an error");
 
@@ -109,6 +119,7 @@ fn source_swap_failure_silent_on_verified_swap() {
             None,
             Some(Path::new("/src/homeboy")),
             Some(Path::new("/src/homeboy/target/release/homeboy")),
+            None,
             None,
         )
         .is_none(),
@@ -128,6 +139,7 @@ fn source_swap_failure_ignores_non_source_methods() {
         Some(Path::new("/src/homeboy")),
         Some(Path::new("/src/homeboy/target/release/homeboy")),
         None,
+        None,
     )
     .is_none());
     assert!(source_swap_failure(
@@ -137,6 +149,7 @@ fn source_swap_failure_ignores_non_source_methods() {
         None,
         Some(Path::new("/src/homeboy")),
         Some(Path::new("/src/homeboy/target/release/homeboy")),
+        None,
         None,
     )
     .is_none());
@@ -158,6 +171,7 @@ fn source_swap_failure_diagnostics_use_replacement_target_path() {
         Some(&source),
         Some(&source.join("target/release/homeboy")),
         Some(&target),
+        Some("homeboy 0.255.8+new"),
     )
     .expect("unverified source swap must surface an error");
 
@@ -188,8 +202,13 @@ fn source_swap_failure_diagnostics_include_paths_permissions_and_remediation() {
     std::fs::write(&active, "old").expect("active");
     std::fs::write(&built, "new").expect("built");
 
-    let diagnostics =
-        source_swap_failure_diagnostics_for_paths(Some(&source), Some(&built), Some(&active));
+    let diagnostics = source_swap_failure_diagnostics_for_paths(
+        Some(&source),
+        Some(&built),
+        Some(&active),
+        Some("homeboy 0.255.8+new"),
+        Some("homeboy 0.255.8+old"),
+    );
 
     assert_eq!(diagnostics.active_path, active.display().to_string());
     assert_eq!(diagnostics.built_binary_path, built.display().to_string());
@@ -221,8 +240,13 @@ fn source_swap_failure_diagnostics_report_effective_cargo_target_binary() {
     let built = Path::new("/shared/cargo-target/release/homeboy");
     let active = Path::new("/bin/homeboy");
 
-    let diagnostics =
-        source_swap_failure_diagnostics_for_paths(Some(source), Some(built), Some(active));
+    let diagnostics = source_swap_failure_diagnostics_for_paths(
+        Some(source),
+        Some(built),
+        Some(active),
+        None,
+        None,
+    );
 
     assert_eq!(diagnostics.built_binary_path, built.display().to_string());
     assert!(diagnostics
@@ -689,4 +713,107 @@ fn missing_tool_upgrade_error_suggests_source_fallback() {
         .hints
         .iter()
         .any(|hint| hint.message.contains("--source-path")));
+}
+
+#[test]
+fn verify_source_install_with_retry_terminates_on_mismatch() {
+    // Issue #9686: a source swap failure must NOT loop forever. The bounded
+    // retry must terminate after the configured number of attempts, returning
+    // false to signal the mismatch.
+    let attempts = 3;
+    let mut sleep_count = 0u32;
+    let success = verify_source_install_with_retry(
+        None,
+        attempts,
+        std::time::Duration::from_millis(0),
+        |_| {
+            sleep_count += 1;
+        },
+    );
+    assert!(!success, "mismatch must fail closed");
+    assert_eq!(sleep_count, attempts - 1, "must sleep between each attempt");
+}
+
+#[test]
+fn verify_upgrade_with_retry_terminates_on_identity_mismatch() {
+    // Issue #9686: even when `read_active` always returns the same identity
+    // (i.e. the swap was a no-op), the bounded retry must terminate and report
+    // failure rather than looping indefinitely.
+    let attempts = 4;
+    let mut reads = 0u32;
+    let (success, last) = verify_upgrade_with_retry(
+        InstallMethod::Source,
+        true,
+        "0.300.0",
+        Some("homeboy 0.300.0+old"),
+        attempts,
+        std::time::Duration::from_millis(0),
+        || {
+            reads += 1;
+            Some(ActiveBinaryInfo {
+                version: Some("0.300.0".to_string()),
+                build_identity: Some("homeboy 0.300.0+old".to_string()),
+            })
+        },
+        |_| {},
+    );
+    assert!(!success, "identity mismatch must fail closed");
+    assert_eq!(reads, attempts, "must attempt exactly the configured count");
+    assert_eq!(
+        last.and_then(|i| i.build_identity).as_deref(),
+        Some("homeboy 0.300.0+old")
+    );
+}
+
+#[test]
+fn source_swap_failure_includes_identity_comparison() {
+    let err = source_swap_failure(
+        InstallMethod::Source,
+        false,
+        Some("0.300.0"),
+        Some("homeboy 0.300.0+old"),
+        Some(Path::new("/src/homeboy")),
+        Some(Path::new("/src/homeboy/target/release/homeboy")),
+        Some(Path::new("/active/homeboy")),
+        Some("homeboy 0.300.0+new"),
+    )
+    .expect("unverified source swap must surface an error");
+
+    assert!(err
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("Built identity: homeboy 0.300.0+new")));
+    assert!(err.hints.iter().any(|hint| hint
+        .message
+        .contains("Installed identity: homeboy 0.300.0+old")));
+}
+
+#[test]
+fn install_source_built_binary_cleans_up_temp_on_copy_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("source");
+    let target_dir = dir.path().join("bin");
+    std::fs::create_dir_all(&source).expect("source dir");
+    std::fs::create_dir_all(&target_dir).expect("target dir");
+    let active = target_dir.join("homeboy");
+    std::fs::write(&active, "old").expect("active binary");
+
+    let built = source.join("target/release/homeboy");
+    let _ = install_source_built_binary(&built, &active);
+
+    // Verify no stale .homeboy-upgrade.*.tmp files remain in the bin directory.
+    let stale: Vec<_> = std::fs::read_dir(&target_dir)
+        .expect("read target dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".homeboy-upgrade.")
+        })
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "no stale temp files should remain after a failed install, found: {:?}",
+        stale
+    );
 }
