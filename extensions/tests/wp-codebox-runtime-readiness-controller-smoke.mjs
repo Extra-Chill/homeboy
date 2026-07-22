@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hbe-codebox-runtime-readiness-controller-'));
 const executor = path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs');
+const providerReadiness = path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'scripts', 'agent', 'homeboy-codebox-provider-readiness.cjs');
 const coreModule = path.join(rootDir, 'wordpress', 'tests', 'fixtures', 'wp-codebox-core-agent-task-normalizer.mjs');
 
 try {
@@ -45,6 +46,25 @@ process.stdout.write(JSON.stringify({ success: true, status: 'completed' }));
     workspace: { mode: 'ephemeral' },
     limits: { timeout_ms: 120000 },
   };
+
+  const configuredReadiness = spawnSync(process.execPath, [providerReadiness], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      schema: 'homeboy/agent-task-provider-readiness-request/v1',
+      provider_id: 'wordpress.codebox-agent-task-executor',
+      backend: 'wp-codebox',
+      effective_config: request.executor.config,
+    }),
+    env: {
+      ...process.env,
+      HOMEBOY_WP_CODEBOX_CORE_MODULE: coreModule,
+    },
+  });
+  assert.equal(configuredReadiness.status, 0, configuredReadiness.stderr);
+  const readinessResult = JSON.parse(configuredReadiness.stdout);
+  assert.equal(readinessResult.schema, 'homeboy/agent-task-provider-readiness-result/v1');
+  assert.equal(readinessResult.ready, false);
+  assert.match(readinessResult.message, /vendor\/autoload\.php is missing/);
 
   const result = spawnSync(process.execPath, [executor, '--task-runner', runner], {
     encoding: 'utf8',
