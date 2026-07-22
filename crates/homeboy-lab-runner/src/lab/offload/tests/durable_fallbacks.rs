@@ -1,6 +1,14 @@
 use super::*;
 
 #[test]
+fn detached_staging_controller_job_commands_use_activity_surface() {
+    let commands = controller_job_retrieval_commands("controller-job-9678");
+
+    assert_eq!(commands.show, "homeboy activity show controller-job-9678");
+    assert_eq!(commands.watch, "homeboy activity watch controller-job-9678");
+}
+
+#[test]
 fn emit_durable_run_id_writes_json_to_output_before_execution() {
     let dir = tempfile::tempdir().expect("temp dir");
     let output_path = dir.path().join("cook-output.json");
