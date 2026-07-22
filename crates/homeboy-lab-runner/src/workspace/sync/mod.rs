@@ -578,7 +578,13 @@ fn compatible_incremental_snapshot(
 }
 
 fn is_runner_git_auth_or_network_failure(error: &Error) -> bool {
-    let message = error.message.to_ascii_lowercase();
+    let details = error.details.to_string();
+    let evidence = std::iter::once(error.message.as_str())
+        .chain(error.hints.iter().map(|hint| hint.message.as_str()))
+        .chain(std::iter::once(details.as_str()))
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join("\n");
     [
         "authentication failed",
         "permission denied",
@@ -592,7 +598,7 @@ fn is_runner_git_auth_or_network_failure(error: &Error) -> bool {
         "proxy",
     ]
     .iter()
-    .any(|needle| message.contains(needle))
+    .any(|needle| evidence.contains(needle))
 }
 
 pub(crate) fn workspace_materialization_plan(
@@ -1678,8 +1684,10 @@ fn local_git_state(local_path: &Path) -> LocalGitState {
 #[cfg(test)]
 mod tests {
     use super::{
-        retry_idempotent_ssh_operation, runner_workspace_disk_is_critical, RunnerWorkspaceDiskProbe,
+        is_runner_git_auth_or_network_failure, retry_idempotent_ssh_operation,
+        runner_workspace_disk_is_critical, RunnerWorkspaceDiskProbe,
     };
+    use homeboy_core::error::{Error, ErrorCode};
     use homeboy_core::server::CommandOutput;
 
     fn command_output(success: bool, exit_code: i32, stderr: &str) -> CommandOutput {
@@ -1691,6 +1699,46 @@ mod tests {
             timed_out: false,
             child_resource: None,
         }
+    }
+
+    #[test]
+    fn runner_git_network_failure_in_hint_activates_controller_fallback() {
+        let error = Error::validation_invalid_argument(
+            "changed_since",
+            "runner dispatch could not make the requested --changed-since base reachable in the runner workspace before dispatch",
+            None,
+            Some(vec![
+                "Remote git error: ssh: Could not resolve hostname git.example.test: Temporary failure in name resolution\nfatal: Could not read from remote repository."
+                    .to_string(),
+            ]),
+        );
+
+        assert!(is_runner_git_auth_or_network_failure(&error));
+    }
+
+    #[test]
+    fn runner_git_network_failure_in_structured_details_activates_controller_fallback() {
+        let error = Error::new(
+            ErrorCode::RunnerLabTransportFailure,
+            "runner Git materialization failed",
+            serde_json::json!({
+                "stderr": "fatal: unable to access source: Failed to connect to git.example.test",
+            }),
+        );
+
+        assert!(is_runner_git_auth_or_network_failure(&error));
+    }
+
+    #[test]
+    fn runner_git_non_transport_failure_does_not_activate_controller_fallback() {
+        let error = Error::validation_invalid_argument(
+            "changed_since",
+            "runner dispatch could not make the requested --changed-since base reachable in the runner workspace before dispatch",
+            None,
+            Some(vec!["Remote git error: fatal: invalid object name 'missing-ref'".to_string()]),
+        );
+
+        assert!(!is_runner_git_auth_or_network_failure(&error));
     }
 
     #[test]
