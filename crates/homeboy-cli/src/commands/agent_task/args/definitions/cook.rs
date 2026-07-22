@@ -110,6 +110,9 @@ pub struct AgentTaskCookArgs {
     pub max_attempts: u32,
     #[arg(long = "no-finalize")]
     pub no_finalize: bool,
+    /// Return the complete cook report, including nested promotion and gate evidence.
+    #[arg(long)]
+    pub full: bool,
     #[arg(long, default_value = "main", value_name = "BRANCH")]
     pub base: String,
     #[arg(long, value_name = "BRANCH")]

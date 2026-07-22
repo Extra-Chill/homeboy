@@ -220,6 +220,9 @@ pub struct AdoptArgs {
     /// Concrete model that prepared the externally supplied candidate.
     #[arg(long, value_name = "MODEL")]
     pub ai_model: Option<String>,
+    /// Return the complete cook adoption report, including nested gate evidence.
+    #[arg(long)]
+    pub full: bool,
 }
 #[derive(Args, Debug)]
 pub struct FinalizePrArgs {

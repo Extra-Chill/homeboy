@@ -393,7 +393,10 @@ pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
         ExtensionProviderAgentTaskExecutor::discover(),
     )?;
     let exit_code = result.exit_code;
-    let mut value = serde_json::to_value(result.value).unwrap_or(Value::Null);
+    let mut value = super::status::compact_cook_report(
+        serde_json::to_value(result.value).unwrap_or(Value::Null),
+        args.full,
+    );
     value["adoption"] = serde_json::json!({
         "schema": "homeboy/agent-task-candidate-adoption/v1",
         "source": args.run_or_cook_id,

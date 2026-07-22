@@ -40,6 +40,8 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 
 `agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `agent-task active --reconcile` cancels stale, suspect, or unreconciled active records through the durable lifecycle path; add `--dry-run` to report candidates without mutating records.
 
+Machine-readable `cook`, `resume`, `adopt`, and `status` responses default to bounded summaries: stable ids, states, totals, timestamps when present, artifact/evidence references, and actionable failure reasons are retained while nested provider evidence is projected away. Use `cook --full`, `resume --full`, `adopt --full`, or the emitted `full_command`; use the emitted `evidence_command` (with `--task` or `--kind`) to retrieve selected durable evidence.
+
 `agent-task replay-provider-boundary <run-id>` is a focused inspect/replay path for
 provider-boundary debugging. It loads saved `executor-input` evidence, projects the
 normalized `runtime_task`, provider config, `runtime_component_paths`,

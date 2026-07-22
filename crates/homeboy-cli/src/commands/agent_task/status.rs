@@ -31,6 +31,8 @@ use crate::commands::utils::response::{
 /// aggregate cannot flood recovery output. Overflow is reported as an
 /// `omitted` count rather than dropped silently.
 const COMPACT_REF_LIMIT: usize = 12;
+const COMPACT_TASK_LIMIT: usize = 12;
+const COMPACT_TEXT_LIMIT: usize = 512;
 
 pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     if args.bridge {
@@ -1236,6 +1238,10 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
     let plan = agent_task_lifecycle::load_plan(run_id).ok();
     let aggregate = completed_run_aggregate(run_id).and_then(Result::ok);
     let task_table = task_source_table(record, plan.as_ref());
+    let tasks_omitted = record
+        .get("tasks")
+        .and_then(Value::as_array)
+        .map_or(0, |tasks| tasks.len().saturating_sub(COMPACT_TASK_LIMIT));
     let ref_inventory = ref_inventory(record, aggregate.as_ref());
     let (refs, refs_omitted) = compact_refs(&ref_inventory);
     let risk_flags = risk_flags(record);
@@ -1245,12 +1251,13 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         "schema": "homeboy/agent-task-status-summary/v1",
         "run_id": record.get("run_id").cloned().unwrap_or_else(|| json!(run_id)),
         "state": record.get("state").cloned().unwrap_or(Value::Null),
+        "timestamps": compact_fields(record, &["created_at", "updated_at", "started_at", "completed_at"]),
         "work_summary": work_summary,
-        // Keep typed refs so the shared status presentation can classify
-        // recovered terminal patch artifacts by their size and kind.
-        "artifact_refs": record.get("artifact_refs").cloned().unwrap_or(Value::Null),
+        "artifact_refs": refs.clone(),
+        "artifact_refs_omitted": refs_omitted,
         "totals": record.get("totals").cloned().unwrap_or(Value::Null),
         "tasks": task_table,
+        "tasks_omitted": tasks_omitted,
         "refs": refs,
         "refs_omitted": refs_omitted,
         "risk_flags": risk_flags,
@@ -1294,10 +1301,144 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         .and_then(|metadata| metadata.get("latest_promotion"))
     {
         if !latest_promotion.is_null() {
-            summary["latest_promotion"] = latest_promotion.clone();
+            summary["latest_promotion"] = compact_fields(
+                latest_promotion,
+                &[
+                    "schema",
+                    "status",
+                    "run_id",
+                    "task_id",
+                    "artifact_id",
+                    "updated_at",
+                    "created_at",
+                    "command",
+                ],
+            );
         }
     }
     summary
+}
+
+/// Project completion evidence for machine consumers. The durable aggregate and
+/// `agent-task status <run-id> --full` remain the explicit lossless paths.
+pub(crate) fn compact_aggregate_summary(
+    aggregate: &AgentTaskAggregate,
+    run_id: Option<&str>,
+) -> Value {
+    let full = serde_json::to_value(
+        homeboy::agents::agent_task_artifacts::reviewer_facing_aggregate(aggregate),
+    )
+    .unwrap_or(Value::Null);
+    let outcomes = full
+        .get("outcomes")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let tasks = outcomes.iter().take(COMPACT_TASK_LIMIT).map(|outcome| json!({
+        "task_id": outcome.get("task_id"),
+        "status": outcome.get("status"),
+        "summary": bounded_value(outcome.get("summary").unwrap_or(&Value::Null)),
+        "failure_classification": outcome.get("failure_classification"),
+        "timestamps": compact_fields(outcome, &["created_at", "updated_at", "timestamp", "finished_at"]),
+        "artifacts": compact_items(outcome.get("artifacts"), &["schema", "id", "kind", "name", "path", "url", "sha256", "size_bytes"]),
+        "evidence_refs": compact_items(outcome.get("evidence_refs"), &["schema", "kind", "uri", "created_at", "timestamp"]),
+    })).collect::<Vec<_>>();
+    let mut summary = json!({
+        "schema": full.get("schema"),
+        "view": "summary",
+        "plan_id": full.get("plan_id"),
+        "status": full.get("status"),
+        "totals": full.get("totals"),
+        "tasks": tasks,
+        "tasks_omitted": outcomes.len().saturating_sub(COMPACT_TASK_LIMIT),
+        "failure_reasons": bounded_failure_reasons(&Value::Array(failure_reasons_from_aggregate(aggregate))),
+    });
+    if let Some(run_id) = run_id {
+        summary["run_id"] = json!(run_id);
+        summary["full_command"] = json!(format!("homeboy agent-task status {run_id} --full"));
+        summary["evidence_command"] = json!(format!("homeboy agent-task evidence {run_id}"));
+    }
+    summary
+}
+
+pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
+    if full {
+        return value;
+    }
+    let attempts = value
+        .get("attempts")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let latest_run_id = value.get("latest_run_id").and_then(Value::as_str);
+    let mut summary = json!({
+        "schema": value.get("schema"),
+        "view": "summary",
+        "cook_id": value.get("cook_id"),
+        "latest_run_id": value.get("latest_run_id"),
+        "status": value.get("status"),
+        "stop_reason": bounded_value(value.get("stop_reason").unwrap_or(&Value::Null)),
+        "terminal_phase": value.get("terminal_phase"),
+        "terminal_failure_classification": value.get("terminal_failure_classification"),
+        "attempts": attempts.iter().take(COMPACT_TASK_LIMIT).map(|attempt| compact_fields(attempt, &["attempt", "run_id", "run_state", "aggregate_path"])).collect::<Vec<_>>(),
+        "attempts_omitted": attempts.len().saturating_sub(COMPACT_TASK_LIMIT),
+        "finalization": value.get("finalization").map(|finalization| compact_fields(finalization, &["schema", "status", "pr_number", "pr_url", "updated_at", "created_at"])),
+    });
+    if let Some(run_id) = latest_run_id {
+        summary["full_command"] = json!(format!("homeboy agent-task status {run_id} --full"));
+        summary["evidence_command"] = json!(format!("homeboy agent-task evidence {run_id}"));
+    }
+    summary
+}
+
+fn compact_items(value: Option<&Value>, fields: &[&str]) -> Value {
+    Value::Array(
+        value
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .take(COMPACT_REF_LIMIT)
+                    .map(|item| compact_fields(item, fields))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
+}
+
+fn compact_fields(value: &Value, fields: &[&str]) -> Value {
+    let mut object = serde_json::Map::new();
+    for field in fields {
+        if let Some(value) = value.get(*field) {
+            object.insert((*field).to_string(), bounded_value(value));
+        }
+    }
+    Value::Object(object)
+}
+
+fn bounded_failure_reasons(value: &Value) -> Value {
+    Value::Array(
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .take(FAILURE_REASON_LIMIT)
+                    .map(|item| compact_fields(item, &["task_id", "class", "message", "source"]))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
+}
+
+fn bounded_value(value: &Value) -> Value {
+    match value {
+        Value::String(text) if text.chars().count() > COMPACT_TEXT_LIMIT => Value::String(format!(
+            "{}...",
+            text.chars().take(COMPACT_TEXT_LIMIT).collect::<String>()
+        )),
+        _ => value.clone(),
+    }
 }
 
 fn liveness_summary(record: &Value, run_id: &str) -> Value {
@@ -1383,6 +1524,7 @@ fn task_source_table(record: &Value, plan: Option<&AgentTaskPlan>) -> Value {
 
     let rows: Vec<Value> = tasks
         .iter()
+        .take(COMPACT_TASK_LIMIT)
         .map(|task| {
             let task_id = task.get("task_id").and_then(Value::as_str).unwrap_or("");
             let state = task.get("state").cloned().unwrap_or(Value::Null);
@@ -1896,14 +2038,10 @@ mod tests {
 
         let summary = compact_status_summary(&record, "agent-task-run-1");
 
-        assert_eq!(
-            summary["latest_promotion"]["patch_artifact_id"],
-            "patch.diff"
-        );
-        assert_eq!(
-            summary["latest_promotion"]["operator_notification"]["status"],
-            "completed"
-        );
+        assert_eq!(summary["latest_promotion"]["status"], "applied");
+        assert!(summary["latest_promotion"]
+            .get("operator_notification")
+            .is_none());
         assert_eq!(
             summary["queue_visibility"]["commands"][0],
             "homeboy agent-task list"
@@ -1990,7 +2128,46 @@ mod tests {
 
         let summary = compact_status_summary(&record, "recovered-lab-run");
 
-        assert_eq!(summary["artifact_refs"], record["artifact_refs"]);
+        assert_eq!(summary["artifact_refs"][0]["kind"], "patch");
+        assert!(summary["artifact_refs"][0].get("size_bytes").is_none());
+    }
+
+    #[test]
+    fn compact_cook_report_is_bounded_and_full_remains_retrievable() {
+        let attempts = (0..(COMPACT_TASK_LIMIT + 3))
+            .map(|attempt| {
+                json!({
+                    "attempt": attempt,
+                    "run_id": format!("run-{attempt}"),
+                    "run_state": "failed",
+                    "promotion": { "nested_evidence": "x".repeat(COMPACT_TEXT_LIMIT + 1) }
+                })
+            })
+            .collect::<Vec<_>>();
+        let report = json!({
+            "schema": "homeboy/agent-task-cook/v1",
+            "cook_id": "cook-1",
+            "latest_run_id": "run-14",
+            "status": "failed",
+            "stop_reason": "x".repeat(COMPACT_TEXT_LIMIT + 1),
+            "attempts": attempts,
+            "finalization": { "status": "blocked", "nested_evidence": { "large": "x".repeat(COMPACT_TEXT_LIMIT + 1) } }
+        });
+
+        let compact = compact_cook_report(report.clone(), false);
+        assert_eq!(compact["schema"], report["schema"]);
+        assert_eq!(compact["cook_id"], "cook-1");
+        assert_eq!(
+            compact["attempts"].as_array().unwrap().len(),
+            COMPACT_TASK_LIMIT
+        );
+        assert_eq!(compact["attempts_omitted"], 3);
+        assert!(compact["attempts"][0].get("promotion").is_none());
+        assert_eq!(
+            compact["full_command"],
+            "homeboy agent-task status run-14 --full"
+        );
+        assert_eq!(compact_cook_report(report.clone(), true), report);
     }
 
     #[test]

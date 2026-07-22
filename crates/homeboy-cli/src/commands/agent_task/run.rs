@@ -242,7 +242,10 @@ where
         executor,
     )?;
     Ok((
-        serde_json::to_value(result.value).unwrap_or(Value::Null),
+        super::status::compact_cook_report(
+            serde_json::to_value(result.value).unwrap_or(Value::Null),
+            args.full,
+        ),
         result.exit_code,
     ))
 }
@@ -319,7 +322,7 @@ where
 {
     let result = agent_task_service::run_loaded_plan(plan, record_run_id, executor)?;
     Ok((
-        aggregate_value_with_failure_reasons(&result.value),
+        super::status::compact_aggregate_summary(&result.value, record_run_id),
         result.exit_code,
     ))
 }
@@ -340,9 +343,10 @@ pub(super) fn run_submitted_with_executor<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
-    let result = agent_task_service::run_submitted_with_timeout(run_id, timeout_ms, executor)?;
+    let result =
+        agent_task_service::run_submitted_with_timeout(run_id.clone(), timeout_ms, executor)?;
     Ok((
-        aggregate_value_with_failure_reasons(&result.value),
+        super::status::compact_aggregate_summary(&result.value, Some(&run_id)),
         result.exit_code,
     ))
 }
@@ -378,6 +382,7 @@ pub(super) fn resume(args: StatusArgs) -> CmdResult<Value> {
         args.run_id,
         args.bridge,
         args.since_cursor,
+        args.full,
         ExtensionProviderAgentTaskExecutor::discover(),
     )
 }
@@ -386,13 +391,14 @@ pub(super) fn run_resume_with_executor<E>(run_id: String, executor: E) -> CmdRes
 where
     E: AgentTaskExecutorAdapter,
 {
-    run_resume_with_executor_and_bridge(run_id, false, None, executor)
+    run_resume_with_executor_and_bridge(run_id, false, None, false, executor)
 }
 
 pub(super) fn run_resume_with_executor_and_bridge<E>(
     run_id: String,
     bridge: bool,
     since_cursor: Option<u64>,
+    full: bool,
     executor: E,
 ) -> CmdResult<Value>
 where
@@ -416,7 +422,11 @@ where
         ));
     }
     Ok((
-        aggregate_value_with_failure_reasons(&result.value),
+        if full {
+            aggregate_value_with_failure_reasons(&result.value)
+        } else {
+            super::status::compact_aggregate_summary(&result.value, Some(&run_id))
+        },
         result.exit_code,
     ))
 }
