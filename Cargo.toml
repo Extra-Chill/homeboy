@@ -24,6 +24,9 @@ publish = false
 [package.metadata.dist]
 dist = true
 
+[package.metadata.cargo-machete]
+ignored = ["homeboy-lab-contract"] # Required as a direct edge by release preflight.
+
 [lib]
 name = "homeboy"
 path = "src/lib.rs"
@@ -41,54 +44,27 @@ name = "bench-audit-self"
 path = "src/bin/bench-audit-self.rs"
 
 [dependencies]
-# Private workspace crates shipped only in the Homeboy binary.
-homeboy-cli-contract = { path = "crates/contracts/homeboy-cli-contract" }
-homeboy-error = { path = "crates/homeboy-error" }
-homeboy-finding = { path = "crates/homeboy-finding" }
-homeboy-output = { path = "crates/homeboy-output" }
-homeboy-paths = { path = "crates/homeboy-paths" }
-homeboy-process = { path = "crates/homeboy-process" }
 homeboy-product-identity = { path = "crates/homeboy-product-identity" }
-homeboy-engine-primitives = { path = "crates/homeboy-engine-primitives" }
 homeboy-cli = { path = "crates/homeboy-cli" }
 homeboy-core = { path = "crates/homeboy-core" }
-homeboy-lab-runner = { path = "crates/homeboy-lab-runner" }
 homeboy-lab-contract = { path = "crates/contracts/homeboy-lab-contract" }
-homeboy-redaction = { path = "crates/homeboy-redaction" }
 
 # Core library dependencies
 base64 = "0.22"
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_path_to_error = "0.1"
-serde_yml = "0.0.12"
-heck = "0.5"
 uuid = { version = "1.11", features = ["v4", "v5", "serde"] }
-shellexpand = "3.1"
-regex = "1.11"
-glob-match = "0.2"
-glob = "0.3"
-zip = "0.6"
-keyring = { version = "3.6", features = ["apple-native"] }
-core-foundation-sys = "0.8"
-security-framework-sys = "2.17"
 # default-features disabled to drop reqwest's `default-tls` (native-tls/openssl),
 # which pulled a second, redundant TLS stack alongside the rustls-tls we actually use.
 # Kept features cover current usage (blocking JSON client, socks proxy, http2, charset,
 # system proxy).
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "socks", "http2", "charset", "system-proxy"] }
 chrono = "0.4"
-ctrlc = "3.4"
-semver = "1.0"
 libc = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
-serde_json_path = "0.7"
 tempfile = "3.14"
 
 # CLI dependencies
 clap = { version = "4.5", features = ["derive", "string"] }
-toml = "1.0.3"
-sha2 = "0.10.9"
 
 [dev-dependencies]
 # Enable homeboy-core's shared hermetic test fixtures for this crate's test build
