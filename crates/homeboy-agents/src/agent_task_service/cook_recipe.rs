@@ -456,6 +456,15 @@ pub fn reconstruct_adoption_options(
     reconstruct_recipe_options(recipe, None, false, false)
 }
 
+/// Adoption accepts historical policy, but a remediation retry still needs the
+/// recipe's exact durable transport reconstructed before it can dispatch.
+pub fn reconstruct_adoption_options_with_dispatcher(
+    recipe: &AgentTaskCookRecipe,
+    attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
+) -> Result<AgentTaskCookServiceOptions> {
+    reconstruct_recipe_options(recipe, attempt_dispatcher, false, true)
+}
+
 fn reconstruct_recipe_options(
     recipe: &AgentTaskCookRecipe,
     attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
@@ -637,6 +646,24 @@ pub fn consume_claimed_with_dispatcher(
             return Err(error);
         }
     };
+    let mut options = options;
+    if let Some(attempt) = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == claim.continuation().run_id)
+    {
+        options.initial_run_id = attempt.run_id.clone();
+        options.initial_plan = attempt.plan.clone();
+    } else {
+        let error = Error::validation_invalid_argument(
+            "cook_continuation.run_id",
+            "claimed continuation is not declared by the durable cook recipe",
+            Some(claim.continuation().run_id.clone()),
+            None,
+        );
+        claim.fail(&error.message)?;
+        return Err(error);
+    }
     match execute(options) {
         Ok(exit_code) => {
             claim.complete()?;

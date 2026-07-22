@@ -56,6 +56,49 @@ fn seed_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     };
     let form = test_review_form();
+    let task = plan.tasks.first().expect("review form plan has one task");
+    agent_task_lifecycle::record_run_aggregate(
+        run_id,
+        plan,
+        &AgentTaskAggregate {
+            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: plan.plan_id.clone(),
+            status: AgentTaskAggregateStatus::Succeeded,
+            totals: AgentTaskAggregateTotals {
+                succeeded: 1,
+                ..Default::default()
+            },
+            outcomes: vec![AgentTaskOutcome {
+                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: task.task_id.clone(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("provider dispatched once".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: serde_json::json!({ "review_form": form }),
+                workflow: None,
+                follow_up: None,
+                metadata: serde_json::json!({ "model": task.executor.model() }),
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        },
+    )
+    .unwrap();
+}
+
+fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
+    use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
+    use crate::agent_task_scheduler::{
+        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
+    };
+
     agent_task_lifecycle::record_run_aggregate(
         run_id,
         plan,
@@ -71,13 +114,13 @@ fn seed_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
                 schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: "provider".to_string(),
                 status: AgentTaskOutcomeStatus::Succeeded,
-                summary: Some("provider dispatched once".to_string()),
+                summary: Some("candidate prepared without review form".to_string()),
                 failure_classification: None,
                 artifacts: Vec::new(),
                 typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
-                outputs: serde_json::json!({ "review_form": form }),
+                outputs: Value::Null,
                 workflow: None,
                 follow_up: None,
                 metadata: Value::Null,
@@ -736,6 +779,33 @@ impl AgentTaskExecutorAdapter for SucceedingExecutor {
     }
 }
 
+#[derive(Clone)]
+struct ReviewFormOnlyExecutor;
+
+impl AgentTaskExecutorAdapter for ReviewFormOnlyExecutor {
+    fn execute(
+        &self,
+        request: crate::agent_task::AgentTaskRequest,
+        _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> crate::agent_task::AgentTaskOutcome {
+        crate::agent_task::AgentTaskOutcome {
+            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("review form emitted without modifying the candidate".to_string()),
+            failure_classification: None,
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: test_review_form_outputs(),
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct BatchAttemptDispatcher {
     barrier: Arc<Barrier>,
@@ -1012,6 +1082,187 @@ fn batch_cook_options(
         ai_used_for: "test".to_string(),
         attempt_dispatcher: Some(dispatcher),
         harvest_context: Default::default(),
+    }
+}
+
+/// A complete externally-prepared candidate: the original cook failed before a
+/// provider was accepted, while a separate immutable source commit is ready to
+/// be promoted and adopted.
+struct CandidateAdoptionFixture {
+    _temp: tempfile::TempDir,
+    _source: std::path::PathBuf,
+    _target: std::path::PathBuf,
+    candidate: String,
+    cook_id: String,
+    run_id: String,
+    options: AgentTaskCookServiceOptions,
+}
+
+impl CandidateAdoptionFixture {
+    fn new(
+        cook_id: &str,
+        max_attempts: u32,
+        max_same_provider_retries: u32,
+        no_finalize: bool,
+        dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
+    ) -> Self {
+        let temp = tempfile::tempdir().expect("temporary adoption repositories");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        std::fs::create_dir(&source).expect("create source repository");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let git_output = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("read git output");
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&source, &["init"]);
+        git(&source, &["config", "user.email", "agent@example.test"]);
+        git(&source, &["config", "user.name", "Agent"]);
+        std::fs::write(source.join("lib.rs"), "base\n").unwrap();
+        git(&source, &["add", "lib.rs"]);
+        git(&source, &["commit", "-m", "base"]);
+        let base = git_output(&source, &["rev-parse", "HEAD"]);
+        assert!(Command::new("git")
+            .args(["clone", source.to_str().unwrap(), target.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(source.join("lib.rs"), "candidate\n").unwrap();
+        git(&source, &["commit", "-am", "candidate"]);
+        let candidate = git_output(&source, &["rev-parse", "HEAD"]);
+        let provider = temp.path().join("promotion-provider.sh");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\ngit -C {target} fetch origin {candidate}\ngit -C {target} diff HEAD FETCH_HEAD | git -C {target} apply\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
+                target = target.display(),
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&provider, permissions).unwrap();
+        }
+
+        let run_id = format!("{cook_id}-attempt-1");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.attempt_dispatcher = dispatcher;
+        options.initial_run_id = run_id.clone();
+        options.source_worktree_path = Some(source.clone());
+        options.task_base_sha = Some(base);
+        options.provider_command = Some(provider.display().to_string());
+        options.gates.verify = vec!["test \"$(cat lib.rs)\" = candidate".to_string()];
+        options.max_attempts = max_attempts;
+        options.initial_plan.options.execution_budget =
+            crate::agent_task_scheduler::AgentTaskExecutionBudget::new(
+                max_attempts,
+                max_same_provider_retries,
+                0,
+            );
+        options.no_finalize = no_finalize;
+        options.head = Some("fix/8058".to_string());
+        options.ai_model = Some("openai/gpt-5.6-terra".to_string());
+        super::super::persist_initial_recipe(&options).unwrap();
+
+        let mut fixture = Self {
+            _temp: temp,
+            _source: source,
+            _target: target,
+            candidate,
+            cook_id: cook_id.to_string(),
+            run_id,
+            options,
+        };
+        fixture.authenticate_pre_provider_recovery();
+        fixture
+    }
+
+    fn authenticate_pre_provider_recovery(&mut self) {
+        agent_task_lifecycle::record_lab_offload_phase(
+            &self.run_id,
+            "fixture-lab",
+            "lab_handoff_preacceptance",
+            None,
+            None,
+            None,
+            Some(&self.options.initial_plan),
+        )
+        .unwrap();
+        let attempt = super::super::load_recipe(&self.cook_id)
+            .unwrap()
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == self.run_id)
+            .unwrap()
+            .attempt;
+        agent_task_lifecycle::record_cook_attempt(&self.cook_id, attempt, &self.run_id).unwrap();
+        agent_task_lifecycle::record_pre_execution_failure(
+            &self.run_id,
+            &self.options.initial_plan,
+            "lab_handoff_preacceptance",
+            &Error::internal_unexpected("fixture pre-provider transport failure"),
+        )
+        .unwrap();
+        let record = agent_task_lifecycle::status(&self.run_id).unwrap();
+        assert_eq!(
+            record.state,
+            agent_task_lifecycle::AgentTaskRunState::Failed
+        );
+        assert!(candidate_adoption_source(&record, &self.options.initial_plan.tasks[0]).is_ok());
+    }
+
+    fn append_adoptable_attempt(&mut self, attempt: u32) {
+        assert!(attempt > 1);
+        let run_id = agent_task_lifecycle::cook_attempt_run_id(&self.cook_id, attempt);
+        super::super::record_recipe_attempt(
+            &self.cook_id,
+            attempt,
+            &run_id,
+            &self.options.initial_plan,
+        )
+        .unwrap();
+        self.run_id = run_id;
+        self.options.initial_run_id = self.run_id.clone();
+        self.authenticate_pre_provider_recovery();
+    }
+
+    fn adopt<E: AgentTaskExecutorAdapter + Clone>(
+        &self,
+        dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+        executor: E,
+        backend: &mut CaptureBackend,
+    ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+        adopt_cook_candidate_with_dispatcher_and_backend(
+            &self.run_id,
+            &self.candidate,
+            AgentTaskCandidateAdoptionOptions {
+                ai_model: Some("openai/gpt-5.6-terra".to_string()),
+            },
+            dispatcher,
+            executor,
+            backend,
+        )
     }
 }
 
@@ -1997,6 +2248,7 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
                     ai_model: Some("openai/gpt-5.6-sol".to_string()),
                 },
                 |_| Ok(None),
+                UnusedExecutor,
                 &mut backend,
             );
             (result, backend)
@@ -2030,8 +2282,8 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
         let (result, backend) = adoption_result.expect("adoption thread completes");
         let result = result.expect("historical recipe adoption succeeds");
 
-        assert_eq!(result.exit_code, 0);
-        assert_eq!(result.value.status, "review_ready");
+        assert_eq!(result.exit_code, 0, "{:?}", result.value);
+        assert_eq!(result.value.status, "review_ready", "{:?}", result.value);
         assert_eq!(result.value.attempts.len(), 1);
         assert_eq!(
             result.value.attempts[0]
@@ -2073,6 +2325,380 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
         assert!(backend.body.contains("- **Tool(s):** test"));
         assert!(backend.body.contains("- **Model:** openai/gpt-5.6-sol"));
         assert!(backend.committed && backend.pushed && backend.created);
+    });
+}
+
+#[test]
+fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_finalizes() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repositories");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        std::fs::create_dir(&source).expect("create source repository");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let git_output = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("read git output");
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&source, &["init"]);
+        git(&source, &["config", "user.email", "agent@example.test"]);
+        git(&source, &["config", "user.name", "Agent"]);
+        std::fs::write(source.join("lib.rs"), "base\n").unwrap();
+        git(&source, &["add", "lib.rs"]);
+        git(&source, &["commit", "-m", "base"]);
+        let base = git_output(&source, &["rev-parse", "HEAD"]);
+        assert!(Command::new("git")
+            .args(["clone", source.to_str().unwrap(), target.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(source.join("lib.rs"), "candidate\n").unwrap();
+        git(&source, &["commit", "-am", "candidate"]);
+        let candidate = git_output(&source, &["rev-parse", "HEAD"]);
+        let provider = temp.path().join("promotion-provider.sh");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\ngit -C {target} fetch origin {candidate}\ngit -C {target} diff HEAD FETCH_HEAD | git -C {target} apply\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
+                target = target.display(),
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&provider, permissions).unwrap();
+        }
+
+        let cook_id = "cook-adopt-review-form";
+        let run_id = "cook-adopt-review-form-attempt-1";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        options.source_worktree_path = Some(source.clone());
+        options.task_base_sha = Some(base);
+        options.provider_command = Some(provider.display().to_string());
+        options.attempt_dispatcher = None;
+        options.gates.verify = vec!["test \"$(cat lib.rs)\" = candidate".to_string()];
+        options.max_attempts = 2;
+        options.no_finalize = false;
+        options.head = Some("fix/8058".to_string());
+        options.ai_model = Some("openai/gpt-5.6-terra".to_string());
+        super::super::persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
+        seed_missing_review_form_aggregate(run_id, &options.initial_plan);
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).unwrap();
+
+        let mut backend = CaptureBackend {
+            hydrate_run_id: Some(run_id.to_string()),
+            ..Default::default()
+        };
+        let result = adopt_cook_candidate_with_dispatcher_and_backend(
+            cook_id,
+            &candidate,
+            AgentTaskCandidateAdoptionOptions {
+                ai_model: Some("openai/gpt-5.6-terra".to_string()),
+            },
+            |_| Ok(None),
+            ReviewFormOnlyExecutor,
+            &mut backend,
+        )
+        .expect("adoption retries only the missing review form");
+
+        let follow_up_aggregate = result
+            .value
+            .latest_run_id
+            .as_deref()
+            .and_then(|run_id| agent_task_lifecycle::read_aggregate(run_id).ok());
+        assert_eq!(
+            result.exit_code, 0,
+            "{:?}\nfollow-up aggregate: {follow_up_aggregate:#?}",
+            result.value
+        );
+        assert_eq!(result.value.status, "review_ready");
+        assert_eq!(result.value.attempts.len(), 2);
+        assert_eq!(
+            result.value.attempts[0].feedback.as_ref().unwrap().status,
+            AgentTaskCookLoopStatus::RetryRequested
+        );
+        assert_eq!(
+            result.value.attempts[1].feedback.as_ref().unwrap().status,
+            AgentTaskCookLoopStatus::GreenCompleted
+        );
+        let follow_up_run_id = &result.value.attempts[1].run_id;
+        let follow_up_promotion = persisted_promotion_for_attempt(follow_up_run_id)
+            .unwrap()
+            .expect("form-only continuation carries promoted candidate");
+        assert_eq!(
+            follow_up_promotion.provenance["cook_follow_up"]["kind"],
+            "review_form_only"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("lib.rs")).unwrap(),
+            "candidate\n"
+        );
+        assert!(backend.committed && backend.pushed && backend.created);
+    });
+}
+
+#[test]
+fn pre_provider_adoption_retries_only_the_missing_form_binds_model_and_reaches_review_ready() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let fixture = CandidateAdoptionFixture::new("cook-9575-local", 2, 1, false, None);
+        let mut backend = CaptureBackend {
+            hydrate_run_id: Some(fixture.run_id.clone()),
+            ..Default::default()
+        };
+
+        let result = fixture
+            .adopt(|_| Ok(None), ReviewFormOnlyExecutor, &mut backend)
+            .expect("authenticated pre-provider adoption succeeds");
+
+        let follow_up_aggregate = result
+            .value
+            .latest_run_id
+            .as_deref()
+            .and_then(|run_id| agent_task_lifecycle::read_aggregate(run_id).ok());
+        assert_eq!(
+            result.exit_code, 0,
+            "{:#?}\nfollow-up aggregate: {follow_up_aggregate:#?}",
+            result.value
+        );
+        assert_eq!(result.value.status, "review_ready");
+        assert_eq!(result.value.attempts.len(), 2);
+        assert_eq!(
+            result.value.attempts[0].feedback.as_ref().unwrap().status,
+            AgentTaskCookLoopStatus::RetryRequested
+        );
+        let adoption = agent_task_lifecycle::status(&fixture.run_id)
+            .unwrap()
+            .candidate_adoption
+            .unwrap();
+        assert_eq!(adoption.ai_model, "openai/gpt-5.6-terra");
+        assert_eq!(adoption.candidate_sha, fixture.candidate);
+        assert!(backend.committed && backend.pushed && backend.created);
+    });
+}
+
+#[test]
+fn adoption_budget_failure_is_terminal_non_green_and_replay_does_not_dispatch() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let fixture = CandidateAdoptionFixture::new("cook-9575-budget", 2, 0, true, None);
+        let mut backend = CaptureBackend::default();
+
+        let first = fixture
+            .adopt(|_| Ok(None), ReviewFormOnlyExecutor, &mut backend)
+            .expect("budget exhaustion returns a durable report");
+        let replay = fixture
+            .adopt(
+                |_| panic!("terminal adoption must not reconstruct a dispatcher"),
+                UnusedExecutor,
+                &mut backend,
+            )
+            .expect("identical adoption replays its terminal result");
+
+        assert_eq!(first.exit_code, 1);
+        assert_eq!(first.value.status, "execution_budget_exhausted");
+        assert_eq!(replay.exit_code, 1);
+        assert_eq!(replay.value.status, "execution_budget_exhausted");
+        assert_ne!(replay.value.status, "green_no_finalize");
+        assert!(!backend.created);
+        let record = agent_task_lifecycle::status(&fixture.run_id).unwrap();
+        assert_eq!(record.candidate_adoption.unwrap().state, "failed");
+        assert!(agent_task_lifecycle::cook_index(&fixture.cook_id)
+            .unwrap()
+            .attempts
+            .iter()
+            .all(|attempt| attempt.run_id == fixture.run_id));
+    });
+}
+
+#[test]
+fn adoption_of_attempt_n_appends_n_plus_one_and_resumes_that_attempt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture = CandidateAdoptionFixture::new("cook-9575-n", 4, 1, true, None);
+        fixture.append_adoptable_attempt(2);
+        fixture.append_adoptable_attempt(3);
+        let mut backend = CaptureBackend::default();
+
+        let result = fixture
+            .adopt(|_| Ok(None), ReviewFormOnlyExecutor, &mut backend)
+            .expect("attempt N adoption resumes through its form-only retry");
+
+        assert_eq!(
+            result.value.status,
+            "green_no_finalize",
+            "unexpected stop reason: {:?}",
+            result.value.stop_reason
+        );
+        assert_eq!(result.value.attempts[0].attempt, 3);
+        assert_eq!(result.value.attempts[1].attempt, 4);
+        assert!(result.value.attempts[1]
+            .run_id
+            .starts_with("cook-9575-n-attempt-4"));
+        let recipe = super::super::load_recipe(&fixture.cook_id).unwrap();
+        assert_eq!(recipe.attempts.len(), 4);
+        assert_eq!(recipe.attempts[3].attempt, 4);
+        assert_eq!(recipe.attempts[3].run_id, result.value.attempts[1].run_id);
+    });
+}
+
+#[test]
+fn detached_adoption_follow_up_records_before_dispatch_then_finalizes_once_without_redispatch() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let dispatcher = Arc::new(RecordingDetachedAttemptDispatcher {
+            dispatches: Arc::clone(&dispatches),
+        });
+        let fixture = CandidateAdoptionFixture::new(
+            "cook-9575-detached",
+            2,
+            1,
+            false,
+            Some(dispatcher.clone()),
+        );
+        let mut backend = CaptureBackend {
+            hydrate_run_id: Some(fixture.run_id.clone()),
+            ..Default::default()
+        };
+
+        let first = fixture
+            .adopt(
+                |_| Ok(Some(dispatcher.clone())),
+                UnusedExecutor,
+                &mut backend,
+            )
+            .expect("detached form retry is accepted");
+        let follow_up = first
+            .value
+            .latest_run_id
+            .as_deref()
+            .expect("detached retry reports its durable run id");
+        assert_eq!(first.value.status, "in_flight");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        assert!(agent_task_lifecycle::load_plan(follow_up).is_ok());
+        assert!(persisted_promotion_for_attempt(follow_up)
+            .unwrap()
+            .is_some());
+
+        let follow_up_plan = agent_task_lifecycle::load_plan(follow_up).unwrap();
+        seed_review_form_aggregate(follow_up, &follow_up_plan);
+        let terminal = agent_task_lifecycle::status(follow_up).unwrap();
+        assert_eq!(
+            terminal.state,
+            agent_task_lifecycle::AgentTaskRunState::Succeeded
+        );
+        let claim = crate::agent_task_service::claim_continuation()
+            .unwrap()
+            .expect("terminal detached follow-up queues continuation");
+        let mut resumed_backend = CaptureBackend {
+            hydrate_run_id: Some(fixture.run_id.clone()),
+            ..Default::default()
+        };
+        let exit_code = super::super::consume_claimed_with_dispatcher(
+            claim,
+            |_| Ok(Some(dispatcher.clone())),
+            |options| {
+                run_cook_with_finalizer(options, UnusedExecutor, |options, run_id, promotion| {
+                    finalize_cook_pr_with_backend(options, run_id, promotion, &mut resumed_backend)
+                })
+                .map(|result| result.exit_code)
+            },
+        )
+        .expect("continuation consumes terminal follow-up");
+
+        assert_eq!(exit_code, 0);
+        assert!(resumed_backend.created);
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        let carried = persisted_promotion_for_attempt(follow_up).unwrap().unwrap();
+        assert_eq!(carried.source.run_id.as_deref(), Some(follow_up));
+        assert_eq!(
+            carried.provenance["cook_follow_up"]["source_run_id"],
+            fixture.run_id
+        );
+        assert!(crate::agent_task_service::claim_continuation()
+            .unwrap()
+            .is_none());
+    });
+}
+
+#[test]
+fn detached_adoption_follow_up_failure_stays_non_green_and_skips_finalization() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let dispatcher = Arc::new(RecordingDetachedAttemptDispatcher {
+            dispatches: Arc::clone(&dispatches),
+        });
+        let fixture = CandidateAdoptionFixture::new(
+            "cook-9575-detached-red",
+            2,
+            1,
+            false,
+            Some(dispatcher.clone()),
+        );
+        let mut backend = CaptureBackend::default();
+        let first = fixture
+            .adopt(
+                |_| Ok(Some(dispatcher.clone())),
+                UnusedExecutor,
+                &mut backend,
+            )
+            .expect("detached form retry is accepted");
+        let follow_up = first
+            .value
+            .latest_run_id
+            .as_deref()
+            .expect("detached retry reports its durable run id");
+        let mut plan = agent_task_lifecycle::load_plan(follow_up).unwrap();
+        plan.tasks[0].instructions = "terminal failure".to_string();
+        agent_task_lifecycle::record_run_aggregate(
+            follow_up,
+            &plan,
+            &crate::agent_task_scheduler::AgentTaskAggregate {
+                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed,
+                totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
+                    failed: 1,
+                    ..Default::default()
+                },
+                outcomes: Vec::new(),
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            },
+        )
+        .unwrap();
+        let terminal = agent_task_lifecycle::status(follow_up).unwrap();
+        assert_eq!(
+            terminal.state,
+            agent_task_lifecycle::AgentTaskRunState::Failed
+        );
+        assert!(crate::agent_task_service::claim_continuation()
+            .unwrap()
+            .is_none());
+        assert!(!backend.created);
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
     });
 }
 
@@ -2233,8 +2859,8 @@ struct CaptureBackend {
 }
 
 impl AgentTaskPrFinalizationBackend for CaptureBackend {
-    fn hydrate_run(&mut self, _run_id: &str) -> Result<RunLifecycleRecord> {
-        if let Some(run_id) = self.hydrate_run_id.as_deref() {
+    fn hydrate_run(&mut self, run_id: &str) -> Result<RunLifecycleRecord> {
+        if self.hydrate_run_id.is_some() {
             return RealAgentTaskPrFinalizationBackend.hydrate_run(run_id);
         }
         Ok(RunLifecycleRecord {
@@ -2578,7 +3204,8 @@ fn follow_up_baseline_is_clean_and_preserves_binary_mode_and_untracked_candidate
             "command_evidence":[], "deterministic_gates":[], "gate_results":[],
             "provenance":{"worktree_path":root}, "operator_notification":{"status":"blocked","message":"red"}
         })).unwrap();
-    let baseline = materialize_follow_up_baseline(&report, "first-run").expect("baseline");
+    let baseline =
+        materialize_follow_up_baseline(&report, "first-run", "candidate-task").expect("baseline");
     assert!(git_output(&baseline.path, &["status", "--porcelain"])
         .unwrap()
         .is_empty());
@@ -2599,6 +3226,7 @@ fn follow_up_baseline_is_clean_and_preserves_binary_mode_and_untracked_candidate
     );
     assert!(!baseline.capability.commit().is_empty());
     assert!(!baseline.capability.tree().is_empty());
+    assert_eq!(baseline.capability.bound_task_id(), "candidate-task");
     assert_eq!(
         baseline.artifact_provenance()["source_patch_artifact_sha256"],
         sha2::Sha256::digest(std::fs::read(&patch_path).unwrap())
@@ -2664,7 +3292,7 @@ fn follow_up_baseline_refuses_when_promotion_target_head_has_advanced() {
         }))
         .unwrap();
 
-    let error = match materialize_follow_up_baseline(&report, "first-run") {
+    let error = match materialize_follow_up_baseline(&report, "first-run", "candidate-task") {
         Ok(_) => panic!("target advancement rejects the stale promotion baseline"),
         Err(error) => error,
     };

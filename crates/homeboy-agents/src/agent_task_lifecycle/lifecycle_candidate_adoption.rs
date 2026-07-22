@@ -149,6 +149,7 @@ pub fn start_candidate_adoption_with_rerun_policy(
             resume_count: 0,
             terminal_error: None,
             completed_at: None,
+            result: None,
         });
         record.updated_at = Some(now);
         true
@@ -286,6 +287,20 @@ pub fn finish_candidate_adoption(
         true
     })?;
     Ok(record.unwrap_or(store::read_record(&run_id)?))
+}
+
+pub fn record_candidate_adoption_result(run_id: &str, result: Value) -> Result<()> {
+    let run_id = sanitize_run_id(run_id);
+    store::mutate_record(&run_id, |record| {
+        let Some(attempt) = record.candidate_adoption.as_mut() else {
+            return false;
+        };
+        attempt.result = Some(result);
+        attempt.updated_at = now_timestamp();
+        record.updated_at = Some(attempt.updated_at.clone());
+        true
+    })?;
+    Ok(())
 }
 
 pub(crate) fn reconcile_candidate_adoption(record: &mut AgentTaskRunRecord) -> bool {
