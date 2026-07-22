@@ -621,7 +621,7 @@ fn reports_exact_runner_set_remediation_when_path_update_is_unsafe() {
         .unwrap()
         .contains("automatic runner homeboy_path update is unsafe"));
     assert!(skipped[0].recovery_commands.contains(
-        &"homeboy runner exec lab --ssh -- sh -lc 'type -a homeboy; command -v homeboy; homeboy --version'".to_string()
+        &"homeboy runner exec --ssh lab -- sh -lc 'type -a homeboy; command -v homeboy; homeboy --version'".to_string()
     ));
     assert!(skipped[0]
         .recovery_commands

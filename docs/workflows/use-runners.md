@@ -47,8 +47,7 @@ homeboy --runner <runner-id> trace my-component checkout-flow --baseline
 When the intended checkout already exists on the runner, dispatch from that checkout instead of forcing controller-local execution:
 
 ```bash
-homeboy runner exec <runner-id> \
-  --cwd /srv/homeboy/checkouts/my-component \
+homeboy runner exec --cwd /srv/homeboy/checkouts/my-component <runner-id> \
   -- homeboy review my-component --changed-since origin/main
 ```
 

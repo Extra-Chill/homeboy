@@ -639,7 +639,7 @@ fn default_runtime_probe_value() -> RuntimeProbeValue {
 fn diagnostic_command(runner_id: Option<&str>, script: &str) -> String {
     match runner_id {
         Some(runner_id) => format!(
-            "homeboy runner exec {} --raw -- bash -lc {}",
+            "homeboy runner exec --raw {} -- bash -lc {}",
             shell_arg(runner_id),
             shell_arg(script)
         ),
@@ -708,7 +708,7 @@ pub(super) fn runner_artifact_feature_diagnostics(
     RunnerArtifactFeatureDiagnostics {
         required_features: vec!["runner_exec_artifact_output", "runs_artifact_attach"],
         controller_commands: vec![
-            "homeboy runner exec <runner-id> --run-id <run-id> --artifact <path> -- <command>"
+            "homeboy runner exec --run-id <run-id> --artifact <path> <runner-id> -- <command>"
                 .to_string(),
             "homeboy runs artifact attach <run-id> --runner <runner-id> --path <path> --name <name>"
                 .to_string(),

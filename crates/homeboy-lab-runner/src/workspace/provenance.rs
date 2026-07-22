@@ -643,9 +643,9 @@ fn verify_snapshot_workspace_content(
     if actual_content_hash != provenance.content_hash {
         let diagnostic = match provenance.materialization_mode.as_str() {
             "snapshot-git" => format!(
-                "homeboy runner exec {} --cwd {} -- git status --short",
-                shell::quote_arg(&provenance.runner_id),
+                "homeboy runner exec --cwd {} {} -- git status --short",
                 shell::quote_arg(&provenance.remote_workspace_path),
+                shell::quote_arg(&provenance.runner_id),
             ),
             "snapshot" | "filesystem_snapshot" => format!(
                 "homeboy runner workspace sync --mode snapshot --path {} {}",

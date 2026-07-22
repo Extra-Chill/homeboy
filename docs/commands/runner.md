@@ -716,16 +716,18 @@ homeboy runner remove <id>
 ### `exec`
 
 ```sh
-homeboy runner exec <runner-id> -- <command...>
-homeboy runner exec <runner-id> --project <project-id> --cwd /runner/workspace/project -- <command...>
-homeboy runner exec <runner-id> --sync-workspace /local/project@patch --require-path /runner/resources/input -- <command...>
-homeboy runner exec <runner-id> --ssh --cwd /runner/workspace/project -- <command...>
-homeboy runner exec <runner-id> --run-id ssi-fixture-matrix-summary -- <command...>
-homeboy runner exec <runner-id> --cwd /runner/workspace/project --require-path /runner/workspace/project -- <command...>
+homeboy runner exec [HOMEBOY_OPTIONS] <runner-id> -- <command...>
+homeboy runner exec --project <project-id> --cwd /runner/workspace/project <runner-id> -- <command...>
+homeboy runner exec --sync-workspace /local/project@patch --require-path /runner/resources/input <runner-id> -- <command...>
+homeboy runner exec --ssh --cwd /runner/workspace/project <runner-id> -- <command...>
+homeboy runner exec --run-id ssi-fixture-matrix-summary <runner-id> -- <command...>
+homeboy runner exec --cwd /runner/workspace/project --require-path /runner/workspace/project <runner-id> -- <command...>
 homeboy runner env <runner-id>
 ```
 
 `exec` submits the command to the connected runner daemon when `homeboy runner connect <runner-id>` has established a live loopback tunnel. If no daemon session is connected, local runners execute directly and SSH runners require explicit diagnostic `--ssh`. SSH runner raw exec is policy-denied by default until `policy.allow_raw_exec` is explicitly true.
+
+Place Homeboy options before the runner ID and use `--` before the remote command. Without the separator, Homeboy diagnoses known exec options that appear after a remote command; the separator preserves remote flags with names such as `--cwd`, `--raw`, and `--run-id`.
 
 Path rules:
 
@@ -747,10 +749,10 @@ Path rules:
 Dirty local worktree against runner-side resources:
 
 ```sh
-homeboy runner exec <runner-id> \
-  --sync-workspace /local/project@patch \
+homeboy runner exec --sync-workspace /local/project@patch \
   --require-path /runner/resources/input \
   --capture-patch \
+  <runner-id> \
   -- ./run-workload --input /runner/resources/input
 ```
 

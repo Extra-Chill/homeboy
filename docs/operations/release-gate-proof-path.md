@@ -72,8 +72,7 @@ non-interactive shell and points you at Lab offload. Honor that routing:
   **without** a public placement override:
 
   ```bash
-  homeboy runner exec homeboy-lab \
-    --cwd /srv/homeboy/checkouts/my-component \
+  homeboy runner exec --cwd /srv/homeboy/checkouts/my-component homeboy-lab \
     -- homeboy review my-component --changed-since=origin/main
   ```
 

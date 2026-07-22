@@ -46,9 +46,9 @@ pub fn list_workspaces(runner_id: &str, limit: usize) -> Result<(RunnerWorkspace
         .into_iter()
         .map(|remote_path| RunnerWorkspaceListEntry {
             exec_command: format!(
-                "homeboy runner exec {} --cwd {} -- <command>",
-                shell_arg(&runner.id),
-                shell_arg(&remote_path)
+                "homeboy runner exec --cwd {} {} -- <command>",
+                shell_arg(&remote_path),
+                shell_arg(&runner.id)
             ),
             remote_path,
         })
@@ -350,9 +350,9 @@ fn workspace_snapshot_entry(
         .unwrap_or_else(|| workspace_repo_from_path(&metadata.local_path));
     Some(RunnerWorkspaceSnapshotEntry {
         exec_command: format!(
-            "homeboy runner exec {} --cwd {} -- <command>",
-            shell_arg(&metadata.runner_id),
-            shell_arg(&metadata.remote_path)
+            "homeboy runner exec --cwd {} {} -- <command>",
+            shell_arg(&metadata.remote_path),
+            shell_arg(&metadata.runner_id)
         ),
         runner_id: metadata.runner_id,
         repo,

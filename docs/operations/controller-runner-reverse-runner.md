@@ -218,10 +218,10 @@ private smoke environment that provides equivalent branch builds.
 3. Submit a minimal command from the controller:
 
    ```sh
-   homeboy runner exec <runner-id> \
-     --project <project-id> \
-     --cwd <runner-workspace-root> \
-     --output /tmp/homeboy-runner-smoke.json \
+    homeboy runner exec --project <project-id> \
+      --cwd <runner-workspace-root> \
+      --output /tmp/homeboy-runner-smoke.json \
+      <runner-id> \
      -- /bin/sh -lc 'printf "homeboy-runner-smoke\\n"'
    ```
 

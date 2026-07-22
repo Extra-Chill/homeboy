@@ -616,7 +616,7 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
         .required_features
         .contains(&"runs_artifact_attach"));
     assert!(serialized.contains(
-        "homeboy runner exec <runner-id> --run-id <run-id> --artifact <path> -- <command>"
+        "homeboy runner exec --run-id <run-id> --artifact <path> <runner-id> -- <command>"
     ));
     assert!(serialized.contains(
         "homeboy runs artifact attach <run-id> --runner <runner-id> --path <path> --name <name>"

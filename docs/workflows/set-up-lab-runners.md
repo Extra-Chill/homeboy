@@ -102,8 +102,7 @@ homeboy --runner <runner-id> agent-task controller run-from-spec @controller.jso
 For runner-side checkouts, use `runner exec`:
 
 ```bash
-homeboy runner exec <runner-id> \
-  --cwd /srv/homeboy/checkouts/<component-id> \
+homeboy runner exec --cwd /srv/homeboy/checkouts/<component-id> <runner-id> \
   -- homeboy review <component-id> --changed-since origin/main
 ```
 
