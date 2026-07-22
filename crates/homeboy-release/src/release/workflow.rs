@@ -1295,6 +1295,129 @@ mod tests {
     }
 
     #[test]
+    fn recover_dry_run_reports_the_recovery_plan_without_mutating_git_or_remote_tags() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = tempfile::tempdir().expect("remote");
+        let dir = temp.path();
+
+        run_in(remote.path(), &["git", "init", "--bare", "-q"]);
+        run_in(dir, &["git", "init", "-q", "--initial-branch", "main"]);
+        run_in(dir, &["git", "config", "user.email", "test@example.com"]);
+        run_in(dir, &["git", "config", "user.name", "Test"]);
+        run_in(dir, &["git", "config", "commit.gpgsign", "false"]);
+        std::fs::write(
+            dir.join("homeboy.json"),
+            r#"{
+                "id": "fixture",
+                "version_targets": [
+                    { "file": "VERSION", "pattern": "^([0-9]+\\.[0-9]+\\.[0-9]+)$" }
+                ]
+            }"#,
+        )
+        .expect("write homeboy config");
+        std::fs::write(dir.join("VERSION"), "1.2.3\n").expect("write version");
+        run_in(dir, &["git", "add", "."]);
+        run_in(dir, &["git", "commit", "-q", "-m", "chore: initial"]);
+        run_in(
+            dir,
+            &[
+                "git",
+                "remote",
+                "add",
+                "origin",
+                &remote.path().to_string_lossy(),
+            ],
+        );
+        run_in(dir, &["git", "push", "-q", "-u", "origin", "main"]);
+
+        std::fs::write(dir.join("VERSION"), "1.2.4\n").expect("stage recovery version change");
+        let head_before =
+            String::from_utf8_lossy(&run_in(dir, &["git", "rev-parse", "HEAD"]).stdout)
+                .trim()
+                .to_string();
+        let status_before =
+            String::from_utf8_lossy(&run_in(dir, &["git", "status", "--porcelain"]).stdout)
+                .to_string();
+        let identity_before =
+            String::from_utf8_lossy(&run_in(dir, &["git", "config", "user.name"]).stdout)
+                .to_string();
+        let local_tags_before =
+            String::from_utf8_lossy(&run_in(dir, &["git", "tag", "--list"]).stdout).to_string();
+        let remote_tags_before = String::from_utf8_lossy(
+            &run_in(
+                remote.path(),
+                &["git", "for-each-ref", "refs/tags", "--format=%(refname)"],
+            )
+            .stdout,
+        )
+        .to_string();
+
+        let (result, exit_code) = run_command(ReleaseCommandInput {
+            component_id: "fixture".to_string(),
+            path_override: Some(dir.to_string_lossy().to_string()),
+            dry_run: true,
+            recover: true,
+            git_identity: Some("Dry Run <dry-run@example.com>".to_string()),
+            ..Default::default()
+        })
+        .expect("recovery dry run should plan without applying");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(result.status, "planned");
+        assert!(result.dry_run);
+        assert_eq!(result.tag.as_deref(), Some("v1.2.4"));
+        assert_eq!(
+            result.release_summary,
+            vec![
+                "would commit version files".to_string(),
+                "would create tag v1.2.4".to_string(),
+                "would push commits and tags".to_string(),
+            ]
+        );
+        let plan = result.plan.expect("recovery plan");
+        assert!(plan.enabled());
+        assert_eq!(
+            plan.plan
+                .steps
+                .iter()
+                .map(|step| step.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["recover.commit", "recover.tag", "recover.push"]
+        );
+        assert!(plan
+            .plan
+            .steps
+            .iter()
+            .all(|step| step.status == PlanStepStatus::Ready));
+        assert_eq!(
+            head_before,
+            String::from_utf8_lossy(&run_in(dir, &["git", "rev-parse", "HEAD"]).stdout).trim()
+        );
+        assert_eq!(
+            status_before,
+            String::from_utf8_lossy(&run_in(dir, &["git", "status", "--porcelain"]).stdout)
+        );
+        assert_eq!(
+            identity_before,
+            String::from_utf8_lossy(&run_in(dir, &["git", "config", "user.name"]).stdout)
+        );
+        assert_eq!(
+            local_tags_before,
+            String::from_utf8_lossy(&run_in(dir, &["git", "tag", "--list"]).stdout)
+        );
+        assert_eq!(
+            remote_tags_before,
+            String::from_utf8_lossy(
+                &run_in(
+                    remote.path(),
+                    &["git", "for-each-ref", "refs/tags", "--format=%(refname)"]
+                )
+                .stdout
+            )
+        );
+    }
+
+    #[test]
     fn release_phase_maps_current_modes() {
         let mut input = ReleaseCommandInput::default();
         assert_eq!(release_execution_plan(&input).phase, ReleasePhase::Publish);

@@ -23,12 +23,6 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
         },
     )?;
 
-    // Configure git identity for recovery commits/tags
-    if let Some(ref identity_str) = input.git_identity {
-        let identity = git::parse_git_identity(Some(identity_str));
-        git::configure_identity(&component.local_path, &identity)?;
-    }
-
     let release_scope = ReleaseScope::resolve(&component, &input.component_id)?;
     let version_info = crate::release::version::read_component_version(&component)?;
     let current_version = &version_info.version;
@@ -186,6 +180,27 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
             ));
         }
 
+        if input.dry_run {
+            let actions = vec![format!("would retag {} to HEAD", tag_name)];
+            return Ok((
+                recovery_dry_run_result(
+                    input,
+                    current_version,
+                    &tag_name,
+                    false,
+                    true,
+                    true,
+                    actions,
+                ),
+                0,
+            ));
+        }
+
+        if let Some(ref identity_str) = input.git_identity {
+            let identity = git::parse_git_identity(Some(identity_str));
+            git::configure_identity(&component.local_path, &identity)?;
+        }
+
         // Safe to move: delete the stale tag (local + remote) and re-create at HEAD.
         homeboy_core::log_status!(
             "recover",
@@ -284,6 +299,41 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
 
     let uncommitted = git::get_uncommitted_changes(&component.local_path)?;
 
+    if input.dry_run {
+        let mut actions = Vec::new();
+        if uncommitted.has_changes {
+            actions.push("would commit version files".to_string());
+        }
+        if !tag_exists_local {
+            actions.push(format!("would create tag {}", tag_name));
+        }
+        if !tag_exists_remote {
+            actions.push("would push commits and tags".to_string());
+        }
+
+        return Ok((
+            recovery_dry_run_result(
+                input,
+                current_version,
+                &tag_name,
+                uncommitted.has_changes,
+                !tag_exists_local,
+                !tag_exists_remote,
+                actions,
+            ),
+            0,
+        ));
+    }
+
+    // Recovery dry-runs must not update repository config. Apply the requested
+    // identity only immediately before a recovery can create a commit or tag.
+    if uncommitted.has_changes || !tag_exists_local {
+        if let Some(ref identity_str) = input.git_identity {
+            let identity = git::parse_git_identity(Some(identity_str));
+            git::configure_identity(&component.local_path, &identity)?;
+        }
+    }
+
     let mut actions = Vec::new();
 
     if uncommitted.has_changes {
@@ -380,6 +430,40 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
         },
         0,
     ))
+}
+
+fn recovery_dry_run_result(
+    input: &ReleaseCommandInput,
+    version: &str,
+    tag_name: &str,
+    commit_needed: bool,
+    tag_needed: bool,
+    push_needed: bool,
+    actions: Vec<String>,
+) -> ReleaseCommandResult {
+    ReleaseCommandResult {
+        component_id: input.component_id.clone(),
+        status: "planned".to_string(),
+        phase: release_execution_plan(input).phase,
+        bump_type: "recover".to_string(),
+        dry_run: true,
+        releasable_commits: 0,
+        new_version: None,
+        tag: Some(tag_name.to_string()),
+        skipped_reason: None,
+        plan: Some(recovery_release_plan(
+            &input.component_id,
+            version,
+            tag_name,
+            commit_needed,
+            tag_needed,
+            push_needed,
+            &actions,
+        )),
+        run: None,
+        deployment: None,
+        release_summary: actions,
+    }
 }
 
 /// Reconcile the release branch with an advanced remote during `--recover`
