@@ -134,6 +134,26 @@ mod tests {
     }
 
     #[test]
+    fn propagates_runner_id_to_resource_records() {
+        let resources = RigResourcesSpec {
+            exclusive: vec!["runtime".to_string()],
+            paths: vec!["/tmp/homeboy-rig".to_string()],
+            ports: vec![9981],
+            process_patterns: vec!["homeboy fixture".to_string()],
+        };
+
+        let mut options =
+            RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active);
+        options.runner_id = Some("runner-abc".to_string());
+
+        let index = rig_resource_lifecycle_index("fixture-rig", &resources, options);
+
+        for record in &index.resources {
+            assert_eq!(record.runner_id.as_deref(), Some("runner-abc"));
+        }
+    }
+
+    #[test]
     fn applies_declared_cleanup_intent_to_resource_records() {
         let resources = RigResourcesSpec {
             paths: vec!["/tmp/homeboy-rig".to_string()],
