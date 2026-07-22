@@ -367,6 +367,7 @@ mod tests {
                 warnings: vec![],
                 summary: None,
                 phase_timings: None,
+                rollback: None,
             },
         };
 

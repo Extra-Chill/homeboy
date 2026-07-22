@@ -447,6 +447,7 @@ fn run_dry_run_preflights(
                 warnings: Vec::new(),
                 summary: None,
                 phase_timings: None,
+                rollback: None,
             },
         }));
     }
@@ -604,6 +605,16 @@ fn release_summary_from_run(run: &ReleaseRun) -> Vec<String> {
     summary.push(git_commit_summary_line(run));
     summary.push(git_tag_summary_line(run));
     summary.push(github_release_summary_line(run));
+    if let Some(rollback) = &run.result.rollback {
+        summary.push(format!(
+            "Rollback evidence: original HEAD {}; temporary HEAD {}; final HEAD {}",
+            rollback.original_head, rollback.temporary_head, rollback.final_head
+        ));
+        summary.push(
+            "Inspect remote branch and tag state before retrying: git ls-remote --heads --tags origin"
+                .to_string(),
+        );
+    }
     summary
 }
 
@@ -631,6 +642,11 @@ fn git_commit_summary_line(run: &ReleaseRun) -> String {
     };
     if step_data_bool(step, "skipped") {
         "No release commit created".to_string()
+    } else if let Some(rollback) = &run.result.rollback {
+        format!(
+            "Release commit rolled back: {} (checkout restored to {})",
+            rollback.temporary_head, rollback.final_head
+        )
     } else {
         "Release commit created".to_string()
     }
@@ -645,6 +661,16 @@ fn git_tag_summary_line(run: &ReleaseRun) -> String {
         .as_ref()
         .and_then(|data| data.get("tag"))
         .and_then(|value| value.as_str());
+    if run.result.rollback.is_some() {
+        return tag
+            .map(|tag| {
+                format!(
+                    "Tag {} may have been created before rollback; inspect local and remote state",
+                    tag
+                )
+            })
+            .unwrap_or_else(|| "Tag state requires inspection after rollback".to_string());
+    }
     if step_data_bool(step, "skipped") {
         tag.map(|tag| format!("Tag already exists: {}", tag))
             .unwrap_or_else(|| "No tag created".to_string())
@@ -854,7 +880,9 @@ pub fn run_batch(
 mod tests {
     use super::*;
     use crate::release::types::ReleasePhase;
-    use crate::release::{ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus};
+    use crate::release::{
+        ReleaseRollbackEvidence, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
+    };
     use homeboy_core::plan::{PlanStep, PlanStepStatus, PlanValues};
 
     #[test]
@@ -1087,6 +1115,7 @@ mod tests {
                 warnings: vec![],
                 summary: None,
                 phase_timings: None,
+                rollback: None,
             },
         };
 
@@ -1110,6 +1139,7 @@ mod tests {
                 warnings: vec![],
                 summary: None,
                 phase_timings: None,
+                rollback: None,
             },
         };
 
@@ -1184,6 +1214,7 @@ mod tests {
                 warnings: vec![],
                 summary: None,
                 phase_timings: None,
+                rollback: None,
             },
         };
 
@@ -1193,6 +1224,45 @@ mod tests {
         assert!(summary.contains(&"Release commit created".to_string()));
         assert!(summary.contains(&"Tag created: v1.2.3".to_string()));
         assert!(summary.contains(&"No GitHub Release created".to_string()));
+    }
+
+    #[test]
+    fn release_summary_reports_rolled_back_commit_as_non_durable() {
+        let run = ReleaseRun {
+            component_id: "demo".to_string(),
+            enabled: true,
+            result: ReleaseRunResult {
+                steps: vec![ReleaseStepResult {
+                    id: "git.commit".to_string(),
+                    step_type: "git.commit".to_string(),
+                    status: ReleaseStepStatus::Success,
+                    ..Default::default()
+                }],
+                status: ReleaseStepStatus::PartialSuccess,
+                warnings: vec![],
+                summary: None,
+                phase_timings: None,
+                rollback: Some(ReleaseRollbackEvidence {
+                    original_head: "original".to_string(),
+                    temporary_head: "release-commit".to_string(),
+                    final_head: "original".to_string(),
+                }),
+            },
+        };
+
+        let summary = release_summary_from_run(&run);
+
+        assert!(summary.contains(
+            &"Release commit rolled back: release-commit (checkout restored to original)"
+                .to_string()
+        ));
+        assert!(summary.iter().any(|line| line.contains(
+            "original HEAD original; temporary HEAD release-commit; final HEAD original"
+        )));
+        assert!(summary
+            .iter()
+            .any(|line| line.contains("git ls-remote --heads --tags origin")));
+        assert!(!summary.contains(&"Release commit created".to_string()));
     }
 
     #[test]
@@ -1226,6 +1296,7 @@ mod tests {
                 warnings: vec![],
                 summary: None,
                 phase_timings: None,
+                rollback: None,
             },
         };
 
