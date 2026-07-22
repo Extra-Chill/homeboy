@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
@@ -66,7 +67,7 @@ pub(crate) fn cook_batch_with_attempt_dispatcher(
 fn submit_batch_cook_fanout(args: AgentTaskFanoutSubmitArgs) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input)?;
     if let Some(run_id) = args.run_id {
-        plan.fanout_id = run_id;
+        plan.rekey(run_id);
     }
 
     let cooks = plan
@@ -159,7 +160,7 @@ fn batch_artifacts(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
 fn run_batch_cook_fanout(args: AgentTaskFanoutRunPlanArgs) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input)?;
     if let Some(record_run_id) = args.record_run_id {
-        plan.fanout_id = record_run_id;
+        plan.rekey(record_run_id);
     }
     run_batch_cook_fanout_plan(plan)
 }
@@ -172,7 +173,7 @@ pub(crate) fn run_batch_cook_fanout_with_attempt_dispatcher(
 ) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input)?;
     if let Some(record_run_id) = args.record_run_id {
-        plan.fanout_id = record_run_id;
+        plan.rekey(record_run_id);
     }
     run_batch_cook_fanout_plan_with_attempt_dispatcher(plan, attempt_dispatcher)
 }
@@ -346,6 +347,7 @@ fn cook_batch_inner(
     // pins every child cook to the same resolved backend.
     resolve_and_validate_effective_backend(&mut args)?;
     let plan = build_cook_batch_plan(&args)?;
+    preflight_batch_cook_recipes(&plan, attempt_dispatcher)?;
     let branches = plan
         .cooks
         .iter()
@@ -491,6 +493,21 @@ fn queue_or_reuse_worktrees(
     })
 }
 
+fn preflight_batch_cook_recipes(
+    plan: &BatchCookFanoutPlan,
+    attempt_dispatcher: Option<&CookAttemptDispatcherFactory>,
+) -> Result<()> {
+    for cook in &plan.cooks {
+        let mut invocation = cook.to_cook_invocation(plan)?;
+        invocation.options.harvest_context = batch_harvest_context()?;
+        if let Some(dispatcher) = attempt_dispatcher {
+            invocation.options.attempt_dispatcher = Some(dispatcher(&invocation.options));
+        }
+        agent_task_service::validate_initial_recipe_compatibility(&invocation.options)?;
+    }
+    Ok(())
+}
+
 fn load_fanout_agent_task_plan(
     args: &AgentTaskFanoutInputArgs,
 ) -> Result<homeboy::agents::agent_tasks::scheduler::AgentTaskPlan> {
@@ -533,7 +550,7 @@ impl BatchCookFanoutPlan {
             )
         })?;
         if let Some(fanout_id) = &args.fanout_id {
-            plan.fanout_id = fanout_id.clone();
+            plan.rekey(fanout_id.clone());
         }
         if plan.schema != AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA {
             return Err(invalid_fanout(
@@ -554,6 +571,18 @@ impl BatchCookFanoutPlan {
             cook.apply_defaults(args)?;
         }
         Ok(plan)
+    }
+
+    fn rekey(&mut self, fanout_id: String) {
+        let previous_prefix = format!("{}-", self.fanout_id);
+        for cook in &mut self.cooks {
+            let cell_id = cook
+                .cook_id
+                .strip_prefix(&previous_prefix)
+                .unwrap_or(&cook.cook_id);
+            cook.cook_id = format!("{fanout_id}-{cell_id}");
+        }
+        self.fanout_id = fanout_id;
     }
 }
 
@@ -762,7 +791,12 @@ impl BatchCookSpec {
                 head: self.head.clone(),
                 title,
                 commit_message,
-                source_refs: self.task_url.clone().into_iter().collect(),
+                source_refs: self
+                    .task_url
+                    .clone()
+                    .into_iter()
+                    .chain(std::iter::once(cook_recipe_source_identity(plan, self)?))
+                    .collect(),
                 protected_branches: self.protected_branches.clone(),
                 ai_tool: resolve_ai_tool_disclosure(
                     &self.ai_tool,
@@ -781,6 +815,19 @@ impl BatchCookSpec {
             },
         })
     }
+}
+
+fn cook_recipe_source_identity(plan: &BatchCookFanoutPlan, cook: &BatchCookSpec) -> Result<String> {
+    let encoded = serde_json::to_vec(&serde_json::json!({
+        "schema": "homeboy/agent-task-fanout-cook-source/v1",
+        "fanout_id": plan.fanout_id,
+        "cook": cook,
+    }))
+    .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    Ok(format!(
+        "homeboy://agent-task/fanout-source/{:x}",
+        Sha256::digest(encoded)
+    ))
 }
 
 fn default_cook_title(cook: &BatchCookSpec) -> String {
@@ -906,10 +953,17 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
         .first()
         .map(|cook| cook.cook_id.clone())
         .unwrap_or_else(|| "empty".to_string());
-    let fanout_id = args
-        .fanout_id
-        .clone()
-        .unwrap_or_else(|| format!("cook-batch-{}-{}-{}", args.repo, first, cooks.len()));
+    let fanout_id = args.fanout_id.clone().unwrap_or_else(|| {
+        let encoded = serde_json::to_vec(&cooks).expect("Cook specs serialize");
+        let digest = format!("{:x}", Sha256::digest(encoded));
+        format!(
+            "cook-batch-{}-{}-{}-{}",
+            args.repo,
+            first,
+            cooks.len(),
+            &digest[..12]
+        )
+    });
     // Durable cook recipes are keyed by cook_id. Scope each generated child to
     // its fanout generation so the same issue can run in a later batch.
     for cook in &mut cooks {
@@ -1477,8 +1531,11 @@ mod tests {
                 .run_id
                 .as_deref()
                 .expect("attempt run id");
-            assert!(run_id.starts_with("cook-5929-docs-attempt-1-"));
-            assert_eq!(run_id.len(), "cook-5929-docs-attempt-1-".len() + 8);
+            assert!(run_id.starts_with("cook-fanout_refactor-5929-docs-attempt-1-"));
+            assert_eq!(
+                run_id.len(),
+                "cook-fanout_refactor-5929-docs-attempt-1-".len() + 8
+            );
             assert_eq!(
                 invocation.options.gates.verify,
                 vec!["homeboy review test homeboy"]
@@ -1613,6 +1670,69 @@ mod tests {
         assert_ne!(first.cooks[0].run_id(), second.cooks[0].run_id());
         assert_ne!(first.cooks[0].to_worktree, second.cooks[0].to_worktree);
         assert_eq!(second.cooks[0].cook_id, "issue-wave-v2-issue-6453");
+    }
+
+    #[test]
+    fn implicit_fanout_identity_tracks_effective_cook_inputs() {
+        let mut args = cook_batch_args();
+        args.fanout_id = None;
+        let first = build_cook_batch_plan(&args).expect("first implicit plan");
+        let replay = build_cook_batch_plan(&args).expect("exact replay");
+        assert_eq!(first.fanout_id, replay.fanout_id);
+        assert_eq!(first.cooks[0].cook_id, replay.cooks[0].cook_id);
+
+        args.branch_prefix = "fix-v2".to_string();
+        let changed = build_cook_batch_plan(&args).expect("changed plan");
+        assert_ne!(first.fanout_id, changed.fanout_id);
+        assert_ne!(first.cooks[0].cook_id, changed.cooks[0].cook_id);
+    }
+
+    #[test]
+    fn fanout_overrides_rekey_scoped_and_legacy_children_once() {
+        let mut plan = test_batch_plan();
+        assert_eq!(plan.cooks[0].cook_id, "fanout/refactor-first");
+
+        plan.rekey("replacement".to_string());
+        assert_eq!(plan.fanout_id, "replacement");
+        assert_eq!(plan.cooks[0].cook_id, "replacement-first");
+        assert_eq!(plan.cooks[1].cook_id, "replacement-second");
+
+        let mut legacy = BatchCookFanoutPlan {
+            schema: batch_cook_fanout_plan_schema(),
+            fanout_id: "legacy".to_string(),
+            cooks: vec![BatchCookSpec {
+                cook_id: "issue-6453".to_string(),
+                ..plan.cooks[0].clone()
+            }],
+            metadata: Value::Null,
+        };
+        legacy.rekey("fresh".to_string());
+        assert_eq!(legacy.cooks[0].cook_id, "fresh-issue-6453");
+    }
+
+    #[test]
+    fn recipe_preflight_accepts_exact_replay_and_rejects_changed_inputs() {
+        with_isolated_home(|_| {
+            let plan = test_batch_plan();
+            let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile batch cooks");
+            let mut invocation = plan.cooks[0]
+                .to_cook_invocation(&plan)
+                .expect("cook invocation");
+            invocation.options.harvest_context = batch_harvest_context().expect("harvest context");
+            invocation.options.initial_plan = compiled[0].initial_plan.clone();
+            agent_task_service::persist_initial_recipe(&invocation.options)
+                .expect("persist initial recipe");
+
+            if let Err(error) = preflight_batch_cook_recipes(&plan, None) {
+                panic!("exact replay is incompatible: {error:?}");
+            }
+
+            let mut changed = plan;
+            changed.cooks[0].title = Some("changed title".to_string());
+            let error = preflight_batch_cook_recipes(&changed, None)
+                .expect_err("changed execution inputs conflict");
+            assert!(error.message.contains("different execution inputs"));
+        });
     }
 
     #[test]

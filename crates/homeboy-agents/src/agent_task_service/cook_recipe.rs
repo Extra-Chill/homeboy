@@ -105,6 +105,34 @@ pub trait AgentTaskCookContinuationScheduler {
 pub fn persist_initial_recipe(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<AgentTaskCookRecipe> {
+    let recipe = initial_recipe(options)?;
+    validate_recipe(&recipe)?;
+    if let Some(existing) = compatible_existing_recipe(&recipe)? {
+        return Ok(existing);
+    }
+    write_recipe(&recipe)?;
+    Ok(recipe)
+}
+
+/// Validate a Cook recipe against durable state without writing it. Fanout
+/// uses this before creating worktrees so incompatible replays fail before any
+/// lifecycle resources are mutated.
+pub fn validate_initial_recipe_compatibility(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    if !recipe_exists(&options.cook_id)? {
+        return Ok(());
+    }
+    let existing = load_recipe(&options.cook_id)?;
+    let mut recipe = initial_recipe(options)?;
+    // The attempt plan is compiled only after the target worktree exists. Use
+    // the durable plan here so preflight compares every input already known
+    // without weakening persistence-time plan validation.
+    recipe.attempts = existing.attempts;
+    recipe.retry_budget["execution_budget"] = existing.retry_budget["execution_budget"].clone();
+    compatible_existing_recipe(&recipe)?;
+    Ok(())
+}
+
+fn initial_recipe(options: &AgentTaskCookServiceOptions) -> Result<AgentTaskCookRecipe> {
     let attempt_dispatch = options
         .attempt_dispatcher
         .as_ref()
@@ -150,7 +178,10 @@ pub fn persist_initial_recipe(
         sensitive_mappings: sensitive_mappings(&options.initial_plan)?,
         harvest_context: options.harvest_context.clone(),
     };
-    validate_recipe(&recipe)?;
+    Ok(recipe)
+}
+
+fn compatible_existing_recipe(recipe: &AgentTaskCookRecipe) -> Result<Option<AgentTaskCookRecipe>> {
     if recipe_exists(&recipe.cook_id)? {
         let existing = load_recipe(&recipe.cook_id)?;
         let mut expected = recipe.clone();
@@ -183,41 +214,79 @@ pub fn persist_initial_recipe(
                     )
             });
         if !inputs_match {
+            let mismatches = recipe_mismatch_fields(&existing, &expected);
+            let problem = if mismatches.is_empty() {
+                "durable cook recipe already exists with different execution inputs".to_string()
+            } else {
+                format!(
+                    "durable cook recipe already exists with different execution inputs: {}",
+                    mismatches.join(", ")
+                )
+            };
             return Err(Error::validation_invalid_argument(
                 "cook_recipe",
-                "durable cook recipe already exists with different execution inputs",
+                problem,
                 Some(recipe.cook_id.clone()),
                 None,
             ));
         }
-        return Ok(existing);
+        return Ok(Some(existing));
     }
-    write_recipe(&recipe)?;
-    Ok(recipe)
+    Ok(None)
 }
 
 /// `homeboy_plan` is a derived execution projection rebuilt by each controller
 /// compile. Compare its typed source inputs, not transient projection details,
 /// when deciding whether a persisted recipe may resume.
 fn recipes_match(left: &AgentTaskCookRecipe, right: &AgentTaskCookRecipe) -> bool {
-    if left.schema != right.schema
-        || left.cook_id != right.cook_id
-        || left.promotion_transport != right.promotion_transport
-        || left.gate_policy != right.gate_policy
-        || left.retry_budget != right.retry_budget
-        || left.finalization != right.finalization
-        || left.source_refs != right.source_refs
-        || left.runtime_generation != right.runtime_generation
-        || left.sensitive_mappings != right.sensitive_mappings
-        || left.harvest_context != right.harvest_context
-        || left.attempts.len() != right.attempts.len()
-    {
-        return false;
+    recipe_mismatch_fields(left, right).is_empty()
+}
+
+fn recipe_mismatch_fields(
+    left: &AgentTaskCookRecipe,
+    right: &AgentTaskCookRecipe,
+) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if left.schema != right.schema {
+        fields.push("schema");
     }
-    left.attempts
-        .iter()
-        .zip(&right.attempts)
-        .all(|(left, right)| attempt_inputs_match(left, right))
+    if left.cook_id != right.cook_id {
+        fields.push("cook_id");
+    }
+    if left.promotion_transport != right.promotion_transport {
+        fields.push("promotion_transport");
+    }
+    if left.gate_policy != right.gate_policy {
+        fields.push("gate_policy");
+    }
+    if left.retry_budget != right.retry_budget {
+        fields.push("retry_budget");
+    }
+    if left.finalization != right.finalization {
+        fields.push("finalization");
+    }
+    if left.source_refs != right.source_refs {
+        fields.push("source_refs");
+    }
+    if left.runtime_generation != right.runtime_generation {
+        fields.push("runtime_generation");
+    }
+    if left.sensitive_mappings != right.sensitive_mappings {
+        fields.push("sensitive_mappings");
+    }
+    if left.harvest_context != right.harvest_context {
+        fields.push("harvest_context");
+    }
+    if left.attempts.len() != right.attempts.len()
+        || !left
+            .attempts
+            .iter()
+            .zip(&right.attempts)
+            .all(|(left, right)| attempt_inputs_match(left, right))
+    {
+        fields.push("attempts");
+    }
+    fields
 }
 
 fn attempt_inputs_match(
@@ -1314,6 +1383,25 @@ mod tests {
             let mut conflicting = retry_plan;
             conflicting.plan_id = "different".to_string();
             assert!(record_recipe_attempt("cook", 2, "run-2", &conflicting).is_err());
+        });
+    }
+
+    #[test]
+    fn recipe_compatibility_preflight_is_read_only_and_rejects_changed_inputs() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let options = reconstruct_options(&recipe()).expect("canonical options");
+
+            validate_initial_recipe_compatibility(&options).expect("new recipe is compatible");
+            assert!(!recipe_exists(&options.cook_id).expect("recipe existence"));
+
+            persist_initial_recipe(&options).expect("persist canonical recipe");
+            validate_initial_recipe_compatibility(&options).expect("exact replay is compatible");
+
+            let mut changed = options;
+            changed.title = "different title".to_string();
+            let error = validate_initial_recipe_compatibility(&changed)
+                .expect_err("changed execution inputs conflict");
+            assert!(error.message.contains("different execution inputs"));
         });
     }
 
