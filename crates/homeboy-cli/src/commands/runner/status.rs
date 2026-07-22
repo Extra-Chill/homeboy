@@ -31,11 +31,16 @@ pub(super) fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
         let operator_hints = runner_status_operator_hints(&report);
         let operator_commands = runner_status_operator_commands(&report);
         let selected_lab_runner = selected_lab_runner_status(Some(id), Some(report.clone()))?;
+        // Lead with the compact authoritative admission answer, summarizing the
+        // draining generations by count rather than expanding the full ledger
+        // (#9478/#9522). The full inventory stays available as detail below.
+        let admission_summary = Some(report.admission_summary(generation_inventory.len()));
         return Ok((
             RunnerOutput {
                 command: "runner.status".to_string(),
                 id: Some(id.to_string()),
                 extra: RunnerExtra {
+                    admission_summary,
                     connection: Some(RunnerConnectionOutput::Status(report)),
                     generation_inventory,
                     preferred_lab_runner,
