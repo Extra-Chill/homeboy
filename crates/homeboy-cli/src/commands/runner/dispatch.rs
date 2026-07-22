@@ -227,7 +227,7 @@ pub fn run(
             summary_outputs,
             read_only_artifact,
             json: _,
-            raw: _,
+            raw,
             command,
         } => map_execution(exec(
             &id,
@@ -248,6 +248,7 @@ pub fn run(
             artifact_dir_outputs,
             summary_outputs,
             read_only_artifact,
+            raw,
             command,
         )),
         RunnerCommand::Env { id } => map_env(env_mod::env(&id)),
@@ -487,6 +488,7 @@ fn run_json_exec(
             artifact_dir_outputs,
             summary_outputs,
             read_only_artifact,
+            false,
             command,
         )
         .map(|(output, exit_code)| {
@@ -540,6 +542,7 @@ fn run_raw_exec(
         artifact_dir_outputs,
         summary_outputs,
         read_only_artifact,
+        true,
         command,
     ) {
         Ok((output, exit_code)) => raw_exec_command_run(output, exit_code),
@@ -649,6 +652,7 @@ pub(super) fn run_compact_exec(
         artifact_dir_outputs,
         summary_outputs,
         read_only_artifact,
+        false,
         command,
     ) {
         Ok((output, exit_code)) => compact_exec_command_run(output, exit_code),

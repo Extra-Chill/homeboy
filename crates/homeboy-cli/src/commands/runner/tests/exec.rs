@@ -4,7 +4,7 @@ use super::super::dispatch::{
 use super::super::exec::{
     exec, exec_workspace_context, prepare_runner_exec_command, prepare_runner_exec_env,
     prepare_runner_exec_secret_env_plan, read_bounded, read_runner_exec_script,
-    validate_runner_exec_public_env, RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
+    should_print_handoff, validate_runner_exec_public_env, RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
 };
 
 use homeboy::core::observation::{NewRunRecord, ObservationStore};
@@ -59,6 +59,13 @@ fn raw_exec_command_run_keeps_structured_output_and_presentation_streams() {
     assert_eq!(value["stdout"], "hello\n");
     assert_eq!(value["stderr"], "warn\n");
     assert_eq!(value["job_id"], "job-123");
+}
+
+#[test]
+fn raw_exec_suppresses_handoff_output() {
+    assert!(!should_print_handoff(true, false));
+    assert!(!should_print_handoff(false, true));
+    assert!(should_print_handoff(false, false));
 }
 
 #[test]
@@ -328,6 +335,7 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
             Vec::new(),
             Vec::new(),
             false,
+            false,
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
@@ -405,6 +413,7 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
             Vec::new(),
             Vec::new(),
             vec!["summary.json".to_string()],
+            false,
             false,
             vec![
                 "sh".to_string(),
@@ -486,6 +495,7 @@ fn runner_exec_structured_summary_is_independent_of_large_stdout() {
             Vec::new(),
             Vec::new(),
             vec!["summary.json".to_string()],
+            false,
             false,
             vec![
                 "sh".to_string(),
@@ -896,6 +906,7 @@ fn runner_exec_rejects_artifacts_without_run_id() {
         Vec::new(),
         Vec::new(),
         false,
+        false,
         vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
     )
     .expect_err("artifact requires run id");
@@ -927,6 +938,7 @@ fn read_only_artifact_exec_rejects_capture_patch() {
         Vec::new(),
         Vec::new(),
         true, // read_only_artifact
+        false,
         vec![
             "sh".to_string(),
             "-c".to_string(),
@@ -960,6 +972,7 @@ fn read_only_artifact_exec_rejects_declared_outputs() {
         Vec::new(),
         Vec::new(),
         true, // read_only_artifact
+        false,
         vec![
             "sh".to_string(),
             "-c".to_string(),
@@ -1024,6 +1037,7 @@ fn runner_exec_rejects_summaries_without_run_id() {
         Vec::new(),
         Vec::new(),
         vec!["summary.json".to_string()],
+        false,
         false,
         vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
     )
