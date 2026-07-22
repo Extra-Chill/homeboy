@@ -526,6 +526,30 @@ fn canonical_digest<T: Serialize>(value: &T) -> Result<String> {
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
+/// Shared identity header carried by every durable Lab stage
+/// (schema + run/runner identity + recipe/plan digests). The per-stage
+/// `validate` methods all bind their state to the same request identity; this
+/// centralizes that check so each `validate` only asserts its own extra fields.
+///
+/// Returns `Ok(true)` when the header matches the request, `Ok(false)` on any
+/// mismatch (schema, run id, runner id, recipe digest, or plan digest), and
+/// propagates a digest-computation error.
+fn durable_stage_header_matches(
+    schema: &str,
+    expected_schema: &str,
+    run_id: &str,
+    runner_id: &str,
+    recipe_digest: &str,
+    plan_digest: &str,
+    request: &LabStagingExecutionRequest,
+) -> Result<bool> {
+    Ok(schema == expected_schema
+        && run_id == request.recipe.run_id
+        && runner_id == request.recipe.runner_id
+        && recipe_digest == canonical_digest(&request.recipe)?
+        && plan_digest == canonical_digest(&request.durable_agent_task_plan)?)
+}
+
 /// Complete, owner-only output of the one admitted production boundary. Later
 /// stages consume this attachment rather than recomputing or re-syncing it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -705,13 +729,16 @@ impl DurableLabRuntimeStage {
         request: &LabStagingExecutionRequest,
         checkpoint: &LabStagingCheckpoint,
     ) -> Result<()> {
-        if self.schema != "homeboy/durable-lab-runtime-stage/v1"
-            || self.run_id != request.recipe.run_id
-            || self.runner_id != request.recipe.runner_id
-            || self.recipe_digest != canonical_digest(&request.recipe)?
-            || self.plan_digest != canonical_digest(&request.durable_agent_task_plan)?
-            || self.output.get("remote_cwd").and_then(Value::as_str)
-                != Some(self.workspace_id.as_str())
+        if !durable_stage_header_matches(
+            &self.schema,
+            "homeboy/durable-lab-runtime-stage/v1",
+            &self.run_id,
+            &self.runner_id,
+            &self.recipe_digest,
+            &self.plan_digest,
+            request,
+        )? || self.output.get("remote_cwd").and_then(Value::as_str)
+            != Some(self.workspace_id.as_str())
             || self.runtime_id.trim().is_empty()
             || checkpoint.workspace_id.as_deref() != Some(self.workspace_id.as_str())
             || checkpoint
@@ -746,12 +773,15 @@ impl DurableLabHydrationStage {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if self.schema != "homeboy/durable-lab-hydration-stage/v1"
-            || self.run_id != request.recipe.run_id
-            || self.runner_id != request.recipe.runner_id
-            || self.recipe_digest != canonical_digest(&request.recipe)?
-            || self.plan_digest != canonical_digest(&request.durable_agent_task_plan)?
-            || self.workspace_id != workspace.workspace_id
+        if !durable_stage_header_matches(
+            &self.schema,
+            "homeboy/durable-lab-hydration-stage/v1",
+            &self.run_id,
+            &self.runner_id,
+            &self.recipe_digest,
+            &self.plan_digest,
+            request,
+        )? || self.workspace_id != workspace.workspace_id
             || self.runtime_id != runtime.runtime_id
             || self.hydration_id != canonical_digest(&self.hydration_record)?
             || self
@@ -799,12 +829,15 @@ impl DurableLabWorkspaceStage {
         request: &LabStagingExecutionRequest,
         checkpoint: &LabStagingCheckpoint,
     ) -> Result<()> {
-        if self.schema != "homeboy/durable-lab-workspace-stage/v1"
-            || self.run_id != request.recipe.run_id
-            || self.runner_id != request.recipe.runner_id
-            || self.recipe_digest != canonical_digest(&request.recipe)?
-            || self.plan_digest != canonical_digest(&request.durable_agent_task_plan)?
-            || self.remote_cwd.trim().is_empty()
+        if !durable_stage_header_matches(
+            &self.schema,
+            "homeboy/durable-lab-workspace-stage/v1",
+            &self.run_id,
+            &self.runner_id,
+            &self.recipe_digest,
+            &self.plan_digest,
+            request,
+        )? || self.remote_cwd.trim().is_empty()
             || self.source_snapshot_id.trim().is_empty()
             || self.workspace_id != self.remote_cwd
             || self
