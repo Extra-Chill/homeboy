@@ -491,60 +491,25 @@ pub struct LabStagingRecipeRef {
     pub canonical_plan_digest: String,
 }
 
-fn canonical_plan_digest(
-    plan: &homeboy_agents::agent_task_scheduler::AgentTaskPlan,
-) -> Result<String> {
-    fn canonicalize(value: Value) -> Value {
-        match value {
-            Value::Array(values) => Value::Array(values.into_iter().map(canonicalize).collect()),
-            Value::Object(values) => {
-                let mut fields: Vec<_> = values.into_iter().collect();
-                fields.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-                Value::Object(
-                    fields
-                        .into_iter()
-                        .map(|(key, value)| (key, canonicalize(value)))
-                        .collect(),
-                )
-            }
-            value => value,
-        }
-    }
-    let bytes = serde_json::to_vec(&canonicalize(serde_json::to_value(plan).map_err(
-        |error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("serialize durable Lab staging plan".to_string()),
+fn canonicalize_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize_json).collect()),
+        Value::Object(values) => {
+            let mut fields: Vec<_> = values.into_iter().collect();
+            fields.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                fields
+                    .into_iter()
+                    .map(|(key, value)| (key, canonicalize_json(value)))
+                    .collect(),
             )
-        },
-    )?))
-    .map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("serialize canonical durable Lab staging plan".to_string()),
-        )
-    })?;
-    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+        }
+        value => value,
+    }
 }
 
 fn canonical_digest<T: Serialize>(value: &T) -> Result<String> {
-    fn canonicalize(value: Value) -> Value {
-        match value {
-            Value::Array(values) => Value::Array(values.into_iter().map(canonicalize).collect()),
-            Value::Object(values) => {
-                let mut fields: Vec<_> = values.into_iter().collect();
-                fields.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-                Value::Object(
-                    fields
-                        .into_iter()
-                        .map(|(key, value)| (key, canonicalize(value)))
-                        .collect(),
-                )
-            }
-            value => value,
-        }
-    }
-    let bytes = serde_json::to_vec(&canonicalize(serde_json::to_value(value).map_err(
+    let bytes = serde_json::to_vec(&canonicalize_json(serde_json::to_value(value).map_err(
         |error| {
             Error::internal_json(
                 error.to_string(),
@@ -744,7 +709,7 @@ impl DurableLabRuntimeStage {
             || self.run_id != request.recipe.run_id
             || self.runner_id != request.recipe.runner_id
             || self.recipe_digest != canonical_digest(&request.recipe)?
-            || self.plan_digest != canonical_plan_digest(&request.durable_agent_task_plan)?
+            || self.plan_digest != canonical_digest(&request.durable_agent_task_plan)?
             || self.output.get("remote_cwd").and_then(Value::as_str)
                 != Some(self.workspace_id.as_str())
             || self.runtime_id.trim().is_empty()
@@ -785,7 +750,7 @@ impl DurableLabHydrationStage {
             || self.run_id != request.recipe.run_id
             || self.runner_id != request.recipe.runner_id
             || self.recipe_digest != canonical_digest(&request.recipe)?
-            || self.plan_digest != canonical_plan_digest(&request.durable_agent_task_plan)?
+            || self.plan_digest != canonical_digest(&request.durable_agent_task_plan)?
             || self.workspace_id != workspace.workspace_id
             || self.runtime_id != runtime.runtime_id
             || self.hydration_id != canonical_digest(&self.hydration_record)?
@@ -838,7 +803,7 @@ impl DurableLabWorkspaceStage {
             || self.run_id != request.recipe.run_id
             || self.runner_id != request.recipe.runner_id
             || self.recipe_digest != canonical_digest(&request.recipe)?
-            || self.plan_digest != canonical_plan_digest(&request.durable_agent_task_plan)?
+            || self.plan_digest != canonical_digest(&request.durable_agent_task_plan)?
             || self.remote_cwd.trim().is_empty()
             || self.source_snapshot_id.trim().is_empty()
             || self.workspace_id != self.remote_cwd
@@ -879,7 +844,7 @@ impl LabStagingRecipeRef {
         Ok(Self {
             attachment_digest,
             durable_plan_id: plan.plan_id.clone(),
-            canonical_plan_digest: canonical_plan_digest(plan)?,
+            canonical_plan_digest: canonical_digest(plan)?,
         })
     }
 
@@ -951,8 +916,7 @@ fn load_validated_staging_request(
     if attachment.payload_digest != recipe_ref.attachment_digest
         || staging.recipe.runner_id != runner_id
         || staging.durable_agent_task_plan.plan_id != recipe_ref.durable_plan_id
-        || canonical_plan_digest(&staging.durable_agent_task_plan)?
-            != recipe_ref.canonical_plan_digest
+        || canonical_digest(&staging.durable_agent_task_plan)? != recipe_ref.canonical_plan_digest
     {
         return Err(Error::validation_invalid_argument(
             "recipe_ref",
@@ -1866,7 +1830,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             run_id: request.recipe.run_id.clone(),
             runner_id: request.recipe.runner_id.clone(),
             recipe_digest: canonical_digest(&request.recipe)?,
-            plan_digest: canonical_plan_digest(&request.durable_agent_task_plan)?,
+            plan_digest: canonical_digest(&request.durable_agent_task_plan)?,
             source_snapshot_id: source_snapshot_id.clone(),
             workspace_id: remote_cwd.clone(),
             remote_cwd,
@@ -2030,7 +1994,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             run_id: request.recipe.run_id.clone(),
             runner_id: request.recipe.runner_id.clone(),
             recipe_digest: canonical_digest(&request.recipe)?,
-            plan_digest: canonical_plan_digest(&request.durable_agent_task_plan)?,
+            plan_digest: canonical_digest(&request.durable_agent_task_plan)?,
             workspace_id: workspace.workspace_id,
             runtime_id: runtime_id.clone(),
             output: serde_json::to_value(&output).map_err(|error| {
@@ -2132,7 +2096,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             run_id: request.recipe.run_id.clone(),
             runner_id: request.recipe.runner_id.clone(),
             recipe_digest: canonical_digest(&request.recipe)?,
-            plan_digest: canonical_plan_digest(&request.durable_agent_task_plan)?,
+            plan_digest: canonical_digest(&request.durable_agent_task_plan)?,
             workspace_id: workspace.workspace_id.clone(),
             runtime_id: runtime.runtime_id.clone(),
             hydration_id: hydration_id.clone(),
@@ -3912,8 +3876,7 @@ mod tests {
             run_id: request.recipe.run_id.clone(),
             runner_id: request.recipe.runner_id.clone(),
             recipe_digest: canonical_digest(&request.recipe).expect("recipe digest"),
-            plan_digest: canonical_plan_digest(&request.durable_agent_task_plan)
-                .expect("plan digest"),
+            plan_digest: canonical_digest(&request.durable_agent_task_plan).expect("plan digest"),
             source_snapshot_id: "snapshot-1".to_string(),
             workspace_id: "/runner/workspaces/attempt-1".to_string(),
             remote_cwd: "/runner/workspaces/attempt-1".to_string(),
@@ -3974,8 +3937,7 @@ mod tests {
             run_id: request.recipe.run_id.clone(),
             runner_id: request.recipe.runner_id.clone(),
             recipe_digest: canonical_digest(&request.recipe).expect("recipe digest"),
-            plan_digest: canonical_plan_digest(&request.durable_agent_task_plan)
-                .expect("plan digest"),
+            plan_digest: canonical_digest(&request.durable_agent_task_plan).expect("plan digest"),
             workspace_id: workspace.workspace_id.clone(),
             runtime_id: "runtime-1".to_string(),
             output: json!({ "remote_cwd": workspace.workspace_id, "plan": plan }),
@@ -3993,8 +3955,7 @@ mod tests {
             run_id: request.recipe.run_id.clone(),
             runner_id: request.recipe.runner_id.clone(),
             recipe_digest: canonical_digest(&request.recipe).expect("recipe digest"),
-            plan_digest: canonical_plan_digest(&request.durable_agent_task_plan)
-                .expect("plan digest"),
+            plan_digest: canonical_digest(&request.durable_agent_task_plan).expect("plan digest"),
             workspace_id: workspace.workspace_id.clone(),
             runtime_id: runtime.runtime_id.clone(),
             hydration_id,
@@ -4091,7 +4052,7 @@ mod tests {
                 run_id: request.recipe.run_id.clone(),
                 runner_id: request.recipe.runner_id.clone(),
                 recipe_digest: canonical_digest(&request.recipe).expect("recipe digest"),
-                plan_digest: canonical_plan_digest(&request.durable_agent_task_plan)
+                plan_digest: canonical_digest(&request.durable_agent_task_plan)
                     .expect("plan digest"),
                 workspace_id: workspace.workspace_id.clone(),
                 runtime_id: "runtime-1".to_string(),
@@ -4106,7 +4067,7 @@ mod tests {
                 run_id: request.recipe.run_id.clone(),
                 runner_id: request.recipe.runner_id.clone(),
                 recipe_digest: canonical_digest(&request.recipe).expect("recipe digest"),
-                plan_digest: canonical_plan_digest(&request.durable_agent_task_plan)
+                plan_digest: canonical_digest(&request.durable_agent_task_plan)
                     .expect("plan digest"),
                 workspace_id: workspace.workspace_id.clone(),
                 runtime_id: runtime.runtime_id.clone(),
