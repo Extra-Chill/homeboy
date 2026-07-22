@@ -519,6 +519,20 @@ fn envelope_for_data(
     }
 
     let diagnostics = failure_diagnostics_for_data(exit_code, &run, &artifacts, &data);
+    let failure_next_actions = diagnostics
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.failure_digest.as_ref())
+        .map(|digest| digest.next_actions.clone())
+        .unwrap_or_default();
+    let summary = diagnostics
+        .as_ref()
+        .map(|diagnostics| diagnostics.message.clone())
+        .or_else(|| summary_for_payload(&data, presentation.as_ref()));
+    let next_actions = if actionable.next_actions.is_empty() {
+        failure_next_actions
+    } else {
+        actionable.next_actions
+    };
 
     CommandResultEnvelope {
         schema: COMMAND_RESULT_SCHEMA,
@@ -528,8 +542,8 @@ fn envelope_for_data(
         status: status_for_result(Some(&data), exit_code),
         run,
         refs,
-        summary: summary_for_payload(&data, presentation.as_ref()),
-        next_actions: actionable.next_actions,
+        summary,
+        next_actions,
         artifacts,
         evidence,
         diagnostics,
@@ -583,6 +597,9 @@ fn failure_digest_for_error(err: &Error) -> Option<CommandFailureDigest> {
 }
 
 fn failure_digest_for_data(data: &Value) -> Option<CommandFailureDigest> {
+    if let Some(digest) = release_failure_digest(data) {
+        return Some(digest);
+    }
     if let Some(digest) = formatting_failure_digest(data) {
         return Some(digest);
     }
@@ -608,6 +625,76 @@ fn failure_digest_for_data(data: &Value) -> Option<CommandFailureDigest> {
         next_actions: Vec::new(),
         retryable: None,
     })
+}
+
+/// Lift the first failed release step into the bounded command envelope. The
+/// complete plan and step payload remain available under `data` for inspection.
+fn release_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
+    if data.get("command").and_then(Value::as_str) != Some("release") {
+        return None;
+    }
+
+    let result = data.get("result")?;
+    let component_id = result.get("component_id").and_then(Value::as_str)?;
+    let steps = result.get("run")?.get("result")?.get("steps")?.as_array()?;
+    let failed_step = steps.iter().find(|step| {
+        matches!(
+            step.get("status").and_then(Value::as_str),
+            Some("failed") | Some("missing")
+        )
+    })?;
+    let step_id = failed_step
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let step_type = failed_step
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or(step_id);
+    let cause = failed_step
+        .get("error")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            failed_step
+                .get("missing")
+                .and_then(Value::as_array)
+                .and_then(|missing| missing.first())
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            failed_step
+                .get("warnings")
+                .and_then(Value::as_array)
+                .and_then(|warnings| warnings.first())
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("release step failed without a reported error");
+
+    Some(CommandFailureDigest {
+        summary: format!(
+            "Release step {step_id} ({step_type}) failed: {}",
+            bounded_text(cause, 1000)
+        ),
+        stdout_tail: None,
+        stderr_tail: None,
+        artifact_refs: Vec::new(),
+        next_actions: vec![CommandNextAction::new(
+            "inspect release state",
+            format!("homeboy release {component_id} --dry-run"),
+        )
+        .with_kind(CommandNextActionKind::Repair)],
+        retryable: None,
+    })
+}
+
+fn bounded_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let bounded: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{bounded}...")
+    } else {
+        bounded
+    }
 }
 
 fn formatting_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
@@ -1052,6 +1139,49 @@ mod tests {
         assert_eq!(
             value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
             "cargo fmt"
+        );
+    }
+
+    #[test]
+    fn failed_release_lifts_a_bounded_root_cause_and_retry_action() {
+        let long_error = format!("package upload rejected: {}", "x".repeat(1_100));
+        let response = cli_response_for_json_result_for_command(
+            &Ok(json!({
+                "command": "release",
+                "variant": "single",
+                "result": {
+                    "component_id": "site-generator",
+                    "run": {
+                        "result": {
+                            "steps": [{
+                                "id": "publish.npm",
+                                "type": "publish.npm",
+                                "status": "failed",
+                                "error": long_error,
+                                "data": { "verbose_log": "retained in the detailed release output" }
+                            }]
+                        }
+                    }
+                }
+            })),
+            1,
+            "release",
+            None,
+        );
+        let value = serde_json::to_value(response).expect("response json");
+        let summary = value["summary"].as_str().expect("bounded root cause");
+
+        assert!(summary.starts_with("Release step publish.npm (publish.npm) failed:"));
+        assert!(summary.ends_with("..."));
+        assert!(summary.chars().count() <= 1_050);
+        assert_eq!(value["diagnostics"]["message"], summary);
+        assert_eq!(
+            value["next_actions"][0]["command"],
+            "homeboy release site-generator --dry-run"
+        );
+        assert_eq!(
+            value["data"]["result"]["run"]["result"]["steps"][0]["data"]["verbose_log"],
+            "retained in the detailed release output"
         );
     }
 
