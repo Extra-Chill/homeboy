@@ -21,7 +21,7 @@ use super::types::{
     RuntimeDiagnostic, RuntimePackageOutput, RuntimeProbeValue, SelectedRuntimeOutput,
 };
 
-pub(super) fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
+pub(super) fn status(id: Option<&str>, include_generations: bool) -> CmdResult<RunnerOutput> {
     let preferred_lab_runner = runner::resolve_default_lab_runner()?;
     if let Some(id) = id {
         let report = runner::status(id)?;
@@ -34,7 +34,19 @@ pub(super) fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
         // Lead with the compact authoritative admission answer, summarizing the
         // draining generations by count rather than expanding the full ledger
         // (#9478/#9522). The full inventory stays available as detail below.
+        // Count the draining generations before optionally dropping the expanded
+        // ledger, so the summary's count is accurate whether or not the caller
+        // asked for the full list.
         let admission_summary = Some(report.admission_summary(generation_inventory.len()));
+        // By default the expanded per-generation ledger is omitted — the summary
+        // already carries the count, and on a long-lived runner the full
+        // inventory runs to thousands of lines that make old ownership look like
+        // current load. `--generations` opts back into the full detail.
+        let generation_inventory = if include_generations {
+            generation_inventory
+        } else {
+            Vec::new()
+        };
         return Ok((
             RunnerOutput {
                 command: "runner.status".to_string(),
