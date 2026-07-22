@@ -478,6 +478,8 @@ fn truncate(value: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli_surface::Cli;
+    use clap::Parser;
     use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
     use homeboy::test_support::with_isolated_home;
     use serde_json::json;
@@ -498,6 +500,16 @@ mod tests {
             parse_duration("2s").expect("duration"),
             Duration::from_secs(2)
         );
+    }
+
+    #[test]
+    fn controller_job_retrieval_commands_parse() {
+        for command in [
+            ["homeboy", "activity", "show", "controller-job-9678"],
+            ["homeboy", "activity", "watch", "controller-job-9678"],
+        ] {
+            Cli::try_parse_from(command).expect("controller job retrieval command parses");
+        }
     }
 
     #[test]

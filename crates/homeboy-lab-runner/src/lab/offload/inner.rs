@@ -1488,6 +1488,7 @@ pub(crate) fn run_lab_offload_inner(
                 );
             }
         };
+        let controller_job_commands = controller_job_retrieval_commands(&controller_job_id);
         let stdout = serde_json::to_string_pretty(&serde_json::json!({
             "success": true,
             "data": {
@@ -1496,8 +1497,13 @@ pub(crate) fn run_lab_offload_inner(
                 "controller_job_id": controller_job_id,
                 "retrieval_commands": {
                     "status": format!("homeboy agent-task status {run_id}"),
-                    "controller_job": format!("homeboy daemon job {}", controller_job_id),
-                }
+                    "controller_job": controller_job_commands.show,
+                    "controller_job_watch": controller_job_commands.watch,
+                },
+                "next_actions": [
+                    format!("Show controller job: {}", controller_job_commands.show),
+                    format!("Watch controller job: {}", controller_job_commands.watch),
+                ],
             }
         }))
         .unwrap_or_else(|_| {
@@ -1506,7 +1512,10 @@ pub(crate) fn run_lab_offload_inner(
         return Ok(LabOffloadOutcome::InFlight {
             plan,
             stdout: format!("{stdout}\n"),
-            stderr: format!("Lab staging continues in controller job `{controller_job_id}`.\nNext: homeboy agent-task status {run_id}\n"),
+            stderr: format!(
+                "Lab staging continues in controller job `{controller_job_id}`.\nNext: homeboy agent-task status {run_id}\nNext: {}\nNext: {}\n",
+                controller_job_commands.show, controller_job_commands.watch,
+            ),
             exit_code: 0,
             output_file_content: Some(format!("{stdout}\n")),
         });
@@ -1978,6 +1987,18 @@ pub(crate) fn run_lab_offload_inner(
         print_handoff: true,
         detach_after_handoff: request.detach_after_handoff,
     })
+}
+
+pub(crate) struct ControllerJobRetrievalCommands {
+    pub(crate) show: String,
+    pub(crate) watch: String,
+}
+
+pub(crate) fn controller_job_retrieval_commands(job_id: &str) -> ControllerJobRetrievalCommands {
+    ControllerJobRetrievalCommands {
+        show: format!("homeboy activity show {job_id}"),
+        watch: format!("homeboy activity watch {job_id}"),
+    }
 }
 
 /// Keep the generated direct command and the reverse-transport command in
