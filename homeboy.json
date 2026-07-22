@@ -146,6 +146,9 @@
           "crates/homeboy-core/src/release/executor/lockfile_guard.rs",
           "crates/homeboy-core/src/extension/bench/baseline.rs"
         ],
+        "allow_line_contains": [
+          "audit-allow-cargo-secondary-key"
+        ],
         "id": "core-agnostic-source",
         "ignore_after_line_equals": [
           "#[cfg(test)]"
