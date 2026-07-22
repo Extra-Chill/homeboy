@@ -115,6 +115,7 @@ pub(crate) fn pre_execution_failure_report(
     attempts: Vec<AgentTaskCookAttemptReport>,
     failure: PreExecutionFailureDetails,
     error: Error,
+    invocation_latest_run_id: Option<&str>,
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
     let phase = failure.phase.as_deref().unwrap_or("cook_pre_execution");
     let classification = failure.classification.as_deref().unwrap_or("unknown");
@@ -127,6 +128,7 @@ pub(crate) fn pre_execution_failure_report(
             "pre-provider failure in phase `{phase}` classified as `{classification}`: {error}"
         )),
         1,
+        invocation_latest_run_id,
     );
     report.value.terminal_phase = failure.phase;
     report.value.terminal_failure_classification = failure.classification;

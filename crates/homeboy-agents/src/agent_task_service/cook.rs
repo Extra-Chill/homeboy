@@ -144,6 +144,8 @@ pub struct AgentTaskCookReport {
     pub latest_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history_run_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invocation_run_ids: Vec<String>,
     pub status: String,
     pub attempts: Vec<AgentTaskCookAttemptReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -906,6 +908,7 @@ where
                         attempts,
                         pre_execution_failure,
                         error,
+                        Some(&run_id),
                     ));
                 }
                 if attempt == max_attempts {
@@ -916,6 +919,7 @@ where
                         None,
                         Some(error.to_string()),
                         1,
+                        Some(&run_id),
                     ));
                 }
                 let next_attempt = attempt + 1;
@@ -957,6 +961,7 @@ where
                 None,
                 Some("provider attempt accepted by the runner daemon".to_string()),
                 0,
+                Some(&run_id),
             ));
         }
         let plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
@@ -978,6 +983,7 @@ where
                 None,
                 Some("agent-task cook requires a plan with one source task".to_string()),
                 1,
+                Some(&run_id),
             ));
         };
         if plan.tasks.len() != 1 {
@@ -988,6 +994,7 @@ where
                 None,
                 Some("agent-task cook currently supports one task per cook attempt".to_string()),
                 1,
+                Some(&run_id),
             ));
         }
 
@@ -1017,6 +1024,7 @@ where
                     record.state
                 )),
                 1,
+                Some(&run_id),
             ));
         }
 
@@ -1038,6 +1046,7 @@ where
                     None,
                     Some(error.to_string()),
                     1,
+                    Some(&run_id),
                 ));
             }
         };
@@ -1078,6 +1087,7 @@ where
                                 .to_string(),
                         ),
                         0,
+                        Some(&run_id),
                     ));
                 }
                 let mut active_moving_base_recovery = None;
@@ -1110,7 +1120,11 @@ where
                                     })?,
                                 )?;
                                 return Ok(moving_base_recovery_report(
-                                    cook_id, attempts, recovery, false,
+                                    cook_id,
+                                    attempts,
+                                    recovery,
+                                    false,
+                                    Some(&run_id),
                                 ));
                             }
                             active_moving_base_recovery = Some(recovery);
@@ -1133,6 +1147,7 @@ where
                                 attempts,
                                 recovery,
                                 continuation_queued,
+                                Some(&run_id),
                             ));
                         }
                     },
@@ -1166,6 +1181,7 @@ where
                             attempts,
                             recovery,
                             continuation_queued,
+                            Some(&run_id),
                         ));
                     }
                     Err(error) => return Err(error),
@@ -1185,6 +1201,7 @@ where
                     Some(finalization),
                     stop_reason,
                     exit_code,
+                    Some(&run_id),
                 ));
             }
             AgentTaskCookLoopStatus::NoChanges => {
@@ -1198,6 +1215,7 @@ where
                             .to_string(),
                     ),
                     1,
+                    Some(&run_id),
                 ));
             }
             AgentTaskCookLoopStatus::NoOpGateFailed => {
@@ -1211,6 +1229,7 @@ where
                             .to_string(),
                     ),
                     1,
+                    Some(&run_id),
                 ));
             }
             AgentTaskCookLoopStatus::RetryRequested => {
@@ -1224,6 +1243,7 @@ where
                             "cook feedback requested retry without a follow-up request".to_string(),
                         ),
                         1,
+                        Some(&run_id),
                     ));
                 };
                 let budget_limit = budget_limit
@@ -1257,6 +1277,7 @@ where
                                 "provider execution stopped because {reason} was exhausted"
                             )),
                             1,
+                            Some(&run_id),
                         ));
                     }
                     CookFollowUpDispatch::PolicyFailure { reason } => {
@@ -1267,6 +1288,7 @@ where
                             None,
                             Some(reason),
                             1,
+                            Some(&run_id),
                         ));
                     }
                 }
@@ -1282,6 +1304,7 @@ where
                             .to_string(),
                     ),
                     1,
+                    Some(&run_id),
                 ));
             }
         }
@@ -1294,6 +1317,7 @@ where
         None,
         Some("cook attempt budget exhausted".to_string()),
         1,
+        Some(&run_id),
     ))
 }
 
