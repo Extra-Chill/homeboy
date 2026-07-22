@@ -317,6 +317,10 @@ fn remove_path(path: &Path, action: &str) -> Result<()> {
 
 mod install_sources;
 use install_sources::{install_configured_extension, install_from_path, install_from_url};
+/// Returns the non-empty shared asset paths declared by an extension source root.
+pub fn shared_assets_for_root(source_root: &Path) -> Vec<String> {
+    install_sources::shared_assets_for_root(source_root)
+}
 pub(crate) use install_sources::{
     install_linked_shared_assets, rename_dir, resolve_cloned_extension,
 };

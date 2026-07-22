@@ -66,9 +66,40 @@ pub(crate) struct LabJobExtensionOverlay {
     pub(crate) remote_path: String,
     pub(crate) source_revision: Option<String>,
     pub(crate) content_hash: String,
+    pub(crate) shared_assets: Vec<LabJobExtensionSharedAsset>,
+}
+
+/// A root-manifest asset staged alongside one extension's isolated Lab overlay.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct LabJobExtensionSharedAsset {
+    pub(crate) path: String,
+    pub(crate) remote_path: String,
 }
 
 pub(crate) fn materialize_lab_job_extension_overlays(
+    runner: &Runner,
+    runtime_root: &str,
+    extension_ids: &[String],
+) -> Result<Vec<LabJobExtensionOverlay>> {
+    let overlays =
+        materialize_lab_job_extension_overlay_snapshots(runner, runtime_root, extension_ids)?;
+    if overlays.is_empty() {
+        return Ok(overlays);
+    }
+    let command = lab_job_extension_overlay_command(runtime_root, &overlays);
+    let (_, exit_code) = exec(&runner.id, RunnerExecOptions::diagnostic_raw_shell(command))?;
+    if exit_code != 0 {
+        return Err(Error::validation_invalid_argument(
+            "extensions",
+            "failed to create the job-scoped Homeboy extension overlay on the runner",
+            Some(runtime_root.to_string()),
+            None,
+        ));
+    }
+    Ok(overlays)
+}
+
+fn materialize_lab_job_extension_overlay_snapshots(
     runner: &Runner,
     runtime_root: &str,
     extension_ids: &[String],
@@ -101,26 +132,55 @@ pub(crate) fn materialize_lab_job_extension_overlays(
                 content_hash: content_hash.clone(),
             },
         )?;
+        let resolved_source = source.canonicalize().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("resolve Lab extension source `{id}`")),
+            )
+        })?;
+        let source_root = resolved_source.parent().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "extensions",
+                format!("Lab extension `{id}` has no source root"),
+                Some(source_path.clone()),
+                None,
+            )
+        })?;
+        let mut shared_assets = Vec::new();
+        for asset_path in homeboy_extension::lifecycle::shared_assets_for_root(source_root) {
+            let asset_source = source_root.join(&asset_path);
+            if !asset_source.is_dir() {
+                continue;
+            }
+            let asset_hash = extension_source_content_hash(&asset_source)?;
+            let remote_path = format!(
+                "{}/shared-assets/{}/{}",
+                runtime_root.trim_end_matches('/'),
+                sanitize_ref(&asset_path),
+                &asset_hash[..16]
+            );
+            sync_controller_snapshot(
+                runner,
+                &RunnerExtensionMaterializationPlan {
+                    id: format!("{id}-{asset_path}"),
+                    source_path: asset_source.display().to_string(),
+                    synced_source_path: remote_path.clone(),
+                    content_hash: asset_hash,
+                },
+            )?;
+            shared_assets.push(LabJobExtensionSharedAsset {
+                path: asset_path,
+                remote_path,
+            });
+        }
         overlays.push(LabJobExtensionOverlay {
             id: id.clone(),
             source_path,
             remote_path,
             source_revision: git_revision(&source),
             content_hash,
+            shared_assets,
         });
-    }
-    if overlays.is_empty() {
-        return Ok(overlays);
-    }
-    let command = lab_job_extension_overlay_command(runtime_root, &overlays);
-    let (_, exit_code) = exec(&runner.id, RunnerExecOptions::diagnostic_raw_shell(command))?;
-    if exit_code != 0 {
-        return Err(Error::validation_invalid_argument(
-            "extensions",
-            "failed to create the job-scoped Homeboy extension overlay on the runner",
-            Some(runtime_root.to_string()),
-            None,
-        ));
     }
     Ok(overlays)
 }
@@ -129,7 +189,7 @@ fn lab_job_extension_overlay_command(
     runtime_root: &str,
     overlays: &[LabJobExtensionOverlay],
 ) -> String {
-    let links = overlays
+    let extension_links = overlays
         .iter()
         .map(|overlay| {
             format!(
@@ -144,10 +204,45 @@ fn lab_job_extension_overlay_command(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let shared_asset_links = overlays
+        .iter()
+        .flat_map(|overlay| overlay.shared_assets.iter())
+        .map(|asset| {
+            let target = lab_job_shared_asset_target(runtime_root, &asset.path);
+            let parent = Path::new(&target)
+                .parent()
+                .and_then(Path::to_str)
+                .expect("shared asset target has a UTF-8 parent");
+            format!(
+                "mkdir -p {parent}; rm -rf {target}; ln -s {source} {target}",
+                parent = shell::quote_path(parent),
+                target = shell::quote_path(&target),
+                source = shell::quote_path(&asset.remote_path),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let links = [extension_links, shared_asset_links]
+        .into_iter()
+        .filter(|links| !links.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         "set -eu\nruntime={runtime}\n# A job gets only its declared extensions; runner-global config may contain mutable links.\nmkdir -p \"$runtime/home/.config/homeboy/extensions\"\n{links}\n",
         runtime = shell::quote_path(runtime_root),
     )
+}
+
+fn lab_job_shared_asset_target(runtime_root: &str, asset_path: &str) -> String {
+    let homeboy_root = format!(
+        "{}/home/.config/homeboy",
+        runtime_root.trim_end_matches('/')
+    );
+    match asset_path {
+        "agent-runtimes" => format!("{homeboy_root}/agent-runtimes"),
+        "runtime-agent-ci" | "agent-task-contracts" => format!("{homeboy_root}/{asset_path}"),
+        _ => format!("{homeboy_root}/extensions/{asset_path}"),
+    }
 }
 
 #[cfg(test)]
@@ -161,6 +256,7 @@ mod lab_job_overlay_tests {
             remote_path: format!("{root}/extensions/{id}/{hash}"),
             source_revision: Some(hash.to_string()),
             content_hash: hash.to_string(),
+            shared_assets: Vec::new(),
         }
     }
 
@@ -1020,6 +1116,99 @@ mod tests {
     }
 
     #[test]
+    fn isolated_lab_nodejs_overlay_stages_root_assets_for_project_tests() {
+        homeboy_core::test_support::with_isolated_home(|_home| {
+            let source_root = tempfile::tempdir().expect("extension source root");
+            let nodejs = source_root.path().join("nodejs");
+            let scripts_lib = source_root.path().join("scripts/lib");
+            fs::create_dir_all(&nodejs).expect("nodejs extension");
+            fs::create_dir_all(&scripts_lib).expect("shared scripts library");
+            fs::create_dir_all(source_root.path().join("dependency-adapters"))
+                .expect("dependency adapters");
+            fs::create_dir_all(source_root.path().join("agent-runtimes")).expect("agent runtimes");
+            fs::write(
+                source_root.path().join("homeboy-extension-root.json"),
+                r#"{"shared_assets":["scripts/lib",{"path":"dependency-adapters"},"agent-runtimes"]}"#,
+            )
+            .expect("root manifest");
+            fs::write(
+                nodejs.join("nodejs.json"),
+                r#"{"id":"nodejs","name":"Node.js","version":"1.0.0"}"#,
+            )
+            .expect("nodejs manifest");
+            fs::write(
+                nodejs.join("run-tests.sh"),
+                "#!/bin/sh\nset -eu\nexec sh \"$HOME/.config/homeboy/extensions/scripts/lib/nodejs-test-runner.sh\" \"$1\"\n",
+            )
+            .expect("nodejs runner");
+            fs::write(
+                scripts_lib.join("nodejs-test-runner.sh"),
+                "#!/bin/sh\nset -eu\nexec node --test \"$1\"\n",
+            )
+            .expect("shared node runner");
+            homeboy_extension::install(&nodejs.display().to_string(), Some("nodejs"))
+                .expect("install linked nodejs extension");
+
+            let runner_root = tempfile::tempdir().expect("runner root");
+            crate::create(
+                &format!(
+                    r#"{{"id":"lab-nodejs-overlay","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let runner = crate::load("lab-nodejs-overlay").expect("load runner");
+            let runtime_root = runner_root.path().join("extension-runtime");
+            let overlays = materialize_lab_job_extension_overlay_snapshots(
+                &runner,
+                &runtime_root.display().to_string(),
+                &["nodejs".to_string()],
+            )
+            .expect("stage isolated overlay snapshots");
+            let status = Command::new("sh")
+                .arg("-c")
+                .arg(lab_job_extension_overlay_command(
+                    &runtime_root.display().to_string(),
+                    &overlays,
+                ))
+                .status()
+                .expect("link isolated overlay");
+            assert!(status.success(), "link isolated overlay");
+
+            assert_eq!(overlays[0].shared_assets.len(), 3);
+            assert!(runtime_root
+                .join("home/.config/homeboy/extensions/scripts/lib/nodejs-test-runner.sh")
+                .exists());
+            assert!(runtime_root
+                .join("home/.config/homeboy/extensions/dependency-adapters")
+                .exists());
+            assert!(runtime_root
+                .join("home/.config/homeboy/agent-runtimes")
+                .exists());
+
+            let project = tempfile::tempdir().expect("project");
+            let test_file = project.path().join("project.test.js");
+            fs::write(
+                &test_file,
+                "import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest('project test', () => assert.equal(2 + 2, 4));\n",
+            )
+            .expect("project test");
+            let output = Command::new("sh")
+                .arg(runtime_root.join("home/.config/homeboy/extensions/nodejs/run-tests.sh"))
+                .arg(&test_file)
+                .env("HOME", runtime_root.join("home"))
+                .output()
+                .expect("run isolated Node.js test runner");
+            assert!(
+                output.status.success(),
+                "Node.js test runner did not reach project tests: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        });
+    }
+
+    #[test]
     fn concurrent_job_snapshots_keep_distinct_extension_revisions_after_global_source_changes() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let runner_root = tempfile::tempdir().expect("runner root");
@@ -1044,12 +1233,21 @@ mod tests {
             let first_root = runner_root
                 .path()
                 .join("_lab_workspaces/job-a-homeboy-artifacts/runtime");
-            let first = materialize_lab_job_extension_overlays(
+            let first = materialize_lab_job_extension_overlay_snapshots(
                 &runner,
                 &first_root.display().to_string(),
                 &["fixture".to_string()],
             )
-            .expect("materialize first snapshot");
+            .expect("stage first snapshot");
+            assert!(Command::new("sh")
+                .arg("-c")
+                .arg(lab_job_extension_overlay_command(
+                    &first_root.display().to_string(),
+                    &first,
+                ))
+                .status()
+                .expect("link first snapshot")
+                .success());
 
             // The controller's administrative default changes while A remains
             // admitted. B must get the new source without rewriting A's link.
@@ -1057,12 +1255,21 @@ mod tests {
             let second_root = runner_root
                 .path()
                 .join("_lab_workspaces/job-b-homeboy-artifacts/runtime");
-            let second = materialize_lab_job_extension_overlays(
+            let second = materialize_lab_job_extension_overlay_snapshots(
                 &runner,
                 &second_root.display().to_string(),
                 &["fixture".to_string()],
             )
-            .expect("materialize second snapshot");
+            .expect("stage second snapshot");
+            assert!(Command::new("sh")
+                .arg("-c")
+                .arg(lab_job_extension_overlay_command(
+                    &second_root.display().to_string(),
+                    &second,
+                ))
+                .status()
+                .expect("link second snapshot")
+                .success());
 
             assert_ne!(first[0].content_hash, second[0].content_hash);
             assert_eq!(
