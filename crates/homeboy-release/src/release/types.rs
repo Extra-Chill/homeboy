@@ -510,6 +510,10 @@ pub struct ReleaseCommandResult {
     pub run: Option<ReleaseRun>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment: Option<ReleaseDeploymentResult>,
+    /// Exact `--head` command required when Git recovery has completed but this
+    /// command intentionally has not run the publication pipeline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation_command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub release_summary: Vec<String>,
 }
