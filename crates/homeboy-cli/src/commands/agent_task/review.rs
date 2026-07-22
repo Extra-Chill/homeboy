@@ -15,11 +15,11 @@ use homeboy::agents::agent_tasks::provider::{
     AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
-    resolve_review_profile, AgentTaskExternalUsageEvidence, AgentTaskExternalUsageStatus,
-    AgentTaskPublicContract, AgentTaskPublicContractEvidence, AgentTaskReviewAiAssistance,
-    AgentTaskReviewDossier, AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind,
-    AgentTaskReviewOverride, AgentTaskReviewOverrideTarget, AgentTaskReviewTestStep,
-    AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
+    homeboy_tool_disclosure, resolve_review_profile, AgentTaskExternalUsageEvidence,
+    AgentTaskExternalUsageStatus, AgentTaskPublicContract, AgentTaskPublicContractEvidence,
+    AgentTaskReviewAiAssistance, AgentTaskReviewDossier, AgentTaskReviewIssueRelationship,
+    AgentTaskReviewIssueRelationshipKind, AgentTaskReviewOverride, AgentTaskReviewOverrideTarget,
+    AgentTaskReviewTestStep, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
 };
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::agents::agent_tasks::{
@@ -459,7 +459,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         public_contract_evidence: evidence.public_contract_evidence.clone(),
         ai_assistance: AgentTaskReviewAiAssistance {
             used: true,
-            tool: evidence.ai_tool.clone(),
+            tool: homeboy_tool_disclosure(&evidence.ai_tool),
             model: evidence
                 .ai_model
                 .clone()

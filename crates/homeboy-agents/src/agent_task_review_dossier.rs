@@ -266,6 +266,23 @@ fn used_for_is_placeholder(value: &str) -> bool {
     )
 }
 
+/// Compose the deterministic AI-assistance tool disclosure for a generated PR.
+///
+/// The tool string is orchestrator-owned (not AI-authored), which makes it the
+/// honest place to attribute the orchestrator that actually drove the change.
+/// Every PR Homeboy opens names Homeboy as the harness, wrapping the underlying
+/// provider disclosure: `Homeboy (OpenCode / openai/gpt-5.6-terra)`.
+///
+/// If the provider disclosure is already Homeboy-attributed (idempotent) or
+/// empty, it is passed through unchanged.
+pub fn homeboy_tool_disclosure(provider_disclosure: &str) -> String {
+    let provider = provider_disclosure.trim();
+    if provider.is_empty() || provider.starts_with("Homeboy") {
+        return provider.to_string();
+    }
+    format!("Homeboy ({provider})")
+}
+
 pub fn default_profile() -> AgentTaskReviewProfile {
     AgentTaskReviewProfile {
         required_sections: vec![
@@ -498,6 +515,25 @@ impl AgentTaskReviewDossier {
                 "ai_assistance.model",
                 "AI disclosure requires a concrete model identifier",
             );
+        }
+        // `used_for` is the one introspective slot and must never render empty or
+        // as a canned placeholder. This is the render-time boundary EVERY
+        // finalization path crosses (cook's form gate is upstream of the cook
+        // path only), so enforcing it here closes the hole for the manual
+        // `agent-task review`/`pr` path too.
+        if self.ai_assistance.used {
+            if self.ai_assistance.used_for.trim().is_empty() {
+                return invalid(
+                    "ai_assistance.used_for",
+                    "AI disclosure requires a concrete, self-reflective description of how AI was used (the `used_for` field); it cannot be empty",
+                );
+            }
+            if used_for_is_placeholder(&self.ai_assistance.used_for) {
+                return invalid(
+                    "ai_assistance.used_for",
+                    "AI disclosure `used_for` is a placeholder; provide a genuine, self-reflective description of the process the AI took",
+                );
+            }
         }
         Ok(())
     }
@@ -951,7 +987,7 @@ mod tests {
                 used: true,
                 tool: "OpenCode".into(),
                 model: "openai/gpt-5.6-terra".into(),
-                used_for: "Implementation".into(),
+                used_for: "Isolated the failing path, implemented the guard, and verified with the recorded gate before finalizing.".into(),
             },
             source_relationships: vec![AgentTaskReviewIssueRelationship {
                 kind: AgentTaskReviewIssueRelationshipKind::Closes,
@@ -1118,6 +1154,41 @@ mod tests {
         value.source_relationships[0].reference = "https://evil.test/issues/1".into();
         assert!(value.validate(&default_profile()).is_err());
     }
+    #[test]
+    fn dossier_validate_rejects_empty_or_placeholder_used_for_on_every_path() {
+        // Regression for #9649: the manual finalize path rendered an empty
+        // `Used for:` because used_for enforcement only lived in the cook form
+        // gate. The render-time dossier gate must reject it regardless of path.
+        let mut empty = dossier();
+        empty.ai_assistance.used_for = "  ".into();
+        assert!(
+            empty.validate(&default_profile()).is_err(),
+            "empty used_for must fail finalization"
+        );
+
+        let mut placeholder = dossier();
+        placeholder.ai_assistance.used_for =
+            "Drafted implementation and tests; Chris reviews and owns the change.".into();
+        assert!(
+            placeholder.validate(&default_profile()).is_err(),
+            "canned placeholder used_for must fail finalization"
+        );
+    }
+
+    #[test]
+    fn homeboy_tool_disclosure_attributes_the_orchestrator() {
+        assert_eq!(
+            homeboy_tool_disclosure("OpenCode (openai/gpt-5.6-terra)"),
+            "Homeboy (OpenCode (openai/gpt-5.6-terra))"
+        );
+        // Idempotent and empty-safe.
+        assert_eq!(
+            homeboy_tool_disclosure("Homeboy (OpenCode)"),
+            "Homeboy (OpenCode)"
+        );
+        assert_eq!(homeboy_tool_disclosure(""), "");
+    }
+
     #[test]
     fn profile_conflicts_fail_closed() {
         let profile = AgentTaskReviewProfile {

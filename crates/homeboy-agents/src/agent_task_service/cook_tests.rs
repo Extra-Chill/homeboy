@@ -2341,7 +2341,7 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
         assert_eq!(adoption.state, "completed");
         assert_eq!(adoption.candidate_sha, candidate);
         assert_eq!(adoption.ai_model, "openai/gpt-5.6-sol");
-        assert!(backend.body.contains("- **Tool(s):** test"));
+        assert!(backend.body.contains("- **Tool(s):** Homeboy (test)"));
         assert!(backend.body.contains("- **Model:** openai/gpt-5.6-sol"));
         assert!(backend.committed && backend.pushed && backend.created);
     });

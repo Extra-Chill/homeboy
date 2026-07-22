@@ -226,14 +226,15 @@ pub mod finalization {
 /// Typed reviewer dossier contracts and deterministic rendering.
 pub mod review_dossier {
     pub use super::super::agent_task_review_dossier::{
-        default_profile, enrich_dossier, render_review_dossier, resolve_review_profile,
-        validate_profile, AgentTaskExternalUsageEvidence, AgentTaskExternalUsageStatus,
-        AgentTaskPublicContract, AgentTaskPublicContractEvidence, AgentTaskReviewAdditionalSection,
-        AgentTaskReviewAiAssistance, AgentTaskReviewDossier, AgentTaskReviewEvidence,
-        AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind,
-        AgentTaskReviewOverride, AgentTaskReviewOverrideTarget, AgentTaskReviewProfile,
-        AgentTaskReviewSectionId, AgentTaskReviewTestStep, AiFilledReviewForm,
-        AGENT_TASK_REVIEW_DOSSIER_SCHEMA, AI_REVIEW_FORM_OUTPUT_KEY,
+        default_profile, enrich_dossier, homeboy_tool_disclosure, render_review_dossier,
+        resolve_review_profile, validate_profile, AgentTaskExternalUsageEvidence,
+        AgentTaskExternalUsageStatus, AgentTaskPublicContract, AgentTaskPublicContractEvidence,
+        AgentTaskReviewAdditionalSection, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
+        AgentTaskReviewEvidence, AgentTaskReviewIssueRelationship,
+        AgentTaskReviewIssueRelationshipKind, AgentTaskReviewOverride,
+        AgentTaskReviewOverrideTarget, AgentTaskReviewProfile, AgentTaskReviewSectionId,
+        AgentTaskReviewTestStep, AiFilledReviewForm, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
+        AI_REVIEW_FORM_OUTPUT_KEY,
     };
 }
 
