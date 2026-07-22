@@ -551,11 +551,95 @@ impl Serialize for RunnerStatusReport {
     }
 }
 
+/// One compact, authoritative answer to "is this runner ready for the next
+/// workload right now, and is it safe to rotate?" — the lead of `runner
+/// status`.
+///
+/// This is the projection the historical generation ledger was drowning
+/// (#9478/#9522): `runner status` embedded every draining daemon generation
+/// with full owner counts, and non-authoritative per-generation
+/// `active_job_count` values made stale ownership look like current load. This
+/// summary is derived only from the authoritative selected-daemon state plus a
+/// bounded count of draining generations, so it stays small and fast no matter
+/// how much history accumulates. The full generation list remains available
+/// behind an explicit detail view.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerAdmissionSummary {
+    pub runner_id: String,
+    /// Whether the runner's session is connected.
+    pub connected: bool,
+    /// Whether the selected daemon's build matches what the controller
+    /// requires (i.e. no stale-daemon warning). `false` means a version
+    /// convergence is needed before admission.
+    pub daemon_fresh: bool,
+    /// Whether the runner can admit a new workload now: connected, fresh, and
+    /// not otherwise blocked.
+    pub accepting_jobs: bool,
+    /// Authoritative count of jobs the selected daemon is currently running.
+    pub active_job_count: usize,
+    /// Count of runner jobs whose liveness can no longer be confirmed.
+    pub stale_job_count: usize,
+    /// The exact build identity of the selected daemon, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_build_identity: Option<String>,
+    /// Number of historical draining generations, summarized rather than
+    /// expanded. Never presented as active load.
+    pub draining_generation_count: usize,
+    /// Whether it is safe to rotate the runner now — true only when no
+    /// authoritative current job is active on the selected daemon.
+    pub safe_to_rotate: bool,
+    /// The single next actionable step, state-sensitive and executable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
+}
+
 impl RunnerStatusReport {
     /// The session state is the canonical connection view; `connected` is a
     /// serialized compatibility field for command consumers.
     pub fn is_connected(&self) -> bool {
         self.state == RunnerSessionState::Connected
+    }
+
+    /// Project the authoritative current-state admission summary.
+    ///
+    /// `draining_generation_count` is supplied by the caller from the same
+    /// generation inventory used for the detail view, so the summary and detail
+    /// derive from one source. Only the authoritative selected-daemon
+    /// `active_job_count` drives `active_job_count`/`safe_to_rotate` — historical
+    /// per-generation counts (non-authoritative) never contribute.
+    pub fn admission_summary(&self, draining_generation_count: usize) -> RunnerAdmissionSummary {
+        let connected = self.is_connected();
+        let daemon_fresh = self.stale_daemon.is_none();
+        let active_job_count = self.active_job_count;
+        let accepting_jobs = connected && daemon_fresh;
+        let safe_to_rotate = active_job_count == 0;
+        let daemon_build_identity = self
+            .session
+            .as_ref()
+            .and_then(|session| session.homeboy_build_identity.clone());
+
+        let next_action = if !connected {
+            Some("homeboy runner connect".to_string())
+        } else if !daemon_fresh {
+            Some("homeboy runner refresh-homeboy --reconnect".to_string())
+        } else if active_job_count > 0 {
+            None
+        } else {
+            None
+        };
+
+        RunnerAdmissionSummary {
+            runner_id: self.runner_id.clone(),
+            connected,
+            daemon_fresh,
+            accepting_jobs,
+            active_job_count,
+            stale_job_count: self.stale_runner_job_count,
+            daemon_build_identity,
+            draining_generation_count,
+            safe_to_rotate,
+            next_action,
+        }
     }
 
     pub fn recovery_state(&self) -> RunnerRecoveryState {
@@ -615,6 +699,120 @@ mod status_serialization_tests {
             assert!(value.get(field).is_none(), "{field} must be omitted");
         }
         assert_eq!(value["generations"], serde_json::json!([]));
+    }
+
+    fn base_report() -> RunnerStatusReport {
+        RunnerStatusReport {
+            runner_id: "homeboy-lab".to_string(),
+            connected: true,
+            state: RunnerSessionState::Connected,
+            session: None,
+            stale_daemon: None,
+            daemon_freshness: None,
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::NotQueried,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn admission_summary_fresh_idle_accepts_and_is_safe_to_rotate() {
+        let summary = base_report().admission_summary(0);
+        assert!(summary.connected);
+        assert!(summary.daemon_fresh);
+        assert!(summary.accepting_jobs);
+        assert_eq!(summary.active_job_count, 0);
+        assert!(summary.safe_to_rotate);
+        assert_eq!(summary.next_action, None);
+    }
+
+    #[test]
+    fn admission_summary_busy_is_not_safe_to_rotate_but_still_accepting() {
+        let mut report = base_report();
+        report.active_job_count = 3;
+        let summary = report.admission_summary(0);
+        assert!(
+            summary.accepting_jobs,
+            "a busy fresh runner still admits work"
+        );
+        assert_eq!(summary.active_job_count, 3);
+        assert!(
+            !summary.safe_to_rotate,
+            "an authoritative active job blocks rotation"
+        );
+    }
+
+    #[test]
+    fn admission_summary_stale_daemon_refuses_and_points_to_refresh() {
+        let mut report = base_report();
+        report.stale_daemon = Some(RunnerStaleDaemonWarning {
+            severity: "error",
+            session_homeboy_version: "0.299.0".to_string(),
+            current_homeboy_version: "0.299.2".to_string(),
+            session_homeboy_build_identity: None,
+            current_homeboy_build_identity: None,
+            active_daemon_control_plane_version: "0.299.0".to_string(),
+            job_command_binary_version: "0.299.0".to_string(),
+            active_daemon_control_plane_build_identity: None,
+            job_command_binary_build_identity: None,
+            refresh_command: "homeboy runner refresh-homeboy homeboy-lab".to_string(),
+            stale_runtime_paths: Vec::new(),
+            changed_runtime_paths: Vec::new(),
+            message: "stale".to_string(),
+            recovery_commands: Vec::new(),
+        });
+        let summary = report.admission_summary(0);
+        assert!(!summary.daemon_fresh);
+        assert!(
+            !summary.accepting_jobs,
+            "a stale daemon must not admit work"
+        );
+        assert!(
+            summary
+                .next_action
+                .as_deref()
+                .is_some_and(|a| a.contains("refresh-homeboy")),
+            "stale daemon points at refresh: {:?}",
+            summary.next_action
+        );
+    }
+
+    #[test]
+    fn admission_summary_disconnected_points_to_connect() {
+        let mut report = base_report();
+        report.connected = false;
+        report.state = RunnerSessionState::Disconnected;
+        let summary = report.admission_summary(0);
+        assert!(!summary.connected);
+        assert!(!summary.accepting_jobs);
+        assert!(
+            summary
+                .next_action
+                .as_deref()
+                .is_some_and(|a| a.contains("connect")),
+            "disconnected points at connect: {:?}",
+            summary.next_action
+        );
+    }
+
+    #[test]
+    fn admission_summary_summarizes_draining_generations_by_count_not_as_load() {
+        // The historical draining generations are reported only as a count and
+        // never contribute to active_job_count (the #9522 confusion).
+        let summary = base_report().admission_summary(7);
+        assert_eq!(summary.draining_generation_count, 7);
+        assert_eq!(
+            summary.active_job_count, 0,
+            "draining history is not current load"
+        );
+        assert!(summary.safe_to_rotate);
     }
 }
 
