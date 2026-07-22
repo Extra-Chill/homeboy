@@ -28,6 +28,9 @@ install_wp_codebox() {
         if [ ! -f "${module_path}" ]; then
             return 1
         fi
+        if ! node -e 'const value=require(process.argv[1]); const module=value?.default && typeof value.default === "object" ? {...value.default,...value} : value; if (typeof module?.runtimeContractManifest !== "function") process.exit(1);' "${module_path}" >/dev/null 2>&1; then
+            return 1
+        fi
 
         export HOMEBOY_WP_CODEBOX_CORE_MODULE="${module_path}"
         write_github_env "HOMEBOY_WP_CODEBOX_CORE_MODULE" "${module_path}"
@@ -94,7 +97,9 @@ install_wp_codebox() {
         for candidate in \
             "${WP_CODEBOX_CORE_MODULE:-}" \
             "${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}" \
+            "${probe_root}/source/node_modules/@automattic/wp-codebox-core/dist/contracts.js" \
             "${probe_root}/source/node_modules/@automattic/wp-codebox-core/dist/index.js" \
+            "${probe_root}/release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/contracts.js" \
             "${probe_root}/release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js"; do
             if [ -n "${candidate}" ] && configure_core_module "${candidate}"; then
                 return 0
@@ -179,7 +184,7 @@ EOF
             write_github_env "PATH" "${bin_dir}:${PATH}"
 
             echo "WP Codebox installed: ${bin_path}"
-            if configure_core_module "${extract_dir}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js"; then
+            if resolve_core_module_from_known_locations; then
                 return 0
             fi
 
@@ -217,7 +222,7 @@ EOF
     npm --prefix "${repo_dir}" install --quiet --no-fund --no-audit --omit=optional
     npm --prefix "${repo_dir}" run build --silent
 
-    configure_core_module "${repo_dir}/node_modules/@automattic/wp-codebox-core/dist/index.js" || {
+    resolve_core_module_from_known_locations || {
         echo "Built WP Codebox source did not contain the @automattic/wp-codebox-core package entrypoint" >&2
         exit 1
     }

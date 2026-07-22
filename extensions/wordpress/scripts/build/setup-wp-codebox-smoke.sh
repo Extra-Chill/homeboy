@@ -29,7 +29,8 @@ set -euo pipefail
 printf '%s\n' 'wp-codebox release stub'
 SH
 chmod +x "${ARTIFACT_ROOT}/wp-codebox-cli/bin/wp-codebox"
-printf '%s\n' 'export const fixture = true;' > "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js"
+printf '%s\n' 'module.exports = { fixture: true };' > "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js"
+printf '%s\n' 'module.exports = { runtimeContractManifest() { return {}; } };' > "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/contracts.js"
 tar -czf "${ARTIFACT_PATH}" -C "${ARTIFACT_ROOT}" wp-codebox-cli
 
 cat > "${FAKE_BIN}/curl" <<SH
@@ -104,7 +105,8 @@ while [ "$#" -gt 0 ]; do
         run)
             mkdir -p "${prefix}/node_modules/@automattic/wp-codebox-core/dist"
             mkdir -p "${prefix}/packages/cli/dist"
-            printf '%s\n' 'export const fixture = true;' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/index.js"
+            printf '%s\n' 'module.exports = { fixture: true };' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/index.js"
+            printf '%s\n' 'module.exports = { runtimeContractManifest() { return {}; } };' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/contracts.js"
             cat > "${prefix}/packages/cli/dist/index.js" <<'NODE'
 #!/usr/bin/env node
 console.log('wp-codebox source stub');
@@ -214,7 +216,8 @@ cat > "${COLD_BIN}" <<'SH'
 printf '%s\n' 'wp-codebox cached stub'
 SH
 chmod +x "${COLD_BIN}"
-printf '%s\n' 'export const fixture = true;' > "${COLD_INSTALL_DIR}/source/node_modules/@automattic/wp-codebox-core/dist/index.js"
+printf '%s\n' 'module.exports = { fixture: true };' > "${COLD_INSTALL_DIR}/source/node_modules/@automattic/wp-codebox-core/dist/index.js"
+printf '%s\n' 'module.exports = { runtimeContractManifest() { return {}; } };' > "${COLD_INSTALL_DIR}/source/node_modules/@automattic/wp-codebox-core/dist/contracts.js"
 
 # A network would be a hard failure here: the bin already exists, so no curl/git
 # install should run. Point curl/git at stubs that fail loudly if invoked.
@@ -242,7 +245,7 @@ if ! grep -q '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${COLD_GITHUB_ENV_FILE}"; then
 fi
 
 cold_core_module="$(grep '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${COLD_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
-if [ "${cold_core_module}" != "${COLD_INSTALL_DIR}/source/node_modules/@automattic/wp-codebox-core/dist/index.js" ]; then
+if [ "${cold_core_module}" != "${COLD_INSTALL_DIR}/source/node_modules/@automattic/wp-codebox-core/dist/contracts.js" ]; then
     echo "Expected cold-cache setup to resolve the on-disk core package module, got: ${cold_core_module}" >&2
     exit 1
 fi
@@ -266,14 +269,14 @@ cat > "${STALE_ROOT}/packages/cli/dist/index.js" <<'NODE'
 console.log('stale wp-codebox');
 NODE
 chmod +x "${STALE_ROOT}/packages/cli/dist/index.js"
-printf '%s\n' 'export const fixture = "stale";' > "${STALE_ROOT}/packages/runtime-core/dist/index.js"
+printf '%s\n' 'module.exports = { runtimeContractManifest() { return { fixture: "stale" }; } };' > "${STALE_ROOT}/packages/runtime-core/dist/index.js"
 
 cat > "${CURRENT_ROOT}/packages/cli/dist/index.js" <<'NODE'
 #!/usr/bin/env node
 console.log('current wp-codebox');
 NODE
 chmod +x "${CURRENT_ROOT}/packages/cli/dist/index.js"
-printf '%s\n' 'export const fixture = "current";' > "${CURRENT_ROOT}/packages/runtime-core/dist/index.js"
+printf '%s\n' 'module.exports = { runtimeContractManifest() { return { fixture: "current" }; } };' > "${CURRENT_ROOT}/packages/runtime-core/dist/index.js"
 
 (
     cd "${EXTENSION_DIR}"
