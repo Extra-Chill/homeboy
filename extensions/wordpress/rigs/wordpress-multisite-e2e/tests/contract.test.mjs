@@ -17,14 +17,36 @@ const theme = path.join(temporary, 'consumer-theme');
 const secondTheme = path.join(temporary, 'second-theme');
 const noHeaderTheme = path.join(temporary, 'no-header-theme');
 const noStyleTheme = path.join(temporary, 'no-style-theme');
+const emptyHeaderTheme = path.join(temporary, 'empty-header-theme');
+const lateHeaderTheme = path.join(temporary, 'late-header-theme');
+const noEntrypointTheme = path.join(temporary, 'no-entrypoint-theme');
+const childTheme = path.join(temporary, 'child-theme');
 const notDirectory = path.join(temporary, 'not-directory');
 
 try {
-  await Promise.all([mkdir(theme), mkdir(secondTheme), mkdir(noHeaderTheme), mkdir(noStyleTheme)]);
+  await Promise.all([
+    mkdir(theme),
+    mkdir(path.join(secondTheme, 'templates'), { recursive: true }),
+    mkdir(noHeaderTheme),
+    mkdir(noStyleTheme),
+    mkdir(emptyHeaderTheme),
+    mkdir(lateHeaderTheme),
+    mkdir(noEntrypointTheme),
+    mkdir(childTheme),
+  ]);
   await Promise.all([
     writeFile(path.join(theme, 'style.css'), '/*\nTheme Name: Consumer Theme\n*/\n'),
+    writeFile(path.join(theme, 'index.php'), '<?php\n'),
     writeFile(path.join(secondTheme, 'style.css'), '/*\n * Theme Name: Second Theme\n */\n'),
+    writeFile(path.join(secondTheme, 'templates/index.html'), '<!-- wp:paragraph --><p>Second theme</p><!-- /wp:paragraph -->\n'),
     writeFile(path.join(noHeaderTheme, 'style.css'), '/* No theme header. */\n'),
+    writeFile(path.join(noHeaderTheme, 'index.php'), '<?php\n'),
+    writeFile(path.join(emptyHeaderTheme, 'style.css'), '/*\nTheme Name:   \n*/\n'),
+    writeFile(path.join(emptyHeaderTheme, 'index.php'), '<?php\n'),
+    writeFile(path.join(lateHeaderTheme, 'style.css'), `${'x'.repeat(8192)}\nTheme Name: Too Late\n`),
+    writeFile(path.join(lateHeaderTheme, 'index.php'), '<?php\n'),
+    writeFile(path.join(noEntrypointTheme, 'style.css'), '/*\nTheme Name: No Entrypoint\n*/\n'),
+    writeFile(path.join(childTheme, 'style.css'), '/*\nTheme Name: Child Theme\nTemplate: consumer-theme\n*/\n'),
     writeFile(notDirectory, 'not a theme directory\n'),
   ]);
 
@@ -78,6 +100,23 @@ try {
   assert.ok(recipe.workflow.steps[activationIndex].args[0].includes("switch_theme( $theme_slug )"));
   assert.ok(recipe.workflow.steps.some((step) => step.args?.some((arg) => arg.includes('network-assert.php'))));
 
+  const childRecipe = await buildRecipe({ wp_codebox_extra_themes: [
+    { source: theme, slug: 'consumer-theme' },
+    { source: childTheme, slug: 'child-theme', activate: true },
+  ] }, root);
+  assert.equal(childRecipe.inputs.mounts.length, 2);
+  assert.equal(childRecipe.runtime.blueprint.steps.find((step) => step.step === 'defineWpConfigConsts').consts.WP_DEFAULT_THEME, 'child-theme');
+
+  const repeatedDefinitions = await buildRecipe({
+    wordpress_runtime_blueprint: { steps: [
+      { step: 'defineWpConfigConsts', consts: { WP_DEBUG: true } },
+      { step: 'defineWpConfigConsts', consts: { WP_DEFAULT_THEME: 'consumer-theme' } },
+    ] },
+    wp_codebox_extra_themes: [{ source: theme, slug: 'consumer-theme', activate: true }],
+  }, root);
+  assert.equal(repeatedDefinitions.runtime.blueprint.steps[1].consts.WP_DEFAULT_THEME, 'consumer-theme');
+  assert.equal(repeatedDefinitions.runtime.blueprint.steps[2].consts.WP_DEFAULT_THEME, 'consumer-theme');
+
   const withoutRuntimeInputs = await buildRecipe({}, root);
   assert.equal(Object.hasOwn(withoutRuntimeInputs.runtime, 'phpVersion'), false);
   assert.deepEqual(withoutRuntimeInputs.inputs.mounts, []);
@@ -93,7 +132,10 @@ try {
   await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [{ source: path.join(temporary, 'missing'), slug: 'theme' }] }, root), /does not exist/);
   await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [{ source: notDirectory, slug: 'theme' }] }, root), /must be a directory/);
   await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [{ source: noStyleTheme, slug: 'theme' }] }, root), /must contain style\.css/);
-  await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [{ source: noHeaderTheme, slug: 'theme' }] }, root), /Theme Name header/);
+  await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [{ source: noHeaderTheme, slug: 'theme' }] }, root), /non-empty Theme Name header/);
+  await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [{ source: emptyHeaderTheme, slug: 'theme' }] }, root), /non-empty Theme Name header/);
+  await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [{ source: lateHeaderTheme, slug: 'theme' }] }, root), /first 8 KB/);
+  await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [{ source: noEntrypointTheme, slug: 'theme' }] }, root), /standalone theme must contain/);
   await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [{ source: theme, slug: '../theme' }] }, root), /valid WordPress theme directory slug/);
   await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [{ source: theme, slug: 'theme', metadata: [] }] }, root), /metadata must be an object/);
   await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [{ source: theme, slug: 'theme', activate: 'yes' }] }, root), /activate must be a boolean/);
@@ -105,6 +147,15 @@ try {
     { source: theme, slug: 'consumer-theme', activate: true },
     { source: secondTheme, slug: 'second-theme', activate: true },
   ] }, root), /at most one active theme/);
+  await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [
+    { source: childTheme, slug: 'child-theme' },
+  ] }, root), /requires mounted parent theme/);
+  await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [
+    { source: theme, slug: 'consumer-theme', activate: true },
+  ], wordpress_runtime_blueprint: { steps: [
+    { step: 'defineWpConfigConsts', consts: { WP_DEFAULT_THEME: 'consumer-theme' } },
+    { step: 'defineWpConfigConsts', consts: { WP_DEFAULT_THEME: 'conflicting-theme' } },
+  ] } }, root), /WP_DEFAULT_THEME must match/);
 
   const rig = JSON.parse(await readFile(path.join(root, 'rig.json'), 'utf8'));
   assert.equal(rig.id, 'wordpress-multisite-e2e');

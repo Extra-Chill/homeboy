@@ -49,8 +49,10 @@ settings. Consumers do not edit the rig:
 - `wp_codebox_extra_plugins` mounts consumer plugins/components.
 - `wp_codebox_extra_themes` mounts immutable local theme checkouts readonly.
   Entries use `{source,slug,activate?,metadata?}`; sources must be absolute paths
-  to directories with a valid `style.css` `Theme Name` header. At most one theme
-  may be active, and supplied metadata remains in WP Codebox recipe evidence.
+  to directories with a non-empty `style.css` `Theme Name` header in the first
+  8 KB. Standalone themes need a WordPress-supported index template; child themes
+  need their standalone parent in the same mount list. At most one theme may be
+  active, and supplied metadata remains in WP Codebox recipe evidence.
 - `wordpress_runtime_prepare_steps` adds seed/setup recipe steps.
 - `wordpress_runtime_workloads` runs consumer workloads through
   `wordpress.bench` after network setup.

@@ -111,12 +111,17 @@ function mergeMultisiteBlueprint(value, activeThemeSlug) {
   const blueprint = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const steps = Array.isArray(blueprint.steps) ? [...blueprint.steps] : [];
   if (activeThemeSlug) {
-    const defineIndex = steps.findIndex((step) => step?.step === 'defineWpConfigConsts');
-    if (defineIndex >= 0) {
-      const existing = steps[defineIndex]?.consts?.WP_DEFAULT_THEME;
+    const defineIndexes = steps
+      .map((step, index) => step?.step === 'defineWpConfigConsts' ? index : -1)
+      .filter((index) => index >= 0);
+    for (const index of defineIndexes) {
+      const existing = steps[index]?.consts?.WP_DEFAULT_THEME;
       if (existing !== undefined && existing !== activeThemeSlug) {
         throw new Error('wordpress_runtime_blueprint WP_DEFAULT_THEME must match the active wp_codebox_extra_themes slug.');
       }
+    }
+    const defineIndex = defineIndexes[0] ?? -1;
+    if (defineIndex >= 0) {
       steps[defineIndex] = {
         ...steps[defineIndex],
         consts: { ...(steps[defineIndex].consts || {}), WP_DEFAULT_THEME: activeThemeSlug },
@@ -193,13 +198,15 @@ async function extraThemes(value) {
     } catch {
       throw new Error(`wp_codebox_extra_themes[${index}] must contain style.css.`);
     }
-    if (!/^[ \t*]*Theme Name\s*:/mi.test(style)) {
-      throw new Error(`wp_codebox_extra_themes[${index}].style.css must contain a Theme Name header.`);
+    const name = themeHeader(style, 'Theme Name');
+    if (!name) {
+      throw new Error(`wp_codebox_extra_themes[${index}].style.css must contain a non-empty Theme Name header in its first 8 KB.`);
     }
 
     themes.push({
       source,
       slug: entry.slug,
+      template: themeHeader(style, 'Template'),
       activate: entry.activate === true,
       metadata: entry.metadata || {},
     });
@@ -208,7 +215,49 @@ async function extraThemes(value) {
   if (themes.filter((theme) => theme.activate).length > 1) {
     throw new Error('wp_codebox_extra_themes permits at most one active theme.');
   }
+  const themesBySlug = new Map(themes.map((theme) => [theme.slug, theme]));
+  for (const [index, theme] of themes.entries()) {
+    if (!theme.template) {
+      if (!await hasThemeEntrypoint(theme.source)) {
+        throw new Error(`wp_codebox_extra_themes[${index}] standalone theme must contain index.php, templates/index.html, or block-templates/index.html.`);
+      }
+      continue;
+    }
+    if (theme.template === theme.slug) {
+      throw new Error(`wp_codebox_extra_themes[${index}] child theme cannot name itself as its Template.`);
+    }
+    const parent = themesBySlug.get(theme.template);
+    if (!parent) {
+      throw new Error(`wp_codebox_extra_themes[${index}] child theme requires mounted parent theme: ${theme.template}.`);
+    }
+    if (parent.template) {
+      throw new Error(`wp_codebox_extra_themes[${index}] child theme parent must be a standalone theme: ${theme.template}.`);
+    }
+    if (!await hasThemeEntrypoint(parent.source)) {
+      throw new Error(`wp_codebox_extra_themes[${index}] child theme parent is missing a usable entrypoint: ${theme.template}.`);
+    }
+  }
   return themes;
+}
+
+function themeHeader(style, header) {
+  const contents = style.slice(0, 8 * 1024).replaceAll('\r', '\n');
+  const pattern = new RegExp(`^(?:[ \\t]*<\\?php)?[ \\t\\/*#@]*${header}:(.*)$`, 'im');
+  const match = contents.match(pattern);
+  return match?.[1]?.replace(/\s*(?:\*\/|\?>).*/, '').trim() || '';
+}
+
+async function hasThemeEntrypoint(source) {
+  for (const entrypoint of ['index.php', 'templates/index.html', 'block-templates/index.html']) {
+    try {
+      if ((await stat(path.join(source, entrypoint))).isFile()) {
+        return true;
+      }
+    } catch {
+      // Try the next WordPress-supported entrypoint.
+    }
+  }
+  return false;
 }
 
 function activateThemeStep(slug) {
