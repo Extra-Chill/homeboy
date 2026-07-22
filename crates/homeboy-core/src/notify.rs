@@ -124,7 +124,16 @@ pub fn dispatch(event: &NotifyEvent) -> NotifyOutcome {
         return missing_transport(&transport_id, detail);
     };
 
-    let mut argv = transport.command.clone();
+    // Resolve `{extension_path}` in the transport's literal argv so a manifest
+    // can reference scripts it ships (e.g. `node {extension_path}/scripts/notify.mjs`)
+    // without hardcoding an absolute install path. `extension_path` is populated
+    // by the extension store when the manifest is loaded.
+    let extension_path = extension.extension_path.clone().unwrap_or_default();
+    let mut argv: Vec<String> = transport
+        .command
+        .iter()
+        .map(|arg| arg.replace("{extension_path}", &extension_path))
+        .collect();
     argv.extend(event.argv());
     let program = argv.first().expect("validated transport command").clone();
     match Command::new(&program).args(&argv[1..]).status() {
@@ -235,6 +244,37 @@ mod tests {
             assert!(command
                 .windows(2)
                 .any(|pair| pair == ["--route", "route-42"]));
+        });
+    }
+
+    #[test]
+    fn extension_path_placeholder_is_resolved_in_transport_command() {
+        crate::test_support::with_isolated_home(|_| {
+            install_transport(
+                "test.run-completion",
+                vec!["true", "{extension_path}/scripts/notify.mjs"],
+            );
+            let route = NotificationRoute::new("test.run-completion", "route-42").unwrap();
+            let outcome = dispatch(&NotifyEvent::run_completed_with_route(
+                "run-123",
+                "pass",
+                Some(&route),
+            ));
+            let NotifyDelivery::Transport { command, .. } = outcome.delivery else {
+                panic!("expected transport delivery");
+            };
+            // The `{extension_path}` placeholder must be replaced with the
+            // installed extension directory and never delivered literally.
+            assert!(
+                !command.iter().any(|arg| arg.contains("{extension_path}")),
+                "unresolved placeholder in {command:?}"
+            );
+            assert!(
+                command
+                    .iter()
+                    .any(|arg| arg.ends_with("/scripts/notify.mjs") && arg.starts_with('/')),
+                "expected an absolute resolved script path in {command:?}"
+            );
         });
     }
 
