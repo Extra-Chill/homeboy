@@ -198,7 +198,10 @@ fn selected_non_visual_scenario_omits_optional_comparison_artifacts() {
 fn selected_scenario_workload_failure_preserves_runner_error() {
     with_isolated_home(|home| {
         write_failing_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
+        let component_dir = tempfile::Builder::new()
+            .prefix("static-site-importer@fix-491-")
+            .tempdir()
+            .expect("component dir");
         write_registered_component(home, "studio", component_dir.path());
 
         let (output, exit_code) = run(
