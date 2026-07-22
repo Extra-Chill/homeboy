@@ -144,10 +144,11 @@ pub fn run_upgrade_with_method(
     skip_extensions: bool,
     skip_runners: bool,
     skip_services: bool,
+    runner_only: bool,
     runner_targets: &[String],
     source_path: Option<&Path>,
 ) -> Result<UpgradeResult> {
-    if !runner_targets.is_empty() {
+    if runner_only {
         return run_targeted_runner_upgrade(force, method_override, runner_targets, source_path);
     }
 
@@ -256,6 +257,11 @@ pub fn run_upgrade_with_method(
                     )
                 })?
             };
+            let partial = runner_convergence_failed(
+                &runners_updated,
+                &runners_skipped,
+                Some(previous_version.as_str()),
+            );
             return Ok(UpgradeResult {
                 command: "upgrade".to_string(),
                 install_method,
@@ -265,7 +271,13 @@ pub fn run_upgrade_with_method(
                 new_build_identity: None,
                 source_revision: None,
                 upgraded: false,
-                message: "Already at latest version".to_string(),
+                partial,
+                message: if partial {
+                    "PARTIAL: controller is already current, but configured runners did not converge"
+                        .to_string()
+                } else {
+                    "Already at latest version; configured runners converged".to_string()
+                },
                 restart_required: false,
                 extensions_unrefreshed: warn_unrefreshed_symlinked_extensions(&extensions_updated),
                 extensions_updated,
@@ -341,24 +353,18 @@ pub fn run_upgrade_with_method(
         new_build_identity: new_build_identity.clone(),
         source_revision,
         upgraded: success,
-        message: if success {
-            if let Some(identity) = &new_build_identity {
-                format!(
-                    "Upgraded to {} ({})",
-                    new_version.as_deref().unwrap_or("latest"),
-                    identity
-                )
-            } else {
-                format!("Upgraded to {}", new_version.as_deref().unwrap_or("latest"))
-            }
-        } else if let Some(version) = &new_version {
-            format!(
-                "Upgrade command completed but active binary is still {}",
-                version
-            )
-        } else {
-            "Upgrade command completed but active binary version could not be verified".to_string()
-        },
+        partial: runner_convergence_failed(
+            &runners_updated,
+            &runners_skipped,
+            new_version.as_deref(),
+        ),
+        message: upgrade_message(
+            success,
+            new_version.as_deref(),
+            new_build_identity.as_deref(),
+            &runners_updated,
+            &runners_skipped,
+        ),
         // Source replacement updates the on-disk executable, but this command
         // exits immediately afterwards. Re-execing only `--version` skips the
         // normal completion path and provides no lifecycle benefit.
@@ -388,6 +394,7 @@ fn source_upgrade_noop_result(
         new_build_identity: None,
         source_revision: None,
         upgraded: false,
+        partial: false,
         message: decision.no_op_message(),
         restart_required: false,
         extensions_updated: Vec::new(),
@@ -458,16 +465,23 @@ fn run_targeted_runner_upgrade(
         command: "upgrade".to_string(),
         install_method,
         previous_version: previous_version.clone(),
-        new_version: Some(previous_version),
+        new_version: Some(previous_version.clone()),
         previous_build_identity: Some(previous_build_identity.clone()),
         new_build_identity: Some(previous_build_identity),
         source_revision: None,
         upgraded: false,
-        message: if source_checkout.is_some() {
-            "Selected runners refreshed from the initiating controller source identity".to_string()
-        } else {
-            "Selected runners refreshed without promoting the initiating controller".to_string()
-        },
+        partial: runner_convergence_failed(
+            &runners_updated,
+            &runners_skipped,
+            Some(previous_version.as_str()),
+        ),
+        message: targeted_runner_message(
+            source_checkout.is_some(),
+            &previous_version,
+            runner_targets,
+            &runners_updated,
+            &runners_skipped,
+        ),
         restart_required: false,
         extensions_updated: Vec::new(),
         extensions_skipped: Vec::new(),
@@ -477,6 +491,70 @@ fn run_targeted_runner_upgrade(
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
     })
+}
+
+fn runner_convergence_failed(
+    updated: &[RunnerUpgradeEntry],
+    skipped: &[RunnerUpgradeEntry],
+    controller_version: Option<&str>,
+) -> bool {
+    updated.iter().chain(skipped).any(|runner| {
+        !runner.success
+            || controller_version
+                .is_some_and(|version| runner.new_version.as_deref() != Some(version))
+    })
+}
+
+fn upgrade_message(
+    success: bool,
+    new_version: Option<&str>,
+    new_build_identity: Option<&str>,
+    updated: &[RunnerUpgradeEntry],
+    skipped: &[RunnerUpgradeEntry],
+) -> String {
+    let controller = new_version.unwrap_or("unverified");
+    let identity = new_build_identity
+        .map(|identity| format!(" ({identity})"))
+        .unwrap_or_default();
+    if runner_convergence_failed(updated, skipped, new_version) {
+        return format!(
+            "PARTIAL: controller upgraded to {controller}{identity}, but {} selected configured runner(s) did not converge",
+            updated.len() + skipped.len()
+        );
+    }
+    if success {
+        format!("Controller upgraded to {controller}{identity}; configured runners converged")
+    } else if new_version.is_some() {
+        format!("Upgrade command completed but active controller is still {controller}")
+    } else {
+        "Upgrade command completed but active controller version could not be verified".to_string()
+    }
+}
+
+fn targeted_runner_message(
+    source_checkout: bool,
+    controller_version: &str,
+    runner_targets: &[String],
+    updated: &[RunnerUpgradeEntry],
+    skipped: &[RunnerUpgradeEntry],
+) -> String {
+    let next = format!(
+        "homeboy upgrade --force{}",
+        runner_targets
+            .iter()
+            .map(|runner| format!(" --upgrade-runner {runner}"))
+            .collect::<String>()
+    );
+    let prefix = if source_checkout {
+        "TARGETED RUNNER SCOPE: selected runners refreshed from the initiating controller source identity"
+    } else {
+        "TARGETED RUNNER SCOPE: selected runners refreshed without promoting the initiating controller"
+    };
+    if runner_convergence_failed(updated, skipped, Some(controller_version)) {
+        format!("PARTIAL: {prefix}; controller remains {controller_version}. Next convergence command: {next}")
+    } else {
+        format!("{prefix}; controller remains {controller_version}. To promote controller and reconverge: {next}")
+    }
 }
 
 /// Read extension provenance without refreshing local extension sources. Entries
@@ -1705,5 +1783,88 @@ mod symlinked_extension_tests {
         // not produce warnings (and must not panic on the missing directory).
         let _guard = SudoUserGuard::set(Some("definitely-not-a-real-user-xyz"));
         assert!(detect_unrefreshed_symlinked_extensions(&[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod convergence_tests {
+    use super::*;
+
+    fn runner(previous: &str, current: &str, upgraded: bool) -> RunnerUpgradeEntry {
+        RunnerUpgradeEntry {
+            runner_id: "lab".to_string(),
+            homeboy_path: "/opt/homeboy/homeboy".to_string(),
+            success: true,
+            upgraded,
+            previous_version: Some(previous.to_string()),
+            new_version: Some(current.to_string()),
+            bare_homeboy_version: None,
+            path_drift: None,
+            recovery_commands: Vec::new(),
+            extensions_synced: Vec::new(),
+            extensions_skipped: Vec::new(),
+            extensions_failed: Vec::new(),
+            stale_daemon: None,
+            daemon_previous_version: None,
+            daemon_new_version: None,
+            exit_code: 0,
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn successful_but_stale_child_is_partial_controller_convergence() {
+        let runner = runner("0.301.2", "0.301.2", false);
+
+        assert!(runner_convergence_failed(
+            &[runner.clone()],
+            &[],
+            Some("0.304.0")
+        ));
+        assert!(upgrade_message(true, Some("0.304.0"), None, &[runner], &[])
+            .starts_with("PARTIAL: controller upgraded to 0.304.0"));
+    }
+
+    #[test]
+    fn failed_child_is_partial_even_when_controller_is_already_current() {
+        let mut runner = runner("0.304.0", "0.304.0", false);
+        runner.success = false;
+
+        assert!(runner_convergence_failed(&[], &[runner], None));
+    }
+
+    #[test]
+    fn targeted_runner_only_scope_names_exact_convergence_command() {
+        let message = targeted_runner_message(
+            false,
+            "0.301.2",
+            &["lab".to_string()],
+            &[runner("0.301.2", "0.301.2", false)],
+            &[],
+        );
+
+        assert!(message.starts_with("TARGETED RUNNER SCOPE"));
+        assert!(message.contains("controller remains 0.301.2"));
+        assert!(message.contains("homeboy upgrade --force --upgrade-runner lab"));
+    }
+
+    #[test]
+    fn targeted_runner_only_scope_is_partial_when_runner_remains_stale() {
+        let message = targeted_runner_message(
+            false,
+            "0.301.2",
+            &["lab".to_string()],
+            &[runner("0.299.0", "0.299.0", false)],
+            &[],
+        );
+
+        assert!(message.starts_with("PARTIAL: TARGETED RUNNER SCOPE"));
+    }
+
+    #[test]
+    fn changed_runner_is_partial_when_final_version_still_misses_controller() {
+        let runner = runner("0.299.0", "0.300.0", true);
+
+        assert!(runner_convergence_failed(&[runner], &[], Some("0.301.2")));
     }
 }

@@ -32,9 +32,13 @@ pub struct UpgradeArgs {
     #[arg(long)]
     pub no_restart_services: bool,
 
-    /// Upgrade only the named configured runner. Repeat to target multiple runners.
-    #[arg(long = "upgrade-runner", value_name = "RUNNER_ID")]
+    /// Select the configured runner to converge with the controller. Repeat to target multiple runners.
+    #[arg(long = "upgrade-runner", value_name = "RUNNER_ID", conflicts_with = "skip_runners")]
     pub runners: Vec<String>,
+
+    /// Refresh selected runners without promoting the controller.
+    #[arg(long, requires = "runners")]
+    pub runner_only: bool,
 
     /// Override install method detection (homebrew|cargo|source|binary)
     #[arg(long)]
@@ -79,6 +83,7 @@ pub fn run(args: UpgradeArgs, _global: &GlobalArgs) -> CmdResult<Value> {
         args.skip_extensions,
         args.skip_runners,
         args.no_restart_services,
+        args.runner_only,
         &args.runners,
         args.source_path.as_deref(),
     )?;
@@ -90,7 +95,7 @@ pub fn run(args: UpgradeArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     // the JSON payload (only ever rediscovered via `homeboy self status`).
     warn_degraded_runners(&result);
 
-    Ok((json, upgrade_exit_code(&result, !args.runners.is_empty())))
+    Ok((json, upgrade_exit_code(&result, args.runner_only)))
 }
 
 /// Configured runners that the upgrade left version-degraded (PATH/version drift
@@ -155,7 +160,9 @@ fn warn_degraded_runners(result: &upgrade::UpgradeResult) {
 }
 
 fn upgrade_exit_code(result: &upgrade::UpgradeResult, targeted_runner_upgrade: bool) -> i32 {
-    if targeted_runner_upgrade && result.runners_skipped.iter().any(|runner| !runner.success) {
+    if result.partial
+        || (targeted_runner_upgrade && result.runners_skipped.iter().any(|runner| !runner.success))
+    {
         return 1;
     }
 
@@ -188,11 +195,21 @@ mod tests {
             extensions_skipped: Vec::new(),
             extensions_failed: Vec::new(),
             stale_daemon: None,
+            daemon_previous_version: None,
+            daemon_new_version: None,
             exit_code: 0,
             detail: "extension sync failed".to_string(),
         });
 
         assert_eq!(upgrade_exit_code(&result, true), 1);
+    }
+
+    #[test]
+    fn partial_convergence_returns_non_zero_status() {
+        let mut result = base_upgrade_result();
+        result.partial = true;
+
+        assert_eq!(upgrade_exit_code(&result, false), 1);
     }
 
     #[test]
@@ -214,6 +231,8 @@ mod tests {
             extensions_skipped: Vec::new(),
             extensions_failed: Vec::new(),
             stale_daemon: None,
+            daemon_previous_version: None,
+            daemon_new_version: None,
             exit_code: 1,
             detail: "runner unavailable".to_string(),
         });
@@ -244,6 +263,8 @@ mod tests {
             extensions_skipped: Vec::new(),
             extensions_failed: Vec::new(),
             stale_daemon: None,
+            daemon_previous_version: None,
+            daemon_new_version: None,
             exit_code: 0,
             detail: "runner remains degraded".to_string(),
         });
@@ -274,6 +295,8 @@ mod tests {
             extensions_skipped: Vec::new(),
             extensions_failed: Vec::new(),
             stale_daemon: None,
+            daemon_previous_version: None,
+            daemon_new_version: None,
             exit_code: 0,
             detail: "upgraded".to_string(),
         });
@@ -291,6 +314,7 @@ mod tests {
             new_build_identity: None,
             source_revision: None,
             upgraded: true,
+            partial: false,
             message: "Upgraded to 0.228.7".to_string(),
             restart_required: false,
             extensions_updated: Vec::new(),

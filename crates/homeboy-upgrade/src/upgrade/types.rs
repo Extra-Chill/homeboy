@@ -68,31 +68,36 @@ pub struct UpgradeResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
     pub upgraded: bool,
+    /// True when a requested controller/runner fleet upgrade could not fully
+    /// converge. Omitted for successful responses so existing consumers keep
+    /// their current payload shape; accepted when reading persisted responses.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
     pub message: String,
     pub restart_required: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions_updated: Vec<ExtensionUpgradeEntry>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions_skipped: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runners_updated: Vec<RunnerUpgradeEntry>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runners_skipped: Vec<RunnerUpgradeEntry>,
     /// Symlinked extension clones owned by the invoking (sudo) user that this
     /// upgrade could not refresh because it ran under a different `$HOME`.
     /// Each entry carries the exact recovery command to bring the clone current.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions_unrefreshed: Vec<UnrefreshedExtensionWarning>,
     /// Long-running, binary-resident services (declared in config) that were
     /// successfully restarted to pick up the newly-swapped binary. Distinct
     /// from `restart_required`, which only describes the CLI process itself.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services_restarted: Vec<ServiceRestartEntry>,
     /// Declared resident services that still hold the old binary and need a
     /// restart: either because a restart attempt failed, or because the
     /// upgrade was run with `--no-restart-services`. Each entry carries the
     /// exact recovery command so the operator can restart it manually.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services_pending_restart: Vec<ServiceRestartEntry>,
 }
 
@@ -174,6 +179,10 @@ pub struct RunnerUpgradeEntry {
     pub extensions_failed: Vec<RunnerExtensionSyncEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_daemon: Option<RunnerDaemonDriftEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_previous_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_new_version: Option<String>,
     pub exit_code: i32,
     pub detail: String,
 }
@@ -194,6 +203,23 @@ pub struct RunnerDaemonDriftEntry {
     pub session_homeboy_version: String,
     pub current_homeboy_version: String,
     pub recovery_commands: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upgrade_response_without_new_fields_remains_deserializable() {
+        let result: UpgradeResult = serde_json::from_str(
+            r#"{"command":"upgrade","install_method":"binary","previous_version":"0.301.2","new_version":"0.304.0","upgraded":true,"message":"ok","restart_required":false}"#,
+        )
+        .expect("pre-convergence response remains readable");
+
+        assert!(!result.partial);
+        assert!(result.runners_updated.is_empty());
+        assert!(result.services_pending_restart.is_empty());
+    }
 }
 
 #[derive(Deserialize)]

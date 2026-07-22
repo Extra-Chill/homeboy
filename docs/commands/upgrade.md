@@ -26,8 +26,9 @@ Runner sync uses this contract:
 - `--force`: Force upgrade even if already at the latest version.
 - `--no-restart`: Skip automatic restart after upgrade. Useful for scripted environments.
 - `--skip-extensions`: Skip automatic extension updates.
-- `--skip-runners`: Skip automatic configured runner upgrades.
-- `--upgrade-runner`: Upgrade only the named configured runner. Repeat to target multiple runners. Runner-only mode leaves the controller unchanged; source-built controllers pin the initiating source identity, while packaged controllers retain their configured runner upgrade method.
+- `--skip-runners`: Upgrade the controller only; cannot be combined with `--upgrade-runner`.
+- `--upgrade-runner`: Select configured runners to converge with the controller upgrade. Repeat to target multiple runners.
+- `--runner-only`: With `--upgrade-runner`, preserve the controller and refresh only the selected runners. The response explicitly reports this partial scope and the exact controller-plus-runner convergence command.
 - `--method`: Override install method detection (`homebrew|cargo|source|binary`).
 
 ## Installation Method Detection
@@ -104,6 +105,7 @@ homeboy upgrade --skip-runners
 - `previous_version`: Version before upgrade
 - `new_version`: Version after upgrade (may be null)
 - `upgraded`: Boolean indicating if upgrade was performed
+- `partial`: Present and true when a selected runner did not converge with the controller
 - `message`: Human-readable status message
 - `restart_required`: Boolean indicating if a restart is needed (true only for source installs)
 - `extensions_updated`: Extension upgrade entries when installed extensions were checked

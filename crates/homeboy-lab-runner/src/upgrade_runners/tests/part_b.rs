@@ -538,7 +538,7 @@ fn rejects_packaged_runner_with_same_version_but_different_controller_identity()
             Ok((exec_output(runner_id, options.command, &stdout, "", 0), 0))
         },
         &runner_status,
-        &mut |_| Ok("reconnected".to_string()),
+        &mut |_| Ok(("reconnected".to_string(), None)),
         &mut |_, _| Ok("unused".to_string()),
         &mut |_, _| Ok(()),
         Some("controller-build"),
@@ -654,10 +654,11 @@ fn restarts_stale_connected_daemon_after_runner_upgrade() {
             stale_runner_status,
             |runner_id| {
                 reconnects.push(runner_id.to_string());
-                Ok(
+                Ok((
                     "connected runner daemon restarted after upgrade; session reports 0.228.5"
                         .to_string(),
-                )
+                    Some("0.228.5".to_string()),
+                ))
             },
             |_runner, _path| unreachable!("source materialization not used"),
             |_runner_id, _homeboy_path| unreachable!("homeboy_path update not used"),
@@ -667,7 +668,49 @@ fn restarts_stale_connected_daemon_after_runner_upgrade() {
     assert_eq!(updated.len(), 1);
     assert_eq!(reconnects, vec!["lab".to_string()]);
     assert_eq!(updated[0].stale_daemon, None);
+    assert_eq!(
+        updated[0].daemon_previous_version.as_deref(),
+        Some("0.228.4")
+    );
+    assert_eq!(updated[0].daemon_new_version.as_deref(), Some("0.228.5"));
     assert!(updated[0]
         .detail
         .contains("connected runner daemon restarted after upgrade"));
+    assert!(updated[0]
+        .detail
+        .contains("runner daemon identity: 0.228.4 -> 0.228.5"));
+}
+
+#[test]
+fn fails_when_reconnected_daemon_still_reports_the_old_version() {
+    let _local_version = pin_local_version_for_fixtures();
+    let runner = ssh_runner("lab", None);
+
+    let (updated, skipped) =
+        upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector(
+            &[runner],
+            false,
+            None,
+            None,
+            &[],
+            |runner_id, options| {
+                let stdout = match options.command.as_slice() {
+                    [_, flag] if flag == "--version" => "homeboy 0.228.5\n",
+                    _ => "{\"success\":true}\n",
+                };
+                Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+            },
+            stale_runner_status,
+            |_| Ok(("reconnected".to_string(), Some("0.228.4".to_string()))),
+            |_runner, _path| unreachable!("source materialization not used"),
+            |_runner_id, _homeboy_path| unreachable!("homeboy_path update not used"),
+        );
+
+    assert!(updated.is_empty());
+    assert_eq!(skipped.len(), 1);
+    assert!(!skipped[0].success);
+    assert_eq!(skipped[0].daemon_new_version.as_deref(), Some("0.228.4"));
+    assert!(skipped[0]
+        .detail
+        .contains("runner daemon reconnect did not converge: expected 0.228.5, observed 0.228.4"));
 }
