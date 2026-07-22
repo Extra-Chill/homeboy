@@ -8,7 +8,7 @@ use super::super::cook_adoption::{
 };
 use super::super::cook_baseline::git_output;
 use super::super::cook_promotion::{
-    finalize_cook_pr_with_backend, moving_base_recovery_for_run,
+    cook_report, finalize_cook_pr_with_backend, moving_base_recovery_for_run,
     moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
     persisted_promotion_for_attempt, recover_moving_base_cook_candidate,
     refreshed_moving_base_recovery, MovingBaseCookRecovery,
@@ -174,7 +174,8 @@ fn moving_base_recovery_report_retains_typed_evidence_and_exact_continuation() {
         continuation: "homeboy agent-task run-next".to_string(),
         base_movements: 0,
     };
-    let report = moving_base_recovery_report("cook-9267".to_string(), Vec::new(), recovery, true);
+    let report =
+        moving_base_recovery_report("cook-9267".to_string(), Vec::new(), recovery, true, None);
 
     assert_eq!(report.value.status, "candidate_recoverable");
     let recovery = report
@@ -254,13 +255,17 @@ fn divergent_destination_and_repeated_base_movement_are_terminalized() {
         "moving-base recovery destination differs from the exact promoted candidate".to_string(),
     );
     assert_eq!(divergent.base_movements, 3);
-    assert!(
-        moving_base_recovery_report("cook-bound".to_string(), Vec::new(), divergent, false)
-            .value
-            .stop_reason
-            .unwrap()
-            .contains("exhausted")
-    );
+    assert!(moving_base_recovery_report(
+        "cook-bound".to_string(),
+        Vec::new(),
+        divergent,
+        false,
+        None
+    )
+    .value
+    .stop_reason
+    .unwrap()
+    .contains("exhausted"));
 
     let first = next_moving_base_recovery(recovery, "base advanced".to_string());
     let second = next_moving_base_recovery(first, "base advanced again".to_string());
@@ -3603,5 +3608,96 @@ fn resume_cook_batch_reports_a_child_with_no_recipe_as_unresumable() {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("no durable recipe")));
+    });
+}
+
+#[test]
+fn cook_report_latest_run_id_prefers_invocation_over_stale_cook_index() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        use crate::agent_task_lifecycle;
+
+        let cook_id = "cook-8010-test";
+        let stale_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        let stale_plan = AgentTaskPlan::new("plan-stale", Vec::new());
+        agent_task_lifecycle::submit_plan(&stale_plan, Some(&stale_run_id))
+            .expect("stale run submitted");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, &stale_run_id)
+            .expect("stale cook attempt indexed");
+
+        let stale_index = agent_task_lifecycle::cook_index(cook_id).expect("stale index");
+        assert_eq!(stale_index.latest_run_id, stale_run_id);
+
+        let fresh_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 2);
+        let invocation_run_ids = vec![fresh_run_id.clone()];
+
+        let report = cook_report(
+            cook_id.to_string(),
+            "execution_budget_exhausted",
+            vec![AgentTaskCookAttemptReport {
+                attempt: 2,
+                run_id: fresh_run_id.clone(),
+                run_state: "Running".to_string(),
+                aggregate_path: None,
+                promotion: None,
+                feedback: None,
+            }],
+            None,
+            Some("provider execution stopped because budget was exhausted".to_string()),
+            1,
+            Some(&fresh_run_id),
+        );
+
+        assert_eq!(
+            report.value.latest_run_id.as_deref(),
+            Some(fresh_run_id.as_str()),
+            "latest_run_id must be THIS invocation's run, not the stale cook_index run"
+        );
+        assert_ne!(
+            report.value.latest_run_id.as_deref(),
+            Some(stale_run_id.as_str()),
+            "latest_run_id must not point at the prior-session stale run"
+        );
+        assert_eq!(
+            report.value.invocation_run_ids, invocation_run_ids,
+            "invocation_run_ids must contain exactly the runs dispatched in this invocation"
+        );
+        assert!(
+            report.value.history_run_ids.contains(&stale_run_id),
+            "history_run_ids should still include the full cross-invocation history"
+        );
+        assert!(
+            report.value.history_run_ids.contains(&fresh_run_id),
+            "history_run_ids should include the current invocation's run"
+        );
+    });
+}
+
+#[test]
+fn cook_report_invocation_run_ids_populated_for_policy_failure() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let fresh_run_id = "agent-task-fresh-abc123".to_string();
+        let report = cook_report(
+            "cook-test".to_string(),
+            "policy_failure",
+            vec![AgentTaskCookAttemptReport {
+                attempt: 1,
+                run_id: fresh_run_id.clone(),
+                run_state: "Succeeded".to_string(),
+                aggregate_path: None,
+                promotion: None,
+                feedback: None,
+            }],
+            None,
+            Some("policy failure".to_string()),
+            1,
+            Some(&fresh_run_id),
+        );
+
+        assert_eq!(report.value.invocation_run_ids, vec![fresh_run_id.clone()]);
+        assert_eq!(
+            report.value.latest_run_id.as_deref(),
+            Some(fresh_run_id.as_str())
+        );
+        assert_eq!(report.value.status, "policy_failure");
     });
 }

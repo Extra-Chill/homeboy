@@ -273,6 +273,7 @@ pub(crate) fn moving_base_recovery_report(
     attempts: Vec<AgentTaskCookAttemptReport>,
     recovery: MovingBaseCookRecovery,
     continuation_queued: bool,
+    invocation_latest_run_id: Option<&str>,
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
     let stop_reason = if recovery.base_movements >= 3 {
         Some(format!("moving-base recovery exhausted after {} refreshed base observations: {}; inspect the retained recovery evidence and reconcile the destination before retrying", recovery.base_movements, recovery.blocker))
@@ -294,6 +295,7 @@ pub(crate) fn moving_base_recovery_report(
         None,
         stop_reason,
         1,
+        invocation_latest_run_id,
     );
     report.value.moving_base_recovery = Some(recovery);
     report
@@ -761,25 +763,33 @@ pub(crate) fn cook_report(
     finalization: Option<Value>,
     stop_reason: Option<String>,
     exit_code: i32,
+    invocation_latest_run_id: Option<&str>,
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
-    let (latest_run_id, history_run_ids) = agent_task_lifecycle::cook_index(&cook_id)
+    let history_run_ids = agent_task_lifecycle::cook_index(&cook_id)
         .map(|index| {
-            (
-                Some(index.latest_run_id),
-                index
-                    .attempts
-                    .into_iter()
-                    .map(|attempt| attempt.run_id)
-                    .collect(),
-            )
+            index
+                .attempts
+                .into_iter()
+                .map(|attempt| attempt.run_id)
+                .collect::<Vec<_>>()
         })
-        .unwrap_or((None, Vec::new()));
+        .unwrap_or_default();
+    let latest_run_id = invocation_latest_run_id.map(str::to_string).or_else(|| {
+        agent_task_lifecycle::cook_index(&cook_id)
+            .ok()
+            .map(|index| index.latest_run_id)
+    });
+    let invocation_run_ids: Vec<String> = attempts
+        .iter()
+        .map(|attempt| attempt.run_id.clone())
+        .collect();
     AgentTaskRunResult {
         value: AgentTaskCookReport {
             schema: "homeboy/agent-task-cook/v1",
             cook_id,
             latest_run_id,
             history_run_ids,
+            invocation_run_ids,
             status: status.to_string(),
             attempts,
             finalization,
