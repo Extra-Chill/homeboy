@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.30.0] - 2026-07-22
+
+### Added
+- configure multisite runtime inputs
+
+### Fixed
+- validate multisite theme inputs
+
 ## [3.29.1] - 2026-07-22
 
 ### Fixed
