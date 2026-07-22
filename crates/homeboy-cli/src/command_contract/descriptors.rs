@@ -26,26 +26,9 @@ macro_rules! ops_command_descriptors {
     };
 }
 
-#[macro_export]
-macro_rules! ops_command_descriptor {
-    (ssh, $consumer:ident) => { $consumer!((ssh, Ssh, crate::commands::ssh::SshArgs, command_spec("ssh", CommandJsonFamily::Ops), crate::commands::ssh::run)) };
-    (server, $consumer:ident) => { $consumer!((server, Server, crate::commands::server::ServerArgs, CommandSpec { subcommand_safety: SERVER_SUBCOMMAND_SAFETY, ..command_spec("server", CommandJsonFamily::Ops) }, crate::commands::server::run)) };
-    (db, $consumer:ident) => { $consumer!((db, Db, crate::commands::db::DbArgs, command_spec("db", CommandJsonFamily::Ops), crate::commands::db::run)) };
-    (file, $consumer:ident) => { $consumer!((file, File, crate::commands::file::FileArgs, CommandSpec { subcommand_safety: FILE_SUBCOMMAND_SAFETY, ..command_spec("file", CommandJsonFamily::Ops) }, crate::commands::file::run)) };
-    (logs, $consumer:ident) => { $consumer!((logs, Logs, crate::commands::logs::LogsArgs, command_spec("logs", CommandJsonFamily::Ops), crate::commands::logs::run)) };
-    (triage, $consumer:ident) => { $consumer!((triage, Triage, crate::commands::triage::TriageArgs, command_spec_with_safety("triage", CommandJsonFamily::Ops, operator_safety(None, TRIAGE_DANGEROUS_FLAGS)), crate::commands::triage::run)) };
-    (deploy, $consumer:ident) => { $consumer!((deploy, Deploy, crate::commands::deploy::DeployArgs, command_spec_with_safety("deploy", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), DEPLOY_DANGEROUS_FLAGS)), crate::commands::deploy::run)) };
-    (daemon, $consumer:ident) => { $consumer!((daemon, Daemon, crate::commands::daemon::DaemonArgs, command_spec("daemon", CommandJsonFamily::Ops), crate::commands::daemon::run)) };
-    (status, $consumer:ident) => { $consumer!((status, Status, crate::commands::status::StatusArgs, command_spec("status", CommandJsonFamily::Ops), crate::commands::status::run)) };
-    (git, $consumer:ident) => { $consumer!((git, Git, crate::commands::git::GitArgs, command_spec("git", CommandJsonFamily::Ops), crate::commands::git::run)) };
-    (self_cmd, $consumer:ident) => { $consumer!((self_cmd, SelfCmd, crate::commands::self_cmd::SelfArgs, command_spec_with_output_notes("self", CommandJsonFamily::Ops, "inspects the active Homeboy runtime and renders built-in CLI documentation"), crate::commands::self_cmd::run)) };
-    (api, $consumer:ident) => { $consumer!((api, Api, crate::commands::api::ApiArgs, CommandSpec { subcommand_safety: API_SUBCOMMAND_SAFETY, ..command_spec("api", CommandJsonFamily::Ops) }, crate::commands::api::run)) };
-    (upgrade, $consumer:ident) => { $consumer!((upgrade, Upgrade, crate::commands::upgrade::UpgradeArgs, command_spec_with_output_notes_and_safety("upgrade", CommandJsonFamily::Ops, "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used", operator_safety(None, UPGRADE_DANGEROUS_FLAGS)), crate::commands::upgrade::run)) };
-}
-
 /// Commands-free spec table for the ops command family.
 ///
-/// This mirrors the `$spec` field of [`ops_command_descriptor`] but omits the
+/// This mirrors the `$spec` field of [`ops_command_descriptors`] but omits the
 /// `crate::commands` Args type and handler binding, so it can be expanded inside
 /// `command_contract` (e.g. `spec.rs`) without depending on the `commands`
 /// module. The full descriptor macro (with Args + handler) is expanded only on
