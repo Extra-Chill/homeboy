@@ -1046,3 +1046,53 @@ fn provider_failure_surfaces_bounded_stdout_and_stderr_evidence() {
         "provider-stderr"
     );
 }
+
+#[test]
+fn provider_response_validation_distinguishes_json_schema_and_required_field_errors() {
+    let request = AgentTaskPromotionApplyRequest {
+        schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+        to_workspace: "target-workspace".to_string(),
+        patch: None,
+        patch_path: "changes.patch".to_string(),
+        changed_files: vec!["src/lib.rs".to_string()],
+        gate_feedback_baseline: None,
+        dry_run: false,
+        trusted_unpushed_candidate_destination: None,
+    };
+    let cases = [
+        ("{", "Invalid JSON"),
+        (
+            r#"{"workspace_path":"/workspace"}"#,
+            "expected homeboy/agent-task-promotion-apply-response/v1, got missing schema",
+        ),
+        (
+            r#"{"schema":"homeboy/agent-task-promotion-apply-request/v1"}"#,
+            "expected homeboy/agent-task-promotion-apply-response/v1, got homeboy/agent-task-promotion-apply-request/v1",
+        ),
+        (
+            r#"{"schema":1}"#,
+            "expected homeboy/agent-task-promotion-apply-response/v1, got 1",
+        ),
+        (
+            r#"{"schema":"homeboy/agent-task-promotion-apply-response/v1"}"#,
+            "missing field `workspace_path`",
+        ),
+    ];
+
+    for (response, expected) in cases {
+        let error = run_provider_command(
+            &CommandInvocation {
+                argv: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    format!("printf '%s' '{response}'"),
+                ],
+                ..Default::default()
+            },
+            &request,
+        )
+        .expect_err("invalid provider response");
+
+        assert!(error.message.contains(expected), "{}", error.message);
+    }
+}

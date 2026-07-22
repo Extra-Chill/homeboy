@@ -125,7 +125,7 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
 }
 
 #[test]
-fn cook_returns_durable_id_when_promotion_provider_is_missing() {
+fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema() {
     with_temp_home(|| {
         let (value, exit_code) = run_cook_with_executor(
             AgentTaskCookArgs {
@@ -162,7 +162,12 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
                 goal: Some("cook fixture".to_string()),
                 to_worktree: "homeboy@fix-agent-task-runner-cook".to_string(),
                 provider_command: None,
-                provider_argv: Vec::new(),
+                provider_argv: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "printf '%s' '{\"schema\":\"homeboy/agent-task-promotion-apply-request/v1\"}'"
+                        .to_string(),
+                ],
                 gates: VerifyGateArgs {
                     verify: vec!["cargo test --lib".to_string()],
                     private_verify: Vec::new(),
@@ -177,7 +182,7 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
                 },
                 max_attempts: 2,
                 no_finalize: false,
-                full: false,
+                full: true,
                 base: "main".to_string(),
                 head: None,
                 title: None,
@@ -198,15 +203,27 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
             "cook-missing-provider-attempt-1-controller"
         );
         assert_eq!(
-            value["history_run_ids"].as_array().expect("history").len(),
-            1
+            value["history_run_ids"].as_array().map(Vec::len),
+            Some(1),
+            "{value:#}"
         );
         assert_eq!(value["status"], "policy_failure");
         assert_eq!(value["attempts"][0]["run_id"], value["latest_run_id"]);
         assert!(value["stop_reason"]
             .as_str()
             .expect("stop reason")
-            .contains("no worktree providers are configured"));
+            .contains("expected homeboy/agent-task-promotion-apply-response/v1, got homeboy/agent-task-promotion-apply-request/v1"));
+        assert!(value["stop_reason"]
+            .as_str()
+            .expect("stop reason")
+            .contains("homeboy agent-task review cook-missing-provider-attempt-1-controller --to-worktree <handle>"));
+        assert!(value["stop_reason"]
+            .as_str()
+            .expect("stop reason")
+            .contains("homeboy agent-task adopt cook-missing-provider --candidate-ref <sha> --ai-model <model>"));
+        let lifecycle = lifecycle_status("cook-missing-provider-attempt-1-controller")
+            .expect("successful candidate remains in durable lifecycle");
+        assert_eq!(lifecycle.state, AgentTaskRunState::Succeeded);
     });
 }
 

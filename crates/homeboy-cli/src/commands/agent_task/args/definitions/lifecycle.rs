@@ -150,6 +150,33 @@ mod tests {
         };
         assert_eq!(args.ai_model.as_deref(), Some("openai/gpt-5.6-sol"));
     }
+
+    #[test]
+    fn promotion_provider_help_documents_argv_contract_for_cook_review_and_promote() {
+        for command in ["cook", "review", "promote"] {
+            let Err(error) = Cli::try_parse_from(["homeboy", "agent-task", command, "--help"])
+            else {
+                panic!("help exits after rendering");
+            };
+            let help = error.to_string();
+
+            assert!(help.contains("promotion apply-provider"), "{help}");
+            assert!(
+                help.contains("Repeat once per exact argv element"),
+                "{help}"
+            );
+            assert!(help.contains("never shell-split"), "{help}");
+            assert!(
+                help.contains("homeboy/agent-task-promotion-apply-request/v1"),
+                "{help}"
+            );
+            assert!(
+                help.contains("homeboy/agent-task-promotion-apply-response/v1"),
+                "{help}"
+            );
+            assert!(help.contains("Migrate `--provider-command"), "{help}");
+        }
+    }
 }
 #[derive(Args, Debug)]
 pub struct ReplayProviderBoundaryArgs {
@@ -176,12 +203,17 @@ pub struct ReviewArgs {
     pub run_id: String,
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
-    #[arg(long, value_name = "COMMAND")]
+    #[arg(
+        long,
+        value_name = "COMMAND",
+        long_help = "Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`."
+    )]
     pub provider_command: Option<String>,
     #[arg(
         long = "provider-argv",
         value_name = "ARG",
-        conflicts_with = "provider_command"
+        conflicts_with = "provider_command",
+        long_help = "Promotion apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`."
     )]
     pub provider_argv: Vec<String>,
 }
@@ -193,12 +225,17 @@ pub struct PromoteArgs {
     /// Declared base branch resolved immediately before promotion gates run.
     #[arg(long, default_value = "main", value_name = "BRANCH")]
     pub base: String,
-    #[arg(long, value_name = "COMMAND")]
+    #[arg(
+        long,
+        value_name = "COMMAND",
+        long_help = "Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`."
+    )]
     pub provider_command: Option<String>,
     #[arg(
         long = "provider-argv",
         value_name = "ARG",
-        conflicts_with = "provider_command"
+        conflicts_with = "provider_command",
+        long_help = "Promotion apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`."
     )]
     pub provider_argv: Vec<String>,
     #[arg(long, value_name = "TASK_ID")]
