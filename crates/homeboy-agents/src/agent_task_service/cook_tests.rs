@@ -2182,7 +2182,11 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
         options.source_worktree_path = Some(source.clone());
         options.task_base_sha = Some(base.clone());
         options.provider_command = Some(provider.display().to_string());
+        options.attempt_dispatcher = None;
         options.gates.verify = vec!["test \"$(cat lib.rs)\" = candidate".to_string()];
+        options.max_attempts = 2;
+        options.initial_plan.options.execution_budget =
+            crate::agent_task_scheduler::AgentTaskExecutionBudget::new(2, 1, 0);
         options.no_finalize = false;
         options.head = Some("fix/8058".to_string());
         options.ai_model = Some("openai/gpt-5.6-terra".to_string());
@@ -2211,13 +2215,28 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
             },
         )
         .expect("persist preacceptance handoff");
+        let submission_request: homeboy_core::api_jobs::RemoteRunnerJobRequest =
+            serde_json::from_value(serde_json::json!({
+                "runner_id": "fixture-lab",
+                "command": command,
+                "metadata": { "submission_key": "historical-orphan-submission" }
+            }))
+            .expect("fixture runner submission request");
+        agent_task_lifecycle::record_lab_offload_submission_request(run_id, &submission_request)
+            .expect("persist pending handoff request");
         agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("link recipe attempt");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record
-                .lab_handoff
-                .as_mut()
-                .expect("typed handoff")
-                .acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
+            let handoff = record.lab_handoff.as_mut().expect("typed handoff");
+            handoff.acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
+            handoff.state = agent_task_lifecycle::AgentTaskLabHandoffState::Expired;
+            handoff.expired_at = Some("2000-01-01T00:00:01+00:00".to_string());
+            record.state = agent_task_lifecycle::AgentTaskRunState::Cancelled;
+            record.metadata["phase"] = serde_json::json!("handoff_rejected");
+            record.metadata["handoff_acceptance"] = serde_json::json!({
+                "state": "expired",
+                "reason": agent_task_lifecycle::EXPIRED_LAB_HANDOFF_REASON,
+                "expired_at": "2000-01-01T00:00:01+00:00",
+            });
         })
         .expect("expire handoff deadline");
         let expired = agent_task_lifecycle::status(run_id).expect("expire preacceptance handoff");
@@ -2248,7 +2267,7 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
                     ai_model: Some("openai/gpt-5.6-sol".to_string()),
                 },
                 |_| Ok(None),
-                UnusedExecutor,
+                ReviewFormOnlyExecutor,
                 &mut backend,
             );
             (result, backend)
@@ -2284,7 +2303,7 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
 
         assert_eq!(result.exit_code, 0, "{:?}", result.value);
         assert_eq!(result.value.status, "review_ready", "{:?}", result.value);
-        assert_eq!(result.value.attempts.len(), 1);
+        assert_eq!(result.value.attempts.len(), 2);
         assert_eq!(
             result.value.attempts[0]
                 .promotion
@@ -2544,8 +2563,7 @@ fn adoption_of_attempt_n_appends_n_plus_one_and_resumes_that_attempt() {
             .expect("attempt N adoption resumes through its form-only retry");
 
         assert_eq!(
-            result.value.status,
-            "green_no_finalize",
+            result.value.status, "green_no_finalize",
             "unexpected stop reason: {:?}",
             result.value.stop_reason
         );
@@ -2726,9 +2744,13 @@ fn adoption_rejects_aggregate_free_cancelled_runs_without_pre_provider_evidence(
             .expect("cancel attempt");
         assert!(cancelled.aggregate_path.is_none());
 
-        let error = adopt_cook_candidate(cook_id, "candidate")
+        let candidate = "a".repeat(40);
+        let error = adopt_cook_candidate(cook_id, &candidate)
             .expect_err("cancelled run without recovery evidence is rejected");
-        assert_eq!(error.code, homeboy_core::ErrorCode::ValidationInvalidJson);
+        assert_eq!(
+            error.code,
+            homeboy_core::ErrorCode::ValidationInvalidArgument
+        );
     });
 }
 
@@ -3006,12 +3028,14 @@ fn persisted_promotion_from_another_attempt_is_rejected() {
 fn cook_successful_concrete_attempt_publishes_reviewer_body() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-8058-attempt-1";
-        let plan = AgentTaskPlan::new("cook-8058", Vec::new());
+        let fixture_options =
+            batch_cook_options("cook-8058", Arc::new(AcceptedDetachedAttemptDispatcher));
+        let plan = fixture_options.initial_plan.clone();
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
         let options = AgentTaskCookServiceOptions {
             cook_id: "cook-8058".to_string(),
             initial_run_id: run_id.to_string(),
-            initial_plan: AgentTaskPlan::new("cook-8058", Vec::new()),
+            initial_plan: plan.clone(),
             to_worktree: "homeboy@8058".to_string(),
             source_worktree_path: None,
             provider_command: None,
@@ -3374,7 +3398,7 @@ fn stage_terminal_batch_child(cook_id: &str, pre_finalized: bool) -> String {
                 typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
-                outputs: Value::Null,
+                outputs: test_review_form_outputs(),
                 workflow: None,
                 follow_up: None,
                 metadata: Value::Null,

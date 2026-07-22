@@ -374,43 +374,50 @@ pub(crate) fn materialize_follow_up_baseline(
             preexisting_candidate: false,
         },
     };
-    let patch_path = baseline.path.join(".homeboy-cook-baseline.patch");
-    std::fs::write(&patch_path, normalized.content.as_bytes()).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("write cook baseline patch".to_string()),
+    let head_tree = git_output(&baseline.path, &["rev-parse", "HEAD^{tree}"])?;
+    let (commit, tree) = if head_tree == target_tree {
+        (expected_head.to_string(), head_tree)
+    } else {
+        let patch_path = baseline.path.join(".homeboy-cook-baseline.patch");
+        std::fs::write(&patch_path, normalized.content.as_bytes()).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("write cook baseline patch".to_string()),
+            )
+        })?;
+        git_output(
+            &baseline.path,
+            &[
+                "apply",
+                "--whitespace=nowarn",
+                &patch_path.display().to_string(),
+            ],
+        )?;
+        std::fs::remove_file(&patch_path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("remove cook baseline patch".to_string()),
+            )
+        })?;
+        git_output(&baseline.path, &["add", "--all"])?;
+        git_output(
+            &baseline.path,
+            &[
+                "-c",
+                "user.name=Homeboy",
+                "-c",
+                "user.email=homeboy@localhost",
+                "commit",
+                "--no-verify",
+                "-m",
+                "homeboy: cook promoted baseline",
+            ],
+        )?;
+        (
+            git_output(&baseline.path, &["rev-parse", "HEAD"])?,
+            git_output(&baseline.path, &["rev-parse", "HEAD^{tree}"])?,
         )
-    })?;
-    git_output(
-        &baseline.path,
-        &[
-            "apply",
-            "--whitespace=nowarn",
-            &patch_path.display().to_string(),
-        ],
-    )?;
-    std::fs::remove_file(&patch_path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("remove cook baseline patch".to_string()),
-        )
-    })?;
-    git_output(&baseline.path, &["add", "--all"])?;
-    git_output(
-        &baseline.path,
-        &[
-            "-c",
-            "user.name=Homeboy",
-            "-c",
-            "user.email=homeboy@localhost",
-            "commit",
-            "--no-verify",
-            "-m",
-            "homeboy: cook promoted baseline",
-        ],
-    )?;
-    let commit = git_output(&baseline.path, &["rev-parse", "HEAD"])?;
-    let tree = git_output(&baseline.path, &["rev-parse", "HEAD^{tree}"])?;
+    };
     if tree != target_tree {
         return Err(Error::validation_invalid_argument(
             "promotion",

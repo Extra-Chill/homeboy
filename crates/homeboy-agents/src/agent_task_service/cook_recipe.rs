@@ -159,18 +159,30 @@ pub fn persist_initial_recipe(
         // Harvest transport belongs to the original controller execution. A
         // replay must use that persisted context rather than ambient state.
         expected.harvest_context = existing.harvest_context.clone();
-        if !recipes_match(&existing, &expected)
-            || !initial_attempt_inputs_match(
-                existing
-                    .attempts
-                    .first()
-                    .expect("validated recipe has attempt"),
-                recipe
-                    .attempts
-                    .first()
-                    .expect("validated recipe has attempt"),
-            )
-        {
+        let requested_attempt = recipe
+            .attempts
+            .first()
+            .expect("validated recipe has attempt");
+        let recorded_attempt = existing
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == requested_attempt.run_id);
+        let inputs_match = recorded_attempt
+            .map(|attempt| {
+                attempt.plan == requested_attempt.plan
+                    && (attempt.attempt > 1 || recipes_match(&existing, &expected))
+            })
+            .unwrap_or_else(|| {
+                recipes_match(&existing, &expected)
+                    && initial_attempt_inputs_match(
+                        existing
+                            .attempts
+                            .first()
+                            .expect("validated recipe has attempt"),
+                        requested_attempt,
+                    )
+            });
+        if !inputs_match {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe",
                 "durable cook recipe already exists with different execution inputs",
