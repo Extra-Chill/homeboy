@@ -15,6 +15,8 @@ const threadOneId = '323456789012345678';
 const threadTwoId = '423456789012345678';
 
 await testConcurrentThreadRoutesDoNotCrossDeliver();
+await testGuildlessThreadRoute();
+await testGuildlessChannelRoute();
 await testDynamicChannelRoute();
 await testOperationsChannelDelivery();
 await testRouteLessBotFailsClosed();
@@ -45,6 +47,32 @@ async function testConcurrentThreadRoutesDoNotCrossDeliver() {
         [`/api/v10/channels/${threadTwoId}/messages`, 'run-two'],
       ],
     );
+  });
+}
+
+async function testGuildlessThreadRoute() {
+  // Canonical guild-less form emitted by the kimaki notification bridge
+  // (wp-coding-agents #261): discord:v1:thread:<destination-id>.
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify(
+      { DISCORD_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` },
+      { route: `discord:v1:thread:${threadOneId}` },
+    );
+    assert.equal(result.delivery.route_kind, 'thread');
+    assert.equal(result.delivery.destination, 'dynamic_thread');
+    assert.equal(requests[0].url, `/api/v10/channels/${threadOneId}/messages`);
+  });
+}
+
+async function testGuildlessChannelRoute() {
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify(
+      { DISCORD_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` },
+      { route: `discord:v1:channel:${channelId}` },
+    );
+    assert.equal(result.delivery.route_kind, 'channel');
+    assert.equal(result.delivery.destination, 'dynamic_channel');
+    assert.equal(requests[0].url, `/api/v10/channels/${channelId}/messages`);
   });
 }
 

@@ -146,9 +146,15 @@ function resolveBotDestination(route, operationsChannelId) {
 }
 
 function parseRoute(route) {
-  const match = /^discord:v1:(channel|thread):(\d{17,20}):(\d{17,20})$/.exec(route);
-  if (!match) return { error: 'route must be discord:v1:<channel|thread>:<guild-id>:<destination-id> with Discord snowflake IDs.' };
-  return { kind: match[1], guildId: match[2], id: match[3] };
+  // Canonical guild-less form emitted by the kimaki notification bridge
+  // (wp-coding-agents #261): discord:v1:<channel|thread>:<destination-id>.
+  const canonical = /^discord:v1:(channel|thread):(\d{17,20})$/.exec(route);
+  if (canonical) return { kind: canonical[1], id: canonical[2] };
+  // Legacy 4-segment form with a guild id. The guild is not used for delivery
+  // (only the destination id is), so accept it for backward compatibility.
+  const legacy = /^discord:v1:(channel|thread):(\d{17,20}):(\d{17,20})$/.exec(route);
+  if (legacy) return { kind: legacy[1], id: legacy[3] };
+  return { error: 'route must be discord:v1:<channel|thread>:<destination-id> with Discord snowflake IDs.' };
 }
 
 function renderContent(args) {

@@ -1,7 +1,7 @@
 {
   "name": "Discord Notifications",
   "id": "discord",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "icon": "message.circle",
   "description": "Outbound Discord run-completion notification delivery for Homeboy",
   "author": "Extra Chill",
