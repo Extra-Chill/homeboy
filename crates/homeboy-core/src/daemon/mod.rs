@@ -893,6 +893,12 @@ fn completion_notify_loop(interval: std::time::Duration, shutdown: mpsc::Receive
             }
             let running_after = list_running_run_ids(&store);
             for completed_id in tracker.observe(running_after) {
+                let already_delivered = store
+                    .is_notification_delivered(&completed_id)
+                    .unwrap_or(false);
+                if already_delivered {
+                    continue;
+                }
                 let run = store.get_run(&completed_id).ok().flatten();
                 let status = run
                     .as_ref()
@@ -901,6 +907,12 @@ fn completion_notify_loop(interval: std::time::Duration, shutdown: mpsc::Receive
                 let route = run.as_ref().and_then(|run| {
                     crate::notification_route::NotificationRoute::from_metadata(&run.metadata_json)
                 });
+                let won_race = store
+                    .mark_notification_delivered(&completed_id, "controller")
+                    .unwrap_or(false);
+                if !won_race {
+                    continue;
+                }
                 let event = crate::notify::NotifyEvent::run_completed_with_route(
                     &completed_id,
                     status,

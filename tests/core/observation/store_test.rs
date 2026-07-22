@@ -1062,3 +1062,113 @@ mod write_retry {
         assert!(err.message.contains("insert run record"));
     }
 }
+
+mod notification_delivery_marker_tests {
+    use super::*;
+
+    #[test]
+    fn mark_notification_delivered_sets_marker_and_returns_true() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("test", "homeboy"))
+                .expect("start run");
+
+            assert!(!store.is_notification_delivered(&run.id).unwrap());
+            let won = store
+                .mark_notification_delivered(&run.id, "runner-direct")
+                .unwrap();
+
+            assert!(won);
+            assert!(store.is_notification_delivered(&run.id).unwrap());
+        });
+    }
+
+    #[test]
+    fn mark_notification_delivered_idempotent_second_call_returns_false() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("test", "homeboy"))
+                .expect("start run");
+
+            let first = store
+                .mark_notification_delivered(&run.id, "runner-direct")
+                .unwrap();
+            let second = store
+                .mark_notification_delivered(&run.id, "controller")
+                .unwrap();
+
+            assert!(first);
+            assert!(!second);
+            assert!(store.is_notification_delivered(&run.id).unwrap());
+        });
+    }
+
+    #[test]
+    fn is_notification_delivered_returns_false_for_missing_run() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+
+            assert!(!store.is_notification_delivered("nonexistent-run").unwrap());
+        });
+    }
+
+    #[test]
+    fn notification_delivered_marker_preserves_existing_metadata() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("test", "homeboy"))
+                .expect("start run");
+
+            store
+                .mark_notification_delivered(&run.id, "runner-direct")
+                .unwrap();
+
+            let fetched = store
+                .get_run(&run.id)
+                .expect("get run")
+                .expect("run exists");
+            assert_eq!(fetched.metadata_json["scenario"], "fixture");
+            assert_eq!(
+                fetched.metadata_json["notification_delivered"]["by"],
+                "runner-direct"
+            );
+            assert!(fetched.metadata_json["notification_delivered"]["at"]
+                .as_str()
+                .is_some());
+        });
+    }
+
+    #[test]
+    fn runner_and_controller_race_only_one_wins() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("test", "homeboy"))
+                .expect("start run");
+
+            let runner_won = store
+                .mark_notification_delivered(&run.id, "runner-direct")
+                .unwrap();
+            let controller_won = store
+                .mark_notification_delivered(&run.id, "controller")
+                .unwrap();
+
+            assert!(runner_won);
+            assert!(!controller_won);
+            let marker = &store
+                .get_run(&run.id)
+                .expect("get run")
+                .expect("run exists")
+                .metadata_json["notification_delivered"];
+            assert_eq!(marker["by"], "runner-direct");
+        });
+    }
+}
