@@ -106,6 +106,7 @@ pub fn persist_initial_recipe(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<AgentTaskCookRecipe> {
     let recipe = initial_recipe(options)?;
+    validate_recipe(&recipe)?;
     if let Some(existing) = compatible_existing_recipe(&recipe)? {
         return Ok(existing);
     }
@@ -117,36 +118,18 @@ pub fn persist_initial_recipe(
 /// uses this before creating worktrees so incompatible replays fail before any
 /// lifecycle resources are mutated.
 pub fn validate_initial_recipe_compatibility(options: &AgentTaskCookServiceOptions) -> Result<()> {
-    compatible_existing_recipe(&initial_recipe(options)?)?;
+    if !recipe_exists(&options.cook_id)? {
+        return Ok(());
+    }
+    let existing = load_recipe(&options.cook_id)?;
+    let mut recipe = initial_recipe(options)?;
+    // The attempt plan is compiled only after the target worktree exists. Use
+    // the durable plan here so preflight compares every input already known
+    // without weakening persistence-time plan validation.
+    recipe.attempts = existing.attempts;
+    recipe.retry_budget["execution_budget"] = existing.retry_budget["execution_budget"].clone();
+    compatible_existing_recipe(&recipe)?;
     Ok(())
-}
-
-/// Fail before worktree creation when a generated Cook identity is already
-/// bound to different source inputs, runtime, or dispatch transport.
-pub fn validate_recipe_source_identity(
-    cook_id: &str,
-    source_identity: &str,
-    attempt_dispatch: &Value,
-) -> Result<()> {
-    if !recipe_exists(cook_id)? {
-        return Ok(());
-    }
-    let existing = load_recipe(cook_id)?;
-    let compatible = existing
-        .source_refs
-        .iter()
-        .any(|source_ref| source_ref == source_identity)
-        && existing.runtime_generation == homeboy_core::build_identity::current().display
-        && existing.promotion_transport["attempt_dispatch"] == *attempt_dispatch;
-    if compatible {
-        return Ok(());
-    }
-    Err(Error::validation_invalid_argument(
-        "cook_recipe",
-        "durable cook recipe already exists with different execution inputs",
-        Some(cook_id.to_string()),
-        None,
-    ))
 }
 
 fn initial_recipe(options: &AgentTaskCookServiceOptions) -> Result<AgentTaskCookRecipe> {
@@ -195,7 +178,6 @@ fn initial_recipe(options: &AgentTaskCookServiceOptions) -> Result<AgentTaskCook
         sensitive_mappings: sensitive_mappings(&options.initial_plan)?,
         harvest_context: options.harvest_context.clone(),
     };
-    validate_recipe(&recipe)?;
     Ok(recipe)
 }
 
@@ -232,9 +214,18 @@ fn compatible_existing_recipe(recipe: &AgentTaskCookRecipe) -> Result<Option<Age
                     )
             });
         if !inputs_match {
+            let mismatches = recipe_mismatch_fields(&existing, &expected);
+            let problem = if mismatches.is_empty() {
+                "durable cook recipe already exists with different execution inputs".to_string()
+            } else {
+                format!(
+                    "durable cook recipe already exists with different execution inputs: {}",
+                    mismatches.join(", ")
+                )
+            };
             return Err(Error::validation_invalid_argument(
                 "cook_recipe",
-                "durable cook recipe already exists with different execution inputs",
+                problem,
                 Some(recipe.cook_id.clone()),
                 None,
             ));
@@ -248,24 +239,54 @@ fn compatible_existing_recipe(recipe: &AgentTaskCookRecipe) -> Result<Option<Age
 /// compile. Compare its typed source inputs, not transient projection details,
 /// when deciding whether a persisted recipe may resume.
 fn recipes_match(left: &AgentTaskCookRecipe, right: &AgentTaskCookRecipe) -> bool {
-    if left.schema != right.schema
-        || left.cook_id != right.cook_id
-        || left.promotion_transport != right.promotion_transport
-        || left.gate_policy != right.gate_policy
-        || left.retry_budget != right.retry_budget
-        || left.finalization != right.finalization
-        || left.source_refs != right.source_refs
-        || left.runtime_generation != right.runtime_generation
-        || left.sensitive_mappings != right.sensitive_mappings
-        || left.harvest_context != right.harvest_context
-        || left.attempts.len() != right.attempts.len()
-    {
-        return false;
+    recipe_mismatch_fields(left, right).is_empty()
+}
+
+fn recipe_mismatch_fields(
+    left: &AgentTaskCookRecipe,
+    right: &AgentTaskCookRecipe,
+) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if left.schema != right.schema {
+        fields.push("schema");
     }
-    left.attempts
-        .iter()
-        .zip(&right.attempts)
-        .all(|(left, right)| attempt_inputs_match(left, right))
+    if left.cook_id != right.cook_id {
+        fields.push("cook_id");
+    }
+    if left.promotion_transport != right.promotion_transport {
+        fields.push("promotion_transport");
+    }
+    if left.gate_policy != right.gate_policy {
+        fields.push("gate_policy");
+    }
+    if left.retry_budget != right.retry_budget {
+        fields.push("retry_budget");
+    }
+    if left.finalization != right.finalization {
+        fields.push("finalization");
+    }
+    if left.source_refs != right.source_refs {
+        fields.push("source_refs");
+    }
+    if left.runtime_generation != right.runtime_generation {
+        fields.push("runtime_generation");
+    }
+    if left.sensitive_mappings != right.sensitive_mappings {
+        fields.push("sensitive_mappings");
+    }
+    if left.harvest_context != right.harvest_context {
+        fields.push("harvest_context");
+    }
+    if left.attempts.len() != right.attempts.len()
+        || !left
+            .attempts
+            .iter()
+            .zip(&right.attempts)
+            .all(|(left, right)| attempt_inputs_match(left, right))
+    {
+        fields.push("attempts");
+    }
+    fields
 }
 
 fn attempt_inputs_match(
@@ -1375,18 +1396,6 @@ mod tests {
 
             persist_initial_recipe(&options).expect("persist canonical recipe");
             validate_initial_recipe_compatibility(&options).expect("exact replay is compatible");
-            validate_recipe_source_identity(
-                &options.cook_id,
-                "issue",
-                &serde_json::json!({ "kind": "local" }),
-            )
-            .expect("source identity and transport match");
-            assert!(validate_recipe_source_identity(
-                &options.cook_id,
-                "different-source",
-                &serde_json::json!({ "kind": "local" }),
-            )
-            .is_err());
 
             let mut changed = options;
             changed.title = "different title".to_string();

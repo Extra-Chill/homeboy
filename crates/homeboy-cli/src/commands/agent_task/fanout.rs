@@ -503,18 +503,7 @@ fn preflight_batch_cook_recipes(
         if let Some(dispatcher) = attempt_dispatcher {
             invocation.options.attempt_dispatcher = Some(dispatcher(&invocation.options));
         }
-        let attempt_dispatch = invocation
-            .options
-            .attempt_dispatcher
-            .as_ref()
-            .map(|dispatcher| dispatcher.durable_recipe())
-            .transpose()?
-            .unwrap_or_else(|| serde_json::json!({ "kind": "local" }));
-        agent_task_service::validate_recipe_source_identity(
-            &invocation.options.cook_id,
-            &cook_recipe_source_identity(plan, cook)?,
-            &attempt_dispatch,
-        )?;
+        agent_task_service::validate_initial_recipe_compatibility(&invocation.options)?;
     }
     Ok(())
 }
@@ -1719,6 +1708,31 @@ mod tests {
         };
         legacy.rekey("fresh".to_string());
         assert_eq!(legacy.cooks[0].cook_id, "fresh-issue-6453");
+    }
+
+    #[test]
+    fn recipe_preflight_accepts_exact_replay_and_rejects_changed_inputs() {
+        with_isolated_home(|_| {
+            let plan = test_batch_plan();
+            let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile batch cooks");
+            let mut invocation = plan.cooks[0]
+                .to_cook_invocation(&plan)
+                .expect("cook invocation");
+            invocation.options.harvest_context = batch_harvest_context().expect("harvest context");
+            invocation.options.initial_plan = compiled[0].initial_plan.clone();
+            agent_task_service::persist_initial_recipe(&invocation.options)
+                .expect("persist initial recipe");
+
+            if let Err(error) = preflight_batch_cook_recipes(&plan, None) {
+                panic!("exact replay is incompatible: {error:?}");
+            }
+
+            let mut changed = plan;
+            changed.cooks[0].title = Some("changed title".to_string());
+            let error = preflight_batch_cook_recipes(&changed, None)
+                .expect_err("changed execution inputs conflict");
+            assert!(error.message.contains("different execution inputs"));
+        });
     }
 
     #[test]
