@@ -6,6 +6,8 @@ use homeboy_core::git;
 use homeboy_core::plan::{PlanStep, PlanStepStatus};
 use homeboy_extension::ExtensionManifest;
 use std::collections::BTreeSet;
+use std::path::Path;
+use std::process::Command;
 
 pub(super) struct ReleaseExecutionContext<'a> {
     pub(super) component: &'a Component,
@@ -419,6 +421,9 @@ fn run_dependencies_preflight(
     }
 
     let component_path = std::path::Path::new(&context.component.local_path);
+    if let Err(err) = remove_ignored_untracked_composer_lock(component_path) {
+        return failed_result(&step.id, &step.kind, err);
+    }
     match homeboy_core::deps::install_for_resolved(context.component, component_path) {
         Ok(Some(result)) => ReleaseStepResult {
             id: step.id.clone(),
@@ -439,6 +444,43 @@ fn run_dependencies_preflight(
         },
         Err(err) => failed_result(&step.id, &step.kind, err),
     }
+}
+
+/// Generated Composer locks are safe to reuse only when the component commits
+/// them. An ignored lock can outlive its manifest and make release hydration
+/// resolve a dependency tree unrelated to the reviewed source.
+fn remove_ignored_untracked_composer_lock(component_path: &Path) -> Result<()> {
+    const COMPOSER_LOCK: &str = "composer.lock";
+
+    let lockfile = component_path.join(COMPOSER_LOCK);
+    if !lockfile.is_file() || git::is_tracked_path(component_path, COMPOSER_LOCK) {
+        return Ok(());
+    }
+
+    let ignored = Command::new("git")
+        .args(["check-ignore", "-q", "--", COMPOSER_LOCK])
+        .current_dir(component_path)
+        .status()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("inspect generated Composer lock".to_string()),
+            )
+        })?
+        .success();
+    if !ignored {
+        return Ok(());
+    }
+
+    std::fs::remove_file(&lockfile).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "remove stale generated lock {}",
+                lockfile.display()
+            )),
+        )
+    })
 }
 
 fn run_lint_preflight(step: &PlanStep, context: &ReleaseExecutionContext) -> ReleaseStepResult {
@@ -952,6 +994,56 @@ mod tests {
             .expect("lint dispatch")
             .expect("lint result");
         assert_eq!(lint.status, ReleaseStepStatus::Success);
+    }
+
+    #[test]
+    fn dependency_preflight_discards_ignored_untracked_composer_lock() {
+        let repo = tempfile::tempdir().expect("repo");
+        run_in(repo.path(), &["git", "init", "-q"]);
+        configure_git_user(repo.path());
+        std::fs::write(repo.path().join(".gitignore"), "composer.lock\n").expect("gitignore");
+        std::fs::write(
+            repo.path().join("homeboy-deps.json"),
+            r#"{
+                "provider": "fixture",
+                "commands": {
+                    "install": { "argv": ["sh", "-c", "test ! -e composer.lock"] }
+                }
+            }"#,
+        )
+        .expect("write deps manifest");
+        run_in(
+            repo.path(),
+            &["git", "add", ".gitignore", "homeboy-deps.json"],
+        );
+        run_in(repo.path(), &["git", "commit", "-qm", "Initial commit"]);
+        std::fs::write(repo.path().join("composer.lock"), "stale generated lock\n")
+            .expect("stale lock");
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: repo.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+        let options = ReleaseOptions::default();
+        let mut context = ReleaseExecutionContext {
+            component: &component,
+            extensions: &[],
+            component_id: "fixture",
+            options: &options,
+            state: ReleaseState::default(),
+            publish_failed: false,
+        };
+
+        let deps = execute_release_plan_step(&plan_step("preflight.dependencies"), &mut context)
+            .expect("dependency dispatch")
+            .expect("dependency result");
+
+        assert_eq!(deps.status, ReleaseStepStatus::Success);
+        assert!(
+            !repo.path().join("composer.lock").exists(),
+            "ignored generated lock is removed before install"
+        );
     }
 
     #[test]
