@@ -88,6 +88,25 @@ homeboy release <component_id> --head --package-only --tag v1.2.3 --apply
 homeboy release <component_id> --head --from-artifacts ./artifacts --skip-checks --apply
 ```
 
+### Recover an unpushed sibling tag
+
+An interrupted release can leave a local tag on an abandoned sibling commit while
+`HEAD` contains the recreated release commit and `origin` has no such tag.
+`--recover` refuses this state without modifying it. Inspect both commits, delete
+only the confirmed-abandoned local tag, check for an invalid GitHub Release, then
+retry recovery:
+
+```sh
+git show --no-patch --decorate v1.2.3 HEAD
+git tag -d v1.2.3
+gh release view v1.2.3
+homeboy release <component_id> --recover --apply
+```
+
+Deleting the local tag does not delete remote state. If a GitHub Release exists,
+delete it deliberately before retrying; Homeboy never deletes remote release
+state automatically during this recovery.
+
 ## Release Pipeline
 
 The release command coordinates versioning, committing, tagging, and pushing.

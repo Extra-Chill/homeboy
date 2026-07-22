@@ -103,6 +103,39 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
             .as_deref()
             .is_some_and(|commit| commit != head_commit);
 
+    // An interrupted attempt can leave a tag only in this checkout while the
+    // release commit was recreated on a sibling history. Retagging cannot
+    // safely reconcile divergent history, but removing this unpushed ref is a
+    // deterministic local-only recovery step.
+    let local_tag_is_unpushed_sibling = is_local_unpushed_sibling_tag(
+        &component.local_path,
+        local_tag_commit.as_deref(),
+        remote_tag_commit.as_deref(),
+        &head_commit,
+    )?;
+
+    if local_tag_is_unpushed_sibling {
+        let local_commit = local_tag_commit
+            .as_deref()
+            .expect("sibling state requires a local tag commit");
+        return Err(Error::validation_invalid_argument(
+            "tag",
+            format!(
+                "Tag '{}' exists only locally at sibling commit {}; HEAD is {}. Refusing to retag or delete the tag automatically.",
+                tag_name,
+                short_sha(local_commit),
+                short_sha(&head_commit)
+            ),
+            None,
+            Some(local_sibling_tag_cleanup_hints(
+                &input.component_id,
+                &tag_name,
+                local_commit,
+                &head_commit,
+            )),
+        ));
+    }
+
     if tag_is_stale && input.retag {
         // Guarded retag: only move the tag forward to HEAD when it is safe.
         //   1. Every existing tag commit (local + remote) is a strict ancestor
@@ -543,6 +576,46 @@ fn recovery_step(id: &str, label: impl Into<String>, needed: bool, needs: Vec<St
     }
 }
 
+fn local_sibling_tag_cleanup_hints(
+    component_id: &str,
+    tag_name: &str,
+    local_tag_commit: &str,
+    head_commit: &str,
+) -> Vec<String> {
+    vec![
+        format!(
+            "Inspect the abandoned release commit and current HEAD: `git show --no-patch --decorate {} {}`.",
+            tag_name, head_commit
+        ),
+        format!(
+            "The tag is absent from origin, so after confirming {} is abandoned, remove only the local tag: `git tag -d {}`. This does not delete remote state.",
+            short_sha(local_tag_commit), tag_name
+        ),
+        format!(
+            "Before creating a replacement tag, check for an invalid GitHub Release: `gh release view {}`. If one exists, delete it deliberately before continuing.",
+            tag_name
+        ),
+        format!(
+            "Then retry recovery: `homeboy release {} --recover --apply`.",
+            component_id
+        ),
+    ]
+}
+
+fn is_local_unpushed_sibling_tag(
+    local_path: &str,
+    local_tag_commit: Option<&str>,
+    remote_tag_commit: Option<&str>,
+    head_commit: &str,
+) -> Result<bool> {
+    match local_tag_commit {
+        Some(commit) if remote_tag_commit.is_none() && commit != head_commit => {
+            Ok(!git::is_ancestor(local_path, commit, head_commit)?)
+        }
+        _ => Ok(false),
+    }
+}
+
 /// Resolve the most recent release-shaped tag for the component, honoring
 /// monorepo prefixes. Returns `None` if no matching tag is found.
 fn latest_release_tag(release_scope: &ReleaseScope) -> Option<String> {
@@ -585,4 +658,60 @@ pub(super) fn diagnose_orphan_tag(local_path: &str, tag: &str) -> Option<String>
         tag,
         tag,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn unpushed_sibling_tag_requires_local_only_cleanup() {
+        let repo = tempfile::tempdir().expect("repo");
+        git_in(repo.path(), &["init", "-b", "main"]);
+        git_in(repo.path(), &["config", "user.name", "Homeboy Test"]);
+        git_in(
+            repo.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        std::fs::write(repo.path().join("version.txt"), "base").expect("write base");
+        git_in(repo.path(), &["add", "."]);
+        git_in(repo.path(), &["commit", "-m", "base"]);
+        git_in(repo.path(), &["switch", "-c", "abandoned-release"]);
+        std::fs::write(repo.path().join("version.txt"), "abandoned").expect("write sibling");
+        git_in(repo.path(), &["commit", "-am", "release: v1.2.3"]);
+        let tagged_commit = git_in(repo.path(), &["rev-parse", "HEAD"]);
+        git_in(repo.path(), &["tag", "v1.2.3"]);
+        git_in(repo.path(), &["switch", "main"]);
+        std::fs::write(repo.path().join("version.txt"), "recreated").expect("write head");
+        git_in(repo.path(), &["commit", "-am", "release: v1.2.3"]);
+        let head_commit = git_in(repo.path(), &["rev-parse", "HEAD"]);
+        let repo_path = repo.path().to_str().expect("utf-8 repo path");
+
+        assert!(
+            is_local_unpushed_sibling_tag(repo_path, Some(&tagged_commit), None, &head_commit,)
+                .expect("inspect sibling tag")
+        );
+
+        let hints = local_sibling_tag_cleanup_hints("demo", "v1.2.3", &tagged_commit, &head_commit)
+            .join("\n");
+        assert!(hints.contains("git tag -d v1.2.3"));
+        assert!(hints.contains("gh release view v1.2.3"));
+        assert!(!hints.contains("git push origin :refs/tags/"));
+        assert!(!hints.contains("gh release delete"));
+    }
 }
