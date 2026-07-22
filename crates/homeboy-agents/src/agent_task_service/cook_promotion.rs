@@ -703,9 +703,10 @@ fn cook_review_dossier(
         changed_public_contracts: Vec::new(),
         public_contract_evidence: None,
         ai_assistance: AgentTaskReviewAiAssistance {
-            // Deterministic: the orchestrator knows whether/what tool+model ran.
+            // Deterministic: the orchestrator knows whether/what tool+model ran,
+            // and attributes Homeboy as the harness that drove the change.
             used: true,
-            tool: options.ai_tool.clone(),
+            tool: crate::agent_task_review_dossier::homeboy_tool_disclosure(&options.ai_tool),
             model: options
                 .ai_model
                 .clone()

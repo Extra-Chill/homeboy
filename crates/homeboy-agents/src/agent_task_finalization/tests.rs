@@ -1848,7 +1848,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
             public_contract_evidence: None,
             lifecycle: None,
         },
-        ai_used_for: "Drafted implementation and tests; Chris reviews and owns the change."
+        ai_used_for: "Traced the finalization contract change, implemented it, and confirmed with the recorded gate."
             .to_string(),
         review_dossier: AgentTaskReviewDossier {
             schema: "homeboy/agent-task-review-dossier/v1".to_string(),
@@ -1864,9 +1864,9 @@ fn options() -> AgentTaskPrFinalizationOptions {
             public_contract_evidence: None,
             ai_assistance: crate::agent_task_review_dossier::AgentTaskReviewAiAssistance {
                 used: true,
-                tool: "OpenCode (GPT-5.5)".to_string(),
+                tool: "Homeboy (OpenCode (GPT-5.5))".to_string(),
                 model: "GPT-5.5".to_string(),
-                used_for: "Drafted implementation and tests; Chris reviews and owns the change."
+                used_for: "Traced the finalization contract change, implemented it, and confirmed with the recorded gate."
                     .to_string(),
             },
             source_relationships: Vec::new(),
