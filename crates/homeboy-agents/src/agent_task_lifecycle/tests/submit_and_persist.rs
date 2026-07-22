@@ -215,6 +215,114 @@ fn detached_lab_run_plan_uses_one_identity_for_status_logs_artifacts_and_cancell
 }
 
 #[test]
+fn accepted_lab_runner_execution_preserves_controller_runtime_pin_across_host_identity_divergence()
+{
+    with_isolated_home(|_| {
+        let run_id = "cross-host-controller-pin";
+        let controller_runtime = json!({
+            "schema": "homeboy/controller-runtime-pin/v2",
+            "originating": {
+                "build_identity": "homeboy 0.300.0+398952a1501d",
+                "pinned_executable": "/Users/chubes/.local/share/homeboy/controller-runtimes/macos/homeboy",
+                "sha256": "macos-controller-sha256"
+            }
+        });
+        let runner_runtime = json!({
+            "schema": "homeboy/controller-runtime-pin/v2",
+            "originating": {
+                "build_identity": "homeboy 0.300.0+398952a1501d",
+                "pinned_executable": "/home/chubes/.local/share/homeboy/controller-runtimes/linux/homeboy",
+                "sha256": "linux-runner-sha256"
+            }
+        });
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+        ];
+
+        let record = submit_plan_with_runtime_admission(&test_plan(), Some(run_id), |_| {
+            Ok(controller_runtime.clone())
+        })
+        .expect("controller submits the durable run");
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "linux-lab",
+            runner_job_id: "runner-job-9574",
+            remote_workspace: "/home/chubes/homeboy",
+            remote_command: &command,
+        })
+        .expect("runner acceptance is recorded");
+
+        submit_plan_with_runtime_admission_on_runner(
+            &test_plan(),
+            Some(run_id),
+            Some("linux-lab".to_string()),
+            |_| Ok(runner_runtime.clone()),
+        )
+        .expect("runner records its execution identity without replacing the controller pin");
+        let mirrored = status(&record.run_id).expect("runner-updated controller record");
+        let preserved = mirrored.metadata
+            [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            .clone();
+
+        assert_eq!(preserved, controller_runtime);
+        assert_eq!(
+            mirrored.metadata["runner_execution_runtime"],
+            runner_runtime
+        );
+        assert_ne!(
+            preserved["originating"]["pinned_executable"],
+            runner_runtime["originating"]["pinned_executable"]
+        );
+        assert_ne!(
+            preserved["originating"]["sha256"],
+            runner_runtime["originating"]["sha256"]
+        );
+    });
+}
+
+#[test]
+fn accepted_lab_runner_execution_rejects_missing_controller_runtime_pin() {
+    with_isolated_home(|_| {
+        let run_id = "missing-cross-host-controller-pin";
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+        ];
+        submit_plan(&test_plan(), Some(run_id)).expect("controller submits the durable run");
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "linux-lab",
+            runner_job_id: "runner-job-9574",
+            remote_workspace: "/home/chubes/homeboy",
+            remote_command: &command,
+        })
+        .expect("runner acceptance is recorded");
+        rewrite_record_for_test(run_id, |record| {
+            record
+                .metadata
+                .as_object_mut()
+                .expect("metadata object")
+                .remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
+        })
+        .expect("remove controller runtime pin");
+
+        let error = submit_plan_with_runtime_admission_on_runner(
+            &test_plan(),
+            Some(run_id),
+            Some("linux-lab".to_string()),
+            |_| Ok(json!({ "runner": "runtime" })),
+        )
+        .expect_err("accepted handoff without its controller pin fails closed");
+
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert!(error.message.contains("no controller runtime pin"));
+    });
+}
+
+#[test]
 fn cancelling_queued_runner_proxy_projects_to_accepted_daemon_job() {
     with_isolated_home(|_| {
         let run_id = "agent-task-queued-runner-proxy";
