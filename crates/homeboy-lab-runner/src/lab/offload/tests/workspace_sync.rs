@@ -151,6 +151,45 @@ fn lab_git_workspace_sync_uses_snapshot_for_private_proxied_sources() {
 }
 
 #[test]
+fn lab_source_snapshot_uses_git_workspace_for_committed_git_source() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("package.json"), "{}\n").expect("source file");
+    std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(dir.path())
+        .status()
+        .expect("init git repo");
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(dir.path())
+        .status()
+        .expect("stage source");
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Homeboy Test",
+            "-c",
+            "user.email=test@homeboy.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "source",
+        ])
+        .current_dir(dir.path())
+        .status()
+        .expect("commit source");
+
+    let mode = lab_workspace_sync_mode(
+        LabOffloadWorkspaceModePolicy::RunnerResident,
+        &[],
+        dir.path(),
+    )
+    .expect("sync mode");
+
+    assert_eq!(mode, RunnerWorkspaceSyncMode::SnapshotGit);
+}
+
+#[test]
 fn required_git_checkout_sync_keeps_git_for_private_sources() {
     let dir = tempfile::tempdir().expect("temp dir");
     std::process::Command::new("git")

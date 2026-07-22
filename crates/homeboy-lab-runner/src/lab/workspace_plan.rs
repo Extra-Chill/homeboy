@@ -48,6 +48,11 @@ pub(super) fn lab_workspace_sync_mode_with_source_policy(
     source_policy: &SourceMaterializationPolicy,
 ) -> Result<RunnerWorkspaceSyncMode> {
     let requested = requested_lab_workspace_sync_mode(policy, args);
+    if requested == RunnerWorkspaceSyncMode::Snapshot
+        && super::super::workspace::git_output(source_path, &["rev-parse", "HEAD"]).is_ok()
+    {
+        return Ok(RunnerWorkspaceSyncMode::SnapshotGit);
+    }
     if requested != RunnerWorkspaceSyncMode::Git {
         return Ok(requested);
     }
