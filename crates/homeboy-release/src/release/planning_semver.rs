@@ -36,6 +36,7 @@ pub(super) fn build_semver_recommendation(
             requested_bump: requested_bump.to_string(),
             is_underbump: false,
             reasons: Vec::new(),
+            bump_policy: None,
         }));
     }
 
@@ -85,6 +86,7 @@ pub(super) fn build_semver_recommendation(
         requested_bump: requested.as_str().to_string(),
         is_underbump,
         reasons: recommendation_reasons(&commits, recommended),
+        bump_policy: None,
     }))
 }
 

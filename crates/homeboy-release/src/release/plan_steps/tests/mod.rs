@@ -1141,6 +1141,7 @@ fn semver_recommendation(
         requested_bump: requested.to_string(),
         is_underbump,
         reasons: vec![],
+        bump_policy: None,
     }
 }
 
