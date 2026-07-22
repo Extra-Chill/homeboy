@@ -906,12 +906,18 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
         .first()
         .map(|cook| cook.cook_id.clone())
         .unwrap_or_else(|| "empty".to_string());
+    let fanout_id = args
+        .fanout_id
+        .clone()
+        .unwrap_or_else(|| format!("cook-batch-{}-{}-{}", args.repo, first, cooks.len()));
+    // Durable cook recipes are keyed by cook_id. Scope each generated child to
+    // its fanout generation so the same issue can run in a later batch.
+    for cook in &mut cooks {
+        cook.cook_id = format!("{fanout_id}-{}", cook.cook_id);
+    }
     Ok(BatchCookFanoutPlan {
         schema: batch_cook_fanout_plan_schema(),
-        fanout_id: args
-            .fanout_id
-            .clone()
-            .unwrap_or_else(|| format!("cook-batch-{}-{}-{}", args.repo, first, cooks.len())),
+        fanout_id,
         cooks,
         metadata: serde_json::json!({
             "source": "agent-task fanout cook-batch",
@@ -1555,7 +1561,7 @@ mod tests {
 
             assert_eq!(plan.fanout_id, "issue-wave");
             assert_eq!(plan.cooks.len(), 2);
-            assert_eq!(plan.cooks[0].cook_id, "issue-6453");
+            assert_eq!(plan.cooks[0].cook_id, "issue-wave-issue-6453");
             assert_eq!(plan.cooks[0].to_worktree, "homeboy@fix-issue-6453-homeboy");
             assert_eq!(
                 plan.cooks[0].head.as_deref(),
@@ -1588,6 +1594,25 @@ mod tests {
                 Some("homeboy@fix-issue-6453-homeboy")
             );
         });
+    }
+
+    #[test]
+    fn cook_batch_scopes_durable_children_to_the_fanout_generation() {
+        let first = build_cook_batch_plan(&cook_batch_args()).expect("first cook batch plan");
+        let mut second_args = cook_batch_args();
+        second_args.fanout_id = Some("issue-wave-v2".to_string());
+        second_args.branch_prefix = "fix-v2".to_string();
+        let second = build_cook_batch_plan(&second_args).expect("second cook batch plan");
+
+        assert_eq!(first.cooks[0].task_url, second.cooks[0].task_url);
+        assert_eq!(
+            first.cooks[0].client_context, second.cooks[0].client_context,
+            "issue identity remains task metadata"
+        );
+        assert_ne!(first.cooks[0].cook_id, second.cooks[0].cook_id);
+        assert_ne!(first.cooks[0].run_id(), second.cooks[0].run_id());
+        assert_ne!(first.cooks[0].to_worktree, second.cooks[0].to_worktree);
+        assert_eq!(second.cooks[0].cook_id, "issue-wave-v2-issue-6453");
     }
 
     #[test]
