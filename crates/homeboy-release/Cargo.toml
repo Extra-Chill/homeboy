@@ -14,7 +14,6 @@ path = "src/lib.rs"
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
 homeboy-release-contract = { version = "0.1.0", path = "../contracts/homeboy-release-contract" }
-homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 regex = "1.11"
@@ -22,7 +21,6 @@ zip = "0.6"
 chrono = "0.4"
 semver = "1.0"
 tempfile = "3.14"
-toml = "1.0.3"
 sha2 = "0.10.9"
 glob = "0.3"
 glob-match = "0.2"

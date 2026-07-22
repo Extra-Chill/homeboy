@@ -8,6 +8,9 @@ description = "Core engine for homeboy: build/deploy/test/triage orchestration, 
 repository = "https://github.com/Extra-Chill/homeboy"
 publish = false
 
+[package.metadata.cargo-machete]
+ignored = ["homeboy-extension"] # Imported by an out-of-tree included test fixture.
+
 [lib]
 name = "homeboy_core"
 path = "src/lib.rs"
@@ -41,7 +44,6 @@ homeboy-refactor-contract = { version = "0.1.0", path = "../contracts/homeboy-re
 homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit" }
 homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
 homeboy-lifecycle-contract = { version = "0.1.0", path = "../contracts/homeboy-lifecycle-contract" }
-homeboy-rig-contract = { version = "0.1.0", path = "../contracts/homeboy-rig-contract" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
 homeboy-lab-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-contract" }
 homeboy-lab-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-runner-contract" }
@@ -50,7 +52,6 @@ homeboy-redaction = { version = "0.1.0", path = "../homeboy-redaction" }
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_path_to_error = "0.1"
 serde_yml = "0.0.12"
 heck = "0.5"
 uuid = { version = "1.11", features = ["v4", "v5", "serde"] }
@@ -64,7 +65,6 @@ core-foundation-sys = "0.8"
 security-framework-sys = "2.17"
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "socks", "http2", "charset", "system-proxy"] }
 chrono = "0.4"
-ctrlc = "3.4"
 fs4 = "0.13"
 semver = "1.0"
 libc = "0.2"
@@ -72,7 +72,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json_path = "0.7"
 tempfile = "3.14"
 clap = { version = "4.5", features = ["derive", "string"] }
-toml = "1.0.3"
 sha2 = "0.10.9"
 
 [target.'cfg(windows)'.dependencies]
@@ -80,5 +79,4 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 
 [dev-dependencies]
 homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit", features = ["test-support"] }
-homeboy-release = { version = "0.1.0", path = "../homeboy-release" }
 homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }

@@ -14,15 +14,12 @@ path = "src/lib.rs"
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
-homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 semver = "1.0"
 regex = "1.11"
 toml = "1.0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "socks", "http2", "charset", "system-proxy"] }
-zip = "0.6"
-which = "6.0"
 libc = "0.2"
 tempfile = "3.14"
 
