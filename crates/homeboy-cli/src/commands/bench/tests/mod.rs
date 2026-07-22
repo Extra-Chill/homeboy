@@ -131,6 +131,10 @@ fn write_failing_bench_extension(home: &TempDir) {
         &script_path,
         r#"#!/bin/sh
 if [ "$HOMEBOY_BENCH_LIST_ONLY" = "1" ]; then
+  if [ "${HOMEBOY_BENCH_ITERATIONS:-0}" != "0" ]; then
+    printf 'DISCOVERY_MUST_NOT_EXECUTE_WORKLOAD\n' >&2
+    exit 99
+  fi
   cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
 {
   "component_id": "$HOMEBOY_COMPONENT_ID",

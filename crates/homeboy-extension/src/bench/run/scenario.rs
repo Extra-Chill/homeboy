@@ -149,7 +149,11 @@ pub(crate) fn discover_bench_scenarios(
         })?;
     }
 
-    let runner_output = build_runner(execution_context, component, args, run_dir, None)?
+    // Discovery has the same zero-iteration contract as `bench list`; some
+    // runners use this independently of HOMEBOY_BENCH_LIST_ONLY.
+    let mut discovery_args = args.clone();
+    discovery_args.iterations = 0;
+    let runner_output = build_runner(execution_context, component, &discovery_args, run_dir, None)?
         .env("HOMEBOY_BENCH_LIST_ONLY", "1")
         .run()?;
 
