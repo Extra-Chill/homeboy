@@ -73,6 +73,19 @@ pub trait RunnerEvidenceProvider: Send + Sync {
     /// Status of all known runners (connected or not).
     fn statuses(&self) -> Vec<RunnerConnectionInfo>;
 
+    /// A latency-bounded, read-only view of each runner's active jobs — no
+    /// generation reconcile, no per-generation network polling.
+    ///
+    /// `statuses()` reconciles the full generation ledger, which issues one
+    /// blocking HTTP call per draining generation and can take minutes on a
+    /// long-lived runner. Callers that only need the current/recent active-job
+    /// view (e.g. `homeboy activity`) use this instead so latency stays bounded
+    /// as generation history grows (#9522). The default falls back to
+    /// `statuses()` for providers that have no cheaper path (tests, no-ops).
+    fn statuses_indexed(&self) -> Vec<RunnerConnectionInfo> {
+        self.statuses()
+    }
+
     /// Raw GET against a runner's daemon API.
     fn daemon_api_get(&self, runner_id: &str, path: &str) -> Result<Value>;
 
@@ -362,6 +375,104 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
+    }
+
+    #[test]
+    fn statuses_indexed_defaults_to_statuses_and_honors_override() {
+        // Default: a provider with no cheaper path serves statuses_indexed from
+        // statuses (so `homeboy activity` still works for every provider).
+        struct DefaultProvider;
+        impl RunnerEvidenceProvider for DefaultProvider {
+            fn mirror_connected_runner_run(&self, _: &str) -> Result<Option<RunRecord>> {
+                Ok(None)
+            }
+            fn statuses(&self) -> Vec<RunnerConnectionInfo> {
+                vec![RunnerConnectionInfo {
+                    runner_id: "from-statuses".to_string(),
+                    connected: true,
+                    active_jobs: Vec::new(),
+                    stale_runner_jobs: Vec::new(),
+                }]
+            }
+            fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
+                Ok(Value::Null)
+            }
+            fn runner_artifact_content(&self, _: &str, _: &str, _: &str) -> Result<Value> {
+                Ok(Value::Null)
+            }
+            fn runner_job_cancel(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
+                unreachable!()
+            }
+            fn refresh_mirrored_daemon_evidence(&self, _: &str) -> Result<Option<Vec<RunRecord>>> {
+                Ok(None)
+            }
+            fn mirrored_runner_job_identity(&self, _: &RunRecord) -> Option<(String, String)> {
+                None
+            }
+            fn download_remote_artifact(
+                &self,
+                _: &str,
+                _: Option<PathBuf>,
+            ) -> Result<RemoteArtifactDownloadInfo> {
+                unreachable!()
+            }
+        }
+        let default = DefaultProvider;
+        assert_eq!(default.statuses_indexed().len(), 1);
+        assert_eq!(default.statuses_indexed()[0].runner_id, "from-statuses");
+
+        // Override: a provider with a cheaper indexed path uses it, NOT statuses.
+        // (statuses() here would panic — proving activity never calls it.)
+        struct IndexedProvider;
+        impl RunnerEvidenceProvider for IndexedProvider {
+            fn mirror_connected_runner_run(&self, _: &str) -> Result<Option<RunRecord>> {
+                Ok(None)
+            }
+            fn statuses(&self) -> Vec<RunnerConnectionInfo> {
+                panic!("statuses() must not be called on the indexed activity path");
+            }
+            fn statuses_indexed(&self) -> Vec<RunnerConnectionInfo> {
+                vec![RunnerConnectionInfo {
+                    runner_id: "from-indexed".to_string(),
+                    connected: true,
+                    active_jobs: Vec::new(),
+                    stale_runner_jobs: Vec::new(),
+                }]
+            }
+            fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
+                Ok(Value::Null)
+            }
+            fn runner_artifact_content(&self, _: &str, _: &str, _: &str) -> Result<Value> {
+                Ok(Value::Null)
+            }
+            fn runner_job_cancel(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
+                unreachable!()
+            }
+            fn refresh_mirrored_daemon_evidence(&self, _: &str) -> Result<Option<Vec<RunRecord>>> {
+                Ok(None)
+            }
+            fn mirrored_runner_job_identity(&self, _: &RunRecord) -> Option<(String, String)> {
+                None
+            }
+            fn download_remote_artifact(
+                &self,
+                _: &str,
+                _: Option<PathBuf>,
+            ) -> Result<RemoteArtifactDownloadInfo> {
+                unreachable!()
+            }
+        }
+        let indexed = IndexedProvider;
+        assert_eq!(indexed.statuses_indexed().len(), 1);
+        assert_eq!(indexed.statuses_indexed()[0].runner_id, "from-indexed");
     }
 
     #[test]

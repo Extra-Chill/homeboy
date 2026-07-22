@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.303.0] - 2026-07-22
+
+### Added
+- bound status generation ledger + add --generations detail flag ([#9478](https://github.com/Extra-Chill/homeboy/pull/9478)/[#9522](https://github.com/Extra-Chill/homeboy/pull/9522)) ([#9612](https://github.com/Extra-Chill/homeboy/pull/9612)) (by Chris Huber)
+
+### Fixed
+- preserve controller runtime pin across hosts ([#9611](https://github.com/Extra-Chill/homeboy/pull/9611)) (by Chris Huber)
+
+## [0.302.0] - 2026-07-22
+
+### Added
+- lead status with an authoritative admission summary ([#9478](https://github.com/Extra-Chill/homeboy/pull/9478)/[#9522](https://github.com/Extra-Chill/homeboy/pull/9522)) ([#9609](https://github.com/Extra-Chill/homeboy/pull/9609)) (by Chris Huber)
+
+### Fixed
+- package component-owned artifacts ([#9583](https://github.com/Extra-Chill/homeboy/pull/9583)) (by Chris Huber)
+- make reverse staging controller-owned ([#9581](https://github.com/Extra-Chill/homeboy/pull/9581)) (by Chris Huber)
+
 ## [0.301.2] - 2026-07-22
 
 ### Fixed

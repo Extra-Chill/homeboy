@@ -515,6 +515,38 @@ fn pin_current_unlocked() -> Result<Value> {
     pin_executable(&executable, &identity.display)
 }
 
+/// Pin the currently executing controller while participating in the FIFO
+/// admission queue.  Use this instead of `pin_current()` when concurrent cook
+/// requests must wait their turn rather than fast-fail.
+pub fn pin_current_queued(
+    request_id: &str,
+    cancellation_requested: impl Fn() -> Result<bool>,
+) -> Result<Value> {
+    let root = runtime_root()?;
+    let lock_path = root.join(ADMISSION_LOCK_DIR);
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "controller_admission",
+            "controller admission request ID is required",
+            None,
+            None,
+        ));
+    }
+    enqueue_admission_request(&lock_path, request_id)?;
+    let lock = match acquire_queued_admission_lock(&lock_path, request_id, &cancellation_requested)
+    {
+        Ok(lock) => lock,
+        Err(error) => {
+            let _ = remove_admission_request(&lock_path, request_id);
+            return Err(error);
+        }
+    };
+    let runtime = pin_current_unlocked()?;
+    drop(lock);
+    Ok(runtime)
+}
+
 fn current_executable() -> Result<PathBuf> {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(executable) = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV) {
@@ -3234,6 +3266,92 @@ mod tests {
             })
             .expect("apply");
             assert!(!tombstone.exists());
+        });
+    }
+
+    #[test]
+    fn concurrent_pin_current_queued_requests_queue_and_succeed_in_fifo_order() {
+        crate::test_support::with_isolated_home(|_| {
+            let first = admit_current_for("existing-owner").expect("hold initial admission");
+
+            let (a_enqueued, a_enqueued_result) = std::sync::mpsc::channel();
+            let (a_release, a_release_result) = std::sync::mpsc::channel();
+            let seal_a =
+                std::thread::spawn(move || match pin_current_queued("seal-a", || Ok(false)) {
+                    Ok(_runtime) => {
+                        let _ = a_enqueued.send(Ok(()));
+                        let _ = a_release_result.recv();
+                    }
+                    Err(error) => {
+                        let _ = a_enqueued.send(Err(error.message));
+                    }
+                });
+
+            let (b_enqueued, b_enqueued_result) = std::sync::mpsc::channel();
+            let b_handle =
+                std::thread::spawn(move || match pin_current_queued("seal-b", || Ok(false)) {
+                    Ok(_runtime) => {
+                        let _ = b_enqueued.send(Ok(()));
+                    }
+                    Err(error) => {
+                        let _ = b_enqueued.send(Err(error.message));
+                    }
+                });
+
+            let waiting_a = (0..40)
+                .map(|_| {
+                    let status = admission_status("seal-a").expect("seal-a status");
+                    if status["state"] == "waiting" {
+                        Some(status)
+                    } else {
+                        std::thread::sleep(Duration::from_millis(25));
+                        None
+                    }
+                })
+                .find_map(|status| status)
+                .expect("seal-a queues behind existing owner");
+            assert_eq!(waiting_a["position"], 2);
+
+            let waiting_b = (0..40)
+                .map(|_| {
+                    let status = admission_status("seal-b").expect("seal-b status");
+                    if status["state"] == "waiting" {
+                        Some(status)
+                    } else {
+                        std::thread::sleep(Duration::from_millis(25));
+                        None
+                    }
+                })
+                .find_map(|status| status)
+                .expect("seal-b queues behind seal-a");
+            assert_eq!(waiting_b["position"], 3);
+
+            drop(first);
+
+            assert_eq!(
+                a_enqueued_result
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("seal-a resolves"),
+                Ok(())
+            );
+            assert_eq!(
+                admission_status("seal-a").expect("seal-a admitted")["state"],
+                "admitted"
+            );
+            a_release.send(()).expect("release seal-a");
+            seal_a.join().expect("seal-a thread exits");
+
+            assert_eq!(
+                b_enqueued_result
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("seal-b resolves"),
+                Ok(())
+            );
+            assert_eq!(
+                admission_status("seal-b").expect("seal-b admitted")["state"],
+                "admitted"
+            );
+            b_handle.join().expect("seal-b thread exits");
         });
     }
 }

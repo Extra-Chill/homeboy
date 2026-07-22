@@ -198,11 +198,12 @@ pub use rolling_generation::{
 pub use runtime_materialization_status::{RunnerBinarySource, RuntimeMaterializationStatus};
 pub use session::{
     LabRunnerHandoff, ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource,
-    RunnerActiveJobState, RunnerArtifactRef, RunnerAvailability, RunnerChangedRuntimePath,
-    RunnerConnectReport, RunnerDaemonGenerationStatus, RunnerDisconnectReport, RunnerFailureKind,
-    RunnerJob, RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence,
-    RunnerLifecycleOwner, RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRecoveryState,
-    RunnerResult, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerActiveJobState, RunnerActiveJobsSnapshot, RunnerAdmissionSummary, RunnerArtifactRef,
+    RunnerAvailability, RunnerChangedRuntimePath, RunnerConnectReport,
+    RunnerDaemonGenerationStatus, RunnerDisconnectReport, RunnerFailureKind, RunnerJob,
+    RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner,
+    RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
     RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceLease,
     RunnerWorkspaceLeaseSet,
 };

@@ -165,6 +165,37 @@ fn materialized_workspace_preserve_disarms_reap_even_on_success() {
 }
 
 #[test]
+fn delete_always_workspace_preserved_on_retryable_admission_failure_is_not_reaped() {
+    // #9469: the Lab offload workspace uses DeleteAlways so genuine terminal
+    // outcomes always release the admitted rig/extension snapshots. But a
+    // retryable pre-acceptance admission failure calls preserve() on it so the
+    // already-staged rig install/sync + snapshots survive for a retry to resume
+    // — even under DeleteAlways. Proves preserve() disarms the reap the offload
+    // path would otherwise perform.
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let remote_path = sync_local_workspace("lab-local-mat-retry", runner_root.path());
+
+        {
+            let mut handle = MaterializedWorkspace::new(
+                "lab-local-mat-retry".to_string(),
+                remote_path.clone(),
+                None,
+                WorkspaceCleanupPolicy::DeleteAlways,
+            );
+            // A retryable admission failure preserves the prepared workspace.
+            handle.preserve();
+        } // drop must NOT reap despite DeleteAlways
+
+        assert!(
+            Path::new(&remote_path).exists(),
+            "a retryable admission failure must preserve the prepared workspace for resume, \
+             even under DeleteAlways"
+        );
+    });
+}
+
+#[test]
 fn materialized_workspace_preserve_always_policy_never_reaps() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");

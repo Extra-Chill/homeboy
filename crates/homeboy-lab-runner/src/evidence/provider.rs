@@ -75,6 +75,22 @@ impl RunnerEvidenceProvider for RunnerEvidence {
             .collect()
     }
 
+    fn statuses_indexed(&self) -> Vec<RunnerConnectionInfo> {
+        // Read-only persisted active jobs, no generation reconcile (#9522).
+        // Stale-runner-job detection is a reconcile concern, so the indexed view
+        // reports active jobs only; callers needing stale jobs use `statuses()`.
+        super::super::connection::statuses_indexed()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|snapshot| RunnerConnectionInfo {
+                runner_id: snapshot.runner_id,
+                connected: snapshot.connected,
+                active_jobs: snapshot.active_jobs,
+                stale_runner_jobs: Vec::new(),
+            })
+            .collect()
+    }
+
     fn daemon_api_get(&self, runner_id: &str, path: &str) -> Result<Value> {
         super::super::execution::daemon_api_get(runner_id, path)
     }

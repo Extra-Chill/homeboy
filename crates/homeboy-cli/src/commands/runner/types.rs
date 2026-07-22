@@ -4,8 +4,9 @@ use serde_json::Value;
 use homeboy::core::api_jobs::{Job, JobEvent};
 use homeboy::core::EntityCrudOutput;
 use homeboy::runner::runners::{
-    ReverseRunnerWorkerOutput, Runner, RunnerAvailability, RunnerConnectReport,
-    RunnerDaemonGenerationStatus, RunnerDisconnectReport, RunnerExecOutput, RunnerStatusReport,
+    ReverseRunnerWorkerOutput, Runner, RunnerAdmissionSummary, RunnerAvailability,
+    RunnerConnectReport, RunnerDaemonGenerationStatus, RunnerDisconnectReport, RunnerExecOutput,
+    RunnerStatusReport,
 };
 
 use std::collections::BTreeMap;
@@ -27,6 +28,10 @@ pub struct RunnerExtra {
     pub managed_followups: Vec<LabFollowup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection: Option<RunnerConnectionOutput>,
+    /// The compact authoritative "ready now / safe to rotate" answer. Leads the
+    /// status output; the full generation inventory below is detail behind it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission_summary: Option<RunnerAdmissionSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<RunnerStatusReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -45,6 +50,7 @@ impl Default for RunnerExtra {
             selected_lab_runner: None,
             managed_followups: Vec::new(),
             connection: None,
+            admission_summary: None,
             sessions: Vec::new(),
             generation_inventory: Vec::new(),
             operator_hints: Vec::new(),
