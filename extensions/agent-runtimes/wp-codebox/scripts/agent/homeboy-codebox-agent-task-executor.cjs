@@ -67,11 +67,21 @@ function requireWpCodeboxCoreLoader() {
 
   return {
     async loadWpCodeboxCore(options = {}) {
-      const moduleCandidates = [
+      const explicitCandidates = [
         process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE,
         process.env.WP_CODEBOX_CORE_MODULE,
-        ...(options.packageCandidates || []),
       ].filter(Boolean);
+      const installDir = process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(process.env.HOME || '', '.cache', 'homeboy', 'wp-codebox');
+      const managedDistDirs = [
+        ...explicitCandidates.filter(isPathLike).map((candidate) => path.dirname(path.resolve(candidate))),
+        path.join(installDir, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist'),
+        path.join(installDir, 'release', 'wp-codebox-cli', 'node_modules', '@automattic', 'wp-codebox-core', 'dist'),
+      ];
+      const moduleCandidates = [
+        ...managedDistDirs.flatMap((directory) => (options.packageDistEntries || []).map((entry) => path.join(directory, entry))),
+        ...explicitCandidates,
+        ...(options.packageCandidates || []),
+      ].filter(Boolean).filter((candidate, index, all) => all.indexOf(candidate) === index);
       const errors = [];
       for (const candidate of moduleCandidates) {
         try {

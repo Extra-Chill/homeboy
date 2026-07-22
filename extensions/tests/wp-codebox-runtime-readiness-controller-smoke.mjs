@@ -10,6 +10,7 @@ const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hbe-codebox-runtime-read
 const executor = path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs');
 const providerReadiness = path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'scripts', 'agent', 'homeboy-codebox-provider-readiness.cjs');
 const coreModule = path.join(rootDir, 'wordpress', 'tests', 'fixtures', 'wp-codebox-core-agent-task-normalizer.mjs');
+const runtimeContractFixture = path.join(rootDir, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 
 try {
   const overlayRoot = path.join(tempRoot, 'php-ai-client');
@@ -85,6 +86,26 @@ process.stdout.write(JSON.stringify({ success: true, status: 'completed' }));
   assert.equal(diagnostic.data.setup_command, `composer install --working-dir=${overlayRoot}`);
   assert.equal(diagnostic.data.owner_surface, 'wp-codebox-runtime-integration');
   assert.equal(fs.existsSync(capture), false, 'task runner is not spawned when runtime readiness fails');
+
+  const managedInstall = path.join(tempRoot, 'managed-wp-codebox');
+  const managedCoreDist = path.join(managedInstall, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist');
+  fs.mkdirSync(managedCoreDist, { recursive: true });
+  fs.writeFileSync(path.join(managedCoreDist, 'contracts.js'), `module.exports = require(${JSON.stringify(runtimeContractFixture)});\n`);
+  fs.writeFileSync(path.join(managedCoreDist, 'run-results.js'), 'module.exports = {};\n');
+  const managedResult = spawnSync(process.execPath, [executor, '--task-runner', runner], {
+    encoding: 'utf8',
+    input: JSON.stringify(request),
+    env: {
+      ...process.env,
+      HOMEBOY_WP_CODEBOX_INSTALL_DIR: managedInstall,
+      HOMEBOY_WP_CODEBOX_CORE_MODULE: '',
+      WP_CODEBOX_CORE_MODULE: '',
+    },
+  });
+  assert.equal(managedResult.status, 1, managedResult.stderr || managedResult.stdout);
+  const managedOutcome = JSON.parse(managedResult.stdout);
+  assert.ok(managedOutcome.diagnostics.some((entry) => entry.class === 'codebox.preflight.runtime_overlay_dependency_unprepared'));
+  assert.equal(fs.existsSync(capture), false, 'managed run-results resolution still stops before task runner spawn');
 
   const injectionRequest = {
     schema: 'homeboy/agent-task-request/v1',
