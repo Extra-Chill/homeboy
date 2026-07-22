@@ -11,6 +11,7 @@ use crate::agent_task_lifecycle;
 use crate::agent_task_lifecycle::{status as lifecycle_status, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
 use crate::agent_task_scheduler::{
+    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry,
     AgentTaskProviderRotationPolicy, AgentTaskScheduler, AgentTaskState,
 };
@@ -52,6 +53,145 @@ fn cook_usage_reads_scheduler_rotation_metadata_and_decrements_budget() {
     assert_eq!(usage.provider_rotations, 1);
     assert_eq!(remaining.max_provider_executions, 1);
     assert_eq!(remaining.max_provider_rotations, 0);
+}
+
+#[test]
+fn terminal_executor_uses_durable_execution_when_outcome_executor_is_absent() {
+    let mut plan = test_plan();
+    plan.tasks[0].executor.model = Some("openai/gpt-5.6-terra".to_string());
+    let aggregate = aggregate_with_outcome(serde_json::json!({}));
+    let follow_up = plan.tasks[0].executor.clone();
+    let durable = serde_json::json!([{
+        "task_id": "service-task",
+        "attempt": 1,
+        "backend": "test",
+        "model": "openai/gpt-5.6-terra",
+        "state": "succeeded"
+    }]);
+
+    assert_eq!(
+        terminal_executor_matches(&aggregate, &plan, Some(&durable), &follow_up),
+        Some(true)
+    );
+}
+
+#[test]
+fn terminal_executor_preserves_normalized_outcome_identity() {
+    let mut plan = test_plan();
+    plan.tasks[0].executor.model = Some("normalized-model".to_string());
+    let aggregate = aggregate_with_outcome(serde_json::json!({
+        "executor": {
+            "backend": "test",
+            "selector": "service",
+            "model": "normalized-model"
+        }
+    }));
+
+    assert_eq!(
+        terminal_executor_matches(&aggregate, &plan, None, &plan.tasks[0].executor),
+        Some(true)
+    );
+
+    let conflicting = serde_json::json!([{
+        "task_id": "service-task",
+        "attempt": 1,
+        "backend": "other",
+        "model": "normalized-model",
+        "state": "succeeded"
+    }]);
+    assert_eq!(
+        terminal_executor_matches(
+            &aggregate,
+            &plan,
+            Some(&conflicting),
+            &plan.tasks[0].executor
+        ),
+        None
+    );
+}
+
+#[test]
+fn terminal_executor_uses_rotated_terminal_identity_not_initial_plan() {
+    let mut plan = test_plan();
+    plan.tasks[0].executor.model = Some("initial-model".to_string());
+    let aggregate = aggregate_with_outcome(serde_json::json!({
+        "provider_rotation": {
+            "attempts": [{
+                "attempt": 1,
+                "rotation_index": 0,
+                "backend": "rotated",
+                "selector": "terminal-selector",
+                "model": "terminal-model",
+                "status": "succeeded",
+                "summary": null
+            }]
+        }
+    }));
+    let durable = serde_json::json!([{
+        "task_id": "service-task",
+        "attempt": 1,
+        "backend": "rotated",
+        "model": "terminal-model",
+        "state": "succeeded"
+    }]);
+    let mut follow_up = plan.tasks[0].executor.clone();
+    follow_up.backend = "rotated".to_string();
+    follow_up.selector = Some("terminal-selector".to_string());
+    follow_up.model = Some("terminal-model".to_string());
+
+    assert_eq!(
+        terminal_executor_matches(&aggregate, &plan, Some(&durable), &follow_up),
+        Some(true)
+    );
+    assert_eq!(
+        terminal_executor_matches(&aggregate, &plan, Some(&durable), &plan.tasks[0].executor),
+        Some(false)
+    );
+}
+
+#[test]
+fn terminal_executor_rejects_conflicting_or_unavailable_authority() {
+    let mut plan = test_plan();
+    plan.tasks[0].executor.model = Some("initial-model".to_string());
+    let aggregate = aggregate_with_outcome(serde_json::json!({
+        "provider_rotation": {
+            "attempts": [{
+                "attempt": 1,
+                "rotation_index": 0,
+                "backend": "rotated",
+                "selector": "terminal-selector",
+                "model": "terminal-model",
+                "status": "succeeded",
+                "summary": null
+            }]
+        }
+    }));
+    let conflicting = serde_json::json!([{
+        "task_id": "service-task",
+        "attempt": 1,
+        "backend": "other",
+        "model": "terminal-model",
+        "state": "succeeded"
+    }]);
+
+    assert_eq!(
+        terminal_executor_matches(
+            &aggregate,
+            &plan,
+            Some(&conflicting),
+            &plan.tasks[0].executor
+        ),
+        None
+    );
+    assert_eq!(
+        terminal_executor_matches(
+            &aggregate_with_outcome(serde_json::json!({})),
+            &plan,
+            None,
+            &plan.tasks[0].executor,
+        ),
+        None
+    );
 }
 
 #[test]
@@ -1166,6 +1306,38 @@ fn test_plan() -> AgentTaskPlan {
             metadata: Value::Null,
         }],
     )
+}
+
+fn aggregate_with_outcome(metadata: Value) -> AgentTaskAggregate {
+    AgentTaskAggregate {
+        schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+        plan_id: "service-plan".to_string(),
+        status: AgentTaskAggregateStatus::Succeeded,
+        totals: AgentTaskAggregateTotals {
+            succeeded: 1,
+            ..Default::default()
+        },
+        outcomes: vec![AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: "service-task".to_string(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: None,
+            failure_classification: None,
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata,
+        }],
+        events: Vec::new(),
+        artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
+        queue: Default::default(),
+    }
 }
 
 fn discovery_plan() -> AgentTaskPlan {
