@@ -50,155 +50,6 @@ impl ObservationOutputMetadata {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_for_run() {
-        let metadata = ObservationOutputMetadata::for_run("review", "run-123");
-        let json = serde_json::to_value(metadata).expect("serialize observation metadata");
-
-        assert_eq!(json["schema"], "homeboy/observation-pointer/v1");
-        assert_eq!(json["run_id"], "run-123");
-        assert_eq!(json["kind"], "review");
-        assert_eq!(json["details"]["query"], "homeboy runs show run-123");
-        assert_eq!(
-            json["details"]["artifacts"],
-            "homeboy runs artifacts run-123"
-        );
-        assert_eq!(
-            json["details"]["export_bundle"],
-            "homeboy runs export --run run-123 --output ~/.local/share/homeboy/exports/run-123"
-        );
-    }
-
-    #[test]
-    fn test_exit_code() {
-        let clean = BatchResult::new();
-        assert_eq!(clean.exit_code(), 0);
-
-        let mut failed = BatchResult::new();
-        failed.record_error("item".to_string(), "failed".to_string());
-        assert_eq!(failed.exit_code(), 1);
-    }
-
-    #[test]
-    fn test_record_created() {
-        let mut result = BatchResult::new();
-        result.record_created("alpha".to_string());
-
-        assert_eq!(result.created, 1);
-        assert_eq!(result.items[0].id, "alpha");
-        assert_eq!(result.items[0].status, "created");
-        assert_eq!(result.items[0].error, None);
-    }
-
-    #[test]
-    fn test_record_updated() {
-        let mut result = BatchResult::new();
-        result.record_updated("alpha".to_string());
-
-        assert_eq!(result.updated, 1);
-        assert_eq!(result.items[0].id, "alpha");
-        assert_eq!(result.items[0].status, "updated");
-        assert_eq!(result.items[0].error, None);
-    }
-
-    #[test]
-    fn test_record_skipped() {
-        let mut result = BatchResult::new();
-        result.record_skipped("alpha".to_string());
-
-        assert_eq!(result.skipped, 1);
-        assert_eq!(result.items[0].id, "alpha");
-        assert_eq!(result.items[0].status, "skipped");
-        assert_eq!(result.items[0].error, None);
-    }
-
-    #[test]
-    fn test_record_error() {
-        let mut result = BatchResult::new();
-        result.record_error("alpha".to_string(), "boom".to_string());
-
-        assert_eq!(result.errors, 1);
-        assert_eq!(result.items[0].id, "alpha");
-        assert_eq!(result.items[0].status, "error");
-        assert_eq!(result.items[0].error.as_deref(), Some("boom"));
-    }
-
-    #[test]
-    fn batch_outcome_totals_cover_success_partial_failure_skipped_and_empty() {
-        let empty = BatchResult::new();
-        assert_eq!(empty.outcome_totals(), OutcomeTotals::default());
-
-        let mut result = BatchResult::new();
-        result.record_created("created".to_string());
-        result.record_updated("updated".to_string());
-        result.record_skipped("skipped".to_string());
-        result.record_error("failed".to_string(), "boom".to_string());
-
-        assert_eq!(
-            result.outcome_totals(),
-            OutcomeTotals {
-                total: 4,
-                succeeded: 2,
-                failed: 1,
-                skipped: 1,
-            }
-        );
-        assert_eq!(result.exit_code(), 1);
-    }
-
-    #[test]
-    fn bulk_result_builds_summary_without_changing_json_shape() {
-        let output = BulkResult::new(
-            "fixture",
-            vec![
-                ItemOutcome::success("alpha", json!({ "value": 1 })),
-                ItemOutcome::error("beta", "boom"),
-            ],
-        );
-
-        let serialized = serde_json::to_value(output).expect("serialize bulk result");
-        assert_eq!(serialized["action"], "fixture");
-        assert_eq!(serialized["summary"]["total"], 2);
-        assert_eq!(serialized["summary"]["succeeded"], 1);
-        assert_eq!(serialized["summary"]["failed"], 1);
-        assert!(serialized["summary"].get("skipped").is_none());
-        assert_eq!(serialized["results"][0]["id"], "alpha");
-        assert_eq!(serialized["results"][0]["value"], 1);
-        assert_eq!(serialized["results"][1]["id"], "beta");
-        assert_eq!(serialized["results"][1]["error"], "boom");
-    }
-
-    #[test]
-    fn bulk_builder_counts_failed_results_without_changing_item_shape() {
-        let mut builder = BulkResultBuilder::new("fixture");
-        builder.record_success("alpha", json!({ "success": true }));
-        builder.record_failed_result("beta", json!({ "success": false }));
-
-        let serialized = serde_json::to_value(builder.finish()).expect("serialize bulk result");
-        assert_eq!(serialized["summary"]["total"], 2);
-        assert_eq!(serialized["summary"]["succeeded"], 1);
-        assert_eq!(serialized["summary"]["failed"], 1);
-        assert_eq!(serialized["results"][1]["id"], "beta");
-        assert_eq!(serialized["results"][1]["success"], false);
-        assert!(serialized["results"][1].get("error").is_none());
-    }
-
-    #[test]
-    fn bulk_result_handles_empty_results() {
-        let output = BulkResult::<serde_json::Value>::new("fixture", Vec::new());
-
-        assert_eq!(output.summary.total, 0);
-        assert_eq!(output.summary.succeeded, 0);
-        assert_eq!(output.summary.failed, 0);
-        assert!(output.results.is_empty());
-    }
-}
-
 // ============================================================================
 // Create Operations
 // ============================================================================
@@ -529,5 +380,154 @@ impl<T: Serialize, E: Serialize + Default> Default for EntityCrudOutput<T, E> {
             hint: None,
             extra: E::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_for_run() {
+        let metadata = ObservationOutputMetadata::for_run("review", "run-123");
+        let json = serde_json::to_value(metadata).expect("serialize observation metadata");
+
+        assert_eq!(json["schema"], "homeboy/observation-pointer/v1");
+        assert_eq!(json["run_id"], "run-123");
+        assert_eq!(json["kind"], "review");
+        assert_eq!(json["details"]["query"], "homeboy runs show run-123");
+        assert_eq!(
+            json["details"]["artifacts"],
+            "homeboy runs artifacts run-123"
+        );
+        assert_eq!(
+            json["details"]["export_bundle"],
+            "homeboy runs export --run run-123 --output ~/.local/share/homeboy/exports/run-123"
+        );
+    }
+
+    #[test]
+    fn test_exit_code() {
+        let clean = BatchResult::new();
+        assert_eq!(clean.exit_code(), 0);
+
+        let mut failed = BatchResult::new();
+        failed.record_error("item".to_string(), "failed".to_string());
+        assert_eq!(failed.exit_code(), 1);
+    }
+
+    #[test]
+    fn test_record_created() {
+        let mut result = BatchResult::new();
+        result.record_created("alpha".to_string());
+
+        assert_eq!(result.created, 1);
+        assert_eq!(result.items[0].id, "alpha");
+        assert_eq!(result.items[0].status, "created");
+        assert_eq!(result.items[0].error, None);
+    }
+
+    #[test]
+    fn test_record_updated() {
+        let mut result = BatchResult::new();
+        result.record_updated("alpha".to_string());
+
+        assert_eq!(result.updated, 1);
+        assert_eq!(result.items[0].id, "alpha");
+        assert_eq!(result.items[0].status, "updated");
+        assert_eq!(result.items[0].error, None);
+    }
+
+    #[test]
+    fn test_record_skipped() {
+        let mut result = BatchResult::new();
+        result.record_skipped("alpha".to_string());
+
+        assert_eq!(result.skipped, 1);
+        assert_eq!(result.items[0].id, "alpha");
+        assert_eq!(result.items[0].status, "skipped");
+        assert_eq!(result.items[0].error, None);
+    }
+
+    #[test]
+    fn test_record_error() {
+        let mut result = BatchResult::new();
+        result.record_error("alpha".to_string(), "boom".to_string());
+
+        assert_eq!(result.errors, 1);
+        assert_eq!(result.items[0].id, "alpha");
+        assert_eq!(result.items[0].status, "error");
+        assert_eq!(result.items[0].error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn batch_outcome_totals_cover_success_partial_failure_skipped_and_empty() {
+        let empty = BatchResult::new();
+        assert_eq!(empty.outcome_totals(), OutcomeTotals::default());
+
+        let mut result = BatchResult::new();
+        result.record_created("created".to_string());
+        result.record_updated("updated".to_string());
+        result.record_skipped("skipped".to_string());
+        result.record_error("failed".to_string(), "boom".to_string());
+
+        assert_eq!(
+            result.outcome_totals(),
+            OutcomeTotals {
+                total: 4,
+                succeeded: 2,
+                failed: 1,
+                skipped: 1,
+            }
+        );
+        assert_eq!(result.exit_code(), 1);
+    }
+
+    #[test]
+    fn bulk_result_builds_summary_without_changing_json_shape() {
+        let output = BulkResult::new(
+            "fixture",
+            vec![
+                ItemOutcome::success("alpha", json!({ "value": 1 })),
+                ItemOutcome::error("beta", "boom"),
+            ],
+        );
+
+        let serialized = serde_json::to_value(output).expect("serialize bulk result");
+        assert_eq!(serialized["action"], "fixture");
+        assert_eq!(serialized["summary"]["total"], 2);
+        assert_eq!(serialized["summary"]["succeeded"], 1);
+        assert_eq!(serialized["summary"]["failed"], 1);
+        assert!(serialized["summary"].get("skipped").is_none());
+        assert_eq!(serialized["results"][0]["id"], "alpha");
+        assert_eq!(serialized["results"][0]["value"], 1);
+        assert_eq!(serialized["results"][1]["id"], "beta");
+        assert_eq!(serialized["results"][1]["error"], "boom");
+    }
+
+    #[test]
+    fn bulk_builder_counts_failed_results_without_changing_item_shape() {
+        let mut builder = BulkResultBuilder::new("fixture");
+        builder.record_success("alpha", json!({ "success": true }));
+        builder.record_failed_result("beta", json!({ "success": false }));
+
+        let serialized = serde_json::to_value(builder.finish()).expect("serialize bulk result");
+        assert_eq!(serialized["summary"]["total"], 2);
+        assert_eq!(serialized["summary"]["succeeded"], 1);
+        assert_eq!(serialized["summary"]["failed"], 1);
+        assert_eq!(serialized["results"][1]["id"], "beta");
+        assert_eq!(serialized["results"][1]["success"], false);
+        assert!(serialized["results"][1].get("error").is_none());
+    }
+
+    #[test]
+    fn bulk_result_handles_empty_results() {
+        let output = BulkResult::<serde_json::Value>::new("fixture", Vec::new());
+
+        assert_eq!(output.summary.total, 0);
+        assert_eq!(output.summary.succeeded, 0);
+        assert_eq!(output.summary.failed, 0);
+        assert!(output.results.is_empty());
     }
 }
