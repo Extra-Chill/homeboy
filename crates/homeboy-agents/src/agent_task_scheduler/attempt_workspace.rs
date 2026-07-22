@@ -72,13 +72,19 @@ impl HarvestExecutionContext {
         &self,
     ) -> Result<homeboy_core::source_snapshot::SourceSnapshot, HarvestError> {
         self.source_snapshot.clone().ok_or_else(|| {
-            snapshot_harvest_error("is missing source snapshot transport metadata".to_string())
+            snapshot_harvest_error(
+                Path::new("<snapshot>"),
+                "is missing source snapshot transport metadata".to_string(),
+            )
         })
     }
 
     fn lab_offload(&self) -> Result<serde_json::Value, HarvestError> {
         self.lab_offload.clone().ok_or_else(|| {
-            snapshot_harvest_error("is missing Lab dispatch transport metadata".to_string())
+            snapshot_harvest_error(
+                Path::new("<snapshot>"),
+                "is missing Lab dispatch transport metadata".to_string(),
+            )
         })
     }
 }
@@ -194,18 +200,20 @@ pub(super) fn prepare_committed_harvest(
                     is_repository,
                 )
             })
-            .map_err(snapshot_harvest_error)?;
+            .map_err(|msg| snapshot_harvest_error(root, msg))?;
         if is_repository {
             // git-root verification is folded into verify_lab_workspace above via
             // require_git_root = is_repository.
         } else {
             if provenance.materialization_mode == "git" {
                 return Err(snapshot_harvest_error(
+                    root,
                     "verified Git materialization is missing root Git metadata".to_string(),
                 ));
             }
             if root.join(".git").exists() {
                 return Err(snapshot_harvest_error(
+                    root,
                     "snapshot workspace unexpectedly contains root .git metadata".to_string(),
                 ));
             }
@@ -213,10 +221,13 @@ pub(super) fn prepare_committed_harvest(
                 provenance.materialization_mode.as_str(),
                 "snapshot" | "filesystem_snapshot" | "snapshot-git"
             ) {
-                return Err(snapshot_harvest_error(format!(
-                    "unsupported snapshot materialization mode `{}`",
-                    provenance.materialization_mode
-                )));
+                return Err(snapshot_harvest_error(
+                    root,
+                    format!(
+                        "unsupported snapshot materialization mode `{}`",
+                        provenance.materialization_mode
+                    ),
+                ));
             }
         }
         let mut source_provenance = serde_json::json!({
@@ -254,12 +265,14 @@ pub(super) fn prepare_committed_harvest(
         })
         .map_err(|message| HarvestError::Git {
             command: "materialize verified Lab snapshot Git baseline".to_string(),
+            cwd: root.to_path_buf(),
             message,
         })?;
     }
     let git_root = git_output(root, &["rev-parse", "--show-toplevel"])?;
     let canonical_root = root.canonicalize().map_err(|error| HarvestError::Git {
         command: "canonicalize workspace root".to_string(),
+        cwd: root.to_path_buf(),
         message: error.to_string(),
     })?;
     let canonical_git_root =
@@ -267,11 +280,13 @@ pub(super) fn prepare_committed_harvest(
             .canonicalize()
             .map_err(|error| HarvestError::Git {
                 command: "canonicalize Git top-level".to_string(),
+                cwd: root.to_path_buf(),
                 message: error.to_string(),
             })?;
     if canonical_root != canonical_git_root {
         return Err(HarvestError::Git {
             command: "verify Git top-level ownership".to_string(),
+            cwd: root.to_path_buf(),
             message: "Git top-level does not exactly match the managed workspace root".to_string(),
         });
     }
@@ -334,6 +349,7 @@ fn verified_initial_cook_candidate_baseline(
     }
     let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
         command: "create initial Cook candidate verification index".to_string(),
+        cwd: root.to_path_buf(),
         message: error.to_string(),
     })?;
     let index_path = index.path().display().to_string();
@@ -408,6 +424,7 @@ fn verified_preexisting_cook_baseline(
 fn workspace_patch_for_tree(root: &Path, expected_tree: &str) -> Result<String, HarvestError> {
     let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
         command: "create Cook baseline Git index".to_string(),
+        cwd: root.to_path_buf(),
         message: error.to_string(),
     })?;
     let index_path = index.path().display().to_string();
@@ -419,6 +436,7 @@ fn workspace_patch_for_tree(root: &Path, expected_tree: &str) -> Result<String, 
             .output()
             .map_err(|error| HarvestError::Git {
                 command: args.join(" "),
+                cwd: root.to_path_buf(),
                 message: error.to_string(),
             })?;
         if output.status.success() {
@@ -488,9 +506,10 @@ fn verified_gate_feedback_baseline(
     Ok(CandidateBaseline { patch })
 }
 
-fn snapshot_harvest_error(message: String) -> HarvestError {
+fn snapshot_harvest_error(cwd: &Path, message: String) -> HarvestError {
     HarvestError::Git {
         command: "verify Lab snapshot harvest provenance".to_string(),
+        cwd: cwd.to_path_buf(),
         message,
     }
 }
@@ -502,12 +521,13 @@ fn validate_derived_cook_baseline(
     context: &HarvestExecutionContext,
 ) -> Result<(), HarvestError> {
     let canonical_root = root.canonicalize().map_err(|error| {
-        snapshot_harvest_error(format!("canonicalize derived baseline root: {error}"))
+        snapshot_harvest_error(root, format!("canonicalize derived baseline root: {error}"))
     })?;
     if canonical_root != capability.canonical_path()
         || request.task_id != capability.bound_task_id()
     {
         return Err(snapshot_harvest_error(
+            root,
             "derived baseline capability does not bind this workspace and task".to_string(),
         ));
     }
@@ -519,19 +539,22 @@ fn validate_derived_cook_baseline(
     let tree = git_output(root, &["rev-parse", "HEAD^{tree}"])?;
     if head != capability.commit() || tree != capability.tree() {
         return Err(snapshot_harvest_error(
+            root,
             "derived baseline HEAD/tree does not match its internal contract".to_string(),
         ));
     }
     if let Some(parent_snapshot) = capability.parent_snapshot() {
         let ambient = serde_json::to_value(context.source_snapshot()?)
-            .map_err(|error| snapshot_harvest_error(error.to_string()))?;
+            .map_err(|error| snapshot_harvest_error(root, error.to_string()))?;
         if parent_snapshot != &ambient {
             return Err(snapshot_harvest_error(
+                root,
                 "derived baseline parent snapshot does not match ambient snapshot".to_string(),
             ));
         }
     } else if context.source_snapshot.is_some() {
         return Err(snapshot_harvest_error(
+            root,
             "derived baseline is missing its Lab parent snapshot".to_string(),
         ));
     }
@@ -636,10 +659,12 @@ fn apply_gate_feedback_baseline(
 ) -> Result<(), HarvestError> {
     let patch = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
         command: "create gate-feedback baseline patch".to_string(),
+        cwd: root.to_path_buf(),
         message: error.to_string(),
     })?;
     std::fs::write(patch.path(), &baseline.patch).map_err(|error| HarvestError::Git {
         command: "write gate-feedback baseline patch".to_string(),
+        cwd: root.to_path_buf(),
         message: error.to_string(),
     })?;
     let patch_path = patch.path().display().to_string();

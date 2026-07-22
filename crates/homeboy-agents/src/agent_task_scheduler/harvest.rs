@@ -201,22 +201,51 @@ fn harvest_committed_patch_with_metadata(
     let Some(attempt_root) = running.request.workspace.root.as_deref().map(Path::new) else {
         return Ok(());
     };
-    let mut root = attempt_root;
+
+    // Resolve the harvest root resiliently: prefer the attempt scratch workspace,
+    // but fall back to the durable source workspace when the attempt directory has
+    // been reaped (e.g. multi-attempt cook lifecycle). A missing or non-repo cwd
+    // is not fatal — it just means the attempt scratch is unavailable.
+    let attempt_is_repo = git_is_repository(attempt_root)?;
+    let mut root = if attempt_is_repo {
+        attempt_root
+    } else if let Some(source_root) = running
+        .source_workspace_root
+        .as_deref()
+        .map(Path::new)
+        .filter(|source_root| source_root != &attempt_root)
+    {
+        if git_is_repository(source_root)? {
+            source_root
+        } else {
+            return Ok(());
+        }
+    } else {
+        return Ok(());
+    };
+
     let mut head = git_output(root, &["rev-parse", "HEAD"])?;
     if head == base {
-        if let Some(source_root) = running
-            .source_workspace_root
-            .as_deref()
-            .map(Path::new)
-            .filter(|source_root| source_root != &attempt_root)
-        {
-            let source_head = git_output(source_root, &["rev-parse", "HEAD"])?;
-            if source_head != base {
-                // The scheduler owns this bounded Git-derived patch. It is not
-                // a provider-declared runtime file, even though its source
-                // checkout differs from the isolated execution checkout.
-                root = source_root;
-                head = source_head;
+        // When the attempt root was valid but had no new commits, check the
+        // durable source workspace for commits beyond base.
+        if root == attempt_root {
+            if let Some(source_root) = running
+                .source_workspace_root
+                .as_deref()
+                .map(Path::new)
+                .filter(|source_root| source_root != &attempt_root)
+            {
+                if git_is_repository(source_root)? {
+                    let source_head = git_output(source_root, &["rev-parse", "HEAD"])?;
+                    if source_head != base {
+                        root = source_root;
+                        head = source_head;
+                    } else {
+                        return Ok(());
+                    }
+                } else {
+                    return Ok(());
+                }
             } else {
                 return Ok(());
             }
@@ -405,20 +434,33 @@ fn git_is_ancestor(cwd: &Path, base: &str, head: &str) -> Result<bool, HarvestEr
         .output()
         .map_err(|error| HarvestError::Git {
             command: format!("git merge-base --is-ancestor {base} {head}"),
+            cwd: cwd.to_path_buf(),
             message: error.to_string(),
         })?;
     Ok(output.status.success())
 }
 
 pub(super) fn git_is_repository(cwd: &Path) -> Result<bool, HarvestError> {
-    let output = Command::new("git")
+    let output = match Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(cwd)
         .output()
-        .map_err(|error| HarvestError::Git {
-            command: "git rev-parse --is-inside-work-tree".to_string(),
-            message: error.to_string(),
-        })?;
+    {
+        Ok(output) => output,
+        Err(error) => {
+            // A missing or inaccessible cwd (e.g. reaped scratch workspace)
+            // is not a git repository. Return false so callers can fall back
+            // instead of propagating ENOENT as a hard harvest failure.
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return Ok(false);
+            }
+            return Err(HarvestError::Git {
+                command: "git rev-parse --is-inside-work-tree".to_string(),
+                cwd: cwd.to_path_buf(),
+                message: error.to_string(),
+            });
+        }
+    };
     Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true")
 }
 
@@ -469,11 +511,13 @@ fn git_output_raw_with_env(
         .output()
         .map_err(|error| HarvestError::Git {
             command: format!("git {}", args.join(" ")),
+            cwd: cwd.to_path_buf(),
             message: error.to_string(),
         })?;
     if !output.status.success() {
         return Err(HarvestError::Git {
             command: format!("git {}", args.join(" ")),
+            cwd: cwd.to_path_buf(),
             message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });
     }
@@ -482,13 +526,32 @@ fn git_output_raw_with_env(
 
 #[derive(Debug)]
 pub(crate) enum HarvestError {
-    DirtyWorkspace { status: String },
-    UnrelatedHead { base: String, head: String },
-    Git { command: String, message: String },
-    ArtifactDirectory { path: PathBuf, message: String },
-    ArtifactWrite { path: PathBuf, message: String },
-    Adoption { message: String },
-    CandidateBaselineMismatch { message: String },
+    DirtyWorkspace {
+        status: String,
+    },
+    UnrelatedHead {
+        base: String,
+        head: String,
+    },
+    Git {
+        command: String,
+        cwd: PathBuf,
+        message: String,
+    },
+    ArtifactDirectory {
+        path: PathBuf,
+        message: String,
+    },
+    ArtifactWrite {
+        path: PathBuf,
+        message: String,
+    },
+    Adoption {
+        message: String,
+    },
+    CandidateBaselineMismatch {
+        message: String,
+    },
 }
 
 pub(super) fn committed_harvest_preflight_outcome(task_id: String) -> AgentTaskOutcome {
@@ -530,10 +593,14 @@ pub(super) fn committed_harvest_failure(
                 .to_string(),
             serde_json::json!({ "base": base, "head": head }),
         ),
-        HarvestError::Git { command, message } => (
+        HarvestError::Git {
+            command,
+            cwd,
+            message,
+        } => (
             "agent_task.committed_harvest_git_failed",
             format!("committed-change harvest failed while running {command}: {message}"),
-            serde_json::json!({ "command": command, "stderr": message }),
+            serde_json::json!({ "command": command, "cwd": cwd.display().to_string(), "stderr": message }),
         ),
         HarvestError::ArtifactDirectory { path, message } => (
             "agent_task.committed_harvest_artifact_failed",
@@ -869,6 +936,7 @@ mod committed_harvest_tests {
         let error = harvest_committed_patch_with_metadata(&mut outcome, &running, |_, _| {
             Err(HarvestError::Git {
                 command: "git log injected metadata failure".to_string(),
+                cwd: PathBuf::from("/test/workspace"),
                 message: "injected failure".to_string(),
             })
         })
@@ -1129,5 +1197,120 @@ mod committed_harvest_tests {
         );
         assert!(preflight.source_provenance.is_none());
         std::env::remove_var(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV);
+    }
+
+    #[test]
+    fn committed_harvest_falls_back_to_source_when_attempt_scratch_is_reaped() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        // Create the durable source workspace with a committed change past base.
+        let source = temp.path().join("source-workspace");
+        std::fs::create_dir(&source).expect("source workspace dir");
+        git(&source, &["init", "--quiet", "-b", "main"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        git(&source, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(source.join("file.txt"), "base\n").expect("base file");
+        git(&source, &["add", "file.txt"]);
+        git(&source, &["commit", "--quiet", "-m", "base"]);
+        let base = git(&source, &["rev-parse", "HEAD"]);
+        std::fs::write(source.join("file.txt"), "agent change\n").expect("agent edit");
+        git(&source, &["commit", "--quiet", "-am", "agent change"]);
+
+        // Simulate a reaped attempt scratch workspace (path does not exist).
+        let reaped_scratch = temp.path().join("nonexistent-scratch-workspace");
+        assert!(!reaped_scratch.exists());
+
+        let request = AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "reaped-task".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "test".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: serde_json::Value::Null,
+            },
+            instructions: String::new(),
+            inputs: serde_json::Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace {
+                // The attempt scratch workspace root points at a reaped path.
+                root: Some(reaped_scratch.display().to_string()),
+                ..Default::default()
+            },
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            metadata: serde_json::Value::Null,
+        };
+        let running = RunningTask {
+            task_id: "reaped-task".to_string(),
+            request,
+            workspace_key: None,
+            executor_key: "test".to_string(),
+            model_key: None,
+            resource_units: 1,
+            exclusive_resource_keys: Vec::new(),
+            attempt: 3,
+            started_at: Instant::now(),
+            timeout_ms: None,
+            execution_deadline_unix_ms: None,
+            timeout_cancel_requested: false,
+            rotation_index: 0,
+            rotation_attempts: Vec::new(),
+            candidate_artifacts: Vec::new(),
+            retry_attempts: Vec::new(),
+            // The durable source workspace is the real, persistent checkout.
+            source_workspace_root: Some(source.display().to_string()),
+            _attempt_workspace: None,
+            run_id: Some("reaped-harvest-test".to_string()),
+            artifact_nonce: "test-artifact".to_string(),
+            task_base_sha: Some(base),
+            source_provenance: None,
+            scratch: crate::controller_scratch::ControllerScratchAllocation {
+                path: temp.path().join("controller-scratch"),
+                lease_id: "test-lease-1".to_string(),
+                index_path: temp.path().join("resources.json"),
+            },
+            adoption: None,
+            join_handle: None,
+        };
+        std::fs::create_dir_all(&running.scratch.path).expect("scratch dir");
+
+        let mut outcome = committed_harvest_preflight_outcome("reaped-task".to_string());
+        outcome.status = AgentTaskOutcomeStatus::Succeeded;
+
+        // The harvest must fall back to the durable source and produce the patch.
+        harvest_committed_patch_with_metadata(&mut outcome, &running, |cwd, range| {
+            committed_change_metadata_for_range(cwd, range)
+        })
+        .expect("harvest falls back to source workspace");
+
+        assert!(
+            !outcome.artifacts.is_empty(),
+            "a committed patch artifact must be produced"
+        );
+        let patch_artifact = &outcome.artifacts[0];
+        assert_eq!(patch_artifact.kind, "patch");
+        let patch_path = patch_artifact.path.as_ref().expect("patch path");
+        let patch = std::fs::read_to_string(patch_path).expect("read patch");
+        assert!(
+            patch.contains("agent change"),
+            "patch must contain the agent's change: {patch}"
+        );
+        assert!(
+            !outcome
+                .diagnostics
+                .iter()
+                .any(|d| d.class == "agent_task.committed_harvest_git_failed"),
+            "no harvest git failure diagnostic expected"
+        );
     }
 }
