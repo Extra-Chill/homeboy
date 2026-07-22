@@ -574,9 +574,15 @@ pub fn pinned_runtime_for_mutation(run_id: &str) -> Result<Option<std::path::Pat
 }
 
 /// Seal the currently executing controller into an immutable runtime before a
-/// new cook begins its local routing and admission work.
-pub fn pin_current_controller_runtime() -> Result<std::path::PathBuf> {
-    let runtime = homeboy_core::controller_runtime::pin_current()?;
+/// new cook begins its local routing and admission work.  Participates in the
+/// FIFO admission queue so concurrent seals wait their turn instead of
+/// fast-failing.
+pub fn pin_current_controller_runtime(
+    request_id: &str,
+    cancellation_requested: impl Fn() -> Result<bool>,
+) -> Result<std::path::PathBuf> {
+    let runtime =
+        homeboy_core::controller_runtime::pin_current_queued(request_id, cancellation_requested)?;
     runtime
         .pointer("/originating/pinned_executable")
         .and_then(Value::as_str)
