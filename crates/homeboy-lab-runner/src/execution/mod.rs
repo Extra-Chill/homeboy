@@ -93,8 +93,9 @@ use secrets::*;
 // Crate-internal surface consumed by sibling `runner` modules (evidence, worker,
 // lab_env, lab/offload) and re-exported by the parent `runner` module.
 pub(crate) use daemon::{
-    observe_daemon_job_until_terminal, reserve_daemon_admission, result_event_data,
-    DaemonAdmissionPolicy, DaemonAdmissionReservation,
+    observe_daemon_job_until_terminal, reserve_daemon_admission,
+    reserve_daemon_admission_with_recovery, result_event_data, DaemonAdmissionPolicy,
+    DaemonAdmissionReservation,
 };
 pub use daemon_api::{canonical_daemon_body, daemon_api_get};
 pub(crate) use failure::{
