@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -449,6 +449,31 @@ pub(crate) enum DaemonAdmissionPolicy {
     DurableLeaseRequired,
 }
 
+const ADMISSION_RECOVERY_WINDOW: Duration = Duration::from_secs(10);
+const ADMISSION_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+
+// Admission is the last pre-provider boundary. Keep recovery ownership here so
+// sibling children cannot replace a just-reconnected direct tunnel underneath
+// one another after they have independently completed staging.
+static ADMISSION_RECOVERY_LOCKS: OnceLock<Mutex<BTreeMap<String, Arc<Mutex<()>>>>> =
+    OnceLock::new();
+static ADMISSION_RECOVERY_FAILURES: OnceLock<Mutex<BTreeMap<String, (Instant, Error)>>> =
+    OnceLock::new();
+
+fn admission_recovery_lock(runner_id: &str) -> Arc<Mutex<()>> {
+    ADMISSION_RECOVERY_LOCKS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("admission recovery lock registry")
+        .entry(runner_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn admission_recovery_key(runner_id: &str, lease_id: &str) -> String {
+    format!("{runner_id}\n{lease_id}")
+}
+
 #[derive(Debug, Default)]
 struct AdmissionRenewalHealth {
     lease_expires_at_ms: Option<u64>,
@@ -699,6 +724,117 @@ pub(crate) fn reserve_daemon_admission(
     })
 }
 
+/// Retry only the known post-reconnect admission window under one runner-local
+/// owner. This is deliberately below all provider work: a child either obtains
+/// an authoritative reservation or returns before `/exec` can consume budget.
+pub(crate) fn reserve_daemon_admission_with_recovery(
+    runner_id: &str,
+    local_url: &str,
+    command: &str,
+    expected_daemon_lease_id: &str,
+    idempotency_key: Option<&str>,
+    policy: DaemonAdmissionPolicy,
+) -> Result<DaemonAdmissionReservation> {
+    reserve_daemon_admission_with_recovery_with(
+        runner_id,
+        expected_daemon_lease_id,
+        Instant::now() + ADMISSION_RECOVERY_WINDOW,
+        || {
+            reserve_daemon_admission(
+                runner_id,
+                local_url,
+                command,
+                expected_daemon_lease_id,
+                idempotency_key,
+                policy,
+            )
+        },
+        || std::thread::sleep(ADMISSION_RECOVERY_RETRY_INTERVAL),
+    )
+}
+
+fn reserve_daemon_admission_with_recovery_with<T, Reserve, Wait>(
+    runner_id: &str,
+    expected_daemon_lease_id: &str,
+    deadline: Instant,
+    mut reserve: Reserve,
+    mut wait: Wait,
+) -> Result<T>
+where
+    Reserve: FnMut() -> Result<T>,
+    Wait: FnMut(),
+{
+    let lock = admission_recovery_lock(runner_id);
+    let _owner = lock.lock().expect("runner admission recovery owner");
+    let key = admission_recovery_key(runner_id, expected_daemon_lease_id);
+    let failures = ADMISSION_RECOVERY_FAILURES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let cached_failure = {
+        let mut failures = failures
+            .lock()
+            .expect("admission recovery failure registry");
+        failures.retain(|_, (recorded_at, _)| recorded_at.elapsed() < ADMISSION_RECOVERY_WINDOW);
+        failures.get(&key).cloned()
+    };
+    if let Some((_, error)) = cached_failure {
+        return Err(error);
+    }
+    loop {
+        match reserve() {
+            Ok(reservation) => {
+                failures
+                    .lock()
+                    .expect("admission recovery failure registry")
+                    .remove(&key);
+                return Ok(reservation);
+            }
+            // A different admitted lease proves another daemon owns this endpoint.
+            Err(error) if admission_recovery_failure_is_authoritative(&error) => return Err(error),
+            Err(error) if !admission_recovery_failure_is_transient(&error) => return Err(error),
+            Err(error) if Instant::now() >= deadline => {
+                let error =
+                    admission_recovery_timeout_error(runner_id, expected_daemon_lease_id, error);
+                failures
+                    .lock()
+                    .expect("admission recovery failure registry")
+                    .insert(key, (Instant::now(), error.clone()));
+                return Err(error);
+            }
+            Err(_) => wait(),
+        }
+    }
+}
+
+fn admission_recovery_failure_is_authoritative(error: &Error) -> bool {
+    error.details.get("field").and_then(Value::as_str) == Some("expected_daemon_lease_id")
+}
+
+fn admission_recovery_failure_is_transient(error: &Error) -> bool {
+    error.retryable == Some(true) || error.message.contains("daemon lease is not fresh")
+}
+
+fn admission_recovery_timeout_error(
+    runner_id: &str,
+    expected_daemon_lease_id: &str,
+    source: Error,
+) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "reconnect",
+        format!(
+            "runner `{runner_id}` did not become ready to admit Lab children against lease `{expected_daemon_lease_id}` within {}s: {}",
+            ADMISSION_RECOVERY_WINDOW.as_secs(),
+            source.message,
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![format!(
+            "Re-run `homeboy runner refresh-homeboy {runner_id} --reconnect` once, then retry the batch."
+        )]),
+    );
+    // The provider never started and the staged workspace remains reusable.
+    // Keep the original child lifecycle eligible for bounded retry.
+    error.retryable = Some(true);
+    error
+}
+
 fn strict_admission_response_is_complete(
     lease_protocol_confirmed: bool,
     token: Option<&str>,
@@ -820,6 +956,7 @@ fn spawn_admission_renewer(
 #[cfg(test)]
 mod admission_tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn strict_admission_requires_protocol_token_and_server_expiry() {
@@ -918,6 +1055,133 @@ mod admission_tests {
             .prove_server_owned_expiry_or_cancellation_authority()
             .expect_err("post-acceptance authority must observe renewal failure");
         assert!(error.message.contains("renewal failed"));
+    }
+
+    #[test]
+    fn sibling_admissions_share_one_post_reconnect_recovery_and_lease() {
+        let runner_id = format!("parallel-admission-{}", uuid::Uuid::new_v4());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let recovery_owners = Arc::new(AtomicUsize::new(0));
+        let provider_budget = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let mut children = Vec::new();
+
+        for _ in 0..4 {
+            let runner_id = runner_id.clone();
+            let attempts = Arc::clone(&attempts);
+            let recovery_owners = Arc::clone(&recovery_owners);
+            let provider_budget = Arc::clone(&provider_budget);
+            let barrier = Arc::clone(&barrier);
+            children.push(std::thread::spawn(move || {
+                barrier.wait();
+                reserve_daemon_admission_with_recovery_with(
+                    &runner_id,
+                    "lease-reconnected",
+                    Instant::now() + Duration::from_secs(1),
+                    || {
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        if attempt < 2 {
+                            if attempt == 0 {
+                                recovery_owners.fetch_add(1, Ordering::SeqCst);
+                            }
+                            return Err(Error::validation_invalid_argument(
+                                "runner",
+                                "daemon lease is not fresh",
+                                None,
+                                None,
+                            ));
+                        }
+                        Ok("lease-reconnected".to_string())
+                    },
+                    || {},
+                )
+                .map(|lease| {
+                    assert_eq!(lease, "lease-reconnected");
+                    assert_eq!(provider_budget.load(Ordering::SeqCst), 0);
+                })
+            }));
+        }
+
+        for child in children {
+            child
+                .join()
+                .expect("child thread")
+                .expect("sibling admission");
+        }
+        assert_eq!(
+            recovery_owners.load(Ordering::SeqCst),
+            1,
+            "one recovery owner"
+        );
+        assert_eq!(provider_budget.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn exhausted_sibling_recovery_returns_one_cached_batch_action() {
+        let runner_id = format!("exhausted-admission-{}", uuid::Uuid::new_v4());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut children = Vec::new();
+        for _ in 0..4 {
+            let runner_id = runner_id.clone();
+            let attempts = Arc::clone(&attempts);
+            children.push(std::thread::spawn(move || {
+                reserve_daemon_admission_with_recovery_with::<(), _, _>(
+                    &runner_id,
+                    "lease-reconnected",
+                    Instant::now(),
+                    || {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        Err(Error::validation_invalid_argument(
+                            "runner",
+                            "daemon lease is not fresh",
+                            None,
+                            None,
+                        ))
+                    },
+                    || {},
+                )
+                .expect_err("bounded recovery must fail")
+            }));
+        }
+        let errors = children
+            .into_iter()
+            .map(|child| child.join().expect("child thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "only one recovery owner probes"
+        );
+        assert!(errors.iter().all(|error| error.details["tried"]
+            .as_array()
+            .is_some_and(|actions| actions.len() == 1)));
+        assert!(errors.iter().all(|error| error.retryable == Some(true)));
+        assert_eq!(errors[0].details["tried"], errors[3].details["tried"]);
+    }
+
+    #[test]
+    fn non_transient_admission_failure_is_not_retried() {
+        let runner_id = format!("invalid-admission-{}", uuid::Uuid::new_v4());
+        let attempts = AtomicUsize::new(0);
+        let error = reserve_daemon_admission_with_recovery_with::<(), _, _>(
+            &runner_id,
+            "lease-reconnected",
+            Instant::now() + Duration::from_secs(1),
+            || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(Error::validation_invalid_argument(
+                    "admission_response",
+                    "daemon admission response missing data",
+                    None,
+                    None,
+                ))
+            },
+            || panic!("non-transient admission failure must not wait"),
+        )
+        .expect_err("invalid admission response must fail immediately");
+
+        assert_eq!(error.details["field"], "admission_response");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }
 

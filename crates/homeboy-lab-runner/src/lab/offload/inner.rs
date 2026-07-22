@@ -1861,7 +1861,7 @@ pub(crate) fn run_lab_offload_inner(
     .and_then(|coordinates| {
         coordinates
             .map(|(local_url, expected_daemon_lease_id)| {
-                reserve_daemon_admission(
+                reserve_daemon_admission_with_recovery(
                     runner_id,
                     local_url,
                     &redact_argv_shell_display(&command_prefix.argv),
