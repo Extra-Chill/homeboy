@@ -289,7 +289,11 @@ fn workspace_snapshots_ssh(
         }
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(parts[1])
-            .map_err(|err| Error::internal_json(err.to_string(), None))?;
+            .map_err(|error| invalid_workspace_metadata(parts[0], error));
+        let Ok(decoded) = decoded else {
+            skipped_invalid_metadata.push(decoded.expect_err("base64 decode failed"));
+            continue;
+        };
         let metadata: RunnerWorkspaceMetadata = match serde_json::from_slice(&decoded) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -304,9 +308,74 @@ fn workspace_snapshots_ssh(
     Ok((snapshots, skipped_invalid_metadata))
 }
 
+pub(super) fn workspace_snapshot_for_lease(
+    runner: &super::super::super::Runner,
+    root: &str,
+    lease: &str,
+) -> Result<Option<RunnerWorkspaceSnapshotEntry>> {
+    match runner.kind {
+        RunnerKind::Local => workspace_snapshot_for_lease_local(Path::new(root), lease),
+        RunnerKind::Ssh => workspace_snapshot_for_lease_ssh(runner, root, lease),
+    }
+}
+
+fn workspace_snapshot_for_lease_local(
+    root: &Path,
+    lease: &str,
+) -> Result<Option<RunnerWorkspaceSnapshotEntry>> {
+    if !root.is_dir() {
+        return Ok(None);
+    }
+    for entry in fs::read_dir(root).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("read runner workspace root".to_string()),
+        )
+    })? {
+        let Ok(entry) = entry else { continue };
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(entry.path().join(WORKSPACE_METADATA_FILE)) else {
+            continue;
+        };
+        let Ok(metadata) = serde_json::from_str::<RunnerWorkspaceMetadata>(&content) else {
+            continue;
+        };
+        if metadata.workspace_lease.as_deref() == Some(lease) {
+            return Ok(workspace_snapshot_entry(metadata));
+        }
+    }
+    Ok(None)
+}
+
+fn workspace_snapshot_for_lease_ssh(
+    runner: &super::super::super::Runner,
+    root: &str,
+    lease: &str,
+) -> Result<Option<RunnerWorkspaceSnapshotEntry>> {
+    let (_server, mut client) = ssh_client_for_runner(runner)?;
+    client.env.extend(runner.env.clone());
+    let output = client.execute(&workspace_snapshot_lease_command(root, lease));
+    if !output.success || output.stdout.trim().is_empty() {
+        return Ok(None);
+    }
+    let decoded = match base64::engine::general_purpose::STANDARD.decode(output.stdout.trim()) {
+        Ok(decoded) => decoded,
+        Err(_) => return Ok(None),
+    };
+    let metadata = match serde_json::from_slice::<RunnerWorkspaceMetadata>(&decoded) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(None),
+    };
+    Ok((metadata.workspace_lease.as_deref() == Some(lease))
+        .then(|| workspace_snapshot_entry(metadata))
+        .flatten())
+}
+
 fn invalid_workspace_metadata(
     source: &str,
-    error: serde_json::Error,
+    error: impl std::fmt::Display,
 ) -> RunnerWorkspaceSnapshotInvalidMetadata {
     const MAX_PARSE_ERROR_BYTES: usize = 512;
 
@@ -332,9 +401,20 @@ pub(crate) fn workspace_snapshot_scan_command(root: &str) -> String {
     // disappeared child as an error even though the snapshot root remains
     // valid, so read each candidate defensively and verify the root afterwards.
     format!(
-        "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then for dir in \"$root\"/*; do [ -d \"$dir\" ] || continue; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; encoded=$(base64 < \"$meta\" 2>/dev/null) || continue; printf \"%s\\t%s\\n\" \"$dir\" \"$encoded\"; done; [ -d \"$root\" ] || {{ printf '%s\\n' \"runner workspace snapshot root disappeared during scan: $root\" >&2; exit 1; }}; fi",
+        "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then for dir in \"$root\"/*; do [ -d \"$dir\" ] || continue; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; encoded=$(base64 < \"$meta\" 2>/dev/null) || continue; encoded=$(printf '%s' \"$encoded\" | tr -d '\\n'); printf \"%s\\t%s\\n\" \"$dir\" \"$encoded\"; done; [ -d \"$root\" ] || {{ printf '%s\\n' \"runner workspace snapshot root disappeared during scan: $root\" >&2; exit 1; }}; fi",
         root = shell::quote_arg(root),
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+    )
+}
+
+fn workspace_snapshot_lease_command(root: &str, lease: &str) -> String {
+    let lease = serde_json::to_string(lease).expect("serialize workspace lease");
+    let needle = format!("\"workspace_lease\":{lease}");
+    format!(
+        "root={root}; meta_rel={meta}; needle={needle}; if [ -d \"$root\" ]; then for dir in \"$root\"/*; do meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; tr -d '[:space:]' < \"$meta\" | grep -Fq -- \"$needle\" || continue; base64 < \"$meta\" 2>/dev/null | tr -d '\\n'; exit 0; done; fi",
+        root = shell::quote_arg(root),
+        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        needle = shell::quote_arg(&needle),
     )
 }
 
