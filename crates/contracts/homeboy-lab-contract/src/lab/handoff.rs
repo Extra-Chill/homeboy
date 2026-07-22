@@ -460,15 +460,21 @@ mod runner_job_identity_tests {
             "persisted_run_id": "persisted-run",
             "handoff_id": "handoff-xyz",
         });
-        assert_ne!(stored, replayed, "raw Value equality would reject this pair");
+        assert_ne!(
+            stored, replayed,
+            "raw Value equality would reject this pair"
+        );
         let stored_identity = RunnerJobIdentity::from_dispatch_value(&stored).expect("stored");
-        let replayed_identity = RunnerJobIdentity::from_dispatch_value(&replayed).expect("replayed");
+        let replayed_identity =
+            RunnerJobIdentity::from_dispatch_value(&replayed).expect("replayed");
         assert!(stored_identity.matches(&replayed_identity));
     }
 
     #[test]
     fn from_dispatch_value_rejects_a_non_identity_object() {
-        assert!(RunnerJobIdentity::from_dispatch_value(&serde_json::json!("not-an-object")).is_none());
+        assert!(
+            RunnerJobIdentity::from_dispatch_value(&serde_json::json!("not-an-object")).is_none()
+        );
         assert!(
             RunnerJobIdentity::from_dispatch_value(&serde_json::json!({ "runner_id": "a" }))
                 .is_none(),

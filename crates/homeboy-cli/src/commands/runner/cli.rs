@@ -124,6 +124,10 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         allow_raw_exec: Option<bool>,
 
+        /// Explicitly allow controller-driven Homeboy binary convergence
+        #[arg(long)]
+        allow_homeboy_convergence: Option<bool>,
+
         /// Workspace root allowed by policy. Repeat for multiple roots.
         #[arg(long = "workspace-root")]
         workspace_roots: Vec<String>,
@@ -164,6 +168,10 @@ pub(super) enum RunnerCommand {
         /// Explicitly allow or deny raw runner exec shell commands
         #[arg(long)]
         allow_raw_exec: Option<bool>,
+
+        /// Explicitly allow controller-driven Homeboy binary convergence
+        #[arg(long)]
+        allow_homeboy_convergence: Option<bool>,
     },
     /// Remove a runner configuration
     Remove {

@@ -10,6 +10,7 @@ pub(super) struct RunnerPolicyPatch {
     pub(super) allowed_projects: Vec<String>,
     pub(super) allowed_commands: Vec<String>,
     pub(super) allow_raw_exec: Option<bool>,
+    pub(super) allow_homeboy_convergence: Option<bool>,
     pub(super) workspace_roots: Vec<String>,
     pub(super) artifact_policy: Option<String>,
 }
@@ -21,6 +22,7 @@ impl RunnerPolicyPatch {
         projects: Vec<String>,
         commands: Vec<String>,
         allow_raw_exec: Option<bool>,
+        allow_homeboy_convergence: Option<bool>,
         workspace_roots: Vec<String>,
         artifact_policy: Option<String>,
     ) -> Self {
@@ -30,6 +32,7 @@ impl RunnerPolicyPatch {
             allowed_projects: projects,
             allowed_commands: commands,
             allow_raw_exec,
+            allow_homeboy_convergence,
             workspace_roots,
             artifact_policy,
         }
@@ -40,6 +43,7 @@ impl RunnerPolicyPatch {
         fingerprints: Vec<String>,
         projects: Vec<String>,
         allow_raw_exec: Option<bool>,
+        allow_homeboy_convergence: Option<bool>,
         workspace_roots: Vec<String>,
     ) -> Self {
         Self {
@@ -48,6 +52,7 @@ impl RunnerPolicyPatch {
             allowed_projects: projects,
             allowed_commands: Vec::new(),
             allow_raw_exec,
+            allow_homeboy_convergence,
             workspace_roots,
             artifact_policy: None,
         }
@@ -59,6 +64,7 @@ impl RunnerPolicyPatch {
             && self.allowed_projects.is_empty()
             && self.allowed_commands.is_empty()
             && self.allow_raw_exec.is_none()
+            && self.allow_homeboy_convergence.is_none()
             && self.workspace_roots.is_empty()
             && self.artifact_policy.is_none()
     }
@@ -114,6 +120,9 @@ fn apply_patch(policy: &mut RunnerPolicy, patch: RunnerPolicyPatch) {
     extend_unique(&mut policy.workspace_roots, patch.workspace_roots);
     if let Some(allow_raw_exec) = patch.allow_raw_exec {
         policy.allow_raw_exec = Some(allow_raw_exec);
+    }
+    if let Some(allow_homeboy_convergence) = patch.allow_homeboy_convergence {
+        policy.allow_homeboy_convergence = Some(allow_homeboy_convergence);
     }
     if let Some(artifact_policy) = patch.artifact_policy {
         policy.artifact_policy = Some(artifact_policy);

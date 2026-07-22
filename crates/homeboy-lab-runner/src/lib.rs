@@ -1324,8 +1324,27 @@ mod tests {
             assert_eq!(runner.policy.allowed_projects, vec!["extrachill"]);
             assert_eq!(runner.policy.allowed_commands, vec!["test", "bench"]);
             assert_eq!(runner.policy.allow_raw_exec, Some(false));
+            assert_eq!(runner.policy.allow_homeboy_convergence, None);
             assert_eq!(runner.policy.workspace_roots, vec!["/home/user/Developer"]);
             assert_eq!(runner.policy.artifact_policy.as_deref(), Some("metadata"));
+            assert!(serde_json::to_value(&runner)
+                .expect("serialize legacy policy")
+                .pointer("/policy/allow_homeboy_convergence")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn runner_registry_persists_explicit_homeboy_convergence_policy() {
+        test_support::with_isolated_home(|_| {
+            create(
+                r#"{"id":"lab-local","kind":"local","policy":{"allow_homeboy_convergence":true}}"#,
+                false,
+            )
+            .expect("create runner");
+
+            let runner = load("lab-local").expect("load runner");
+            assert_eq!(runner.policy.allow_homeboy_convergence, Some(true));
         });
     }
 
