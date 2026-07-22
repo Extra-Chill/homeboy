@@ -31,6 +31,7 @@ pub(super) fn request(
         workspace_materialization: None,
         provider_defaults: BTreeMap::new(),
         runner_readiness: Vec::new(),
+        readiness_invocation: None,
         runner_sources: Vec::new(),
         dependency_failure_patterns: Vec::new(),
         config_preflights: Vec::new(),

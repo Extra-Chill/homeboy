@@ -16,6 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
 const REDACTED_VALUE: &str = "[redacted]";
+const PROVIDER_READINESS_RESULT_SCHEMA: &str = "homeboy/agent-task-provider-readiness-result/v1";
+const PROVIDER_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ProviderCommandEnvError {
@@ -1014,12 +1016,135 @@ pub(crate) fn render_provider_command_display(provider: &AgentTaskExecutorProvid
     String::new()
 }
 
+pub fn run_provider_readiness_invocation(
+    provider: &AgentTaskExecutorProvider,
+    effective_config: &Value,
+) -> Result<(), String> {
+    let Some(invocation) = provider.readiness_invocation.as_ref() else {
+        return Ok(());
+    };
+    let Some((program, args, cwd)) = invocation_command_parts(provider, invocation) else {
+        return Err(format!(
+            "provider '{}' declares an empty readiness invocation",
+            provider.id
+        ));
+    };
+    let input = serde_json::to_vec(&json!({
+        "schema": "homeboy/agent-task-provider-readiness-request/v1",
+        "provider_id": provider.id,
+        "backend": provider.backend,
+        "effective_config": effective_config,
+    }))
+    .map_err(|error| format!("failed to encode provider readiness request: {error}"))?;
+
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to spawn provider readiness invocation: {error}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(&input)
+            .map_err(|error| format!("failed to write provider readiness request: {error}"))?;
+    }
+
+    let stdout_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let last_progress = Arc::new(AtomicU64::new(now_unix_ms()));
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|stdout| spawn_output_reader(stdout, Arc::clone(&stdout_buffer), last_progress));
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < PROVIDER_READINESS_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(reader) = stdout_reader {
+                    let _ = reader.join();
+                }
+                return Err(format!(
+                    "provider '{}' readiness invocation timed out after {} seconds",
+                    provider.id,
+                    PROVIDER_READINESS_TIMEOUT.as_secs()
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to wait for provider readiness result: {error}"
+                ));
+            }
+        }
+    };
+    if let Some(reader) = stdout_reader {
+        let _ = reader.join();
+    }
+    if !status.success() {
+        return Err(format!(
+            "provider '{}' readiness invocation exited with status {}",
+            provider.id,
+            status.code().unwrap_or(-1)
+        ));
+    }
+    let stdout = stdout_buffer.lock().expect("stdout buffer").clone();
+    let result: Value = serde_json::from_slice(&stdout).map_err(|_| {
+        format!(
+            "provider '{}' readiness invocation returned malformed JSON",
+            provider.id
+        )
+    })?;
+    if result.get("schema").and_then(Value::as_str) != Some(PROVIDER_READINESS_RESULT_SCHEMA) {
+        return Err(format!(
+            "provider '{}' readiness invocation returned an unsupported result schema",
+            provider.id
+        ));
+    }
+    if result.get("ready").and_then(Value::as_bool) != Some(true) {
+        let message = result
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("provider-owned readiness check failed");
+        return Err(format!(
+            "provider '{}' readiness failed: {message}",
+            provider.id
+        ));
+    }
+    Ok(())
+}
+
 fn render_provider_command_template(value: &str, provider: &AgentTaskExecutorProvider) -> String {
     let extension_path = provider.extension_path.as_deref().unwrap_or_default();
     let runtime_path = provider.runtime_path.as_deref().unwrap_or(extension_path);
     value
         .replace("{{extension_path}}", extension_path)
         .replace("{{runtime_path}}", runtime_path)
+}
+
+fn invocation_command_parts(
+    provider: &AgentTaskExecutorProvider,
+    invocation: &CommandInvocation,
+) -> Option<(String, Vec<String>, Option<PathBuf>)> {
+    let mut argv = invocation
+        .argv
+        .iter()
+        .map(|arg| render_provider_command_template(arg, provider));
+    let program = argv.next()?;
+    let cwd = invocation
+        .cwd
+        .as_deref()
+        .map(|cwd| PathBuf::from(render_provider_command_template(cwd, provider)));
+    Some((program, argv.collect(), cwd))
 }
 
 fn render_provider_command_argv(provider: &AgentTaskExecutorProvider) -> Vec<String> {
@@ -1042,21 +1167,13 @@ fn render_provider_invocation_argv(provider: &AgentTaskExecutorProvider) -> Vec<
 pub fn provider_command_parts(
     provider: &AgentTaskExecutorProvider,
 ) -> Option<(String, Vec<String>, Option<PathBuf>)> {
-    let (argv, cwd) = if !provider.invocation.argv.is_empty() {
-        (
-            render_provider_invocation_argv(provider),
-            provider
-                .invocation
-                .cwd
-                .as_deref()
-                .map(|cwd| PathBuf::from(render_provider_command_template(cwd, provider))),
-        )
+    if !provider.invocation.argv.is_empty() {
+        invocation_command_parts(provider, &provider.invocation)
     } else {
-        (render_provider_command_argv(provider), None)
-    };
-    let mut parts = argv.into_iter();
-    let program = parts.next()?;
-    Some((program, parts.collect(), cwd))
+        let mut argv = render_provider_command_argv(provider).into_iter();
+        let program = argv.next()?;
+        Some((program, argv.collect(), None))
+    }
 }
 
 /// Result of probing whether a provider's executor entrypoint actually loads on

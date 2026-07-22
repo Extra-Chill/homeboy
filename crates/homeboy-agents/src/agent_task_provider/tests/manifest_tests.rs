@@ -220,6 +220,23 @@ fn provider_command_parts_uses_argv() {
 }
 
 #[test]
+fn provider_readiness_invocation_receives_effective_config_and_fails_closed() {
+    let (_, mut provider) = request("configured-readiness", "node ignored.js".to_string());
+    provider.readiness_invocation = Some(CommandInvocation {
+        argv: vec![
+            "node".to_string(),
+            script("let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:req.effective_config.marker==='ready',message:'configured marker is not ready'}));"),
+        ],
+        ..CommandInvocation::default()
+    });
+
+    assert!(run_provider_readiness_invocation(&provider, &json!({ "marker": "ready" })).is_ok());
+    let error = run_provider_readiness_invocation(&provider, &json!({ "marker": "blocked" }))
+        .expect_err("provider-owned readiness failure blocks validation");
+    assert!(error.contains("configured marker is not ready"));
+}
+
+#[test]
 fn opencode_provider_boundary_uses_task_workspace_for_cwd_and_config() {
     let temp = tempfile::tempdir().expect("tempdir");
     let original = temp.path().join("promotion-target");
