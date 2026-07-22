@@ -875,6 +875,53 @@ mod tests {
     }
 
     #[test]
+    fn run_package_collects_component_build_artifact_without_extension() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let component_dir = tempfile::tempdir().expect("component tempdir");
+            let component = Component {
+                id: "plugin".to_string(),
+                local_path: component_dir.path().to_string_lossy().to_string(),
+                build_artifact: Some("build/plugin.zip".to_string()),
+                scripts: Some(homeboy_core::component::ComponentScriptsConfig {
+                    build: vec!["mkdir -p build; printf plugin > build/plugin.zip".to_string()],
+                    ..Default::default()
+                }),
+                ..Component::default()
+            };
+            let mut state = ReleaseState {
+                version: Some("1.2.3".to_string()),
+                ..ReleaseState::default()
+            };
+
+            let result = run_package(
+                &[],
+                &mut state,
+                &component,
+                "plugin",
+                &component.local_path,
+                None,
+                component.build_artifact.as_deref(),
+                false,
+            )
+            .expect("component build package step");
+
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            assert_eq!(state.artifacts.len(), 1);
+            assert_eq!(state.artifacts[0].path, "build/plugin.zip");
+            let durable_path = state.artifacts[0]
+                .durable_path
+                .as_deref()
+                .expect("durable artifact path");
+            assert_eq!(
+                std::fs::read_to_string(durable_path).expect("durable artifact bytes"),
+                "plugin"
+            );
+            github_release::validate_declared_build_artifact(&component, &state, false)
+                .expect("component-owned artifact should satisfy GitHub Release");
+        });
+    }
+
+    #[test]
     fn github_release_rejects_declared_artifact_when_source_and_durable_bytes_are_missing() {
         let component = Component {
             build_artifact: Some("build/plugin.zip".to_string()),
