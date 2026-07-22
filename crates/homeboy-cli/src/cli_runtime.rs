@@ -2,6 +2,7 @@ use clap::{ArgMatches, Command};
 use std::io::IsTerminal;
 use std::process::Command as ProcessCommand;
 use std::sync::OnceLock;
+use uuid::Uuid;
 
 use crate::cli_surface::{
     command_safety_manifest_from_dynamic, command_surface_from, Cli, CommandSafetyManifest,
@@ -484,7 +485,10 @@ fn delegate_agent_task_cook_to_pinned_runtime(
         }
     }
 
-    let pinned = crate::agents::agent_tasks::lifecycle::pin_current_controller_runtime()?;
+    let pinned = crate::agents::agent_tasks::lifecycle::pin_current_controller_runtime(
+        &format!("seal-{}", Uuid::new_v4()),
+        || Ok(false),
+    )?;
     let status = ProcessCommand::new(&pinned)
         .args(&normalized_args[1..])
         .env(COOK_PINNED_RUNTIME_ENV, &pinned)
