@@ -28,6 +28,7 @@ pub mod install;
 mod json_config;
 pub mod lease;
 pub mod lint;
+pub mod local_artifact;
 pub mod pipeline;
 pub mod provider;
 pub mod resource_lifecycle;
@@ -62,6 +63,9 @@ pub use lease::{
     acquire_active_run_lease, acquire_active_run_lease_with_settings, active_run_leases,
     release_active_run_lease, ActiveRigRunLease, ReleaseLeaseOutcome, RigRunLease,
     RIG_LEASE_TTL_ENV,
+};
+pub use local_artifact::{
+    register_current_run_artifact, LocalArtifactRegistration, RIG_ARTIFACT_MANIFEST_ENV,
 };
 pub use pipeline::{PipelineOutcome, PipelineStepOutcome};
 pub use resource_lifecycle::{

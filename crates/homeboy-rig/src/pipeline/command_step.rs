@@ -38,6 +38,7 @@ pub(crate) fn run_command_step(
     for (k, v) in settings_env(settings) {
         command.env(k, v);
     }
+    crate::local_artifact::inherit_registration_context(&mut command);
 
     let status = command.status().map_err(|e| {
         Error::rig_pipeline_failed(
