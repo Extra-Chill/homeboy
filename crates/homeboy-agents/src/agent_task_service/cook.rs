@@ -496,7 +496,22 @@ where
     let same_provider = (known_same_executor
         || follow_up_request.inputs["cook_loop"]["review_form_required"] == true)
         .then_some(true)
-        .or_else(|| terminal_executor_matches(aggregate, &follow_up_request.executor));
+        .or_else(|| {
+            let durable_provider_executions = agent_task_lifecycle::status(source_run_id)
+                .ok()
+                .and_then(|record| record.metadata.get("provider_executions").cloned())
+                .filter(|executions| {
+                    executions
+                        .as_array()
+                        .is_some_and(|executions| !executions.is_empty())
+                });
+            terminal_executor_matches(
+                aggregate,
+                plan,
+                durable_provider_executions.as_ref(),
+                &follow_up_request.executor,
+            )
+        });
     let Some(same_provider) = same_provider else {
         return Ok(CookFollowUpDispatch::PolicyFailure {
             reason: "cannot classify Cook remediation without terminal executor identity"

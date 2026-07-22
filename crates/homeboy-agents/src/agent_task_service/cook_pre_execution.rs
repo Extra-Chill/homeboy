@@ -150,10 +150,12 @@ pub(crate) fn record_pre_execution_failure(
 
 pub(crate) fn terminal_executor_matches(
     aggregate: &crate::agent_task_scheduler::AgentTaskAggregate,
+    plan: &AgentTaskPlan,
+    durable_provider_executions: Option<&Value>,
     follow_up: &AgentTaskExecutor,
 ) -> Option<bool> {
     let outcome = aggregate.outcomes.last()?;
-    let terminal = terminal_executor_identity(outcome)?;
+    let terminal = terminal_executor_identity(outcome, plan, durable_provider_executions)?;
     Some(
         terminal.backend == follow_up.backend
             && terminal.selector == follow_up.selector
@@ -181,26 +183,130 @@ pub(crate) struct TerminalExecutorIdentity {
 
 pub(crate) fn terminal_executor_identity(
     outcome: &crate::agent_task::AgentTaskOutcome,
+    plan: &AgentTaskPlan,
+    durable_provider_executions: Option<&Value>,
 ) -> Option<TerminalExecutorIdentity> {
-    if let Some(attempt) =
-        provider_rotation_attempts(outcome).and_then(|attempts| attempts.last().cloned())
+    // Rotation evidence is the only persisted source with all three executor
+    // fields after a provider swap. A durable execution ledger, when present,
+    // must corroborate its backend/model rather than silently selecting the
+    // initial plan executor.
+    if outcome
+        .metadata
+        .pointer("/provider_rotation/attempts")
+        .is_some()
     {
-        return Some(TerminalExecutorIdentity {
+        let attempt = provider_rotation_attempts(outcome)?.last()?.clone();
+        let terminal = TerminalExecutorIdentity {
             backend: attempt.backend,
             selector: attempt.selector,
             model: attempt.model,
-        });
+        };
+        if durable_provider_executions.is_some() {
+            let durable = terminal_provider_execution(outcome, durable_provider_executions)?;
+            return (durable.backend == terminal.backend && durable.model == terminal.model)
+                .then_some(terminal);
+        }
+        return Some(terminal);
     }
-    let executor = outcome.metadata.get("executor")?;
-    Some(TerminalExecutorIdentity {
-        backend: executor.get("backend")?.as_str()?.to_string(),
-        selector: executor
-            .get("selector")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        model: executor
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    })
+
+    // Preserve the normalized outcome identity used before durable execution
+    // evidence was introduced. When both sources exist they must agree.
+    if let Some(executor) = outcome.metadata.get("executor") {
+        let terminal = TerminalExecutorIdentity {
+            backend: executor.get("backend")?.as_str()?.to_string(),
+            selector: executor
+                .get("selector")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            model: executor
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        };
+        if durable_provider_executions.is_some() {
+            let durable = terminal_provider_execution(outcome, durable_provider_executions)?;
+            return (durable.backend == terminal.backend && durable.model == terminal.model)
+                .then_some(terminal);
+        }
+        return Some(terminal);
+    }
+
+    // Without rotation, the source task is authoritative for the selector only
+    // if the durable terminal execution proves it remained the executor.
+    let task = plan
+        .tasks
+        .iter()
+        .find(|task| task.task_id == outcome.task_id)?;
+    let durable = terminal_provider_execution(outcome, durable_provider_executions)?;
+    (durable.backend == task.executor.backend && durable.model.as_deref() == task.executor.model())
+        .then_some(TerminalExecutorIdentity {
+            backend: task.executor.backend.clone(),
+            selector: task.executor.selector.clone(),
+            model: task.executor.model().map(str::to_string),
+        })
+}
+
+struct DurableTerminalExecution {
+    backend: String,
+    model: Option<String>,
+}
+
+fn terminal_provider_execution(
+    outcome: &crate::agent_task::AgentTaskOutcome,
+    durable_provider_executions: Option<&Value>,
+) -> Option<DurableTerminalExecution> {
+    let executions = durable_provider_executions?.as_array()?;
+    let terminal_attempt = executions
+        .iter()
+        .filter(|execution| {
+            execution["task_id"] == outcome.task_id
+                && matches!(
+                    execution["state"].as_str(),
+                    Some(
+                        "succeeded"
+                            | "failed"
+                            | "cancelled"
+                            | "timed_out"
+                            | "candidate_recoverable"
+                    )
+                )
+        })
+        .filter_map(|execution| {
+            execution["attempt"]
+                .as_u64()
+                .map(|attempt| (attempt, execution))
+        })
+        .max_by_key(|(attempt, _)| *attempt)?
+        .0;
+    let identities: Vec<_> = executions
+        .iter()
+        .filter(|execution| {
+            execution["task_id"] == outcome.task_id
+                && execution["attempt"].as_u64() == Some(terminal_attempt)
+                && matches!(
+                    execution["state"].as_str(),
+                    Some(
+                        "succeeded"
+                            | "failed"
+                            | "cancelled"
+                            | "timed_out"
+                            | "candidate_recoverable"
+                    )
+                )
+        })
+        .map(|execution| {
+            Some(DurableTerminalExecution {
+                backend: execution["backend"].as_str()?.to_string(),
+                model: execution["model"].as_str().map(str::to_string),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let terminal = identities.first()?;
+    identities
+        .iter()
+        .all(|identity| identity.backend == terminal.backend && identity.model == terminal.model)
+        .then(|| DurableTerminalExecution {
+            backend: terminal.backend.clone(),
+            model: terminal.model.clone(),
+        })
 }
