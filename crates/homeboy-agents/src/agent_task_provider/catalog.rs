@@ -453,6 +453,28 @@ fn validate_provider_runner_readiness_for_backend_with_diagnostics(
         )
     })?;
 
+    let effective_config =
+        crate::agent_task_config_materialization::materialize_provider_config_refs(Value::Object(
+            defaults::load_config().settings.into_iter().collect(),
+        ))?;
+    super::command_runner::run_provider_readiness_invocation(provider, &effective_config).map_err(
+        |message| {
+            Error::validation_invalid_argument(
+                "backend",
+                format!(
+                    "agent-task backend '{backend}' is registered but configured readiness failed for provider '{}': {message}",
+                    provider.id
+                ),
+                Some(backend.to_string()),
+                provider
+                    .readiness_invocation
+                    .as_ref()
+                    .and_then(|invocation| invocation.display.clone())
+                    .map(|display| vec![format!("Provider readiness invocation: {display}")]),
+            )
+        },
+    )?;
+
     Ok(())
 }
 

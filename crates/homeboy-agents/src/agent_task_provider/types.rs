@@ -74,6 +74,8 @@ pub struct AgentTaskExecutorProvider {
     pub provider_defaults: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner_readiness: Vec<AgentTaskProviderRunnerReadiness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_invocation: Option<CommandInvocation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner_sources: Vec<AgentTaskProviderRunnerSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
