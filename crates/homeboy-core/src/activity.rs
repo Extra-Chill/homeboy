@@ -688,10 +688,16 @@ mod runner_sessions {
     use super::*;
 
     pub(super) fn collect(collector: &mut ActivityCollector) {
-        for report in
-            crate::observation::runs_service::with_runner_evidence(|provider| provider.statuses())
-                .into_iter()
-                .filter(|report| report.connected)
+        // Use the latency-bounded indexed view: activity only needs the
+        // current/recent active-job list, never the full generation reconcile
+        // that `statuses()` performs (one blocking poll per draining
+        // generation). This keeps `homeboy activity` bounded as generation
+        // history grows (#9522).
+        for report in crate::observation::runs_service::with_runner_evidence(|provider| {
+            provider.statuses_indexed()
+        })
+        .into_iter()
+        .filter(|report| report.connected)
         {
             for job in report.active_jobs {
                 collector.insert(item_from_active_runner_job(job));

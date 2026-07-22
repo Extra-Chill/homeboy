@@ -26,10 +26,11 @@ use homeboy_core::server::{self, Server, SshClient};
 use super::broker_http;
 use super::session::{
     ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobRecoveryEvidence,
-    RunnerActiveJobSource, RunnerActiveJobState, RunnerChangedRuntimePath, RunnerConnectReport,
-    RunnerDisconnectReport, RunnerFailureKind, RunnerLeaselessRecoveryContract,
-    RunnerLeaselessRecoveryEvidence, RunnerSession, RunnerSessionRole, RunnerSessionState,
-    RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode,
+    RunnerActiveJobSource, RunnerActiveJobState, RunnerActiveJobsSnapshot,
+    RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
+    RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerSession,
+    RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath,
+    RunnerStatusReport, RunnerTunnelMode,
 };
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 use homeboy_core::broker_auth;
@@ -2179,6 +2180,41 @@ pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
         reports.push(status(&runner.id)?);
     }
     Ok(reports)
+}
+
+/// A latency-bounded snapshot of each runner's active jobs — a single `/jobs`
+/// query on the current session, with **no generation reconcile**.
+///
+/// `status()` reconciles the full generation ledger, which issues one blocking
+/// HTTP call per *draining* generation (5s timeout each) and can take minutes
+/// with hundreds of generations. Callers that only need the current active-job
+/// view (e.g. `homeboy activity`) must not pay that cost or scan unbounded
+/// history (#9522). This queries the connected session's `/jobs` endpoint once
+/// per runner — bounded work regardless of how much generation history has
+/// accumulated — and skips the per-generation reconcile entirely. Stale-job
+/// detection is a reconcile concern and is intentionally omitted here.
+pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
+    let mut snapshots = Vec::new();
+    for runner in super::list()? {
+        let session = read_session_or_live_peer(&runner.id)?;
+        let connected = session_state(session.as_ref()) == RunnerSessionState::Connected;
+        let active_jobs = if connected {
+            match session.as_ref() {
+                Some(session) => runner_jobs(&runner.id, session)
+                    .map(|(active, _stale)| active)
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        snapshots.push(RunnerActiveJobsSnapshot {
+            runner_id: runner.id,
+            connected,
+            active_jobs,
+        });
+    }
+    Ok(snapshots)
 }
 
 pub fn disconnect(runner_id: &str) -> Result<RunnerDisconnectReport> {
