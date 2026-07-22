@@ -1217,6 +1217,13 @@
       "description": "Additional WP Codebox extra plugin entries for bench recipes. Use for runtime prerequisites that must be installed or activated but should not be treated as Homeboy validation dependencies."
     },
     {
+      "id": "wp_codebox_extra_themes",
+      "label": "WP Codebox extra themes",
+      "type": "array",
+      "default": [],
+      "description": "Immutable local theme checkouts for the wordpress-multisite-e2e rig. Each entry is {source,slug,activate?,metadata?}; the rig validates the theme and maps it to a readonly WP Codebox mount. At most one theme may be active."
+    },
+    {
       "id": "wordpress_runtime_workloads",
       "label": "WordPress runtime workloads",
       "type": "array",
@@ -1348,6 +1355,13 @@
       "type": "string",
       "default": "",
       "description": "Optional WordPress core version passed to WordPress test and bench runtime providers. Leave empty for the runner default. Use this when a component needs classes or behavior from a newer WordPress core build."
+    },
+    {
+      "id": "wordpress_runtime_php_version",
+      "label": "WordPress multisite runtime PHP version",
+      "type": "string",
+      "default": "",
+      "description": "Optional PHP major.minor version projected to WP Codebox runtime.phpVersion by the wordpress-multisite-e2e rig. This setting is rig-scoped; the canonical WP Codebox bench builder does not currently expose PHP selection."
     },
     {
       "id": "wp_codebox_php_memory_limit",

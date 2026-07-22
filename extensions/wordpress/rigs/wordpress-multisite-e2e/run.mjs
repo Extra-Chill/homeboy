@@ -2,17 +2,21 @@
 /**
  * External dependencies
  */
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
+const supportedPhpVersions = new Set(['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']);
 
 export async function buildRecipe(settings = {}, cwd = process.cwd()) {
   const fixturePlugin = path.join(packageRoot, 'fixtures/network-fixture');
-  const blueprint = mergeMultisiteBlueprint(settings.wordpress_runtime_blueprint);
+  const phpVersion = runtimePhpVersion(settings);
+  const themes = await extraThemes(settings.wp_codebox_extra_themes);
+  const activeTheme = themes.find((theme) => theme.activate);
+  const blueprint = mergeMultisiteBlueprint(settings.wordpress_runtime_blueprint, activeTheme?.slug);
   const prepareSteps = recipeSteps(settings.wordpress_runtime_prepare_steps);
   const postSteps = recipeSteps(settings.wordpress_runtime_post_steps);
   const scenarioSteps = await browserScenarioSteps(settings.wp_codebox_scenario_manifests, cwd);
@@ -32,6 +36,7 @@ export async function buildRecipe(settings = {}, cwd = process.cwd()) {
     runtime: {
       backend: 'wordpress',
       ...(settings.wordpress_runtime_version ? { wp: settings.wordpress_runtime_version } : {}),
+      ...(phpVersion ? { phpVersion } : {}),
       blueprint,
       preview: { siteUrl: 'http://localhost' },
     },
@@ -45,10 +50,22 @@ export async function buildRecipe(settings = {}, cwd = process.cwd()) {
         },
         ...(settings.wp_codebox_extra_plugins || []),
       ],
+      mounts: themes.map((theme) => ({
+        type: 'directory',
+        source: theme.source,
+        target: `/wordpress/wp-content/themes/${theme.slug}`,
+        mode: 'readonly',
+        metadata: {
+          ...theme.metadata,
+          kind: 'wordpress-theme',
+          slug: theme.slug,
+        },
+      })),
     },
     workflow: {
       steps: [
         phpFileStep('network-seed.php'),
+        ...(activeTheme ? [activateThemeStep(activeTheme.slug)] : []),
         ...prepareSteps,
         ...workloadSteps,
         phpFileStep('network-assert.php'),
@@ -90,12 +107,183 @@ export async function buildRecipe(settings = {}, cwd = process.cwd()) {
   };
 }
 
-function mergeMultisiteBlueprint(value) {
+function mergeMultisiteBlueprint(value, activeThemeSlug) {
   const blueprint = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-  const steps = Array.isArray(blueprint.steps) ? blueprint.steps : [];
+  const steps = Array.isArray(blueprint.steps) ? [...blueprint.steps] : [];
+  if (activeThemeSlug) {
+    const defineIndexes = steps
+      .map((step, index) => step?.step === 'defineWpConfigConsts' ? index : -1)
+      .filter((index) => index >= 0);
+    for (const index of defineIndexes) {
+      const existing = steps[index]?.consts?.WP_DEFAULT_THEME;
+      if (existing !== undefined && existing !== activeThemeSlug) {
+        throw new Error('wordpress_runtime_blueprint WP_DEFAULT_THEME must match the active wp_codebox_extra_themes slug.');
+      }
+    }
+    const defineIndex = defineIndexes[0] ?? -1;
+    if (defineIndex >= 0) {
+      steps[defineIndex] = {
+        ...steps[defineIndex],
+        consts: { ...(steps[defineIndex].consts || {}), WP_DEFAULT_THEME: activeThemeSlug },
+      };
+    } else {
+      steps.push({ step: 'defineWpConfigConsts', consts: { WP_DEFAULT_THEME: activeThemeSlug } });
+    }
+  }
   return {
     ...blueprint,
     steps: steps.some((step) => step?.step === 'enableMultisite') ? steps : [{ step: 'enableMultisite' }, ...steps],
+  };
+}
+
+function runtimePhpVersion(settings) {
+  if (!Object.hasOwn(settings, 'wordpress_runtime_php_version')) {
+    return undefined;
+  }
+  const value = settings.wordpress_runtime_php_version;
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error('wordpress_runtime_php_version must be a non-empty PHP major.minor version.');
+  }
+  const version = value.trim();
+  if (!supportedPhpVersions.has(version)) {
+    throw new Error(`Unsupported wordpress_runtime_php_version: ${version}.`);
+  }
+  return version;
+}
+
+async function extraThemes(value) {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error('wp_codebox_extra_themes must be an array.');
+  }
+
+  const themes = [];
+  const slugs = new Set();
+  for (const [index, entry] of value.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`wp_codebox_extra_themes[${index}] must be an object.`);
+    }
+    if (typeof entry.source !== 'string' || !path.isAbsolute(entry.source)) {
+      throw new Error(`wp_codebox_extra_themes[${index}].source must be an absolute path.`);
+    }
+    const source = path.resolve(entry.source);
+    let sourceStat;
+    try {
+      sourceStat = await stat(source);
+    } catch {
+      throw new Error(`wp_codebox_extra_themes[${index}].source does not exist: ${source}.`);
+    }
+    if (!sourceStat.isDirectory()) {
+      throw new Error(`wp_codebox_extra_themes[${index}].source must be a directory: ${source}.`);
+    }
+    if (typeof entry.slug !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.slug)) {
+      throw new Error(`wp_codebox_extra_themes[${index}].slug must be a valid WordPress theme directory slug.`);
+    }
+    if (slugs.has(entry.slug)) {
+      throw new Error(`wp_codebox_extra_themes contains duplicate slug: ${entry.slug}.`);
+    }
+    slugs.add(entry.slug);
+    if (entry.activate !== undefined && typeof entry.activate !== 'boolean') {
+      throw new Error(`wp_codebox_extra_themes[${index}].activate must be a boolean.`);
+    }
+    if (entry.metadata !== undefined && (!entry.metadata || typeof entry.metadata !== 'object' || Array.isArray(entry.metadata))) {
+      throw new Error(`wp_codebox_extra_themes[${index}].metadata must be an object.`);
+    }
+
+    let style;
+    try {
+      style = await readFile(path.join(source, 'style.css'), 'utf8');
+    } catch {
+      throw new Error(`wp_codebox_extra_themes[${index}] must contain style.css.`);
+    }
+    const name = themeHeader(style, 'Theme Name');
+    if (!name) {
+      throw new Error(`wp_codebox_extra_themes[${index}].style.css must contain a non-empty Theme Name header in its first 8 KB.`);
+    }
+
+    themes.push({
+      source,
+      slug: entry.slug,
+      template: themeHeader(style, 'Template'),
+      activate: entry.activate === true,
+      metadata: entry.metadata || {},
+    });
+  }
+
+  if (themes.filter((theme) => theme.activate).length > 1) {
+    throw new Error('wp_codebox_extra_themes permits at most one active theme.');
+  }
+  const themesBySlug = new Map(themes.map((theme) => [theme.slug, theme]));
+  for (const [index, theme] of themes.entries()) {
+    if (!theme.template) {
+      if (!await hasThemeEntrypoint(theme.source)) {
+        throw new Error(`wp_codebox_extra_themes[${index}] standalone theme must contain index.php, templates/index.html, or block-templates/index.html.`);
+      }
+      continue;
+    }
+    if (theme.template === theme.slug) {
+      throw new Error(`wp_codebox_extra_themes[${index}] child theme cannot name itself as its Template.`);
+    }
+    const parent = themesBySlug.get(theme.template);
+    if (!parent) {
+      throw new Error(`wp_codebox_extra_themes[${index}] child theme requires mounted parent theme: ${theme.template}.`);
+    }
+    if (parent.template) {
+      throw new Error(`wp_codebox_extra_themes[${index}] child theme parent must be a standalone theme: ${theme.template}.`);
+    }
+    if (!await hasThemeEntrypoint(parent.source)) {
+      throw new Error(`wp_codebox_extra_themes[${index}] child theme parent is missing a usable entrypoint: ${theme.template}.`);
+    }
+  }
+  return themes;
+}
+
+function themeHeader(style, header) {
+  const contents = style.slice(0, 8 * 1024).replaceAll('\r', '\n');
+  const pattern = new RegExp(`^(?:[ \\t]*<\\?php)?[ \\t\\/*#@]*${header}:(.*)$`, 'im');
+  const match = contents.match(pattern);
+  return match?.[1]?.replace(/\s*(?:\*\/|\?>).*/, '').trim() || '';
+}
+
+async function hasThemeEntrypoint(source) {
+  for (const entrypoint of ['index.php', 'templates/index.html', 'block-templates/index.html']) {
+    try {
+      if ((await stat(path.join(source, entrypoint))).isFile()) {
+        return true;
+      }
+    } catch {
+      // Try the next WordPress-supported entrypoint.
+    }
+  }
+  return false;
+}
+
+function activateThemeStep(slug) {
+  const code = `$theme_slug = '${slug}';
+if ( ! is_multisite() ) {
+\tthrow new RuntimeException( 'Expected a multisite runtime.' );
+}
+foreach ( get_sites( array( 'number' => 0, 'fields' => 'ids' ) ) as $site_id ) {
+\tswitch_to_blog( (int) $site_id );
+\ttry {
+\t\t$theme = wp_get_theme( $theme_slug );
+\t\tif ( ! $theme->exists() ) {
+\t\t\tthrow new RuntimeException( 'Mounted theme is unavailable: ' . $theme_slug );
+\t\t}
+\t\tswitch_theme( $theme_slug );
+\t\tif ( get_stylesheet() !== $theme_slug ) {
+\t\t\tthrow new RuntimeException( 'Unable to activate mounted theme: ' . $theme_slug );
+\t\t}
+\t} finally {
+\t\trestore_current_blog();
+\t}
+}`;
+  return {
+    command: 'wordpress.run-php',
+    args: [`code=${code}`],
+    metadata: { kind: 'wordpress-theme-activation', slug },
   };
 }
 
