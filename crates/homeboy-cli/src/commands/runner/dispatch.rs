@@ -74,6 +74,7 @@ pub fn run(
             projects,
             commands,
             allow_raw_exec,
+            allow_homeboy_convergence,
             workspace_roots,
             artifact_policy,
             peers,
@@ -86,6 +87,7 @@ pub fn run(
                 projects,
                 commands,
                 allow_raw_exec,
+                allow_homeboy_convergence,
                 workspace_roots,
                 artifact_policy,
             ),
@@ -98,6 +100,7 @@ pub fn run(
             projects,
             workspace_roots,
             allow_raw_exec,
+            allow_homeboy_convergence,
         } => map_registry(policy::update(
             &runner_id,
             policy::RunnerPolicyPatch::pair(
@@ -105,6 +108,7 @@ pub fn run(
                 fingerprints,
                 projects,
                 allow_raw_exec,
+                allow_homeboy_convergence,
                 workspace_roots,
             ),
             "runner.pair",

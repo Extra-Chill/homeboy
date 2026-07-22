@@ -104,6 +104,10 @@ pub struct RunnerPolicy {
     pub allowed_commands: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_raw_exec: Option<bool>,
+    /// Explicitly permits controller-driven Homeboy binary convergence. This
+    /// is separate from arbitrary command execution and defaults to deny.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_homeboy_convergence: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,6 +152,7 @@ impl RunnerPolicy {
             && self.allowed_projects.is_empty()
             && self.allowed_commands.is_empty()
             && self.allow_raw_exec.is_none()
+            && self.allow_homeboy_convergence.is_none()
             && self.workspace_roots.is_empty()
             && self.artifact_policy.is_none()
             && self.snapshot_excludes.is_empty()

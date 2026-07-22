@@ -1,5 +1,11 @@
 use super::*;
 
+fn expected_controller_refresh_ref() -> String {
+    homeboy_product_identity::build_identity()
+        .git_commit
+        .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
+}
+
 #[test]
 fn command_prefix_tools_are_included_in_capability_contract() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -392,7 +398,15 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         .expect("change remote file");
     let error = verify_lab_workspace_from_env(&remote_path.display().to_string(), remote.path())
         .expect_err("changed remote content must fail verification");
-    assert!(error.contains("homeboy-workspace-content-v3+"));
+    assert!(
+        error.contains(
+            crate::workspace_content_hash_algorithm(
+                crate::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+            )
+            .expect("default content hash algorithm")
+            .as_str()
+        )
+    );
     assert!(error.contains("expected sha256:"));
     assert!(error.contains("got sha256:"));
     assert!(error.contains("homeboy runner workspace sync --mode snapshot"));
@@ -564,8 +578,8 @@ fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
         metadata["refresh_commands"],
         serde_json::json!([
             format!(
-                "homeboy runner refresh-homeboy 'homeboy lab' --ref v{} --reconnect",
-                homeboy_product_identity::product_version()
+                "homeboy runner refresh-homeboy 'homeboy lab' --ref {} --reconnect",
+                expected_controller_refresh_ref()
             ),
             "homeboy runner disconnect 'homeboy lab'",
             "homeboy runner connect 'homeboy lab'"
@@ -605,8 +619,8 @@ fn runner_homeboy_version_drift_blocks_offload_with_upgrade_guidance() {
     let tried = err.details["tried"].as_array().expect("tried hints");
     assert!(tried.iter().any(
         |hint| hint.as_str().is_some_and(|hint| hint.contains(&format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-            homeboy_product_identity::product_version()
+            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+            expected_controller_refresh_ref()
         )))
     ));
     assert!(tried.iter().any(|hint| hint
@@ -658,8 +672,8 @@ fn same_minor_patch_drift_is_compatible_and_proceeds_with_warning() {
         .expect("compatible patch drift should warn");
     assert!(warning.contains("wire-compatible"));
     assert!(warning.contains(&format!(
-        "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-        homeboy_product_identity::product_version()
+        "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+        expected_controller_refresh_ref()
     )));
     assert!(warning.contains("require_exact_homeboy_version"));
 }
@@ -764,8 +778,8 @@ fn older_runner_than_controller_points_to_runner_refresh_first() {
     assert_eq!(
         metadata["primary_remediation_command"],
         format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-            homeboy_product_identity::product_version()
+            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+            expected_controller_refresh_ref()
         )
     );
 
@@ -775,8 +789,8 @@ fn older_runner_than_controller_points_to_runner_refresh_first() {
         .first()
         .and_then(|hint| hint.as_str())
         .is_some_and(|hint| hint.contains(&format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-            homeboy_product_identity::product_version()
+            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+            expected_controller_refresh_ref()
         ))));
 }
 
@@ -1040,8 +1054,8 @@ fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
         )));
     assert!(tried.iter().any(
         |hint| hint.as_str().is_some_and(|hint| hint.contains(&format!(
-            "homeboy runner refresh-homeboy 'homeboy lab' --ref v{} --reconnect",
-            homeboy_product_identity::product_version()
+            "homeboy runner refresh-homeboy 'homeboy lab' --ref {} --reconnect",
+            expected_controller_refresh_ref()
         )))
     ));
     assert!(tried.iter().any(|hint| hint

@@ -105,6 +105,10 @@ pub struct LabStagingRecipe {
     pub schema: String,
     pub run_id: String,
     pub runner_id: String,
+    /// Immutable Homeboy build selected by the controller for this handoff.
+    /// Optional only for recipes persisted by older controllers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_homeboy_build_identity: Option<String>,
     #[serde(default = "default_lab_staging_tunnel_mode")]
     pub tunnel_mode: crate::RunnerTunnelMode,
     pub command: LabStagingCommand,
@@ -182,6 +186,9 @@ impl LabStagingRecipe {
             schema: LAB_STAGING_RECIPE_SCHEMA.to_string(),
             run_id: run_id.into(),
             runner_id: runner_id.into(),
+            required_homeboy_build_identity: Some(
+                homeboy_product_identity::build_identity().display,
+            ),
             tunnel_mode,
             command: command.into(),
             normalized_args: request.normalized_args.to_vec(),
@@ -256,6 +263,131 @@ impl LabStagingRecipe {
             ));
         }
         Ok(())
+    }
+}
+
+/// The four identities that determine whether a handoff can execute safely.
+/// This is persisted with the workspace receipt so recovery evidence names the
+/// requested capability as well as the binary that actually ran the command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LabHandoffHomeboyIdentity {
+    requested_build_identity: String,
+    configured_command_build_identity: String,
+    daemon_build_identity: String,
+    /// This is populated only when the command execution itself reports it.
+    /// Session and configured-binary identities are pre-dispatch evidence.
+    executed_command_build_identity: Option<String>,
+}
+
+/// Execution evidence is appended only after runner admission. The current
+/// runtime reports the configured command provenance, not a child-process
+/// measurement, so `executed_command_build_identity` remains null.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LabHandoffExecutionEvidence {
+    runner_job_id: String,
+    execution_record_id: String,
+    command_build_identity: Option<String>,
+}
+
+fn canonical_homeboy_identity(identity: &str) -> &str {
+    identity
+        .trim()
+        .strip_prefix("homeboy ")
+        .unwrap_or(identity.trim())
+}
+
+fn handoff_build_reference(identity: &str) -> String {
+    let identity = canonical_homeboy_identity(identity);
+    identity
+        .split_once('+')
+        .map(|(_, commit)| commit.trim_end_matches("-dirty").to_string())
+        .filter(|commit| !commit.is_empty())
+        .unwrap_or_else(|| format!("v{}", identity.split('+').next().unwrap_or(identity)))
+}
+
+fn immutable_handoff_recovery_command(runner_id: &str, requested: &str) -> String {
+    let reference = handoff_build_reference(requested);
+    format!(
+        "homeboy runner refresh-homeboy {} --ref {} --reconnect",
+        homeboy_core::engine::shell::quote_arg(runner_id),
+        homeboy_core::engine::shell::quote_arg(&reference),
+    )
+}
+
+fn handoff_identity_error(
+    runner_id: &str,
+    requested: &str,
+    configured: Option<&str>,
+    daemon: Option<&str>,
+) -> Error {
+    let recovery = immutable_handoff_recovery_command(runner_id, requested);
+    let mut error = Error::validation_invalid_argument(
+        "runner",
+        format!(
+            "Lab handoff refused runner `{runner_id}` before workspace materialization because required Homeboy build `{requested}` does not match the selected runner command identity `{}` or active daemon identity `{}`",
+            configured.unwrap_or("unavailable"),
+            daemon.unwrap_or("unavailable"),
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![recovery.clone()]),
+    );
+    error.details["homeboy_handoff_identity"] = json!({
+        "requested_build_identity": requested,
+        "configured_command_build_identity": configured,
+        "daemon_build_identity": daemon,
+        "executed_command_build_identity": serde_json::Value::Null,
+        "recovery_command": recovery,
+    });
+    error
+}
+
+fn handoff_execution_evidence(
+    output: &crate::RunnerExecOutput,
+    runner_job_id: &str,
+) -> Option<LabHandoffExecutionEvidence> {
+    let record = output.execution_record.as_ref()?;
+    handoff_execution_evidence_from_record(record, runner_job_id)
+}
+
+fn handoff_execution_evidence_from_record(
+    record: &homeboy_core::runner_execution_envelope::RunnerExecutionRecord,
+    runner_job_id: &str,
+) -> Option<LabHandoffExecutionEvidence> {
+    if record.job_id.as_deref() != Some(runner_job_id) {
+        return None;
+    }
+    Some(LabHandoffExecutionEvidence {
+        runner_job_id: runner_job_id.to_string(),
+        execution_record_id: record.execution_id.clone(),
+        command_build_identity: record
+            .orchestration_provenance
+            .as_ref()
+            .and_then(|provenance| provenance.runner_command_binary.build_identity.clone()),
+    })
+}
+
+fn automatic_handoff_convergence_allowed(runner: &crate::Runner) -> bool {
+    runner.policy.allow_homeboy_convergence == Some(true)
+}
+
+fn handoff_refresh_options(
+    runner_id: String,
+    mode: crate::HomeboyBinaryRefreshMode,
+    requested: &str,
+) -> crate::HomeboyBinaryRefreshOptions {
+    crate::HomeboyBinaryRefreshOptions {
+        runner_id,
+        mode,
+        source: None,
+        git_ref: Some(handoff_build_reference(requested)),
+        target_dir: None,
+        reconnect: true,
+        force: false,
+        // Automatic recovery must preserve #9088's monotonic upgrade contract.
+        allow_downgrade: false,
+        dry_run: false,
     }
 }
 
@@ -563,6 +695,8 @@ struct DurableLabWorkspaceStage {
     source_snapshot_id: String,
     workspace_id: String,
     remote_cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    homeboy_handoff_identity: Option<LabHandoffHomeboyIdentity>,
     stage: Value,
 }
 
@@ -625,6 +759,9 @@ struct DurableLabDispatchReceipt {
     remote_workspace: String,
     remote_command: Vec<String>,
     workload_identity: String,
+    /// Optional for receipts persisted before handoff execution evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    homeboy_handoff_execution_evidence: Option<LabHandoffExecutionEvidence>,
 }
 
 /// Written only after the runner's terminal state has been read and projected
@@ -1351,10 +1488,19 @@ trait LabStagingStageOperations: Send + Sync {
     ) -> Result<Option<LabStagingStageEffect>> {
         Ok(None)
     }
+    /// This must run immediately before the first workspace side effect. It
+    /// returns the pre-dispatch evidence persisted with the workspace receipt.
+    fn validate_handoff_identity(
+        &self,
+        _request: &LabStagingExecutionRequest,
+    ) -> Result<Option<LabHandoffHomeboyIdentity>> {
+        Ok(None)
+    }
     fn materialize_workspace(
         &self,
         request: &LabStagingExecutionRequest,
         checkpoint: &LabStagingCheckpoint,
+        handoff_identity: Option<LabHandoffHomeboyIdentity>,
     ) -> Result<(String, String)>;
     fn materialize_runtime(
         &self,
@@ -1408,6 +1554,85 @@ enum LabStagingStageEffect {
 struct ProductionLabStagingOperations;
 
 impl ProductionLabStagingOperations {
+    /// Validate the immutable handoff binding immediately before the first
+    /// workspace side effect. An explicit convergence policy may refresh an
+    /// idle Direct SSH runner, but recovery never authorizes a downgrade.
+    fn validate_handoff_homeboy_identity(
+        request: &LabStagingExecutionRequest,
+    ) -> Result<Option<LabHandoffHomeboyIdentity>> {
+        let Some(requested) = request.recipe.required_homeboy_build_identity.as_deref() else {
+            // Mixed-version recovery: old recipes had no immutable binding.
+            return Ok(None);
+        };
+        let mut runner = crate::load(&request.recipe.runner_id)?;
+        let mut command =
+            crate::remote_runner_homeboy_path(&runner, "durable Lab handoff")?.to_string();
+        let mut status = Self::status_for_recipe_transport(request)?;
+        let configured = crate::configured_runner_homeboy_build_identity(&runner, &command)?;
+        let daemon = status
+            .session
+            .as_ref()
+            .and_then(|session| session.homeboy_build_identity.clone());
+        let identities_match = |configured: Option<&str>, daemon: Option<&str>| {
+            configured.is_some_and(|identity| {
+                canonical_homeboy_identity(identity) == canonical_homeboy_identity(requested)
+            }) && daemon.is_some_and(|identity| {
+                canonical_homeboy_identity(identity) == canonical_homeboy_identity(requested)
+            })
+        };
+        if !identities_match(configured.as_deref(), daemon.as_deref())
+            && automatic_handoff_convergence_allowed(&runner)
+            && status.active_jobs.is_empty()
+            && status.active_job_state == crate::RunnerActiveJobState::Available
+            && status
+                .session
+                .as_ref()
+                .is_some_and(|session| session.mode == crate::RunnerTunnelMode::DirectSsh)
+        {
+            let mode = if configured.as_deref().is_some_and(|identity| {
+                canonical_homeboy_identity(identity) == canonical_homeboy_identity(requested)
+            }) {
+                crate::HomeboyBinaryRefreshMode::Select {
+                    binary_path: command.to_string(),
+                }
+            } else {
+                crate::HomeboyBinaryRefreshMode::Materialize
+            };
+            let (report, exit_code) = crate::refresh_homeboy_binary(handoff_refresh_options(
+                request.recipe.runner_id.clone(),
+                mode,
+                requested,
+            ))?;
+            if exit_code == 0 && report.daemon_refreshed {
+                status = Self::status_for_recipe_transport(request)?;
+                runner = crate::load(&request.recipe.runner_id)?;
+                command =
+                    crate::remote_runner_homeboy_path(&runner, "durable Lab handoff")?.to_string();
+            }
+        }
+        let daemon = status
+            .session
+            .as_ref()
+            .and_then(|session| session.homeboy_build_identity.clone());
+        let configured = crate::configured_runner_homeboy_build_identity(&runner, &command)?;
+        if !identities_match(configured.as_deref(), daemon.as_deref()) {
+            return Err(handoff_identity_error(
+                &request.recipe.runner_id,
+                requested,
+                configured.as_deref(),
+                daemon.as_deref(),
+            ));
+        }
+        Ok(Some(LabHandoffHomeboyIdentity {
+            requested_build_identity: requested.to_string(),
+            configured_command_build_identity: configured
+                .clone()
+                .expect("checked configured identity"),
+            daemon_build_identity: daemon.expect("checked daemon identity"),
+            executed_command_build_identity: None,
+        }))
+    }
+
     fn durable_workspace(
         request: &LabStagingExecutionRequest,
     ) -> Result<homeboy_agents::agent_task_lifecycle::PrivateRunAttachment<DurableLabWorkspaceStage>>
@@ -1511,6 +1736,7 @@ impl ProductionLabStagingOperations {
             remote_workspace: workspace.payload.remote_cwd,
             remote_command,
             workload_identity: canonical_digest(&hydration.payload.hydration_metadata)?,
+            homeboy_handoff_execution_evidence: None,
         };
         receipt.validate(request, checkpoint)?;
         homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
@@ -1740,10 +1966,18 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         }
     }
 
+    fn validate_handoff_identity(
+        &self,
+        request: &LabStagingExecutionRequest,
+    ) -> Result<Option<LabHandoffHomeboyIdentity>> {
+        Self::validate_handoff_homeboy_identity(request)
+    }
+
     fn materialize_workspace(
         &self,
         request: &LabStagingExecutionRequest,
         checkpoint: &LabStagingCheckpoint,
+        homeboy_handoff_identity: Option<LabHandoffHomeboyIdentity>,
     ) -> Result<(String, String)> {
         if checkpoint.phase != LabStagingPhase::AcceptedMaterializeWorkspace {
             return Err(Error::internal_unexpected(
@@ -1840,6 +2074,8 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         let mut projection =
             crate::lab::offload::workspace_stage::durable_workspace_stage_projection(&stage);
         projection["lab_dispatch_metadata"] = lab_metadata;
+        projection["homeboy_handoff_identity"] =
+            serde_json::to_value(&homeboy_handoff_identity).unwrap_or(serde_json::Value::Null);
         let source_snapshot_id = projection
             .pointer("/source_snapshot/workspace_snapshot_identity")
             .and_then(Value::as_str)
@@ -1867,6 +2103,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             source_snapshot_id: source_snapshot_id.clone(),
             workspace_id: remote_cwd.clone(),
             remote_cwd,
+            homeboy_handoff_identity,
             stage: projection,
         };
         durable.validate(request, checkpoint)?;
@@ -2321,10 +2558,16 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         );
         // Both daemon and broker submissions are idempotent on the immutable run
         // id. A dropped response is reconciled from active durable-job state.
-        let runner_job_id = match submitted {
-            Ok((output, _)) => output.job_id.ok_or_else(|| {
-                Error::internal_unexpected("durable Lab acceptance returned no runner job identity")
-            })?,
+        let (runner_job_id, handoff_execution_evidence) = match submitted {
+            Ok((output, _)) => {
+                let runner_job_id = output.job_id.clone().ok_or_else(|| {
+                    Error::internal_unexpected(
+                        "durable Lab acceptance returned no runner job identity",
+                    )
+                })?;
+                let evidence = handoff_execution_evidence(&output, &runner_job_id);
+                (runner_job_id, evidence)
+            }
             Err(error) => crate::status(&request.recipe.runner_id)
                 .ok()
                 .and_then(|status| {
@@ -2334,6 +2577,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                         .find(|job| job.durable_run_id.as_deref() == Some(&request.recipe.run_id))
                         .map(|job| job.job_id)
                 })
+                .map(|runner_job_id| (runner_job_id, None))
                 .ok_or(error)?,
         };
         // Direct-daemon authority can expire while `/exec` is in flight. Reverse
@@ -2378,6 +2622,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             remote_workspace: workspace.payload.remote_cwd,
             remote_command: command,
             workload_identity: canonical_digest(&hydration.payload.hydration_metadata)?,
+            homeboy_handoff_execution_evidence: handoff_execution_evidence,
         };
         receipt.validate(request, checkpoint)?;
         homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
@@ -2598,9 +2843,11 @@ impl StageExecutionAdapter {
                 Some(effect) => effect,
                 None => match checkpoint.next_action() {
                     LabStagingPhase::AcceptedMaterializeWorkspace => {
+                        let handoff_identity =
+                            self.operations.validate_handoff_identity(request)?;
                         let (source_snapshot_id, workspace_id) = self
                             .operations
-                            .materialize_workspace(request, &checkpoint)?;
+                            .materialize_workspace(request, &checkpoint, handoff_identity)?;
                         LabStagingStageEffect::Workspace(source_snapshot_id, workspace_id)
                     }
                     LabStagingPhase::MaterializeRuntime => LabStagingStageEffect::Runtime(
@@ -3308,6 +3555,7 @@ mod tests {
     #[derive(Default)]
     struct RecordedStageOperations {
         calls: Mutex<Vec<&'static str>>,
+        reject_handoff_identity: Mutex<bool>,
         fail_hydration: Mutex<bool>,
         cancel_during_hydration: Mutex<bool>,
         recovered_runner_job_id: Mutex<Option<String>>,
@@ -3326,6 +3574,13 @@ mod tests {
 
         fn fail_hydration_once(&self) {
             *self.fail_hydration.lock().expect("failure lock") = true;
+        }
+
+        fn reject_handoff_identity_once(&self) {
+            *self
+                .reject_handoff_identity
+                .lock()
+                .expect("handoff identity lock") = true;
         }
 
         fn cancel_during_hydration_once(&self) {
@@ -3393,10 +3648,32 @@ mod tests {
             Ok(recovered)
         }
 
+        fn validate_handoff_identity(
+            &self,
+            _request: &LabStagingExecutionRequest,
+        ) -> Result<Option<LabHandoffHomeboyIdentity>> {
+            self.record("handoff-identity");
+            if std::mem::take(
+                &mut *self
+                    .reject_handoff_identity
+                    .lock()
+                    .expect("handoff identity lock"),
+            ) {
+                return Err(handoff_identity_error(
+                    "lab-1",
+                    "homeboy 1.2.3+required",
+                    Some("homeboy 1.2.2+stale"),
+                    Some("homeboy 1.2.2+stale"),
+                ));
+            }
+            Ok(None)
+        }
+
         fn materialize_workspace(
             &self,
             _request: &LabStagingExecutionRequest,
             _checkpoint: &LabStagingCheckpoint,
+            _handoff_identity: Option<LabHandoffHomeboyIdentity>,
         ) -> Result<(String, String)> {
             self.record("workspace");
             Ok(("snapshot-1".to_string(), "workspace-1".to_string()))
@@ -3515,6 +3792,152 @@ mod tests {
     }
 
     #[test]
+    fn new_handoff_recipe_pins_the_controller_homeboy_build_identity() {
+        let args = vec!["agent-task".to_string(), "run-plan".to_string()];
+        let recipe = LabStagingRecipe::from_request(
+            "attempt-identity",
+            "lab-identity",
+            &recipe_request(Some(recipe_command()), &args, HashMap::new()),
+        )
+        .expect("recipe");
+
+        assert_eq!(
+            recipe.required_homeboy_build_identity.as_deref(),
+            Some(homeboy_product_identity::build_identity().display.as_str())
+        );
+    }
+
+    #[test]
+    fn legacy_handoff_recipe_without_build_identity_remains_readable() {
+        let mut recipe = serde_json::to_value(execution_request().recipe).expect("recipe JSON");
+        recipe
+            .as_object_mut()
+            .expect("recipe object")
+            .remove("required_homeboy_build_identity");
+
+        let recipe: LabStagingRecipe = serde_json::from_value(recipe).expect("legacy recipe");
+        assert_eq!(recipe.required_homeboy_build_identity, None);
+    }
+
+    #[test]
+    fn handoff_identity_keeps_execution_identity_null_before_dispatch() {
+        let identity = LabHandoffHomeboyIdentity {
+            requested_build_identity: "homeboy 1.2.3+required".to_string(),
+            configured_command_build_identity: "homeboy 1.2.3+required".to_string(),
+            daemon_build_identity: "homeboy 1.2.3+required".to_string(),
+            executed_command_build_identity: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(identity).expect("serialize")["executed_command_build_identity"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn post_dispatch_execution_evidence_links_the_authoritative_record() {
+        use homeboy_core::runner_execution_envelope::{
+            BinaryProvenance, OrchestrationTargetProvenance, RunnerExecutionRecord,
+        };
+
+        let binary = |owner: &str| BinaryProvenance {
+            owner: owner.to_string(),
+            path: None,
+            version: None,
+            build_identity: Some("homeboy 1.2.3+required".to_string()),
+        };
+        let record = RunnerExecutionRecord::in_flight("execution-1", "lab-1", "daemon")
+            .with_job_id("runner-job-1")
+            .with_orchestration_provenance(Some(OrchestrationTargetProvenance::new(
+                "lab-1",
+                binary("controller"),
+                binary("daemon"),
+                binary("command"),
+            )));
+        let evidence = handoff_execution_evidence_from_record(&record, "runner-job-1")
+            .expect("matching admitted execution record");
+
+        let value = serde_json::to_value(evidence).expect("serialize");
+        assert_eq!(value["execution_record_id"], "execution-1");
+        assert_eq!(value["command_build_identity"], "homeboy 1.2.3+required");
+    }
+
+    #[test]
+    fn automatic_convergence_requires_its_own_explicit_policy() {
+        let mut runner: crate::Runner =
+            serde_json::from_value(json!({ "kind": "local" })).expect("runner");
+        runner.policy.allow_raw_exec = Some(true);
+        assert!(!automatic_handoff_convergence_allowed(&runner));
+
+        runner.policy.allow_homeboy_convergence = Some(true);
+        assert!(automatic_handoff_convergence_allowed(&runner));
+    }
+
+    #[test]
+    fn automatic_handoff_refresh_never_allows_a_downgrade() {
+        let options = handoff_refresh_options(
+            "lab-identity".to_string(),
+            crate::HomeboyBinaryRefreshMode::Materialize,
+            "homeboy 1.2.3+required",
+        );
+
+        assert!(!options.allow_downgrade);
+        assert_eq!(options.git_ref.as_deref(), Some("required"));
+    }
+
+    #[test]
+    fn stale_or_incompatible_runner_identity_fails_closed_with_one_immutable_recovery() {
+        let error = handoff_identity_error(
+            "lab-identity",
+            "homeboy 1.2.3+required",
+            Some("homeboy 1.2.2+stale"),
+            Some("homeboy 1.2.2+stale"),
+        );
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("before workspace materialization"));
+        assert!(!error.message.contains("warning"));
+        let recovery = error.details["tried"]
+            .as_array()
+            .expect("one recovery command");
+        assert_eq!(recovery.len(), 1);
+        assert_eq!(
+            recovery[0],
+            "homeboy runner refresh-homeboy lab-identity --ref required --reconnect"
+        );
+        assert_eq!(
+            error.details["homeboy_handoff_identity"]["configured_command_build_identity"],
+            "homeboy 1.2.2+stale"
+        );
+        assert_eq!(
+            error.details["homeboy_handoff_identity"]["daemon_build_identity"],
+            "homeboy 1.2.2+stale"
+        );
+        assert_eq!(
+            error.details["homeboy_handoff_identity"]["executed_command_build_identity"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn incompatible_handoff_identity_is_rejected_before_workspace_materialization() {
+        let operations = Arc::new(RecordedStageOperations::default());
+        operations.reject_handoff_identity_once();
+        let adapter = StageExecutionAdapter::new(operations.clone());
+        let error = adapter
+            .execute_with_checkpoint(
+                &execution_request(),
+                LabStagingCheckpoint::initial(&envelope()),
+                &LabStagingCancellationToken::default(),
+                |_| Ok(()),
+            )
+            .expect_err("stale runner identity must reject the staging operation");
+
+        assert!(error.message.contains("before workspace materialization"));
+        assert_eq!(operations.calls(), ["validate", "handoff-identity"]);
+    }
+
+    #[test]
     fn adapter_recovers_after_each_effect_before_completion_without_repeating_side_effects() {
         // Odd persistence calls store intent. Even calls store the completion
         // checkpoint, so crashing on each even call exercises every exact-once
@@ -3555,7 +3978,7 @@ mod tests {
                 operations
                     .calls()
                     .into_iter()
-                    .filter(|call| *call != "validate")
+                    .filter(|call| !matches!(*call, "validate" | "handoff-identity"))
                     .collect::<Vec<_>>(),
                 ["workspace", "runtime", "hydration", "dispatch", "observe"]
             );
@@ -3913,6 +4336,7 @@ mod tests {
             source_snapshot_id: "snapshot-1".to_string(),
             workspace_id: "/runner/workspaces/attempt-1".to_string(),
             remote_cwd: "/runner/workspaces/attempt-1".to_string(),
+            homeboy_handoff_identity: None,
             stage: json!({
                 "remote_cwd": "/runner/workspaces/attempt-1",
                 "source_snapshot": {
@@ -4046,6 +4470,7 @@ mod tests {
             remote_workspace: "/runner/workspace".to_string(),
             remote_command: vec!["homeboy".to_string(), "agent-task".to_string()],
             workload_identity: "sha256:workload".to_string(),
+            homeboy_handoff_execution_evidence: None,
         };
         receipt.validate(&request, &checkpoint).expect("receipt");
         assert!(!serde_json::to_string(&receipt)
@@ -4202,6 +4627,7 @@ mod tests {
             remote_workspace: "/runner/workspace".to_string(),
             remote_command: vec!["homeboy".to_string(), "agent-task".to_string()],
             workload_identity: "sha256:workload".to_string(),
+            homeboy_handoff_execution_evidence: None,
         };
 
         receipt
