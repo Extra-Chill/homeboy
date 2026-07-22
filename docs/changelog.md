@@ -4,6 +4,52 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.306.0] - 2026-07-22
+
+### Added
+- register local command artifacts
+- add safe prepared workspace updates
+- resolve multi-extension capability ambiguity via composition metadata
+- fire run-completion from the Lab runner directly with exactly-once delivery
+- feat(agent-task): invoke provider-owned configured readiness
+
+### Changed
+- refactor(lab-runner): extract shared durable-stage tamper error constructor
+- refactor(lab-runner): collapse repeated workspace-stage field decode boilerplate
+- Preserve dry-run recovery result compatibility
+- Report incomplete release recovery
+- Stabilize concurrent Lab admission lease recovery
+- refactor(lab-runner): extract shared durable-stage identity header check
+- Make release recovery dry runs non-mutating
+- Guard oversized explicit patch releases
+- Surface release failure diagnostics
+- Report durable release rollback state
+- Diagnose unpushed sibling release tags
+- remove the dead per-command ops_command_descriptor macro
+- Clarify promotion provider contracts and schema errors
+- expect commit-pinned refresh guidance
+- Add isolated environments for Cook gates
+- Keep agent-task payloads compact by default
+- lock direct runner identity comparison
+- test(agent-task): initialize provider readiness invocation
+
+### Fixed
+- Fix stale source snapshot fixtures
+- keep snapshot inventory single pass
+- require runner fleet convergence
+- bound workspace lease metadata lookup
+- fail closed on stale command binaries
+- classify complete Git transport failures
+- diagnose misplaced exec options
+- fix(agent-task): validate fanout recipes before worktrees
+- fix(agent-task): preflight fanout recipe collisions
+- prevent stale recovery downgrades
+- fix(agent-task): resume recoverable projected children
+- prevent promotion pin starvation
+- emit valid controller job retrieval commands
+- fix(agent-task): scope Cook identity to fanout generation
+- fix(agent-task): require readable patches before fanout resume
+
 ## [0.305.0] - 2026-07-22
 
 ### Added
