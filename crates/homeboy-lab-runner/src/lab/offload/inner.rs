@@ -1584,7 +1584,7 @@ pub(crate) fn run_lab_offload_inner(
     let mut workspace_resource_lifecycle = synced.resource_lifecycle.clone();
     workspace_resource_lifecycle.cleanup_policy =
         homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnTerminal;
-    let materialized_workspace = MaterializedWorkspace::new(
+    let mut materialized_workspace = MaterializedWorkspace::new(
         runner_id.to_string(),
         remote_cwd.clone(),
         Some(remote_lab_artifact_dir(&remote_cwd)),
@@ -1835,22 +1835,50 @@ pub(crate) fn run_lab_offload_inner(
     // Reserve only after every local/pre-dispatch preparation, including runtime
     // publication, succeeded. The reservation's Drop implementation releases
     // the lease if the subsequent provider preflight rejects the handoff.
-    let admission = direct_daemon_admission_coordinates(
+    //
+    // A *retryable* pre-acceptance admission failure (a stale lease or a
+    // transient `/admissions` transport error) means the workload never
+    // started, yet all the expensive preparation — rig install/sync, workspace
+    // and package snapshots/uploads, path translation — is already staged on the
+    // remote workspace. Reaping it here (the DeleteAlways default) forces a
+    // retry to repeat the entire prep sequence with new identities (#9469).
+    // Preserve the prepared workspace so a retry can resume against the current
+    // healthy daemon instead; a genuine terminal outcome still reaps as before.
+    let admission = match direct_daemon_admission_coordinates(
         runner_id,
         &selection.mode,
         runner_status.session.as_ref(),
-    )?
-    .map(|(local_url, expected_daemon_lease_id)| {
-        reserve_daemon_admission(
-            runner_id,
-            local_url,
-            &redact_argv_shell_display(&command_prefix.argv),
-            expected_daemon_lease_id,
-            agent_task_run_id.as_deref(),
-            DaemonAdmissionPolicy::LegacyCompatible,
-        )
-    })
-    .transpose()?;
+    )
+    .and_then(|coordinates| {
+        coordinates
+            .map(|(local_url, expected_daemon_lease_id)| {
+                reserve_daemon_admission(
+                    runner_id,
+                    local_url,
+                    &redact_argv_shell_display(&command_prefix.argv),
+                    expected_daemon_lease_id,
+                    agent_task_run_id.as_deref(),
+                    DaemonAdmissionPolicy::LegacyCompatible,
+                )
+            })
+            .transpose()
+    }) {
+        Ok(admission) => admission,
+        Err(error) => {
+            if error.retryable == Some(true) {
+                materialized_workspace.preserve();
+                if let Some(run_id) = agent_task_run_id.as_deref() {
+                    eprintln!(
+                        "Lab offload: retryable admission failure for run `{run_id}` on runner \
+                         `{runner_id}`; preserving prepared workspace `{remote_cwd}` for resume \
+                         (rig install/sync and snapshots are reusable). Retry to resume from \
+                         admission."
+                    );
+                }
+            }
+            return Err(error);
+        }
+    };
     lab_metadata["execution_bundle"] = serde_json::json!({
         "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
         "binary": {
