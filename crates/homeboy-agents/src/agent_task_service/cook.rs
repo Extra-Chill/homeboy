@@ -36,8 +36,8 @@ use super::cook_promotion::{
     attempt_needs_execution, cook_report, finalize_or_load_cook_pr,
     is_moving_base_finalization_error, moving_base_recovery_for_run,
     moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
-    promote_or_load_attempt, recover_moving_base_cook_candidate, refreshed_moving_base_recovery,
-    MovingBaseCookRecovery,
+    persisted_promotion_for_attempt, promote_or_load_attempt, recover_moving_base_cook_candidate,
+    refreshed_moving_base_recovery, MovingBaseCookRecovery,
 };
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
@@ -461,6 +461,150 @@ pub struct AgentTaskCookAttemptReport {
     pub feedback: Option<AgentTaskCookLoopReport>,
 }
 
+pub(crate) enum CookFollowUpDispatch {
+    Dispatched { run_id: String },
+    BudgetExhausted { reason: String },
+    PolicyFailure { reason: String },
+}
+
+/// Append and dispatch one remediation attempt from an authenticated promoted
+/// candidate. Both ordinary Cook feedback and external candidate adoption use
+/// this boundary so their budget, provenance, and baseline authority match.
+pub(crate) fn dispatch_cook_follow_up<E>(
+    options: &AgentTaskCookServiceOptions,
+    executor: E,
+    cook_id: &str,
+    attempt: u32,
+    source_run_id: &str,
+    plan: &AgentTaskPlan,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    promotion: &AgentTaskPromotionReport,
+    mut follow_up_request: crate::agent_task::AgentTaskRequest,
+    known_same_executor: bool,
+    budget_limit: &AgentTaskExecutionBudget,
+    budget_used: ExecutionBudgetUsage,
+    remediation_category_usage: &mut ExecutionBudgetUsage,
+) -> Result<CookFollowUpDispatch>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let Some(remaining_budget) = budget_remaining(budget_limit, budget_used) else {
+        return Ok(CookFollowUpDispatch::BudgetExhausted {
+            reason: "max_provider_executions".to_string(),
+        });
+    };
+    let same_provider = (known_same_executor
+        || follow_up_request.inputs["cook_loop"]["review_form_required"] == true)
+        .then_some(true)
+        .or_else(|| terminal_executor_matches(aggregate, &follow_up_request.executor));
+    let Some(same_provider) = same_provider else {
+        return Ok(CookFollowUpDispatch::PolicyFailure {
+            reason: "cannot classify Cook remediation without terminal executor identity"
+                .to_string(),
+        });
+    };
+    let reservation = match reserve_remediation_budget(&remaining_budget, same_provider) {
+        Ok(reservation) => reservation,
+        Err(reason) => {
+            return Ok(CookFollowUpDispatch::BudgetExhausted {
+                reason: reason.to_string(),
+            })
+        }
+    };
+    let next_attempt = attempt + 1;
+    let next_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt);
+    // This is reviewable lineage, not the process-local baseline capability.
+    follow_up_request.inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
+        "source_run_id": source_run_id,
+        "source_task_id": promotion.source.task_id,
+        "source_patch_artifact_sha256": promotion.patch_artifact.sha256,
+    });
+    let mut follow_up_plan = AgentTaskPlan::new(
+        format!("{cook_id}-cook-attempt-{next_attempt}"),
+        vec![follow_up_request],
+    );
+    follow_up_plan.options = plan.options.clone();
+    follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
+    follow_up_plan.options.retry.max_attempts = 1;
+    let review_form_only =
+        follow_up_plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true;
+    super::record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
+    if attempt_needs_execution(&next_run_id) {
+        let baseline = materialize_follow_up_baseline(
+            promotion,
+            source_run_id,
+            &follow_up_plan.tasks[0].task_id,
+        )?;
+        follow_up_plan.tasks[0].workspace.root = Some(baseline.path.display().to_string());
+        follow_up_plan.tasks[0].inputs["cook_loop"]["artifact_provenance"] =
+            baseline.artifact_provenance();
+        if let Some(dispatcher) = &options.attempt_dispatcher {
+            // A detached dispatcher may return before any executor-side
+            // lifecycle write. Persist the exact materialized plan first so a
+            // continuation resumes this baseline-bound workspace contract.
+            agent_task_lifecycle::submit_plan(&follow_up_plan, Some(&next_run_id))?;
+            dispatcher.dispatch_attempt(
+                follow_up_plan,
+                &next_run_id,
+                Some(baseline.capability()),
+            )?;
+        } else {
+            run_loaded_plan_with_derived_cook_baseline(
+                follow_up_plan,
+                Some(&next_run_id),
+                executor,
+                Some(baseline.capability()),
+                Some(cook_attempt_harvest_context(&options.harvest_context)),
+            )?;
+        }
+    }
+    // The generated ID is random by design. Link the execution only after its
+    // materialized plan is durable, so a resumed controller selects this exact
+    // run without replacing its baseline-bound workspace contract.
+    agent_task_lifecycle::record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
+    if review_form_only {
+        // A form-only retry deliberately makes no code changes. Carry the
+        // already-authenticated candidate forward so its finalization path can
+        // consume the new form without selecting or applying a patch again.
+        let mut carried_promotion = promotion.clone();
+        carried_promotion.source.run_id = Some(next_run_id.clone());
+        carried_promotion.provenance["cook_follow_up"] = serde_json::json!({
+            "kind": "review_form_only",
+            "source_run_id": source_run_id,
+        });
+        agent_task_lifecycle::record_promotion(
+            &next_run_id,
+            serde_json::to_value(carried_promotion)
+                .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        )?;
+    }
+    remediation_category_usage.add(reservation);
+    Ok(CookFollowUpDispatch::Dispatched {
+        run_id: next_run_id,
+    })
+}
+
+fn adopted_attempt_is_ready_for_cook_continuation(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<Option<String>> {
+    let Some(adoption) = record.candidate_adoption.as_ref() else {
+        return Ok(None);
+    };
+    if adoption.state != "completed" {
+        return Ok(None);
+    }
+    let Some(promotion) = persisted_promotion_for_attempt(&record.run_id)? else {
+        return Ok(None);
+    };
+    let provenance = &promotion.provenance["adoption"];
+    if provenance["candidate_ref"].as_str() == Some(adoption.candidate_sha.as_str())
+        && provenance["ai_model"].as_str() == Some(adoption.ai_model.as_str())
+    {
+        return Ok(Some(adoption.ai_model.clone()));
+    }
+    Ok(None)
+}
+
 pub fn run_cook<E>(
     options: AgentTaskCookServiceOptions,
     executor: E,
@@ -471,7 +615,7 @@ where
     run_cook_with_finalizer(options, executor, finalize_or_load_cook_pr)
 }
 
-fn run_cook_with_finalizer<E, F>(
+pub(crate) fn run_cook_with_finalizer<E, F>(
     options: AgentTaskCookServiceOptions,
     executor: E,
     finalize: F,
@@ -521,15 +665,41 @@ where
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
     let existing_recipe = super::recipe_exists(&options.cook_id)?;
-    let recipe = super::persist_initial_recipe(&options)?;
+    let recipe = if existing_recipe {
+        super::load_recipe(&options.cook_id)?
+    } else {
+        super::persist_initial_recipe(&options)?
+    };
     // A recipe can survive an interruption before its first lifecycle record.
     // Resume from the validated durable inputs so ambient transport state cannot
     // turn replay into a conflicting new cook.
-    let options = if existing_recipe {
-        super::reconstruct_options_with_dispatcher(&recipe, options.attempt_dispatcher)?
+    let requested_run_id = options.initial_run_id.clone();
+    let mut options = if existing_recipe {
+        let mut reconstructed =
+            super::reconstruct_options_with_dispatcher(&recipe, options.attempt_dispatcher)?;
+        if let Some(attempt) = recipe
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == requested_run_id)
+        {
+            reconstructed.initial_run_id = attempt.run_id.clone();
+            reconstructed.initial_plan = attempt.plan.clone();
+        }
+        reconstructed
     } else {
         options
     };
+    // Candidate adoption records the concrete external model on the lifecycle
+    // attempt. Reuse it only when the persisted promotion authenticates the
+    // same candidate/model pair, including after a detached continuation.
+    if let Some(model) = agent_task_lifecycle::status(&options.initial_run_id)
+        .ok()
+        .map(|record| adopted_attempt_is_ready_for_cook_continuation(&record))
+        .transpose()?
+        .flatten()
+    {
+        options.ai_model = Some(model);
+    }
     materialize_initial_cook_attempt(&options)?;
     // Transport readiness can serialize on a reconnect/runtime-promotion
     // lease. Complete it before entering the provider-attempt loop so that
@@ -549,14 +719,31 @@ where
         homeboy_core::runtime_promotion::pin_cook_generation(&options.cook_id)?;
     let max_attempts = options.max_attempts.max(1);
     let mut attempts = Vec::new();
-    let mut run_id = options.initial_run_id.clone();
-    let mut next_plan = Some(options.initial_plan.clone());
+    // A retry may already be durably dispatched when this controller resumes.
+    // Continue from that exact recorded attempt rather than re-entering the
+    // original attempt and re-binding its immutable recipe identity.
+    let resumed_run_id = agent_task_lifecycle::cook_index(&options.cook_id)
+        .ok()
+        .map(|index| index.latest_run_id)
+        .filter(|run_id| run_id != &options.initial_run_id);
+    let mut run_id = resumed_run_id
+        .clone()
+        .unwrap_or_else(|| options.initial_run_id.clone());
+    let mut next_plan = resumed_run_id
+        .is_none()
+        .then(|| options.initial_plan.clone());
     let cook_id = options.cook_id.clone();
     let mut budget_limit = None;
     let mut observed_budget_used = ExecutionBudgetUsage::default();
     let mut remediation_category_usage = ExecutionBudgetUsage::default();
 
-    for attempt in 1..=max_attempts {
+    let first_attempt = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .map(|attempt| attempt.attempt)
+        .unwrap_or(1);
+    for attempt in first_attempt..=max_attempts {
         let plan = match next_plan.take() {
             Some(plan) => plan,
             None => agent_task_lifecycle::load_plan(&run_id)?,
@@ -766,12 +953,14 @@ where
             ));
         }
 
+        let adopted_continuation = adopted_attempt_is_ready_for_cook_continuation(&record)?;
         if !matches!(
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
                 | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
                 | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
-        ) {
+        ) && adopted_continuation.is_none()
+        {
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
                 run_id: run_id.clone(),
@@ -987,7 +1176,7 @@ where
                 ));
             }
             AgentTaskCookLoopStatus::RetryRequested => {
-                let Some(mut follow_up_request) = follow_up_request else {
+                let Some(follow_up_request) = follow_up_request else {
                     return Ok(cook_report(
                         cook_id,
                         "policy_failure",
@@ -999,106 +1188,50 @@ where
                         1,
                     ));
                 };
-                let next_run_id = agent_task_lifecycle::cook_attempt_run_id(&cook_id, attempt + 1);
-                let Some(remaining_budget) = budget_limit
+                let budget_limit = budget_limit
                     .as_ref()
-                    .and_then(|budget| budget_remaining(budget, budget_used))
-                else {
-                    return Ok(cook_report(
-                        cook_id,
-                        "execution_budget_exhausted",
-                        attempts,
-                        None,
-                        Some("provider execution stopped because max_provider_executions was exhausted".to_string()),
-                        1,
-                    ));
-                };
-                let Some(same_provider) =
-                    terminal_executor_matches(&aggregate, &follow_up_request.executor)
-                else {
-                    return Ok(cook_report(
-                        cook_id,
-                        "policy_failure",
-                        attempts,
-                        None,
-                        Some(
-                            "cannot classify Cook remediation without terminal executor identity"
-                                .to_string(),
-                        ),
-                        1,
-                    ));
-                };
-                let reservation = match reserve_remediation_budget(&remaining_budget, same_provider)
-                {
-                    Ok(reservation) => reservation,
-                    Err(exhausted_budget) => {
+                    .expect("budget is initialized from the loaded attempt plan");
+                match dispatch_cook_follow_up(
+                    &options,
+                    executor.clone(),
+                    &cook_id,
+                    attempt,
+                    &run_id,
+                    &plan,
+                    &aggregate,
+                    &promotion,
+                    follow_up_request,
+                    false,
+                    budget_limit,
+                    budget_used,
+                    &mut remediation_category_usage,
+                )? {
+                    CookFollowUpDispatch::Dispatched {
+                        run_id: next_run_id,
+                    } => run_id = next_run_id,
+                    CookFollowUpDispatch::BudgetExhausted { reason } => {
                         return Ok(cook_report(
                             cook_id,
                             "execution_budget_exhausted",
                             attempts,
                             None,
-                            Some(format!("provider execution stopped because {exhausted_budget} was exhausted")),
+                            Some(format!(
+                                "provider execution stopped because {reason} was exhausted"
+                            )),
                             1,
                         ));
                     }
-                };
-                // This is durable evidence, not the process-local baseline
-                // capability. A restarted controller re-materializes and
-                // verifies that capability from the exact promoted artifact.
-                follow_up_request.inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
-                    "source_run_id": run_id,
-                    "source_task_id": promotion.source.task_id,
-                    "source_patch_artifact_sha256": promotion.patch_artifact.sha256,
-                });
-                let mut follow_up_plan = AgentTaskPlan::new(
-                    format!("{cook_id}-cook-attempt-{}", attempt + 1),
-                    vec![follow_up_request],
-                );
-                follow_up_plan.options = plan.options.clone();
-                follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
-                follow_up_plan.options.retry.max_attempts = 1;
-                super::record_recipe_attempt(&cook_id, attempt + 1, &next_run_id, &follow_up_plan)?;
-                // A restarted controller may find this exact retry already
-                // accepted or terminal. Its durable recipe is the dispatch
-                // boundary; never send the provider a second copy.
-                if attempt_needs_execution(&next_run_id) {
-                    let baseline = match materialize_follow_up_baseline(&promotion, &run_id) {
-                        Ok(baseline) => baseline,
-                        Err(error) => {
-                            return Ok(cook_report(
-                                cook_id,
-                                "policy_failure",
-                                attempts,
-                                None,
-                                Some(error.to_string()),
-                                1,
-                            ));
-                        }
-                    };
-                    let mut follow_up_plan = follow_up_plan;
-                    follow_up_plan.tasks[0].workspace.root =
-                        Some(baseline.path.display().to_string());
-                    // Requests retain artifact facts for review, never authorization.
-                    follow_up_plan.tasks[0].inputs["cook_loop"]["artifact_provenance"] =
-                        baseline.artifact_provenance();
-                    if let Some(dispatcher) = &options.attempt_dispatcher {
-                        dispatcher.dispatch_attempt(
-                            follow_up_plan,
-                            &next_run_id,
-                            Some(baseline.capability()),
-                        )?;
-                    } else {
-                        run_loaded_plan_with_derived_cook_baseline(
-                            follow_up_plan,
-                            Some(&next_run_id),
-                            executor.clone(),
-                            Some(baseline.capability()),
-                            Some(cook_attempt_harvest_context(&options.harvest_context)),
-                        )?;
+                    CookFollowUpDispatch::PolicyFailure { reason } => {
+                        return Ok(cook_report(
+                            cook_id,
+                            "policy_failure",
+                            attempts,
+                            None,
+                            Some(reason),
+                            1,
+                        ));
                     }
                 }
-                remediation_category_usage.add(reservation);
-                run_id = next_run_id;
             }
             AgentTaskCookLoopStatus::RetriesExhausted => {
                 return Ok(cook_report(

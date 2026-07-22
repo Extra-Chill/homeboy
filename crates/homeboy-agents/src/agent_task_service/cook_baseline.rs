@@ -40,6 +40,7 @@ pub struct DerivedCookBaselineCapability {
     artifact_sha256: String,
     source_run_id: String,
     source_task_id: String,
+    bound_task_id: String,
     parent_snapshot: Option<Value>,
     preexisting_candidate: bool,
 }
@@ -57,8 +58,8 @@ impl DerivedCookBaselineCapability {
         &self.tree
     }
 
-    pub(crate) fn source_task_id(&self) -> &str {
-        &self.source_task_id
+    pub(crate) fn bound_task_id(&self) -> &str {
+        &self.bound_task_id
     }
 
     pub(crate) fn parent_snapshot(&self) -> Option<&Value> {
@@ -120,6 +121,7 @@ pub fn test_derived_cook_baseline_capability(
         artifact_sha256: "test-artifact-sha256".to_string(),
         source_run_id: "test-source-run".to_string(),
         source_task_id: task_id.to_string(),
+        bound_task_id: task_id.to_string(),
         parent_snapshot,
         preexisting_candidate: false,
     }
@@ -232,6 +234,7 @@ pub(crate) fn materialize_initial_candidate_baseline(
             artifact_sha256: format!("{:x}", sha2::Sha256::digest(tree.as_bytes())),
             source_run_id: source_run_id.to_string(),
             source_task_id: task_id.to_string(),
+            bound_task_id: task_id.to_string(),
             parent_snapshot: None,
             preexisting_candidate: true,
         },
@@ -255,6 +258,7 @@ impl Drop for CookFollowUpBaseline {
 pub(crate) fn materialize_follow_up_baseline(
     promotion: &AgentTaskPromotionReport,
     source_run_id: &str,
+    bound_task_id: &str,
 ) -> Result<CookFollowUpBaseline> {
     let source_root = promotion
         .provenance
@@ -365,6 +369,7 @@ pub(crate) fn materialize_follow_up_baseline(
             artifact_sha256,
             source_run_id: source_run_id.to_string(),
             source_task_id: promotion.source.task_id.clone(),
+            bound_task_id: bound_task_id.to_string(),
             parent_snapshot,
             preexisting_candidate: false,
         },

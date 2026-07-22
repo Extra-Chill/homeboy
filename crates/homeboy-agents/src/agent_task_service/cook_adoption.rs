@@ -30,17 +30,36 @@ use crate::agent_task_promotion::resolve_candidate_revision;
 use crate::agent_task_promotion::{
     promote_with_checkpoint, AgentTaskPromotionOptions, AgentTaskPromotionReport,
 };
+use crate::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use homeboy_core::{Error, Result};
 
 use super::cook::{
-    gate_feedback_current_diff, AgentTaskCandidateAdoptionOptions, AgentTaskCookAttemptDispatcher,
-    AgentTaskCookAttemptReport, AgentTaskCookReport,
+    dispatch_cook_follow_up, gate_feedback_current_diff, AgentTaskCandidateAdoptionOptions,
+    AgentTaskCookAttemptDispatcher, AgentTaskCookAttemptReport, AgentTaskCookReport,
+    CookFollowUpDispatch,
 };
 use super::cook_promotion::{
     cook_report, finalize_or_load_cook_pr_with_backend, persisted_promotion_for_attempt,
     promotion_source,
 };
 use super::AgentTaskRunResult;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CandidateAdoptionTerminalResult {
+    status: String,
+    stop_reason: Option<String>,
+}
+
+fn persist_adoption_terminal_result(run_id: &str, report: &AgentTaskCookReport) -> Result<()> {
+    agent_task_lifecycle::record_candidate_adoption_result(
+        run_id,
+        serde_json::to_value(CandidateAdoptionTerminalResult {
+            status: report.status.clone(),
+            stop_reason: report.stop_reason.clone(),
+        })
+        .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    )
+}
 
 /// Read the AI-authored review form off an adopted candidate's terminal
 /// outcome. The candidate was produced by an earlier cook attempt, so any form
@@ -104,24 +123,50 @@ pub fn adopt_cook_candidate_with_options_and_dispatcher(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    adopt_cook_candidate_with_options_dispatcher_and_executor(
+        cook_or_run_id,
+        candidate_ref,
+        adoption,
+        reconstruct_dispatcher,
+        ExtensionProviderAgentTaskExecutor::discover(),
+    )
+}
+
+/// Adopt a candidate and retain the normal Cook execution boundary for any
+/// remediation requested by its deterministic feedback.
+pub fn adopt_cook_candidate_with_options_dispatcher_and_executor<E>(
+    cook_or_run_id: &str,
+    candidate_ref: &str,
+    adoption: AgentTaskCandidateAdoptionOptions,
+    reconstruct_dispatcher: impl FnOnce(
+        &Value,
+    ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+    executor: E,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
+{
     adopt_cook_candidate_with_dispatcher_and_backend(
         cook_or_run_id,
         candidate_ref,
         adoption,
         reconstruct_dispatcher,
+        executor,
         &mut RealAgentTaskPrFinalizationBackend,
     )
 }
 
 pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
+    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
     B: AgentTaskPrFinalizationBackend,
 >(
     cook_or_run_id: &str,
     candidate_ref: &str,
     adoption: AgentTaskCandidateAdoptionOptions,
-    _reconstruct_dispatcher: impl FnOnce(
+    reconstruct_dispatcher: impl FnOnce(
         &Value,
     ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+    executor: E,
     backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let (record, recipe) = resolve_adoption_target(cook_or_run_id)?;
@@ -129,6 +174,21 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
     let mut options = super::reconstruct_adoption_options(&recipe)?;
     let run_id = record.run_id.clone();
     let plan = agent_task_lifecycle::load_plan(&run_id)?;
+    let recipe_attempt = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "adopted run is not declared by the durable cook recipe",
+                Some(run_id.clone()),
+                None,
+            )
+        })?;
+    let adopted_attempt = recipe_attempt.attempt;
+    options.initial_run_id = run_id.clone();
+    options.initial_plan = recipe_attempt.plan.clone();
     let source_request = plan.tasks.first().cloned().ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",
@@ -153,7 +213,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
             "recipe_finalization",
         ),
     };
-    let source_worktree = options.source_worktree_path.as_deref().ok_or_else(|| {
+    let source_worktree = options.source_worktree_path.clone().ok_or_else(|| {
         Error::validation_invalid_argument(
             "candidate_ref",
             "candidate adoption requires the recorded source worktree",
@@ -163,7 +223,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
     })?;
     // Resolve the caller input to the commit object before durable ownership is
     // claimed, then use that immutable SHA for every subsequent operation.
-    let candidate_sha = resolve_candidate_revision(source_worktree, candidate_ref)?;
+    let candidate_sha = resolve_candidate_revision(&source_worktree, candidate_ref)?;
     let gate_identity = if options.gates.verify.is_empty() {
         "promotion verification".to_string()
     } else {
@@ -171,11 +231,33 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
     };
     if !options.gates.rerun_completed_gates
         && record.candidate_adoption.as_ref().is_some_and(|adoption| {
-            adoption.state == "completed"
-                && adoption.candidate_sha == candidate_sha
+            adoption.candidate_sha == candidate_sha
                 && adoption.ai_model == adoption_ai_model
+                && (adoption.state == "completed" || adoption.result.is_some())
         })
     {
+        if let Some(result) = record
+            .candidate_adoption
+            .as_ref()
+            .and_then(|adoption| adoption.result.clone())
+        {
+            let result: CandidateAdoptionTerminalResult = serde_json::from_value(result)
+                .map_err(|error| Error::internal_json(error.to_string(), None))?;
+            let exit_code =
+                if matches!(result.status.as_str(), "review_ready" | "green_no_finalize") {
+                    0
+                } else {
+                    1
+                };
+            return Ok(cook_report(
+                cook_id.to_string(),
+                &result.status,
+                Vec::new(),
+                None,
+                result.stop_reason,
+                exit_code,
+            ));
+        }
         let promotion = persisted_promotion_for_attempt(&record.run_id)?.ok_or_else(|| {
             Error::validation_invalid_argument(
                 "candidate_ref",
@@ -187,7 +269,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
         let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request,
             promotion_report: promotion.clone(),
-            attempt: 1,
+            attempt: adopted_attempt,
             max_attempts: options.max_attempts,
             source_run_id: Some(record.run_id.clone()),
             current_diff: String::new(),
@@ -217,6 +299,9 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
             if status == "review_ready" || status == "green_no_finalize" { 0 } else { 1 },
         ));
     }
+    let attempt_dispatcher =
+        reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
+    options.attempt_dispatcher = attempt_dispatcher;
     agent_task_lifecycle::start_candidate_adoption_with_rerun_policy(
         &record.run_id,
         &candidate_sha,
@@ -312,7 +397,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
     })?;
     compare_adoption_gate_failures_to_base(
         &mut promotion,
-        source_worktree,
+        &source_worktree,
         task_base_sha,
         &record.run_id,
     )?;
@@ -343,7 +428,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
     let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
         source_request,
         promotion_report: promotion.clone(),
-        attempt: 1,
+        attempt: adopted_attempt,
         max_attempts: options.max_attempts,
         source_run_id: Some(record.run_id.clone()),
         current_diff: gate_feedback_current_diff(&promotion),
@@ -352,13 +437,105 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
         metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
     });
     let attempt = AgentTaskCookAttemptReport {
-        attempt: 1,
+        attempt: adopted_attempt,
         run_id: record.run_id.clone(),
         run_state: format!("{:?}", record.state),
         aggregate_path: record.aggregate_path.clone(),
         promotion: Some(promotion.clone()),
         feedback: Some(feedback.clone()),
     };
+    if feedback.status == AgentTaskCookLoopStatus::RetryRequested {
+        let Some(mut follow_up_request) = feedback.follow_up_request.clone() else {
+            agent_task_lifecycle::finish_candidate_adoption(
+                &record.run_id,
+                Some(
+                    "candidate adoption feedback requested retry without a follow-up request"
+                        .to_string(),
+                ),
+            )?;
+            let report = cook_report(
+                cook_id.to_string(),
+                "policy_failure",
+                vec![attempt],
+                None,
+                Some(
+                    "candidate adoption feedback requested retry without a follow-up request"
+                        .to_string(),
+                ),
+                1,
+            );
+            persist_adoption_terminal_result(&record.run_id, &report.value)?;
+            return Ok(report);
+        };
+        // An authenticated pre-provider recovery has no aggregate executor
+        // evidence. The concrete adopted model is the authority for the
+        // remediation request and makes its same-provider budget category
+        // explicit rather than inferred from an absent provider execution.
+        follow_up_request.executor.model = Some(adoption_ai_model.clone());
+        let budget = plan.options.execution_budget.clone();
+        let mut remediation_usage = Default::default();
+        let aggregate = agent_task_lifecycle::read_aggregate(&record.run_id)?;
+        let dispatch = dispatch_cook_follow_up(
+            &options,
+            executor.clone(),
+            cook_id,
+            adopted_attempt,
+            &record.run_id,
+            &plan,
+            &aggregate,
+            &promotion,
+            follow_up_request,
+            true,
+            &budget,
+            super::cook_budget::execution_budget_usage(&aggregate),
+            &mut remediation_usage,
+        )?;
+        return match dispatch {
+            CookFollowUpDispatch::Dispatched { .. } => {
+                agent_task_lifecycle::finish_candidate_adoption(&record.run_id, None)?;
+                let mut result = super::cook::run_cook_with_finalizer(
+                    options,
+                    executor,
+                    |options, run_id, promotion| {
+                        finalize_or_load_cook_pr_with_backend(options, run_id, promotion, backend)
+                    },
+                )?;
+                result.value.attempts.insert(0, attempt);
+                Ok(result)
+            }
+            CookFollowUpDispatch::BudgetExhausted { reason } => {
+                let report = cook_report(
+                    cook_id.to_string(),
+                    "execution_budget_exhausted",
+                    vec![attempt],
+                    None,
+                    Some(format!(
+                        "provider execution stopped because {reason} was exhausted"
+                    )),
+                    1,
+                );
+                persist_adoption_terminal_result(&record.run_id, &report.value)?;
+                agent_task_lifecycle::finish_candidate_adoption(
+                    &record.run_id,
+                    Some("candidate remediation budget exhausted".to_string()),
+                )?;
+                Ok(report)
+            }
+            CookFollowUpDispatch::PolicyFailure { reason } => {
+                let report = cook_report(
+                    cook_id.to_string(),
+                    "policy_failure",
+                    vec![attempt],
+                    None,
+                    Some(reason.clone()),
+                    1,
+                );
+                persist_adoption_terminal_result(&record.run_id, &report.value)?;
+                agent_task_lifecycle::finish_candidate_adoption(&record.run_id, Some(reason))?;
+                Ok(report)
+            }
+        };
+    }
     if feedback.status != AgentTaskCookLoopStatus::GreenCompleted {
         agent_task_lifecycle::finish_candidate_adoption(
             &record.run_id,

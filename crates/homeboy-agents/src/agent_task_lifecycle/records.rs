@@ -145,6 +145,10 @@ pub struct AgentTaskCandidateAdoptionAttempt {
     pub terminal_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+    /// Durable controller outcome for idempotent adoption replay. A completed
+    /// adoption can legitimately be non-green when remediation was blocked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
 }
 
 impl AgentTaskCandidateAdoptionAttempt {

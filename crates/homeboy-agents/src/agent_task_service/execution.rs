@@ -83,10 +83,11 @@ where
     E: AgentTaskExecutorAdapter,
 {
     if let Some(run_id) = record_run_id {
-        // A runner has its own lifecycle store. Materialize the handed-off plan
-        // before any preparation can invoke runner-scoped lifecycle commands.
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+        // Prepare before persistence so the lifecycle record and scheduler use
+        // the same materialized workspace contract. In particular, Cook's
+        // derived baseline capability must bind the persisted task workspace.
         if let Err(error) = prepare_plan_for_execution(&mut plan, Some(run_id)) {
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
             agent_task_lifecycle::record_pre_execution_failure(
                 run_id,
                 &plan,
@@ -95,6 +96,7 @@ where
             )?;
             return Err(error);
         }
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
         let harvest_context = match supplied_harvest_context.clone().map(Ok).unwrap_or_else(
             crate::agent_task_scheduler::HarvestExecutionContext::from_current_process,
         ) {
