@@ -76,6 +76,97 @@ try {
   assert.deepEqual(explicitOverlayRequest.runtime_overlays, [explicitOverlay]);
   assert(!JSON.stringify(explicitOverlayRequest.runtime_overlays).includes(legacyPhpAiClientPath));
 
+  const overlaySha = 'a'.repeat(40);
+  const phpAiClientProfile = {
+    schema: 'homeboy/runtime-overlay-profile/v1',
+    id: 'php-ai-client-provider-metadata',
+    repository: { identity: 'example/php-ai-client', ref: overlaySha, sha: overlaySha },
+    source: explicitPhpAiClientPath,
+    target: '/wordpress/wp-includes/php-ai-client',
+    required_capabilities: ['php-ai-client.provider-metadata.get-description'],
+    preparation_evidence: {
+      checkout: { repository_identity: 'example/php-ai-client', ref: overlaySha, sha: overlaySha, clean: true },
+      probes: [{ capability: 'php-ai-client.provider-metadata.get-description', command: ['true'] }],
+    },
+  };
+  const providerProfile = {
+    schema: 'homeboy/runtime-overlay-profile/v1',
+    id: 'provider-overlay',
+    repository: { identity: 'example/provider', ref: overlaySha, sha: overlaySha },
+    source: path.join(root, 'provider-overlay'),
+    target: '/wordpress/wp-content/plugins/provider-overlay',
+    required_capabilities: ['provider.registration'],
+    preparation_evidence: {
+      checkout: { repository_identity: 'example/provider', ref: overlaySha, sha: overlaySha, clean: true },
+      probes: [{ capability: 'provider.registration', command: ['true'] }],
+    },
+  };
+  fs.mkdirSync(providerProfile.source, { recursive: true });
+  const composedOverlayRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    executor: {
+      ...request.executor,
+      config: {
+        ...request.executor.config,
+        runtime_overlay_profiles: [phpAiClientProfile, providerProfile],
+        runtime_overlays: [
+          { ...explicitOverlay, profile_id: phpAiClientProfile.id },
+          { kind: 'plugin', source: providerProfile.source, target: providerProfile.target, profile_id: providerProfile.id },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(composedOverlayRequest.runtime_overlays.map((overlay) => overlay.profile_id), [
+    'php-ai-client-provider-metadata',
+    'provider-overlay',
+  ]);
+  assert.deepEqual(composedOverlayRequest.runtime_overlays.map((overlay) => overlay.target), [
+    phpAiClientProfile.target,
+    providerProfile.target,
+  ]);
+
+  const materializedOverlayRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    executor: {
+      ...request.executor,
+      config: {
+        ...request.executor.config,
+        runtime_overlay_profiles: [phpAiClientProfile],
+        runtime_overlays: [{ kind: 'bundled-library', profile_id: phpAiClientProfile.id }],
+      },
+    },
+  });
+  assert.deepEqual(materializedOverlayRequest.runtime_overlays[0].source, phpAiClientProfile.source);
+  assert.deepEqual(materializedOverlayRequest.runtime_overlays[0].target, phpAiClientProfile.target);
+  assert.deepEqual(composedOverlayRequest.context.runtime_overlay_profiles.map((profile) => profile.repository.identity), [
+    'example/php-ai-client',
+    'example/provider',
+  ]);
+
+  assert.throws(() => codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    executor: {
+      ...request.executor,
+      config: {
+        ...request.executor.config,
+        runtime_overlay_profiles: [phpAiClientProfile],
+        runtime_overlays: [{ ...explicitOverlay, profile_id: phpAiClientProfile.id, target: '/wordpress/wrong-target' }],
+      },
+    },
+  }), /Overlay target must match profile/);
+
+  assert.throws(() => codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    executor: {
+      ...request.executor,
+      config: {
+        ...request.executor.config,
+        runtime_overlay_proof: true,
+        runtime_overlays: [explicitOverlay],
+      },
+    },
+  }), /must declare a profile_id/);
+
   const clearedRunnerDefaultsRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
     executor: {

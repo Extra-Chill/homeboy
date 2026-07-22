@@ -86,6 +86,7 @@ const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
 // captured workspace patch; genuine agent changes outside `.ci/` are retained.
 const RUNNER_MATERIALIZATION_EXCLUDE_PATHS = Object.freeze(['.ci/**']);
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects. WP Codebox owns the runtime overlay schema and reports field-level validation.';
+const { runtimeOverlayProfileEvidence, validateRuntimeOverlayProfiles } = require('./runtime-overlay-profiles');
 const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 const AGENT_TASK_EVENT_SCHEMA = 'homeboy/agent-task-event/v1';
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
@@ -393,7 +394,15 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
   const runtimeOverlays = runtimeOverlaysFromConfig(config, runtimeOptions, defaults);
-  const runtimeRequirements = codeboxRuntimeRequirementsFromAgentTaskRequest(config, runtimeOptions, defaults, componentContracts, runtimeOverlays);
+  const runtimeOverlayProofBearing = runtimeOverlayProofBearingFromConfig(config, runtimeOptions, defaults);
+  const runtimeOverlayProfileResult = validateRuntimeOverlayProfiles(
+    config.runtime_overlay_profiles || config.runtimeOverlayProfiles || runtimeOptions.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
+    runtimeOverlays,
+    { proofBearing: runtimeOverlayProofBearing }
+  );
+  const runtimeOverlayProfiles = runtimeOverlayProfileResult.profiles;
+  const boundRuntimeOverlays = runtimeOverlayProfileResult.overlays;
+  const runtimeRequirements = codeboxRuntimeRequirementsFromAgentTaskRequest(config, runtimeOptions, defaults, componentContracts, boundRuntimeOverlays);
   componentContracts = codeboxRuntimeComponentContracts({
     componentContracts: [
       ...componentContracts,
@@ -413,6 +422,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     source_refs: request.source_refs || [],
     audit_findings: inputs.audit_findings || [],
     matrix: inputs.matrix,
+    runtime_overlay_profiles: runtimeOverlayProfileEvidence(runtimeOverlayProfiles),
   };
 
   return {
@@ -449,8 +459,9 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     ),
     agent_bundles: agentBundles,
     runtime_stack_mounts: config.runtime_stack_mounts || runtimeOptions.runtimeStackMounts || [],
-    runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || runtimeOptions.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
-    runtime_overlays: runtimeOverlays,
+    runtime_overlay_profiles: runtimeOverlayProfiles,
+    runtime_overlay_proof: runtimeOverlayProofBearing,
+    runtime_overlays: boundRuntimeOverlays,
     runtime_requirements: runtimeRequirements,
     runtime_env: runtimeEnvWithComponentPaths({
       ...firstObject(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, runtimeOptions.runtimeEnv, defaults.runtimeEnv, {}),
@@ -738,6 +749,16 @@ function runtimeOverlaysFromConfig(config, options = {}, defaults = {}) {
     defaults.runtimeOverlays,
     []
   ));
+}
+
+function runtimeOverlayProofBearingFromConfig(config = {}, options = {}, defaults = {}) {
+  return firstDefined(
+    config.runtime_overlay_proof,
+    config.runtimeOverlayProof,
+    options.runtimeOverlayProof,
+    defaults.runtimeOverlayProof,
+    false
+  ) === true;
 }
 
 function validateRuntimeOverlays(value) {

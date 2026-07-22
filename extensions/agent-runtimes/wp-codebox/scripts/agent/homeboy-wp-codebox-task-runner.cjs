@@ -39,6 +39,11 @@ const {
   wpCodeboxProviderPluginPathsFromEnv,
   wpCodeboxResolveCommand,
 } = require('../../lib/wp-codebox-adapter-descriptor');
+const {
+  RuntimeOverlayProfileError,
+  runtimeOverlayProfileReadinessDiagnostics,
+  validateRuntimeOverlayProfiles,
+} = require('../../lib/runtime-overlay-profiles');
 
 
 // Diagnostics mode. When enabled, the wp-codebox CLI subprocess stderr is
@@ -1057,6 +1062,17 @@ function runnerInput(request, artifacts) {
   const runtimeComponentPaths = {
     ...requestRuntimeComponents(request, mounts),
   };
+  const runtimeOverlayProof = request.runtime_overlay_proof === true || request.runtimeOverlayProof === true;
+  const finalOverlayProfiles = request.runtime_overlay_profiles || request.runtimeOverlayProfiles || [];
+  const finalOverlayValidation = validateRuntimeOverlayProfiles(
+    finalOverlayProfiles,
+    runtimeOverlayEntries(request),
+    { proofBearing: runtimeOverlayProof }
+  );
+  const finalOverlayDiagnostics = runtimeOverlayProfileReadinessDiagnostics(finalOverlayValidation.profiles);
+  if (finalOverlayDiagnostics.length > 0) {
+    throw new RuntimeOverlayProfileError(finalOverlayDiagnostics);
+  }
   return Object.fromEntries(Object.entries({
     parent_request: request,
     agent: argValue('--agent') || request.agent || '',
@@ -1068,11 +1084,12 @@ function runnerInput(request, artifacts) {
       argValues('--provider-plugin-path'),
       request.provider_plugin_paths,
     )),
-    runtime_overlay_profiles: request.runtime_overlay_profiles || request.runtimeOverlayProfiles || [],
+    runtime_overlay_profiles: finalOverlayValidation.profiles,
+    runtime_overlay_proof: runtimeOverlayProof,
     ...providerCredentialRequestFields({ secret_env: secretEnvNames(request) }),
     mounts,
     runtime_stack_mounts: runtimeStackMountEntries(request),
-    runtime_overlays: runtimeOverlayEntries(request),
+    runtime_overlays: finalOverlayValidation.overlays,
     runtime_env: request.runtime_env || request.runtimeEnv || {},
     ability_tools: request.ability_tools || request.abilityTools || [],
     runtime_state_mounts: request.runtime_state_mounts || request.runtimeStateMounts || [],
@@ -1305,6 +1322,7 @@ function stableTaskInput(input) {
     // success until the supplied gates (e.g. the repo's smoke/test suite) pass.
     verify_steps: verifySteps(input),
     runtime_overlay_profiles: input.runtime_overlay_profiles || [],
+    runtime_overlay_proof: input.runtime_overlay_proof === true,
     ...providerCredentialFields,
     mounts: input.mounts || [],
     workspaces: input.parent_request?.workspaces || [],
@@ -2158,6 +2176,8 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
     timeout_ms: timeoutMs,
     task_id: request.orchestrator?.agent_task_id,
     sandbox_session_id: request.sandbox_session_id,
+    runtime_overlay_proof: input.runtime_overlay_proof === true,
+    runtime_overlay_profiles: input.runtime_overlay_profiles || [],
   });
 
   if (hasFlag('--print-command')) {

@@ -2,7 +2,7 @@
   "schema": "homeboy/agent-runtime-manifest/v1",
   "id": "wp-codebox",
   "name": "WP Codebox",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "WP Codebox agent runtime for Homeboy agent tasks.",
   "contract_producers": [
     {

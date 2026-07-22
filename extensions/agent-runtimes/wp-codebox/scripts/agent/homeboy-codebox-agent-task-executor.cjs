@@ -9,6 +9,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { pathToFileURL } = require('node:url');
 
 if (process.argv.includes('--provider-contract')) {
   const { agent_task_executors } = require('../../wp-codebox.json');
@@ -64,7 +65,29 @@ function requireWpCodeboxCoreLoader() {
     }
   }
 
-  throw new Error(`Unable to resolve wp-codebox-core-loader from ${candidates.join(', ')}`);
+  return {
+    async loadWpCodeboxCore(options = {}) {
+      const moduleCandidates = [
+        process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE,
+        process.env.WP_CODEBOX_CORE_MODULE,
+        ...(options.packageCandidates || []),
+      ].filter(Boolean);
+      const errors = [];
+      for (const candidate of moduleCandidates) {
+        try {
+          const resolved = isPathLike(candidate) ? path.resolve(candidate) : require.resolve(candidate);
+          return await import(pathToFileURL(resolved).href);
+        } catch (error) {
+          errors.push(error?.message || String(error));
+        }
+      }
+      throw new Error(`Unable to resolve WP Codebox core module from ${moduleCandidates.join(', ')}. ${errors.join(' ')}`);
+    },
+  };
+}
+
+function isPathLike(value) {
+  return String(value || '').startsWith('.') || path.isAbsolute(String(value || ''));
 }
 
 const DEFAULT_TASK_RUNNER = path.resolve(__dirname, 'homeboy-wp-codebox-task-runner.cjs');

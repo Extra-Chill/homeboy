@@ -65,6 +65,32 @@ process.stdout.write(JSON.stringify({ success: true, status: 'completed' }));
   assert.equal(diagnostic.data.setup_command, `composer install --working-dir=${overlayRoot}`);
   assert.equal(diagnostic.data.owner_surface, 'wp-codebox-runtime-integration');
   assert.equal(fs.existsSync(capture), false, 'task runner is not spawned when runtime readiness fails');
+
+  const injectionRequest = {
+    schema: 'homeboy/agent-task-request/v1',
+    task_id: 'runtime-overlay-proof-injection',
+    executor: {
+      backend: 'wp-codebox',
+      config: {
+        runtime_overlay_proof: true,
+      },
+    },
+    instructions: 'Reject a runner-injected mutable overlay.',
+  };
+  const injection = spawnSync(process.execPath, [executor, '--runtime-overlay-json', JSON.stringify({
+    kind: 'library',
+    source: overlayRoot,
+    target: '/wordpress/injected',
+  })], {
+    encoding: 'utf8',
+    input: JSON.stringify(injectionRequest),
+    env: {
+      ...process.env,
+      HOMEBOY_WP_CODEBOX_CORE_MODULE: coreModule,
+    },
+  });
+  assert.equal(injection.status, 1);
+  assert.match(injection.stderr, /must declare a profile_id/);
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true });
 }
