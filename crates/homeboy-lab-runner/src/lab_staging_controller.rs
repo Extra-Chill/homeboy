@@ -682,6 +682,19 @@ fn durable_stage_header_matches(
         && plan_digest == canonical_digest(&request.durable_agent_task_plan)?)
 }
 
+/// The uniform "missing, tampered, or bound to different run inputs" validation
+/// error every durable Lab stage raises when its persisted state fails to bind
+/// to the current run. `field` is the argument name; `subject` is the stage's
+/// operator-facing noun (e.g. "dispatch receipt", "durable runtime state").
+fn durable_stage_tamper_error(field: &'static str, subject: &str) -> Error {
+    Error::validation_invalid_argument(
+        field,
+        format!("Lab staging {subject} is missing, tampered, or bound to different run inputs"),
+        None,
+        None,
+    )
+}
+
 /// Complete, owner-only output of the one admitted production boundary. Later
 /// stages consume this attachment rather than recomputing or re-syncing it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -854,7 +867,10 @@ impl DurableLabDispatchReceipt {
                 .as_deref()
                 .is_some_and(|id| id != self.runner_job_id)
         {
-            return Err(Error::validation_invalid_argument("durable_dispatch_receipt", "Lab staging dispatch receipt is missing, tampered, or bound to different run inputs", None, None));
+            return Err(durable_stage_tamper_error(
+                "durable_dispatch_receipt",
+                "dispatch receipt",
+            ));
         }
         Ok(())
     }
@@ -883,7 +899,10 @@ impl DurableLabRuntimeStage {
                 .as_deref()
                 .is_some_and(|id| id != self.runtime_id)
         {
-            return Err(Error::validation_invalid_argument("durable_runtime_stage", "Lab staging durable runtime state is missing, tampered, or bound to different run inputs", None, None));
+            return Err(durable_stage_tamper_error(
+                "durable_runtime_stage",
+                "durable runtime state",
+            ));
         }
         Ok(())
     }
@@ -939,7 +958,10 @@ impl DurableLabHydrationStage {
             || self.dispatch_inputs.get("plan") != Some(&self.plan)
             || checkpoint.hydration_id.as_deref() != Some(self.hydration_id.as_str())
         {
-            return Err(Error::validation_invalid_argument("durable_hydration_stage", "Lab staging durable hydration receipt is missing, tampered, or bound to different run inputs", None, None));
+            return Err(durable_stage_tamper_error(
+                "durable_hydration_stage",
+                "durable hydration receipt",
+            ));
         }
         Ok(())
     }
@@ -988,7 +1010,10 @@ impl DurableLabWorkspaceStage {
                 .and_then(Value::as_str)
                 != Some(self.remote_cwd.as_str())
         {
-            return Err(Error::validation_invalid_argument("durable_workspace_stage", "Lab staging durable workspace state is missing, tampered, or bound to different run inputs", None, None));
+            return Err(durable_stage_tamper_error(
+                "durable_workspace_stage",
+                "durable workspace state",
+            ));
         }
         if let (Some(source), Some(workspace)) =
             (&checkpoint.source_snapshot_id, &checkpoint.workspace_id)
