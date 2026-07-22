@@ -308,6 +308,11 @@ pub struct WorktreeProviderCommands {
     /// `resolve`. Exact handle lookups prefer `resolve` when it is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list: Option<Vec<String>>,
+    /// Promotion apply command. Homeboy sends the typed promotion request on
+    /// stdin and requires the typed apply response on stdout. `{handle}`
+    /// arguments are replaced with the selected managed-worktree handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apply: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_preview: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

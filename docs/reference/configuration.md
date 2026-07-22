@@ -105,7 +105,9 @@ variables.
 
 ### `WorktreeProviderCommands`
 
+- `resolve`
 - `list`
+- `apply` — Typed promotion apply invocation. Homeboy writes `homeboy/agent-task-promotion-apply-request/v1` to stdin and requires `homeboy/agent-task-promotion-apply-response/v1` on stdout. `{handle}` argv values resolve to the selected managed-worktree handle.
 - `cleanup_preview`
 - `cleanup_apply`
 - `artifacts_preview`

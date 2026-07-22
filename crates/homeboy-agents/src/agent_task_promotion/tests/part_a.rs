@@ -59,6 +59,154 @@ fn configured_promotion_preflight_rejects_missing_provider_before_dispatch() {
 
 #[cfg(unix)]
 #[test]
+fn configured_apply_provider_discovers_and_promotes_a_nonempty_patch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("managed-worktree");
+    std::fs::create_dir(&workspace).expect("workspace");
+    git(&workspace, &["init"]);
+    git(&workspace, &["checkout", "-b", "managed"]);
+    git(&workspace, &["config", "user.email", "agent@example.test"]);
+    git(&workspace, &["config", "user.name", "Agent"]);
+    std::fs::create_dir(workspace.join("src")).expect("source directory");
+    std::fs::write(workspace.join("src/lib.rs"), "old\n").expect("source");
+    git(&workspace, &["add", "src/lib.rs"]);
+    git(&workspace, &["commit", "-m", "initial"]);
+    let patch = temp.path().join("promotion.patch");
+    std::fs::write(&patch, VALID_PATCH).expect("patch");
+
+    let resolve = temp.path().join("dmc-shaped-resolve.sh");
+    let apply = temp.path().join("dmc-shaped-apply.sh");
+    std::fs::write(
+        &resolve,
+        format!(
+            "#!/bin/sh\nset -eu\ntest \"$1\" = fixture@managed\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@managed\",\"path\":\"{}\",\"branch\":\"managed\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+            workspace.display(),
+        ),
+    )
+    .expect("resolve script");
+    std::fs::write(
+        &apply,
+        format!(
+            "#!/bin/sh\nset -eu\ntest \"$1\" = fixture@managed\nrequest=$(cat)\nprintf '%s' \"$request\" | grep -q 'homeboy/agent-task-promotion-apply-request/v1'\ngit -C '{}' apply '{}'\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\",\"command_evidence\":[{{\"command\":[\"dmc-shaped\",\"apply\"],\"exit_code\":0,\"stdout\":\"applied\",\"stderr\":\"\",\"capture\":{{\"stdout\":{{\"limit_bytes\":0,\"seen_bytes\":0,\"retained_bytes\":0,\"truncated\":false}},\"stderr\":{{\"limit_bytes\":0,\"seen_bytes\":0,\"retained_bytes\":0,\"truncated\":false}}}}}}]}}'\n",
+            workspace.display(),
+            patch.display(),
+            workspace.display(),
+        ),
+    )
+    .expect("apply script");
+    for script in [&resolve, &apply] {
+        let mut permissions = std::fs::metadata(script)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(script, permissions).expect("make script executable");
+    }
+
+    let config = config_with_provider(
+        &resolve,
+        Some(vec![apply.display().to_string(), "{handle}".to_string()]),
+    );
+    preflight_configured_workspace_provider_with_config("fixture@managed", &config)
+        .expect("configured provider discovers clean managed target");
+    let mut provider = ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
+        &promotion_options("fixture@managed"),
+        &config,
+        Some(PathBuf::from("/unused/homeboy")),
+        None,
+    );
+    let result = provider
+        .apply_patch(AgentTaskPromotionApplyRequest {
+            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+            to_workspace: "fixture@managed".to_string(),
+            patch: Some(VALID_PATCH.to_string()),
+            patch_path: patch.display().to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+            gate_feedback_baseline: None,
+            dry_run: false,
+            trusted_unpushed_candidate_destination: None,
+        })
+        .expect("configured apply provider promotes patch");
+
+    assert_eq!(
+        result.path.canonicalize().unwrap(),
+        workspace.canonicalize().unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("src/lib.rs")).unwrap(),
+        "new\n"
+    );
+    assert_eq!(
+        result.command_evidence[0].command,
+        vec!["dmc-shaped", "apply"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn configured_apply_provider_rejects_a_dirty_destination_before_mutation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let resolve = temp.path().join("dmc-shaped-resolve.sh");
+    let apply = temp.path().join("dmc-shaped-apply.sh");
+    let marker = temp.path().join("apply-ran");
+    std::fs::write(
+        &resolve,
+        "#!/bin/sh\nprintf '%s\\n' '{\"worktrees\":[{\"handle\":\"fixture@dirty\",\"path\":\"/tmp/not-used\",\"branch\":\"managed\",\"safety\":{\"dirty\":true,\"unpushed\":false,\"primary\":false}}]}'\n",
+    )
+    .expect("resolve script");
+    std::fs::write(&apply, format!("#!/bin/sh\ntouch '{}'\n", marker.display()))
+        .expect("apply script");
+    for script in [&resolve, &apply] {
+        let mut permissions = std::fs::metadata(script)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(script, permissions).expect("make script executable");
+    }
+
+    let config = config_with_provider(&resolve, Some(vec![apply.display().to_string()]));
+    let error = preflight_configured_workspace_provider_with_config("fixture@dirty", &config)
+        .expect_err("dirty provider destination must be rejected");
+    assert!(error.message.contains("dirty"));
+    assert!(
+        !marker.exists(),
+        "apply must not run before safety rejection"
+    );
+}
+
+#[cfg(unix)]
+fn config_with_provider(resolve: &Path, apply: Option<Vec<String>>) -> HomeboyConfig {
+    let mut config = HomeboyConfig::default();
+    config.worktree_providers.insert(
+        "fixture-provider".to_string(),
+        WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            commands: WorktreeProviderCommands {
+                resolve: Some(vec![resolve.display().to_string(), "{handle}".to_string()]),
+                apply,
+                ..Default::default()
+            },
+            list_result_mapping: Some(WorktreeProviderListResultMapping {
+                items: "$.worktrees".to_string(),
+                handle: "$.handle".to_string(),
+                path: "$.path".to_string(),
+                branch: "$.branch".to_string(),
+                dirty: "$.safety.dirty".to_string(),
+                unpushed: "$.safety.unpushed".to_string(),
+                primary: "$.safety.primary".to_string(),
+            }),
+        },
+    );
+    config
+}
+
+#[cfg(unix)]
+#[test]
 fn adopted_workspace_wins_over_a_rejecting_configured_provider() {
     use std::os::unix::fs::PermissionsExt;
 
