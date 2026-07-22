@@ -703,12 +703,20 @@ where
         }
         agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
         let record = agent_task_lifecycle::status(&run_id)?;
-        if record.state == agent_task_lifecycle::AgentTaskRunState::Running
-            && record.runner_job_id().is_some()
+        let controller_owned_staging = record
+            .metadata
+            .get("lab_staging_controller_job_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|job_id| !job_id.is_empty());
+        if matches!(
+            record.state,
+            agent_task_lifecycle::AgentTaskRunState::Queued
+                | agent_task_lifecycle::AgentTaskRunState::Running
+        ) && (record.runner_job_id().is_some() || controller_owned_staging)
         {
-            // A detached runner handoff has durably accepted the provider
-            // child. Its daemon owns timeout and provider rotation; this
-            // controller returns without attempting to read a future aggregate.
+            // Detached staging or runner handoff has a durable owner. It owns
+            // timeout and provider rotation, so Cook must not read a future
+            // aggregate before that owner has produced it.
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
                 run_id: run_id.clone(),

@@ -1144,11 +1144,19 @@ fn handle_reverse_broker_request(
         return ok(json!({ "content_base64": encoded }));
     }
     if request.method == "GET" {
-        if let Some(job_id) = request.path.strip_prefix("/jobs/") {
-            let job = store
-                .get(uuid::Uuid::parse_str(job_id).expect("broker job id"))
-                .expect("broker job");
-            return ok(json!({ "job": job }));
+        if let Some(job_path) = request.path.strip_prefix("/jobs/") {
+            let (job_id, action) = job_path.split_once('/').unwrap_or((job_path, ""));
+            let job_id = uuid::Uuid::parse_str(job_id).expect("broker job id");
+            return match action {
+                "" => ok(json!({ "job": store.get(job_id).expect("broker job") })),
+                "events" => ok(json!({
+                    "events": store.events(job_id).expect("broker job events")
+                })),
+                _ => json!({
+                    "success": false,
+                    "error": { "message": "unknown reverse broker fixture read path" }
+                }),
+            };
         }
     }
     if let Some(job_id) = request.path.strip_prefix("/runner/jobs/") {
