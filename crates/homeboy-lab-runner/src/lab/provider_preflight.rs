@@ -744,11 +744,17 @@ fn refresh_command(runner_id: &str, runner_homeboy: &serde_json::Value) -> Strin
         })
         .unwrap_or_else(|| {
             format!(
-                "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
+                "homeboy runner refresh-homeboy {} --ref {} --reconnect",
                 shell::quote_arg(runner_id),
-                homeboy_product_identity::product_version()
+                controller_refresh_ref()
             )
         })
+}
+
+fn controller_refresh_ref() -> String {
+    homeboy_product_identity::build_identity()
+        .git_commit
+        .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
 }
 
 #[cfg(test)]

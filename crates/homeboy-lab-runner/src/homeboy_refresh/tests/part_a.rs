@@ -256,6 +256,7 @@ fn materialize_plan_uses_clean_runner_cache() {
         target_dir: Some("/runner/ws/homeboy-clean".to_string()),
         reconnect: false,
         force: false,
+        allow_downgrade: false,
         dry_run: true,
     };
     let plan = HomeboyBinaryRefreshPlan {
@@ -270,6 +271,7 @@ fn materialize_plan_uses_clean_runner_cache() {
             "fix/foo",
             "/runner/ws/homeboy-clean",
             "/runner/ws/homeboy-clean/target/release/homeboy",
+            false,
         ),
         reconnect: false,
         followup_commands: refresh_followups("lab", false),
@@ -285,6 +287,317 @@ fn materialize_plan_uses_clean_runner_cache() {
         plan.binary_path,
         "/runner/ws/homeboy-clean/target/release/homeboy"
     );
+}
+
+#[test]
+fn materialize_plan_rejects_implicit_git_ancestry_downgrades() {
+    let script = materialize_script(
+        "https://example.test/homeboy.git",
+        "v0.295.0",
+        "/runner/ws/homeboy-clean",
+        "/runner/ws/homeboy-clean/target/release/homeboy",
+        false,
+    );
+
+    assert!(script.contains("merge-base --is-ancestor \"$target\" \"$current\""));
+    assert!(script.contains("HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current"));
+    assert!(script.contains("--allow-downgrade only for an intentional rollback"));
+    assert!(script.contains("checkout --quiet --force --detach \"$target\""));
+}
+
+#[test]
+fn materialize_plan_allows_an_explicit_git_ancestry_downgrade() {
+    let script = materialize_script(
+        "https://example.test/homeboy.git",
+        "v0.295.0",
+        "/runner/ws/homeboy-clean",
+        "/runner/ws/homeboy-clean/target/release/homeboy",
+        true,
+    );
+
+    assert!(script.contains("allow_downgrade=true"));
+}
+
+#[test]
+fn promotion_policy_blocks_tag_downgrade_without_mutating_selection_and_records_explicit_rollback()
+{
+    let fixture = tempfile::tempdir().expect("git fixture");
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["config", "user.email", "homeboy@example.test"],
+        vec!["config", "user.name", "Homeboy Test"],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(fixture.path())
+            .status()
+            .expect("git")
+            .success());
+    }
+    std::fs::write(fixture.path().join("release"), "same semver release\n").expect("release");
+    assert!(Command::new("git")
+        .args(["add", "."])
+        .current_dir(fixture.path())
+        .status()
+        .expect("add")
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "v1.0.0"])
+        .current_dir(fixture.path())
+        .status()
+        .expect("commit")
+        .success());
+    assert!(Command::new("git")
+        .args(["tag", "v1.0.0"])
+        .current_dir(fixture.path())
+        .status()
+        .expect("tag")
+        .success());
+    let release = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(fixture.path())
+            .output()
+            .expect("release sha")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+    std::fs::write(fixture.path().join("release"), "post tag, same semver\n").expect("post tag");
+    assert!(Command::new("git")
+        .args(["commit", "-am", "post tag"])
+        .current_dir(fixture.path())
+        .status()
+        .expect("commit")
+        .success());
+    let newer = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(fixture.path())
+            .output()
+            .expect("new sha")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+    let mut status = refreshed_daemon_status(true, Some(&format!("homeboy 1.0.0+{newer}")));
+    status
+        .session
+        .as_mut()
+        .expect("session")
+        .homeboy_build_identity = Some(format!("homeboy 1.0.0+{newer}"));
+    let plan = HomeboyBinaryRefreshPlan {
+        runner_id: "lab".to_string(),
+        mode: "select".to_string(),
+        source: None,
+        git_ref: Some("v1.0.0".to_string()),
+        target_dir: Some(fixture.path().display().to_string()),
+        binary_path: "/selected/homeboy".to_string(),
+        script: String::new(),
+        reconnect: false,
+        followup_commands: Vec::new(),
+    };
+    let candidate = serde_json::json!({"data":{"git_commit":release}});
+    let authorities = RefreshPromotionAuthorities {
+        controller: None,
+        active_daemon: status
+            .session
+            .as_ref()
+            .and_then(|session| session.homeboy_build_identity.as_deref())
+            .and_then(build_identity_commit)
+            .map(str::to_string),
+        configured_selected: None,
+    };
+    let denied = validate_refresh_promotion(&plan, &candidate, false, &authorities)
+        .expect_err("post-tag active daemon must block implicit rollback");
+    assert_eq!(denied.details["field"], "allow_downgrade");
+    let rollback = validate_refresh_promotion(&plan, &candidate, true, &authorities)
+        .expect("explicit rollback is allowed")
+        .expect("rollback evidence");
+    assert_eq!(rollback.requested.as_deref(), Some("v1.0.0"));
+    assert_eq!(rollback.resolved, release);
+    assert_eq!(rollback.selected, release);
+    assert!(rollback
+        .previous
+        .iter()
+        .any(|identity| identity.contains(&newer)));
+}
+
+#[test]
+fn old_materializes_first_new_selects_first_uses_fresh_promotion_authorities() {
+    let fixture = tempfile::tempdir().expect("git fixture");
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["config", "user.email", "homeboy@example.test"],
+        vec!["config", "user.name", "Homeboy Test"],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(fixture.path())
+            .status()
+            .expect("git")
+            .success());
+    }
+    std::fs::write(fixture.path().join("release"), "old\n").expect("old release");
+    assert!(Command::new("git")
+        .args(["add", "."])
+        .current_dir(fixture.path())
+        .status()
+        .expect("add")
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "old"])
+        .current_dir(fixture.path())
+        .status()
+        .expect("commit")
+        .success());
+    let old = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(fixture.path())
+            .output()
+            .expect("old sha")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+    std::fs::write(fixture.path().join("release"), "new\n").expect("new release");
+    assert!(Command::new("git")
+        .args(["commit", "-am", "new"])
+        .current_dir(fixture.path())
+        .status()
+        .expect("commit")
+        .success());
+    let new = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(fixture.path())
+            .output()
+            .expect("new sha")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+    let plan = HomeboyBinaryRefreshPlan {
+        runner_id: "lab".to_string(),
+        mode: "materialize".to_string(),
+        source: None,
+        git_ref: Some("old".to_string()),
+        target_dir: Some(fixture.path().display().to_string()),
+        binary_path: "/old/homeboy".to_string(),
+        script: String::new(),
+        reconnect: false,
+        followup_commands: Vec::new(),
+    };
+    let candidate = serde_json::json!({"data":{"git_commit":old}});
+
+    // The old request finished materializing before the newer request selected.
+    let stale_authorities = RefreshPromotionAuthorities {
+        controller: None,
+        active_daemon: None,
+        configured_selected: None,
+    };
+    assert!(
+        validate_refresh_promotion(&plan, &candidate, false, &stale_authorities)
+            .expect("stale snapshot would allow selection")
+            .is_none()
+    );
+
+    // Selection must use the authority reread after obtaining its lease.
+    let fresh_authorities = RefreshPromotionAuthorities {
+        controller: None,
+        active_daemon: None,
+        configured_selected: Some(new),
+    };
+    assert!(validate_refresh_promotion(&plan, &candidate, false, &fresh_authorities).is_err());
+}
+
+#[test]
+fn rollback_evidence_excludes_unrelated_authorities() {
+    let fixture = tempfile::tempdir().expect("git fixture");
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["config", "user.email", "homeboy@example.test"],
+        vec!["config", "user.name", "Homeboy Test"],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(fixture.path())
+            .status()
+            .expect("git")
+            .success());
+    }
+    std::fs::write(fixture.path().join("candidate"), "candidate\n").expect("candidate");
+    for args in [vec!["add", "."], vec!["commit", "-m", "candidate"]] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(fixture.path())
+            .status()
+            .expect("commit candidate")
+            .success());
+    }
+    let revision = |name| {
+        String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", name])
+                .current_dir(fixture.path())
+                .output()
+                .expect("revision")
+                .stdout,
+        )
+        .expect("utf8")
+        .trim()
+        .to_string()
+    };
+    let candidate = revision("HEAD");
+    assert!(Command::new("git")
+        .args(["checkout", "--orphan", "unrelated"])
+        .current_dir(fixture.path())
+        .status()
+        .expect("orphan")
+        .success());
+    assert!(Command::new("git")
+        .args(["rm", "-rf", "."])
+        .current_dir(fixture.path())
+        .status()
+        .expect("clear")
+        .success());
+    std::fs::write(fixture.path().join("authority"), "unrelated\n").expect("authority");
+    for args in [vec!["add", "."], vec!["commit", "-m", "unrelated"]] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(fixture.path())
+            .status()
+            .expect("commit unrelated")
+            .success());
+    }
+    let plan = HomeboyBinaryRefreshPlan {
+        runner_id: "lab".to_string(),
+        mode: "select".to_string(),
+        source: None,
+        git_ref: Some("candidate".to_string()),
+        target_dir: Some(fixture.path().display().to_string()),
+        binary_path: "/selected/homeboy".to_string(),
+        script: String::new(),
+        reconnect: false,
+        followup_commands: Vec::new(),
+    };
+    let evidence = validate_refresh_promotion(
+        &plan,
+        &serde_json::json!({"data":{"git_commit":candidate}}),
+        true,
+        &RefreshPromotionAuthorities {
+            controller: Some(revision("HEAD")),
+            active_daemon: None,
+            configured_selected: None,
+        },
+    )
+    .expect("unrelated authority is not a rollback");
+    assert!(evidence.is_none());
 }
 
 #[test]
@@ -400,6 +713,7 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
             git_ref,
             target_dir.to_str().expect("target path"),
             binary_path.to_str().expect("binary path"),
+            false,
         );
         let output = Command::new("bash")
             .args(["-c", &script])
@@ -505,6 +819,7 @@ fn materialize_failure_preserves_compiler_diagnostics_and_active_binary() {
             target_dir: Some(workspace.join("build").display().to_string()),
             reconnect: false,
             force: false,
+            allow_downgrade: false,
             dry_run: false,
         })
         .expect("refresh returns diagnostics for compiler failure");
@@ -571,11 +886,11 @@ fn select_without_materialization_sha_promotes_the_verified_binary() {
         let promoted = ssh_bootstrap_promote_with(
             &plan,
             || Ok(r#"{"data":{"git_commit":"abc123","git_dirty":false}}"#.to_string()),
-            |path| {
+            |path, _| {
                 let patch = refreshed_runner_patch("lab-local", path)?;
                 match merge(Some("lab-local"), &patch.to_string(), &[])? {
-                    MergeOutput::Single(result) => Ok(result.updated_fields),
-                    MergeOutput::Bulk(_) => Ok(Vec::new()),
+                    MergeOutput::Single(result) => Ok((result.updated_fields, None)),
+                    MergeOutput::Bulk(_) => Ok((Vec::new(), None)),
                 }
             },
         )

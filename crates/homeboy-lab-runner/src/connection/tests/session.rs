@@ -716,8 +716,10 @@ fn stale_daemon_warning_includes_explicit_refresh_recovery_command() {
     assert_eq!(
         warning.refresh_command,
         format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-            homeboy_product_identity::product_version()
+            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+            homeboy_product_identity::build_identity()
+                .git_commit
+                .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
         )
     );
     assert!(warning.message.contains("daemon control plane"));
@@ -726,8 +728,10 @@ fn stale_daemon_warning_includes_explicit_refresh_recovery_command() {
     assert_eq!(
         warning.recovery_commands,
         vec![format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-            homeboy_product_identity::product_version()
+            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+            homeboy_product_identity::build_identity()
+                .git_commit
+                .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
         )]
     );
     assert_ne!(
@@ -811,8 +815,10 @@ fn runtime_path_warning_uses_rebuild_specific_message() {
     assert_eq!(
         warning.recovery_commands,
         vec![format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-            homeboy_product_identity::product_version()
+            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+            homeboy_product_identity::build_identity()
+                .git_commit
+                .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
         )]
     );
 }
