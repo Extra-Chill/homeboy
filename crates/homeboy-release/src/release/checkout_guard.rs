@@ -5,6 +5,13 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 
 #[derive(Debug, Clone)]
+pub(super) struct CheckoutRestoreEvidence {
+    pub(super) original_head: String,
+    pub(super) temporary_head: String,
+    pub(super) final_head: String,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct ReleaseCheckoutGuard {
     path: String,
     original_ref: OriginalRef,
@@ -48,7 +55,8 @@ impl ReleaseCheckoutGuard {
         }))
     }
 
-    pub(super) fn restore_after_failure(&self) -> Result<()> {
+    pub(super) fn restore_after_failure(&self) -> Result<CheckoutRestoreEvidence> {
+        let temporary_head = git_stdout(&self.path, &["rev-parse", "HEAD"])?;
         abort_in_progress_operations(&self.path);
         run_git_checked(&self.path, &["reset", "--hard"])?;
         remove_new_untracked(&self.path, &self.original_untracked)?;
@@ -64,7 +72,12 @@ impl ReleaseCheckoutGuard {
 
         run_git_checked(&self.path, &["reset", "--hard", &self.original_head])?;
         remove_new_untracked(&self.path, &self.original_untracked)?;
-        Ok(())
+        let final_head = git_stdout(&self.path, &["rev-parse", "HEAD"])?;
+        Ok(CheckoutRestoreEvidence {
+            original_head: self.original_head.clone(),
+            temporary_head,
+            final_head,
+        })
     }
 }
 
@@ -212,7 +225,7 @@ mod tests {
         run_git(dir, &["add", "file.txt"]);
         run_git(dir, &["commit", "-q", "-m", "release: v1.0.0"]);
 
-        guard.restore_after_failure().expect("restore");
+        let rollback = guard.restore_after_failure().expect("restore");
 
         assert_eq!(
             git_stdout_for_test(dir, &["branch", "--show-current"]),
@@ -222,6 +235,9 @@ mod tests {
             git_stdout_for_test(dir, &["rev-parse", "HEAD"]),
             original_head
         );
+        assert_eq!(rollback.original_head, original_head);
+        assert_ne!(rollback.temporary_head, rollback.original_head);
+        assert_eq!(rollback.final_head, rollback.original_head);
         assert_eq!(git_stdout_for_test(dir, &["status", "--porcelain=v1"]), "");
         assert!(!dir.join("generated.txt").exists());
         assert_eq!(

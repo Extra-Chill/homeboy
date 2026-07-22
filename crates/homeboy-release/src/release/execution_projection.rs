@@ -278,6 +278,7 @@ mod tests {
                 warnings: vec!["signed artifact missing".to_string()],
                 summary: None,
                 phase_timings: None,
+                rollback: None,
             },
         };
 
@@ -319,6 +320,7 @@ mod tests {
                 warnings: Vec::new(),
                 summary: None,
                 phase_timings: None,
+                rollback: None,
             },
         };
 
@@ -364,6 +366,7 @@ mod tests {
                 warnings: Vec::new(),
                 summary: None,
                 phase_timings: None,
+                rollback: None,
             },
         };
 

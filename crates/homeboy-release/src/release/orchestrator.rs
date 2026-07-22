@@ -13,7 +13,8 @@ use super::execution_plan::{
 use super::pipeline_summary::{build_summary, derive_overall_status};
 use super::planner::plan;
 use super::types::{
-    ReleaseOptions, ReleasePlan, ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
+    ReleaseOptions, ReleasePlan, ReleaseRollbackEvidence, ReleaseRun, ReleaseRunResult,
+    ReleaseStepResult, ReleaseStepStatus,
 };
 
 /// Execute a release end-to-end.
@@ -63,8 +64,8 @@ fn run_with_plan_inner(
     })?;
 
     if initial_stop {
-        let run = finalize(component_id, results, timer.into_report());
-        restore_checkout_after_failed_run(checkout_guard, &run)?;
+        let mut run = finalize(component_id, results, timer.into_report());
+        restore_checkout_after_failed_run(checkout_guard, &mut run)?;
         return Ok((initial_plan, run));
     }
 
@@ -86,8 +87,8 @@ fn run_with_plan_inner(
         )
     })?;
 
-    let run = finalize(component_id, results, timer.into_report());
-    restore_checkout_after_failed_run(checkout_guard, &run)?;
+    let mut run = finalize(component_id, results, timer.into_report());
+    restore_checkout_after_failed_run(checkout_guard, &mut run)?;
 
     Ok((release_plan, run))
 }
@@ -111,20 +112,32 @@ fn finalize(
             warnings: Vec::new(),
             summary: Some(summary),
             phase_timings: Some(phase_timings),
+            rollback: None,
         },
     }
 }
 
 fn restore_checkout_after_failed_run(
     checkout_guard: Option<&super::checkout_guard::ReleaseCheckoutGuard>,
-    run: &ReleaseRun,
+    run: &mut ReleaseRun,
 ) -> Result<()> {
     if matches!(run.result.status, ReleaseStepStatus::Success) {
         return Ok(());
     }
 
     if let Some(checkout_guard) = checkout_guard {
-        checkout_guard.restore_after_failure()?;
+        let evidence = checkout_guard.restore_after_failure()?;
+        run.result.rollback = Some(ReleaseRollbackEvidence {
+            original_head: evidence.original_head,
+            temporary_head: evidence.temporary_head,
+            final_head: evidence.final_head,
+        });
+        if let Some(summary) = &mut run.result.summary {
+            summary.next_actions.push(
+                "Inspect remote branch and tag state before retrying: git ls-remote --heads --tags origin"
+                    .to_string(),
+            );
+        }
     }
 
     Ok(())

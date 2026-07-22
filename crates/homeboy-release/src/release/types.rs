@@ -172,6 +172,18 @@ pub struct ReleaseRunResult {
     pub summary: Option<ReleaseRunSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_timings: Option<PhaseTimingReport>,
+    /// Recorded only after a failed release has restored the checkout. This
+    /// makes the result describe the durable exit state rather than mutations
+    /// attempted before rollback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<ReleaseRollbackEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseRollbackEvidence {
+    pub original_head: String,
+    pub temporary_head: String,
+    pub final_head: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
