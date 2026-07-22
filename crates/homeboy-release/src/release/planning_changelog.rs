@@ -91,7 +91,7 @@ pub(super) fn generate_changelog_entries(
         .filter(|c| c.category.to_changelog_entry_type().is_some())
         .collect();
 
-    let entries = group_commits_for_changelog(component, &releasable);
+    let entries = group_commits_for_changelog(&releasable);
     let count: usize = entries.values().map(|v| v.len()).sum();
 
     homeboy_core::log_status!(
@@ -172,9 +172,8 @@ pub(super) fn ensure_changelog_initialized(component: &Component) -> Result<()> 
     Ok(())
 }
 
-/// Group component-scoped commits into reviewer-facing changelog sections.
+/// Group component-scoped commits into durable product-history changelog sections.
 fn group_commits_for_changelog(
-    component: &Component,
     commits: &[git::CommitInfo],
 ) -> std::collections::HashMap<String, Vec<String>> {
     let mut entries_by_type: std::collections::HashMap<String, Vec<String>> =
@@ -182,7 +181,7 @@ fn group_commits_for_changelog(
 
     for commit in commits {
         if let Some(entry_type) = commit.category.to_changelog_entry_type() {
-            let message = format_changelog_entry(component, commit);
+            let message = format_changelog_entry(commit);
             entries_by_type
                 .entry(entry_type.to_string())
                 .or_default()
@@ -202,7 +201,7 @@ fn group_commits_for_changelog(
                         | git::CommitCategory::Release
                 )
             })
-            .map(|c| format_changelog_entry(component, c))
+            .map(format_changelog_entry)
             .unwrap_or_else(|| "Internal improvements".to_string());
 
         entries_by_type.insert("changed".to_string(), vec![fallback]);
@@ -211,49 +210,45 @@ fn group_commits_for_changelog(
     entries_by_type
 }
 
-/// Render the authoritative component change set for reviewer-facing release
-/// notes. Commit subjects retain their GitHub references as clickable links and
-/// are attributed to the commit author. A mixed commit is emitted once because
-/// the scoped git path query returns each matching commit only once.
-fn format_changelog_entry(component: &Component, commit: &git::CommitInfo) -> String {
-    let subject = git::strip_conventional_prefix(&commit.subject);
-    let subject = github_reference_links(component, &subject);
-    match commit_author(component, &commit.hash) {
-        Some(author) => format!("{} (by {})", subject, author),
-        None => subject,
-    }
+fn format_changelog_entry(commit: &git::CommitInfo) -> String {
+    strip_trailing_reference_groups(git::strip_conventional_prefix(&commit.subject))
 }
 
-fn commit_author(component: &Component, hash: &str) -> Option<String> {
-    let output =
-        git::execute_git_for_release(&component.local_path, &["show", "-s", "--format=%an", hash])
-            .ok()?;
-    if !output.status.success() {
-        return None;
+/// Remove only terminal groups containing GitHub-style numeric references.
+/// Inline `#` characters remain product-history text rather than metadata.
+fn strip_trailing_reference_groups(subject: &str) -> String {
+    let mut subject = subject.trim_end();
+    loop {
+        let Some((open, close)) = subject.chars().last().and_then(|close| match close {
+            ')' => Some(('(', ')')),
+            ']' => Some(('[', ']')),
+            _ => None,
+        }) else {
+            break;
+        };
+        let Some(start) = subject.rfind(open) else {
+            break;
+        };
+        let group = &subject[start + open.len_utf8()..subject.len() - close.len_utf8()];
+        if !is_reference_group(group) {
+            break;
+        }
+        subject = subject[..start].trim_end();
     }
-    let author = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!author.is_empty()).then_some(author)
+    subject.to_string()
 }
 
-fn github_reference_links(component: &Component, subject: &str) -> String {
-    let remote = component.remote_url.clone().or_else(|| {
-        git::release_download::detect_remote_url(std::path::Path::new(&component.local_path))
-    });
-    let Some(remote) = remote else {
-        return subject.to_string();
-    };
-    let Some(repo) = git::release_download::parse_github_url(&remote) else {
-        return subject.to_string();
-    };
-    let reference = regex::Regex::new(r"#(\d+)").expect("valid GitHub reference regex");
-    reference
-        .replace_all(subject, |captures: &regex::Captures<'_>| {
-            format!(
-                "[#{}](https://{}/{}/{}/pull/{})",
-                &captures[1], repo.host, repo.owner, repo.repo, &captures[1]
-            )
+fn is_reference_group(group: &str) -> bool {
+    let references: Vec<&str> = group
+        .split(|character: char| character.is_whitespace() || matches!(character, ',' | '&'))
+        .filter(|part| !part.is_empty())
+        .collect();
+    !references.is_empty()
+        && references.iter().all(|reference| {
+            reference.strip_prefix('#').is_some_and(|number| {
+                !number.is_empty() && number.chars().all(|character| character.is_ascii_digit())
+            })
         })
-        .into_owned()
 }
 
 #[cfg(test)]
@@ -432,7 +427,7 @@ mod tests {
             dir,
             "feature.txt",
             "feature",
-            "feat: add release planner (#2478)",
+            "feat: bound homeboy activity latency with a reconcile-free runner view (#9522) (#9523)",
         );
         let component = component_with_changelog_target(&temp, Some("CHANGELOG.md"));
         let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
@@ -447,7 +442,7 @@ mod tests {
 
         assert_eq!(
             entries["added"],
-            vec!["add release planner (#2478) (by Homeboy Test)"]
+            vec!["bound homeboy activity latency with a reconcile-free runner view"]
         );
     }
 
@@ -464,8 +459,7 @@ mod tests {
             ),
         ];
 
-        let component = Component::default();
-        let entries = group_commits_for_changelog(&component, &commits);
+        let entries = group_commits_for_changelog(&commits);
         let added = &entries["added"];
         let fixed = &entries["fixed"];
 
@@ -477,32 +471,51 @@ mod tests {
     }
 
     #[test]
-    fn group_commits_for_changelog_strips_pr_references() {
+    fn group_commits_for_changelog_strips_all_trailing_reference_groups() {
         let commits = vec![
             commit(
-                "feat: agent-first scoping — Phase 1 schema (#738)",
+                "feat: agent-first scoping — Phase 1 schema (#738) (#739, #740)",
                 CommitCategory::Feature,
             ),
             commit(
                 "fix: rename $class param — fixes bootstrap crash (#711)",
                 CommitCategory::Fix,
             ),
+            commit(
+                "fix: preserve the prepared workspace on retryable admission failure (#9469)",
+                CommitCategory::Fix,
+            ),
         ];
 
-        let component = Component::default();
-        let entries = group_commits_for_changelog(&component, &commits);
+        let entries = group_commits_for_changelog(&commits);
         let added = &entries["added"];
         let fixed = &entries["fixed"];
 
-        assert_eq!(added[0], "agent-first scoping — Phase 1 schema (#738)");
+        assert_eq!(added[0], "agent-first scoping — Phase 1 schema");
+        assert_eq!(fixed[0], "rename $class param — fixes bootstrap crash");
         assert_eq!(
-            fixed[0],
-            "rename $class param — fixes bootstrap crash (#711)"
+            fixed[1],
+            "preserve the prepared workspace on retryable admission failure"
         );
     }
 
     #[test]
-    fn blocks_engine_shaped_changes_exclude_siblings_and_preserve_attribution() {
+    fn changelog_keeps_inline_hash_characters_and_non_reference_groups() {
+        let commits = vec![commit(
+            "fix: preserve #![feature] syntax (#9522) (reviewed)",
+            CommitCategory::Fix,
+        )];
+
+        let entries = group_commits_for_changelog(&commits);
+
+        assert_eq!(
+            entries["fixed"],
+            vec!["preserve #![feature] syntax (#9522) (reviewed)"]
+        );
+    }
+
+    #[test]
+    fn blocks_engine_shaped_changes_exclude_siblings_and_emit_mixed_changes_once() {
         let temp = git_repo();
         let dir = temp.path();
         commit_file(dir, "README.md", "initial", "chore: initial");
@@ -559,7 +572,7 @@ mod tests {
         };
         let scope = ReleaseScope::resolve(&component, &component.id).unwrap();
         let (_, commits) = scope.commits_since_latest_tag().unwrap();
-        let entries = group_commits_for_changelog(&component, &commits);
+        let entries = group_commits_for_changelog(&commits);
         let fixed = &entries["fixed"];
 
         assert_eq!(
@@ -568,11 +581,7 @@ mod tests {
             "mixed commits are emitted once per component release"
         );
         assert!(fixed.iter().all(|entry| !entry.contains("figma-only")));
-        assert!(fixed.iter().any(|entry| {
-            entry.contains("php-only change")
-                && entry.contains("PHP Author")
-                && entry.contains("https://github.com/Automattic/blocks-engine/pull/942")
-        }));
+        assert!(fixed.iter().any(|entry| entry == "php-only change"));
         assert_eq!(
             fixed
                 .iter()

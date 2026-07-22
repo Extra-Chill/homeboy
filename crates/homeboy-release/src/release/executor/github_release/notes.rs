@@ -6,6 +6,7 @@ use crate::release::types::ReleaseState;
 use homeboy_core::component::Component;
 use homeboy_core::component::GithubConfig;
 use homeboy_core::error::{Error, Result};
+use homeboy_core::git;
 use homeboy_core::git::release_download::GitHubRepo;
 
 use super::gh_cli::{gh_command, safe_filename};
@@ -20,9 +21,9 @@ use super::gh_cli::{gh_command, safe_filename};
 /// The body is one of:
 /// - GitHub-generated notes with the `**Full Changelog**` footer rewritten to
 ///   point at the component's changelog URL (`source = GeneratedNotes`), or
-/// - the changelog section text from [`ReleaseState::notes`] (or a minimal
-///   `Release <tag>` body) with the same changelog footer appended
-///   (`source = ChangelogFallback`) when generated notes are unavailable.
+/// - component-scoped commit notes, or the changelog section text from
+///   [`ReleaseState::notes`] when enrichment is unavailable, with the same
+///   changelog footer appended (`source = ChangelogFallback`).
 #[derive(Debug, Clone)]
 pub(crate) struct GitHubReleaseBody {
     /// The exact markdown body passed to `gh release create --notes`.
@@ -68,7 +69,13 @@ pub(crate) fn build_github_release_body(
             tag
         );
         return GitHubReleaseBody {
-            body: fallback_release_notes(state, changelog_url, tag),
+            body: component_scoped_release_notes(
+                component,
+                state,
+                changelog_url,
+                tag,
+                notes_start_tag,
+            ),
             generated_notes_ok: false,
             changelog_url: changelog_url.map(str::to_string),
         };
@@ -104,6 +111,78 @@ fn component_release_notes_require_changelog_fallback(component: &Component) -> 
     ReleaseScope::resolve(component, &component.id)
         .map(|scope| !scope.path_prefix.is_empty() || !scope.path_prefixes.is_empty())
         .unwrap_or(false)
+}
+
+/// Enrich the same component-scoped release range used for changelog generation
+/// only at the GitHub presentation boundary. The persisted changelog remains
+/// durable history without forge-specific links or author metadata.
+fn component_scoped_release_notes(
+    component: &Component,
+    state: &ReleaseState,
+    changelog_url: Option<&str>,
+    tag: &str,
+    previous_tag: Option<&str>,
+) -> String {
+    let entries = git::get_component_changes_since_tag(component, previous_tag)
+        .ok()
+        .map(|commits| {
+            commits
+                .into_iter()
+                .filter(|commit| commit.category.to_changelog_entry_type().is_some())
+                .map(|commit| format!("- {}", format_github_release_entry(component, &commit)))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let base = if entries.is_empty() {
+        fallback_release_notes(state, None, tag)
+    } else {
+        format!("## {}\n\n{}", tag, entries.join("\n"))
+    };
+    changelog_url
+        .map(|url| replace_full_changelog_footer(&base, url))
+        .unwrap_or(base)
+}
+
+fn format_github_release_entry(component: &Component, commit: &git::CommitInfo) -> String {
+    let subject = git::strip_conventional_prefix(&commit.subject);
+    let subject = github_reference_links(component, subject);
+    match commit_author(component, &commit.hash) {
+        Some(author) => format!("{} (by {})", subject, author),
+        None => subject,
+    }
+}
+
+fn commit_author(component: &Component, hash: &str) -> Option<String> {
+    let output =
+        git::execute_git_for_release(&component.local_path, &["show", "-s", "--format=%an", hash])
+            .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let author = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!author.is_empty()).then_some(author)
+}
+
+fn github_reference_links(component: &Component, subject: &str) -> String {
+    let remote = component.remote_url.clone().or_else(|| {
+        git::release_download::detect_remote_url(std::path::Path::new(&component.local_path))
+    });
+    let Some(remote) = remote else {
+        return subject.to_string();
+    };
+    let Some(repo) = git::release_download::parse_github_url(&remote) else {
+        return subject.to_string();
+    };
+    let reference = regex::Regex::new(r"#(\d+)").expect("valid GitHub reference regex");
+    reference
+        .replace_all(subject, |captures: &regex::Captures<'_>| {
+            format!(
+                "[#{}](https://{}/{}/{}/pull/{})",
+                &captures[1], repo.host, repo.owner, repo.repo, &captures[1]
+            )
+        })
+        .into_owned()
 }
 
 /// Persist the exact release body to `build/<tag>-release-notes.md` so it is
