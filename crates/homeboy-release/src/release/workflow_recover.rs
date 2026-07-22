@@ -547,6 +547,7 @@ fn recovery_dry_run_result(
         )),
         run: None,
         deployment: None,
+        continuation_command: None,
         release_summary: actions,
     }
 }
