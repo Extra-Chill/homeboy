@@ -822,11 +822,13 @@ pub(crate) fn terminal_artifact_projection_is_verified(
 ) -> Result<bool> {
     for outcome in &aggregate.outcomes {
         for artifact in &outcome.artifacts {
-            if crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
-                && artifact.path.is_some()
-                && artifact.size_bytes.is_some()
-                && artifact.sha256.is_some()
-            {
+            if crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact) {
+                if artifact.path.is_none()
+                    || artifact.size_bytes.is_none()
+                    || artifact.sha256.is_none()
+                {
+                    return Ok(false);
+                }
                 if verified_controller_artifact_projection_path(
                     &record.run_id,
                     &outcome.task_id,
@@ -840,6 +842,31 @@ pub(crate) fn terminal_artifact_projection_is_verified(
         }
     }
     Ok(true)
+}
+
+/// Return a repairable diagnostic when an actionable patch is not yet readable
+/// from a verified controller-owned projection. Missing aggregates remain
+/// outside this check so historical terminal records keep their existing
+/// recovery behavior.
+pub fn terminal_artifact_projection_readiness(run_id: &str) -> Result<Option<String>> {
+    let record = store::read_record(&super::sanitize_run_id(run_id))?;
+    let Ok(aggregate) = store::read_aggregate(&record.run_id) else {
+        return Ok(None);
+    };
+    if terminal_artifact_projection_is_verified(&record, &aggregate)? {
+        return Ok(None);
+    }
+    Ok(Some(
+        record
+            .metadata
+            .get("artifact_projection")
+            .and_then(|projection| projection.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or(
+                "an actionable patch is missing a readable controller projection or required path, size, and SHA-256 integrity metadata",
+            )
+            .to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -977,6 +1004,7 @@ pub(crate) fn project_terminal_artifacts(
     let store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let status = match record.state {
         AgentTaskRunState::Succeeded => "pass",
+        AgentTaskRunState::CandidateRecoverable => "fail",
         AgentTaskRunState::PartialRecoverable => "fail",
         AgentTaskRunState::PartialFailure => "fail",
         AgentTaskRunState::Failed => "fail",
@@ -1013,6 +1041,21 @@ pub(crate) fn project_terminal_artifacts(
     let mut projection_error = None;
     for outcome in &aggregate.outcomes {
         for artifact in &outcome.artifacts {
+            if crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
+                && (artifact.path.is_none()
+                    || artifact.size_bytes.is_none()
+                    || artifact.sha256.is_none())
+            {
+                return Err(Error::validation_invalid_argument(
+                    "artifact_projection",
+                    format!(
+                        "actionable patch for run '{}', task '{}', and artifact '{}' requires path, size, and SHA-256 before controller projection",
+                        record.run_id, outcome.task_id, artifact.id
+                    ),
+                    Some(artifact.id.clone()),
+                    None,
+                ));
+            }
             let Some(path) = artifact.path.as_deref() else {
                 continue;
             };

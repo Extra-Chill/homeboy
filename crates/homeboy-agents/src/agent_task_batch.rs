@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-use crate::agent_task_lifecycle::{self, AgentTaskRunRecord, AgentTaskRunState};
+use crate::agent_task_lifecycle::{self, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
 use homeboy_core::{paths, Error, Result};
 
@@ -198,6 +198,7 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
     let mut batch = read_batch(batch_id)?;
     let mut changed = false;
     let mut unavailable_child_runs = Vec::new();
+    let mut projection_pending_child_runs = Vec::new();
     let mut resumable_child_runs = Vec::new();
     for child in &mut batch.child_runs {
         match agent_task_lifecycle::status(&child.run_id) {
@@ -206,7 +207,9 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
                     child.state = record.state;
                     changed = true;
                 }
-                if let Some(reason) = resumable_child_reason(&record) {
+                if let Some(pending) = projection_pending_child(child, &record)? {
+                    projection_pending_child_runs.push(pending);
+                } else if let Some(reason) = resumable_child_reason(&record) {
                     resumable_child_runs.push(AgentTaskBatchResumableChild {
                         task_id: child.task_id.clone(),
                         run_id: child.run_id.clone(),
@@ -239,11 +242,17 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
     let commands = commands(&batch.batch_id);
     Ok(AgentTaskBatchStatusReport {
         schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
-        next_actions: batch_next_actions(&unavailable_child_runs, &resumable_child_runs, &commands),
+        next_actions: batch_next_actions(
+            &unavailable_child_runs,
+            &projection_pending_child_runs,
+            &resumable_child_runs,
+            &commands,
+        ),
         commands,
         batch,
         totals,
         unavailable_child_runs,
+        projection_pending_child_runs,
         resumable_child_runs,
         resumable,
     })
@@ -319,6 +328,7 @@ pub fn artifacts(batch_id: &str) -> Result<AgentTaskBatchArtifactsReport> {
         manifest,
         next_actions: batch_next_actions(
             &unavailable_child_runs,
+            &report.projection_pending_child_runs,
             &report.resumable_child_runs,
             &report.commands,
         ),
@@ -445,8 +455,28 @@ fn child_issue(child: &AgentTaskBatchChildRun, problem: String) -> AgentTaskBatc
     }
 }
 
+fn projection_pending_child(
+    child: &AgentTaskBatchChildRun,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<Option<AgentTaskBatchProjectionPendingChild>> {
+    let Some(reason) =
+        agent_task_lifecycle::terminal_artifact_projection_readiness(&record.run_id)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(AgentTaskBatchProjectionPendingChild {
+        task_id: child.task_id.clone(),
+        run_id: child.run_id.clone(),
+        state: record.state,
+        phase: "artifact_projection".to_string(),
+        reason,
+        repair_command: format!("homeboy agent-task status {}", child.run_id),
+    }))
+}
+
 fn batch_next_actions(
     unavailable_child_runs: &[AgentTaskBatchChildIssue],
+    projection_pending_child_runs: &[AgentTaskBatchProjectionPendingChild],
     resumable_child_runs: &[AgentTaskBatchResumableChild],
     commands: &AgentTaskBatchCommands,
 ) -> Vec<String> {
@@ -470,6 +500,11 @@ fn batch_next_actions(
         );
         actions.push(
             "if a Lab runner daemon restarted, reconcile runner-side jobs/artifacts before treating the fanout as terminal".to_string(),
+        );
+    }
+    if !projection_pending_child_runs.is_empty() {
+        actions.push(
+            "resume is withheld until controller-side patch projection completes; inspect projection_pending_child_runs and run each repair_command to retry hydration".to_string(),
         );
     }
     actions
@@ -581,8 +616,10 @@ mod tests {
         AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
         AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
-    use crate::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
-    use crate::agent_task_service;
+    use crate::agent_task_scheduler::{
+        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
+        AgentTaskExecutionContext, AgentTaskExecutorAdapter,
+    };
     use std::collections::HashMap;
 
     #[test]
@@ -756,6 +793,86 @@ mod tests {
 
         assert!(!report.resumable);
         assert!(report.resumable_child_runs.is_empty());
+    }
+
+    #[test]
+    fn batch_status_withholds_resume_until_patch_projection_completes() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let plan = AgentTaskPlan::new("fanout/projection", vec![request("a")]);
+        submit_plan_batch(&plan, Some("batch/projection")).expect("batch submitted");
+        let child_plan = child_plan(&plan, plan.tasks[0].clone(), "batch_projection");
+        let patch_sha = "a".repeat(64);
+        let aggregate = AgentTaskAggregate {
+            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: child_plan.plan_id.clone(),
+            status: AgentTaskAggregateStatus::Succeeded,
+            totals: AgentTaskAggregateTotals {
+                succeeded: 1,
+                ..Default::default()
+            },
+            outcomes: vec![AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: "a".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("runner produced a patch".to_string()),
+                failure_classification: None,
+                artifacts: vec![AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "candidate.patch".to_string(),
+                    kind: "patch".to_string(),
+                    name: Some("candidate.patch".to_string()),
+                    label: Some("Candidate patch".to_string()),
+                    role: None,
+                    semantic_key: None,
+                    path: Some("/runner/private/candidate.patch".to_string()),
+                    url: None,
+                    mime: Some("text/x-patch".to_string()),
+                    size_bytes: Some(1),
+                    sha256: Some(patch_sha),
+                    metadata: json!({
+                        "executor_artifact_finalized": true,
+                        "source_provenance": { "runner_id": "homeboy-lab" },
+                    }),
+                }],
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        };
+        agent_task_lifecycle::record_runner_job_identity(
+            "batch_projection-a",
+            "homeboy-lab",
+            "job-1",
+        )
+        .expect("record runner identity");
+        agent_task_lifecycle::record_run_aggregate("batch_projection-a", &child_plan, &aggregate)
+            .expect("stage unprojected child");
+
+        let report = status("batch/projection").expect("batch status");
+
+        assert!(!report.resumable);
+        assert!(report.resumable_child_runs.is_empty());
+        assert_eq!(report.projection_pending_child_runs.len(), 1);
+        let pending = &report.projection_pending_child_runs[0];
+        assert_eq!(pending.phase, "artifact_projection");
+        assert_eq!(
+            pending.repair_command,
+            "homeboy agent-task status batch_projection-a"
+        );
+        assert!(!pending.reason.is_empty());
+        assert!(report
+            .next_actions
+            .iter()
+            .any(|action| action.contains("withheld")));
     }
 
     #[test]

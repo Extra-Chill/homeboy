@@ -403,6 +403,17 @@ where
             )]),
         ));
     }
+    agent_task_lifecycle::reconcile_terminal_artifact_projection(cook_id)?;
+    if let Some(reason) = agent_task_lifecycle::terminal_artifact_projection_readiness(cook_id)? {
+        return Err(Error::validation_invalid_argument(
+            "cook_id",
+            format!("cook `{cook_id}` cannot resume until controller-side patch projection is ready: {reason}"),
+            Some(cook_id.to_string()),
+            Some(vec![format!(
+                "Run `homeboy agent-task status {cook_id}` to reconcile the controller projection."
+            )]),
+        ));
+    }
     let recipe = super::load_recipe(cook_id)?;
     // Faithfully reconstruct the recipe's transport so re-running `run_cook`
     // matches the persisted durable inputs (a stripped dispatcher would look
@@ -796,6 +807,8 @@ where
                 (!matches!(
                     record.state,
                     agent_task_lifecycle::AgentTaskRunState::Succeeded
+                        | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                        | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
                         | agent_task_lifecycle::AgentTaskRunState::PartialFailure
                         | agent_task_lifecycle::AgentTaskRunState::Failed
                         | agent_task_lifecycle::AgentTaskRunState::Cancelled
