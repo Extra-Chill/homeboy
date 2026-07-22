@@ -159,6 +159,11 @@ pub struct ExtensionManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires: Option<RequirementsConfig>,
 
+    // Multi-extension composition: role ownership used to disambiguate a
+    // capability provided by more than one linked extension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition: Option<CompositionConfig>,
+
     // Extensibility: preserve unknown fields for external consumers (GUI, workflows)
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
@@ -166,6 +171,47 @@ pub struct ExtensionManifest {
     // Internal path (not serialized)
     #[serde(skip)]
     pub extension_path: Option<String>,
+}
+
+/// Multi-extension composition metadata. Declares how a component's linked
+/// extensions relate so Homeboy can resolve a capability that more than one of
+/// them provides without requiring manual `capability_extensions` selection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompositionConfig {
+    /// Extensions this one composes with (informational).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub includes: Vec<String>,
+    /// Optional companion assets (informational).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub optional: Vec<String>,
+    /// Role name -> owning extension(s). A role with a single owner designates
+    /// the extension that owns that role's capabilities across the composition.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub roles: BTreeMap<String, RoleOwners>,
+    /// Extensions that must not be linked together (informational).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
+}
+
+/// Owner(s) of a composition role. Manifests use both a single owner
+/// (`"javascript": "nodejs"`) and a list (`"project": ["a", "b"]`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum RoleOwners {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl CompositionConfig {
+    /// The single extension id that owns `role`, if the role designates exactly
+    /// one owner. Multi-owner roles return `None` (they do not designate a
+    /// unique capability owner).
+    pub fn role_owner(&self, role: &str) -> Option<&str> {
+        match self.roles.get(role) {
+            Some(RoleOwners::One(owner)) => Some(owner.as_str()),
+            _ => None,
+        }
+    }
 }
 
 impl ExtensionManifest {
@@ -543,5 +589,47 @@ impl ExtensionManifest {
     /// Get the contract script path (relative to extension dir), if configured.
     pub fn contract_script(&self) -> Option<&str> {
         self.scripts.as_ref().and_then(|s| s.contract.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod composition_tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_mixed_single_and_list_role_owners() {
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "wordpress",
+            "version": "1.0.0",
+            "composition": {
+                "includes": ["nodejs"],
+                "optional": ["dependency-adapters/nodejs-package-managers"],
+                "roles": {
+                    "javascript": "nodejs",
+                    "project": ["wordpress-plugin", "wordpress-theme"]
+                },
+                "conflicts": []
+            }
+        }))
+        .expect("manifest with composition deserializes");
+
+        let composition = manifest.composition.expect("composition present");
+        assert_eq!(composition.includes, vec!["nodejs".to_string()]);
+        // Single-owner role resolves to the owning extension.
+        assert_eq!(composition.role_owner("javascript"), Some("nodejs"));
+        // Multi-owner role does not designate a unique owner.
+        assert_eq!(composition.role_owner("project"), None);
+        // Absent role.
+        assert_eq!(composition.role_owner("missing"), None);
+    }
+
+    #[test]
+    fn composition_is_optional() {
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "nodejs",
+            "version": "1.0.0"
+        }))
+        .expect("manifest without composition deserializes");
+        assert!(manifest.composition.is_none());
     }
 }

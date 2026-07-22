@@ -265,8 +265,46 @@ fn resolve_extension_for_capability_if_available(
     match matching.len() {
         0 => Ok(None),
         1 => Ok(Some(matching.remove(0))),
-        _ => Err(capability_ambiguous_error(component, capability, &matching)),
+        _ => {
+            // The manifests can encode which linked extension is primary via
+            // `composition.includes`: a component that links WordPress + Node.js
+            // has WordPress declare `includes: ["nodejs"]`, so WordPress owns the
+            // shared capabilities and Node.js is the composed subordinate. When
+            // exactly one of the ambiguous extensions includes all the others,
+            // resolve to it instead of forcing a manual `capability_extensions`
+            // selection. Explicit selection (handled above) still wins.
+            if let Some(primary) = composition_primary_extension(&matching)? {
+                return Ok(Some(primary));
+            }
+            Err(capability_ambiguous_error(component, capability, &matching))
+        }
     }
+}
+
+/// If exactly one of the ambiguous extensions composes all of the others via its
+/// `composition.includes`, return it as the primary owner. Returns `None` when
+/// no single extension includes every other (leaving the ambiguity unresolved).
+fn composition_primary_extension(matching: &[String]) -> Result<Option<String>> {
+    let mut primary: Option<String> = None;
+    for candidate in matching {
+        let manifest = load_extension(candidate)?;
+        let Some(composition) = manifest.composition.as_ref() else {
+            continue;
+        };
+        let includes_all_others = matching
+            .iter()
+            .filter(|other| *other != candidate)
+            .all(|other| composition.includes.iter().any(|inc| inc == other));
+        if includes_all_others {
+            if primary.is_some() {
+                // More than one extension claims to include the others; the
+                // composition is not unambiguous, so do not guess.
+                return Ok(None);
+            }
+            primary = Some(candidate.clone());
+        }
+    }
+    Ok(primary)
 }
 
 /// Whether a linked extension can provide a capability without requiring one.
@@ -428,6 +466,79 @@ mod tests {
             extensions: Some(extensions),
             ..Default::default()
         }
+    }
+
+    fn write_extension_manifest_with_includes(
+        home: &Path,
+        extension_id: &str,
+        capability: &str,
+        includes: &[&str],
+    ) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(extension_id);
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        let includes_json = includes
+            .iter()
+            .map(|inc| format!("\"{inc}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        std::fs::write(
+            extension_dir.join(format!("{extension_id}.json")),
+            format!(
+                r#"{{"name":"{extension_id}","version":"1.0.0","{capability}":{{"extension_script":"{capability}.sh"}},"composition":{{"includes":[{includes_json}],"roles":{{"javascript":"nodejs","project":["a","b"]}}}}}}"#
+            ),
+        )
+        .expect("extension manifest");
+    }
+
+    #[test]
+    fn composition_includes_resolves_ambiguous_capability_to_primary() {
+        crate::test_support::with_isolated_home(|home| {
+            // WordPress and Node.js both provide `deps`; WordPress composes
+            // Node.js via `composition.includes`, so it is the primary owner.
+            write_extension_manifest_with_includes(home.path(), "wordpress", "deps", &["nodejs"]);
+            write_extension_manifest(home.path(), "nodejs", "deps");
+
+            let component = component_with_extensions(&["wordpress", "nodejs"]);
+            assert_eq!(
+                resolve_extension_for_capability(&component, ExtensionCapability::Deps)
+                    .expect("composition.includes should resolve the ambiguity"),
+                "wordpress"
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_capability_extension_overrides_composition_primary() {
+        crate::test_support::with_isolated_home(|home| {
+            write_extension_manifest_with_includes(home.path(), "wordpress", "deps", &["nodejs"]);
+            write_extension_manifest(home.path(), "nodejs", "deps");
+
+            let mut component = component_with_extensions(&["wordpress", "nodejs"]);
+            // Explicit selection must still win over the composition primary.
+            component
+                .capability_extensions
+                .insert("deps".to_string(), "nodejs".to_string());
+            assert_eq!(
+                resolve_extension_for_capability(&component, ExtensionCapability::Deps).unwrap(),
+                "nodejs"
+            );
+        });
+    }
+
+    #[test]
+    fn ambiguous_capability_without_composition_still_errors() {
+        crate::test_support::with_isolated_home(|home| {
+            // Neither includes the other -> ambiguity is preserved.
+            write_extension_manifest(home.path(), "wordpress", "deps");
+            write_extension_manifest(home.path(), "nodejs", "deps");
+
+            let component = component_with_extensions(&["wordpress", "nodejs"]);
+            let err = resolve_extension_for_capability(&component, ExtensionCapability::Deps)
+                .expect_err("no composition primary should remain ambiguous");
+            assert!(err
+                .message
+                .contains("multiple linked extensions with deps support"));
+        });
     }
 
     #[test]
