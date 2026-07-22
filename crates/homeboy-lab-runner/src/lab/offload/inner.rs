@@ -1440,11 +1440,10 @@ pub(crate) fn run_lab_offload_inner(
     }
 
     let capability_preflight: Option<RunnerCapabilityPreflight> = capability_plan.map(Into::into);
-    // Detached direct-daemon agent-task work is controller-owned from this point.
+    // Detached agent-task work is controller-owned from this point.
     // It must never fall through to caller-side workspace staging after admission.
     if request.detach_after_handoff
         && request.durable_agent_task_plan.is_some()
-        && selection.mode != super::super::super::RunnerTunnelMode::Reverse
         && capability_preflight.is_some()
     {
         let run_id = pre_acceptance_run_id.as_deref().ok_or_else(|| {
@@ -1464,7 +1463,10 @@ pub(crate) fn run_lab_offload_inner(
             );
         }
         let controller_job_id = match crate::lab_staging_controller::submit_detached_staging(
-            run_id, runner_id, &request,
+            run_id,
+            runner_id,
+            selection.mode.clone(),
+            &request,
         ) {
             Ok(controller_job_id) => controller_job_id,
             Err(error) => {

@@ -1,7 +1,7 @@
 //! Durable controller-job contract for Lab staging and final dispatch.
 //!
-//! Detached direct-daemon routing constructs this job after the agent-task
-//! attempt exists and before workspace staging begins.
+//! Detached Lab routing constructs this job after the agent-task attempt exists
+//! and before workspace staging begins.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,6 +19,7 @@ use homeboy_core::lab_contract::{
     LabRigWorkloadKind, LabRoutingPolicy, LabRunnerWorkloadCapability, LabSecretEnvSource,
     LabSourcePathMode, LabWorkspaceModePolicy,
 };
+use homeboy_core::runner_execution_envelope::PathMaterializationPlan;
 use homeboy_core::{Error, Result};
 use sha2::{Digest, Sha256};
 
@@ -104,6 +105,8 @@ pub struct LabStagingRecipe {
     pub schema: String,
     pub run_id: String,
     pub runner_id: String,
+    #[serde(default = "default_lab_staging_tunnel_mode")]
+    pub tunnel_mode: crate::RunnerTunnelMode,
     pub command: LabStagingCommand,
     pub normalized_args: Vec<String>,
     pub placement: homeboy_cli_contract::Placement,
@@ -135,12 +138,19 @@ impl LabStagingRecipe {
         runner_id: impl Into<String>,
         request: &LabOffloadRequest<'_>,
     ) -> Result<Self> {
-        Self::from_request_with_output_obligation(run_id, runner_id, request, false)
+        Self::from_request_with_transport(
+            run_id,
+            runner_id,
+            crate::RunnerTunnelMode::DirectSsh,
+            request,
+            false,
+        )
     }
 
-    fn from_request_with_output_obligation(
+    fn from_request_with_transport(
         run_id: impl Into<String>,
         runner_id: impl Into<String>,
+        tunnel_mode: crate::RunnerTunnelMode,
         request: &LabOffloadRequest<'_>,
         local_output_run_id_emitted: bool,
     ) -> Result<Self> {
@@ -172,6 +182,7 @@ impl LabStagingRecipe {
             schema: LAB_STAGING_RECIPE_SCHEMA.to_string(),
             run_id: run_id.into(),
             runner_id: runner_id.into(),
+            tunnel_mode,
             command: command.into(),
             normalized_args: request.normalized_args.to_vec(),
             placement: request.placement,
@@ -198,12 +209,15 @@ impl LabStagingRecipe {
     }
 
     fn validate(&self) -> Result<()> {
+        // Canonical argv may contain the executable and global options before
+        // the resolved subcommand token.
+        let normalized_agent_task = self.normalized_args.iter().any(|arg| arg == "agent-task");
         if self.schema != LAB_STAGING_RECIPE_SCHEMA
             || self.run_id.trim().is_empty()
             || self.runner_id.trim().is_empty()
             || !self.command.portable
             || !self.command.hot_label.starts_with("agent-task")
-            || self.normalized_args.first().map(String::as_str) != Some("agent-task")
+            || !normalized_agent_task
         {
             return Err(Error::validation_invalid_argument(
                 "lab_staging_recipe",
@@ -245,6 +259,10 @@ impl LabStagingRecipe {
     }
 }
 
+fn default_lab_staging_tunnel_mode() -> crate::RunnerTunnelMode {
+    crate::RunnerTunnelMode::DirectSsh
+}
+
 /// Owned replay inputs plus the separately loaded durable plan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabStagingRequest {
@@ -274,18 +292,26 @@ pub fn persist_lab_staging_recipe(
     runner_id: &str,
     request: &LabOffloadRequest<'_>,
 ) -> Result<LabStagingRecipe> {
-    persist_lab_staging_recipe_with_output_obligation(run_id, runner_id, request, false)
+    persist_lab_staging_recipe_for_transport(
+        run_id,
+        runner_id,
+        crate::RunnerTunnelMode::DirectSsh,
+        request,
+        false,
+    )
 }
 
-fn persist_lab_staging_recipe_with_output_obligation(
+fn persist_lab_staging_recipe_for_transport(
     run_id: &str,
     runner_id: &str,
+    tunnel_mode: crate::RunnerTunnelMode,
     request: &LabOffloadRequest<'_>,
     local_output_run_id_emitted: bool,
 ) -> Result<LabStagingRecipe> {
-    let recipe = LabStagingRecipe::from_request_with_output_obligation(
+    let recipe = LabStagingRecipe::from_request_with_transport(
         run_id,
         runner_id,
+        tunnel_mode,
         request,
         local_output_run_id_emitted,
     )?;
@@ -297,11 +323,12 @@ fn persist_lab_staging_recipe_with_output_obligation(
     .map(|attachment| attachment.payload)
 }
 
-/// Controller-owned admission for a detached direct-daemon agent-task attempt.
+/// Controller-owned admission for a detached agent-task attempt.
 /// No workspace side effect occurs before this returns an accepted controller job.
 pub(crate) fn submit_detached_staging(
     run_id: &str,
     runner_id: &str,
+    tunnel_mode: crate::RunnerTunnelMode,
     request: &LabOffloadRequest<'_>,
 ) -> Result<String> {
     if !routing_ready() {
@@ -312,9 +339,10 @@ pub(crate) fn submit_detached_staging(
             None,
         ));
     }
-    let recipe = persist_lab_staging_recipe_with_output_obligation(
+    let recipe = persist_lab_staging_recipe_for_transport(
         run_id,
         runner_id,
+        tunnel_mode,
         request,
         request.local_output_file.is_some(),
     )?;
@@ -350,7 +378,7 @@ pub(crate) fn submit_detached_staging(
         &client,
         format!("{endpoint}/controller/jobs"),
         Some(json!({
-            "job_type": LAB_STAGING_DISPATCH_JOB_TYPE,
+            "type": LAB_STAGING_DISPATCH_JOB_TYPE,
             "version": LAB_STAGING_DISPATCH_VERSION,
             "request": envelope,
             "idempotency_key": run_id,
@@ -602,6 +630,8 @@ struct DurableLabDispatchReceipt {
     daemon_lease_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reservation_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reverse_submission_key: Option<String>,
     runner_job_id: String,
     remote_workspace: String,
     remote_command: Vec<String>,
@@ -644,6 +674,43 @@ impl DurableLabDispatchReceipt {
         request: &LabStagingExecutionRequest,
         checkpoint: &LabStagingCheckpoint,
     ) -> Result<()> {
+        let authority_valid = match request.recipe.tunnel_mode {
+            crate::RunnerTunnelMode::DirectSsh => {
+                let live_admission = self
+                    .daemon_lease_id
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && self
+                        .reservation_job_id
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty());
+                let recovered_admission =
+                    if self.daemon_lease_id.is_none() && self.reservation_job_id.is_none() {
+                        homeboy_agents::agent_task_lifecycle::accepted_lab_runner_job_identity(
+                            &request.recipe.run_id,
+                        )?
+                        .is_some_and(|identity| {
+                            identity.run_id == request.recipe.run_id
+                                && identity.runner_id == request.recipe.runner_id
+                                && identity.runner_job_id == self.runner_job_id
+                        })
+                    } else {
+                        false
+                    };
+                (live_admission || recovered_admission) && self.reverse_submission_key.is_none()
+            }
+            crate::RunnerTunnelMode::Reverse => {
+                self.daemon_lease_id.is_none()
+                    && self.reservation_job_id.is_none()
+                    && self.reverse_submission_key.as_deref().is_some_and(|value| {
+                        value
+                            == crate::execution::reverse_broker_submission_key(
+                                &request.recipe.runner_id,
+                                &request.recipe.run_id,
+                            )
+                    })
+            }
+        };
         if self.schema != "homeboy/durable-lab-dispatch-receipt/v1"
             || self.run_id != request.recipe.run_id
             || self.runner_id != request.recipe.runner_id
@@ -651,6 +718,7 @@ impl DurableLabDispatchReceipt {
             || self.workspace_attachment_digest.is_empty()
             || self.runtime_attachment_digest.is_empty()
             || self.hydration_attachment_digest.is_empty()
+            || !authority_valid
             || self.runner_job_id.is_empty()
             || self.remote_workspace.is_empty()
             || self.remote_command.is_empty()
@@ -1434,6 +1502,14 @@ impl ProductionLabStagingOperations {
             // accepted lifecycle identity is the recovery authority.
             daemon_lease_id: None,
             reservation_job_id: None,
+            reverse_submission_key: (request.recipe.tunnel_mode
+                == crate::RunnerTunnelMode::Reverse)
+                .then(|| {
+                    crate::execution::reverse_broker_submission_key(
+                        &request.recipe.runner_id,
+                        &request.recipe.run_id,
+                    )
+                }),
             runner_job_id: identity.runner_job_id,
             remote_workspace: workspace.payload.remote_cwd,
             remote_command,
@@ -1458,6 +1534,72 @@ impl ProductionLabStagingOperations {
             .ok_or_else(Self::cancellation_error)
     }
 
+    fn status_for_recipe_transport(
+        request: &LabStagingExecutionRequest,
+    ) -> Result<crate::RunnerStatusReport> {
+        let status = crate::status_for_admission(&request.recipe.runner_id)?;
+        let session = status.session.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner",
+                "durable Lab staging requires an accepted runner session",
+                Some(request.recipe.runner_id.clone()),
+                None,
+            )
+        })?;
+        if session.mode != request.recipe.tunnel_mode {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                format!(
+                    "durable Lab staging recipe requires `{}` transport, but the current session is `{}`",
+                    request.recipe.tunnel_mode.metadata_value(),
+                    session.mode.metadata_value(),
+                ),
+                Some(request.recipe.runner_id.clone()),
+                None,
+            ));
+        }
+        if session.mode == crate::RunnerTunnelMode::Reverse && session.broker_url.is_none() {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                "durable reverse Lab staging requires its accepted broker endpoint",
+                Some(request.recipe.runner_id.clone()),
+                None,
+            ));
+        }
+        Ok(status)
+    }
+
+    fn observe_runner_job_until_terminal(
+        request: &LabStagingExecutionRequest,
+        runner_job_id: &str,
+        cancellation: Option<&LabStagingCancellationToken>,
+    ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
+        if request.recipe.tunnel_mode == crate::RunnerTunnelMode::DirectSsh {
+            let observed = crate::execution::observe_daemon_job_until_terminal(
+                &request.recipe.runner_id,
+                runner_job_id,
+                None,
+            )?;
+            return Ok(homeboy_core::api_jobs::RunnerJobLogSnapshot {
+                job: observed.job,
+                events: observed.events,
+            });
+        }
+        loop {
+            if cancellation.is_some_and(LabStagingCancellationToken::is_cancelled) {
+                return Err(Self::cancellation_error());
+            }
+            match crate::runner_job_log_snapshot(&request.recipe.runner_id, runner_job_id) {
+                Ok(snapshot) if snapshot.job.status.is_terminal() => return Ok(snapshot),
+                Ok(_) => std::thread::sleep(Duration::from_millis(200)),
+                Err(mut error) => {
+                    error.retryable = error.retryable.or(Some(true));
+                    return Err(error);
+                }
+            }
+        }
+    }
+
     fn ambiguous_intent(stage: &str) -> Error {
         Error::validation_invalid_argument(
             "checkpoint.stage_intent",
@@ -1474,6 +1616,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         request: &LabStagingExecutionRequest,
         checkpoint: &LabStagingCheckpoint,
     ) -> Result<()> {
+        Self::status_for_recipe_transport(request)?;
         if checkpoint.phase == LabStagingPhase::AcceptedMaterializeWorkspace {
             return Ok(());
         }
@@ -1669,8 +1812,37 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             &request.recipe.normalized_args,
             Some(&request.recipe.run_id),
         )?;
-        let projection =
+        let workspace_mapping =
+            serde_json::to_value(&stage.workspace_mapping).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize durable Lab workspace mapping".to_string()),
+                )
+            })?;
+        let mut lab_metadata = crate::lab_offload_metadata_with_workspace_mapping(
+            &stage.plan,
+            "durable_controller",
+            Some(&request.recipe.runner_id),
+            Some(request.recipe.tunnel_mode.metadata_value()),
+            "offloaded",
+            Some(&stage.remote_cwd),
+            None,
+            Some(&workspace_mapping),
+        );
+        crate::lab::offload::attach_lab_workspace_metadata(
+            &mut lab_metadata,
+            crate::lab::offload::LabWorkspaceMetadataInputs {
+                source_snapshot: &stage.source_snapshot,
+                legacy_path_materialization_plan: &stage.path_materialization_plan,
+                primary_synced_workspace: &stage.synced,
+            },
+        )?;
+        lab_metadata["workspace_cleanliness"] = json!({
+            "allow_dirty_lab_workspace": request.recipe.allow_dirty_lab_workspace,
+        });
+        let mut projection =
             crate::lab::offload::workspace_stage::durable_workspace_stage_projection(&stage);
+        projection["lab_dispatch_metadata"] = lab_metadata;
         let source_snapshot_id = projection
             .pointer("/source_snapshot/workspace_snapshot_identity")
             .and_then(Value::as_str)
@@ -2031,6 +2203,33 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 None,
             )
         })?;
+        let path_materialization_plan: PathMaterializationPlan = serde_json::from_value(
+            workspace
+                .payload
+                .stage
+                .get("path_materialization_plan")
+                .cloned()
+                .ok_or_else(|| {
+                    Error::internal_unexpected("durable workspace has no path materialization plan")
+                })?,
+        )
+        .map_err(|_| {
+            Error::validation_invalid_argument(
+                "durable_workspace_stage",
+                "Lab staging path materialization plan is invalid",
+                None,
+                None,
+            )
+        })?;
+        let mut lab_metadata = workspace
+            .payload
+            .stage
+            .get("lab_dispatch_metadata")
+            .cloned()
+            .ok_or_else(|| {
+                Error::internal_unexpected("durable workspace has no Lab dispatch metadata")
+            })?;
+        lab_metadata["dependency_hydration"] = hydration.payload.hydration_metadata.clone();
         let runtime_env: Vec<(String, String)> = serde_json::from_value(
             runtime
                 .payload
@@ -2049,6 +2248,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         })?;
         let mut public_env = request.recipe.job_override_env.clone();
         public_env.extend(runtime_env);
+        public_env.extend(crate::lab_env::build_lab_offload_env(&lab_metadata));
         let secret_handoff = crate::lab::secrets::build_lab_secret_env_handoff_plan(
             &request.recipe.command.secret_env_sources,
             &request.recipe.normalized_args,
@@ -2063,41 +2263,45 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV.to_string(),
             request.recipe.runner_id.clone(),
         );
-        let runner_status = crate::status_for_admission(&request.recipe.runner_id)?;
+        let runner_status = Self::status_for_recipe_transport(request)?;
         let session = runner_status.session.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "runner",
-                "durable Lab dispatch requires an admitted direct daemon session",
+                "durable Lab dispatch requires its accepted runner session",
                 Some(request.recipe.runner_id.clone()),
                 None,
             )
         })?;
-        if session.mode != crate::RunnerTunnelMode::DirectSsh {
-            return Err(Error::validation_invalid_argument(
-                "runner",
-                "durable Lab dispatch requires direct daemon admission",
-                Some(request.recipe.runner_id.clone()),
+        Self::check_cancelled(cancellation)?;
+        let (admission, daemon_authority, reverse_submission_key) = match session.mode {
+            crate::RunnerTunnelMode::DirectSsh => {
+                let local_url = session.local_url.as_deref().ok_or_else(|| {
+                    Error::internal_unexpected("durable Lab dispatch has no daemon endpoint")
+                })?;
+                let lease_id = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
+                    Error::internal_unexpected("durable Lab dispatch has no daemon lease")
+                })?;
+                let admission = crate::execution::reserve_daemon_admission(
+                    &request.recipe.runner_id,
+                    local_url,
+                    "lab.staging-dispatch",
+                    lease_id,
+                    Some(&request.recipe.run_id),
+                    crate::execution::DaemonAdmissionPolicy::DurableLeaseRequired,
+                )?;
+                let authority = admission.authority();
+                authority.prove_server_owned_expiry_or_cancellation_authority()?;
+                (Some(admission), Some(authority), None)
+            }
+            crate::RunnerTunnelMode::Reverse => (
                 None,
-            ));
-        }
-        let local_url = session.local_url.as_deref().ok_or_else(|| {
-            Error::internal_unexpected("durable Lab dispatch has no daemon endpoint")
-        })?;
-        let lease_id = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
-            Error::internal_unexpected("durable Lab dispatch has no daemon lease")
-        })?;
-        Self::check_cancelled(cancellation)?;
-        let admission = crate::execution::reserve_daemon_admission(
-            &request.recipe.runner_id,
-            local_url,
-            "lab.staging-dispatch",
-            lease_id,
-            Some(&request.recipe.run_id),
-            crate::execution::DaemonAdmissionPolicy::DurableLeaseRequired,
-        )?;
-        Self::check_cancelled(cancellation)?;
-        let authority = admission.authority();
-        authority.prove_server_owned_expiry_or_cancellation_authority()?;
+                None,
+                Some(crate::execution::reverse_broker_submission_key(
+                    &request.recipe.runner_id,
+                    &request.recipe.run_id,
+                )),
+            ),
+        };
         Self::check_cancelled(cancellation)?;
         let submitted = crate::exec_with_status_snapshot(
             &request.recipe.runner_id,
@@ -2109,6 +2313,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 secret_env_plan: Some(secret_handoff.secret_env_plan),
                 capture_patch: request.recipe.capture_patch,
                 source_snapshot: Some(source_snapshot),
+                path_materialization_plan: Some(path_materialization_plan),
                 required_extensions: request.recipe.command.required_extensions.clone(),
                 run_id: Some(request.recipe.run_id.clone()),
                 detach_after_handoff: true,
@@ -2117,14 +2322,11 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             },
             Some(runner_status),
         );
-        // `/exec` is idempotent on the immutable run id. A dropped response is
-        // reconciled from the daemon's active durable-job projection instead of
-        // submitting a second child.
+        // Both daemon and broker submissions are idempotent on the immutable run
+        // id. A dropped response is reconciled from active durable-job state.
         let runner_job_id = match submitted {
             Ok((output, _)) => output.job_id.ok_or_else(|| {
-                Error::internal_unexpected(
-                    "durable Lab daemon acceptance returned no runner job identity",
-                )
+                Error::internal_unexpected("durable Lab acceptance returned no runner job identity")
             })?,
             Err(error) => crate::status(&request.recipe.runner_id)
                 .ok()
@@ -2137,12 +2339,13 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 })
                 .ok_or(error)?,
         };
-        // The renewer may fail while `/exec` is in flight. Acceptance is then
-        // known, but dispatch authority is not: stop and reconcile this exact
-        // child before failing the controller stage closed.
-        if let Err(error) = authority.prove_server_owned_expiry_or_cancellation_authority() {
-            self.cancel_and_reconcile_runner_job(request, &runner_job_id)?;
-            return Err(error);
+        // Direct-daemon authority can expire while `/exec` is in flight. Reverse
+        // authority is the broker's durable submission-key record itself.
+        if let Some(authority) = daemon_authority.as_ref() {
+            if let Err(error) = authority.prove_server_owned_expiry_or_cancellation_authority() {
+                self.cancel_and_reconcile_runner_job(request, &runner_job_id)?;
+                return Err(error);
+            }
         }
         if cancellation.is_cancelled() {
             self.cancel_and_reconcile_runner_job(request, &runner_job_id)?;
@@ -2167,8 +2370,13 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             workspace_attachment_digest: workspace.payload_digest,
             runtime_attachment_digest: runtime.payload_digest,
             hydration_attachment_digest: hydration.payload_digest,
-            daemon_lease_id: Some(authority.daemon_lease_id().to_string()),
-            reservation_job_id: Some(authority.reservation_job_id().to_string()),
+            daemon_lease_id: daemon_authority
+                .as_ref()
+                .map(|authority| authority.daemon_lease_id().to_string()),
+            reservation_job_id: daemon_authority
+                .as_ref()
+                .map(|authority| authority.reservation_job_id().to_string()),
+            reverse_submission_key,
             runner_job_id: runner_job_id.clone(),
             remote_workspace: workspace.payload.remote_cwd,
             remote_command: command,
@@ -2180,6 +2388,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             DURABLE_LAB_DISPATCH_RECEIPT_ATTACHMENT_KIND,
             &receipt,
         )?;
+        drop(admission);
         Ok(runner_job_id)
     }
     fn observe_runner(
@@ -2215,17 +2424,11 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             return receipt.payload.validate(request, checkpoint);
         }
         Self::check_cancelled(cancellation)?;
-        let observed = crate::execution::observe_daemon_job_until_terminal(
-            &request.recipe.runner_id,
-            runner_job_id,
-            None,
-        )?;
+        let observed =
+            Self::observe_runner_job_until_terminal(request, runner_job_id, Some(cancellation))?;
         homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(
             &request.recipe.run_id,
-            &homeboy_core::api_jobs::RunnerJobLogSnapshot {
-                job: observed.job.clone(),
-                events: observed.events,
-            },
+            &observed,
         )?;
         let receipt = DurableLabTerminalReceipt {
             schema: "homeboy/durable-lab-terminal-receipt/v1".to_string(),
@@ -2288,11 +2491,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 job_id,
                 durable_run_id,
             )?;
-            let observed = crate::execution::observe_daemon_job_until_terminal(
-                &request.recipe.runner_id,
-                job_id,
-                None,
-            )?;
+            let observed = Self::observe_runner_job_until_terminal(request, job_id, None)?;
             if observed.job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
                 return Err(Error::internal_unexpected(format!(
                     "Lab staging child cancellation for runner job `{job_id}` was not authoritative: observed `{}`",
@@ -2323,11 +2522,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             runner_job_id,
             &request.recipe.run_id,
         )?;
-        let observed = crate::execution::observe_daemon_job_until_terminal(
-            &request.recipe.runner_id,
-            runner_job_id,
-            None,
-        )?;
+        let observed = Self::observe_runner_job_until_terminal(request, runner_job_id, None)?;
         if observed.job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
             return Err(Error::internal_unexpected(format!(
                 "Lab staging cancellation for runner job `{runner_job_id}` was not authoritative: observed `{}`",
@@ -3016,7 +3211,7 @@ mod tests {
             .build()
             .expect("client");
         let create_body = json!({
-            "job_type": LAB_STAGING_DISPATCH_JOB_TYPE,
+            "type": LAB_STAGING_DISPATCH_JOB_TYPE,
             "version": LAB_STAGING_DISPATCH_VERSION,
             "request": envelope(),
             "idempotency_key": "attempt-1",
@@ -3852,6 +4047,7 @@ mod tests {
             hydration_attachment_digest: "sha256:hydration".to_string(),
             daemon_lease_id: Some("lease-1".to_string()),
             reservation_job_id: Some("reservation-1".to_string()),
+            reverse_submission_key: None,
             runner_job_id: "runner-job-1".to_string(),
             remote_workspace: "/runner/workspace".to_string(),
             remote_command: vec!["homeboy".to_string(), "agent-task".to_string()],
@@ -3979,7 +4175,46 @@ mod tests {
             assert_eq!(receipt.payload.runner_job_id, "runner-job-accepted");
             assert!(receipt.payload.daemon_lease_id.is_none());
             assert!(receipt.payload.reservation_job_id.is_none());
+            assert!(receipt.payload.reverse_submission_key.is_none());
         });
+    }
+
+    #[test]
+    fn reverse_dispatch_receipt_requires_the_bound_broker_submission_key() {
+        let mut request = execution_request();
+        request.recipe.tunnel_mode = crate::RunnerTunnelMode::Reverse;
+        let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+        checkpoint.phase = LabStagingPhase::ObserveRunner;
+        checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
+        checkpoint.workspace_id = Some("workspace-1".to_string());
+        checkpoint.runtime_id = Some("runtime-1".to_string());
+        checkpoint.hydration_id = Some("hydration-1".to_string());
+        checkpoint.final_runner_job_id = Some("runner-job-1".to_string());
+        let mut receipt = DurableLabDispatchReceipt {
+            schema: "homeboy/durable-lab-dispatch-receipt/v1".to_string(),
+            run_id: request.recipe.run_id.clone(),
+            runner_id: request.recipe.runner_id.clone(),
+            recipe_digest: canonical_digest(&request.recipe).expect("digest"),
+            workspace_attachment_digest: "sha256:workspace".to_string(),
+            runtime_attachment_digest: "sha256:runtime".to_string(),
+            hydration_attachment_digest: "sha256:hydration".to_string(),
+            daemon_lease_id: None,
+            reservation_job_id: None,
+            reverse_submission_key: Some(crate::execution::reverse_broker_submission_key(
+                &request.recipe.runner_id,
+                &request.recipe.run_id,
+            )),
+            runner_job_id: "runner-job-1".to_string(),
+            remote_workspace: "/runner/workspace".to_string(),
+            remote_command: vec!["homeboy".to_string(), "agent-task".to_string()],
+            workload_identity: "sha256:workload".to_string(),
+        };
+
+        receipt
+            .validate(&request, &checkpoint)
+            .expect("reverse receipt");
+        receipt.reverse_submission_key = Some("wrong-key".to_string());
+        assert!(receipt.validate(&request, &checkpoint).is_err());
     }
 
     #[test]
