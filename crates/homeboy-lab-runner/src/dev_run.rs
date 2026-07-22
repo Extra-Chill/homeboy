@@ -1000,6 +1000,7 @@ mod tests {
             ),
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             snapshot_identity: "snapshot-1".to_string(),
+            prepared_workspace_lease: None,
             counts: ByteFileCounts { files: 1, bytes: 2 },
             excludes: Vec::new(),
             includes: Vec::new(),

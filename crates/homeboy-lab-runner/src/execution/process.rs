@@ -270,7 +270,7 @@ pub(crate) fn prepare_runner_process(
         )?);
     }
 
-    let source_snapshot = request
+    let mut source_snapshot = request
         .source_snapshot
         .unwrap_or_else(|| match runner.kind {
             RunnerKind::Local => homeboy_core::source_snapshot::collect_local(
@@ -285,6 +285,7 @@ pub(crate) fn prepare_runner_process(
                 runner.workspace_root.as_deref(),
             ),
         });
+    crate::hydrate_prepared_workspace_source_snapshot(&runner.id, &cwd, &mut source_snapshot)?;
     validate_required_paths(
         &runner,
         &request.require_paths,

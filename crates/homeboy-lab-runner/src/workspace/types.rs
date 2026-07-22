@@ -47,12 +47,42 @@ pub struct RunnerWorkspaceSyncOutput {
     pub resource_lifecycle: ResourceLifecycleRecord,
     pub sync_mode: RunnerWorkspaceSyncMode,
     pub snapshot_identity: String,
+    /// Opaque lease used by `runner workspace update`; distinct from the
+    /// deterministic source snapshot identity.
+    pub prepared_workspace_lease: Option<String>,
     #[serde(flatten)]
     pub counts: ByteFileCounts,
     pub excludes: Vec<String>,
     pub includes: Vec<String>,
     pub workspace_cleanliness: String,
     pub validation_dependencies: Vec<RunnerValidationDependencySyncOutput>,
+}
+
+/// Options for advancing a prepared snapshot by its opaque snapshot lease.
+#[derive(Debug, Clone)]
+pub struct RunnerWorkspaceUpdateOptions {
+    pub path: String,
+    pub lease: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceUpdateOutput {
+    pub variant: &'static str,
+    pub command: &'static str,
+    pub runner_id: String,
+    pub lease: String,
+    pub remote_path: String,
+    /// Actual source snapshot identity before the first prepared-workspace
+    /// update. This is intentionally distinct from the opaque input lease.
+    pub original_snapshot_identity: String,
+    pub original_workspace_lease: String,
+    pub resulting_snapshot_identity: String,
+    pub original_prepared_snapshot_identity: String,
+    pub update_lineage: Vec<String>,
+    pub changed_paths: Vec<String>,
+    pub deleted_paths: Vec<String>,
+    pub retained_prepared_assets: bool,
+    pub exec_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -391,6 +421,14 @@ pub struct RunnerWorkspaceSnapshotEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual_materialization_mode: Option<String>,
     pub snapshot_identity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_lease: Option<String>,
+    #[serde(default)]
+    pub workspace_generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_prepared_snapshot_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub update_lineage: Vec<String>,
     #[serde(default)]
     pub snapshot_excludes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -425,6 +463,16 @@ pub(super) struct RunnerWorkspaceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual_materialization_mode: Option<String>,
     pub snapshot_identity: String,
+    /// Opaque, single-generation capability for a prepared workspace. Older
+    /// metadata intentionally has no lease and is ineligible for mutation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_lease: Option<String>,
+    #[serde(default)]
+    pub workspace_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_prepared_snapshot_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub update_lineage: Vec<String>,
     #[serde(default)]
     pub snapshot_excludes: Vec<String>,
     #[serde(default)]

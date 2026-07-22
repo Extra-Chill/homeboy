@@ -459,6 +459,10 @@ fn source_snapshot_identity(snapshot: &SourceSnapshot) -> SourceSnapshotIdentity
         sync_mode: snapshot.sync_mode.clone(),
         dirty: snapshot.dirty,
         workspace_snapshot_identity: snapshot.workspace_snapshot_identity.clone(),
+        prepared_workspace_original_snapshot_identity: snapshot
+            .prepared_workspace_original_snapshot_identity
+            .clone(),
+        prepared_workspace_update_lineage: snapshot.prepared_workspace_update_lineage.clone(),
         git_sha: snapshot.git_sha.clone(),
         git_branch: snapshot.git_branch.clone(),
         remote_path: snapshot.remote_path.clone(),

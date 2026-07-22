@@ -969,6 +969,8 @@ mod tests {
             dirty: false,
             sync_mode: LAB_SOURCE_SNAPSHOT_SYNC_MODE.to_string(),
             workspace_snapshot_identity: Some("snapshot:verified-content".to_string()),
+            prepared_workspace_original_snapshot_identity: None,
+            prepared_workspace_update_lineage: Vec::new(),
             synthetic_checkout_commit: None,
             synthetic_checkout_ref: None,
             synthetic_checkout_tree: None,

@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use base64::Engine;
+use homeboy_core::source_snapshot::SourceSnapshot;
 
 use homeboy_core::engine::temp;
 use homeboy_core::error::{Error, ErrorCode, Result};
@@ -23,9 +24,9 @@ use super::git::{
 };
 use super::snapshot::{
     effective_snapshot_excludes, ensure_no_runner_workspace_metadata_collision,
-    local_snapshot_stats, materialize_snapshot, materialize_snapshot_git,
-    materialize_snapshot_incremental, snapshot_identity, snapshot_manifest_delta,
-    workspace_content_manifest_for_policy, SnapshotManifestDelta,
+    local_snapshot_stats, materialize_prepared_workspace_update, materialize_snapshot,
+    materialize_snapshot_git, materialize_snapshot_incremental, snapshot_identity,
+    snapshot_manifest_delta, workspace_content_manifest_for_policy, SnapshotManifestDelta,
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 use super::types::{
@@ -33,7 +34,8 @@ use super::types::{
     RunnerWorkspaceMaterializationPlan, RunnerWorkspaceMetadata, RunnerWorkspacePruneEntry,
     RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
     RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, DEFAULT_EXCLUDES,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceUpdateOptions,
+    RunnerWorkspaceUpdateOutput, DEFAULT_EXCLUDES,
 };
 use super::util::{
     deterministic_remote_path, git_output, parent_remote_path, ssh_client_for_runner,
@@ -230,6 +232,7 @@ pub fn sync_workspace(
                     ResourceCleanupPolicy::DeleteOnSuccess,
                 )
             });
+            let prepared_workspace_lease = metadata.workspace_lease.clone();
             let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
                 &runner,
                 metadata,
@@ -264,6 +267,7 @@ pub fn sync_workspace(
                     resource_lifecycle,
                     sync_mode: options.mode,
                     snapshot_identity: snapshot,
+                    prepared_workspace_lease,
                     counts: stats,
                     excludes,
                     includes,
@@ -406,6 +410,7 @@ pub fn sync_workspace(
                     resource_lifecycle,
                     sync_mode: RunnerWorkspaceSyncMode::Git,
                     snapshot_identity: git.head,
+                    prepared_workspace_lease: None,
                     counts: ByteFileCounts::default(),
                     excludes,
                     includes,
@@ -416,6 +421,194 @@ pub fn sync_workspace(
             ))
         }
     }
+}
+
+/// Advance a prepared snapshot selected by its snapshot lease. The lease is a
+/// snapshot identity, not a caller-provided runner path.
+pub fn update_workspace(
+    runner_id: &str,
+    options: RunnerWorkspaceUpdateOptions,
+) -> Result<(RunnerWorkspaceUpdateOutput, i32)> {
+    let runner = load(runner_id)?;
+    let local_path = canonical_workspace_path(&options.path)?;
+    let (snapshots, _) = workspace_snapshots(
+        runner_id,
+        RunnerWorkspaceSnapshotFilters {
+            limit: usize::MAX,
+            ..Default::default()
+        },
+    )?;
+    let snapshot = snapshots
+        .snapshots
+        .into_iter()
+        .find(|entry| entry.workspace_lease.as_deref() == Some(options.lease.as_str()))
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "lease",
+                "workspace update requires a current opaque workspace lease for this runner",
+                Some(options.lease.clone()),
+                None,
+            )
+        })?;
+    let state = local_git_state(&local_path);
+    if snapshot.local_path != local_path.display().to_string()
+        || snapshot.source_remote_url != state.remote_url
+        || snapshot.source_ref != state.ref_name
+    {
+        return Err(Error::validation_invalid_argument(
+            "lease",
+            "workspace update rejected an unrelated repository or branch lineage",
+            Some(options.lease),
+            None,
+        ));
+    }
+    let mut excludes = DEFAULT_EXCLUDES
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    for pattern in &runner.policy.snapshot_excludes {
+        if !excludes.contains(pattern) {
+            excludes.push(pattern.clone());
+        }
+    }
+    for pattern in homeboy_core::source_snapshot::declared_sync_excludes_for_path(&local_path) {
+        if !excludes.contains(&pattern) {
+            excludes.push(pattern);
+        }
+    }
+    let includes = runner.policy.snapshot_includes.clone();
+    let excludes = effective_snapshot_excludes(excludes, &includes);
+    if snapshot.snapshot_excludes != excludes {
+        return Err(Error::validation_invalid_argument(
+            "lease",
+            "workspace update rejected an incompatible exclude policy",
+            Some(snapshot.remote_path),
+            None,
+        ));
+    }
+    let previous_manifest = snapshot.content_manifest.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "lease",
+            "workspace update requires a manifest-backed snapshot lease",
+            Some(options.lease.clone()),
+            None,
+        )
+    })?;
+    let manifest = workspace_content_manifest_for_policy(
+        &local_path,
+        &excludes,
+        WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+    )?;
+    let delta = snapshot_manifest_delta(&manifest, &previous_manifest)?;
+    let resulting_snapshot_identity = snapshot_identity(&local_path, &excludes, &includes)?;
+    let original_prepared_snapshot_identity = snapshot
+        .original_prepared_snapshot_identity
+        .clone()
+        .unwrap_or_else(|| snapshot.snapshot_identity.clone());
+    let mut update_lineage = snapshot.update_lineage.clone();
+    update_lineage.push(resulting_snapshot_identity.clone());
+    let metadata = workspace_metadata(
+        &runner.id,
+        &local_path,
+        &snapshot.remote_path,
+        RunnerWorkspaceSyncMode::Snapshot,
+        Some("prepared_workspace_delta"),
+        &resulting_snapshot_identity,
+        &excludes,
+        Some(manifest),
+        snapshot.run_id.as_deref(),
+        ResourceCleanupPolicy::DeleteOnSuccess,
+    );
+    let mut metadata = metadata;
+    metadata.workspace_lease = Some(new_workspace_lease());
+    metadata.workspace_generation = snapshot.workspace_generation.saturating_add(1);
+    metadata.original_prepared_snapshot_identity =
+        Some(original_prepared_snapshot_identity.clone());
+    metadata.update_lineage = update_lineage.clone();
+    materialize_prepared_workspace_update(
+        &runner,
+        &local_path,
+        &snapshot.remote_path,
+        &delta,
+        snapshot.workspace_lease.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "lease",
+                "workspace update requires a lease-backed prepared workspace",
+                Some(options.lease.clone()),
+                None,
+            )
+        })?,
+        &serde_json::to_string_pretty(&metadata)
+            .map_err(|err| Error::internal_json(err.to_string(), None))?,
+    )?;
+    let exec_command = format!(
+        "homeboy runner exec {} --cwd {} --env HOMEBOY_PREPARED_WORKSPACE_ORIGINAL_SNAPSHOT={} --env HOMEBOY_PREPARED_WORKSPACE_UPDATE_LINEAGE={} -- <command>",
+        shell_arg(&runner.id),
+        shell_arg(&snapshot.remote_path),
+        shell_arg(&original_prepared_snapshot_identity),
+        shell_arg(&update_lineage.join(",")),
+    );
+    Ok((
+        RunnerWorkspaceUpdateOutput {
+            variant: "workspace_update",
+            command: "runner.workspace.update",
+            runner_id: runner.id.clone(),
+            lease: metadata
+                .workspace_lease
+                .clone()
+                .expect("new workspace lease"),
+            remote_path: snapshot.remote_path.clone(),
+            original_snapshot_identity: original_prepared_snapshot_identity.clone(),
+            original_workspace_lease: options.lease,
+            resulting_snapshot_identity,
+            original_prepared_snapshot_identity,
+            update_lineage,
+            changed_paths: delta.changed_paths,
+            deleted_paths: delta.deleted_paths,
+            retained_prepared_assets: true,
+            exec_command,
+        },
+        0,
+    ))
+}
+
+/// Hydrate execution provenance from a metadata-backed prepared workspace.
+/// Ordinary runner paths remain unchanged; only an exact workspace match gains
+/// the original snapshot and ordered delta lineage recorded at promotion time.
+pub fn hydrate_prepared_workspace_source_snapshot(
+    runner_id: &str,
+    remote_path: &str,
+    source_snapshot: &mut SourceSnapshot,
+) -> Result<()> {
+    let runner = load(runner_id)?;
+    let Some(workspace_root) = runner.workspace_root.as_deref() else {
+        return Ok(());
+    };
+    let prepared_root = format!("{}/_lab_workspaces/", workspace_root.trim_end_matches('/'));
+    if !remote_path.starts_with(&prepared_root) {
+        return Ok(());
+    }
+    let (snapshots, _) = workspace_snapshots(
+        runner_id,
+        RunnerWorkspaceSnapshotFilters {
+            limit: usize::MAX,
+            ..Default::default()
+        },
+    )?;
+    let Some(snapshot) = snapshots
+        .snapshots
+        .into_iter()
+        .find(|snapshot| snapshot.remote_path == remote_path)
+    else {
+        return Ok(());
+    };
+    let Some(original) = snapshot.original_prepared_snapshot_identity else {
+        return Ok(());
+    };
+    source_snapshot.workspace_snapshot_identity = Some(snapshot.snapshot_identity);
+    source_snapshot.prepared_workspace_original_snapshot_identity = Some(original);
+    source_snapshot.prepared_workspace_update_lineage = snapshot.update_lineage;
+    Ok(())
 }
 
 /// Return a previously materialized source snapshot only when it is tied to the
@@ -538,6 +731,7 @@ pub fn reuse_compatible_snapshot_workspace(
         resource_lifecycle,
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         snapshot_identity: snapshot.snapshot_identity,
+        prepared_workspace_lease: snapshot.workspace_lease,
         counts: ByteFileCounts::default(),
         excludes,
         includes,
@@ -816,6 +1010,10 @@ fn workspace_metadata(
         sync_mode: sync_mode.label().to_string(),
         actual_materialization_mode: actual_materialization_mode.map(str::to_string),
         snapshot_identity: snapshot_identity.to_string(),
+        workspace_lease: Some(new_workspace_lease()),
+        workspace_generation: 0,
+        original_prepared_snapshot_identity: Some(snapshot_identity.to_string()),
+        update_lineage: Vec::new(),
         snapshot_excludes: snapshot_excludes.to_vec(),
         content_manifest,
         synced_at: chrono::Utc::now().to_rfc3339(),
@@ -827,6 +1025,10 @@ fn workspace_metadata(
         job_id: None,
         resource_lifecycle: Some(resource_lifecycle),
     }
+}
+
+fn new_workspace_lease() -> String {
+    format!("workspace:{}", uuid::Uuid::new_v4())
 }
 
 pub(crate) fn workspace_resource_lifecycle(

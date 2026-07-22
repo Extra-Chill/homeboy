@@ -189,6 +189,10 @@ pub struct SourceSnapshotIdentity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_snapshot_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_workspace_original_snapshot_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepared_workspace_update_lineage: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
