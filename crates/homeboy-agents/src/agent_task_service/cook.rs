@@ -22,7 +22,8 @@ use homeboy_core::{Error, Result};
 
 use super::cook_baseline::{
     cook_attempt_harvest_context, materialize_follow_up_baseline,
-    materialize_initial_candidate_baseline, CookFollowUpBaseline, DerivedCookBaselineCapability,
+    materialize_initial_candidate_baseline, re_materialize_follow_up_baseline,
+    CookFollowUpBaseline, DerivedCookBaselineCapability,
 };
 use super::cook_budget::{
     budget_remaining, execution_budget_usage, reserve_remediation_budget, ExecutionBudgetUsage,
@@ -823,8 +824,74 @@ where
                 } else {
                     None
                 };
+                // For follow-up attempts (attempt > 1), the plan's workspace.root
+                // was set by a previous dispatch_cook_follow_up to a baseline
+                // worktree path. If that worktree was reaped (e.g. by tmp cleanup,
+                // disk-pressure cleanup, or git worktree prune), re-materialize it
+                // at the same path so the provider preflight check passes.
+                let re_materialized_baseline = if attempt > 1 && initial_baseline.is_none() {
+                    let root = plan
+                        .tasks
+                        .first()
+                        .and_then(|t| t.workspace.root.as_deref())
+                        .map(std::path::Path::new);
+                    match root {
+                        Some(path) if !path.exists() => {
+                            let source_run_id = plan.tasks[0]
+                                .inputs["cook_loop"]["artifact_provenance"]["source_run_id"]
+                                .as_str()
+                                .ok_or_else(|| {
+                                    with_pre_execution_phase(
+                                        Error::validation_invalid_argument(
+                                            "cook_loop.artifact_provenance.source_run_id",
+                                            "follow-up plan missing source run id for baseline re-materialization",
+                                            None,
+                                            None,
+                                        ),
+                                        "re_materialize_follow_up_baseline",
+                                    )
+                                })?;
+                            let promotion = persisted_promotion_for_attempt(source_run_id)?
+                                .ok_or_else(|| {
+                                    with_pre_execution_phase(
+                                        Error::validation_invalid_argument(
+                                            "promotion",
+                                            format!(
+                                                "source attempt {source_run_id} has no persisted \
+                                                 promotion for baseline re-materialization"
+                                            ),
+                                            Some(source_run_id.to_string()),
+                                            None,
+                                        ),
+                                        "re_materialize_follow_up_baseline",
+                                    )
+                                })?;
+                            let task_id = &plan.tasks[0].task_id;
+                            Some(
+                                re_materialize_follow_up_baseline(
+                                    &promotion,
+                                    path,
+                                    source_run_id,
+                                    task_id,
+                                )
+                                .map_err(|error| {
+                                    with_pre_execution_phase(
+                                        error,
+                                        "re_materialize_follow_up_baseline",
+                                    )
+                                })?,
+                            )
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let effective_baseline = initial_baseline
+                    .as_ref()
+                    .or(re_materialized_baseline.as_ref());
                 let mut dispatch_plan = plan.clone();
-                if let Some(baseline) = initial_baseline.as_ref() {
+                if let Some(baseline) = effective_baseline {
                     for task in &mut dispatch_plan.tasks {
                         // The baseline is immutable evidence for this dispatch,
                         // never the durable workspace a retry continues in.
@@ -848,18 +915,14 @@ where
                     dispatcher.dispatch_attempt(
                         dispatch_plan,
                         &run_id,
-                        initial_baseline
-                            .as_ref()
-                            .map(CookFollowUpBaseline::capability),
+                        effective_baseline.map(CookFollowUpBaseline::capability),
                     )
                 } else {
                     run_loaded_plan_with_derived_cook_baseline(
                         dispatch_plan,
                         Some(&run_id),
                         executor.clone(),
-                        initial_baseline
-                            .as_ref()
-                            .map(CookFollowUpBaseline::capability),
+                        effective_baseline.map(CookFollowUpBaseline::capability),
                         Some(cook_attempt_harvest_context(&options.harvest_context)),
                     )
                     .map(|_| ())

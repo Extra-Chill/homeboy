@@ -260,6 +260,36 @@ pub(crate) fn materialize_follow_up_baseline(
     source_run_id: &str,
     bound_task_id: &str,
 ) -> Result<CookFollowUpBaseline> {
+    materialize_follow_up_baseline_at(promotion, None, source_run_id, bound_task_id)
+}
+
+/// Re-materialize a follow-up baseline worktree at a specific path that was
+/// previously created by [`materialize_follow_up_baseline`] but has since been
+/// reaped (e.g. by tmp cleanup, disk-pressure cleanup, or `git worktree prune`).
+///
+/// This reuses the same durable promotion data and worktree/patch logic as
+/// [`materialize_follow_up_baseline`] to deterministically recreate an identical
+/// worktree at the original path, preserving the baseline identity contract for
+/// the provider preflight and subsequent gate verification.
+pub(crate) fn re_materialize_follow_up_baseline(
+    promotion: &AgentTaskPromotionReport,
+    target_path: &std::path::Path,
+    source_run_id: &str,
+    bound_task_id: &str,
+) -> Result<CookFollowUpBaseline> {
+    materialize_follow_up_baseline_at(promotion, Some(target_path), source_run_id, bound_task_id)
+}
+
+/// Shared worktree/patch materialization logic. When `target_path` is `None` a
+/// fresh UUID path is generated under the follow-up baselines temp directory;
+/// when `Some(path)` the worktree is created at the exact given path (used by
+/// recovery to re-materialize a reaped baseline at its original location).
+fn materialize_follow_up_baseline_at(
+    promotion: &AgentTaskPromotionReport,
+    target_path: Option<&std::path::Path>,
+    source_run_id: &str,
+    bound_task_id: &str,
+) -> Result<CookFollowUpBaseline> {
     let source_root = promotion
         .provenance
         .get("worktree_path")
@@ -353,14 +383,19 @@ pub(crate) fn materialize_follow_up_baseline(
         &["write-tree"],
         &[("GIT_INDEX_FILE", &index_path)],
     )?;
-    let parent = std::env::temp_dir().join("homeboy-cook-follow-up-baselines");
-    std::fs::create_dir_all(&parent).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("create cook baseline directory".to_string()),
-        )
-    })?;
-    let path = parent.join(format!("baseline-{}", uuid::Uuid::new_v4()));
+    let path = match target_path {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let parent = std::env::temp_dir().join("homeboy-cook-follow-up-baselines");
+            std::fs::create_dir_all(&parent).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("create cook baseline directory".to_string()),
+                )
+            })?;
+            parent.join(format!("baseline-{}", uuid::Uuid::new_v4()))
+        }
+    };
     let path_string = path.display().to_string();
     git_output(
         &source_root,
