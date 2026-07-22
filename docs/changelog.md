@@ -4,6 +4,27 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.304.1] - 2026-07-22
+
+### Changed
+- remove redundant duplicate refactor test file
+- replace audit-evasion string splits with sourced literals
+- refactor(lab-runner): merge canonical_plan_digest into generic canonical_digest
+
+### Fixed
+- report invocation-accurate latest_run_id in cook result envelope
+- report invocation-accurate latest_run_id in cook result envelope so orchestrators inspect the right run
+- classify Cook remediation from durable executor
+- harvest committed changes from durable source when attempt scratch workspace is reaped
+- fix(agent-task): enforce non-empty used_for at render time and attribute Homeboy in tool disclosure
+- keep raw exec output pipeable
+- preserve Git identity for source snapshots
+- ignore stale generated Composer locks
+- keep scenario discovery side-effect free
+- separate changelog and release attribution
+- reconstruct adopted cook retry baseline
+- attribute runner_id on resource lifecycle records
+
 ## [0.304.0] - 2026-07-22
 
 ### Added
