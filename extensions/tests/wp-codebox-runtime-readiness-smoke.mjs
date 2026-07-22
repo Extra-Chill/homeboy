@@ -26,7 +26,7 @@ const {
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hbe-codebox-runtime-readiness-'));
 try {
   const missingContract = path.join(tempRoot, 'missing-contract.cjs');
-  const contractDiagnostics = runtimeContractReadinessDiagnostics({ wpCodeboxCoreModule: missingContract });
+  const contractDiagnostics = runtimeContractReadinessDiagnostics({ wpCodeboxCoreModule: missingContract, wpCodeboxInstallDir: tempRoot });
   assert.equal(contractDiagnostics.length, 1);
   assert.equal(contractDiagnostics[0].class, RUNTIME_CONTRACT_FAILURE_CLASS);
   assert.match(contractDiagnostics[0].message, /HOMEBOY_WP_CODEBOX_CORE_MODULE/);

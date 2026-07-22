@@ -157,15 +157,15 @@ function validateCanonicalRuntimeContractManifest(manifest) {
 
 function coreModuleCandidates(options = {}) {
   const explicit = options.wpCodeboxCoreModule || options.coreModule || process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE || process.env.WP_CODEBOX_CORE_MODULE;
-  if (explicit) {
-    return [normalizeCoreModuleSpecifier(explicit)];
-  }
-
+  const installDir = options.wpCodeboxInstallDir || process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(process.env.HOME || '', '.cache', 'homeboy', 'wp-codebox');
   const candidates = [
+    explicit,
+    path.join(installDir, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'contracts.js'),
+    path.join(installDir, 'release', 'wp-codebox-cli', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'contracts.js'),
     DEFAULT_CODEBOX_CONTRACTS_MODULE,
     'wp-codebox-workspace/contracts',
-  ];
-  return candidates.map(normalizeCoreModuleSpecifier);
+  ].filter(Boolean);
+  return [...new Set(candidates.map(normalizeCoreModuleSpecifier))];
 }
 
 function normalizeCoreModuleSpecifier(specifier) {

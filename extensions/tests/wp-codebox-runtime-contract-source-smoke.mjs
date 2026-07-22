@@ -195,8 +195,10 @@ assert.deepEqual(loaded.manifest, canonicalManifest);
 
 delete process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE;
 const contractCandidates = coreModuleCandidates({ wpCodeboxInstallDir: path.join(tempRoot, 'wp-codebox-install') });
-assert.equal(contractCandidates[0], '@automattic/wp-codebox-core/contracts');
-assert.equal(contractCandidates[1], 'wp-codebox-workspace/contracts');
-assert.equal(contractCandidates.length, 2);
+assert.equal(contractCandidates[0], pathToFileURL(path.join(tempRoot, 'wp-codebox-install/source/node_modules/@automattic/wp-codebox-core/dist/contracts.js')).href);
+assert.equal(contractCandidates[1], pathToFileURL(path.join(tempRoot, 'wp-codebox-install/release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/contracts.js')).href);
+assert.equal(contractCandidates[2], '@automattic/wp-codebox-core/contracts');
+assert.equal(contractCandidates[3], 'wp-codebox-workspace/contracts');
+assert.equal(contractCandidates.length, 4);
 
 console.log('wp-codebox runtime contract source smoke passed');
