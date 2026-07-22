@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.29.1] - 2026-07-22
+
+### Fixed
+- skip absent PHPUnit suites (by Chris Huber)
+
 ## [3.29.0] - 2026-07-22
 
 ### Added
