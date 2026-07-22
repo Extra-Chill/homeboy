@@ -375,6 +375,7 @@ pub(crate) trait AgentTaskPromotionWorkspaceProvider {
 pub(crate) struct ExternalPromotionWorkspaceProvider {
     invocation: Option<CommandInvocation>,
     provenance: Option<serde_json::Value>,
+    expected_workspace: Option<PathBuf>,
     configured_fallback: Option<ConfiguredPromotionWorkspaceProvider>,
 }
 
@@ -404,6 +405,7 @@ impl ExternalPromotionWorkspaceProvider {
             return Self {
                 invocation: Some(invocation),
                 provenance: None,
+                expected_workspace: None,
                 configured_fallback: None,
             };
         }
@@ -418,6 +420,7 @@ impl ExternalPromotionWorkspaceProvider {
                     ..Default::default()
                 }),
                 provenance: None,
+                expected_workspace: None,
                 configured_fallback: None,
             };
         }
@@ -425,6 +428,7 @@ impl ExternalPromotionWorkspaceProvider {
         Self {
             invocation: None,
             provenance: None,
+            expected_workspace: None,
             configured_fallback: Some(ConfiguredPromotionWorkspaceProvider {
                 config: config.clone(),
                 executable,
@@ -499,15 +503,42 @@ impl ExternalPromotionWorkspaceProvider {
             }));
             std::path::PathBuf::from(workspace)
         };
-        self.invocation = Some(CommandInvocation {
-            argv: vec![
-                executable.display().to_string(),
-                "agent-task".to_string(),
-                "promotion-provider".to_string(),
-                "--workspace".to_string(),
-                workspace.display().to_string(),
-            ],
-            ..Default::default()
+        self.expected_workspace = Some(workspace.clone());
+        let configured_apply = self
+            .provenance
+            .as_ref()
+            .and_then(|provenance| provenance.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| *id != "homeboy")
+            .and_then(|provider_id| {
+                configured_fallback
+                    .config
+                    .worktree_providers
+                    .get(provider_id)
+            })
+            .and_then(|provider| provider.commands.apply.as_ref())
+            .map(|command| {
+                command
+                    .iter()
+                    .map(|argument| argument.replace("{handle}", &request.to_workspace))
+                    .collect::<Vec<_>>()
+            });
+        self.invocation = Some(if let Some(argv) = configured_apply {
+            CommandInvocation {
+                argv,
+                ..Default::default()
+            }
+        } else {
+            CommandInvocation {
+                argv: vec![
+                    executable.display().to_string(),
+                    "agent-task".to_string(),
+                    "promotion-provider".to_string(),
+                    "--workspace".to_string(),
+                    workspace.display().to_string(),
+                ],
+                ..Default::default()
+            }
         });
         Ok(())
     }
@@ -549,7 +580,7 @@ impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider 
                 None,
             )
         })?;
-        run_provider_command(invocation, &request)
+        run_provider_command_for_workspace(invocation, &request, self.expected_workspace.as_deref())
             .map_err(|error| self.with_configured_provider_provenance(error))
     }
 
@@ -595,6 +626,14 @@ impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider 
 pub(crate) fn run_provider_command(
     invocation: &CommandInvocation,
     request: &AgentTaskPromotionApplyRequest,
+) -> Result<AgentTaskPromotionWorkspace> {
+    run_provider_command_for_workspace(invocation, request, None)
+}
+
+fn run_provider_command_for_workspace(
+    invocation: &CommandInvocation,
+    request: &AgentTaskPromotionApplyRequest,
+    expected_workspace: Option<&Path>,
 ) -> Result<AgentTaskPromotionWorkspace> {
     let (program, args) = invocation_program_and_args(invocation).ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -857,6 +896,36 @@ pub(crate) fn run_provider_command(
 
     let workspace_path = PathBuf::from(response.workspace_path);
     validate_provider_workspace_path(&workspace_path)?;
+    if let Some(expected_workspace) = expected_workspace {
+        let actual = std::fs::canonicalize(&workspace_path).map_err(|error| {
+            Error::validation_invalid_argument(
+                "promotion_provider.response.workspace_path",
+                format!("could not canonicalize provider workspace_path: {error}"),
+                None,
+                None,
+            )
+        })?;
+        let expected = std::fs::canonicalize(expected_workspace).map_err(|error| {
+            Error::validation_invalid_argument(
+                "to_worktree",
+                format!("could not canonicalize resolved managed worktree: {error}"),
+                None,
+                None,
+            )
+        })?;
+        if actual != expected {
+            return Err(Error::validation_invalid_argument(
+                "promotion_provider.response.workspace_path",
+                format!(
+                    "promotion provider returned {}, but configured provider resolved {}",
+                    actual.display(),
+                    expected.display()
+                ),
+                None,
+                None,
+            ));
+        }
+    }
 
     let mut command_evidence = response.command_evidence;
     if command_evidence.is_empty() {
