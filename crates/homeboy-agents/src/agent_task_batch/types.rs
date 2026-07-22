@@ -45,6 +45,10 @@ pub struct AgentTaskBatchStatusReport {
     pub totals: AgentTaskBatchTotals,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unavailable_child_runs: Vec<AgentTaskBatchChildIssue>,
+    /// Terminal children whose runner patch remains unavailable to the
+    /// controller. Retrying `repair_command` re-runs lifecycle reconciliation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projection_pending_child_runs: Vec<AgentTaskBatchProjectionPendingChild>,
     /// Terminal children whose provider attempt finished but whose promotion,
     /// gates, and PR finalization were never completed (typically because the
     /// synchronous coordinator exited). These can be idempotently harvested with
@@ -65,6 +69,15 @@ pub struct AgentTaskBatchResumableChild {
     pub state: AgentTaskRunState,
     /// Why this child is resumable — e.g. terminal with a patch but no PR.
     pub reason: String,
+}
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentTaskBatchProjectionPendingChild {
+    pub task_id: String,
+    pub run_id: String,
+    pub state: AgentTaskRunState,
+    pub phase: String,
+    pub reason: String,
+    pub repair_command: String,
 }
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct AgentTaskBatchTotals {
