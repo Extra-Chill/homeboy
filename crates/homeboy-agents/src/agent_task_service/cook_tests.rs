@@ -3673,6 +3673,97 @@ fn cook_report_latest_run_id_prefers_invocation_over_stale_cook_index() {
 }
 
 #[test]
+fn re_materialize_follow_up_baseline_recovers_after_worktree_deletion() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = &temp.path().join("repo");
+    std::fs::create_dir(root).unwrap();
+    for args in [
+        vec!["init"],
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "test@example.com"],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::write(root.join("base.txt"), "base\n").unwrap();
+    assert!(Command::new("git")
+        .args(["add", "."])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "base"])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    let target_head = git_output(root, &["rev-parse", "HEAD"]).unwrap();
+    std::fs::write(root.join("patched.txt"), "patched\n").unwrap();
+    assert!(Command::new("git")
+        .args(["add", "patched.txt"])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    let patch = Command::new("git")
+        .args([
+            "diff",
+            "--cached",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            "HEAD",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(patch.status.success());
+    let patch_path = temp.path().join("candidate.patch");
+    std::fs::write(&patch_path, patch.stdout).unwrap();
+    assert!(Command::new("git")
+        .args(["reset"])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    let report: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+        "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
+        "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
+        "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":target_head},
+        "patch_artifact":{"id":"candidate","kind":"patch","path":patch_path},
+        "provenance":{"worktree_path":root}, "operator_notification":{"status":"blocked","message":"red"}
+    }))
+    .unwrap();
+    let baseline =
+        materialize_follow_up_baseline(&report, "first-run", "candidate-task").expect("baseline");
+    let baseline_path = baseline.path.clone();
+    assert!(baseline_path.exists());
+    let original_commit = baseline.capability().commit().to_string();
+    let original_tree = baseline.capability().tree().to_string();
+    drop(baseline);
+    assert!(!baseline_path.exists(), "drop should remove the worktree");
+    let re_materialized =
+        re_materialize_follow_up_baseline(&report, &baseline_path, "first-run", "candidate-task")
+            .expect("re-materialized baseline");
+    assert_eq!(re_materialized.path, baseline_path);
+    assert!(baseline_path.exists());
+    assert_eq!(re_materialized.capability().commit(), original_commit);
+    assert_eq!(re_materialized.capability().tree(), original_tree);
+    assert_eq!(
+        std::fs::read_to_string(baseline_path.join("patched.txt")).unwrap(),
+        "patched\n"
+    );
+    assert!(git_output(&baseline_path, &["status", "--porcelain"])
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn cook_report_invocation_run_ids_populated_for_policy_failure() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let fresh_run_id = "agent-task-fresh-abc123".to_string();
