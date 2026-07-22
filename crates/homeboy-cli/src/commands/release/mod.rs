@@ -11,6 +11,7 @@ use homeboy_release::release::{
 };
 
 use super::utils::args::DryRunArgs;
+use super::utils::response::{CommandActionableMetadata, CommandNextAction, CommandNextActionKind};
 use super::CmdResult;
 
 pub mod changelog;
@@ -204,6 +205,11 @@ pub struct ReleaseOutput {
     /// dependents after this component.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cascade: Option<release::CascadeResult>,
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub actionable: Option<CommandActionableMetadata>,
 }
 
 #[derive(Serialize)]
@@ -437,6 +443,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         return Ok((
             ReleaseCommandOutput::Single(ReleaseOutput {
                 variant: "single",
+                actionable: recovery_actionable_metadata(&result),
                 result,
                 cascade,
             }),
@@ -530,6 +537,17 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         }),
         exit_code,
     ))
+}
+
+fn recovery_actionable_metadata(
+    result: &ReleaseCommandResult,
+) -> Option<CommandActionableMetadata> {
+    result.continuation_command.as_ref().map(|command| {
+        CommandActionableMetadata::default().with_next_action(
+            CommandNextAction::new("finish release publication", command)
+                .with_kind(CommandNextActionKind::Repair),
+        )
+    })
 }
 
 /// Run the dependency-aware cascade after a single-component release, when
@@ -1293,5 +1311,44 @@ jobs:
 
         assert_eq!(execution.phase, ReleasePhase::Prepare);
         assert!(!execution.requires_apply);
+    }
+
+    #[test]
+    fn recovered_git_state_surfaces_publication_continuation_in_json_envelope() {
+        let continuation = "homeboy release fixture --head --skip-checks --apply".to_string();
+        let result = ReleaseCommandResult {
+            component_id: "fixture".to_string(),
+            status: "git_recovered".to_string(),
+            phase: ReleasePhase::Recover,
+            bump_type: "recover".to_string(),
+            dry_run: false,
+            releasable_commits: 0,
+            new_version: None,
+            tag: Some("v1.2.3".to_string()),
+            skipped_reason: None,
+            plan: None,
+            run: None,
+            deployment: None,
+            continuation_command: Some(continuation.clone()),
+            release_summary: vec!["Git state recovered; publication is incomplete".to_string()],
+        };
+        let output = ReleaseOutput {
+            variant: "single",
+            actionable: recovery_actionable_metadata(&result),
+            result,
+            cascade: None,
+        };
+        let data = serde_json::to_value(output).expect("serialize release result");
+        let response = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(data),
+            4,
+            "release",
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize command envelope");
+
+        assert!(!value["success"].as_bool().expect("success boolean"));
+        assert_eq!(value["data"]["result"]["status"], "git_recovered");
+        assert_eq!(value["next_actions"][0]["command"], continuation);
     }
 }

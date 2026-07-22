@@ -14,6 +14,41 @@ use super::scope::ReleaseScope;
 use super::types::{ReleaseCommandInput, ReleaseCommandResult, ReleaseOptions, ReleasePlan};
 use super::workflow::{release_execution_plan, short_sha};
 
+/// `--recover` repairs Git state only. Keep the remaining release lifecycle
+/// explicit so an orchestration result cannot mistake a pushed tag for a
+/// published release.
+pub const RECOVERY_INCOMPLETE_EXIT_CODE: i32 = 4;
+
+fn publication_continuation_command(input: &ReleaseCommandInput) -> String {
+    let mut command = format!("homeboy release {} --head", input.component_id);
+    if let Some(path) = &input.path_override {
+        command.push_str(&format!(" --path {}", shell_quote(path)));
+    }
+    if input.skip_checks {
+        command.push_str(" --skip-checks");
+    } else if !input.skip_checks_granular.is_empty() {
+        command.push_str(&format!(
+            " --skip-checks={}",
+            input.skip_checks_granular.join(",")
+        ));
+    }
+    if input.skip_build_validation {
+        command.push_str(" --skip-build-validation");
+    }
+    if input.pipeline.skip_publish {
+        command.push_str(" --skip-publish");
+    }
+    if let Some(identity) = &input.git_identity {
+        command.push_str(&format!(" --git-identity {}", shell_quote(identity)));
+    }
+    command.push_str(" --apply");
+    command
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
     let component = load_component(
         &input.component_id,
@@ -259,16 +294,18 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
         push_tags(&format!("Failed to push retagged {}", tag_name))?;
 
         let actions = vec![format!("retagged {} to HEAD", tag_name)];
+        let continuation_command = publication_continuation_command(input);
         homeboy_core::log_status!(
             "recover",
-            "Recovery complete for v{}: {}",
+            "Git recovery complete for v{}: {}. Release publication remains incomplete; run: {}",
             current_version,
-            actions.join(", ")
+            actions.join(", "),
+            continuation_command
         );
         return Ok((
             ReleaseCommandResult {
                 component_id: input.component_id.clone(),
-                status: "recovered".to_string(),
+                status: "git_recovered".to_string(),
                 phase: release_execution_plan(input).phase,
                 bump_type: "recover".to_string(),
                 dry_run: false,
@@ -287,9 +324,17 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
                 )),
                 run: None,
                 deployment: None,
-                release_summary: actions.clone(),
+                continuation_command: Some(continuation_command.clone()),
+                release_summary: [
+                    actions,
+                    vec![format!(
+                        "Git state recovered; release publication is incomplete. Run: {}",
+                        continuation_command
+                    )],
+                ]
+                .concat(),
             },
-            0,
+            RECOVERY_INCOMPLETE_EXIT_CODE,
         ));
     }
 
@@ -414,29 +459,28 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
         actions.push(reconcile_action);
     }
 
+    let continuation_command = publication_continuation_command(input);
     if actions.is_empty() {
         homeboy_core::log_status!(
             "recover",
-            "Release v{} appears complete — nothing to recover.",
-            current_version
+            "Git recovery found no pending Git changes for v{}. Release publication was not verified or run; it remains incomplete. Run: {}",
+            current_version,
+            continuation_command
         );
     } else {
         homeboy_core::log_status!(
             "recover",
-            "Recovery complete for v{}: {}",
+            "Git recovery complete for v{}: {}. Release publication remains incomplete; run: {}",
             current_version,
-            actions.join(", ")
+            actions.join(", "),
+            continuation_command
         );
     }
 
     Ok((
         ReleaseCommandResult {
             component_id: input.component_id.clone(),
-            status: if actions.is_empty() {
-                "already_recovered".to_string()
-            } else {
-                "recovered".to_string()
-            },
+            status: "git_recovered".to_string(),
             phase: release_execution_plan(input).phase,
             bump_type: "recover".to_string(),
             dry_run: false,
@@ -455,13 +499,21 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
             )),
             run: None,
             deployment: None,
-            release_summary: if actions.is_empty() {
-                vec![format!("Release already exists: {}", tag_name)]
-            } else {
-                actions.to_vec()
-            },
+            continuation_command: Some(continuation_command.clone()),
+            release_summary: [
+                if actions.is_empty() {
+                    vec![format!("Git state already exists: {}", tag_name)]
+                } else {
+                    actions.to_vec()
+                },
+                vec![format!(
+                    "Git state recovered; release publication is incomplete. Run: {}",
+                    continuation_command
+                )],
+            ]
+            .concat(),
         },
-        0,
+        RECOVERY_INCOMPLETE_EXIT_CODE,
     ))
 }
 
@@ -797,5 +849,31 @@ mod tests {
         assert!(hints.contains("gh release view v1.2.3"));
         assert!(!hints.contains("git push origin :refs/tags/"));
         assert!(!hints.contains("gh release delete"));
+    }
+
+    #[test]
+    fn publication_continuation_preserves_recovery_execution_flags() {
+        let input = ReleaseCommandInput {
+            component_id: "sample-plugin".to_string(),
+            path_override: Some("/tmp/plugin path".to_string()),
+            skip_checks: true,
+            skip_build_validation: true,
+            pipeline: super::super::types::ReleasePipelineOptions {
+                skip_publish: true,
+                ..Default::default()
+            },
+            git_identity: Some("Chris Huber <chris@example.com>".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            publication_continuation_command(&input),
+            "homeboy release sample-plugin --head --path '/tmp/plugin path' --skip-checks --skip-build-validation --skip-publish --git-identity 'Chris Huber <chris@example.com>' --apply"
+        );
+    }
+
+    #[test]
+    fn recovery_incomplete_exit_code_is_not_success() {
+        assert_ne!(RECOVERY_INCOMPLETE_EXIT_CODE, 0);
     }
 }
