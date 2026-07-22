@@ -46,9 +46,9 @@ result refs.
 ```sh
 run_id="review-static-html-$(date -u +%Y%m%dT%H%M%SZ)"
 
-homeboy runner exec lab-runner \
-  --cwd /workspace/example-component \
+homeboy runner exec --cwd /workspace/example-component \
   --run-id "$run_id" \
+  lab-runner \
   -- \
   sh -lc 'mkdir -p artifacts/review && npm run build-report -- --out artifacts/review'
 
@@ -126,9 +126,9 @@ for runtime in runtime-a runtime-b; do
     cell="runtime=${runtime},browser=${browser}"
     out="artifacts/matrix/${runtime}/${browser}"
 
-    homeboy runner exec lab-runner \
-      --cwd /workspace/example-component \
+    homeboy runner exec --cwd /workspace/example-component \
       --run-id "${run_id}-${runtime}-${browser}" \
+      lab-runner \
       -- \
       sh -lc "mkdir -p ${out} && ./scripts/run-cell --runtime ${runtime} --browser ${browser} --out ${out}"
   done

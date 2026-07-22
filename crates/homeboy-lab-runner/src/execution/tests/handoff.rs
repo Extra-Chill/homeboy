@@ -59,7 +59,7 @@ fn timeout_mirrors_remote_job_without_cancelling() {
             .message
             .contains("Lab offload handoff: runner `lab` has daemon job")));
         assert!(err.hints.iter().any(|hint| hint.message.contains(
-            "homeboy runner exec lab --cwd /srv/homeboy/project -- homeboy runs list --status running --limit 20"
+            "homeboy runner exec --cwd /srv/homeboy/project lab -- homeboy runs list --status running --limit 20"
         )));
         assert!(err.hints.iter().any(|hint| hint
             .message
@@ -265,7 +265,7 @@ fn lab_offload_handoff_hints_render_durable_commands() {
     assert!(joined.contains("homeboy runs evidence run-456"));
     assert!(joined.contains("homeboy runs artifacts run-456"));
     assert!(joined.contains(
-        "homeboy runner exec homeboy-lab --cwd '/home/user/Developer/project with spaces' -- homeboy runs list --status running --limit 20"
+        "homeboy runner exec --cwd '/home/user/Developer/project with spaces' homeboy-lab -- homeboy runs list --status running --limit 20"
     ));
     assert!(joined.contains("homeboy runner job logs homeboy-lab job-123 --follow"));
     assert!(joined.contains("Cancel: `homeboy runner job cancel homeboy-lab job-123`"));

@@ -400,7 +400,7 @@ pub(crate) fn unsupported_runner_hints(
 
     if let Some(service_command) = tunnel_service_command(normalized_args) {
         hints.push(format!(
-            "`tunnel service {service_command} --runner {runner_id}` is not routed directly; inspect runner-side tunnel state with `homeboy runner exec {runner_id} --ssh --raw -- homeboy tunnel service {service_command} ...` until service inspection supports native --runner routing."
+            "`tunnel service {service_command} --runner {runner_id}` is not routed directly; inspect runner-side tunnel state with `homeboy runner exec --ssh --raw {runner_id} -- homeboy tunnel service {service_command} ...` until service inspection supports native --runner routing."
         ));
     }
 

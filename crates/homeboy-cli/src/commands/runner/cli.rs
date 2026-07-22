@@ -332,7 +332,10 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Execute a command on a configured runner
+    /// Execute a command on a configured runner. Use `homeboy runner exec [HOMEBOY_OPTIONS] <RUNNER> -- <COMMAND>...`.
+    #[command(
+        after_help = "Use `homeboy runner exec [HOMEBOY_OPTIONS] <RUNNER> -- <COMMAND>...` to make the Homeboy/remote-command boundary explicit."
+    )]
     Exec {
         /// Runner ID
         id: String,

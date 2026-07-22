@@ -577,7 +577,7 @@ fn build_runner_error_gives_managed_runner_replacement() {
     assert!(tried
         .iter()
         .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
-            "homeboy runner exec homeboy-lab --cwd <runner_path> -- homeboy build <component>"
+            "homeboy runner exec --cwd <runner_path> homeboy-lab -- homeboy build <component>"
         ))));
 }
 
@@ -625,7 +625,7 @@ fn build_lab_placement_error_gives_managed_runner_replacement() {
     assert!(tried
         .iter()
         .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
-            "homeboy runner exec <runner-id> --cwd <runner_path> -- homeboy build <component>"
+            "homeboy runner exec --cwd <runner_path> <runner-id> -- homeboy build <component>"
         ))));
 }
 

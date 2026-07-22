@@ -885,7 +885,7 @@ fn workspace_list_reports_recent_lab_workspaces_with_exec_commands() {
         assert_eq!(list.workspaces[0].remote_path, sync.remote_path);
         assert!(list.workspaces[0]
             .exec_command
-            .contains("homeboy runner exec lab-local-list --cwd"));
+            .contains("homeboy runner exec --cwd"));
         assert!(list.workspaces[0].exec_command.contains("-- <command>"));
     });
 }

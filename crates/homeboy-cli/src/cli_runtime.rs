@@ -92,6 +92,12 @@ impl CliRuntime {
     }
 
     pub fn run_from_args(&self, args: Vec<String>) -> std::process::ExitCode {
+        let normalized = args::normalize(args);
+        if let Some(message) = args::runner_exec_option_boundary_error(&normalized) {
+            eprintln!("error: {message}");
+            return std::process::ExitCode::from(2);
+        }
+
         // Register the config-level artifact_root resolver before any command runs
         // so paths::artifact_root() can honor global config without paths depending
         // on the defaults layer (breaks the paths <-> defaults dependency cycle).
@@ -260,12 +266,11 @@ impl CliRuntime {
             }
         });
 
-        if is_top_level_version_request(&args) {
+        if is_top_level_version_request(&normalized) {
             println!("{}", upgrade::current_build_version());
             return std::process::ExitCode::SUCCESS;
         }
 
-        let normalized = args::normalize(args);
         let matches = self.parse_matches(normalized.clone());
         self.run_matches(matches, normalized)
     }
@@ -1332,6 +1337,29 @@ mod tests {
     #[test]
     fn normal_output_file_paths_are_allowed() {
         assert!(output_runtime::validate_output_file_path("./homeboy-output.json").is_none());
+    }
+
+    #[test]
+    fn runner_exec_rejects_inherited_options_before_runtime_initialization() {
+        for option in [
+            "--output",
+            "--notification-transport",
+            "--notification-route",
+        ] {
+            let exit = CliRuntime::new().run_from_args(vec![
+                "homeboy".to_string(),
+                "runner".to_string(),
+                "exec".to_string(),
+                "lab".to_string(),
+                "cp".to_string(),
+                "source".to_string(),
+                "destination".to_string(),
+                option.to_string(),
+                "value".to_string(),
+            ]);
+
+            assert_eq!(exit, std::process::ExitCode::from(2));
+        }
     }
 
     #[test]

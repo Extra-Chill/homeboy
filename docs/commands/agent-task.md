@@ -779,8 +779,7 @@ runner-side checkout through `runner exec` instead of forcing a controller-local
 hot run:
 
 ```bash
-homeboy runner exec homeboy-lab \
-  --cwd /srv/homeboy/checkouts/homeboy \
+homeboy runner exec --cwd /srv/homeboy/checkouts/homeboy homeboy-lab \
   -- homeboy agent-task cook \
     --repo homeboy \
     --cwd /srv/homeboy/checkouts/homeboy \

@@ -114,7 +114,7 @@ fn isolates_runner_extension_sync_failures_and_continues_later_extensions() {
     assert_eq!(skipped[0].extensions_failed[0].extension_id, "swift");
     assert_eq!(
         skipped[0].extensions_failed[0].recovery_commands,
-        vec!["homeboy runner exec lab --ssh -- /home/user/.cargo/bin/homeboy extension install https://github.com/Extra-Chill/homeboy-extensions.git --id swift --ref 98a61eda --replace"]
+        vec!["homeboy runner exec --ssh lab -- /home/user/.cargo/bin/homeboy extension install https://github.com/Extra-Chill/homeboy-extensions.git --id swift --ref 98a61eda --replace"]
     );
     assert_eq!(skipped[0].extensions_synced.len(), 1);
     assert_eq!(skipped[0].extensions_synced[0].extension_id, "wordpress");

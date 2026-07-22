@@ -81,7 +81,7 @@ fn build_lab_replacement_hints(runner_id: Option<&str>) -> Vec<String> {
             "Materialize the build workspace first: homeboy runner workspace sync {runner} --path <local-worktree> --mode snapshot"
         ),
         format!(
-            "Then run the build in the returned runner_path: homeboy runner exec {runner} --cwd <runner_path> -- homeboy build <component>"
+            "Then run the build in the returned runner_path: homeboy runner exec --cwd <runner_path> {runner} -- homeboy build <component>"
         ),
     ]
 }

@@ -128,6 +128,69 @@ fn known_cli_flags_for_path(path: &[&str]) -> Option<Vec<CliFlagSpec>> {
     Some(flags)
 }
 
+/// Detect runner exec options that occur after an implicit remote command tail.
+/// An explicit `--` makes all remaining tokens remote-owned.
+pub(crate) fn runner_exec_option_boundary_error(args: &[String]) -> Option<String> {
+    let exec_index = top_level_runner_exec_index(args)?;
+    let flags = known_cli_flags_for_path(&["runner", "exec"])?;
+    let mut runner_seen = false;
+    let mut command_seen = false;
+    let mut index = exec_index;
+
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            return None;
+        }
+
+        let flag = flags.iter().find(|flag| {
+            arg == &flag.flag || (flag.takes_value && arg.strip_prefix(&flag.flag) == Some("="))
+        });
+        if let Some(flag) = flag {
+            if command_seen {
+                return Some(format!(
+                    "runner exec option `{}` appears after the remote command. Use `homeboy runner exec [HOMEBOY_OPTIONS] <RUNNER> -- <COMMAND>...`; place `{}` before the runner or add `--` before a remote argument with that name.",
+                    flag.flag, flag.flag
+                ));
+            }
+            if flag.takes_value && arg == &flag.flag {
+                index += 1;
+            }
+        } else if runner_seen {
+            command_seen = true;
+        } else {
+            runner_seen = true;
+        }
+        index += 1;
+    }
+
+    None
+}
+
+fn top_level_runner_exec_index(args: &[String]) -> Option<usize> {
+    let root = Cli::command();
+    let flags = command_flag_specs(&root);
+    let mut index = 1;
+
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            return None;
+        }
+        if arg == "runner" && args.get(index + 1).is_some_and(|next| next == "exec") {
+            return Some(index + 2);
+        }
+
+        let flag = flags.iter().find(|flag| {
+            arg == &flag.flag || (flag.takes_value && arg.strip_prefix(&flag.flag) == Some("="))
+        });
+        let Some(flag) = flag else {
+            return None;
+        };
+        index += usize::from(flag.takes_value && arg == &flag.flag) + 1;
+    }
+
+    None
+}
+
 fn find_subcommand<'a>(command: &'a Command, name: &str) -> Option<&'a Command> {
     command
         .get_subcommands()
@@ -296,7 +359,7 @@ mod positional_tests {
 
 #[cfg(test)]
 mod normalize_tests {
-    use super::{normalize, EXPLICIT_PASSTHROUGH_SENTINEL};
+    use super::{normalize, runner_exec_option_boundary_error, EXPLICIT_PASSTHROUGH_SENTINEL};
     use crate::cli_surface::{Cli, Commands};
     use clap::Parser;
 
@@ -444,6 +507,92 @@ mod normalize_tests {
             "value",
         ]));
         assert!(Cli::try_parse_from(explicit).is_ok());
+    }
+
+    #[test]
+    fn runner_exec_rejects_known_options_after_an_implicit_command() {
+        for flag in [
+            "--cwd",
+            "--raw",
+            "--run-id",
+            "--output",
+            "--notification-transport",
+        ] {
+            let mut args = argv(&[
+                "homeboy",
+                "runner",
+                "exec",
+                "lab",
+                "cp",
+                "source",
+                "destination",
+            ]);
+            args.push(flag.to_string());
+            if !matches!(flag, "--raw") {
+                args.push("value".to_string());
+            }
+
+            let error = runner_exec_option_boundary_error(&args)
+                .expect("misplaced runner exec option should be diagnosed");
+            assert!(error.contains(flag));
+            assert!(error.contains("[HOMEBOY_OPTIONS] <RUNNER> -- <COMMAND>..."));
+        }
+    }
+
+    #[test]
+    fn runner_exec_allows_remote_flags_after_an_explicit_separator() {
+        let args = argv(&[
+            "homeboy",
+            "runner",
+            "exec",
+            "lab",
+            "--",
+            "cp",
+            "source",
+            "destination",
+            "--cwd",
+            "remote",
+            "--raw",
+            "--run-id",
+            "remote-run",
+        ]);
+
+        assert_eq!(runner_exec_option_boundary_error(&args), None);
+    }
+
+    #[test]
+    fn runner_exec_allows_commands_without_flags() {
+        let args = argv(&[
+            "homeboy",
+            "runner",
+            "exec",
+            "lab",
+            "cp",
+            "source",
+            "destination",
+        ]);
+
+        assert_eq!(runner_exec_option_boundary_error(&args), None);
+    }
+
+    #[test]
+    fn runner_exec_does_not_inspect_a_remote_ssh_command_tail() {
+        let args = argv(&[
+            "homeboy",
+            "ssh",
+            "lab-host",
+            "--",
+            "runner",
+            "exec",
+            "lab",
+            "cp",
+            "source",
+            "destination",
+            "--cwd",
+            "/tmp",
+        ]);
+
+        assert_eq!(runner_exec_option_boundary_error(&args), None);
     }
 
     #[test]

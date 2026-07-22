@@ -131,9 +131,9 @@ pub(super) fn runner_exec_diagnostics(
     let mut hints = Vec::new();
     if let Some(remote_path) = source_snapshot.and_then(|snapshot| snapshot.remote_path.as_ref()) {
         hints.push(format!(
-            "Reuse this runner workspace with `homeboy runner exec {} --cwd {} -- <command>`.",
-            shell_arg(&runner.id),
-            shell_arg(remote_path)
+            "Reuse this runner workspace with `homeboy runner exec --cwd {} {} -- <command>`.",
+            shell_arg(remote_path),
+            shell_arg(&runner.id)
         ));
         hints.push(format!(
             "Discover recent runner workspaces with `homeboy runner workspace list {}`.",

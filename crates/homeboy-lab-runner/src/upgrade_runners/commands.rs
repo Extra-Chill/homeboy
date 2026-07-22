@@ -85,7 +85,7 @@ pub fn runner_recovery_commands(
 pub fn runner_inspect_bare_homeboy_command(runner_id: &str) -> String {
     let script = "type -a homeboy; command -v homeboy; homeboy --version";
     format!(
-        "homeboy runner exec {} --ssh -- sh -lc {}",
+        "homeboy runner exec --ssh {} -- sh -lc {}",
         shell_arg(runner_id),
         shell_arg(script)
     )
@@ -117,8 +117,8 @@ pub fn runner_exec_recovery_commands(runner: &Runner, command: &[String]) -> Vec
         "homeboy".to_string(),
         "runner".to_string(),
         "exec".to_string(),
-        runner.id.clone(),
         "--ssh".to_string(),
+        runner.id.clone(),
         "--".to_string(),
     ];
     args.extend(command.iter().cloned());

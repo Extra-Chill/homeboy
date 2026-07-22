@@ -26,7 +26,7 @@ pub(crate) fn lab_offload_handoff_hints(
 ) -> Vec<String> {
     let runner_exec_prefix = match remote_cwd.filter(|cwd| !cwd.trim().is_empty()) {
         Some(cwd) => format!(
-            "homeboy runner exec {runner_id} --cwd {} --",
+            "homeboy runner exec --cwd {} {runner_id} --",
             shell::quote_arg(cwd)
         ),
         None => format!("homeboy runner exec {runner_id} --"),
