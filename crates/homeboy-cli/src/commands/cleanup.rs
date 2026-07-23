@@ -792,6 +792,15 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             homeboy::agents::controller_scratch::ControllerScratchCleanupOptions {
                 apply,
                 limit: usize::try_from(limit).unwrap_or(usize::MAX),
+                // Thread the operator's explicit `--older-than-days` override
+                // into the retention eligibility decision so released, clean,
+                // terminal scratch can converge under disk pressure. When the
+                // operator does not pass the flag (`None`), preserve the default
+                // per-resource retention window (P7D) rather than substituting
+                // the configured terminal-run default used by other categories.
+                retention_override_seconds: args
+                    .older_than_days
+                    .map(|days| days.saturating_mul(86_400)),
             },
         )?;
         categories.push(category_from_output(
