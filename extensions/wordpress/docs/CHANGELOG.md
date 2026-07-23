@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.31.0] - 2026-07-23
+
+### Added
+- unblock consumer multisite E2E composition
+
 ## [3.30.1] - 2026-07-23
 
 ### Fixed
