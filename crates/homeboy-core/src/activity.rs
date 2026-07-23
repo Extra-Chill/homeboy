@@ -158,35 +158,60 @@ pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityRep
     Ok(report)
 }
 
-pub fn show_activity(id: &str) -> Result<ActivityReport> {
+/// Resolve a known activity id through targeted, indexed per-provider probes
+/// before falling back to a full-corpus scan.
+///
+/// `activity show`/`watch` are called with a concrete id (an observation run id
+/// or a daemon/runner job UUID). Building the entire activity report just to
+/// find one item enumerated every observation, agent-task record, daemon job,
+/// runner session, and record-health probe — which timed out for active Lab
+/// jobs (#9762). This probes the cheap indexed lookups first; only when none
+/// resolve does it fall back to `resolve_item` over the bounded full report.
+///
+/// Ownership note: full-corpus aggregation belongs to `activity list`, so the
+/// fallback is intentionally the last resort here.
+fn resolve_activity_item(id: &str) -> Result<Option<ActivityItem>> {
+    // Bounded, indexed probes for the id shapes `show`/`watch` are called with.
+    // A failing probe (missing store, etc.) must not abort resolution — treat it
+    // as "not found here" and continue so a partial-source outage still resolves
+    // the id from another provider.
+    if let Ok(Some(item)) = observation::probe_by_id(id) {
+        return Ok(Some(item));
+    }
+    if let Ok(Some(item)) = daemon_jobs::probe_by_id(id) {
+        return Ok(Some(item));
+    }
+
+    // Fallback: aggregate the bounded report and resolve cross-refs (agent-task
+    // run ids, runner job ids mirrored onto observation runs, etc.).
     let report = activity_report(ActivityScope::All, 1000)?;
-    let Some(item) = resolve_item(&report.items, id) else {
-        return Err(Error::validation_invalid_argument(
-            "id",
-            format!("activity item not found: {id}"),
-            Some(id.to_string()),
-            Some(vec![
-                "Run `homeboy activity` to list active and recent work.".to_string(),
-            ]),
-        ));
+    Ok(resolve_item(&report.items, id).cloned())
+}
+
+fn activity_item_not_found(id: &str) -> Error {
+    Error::validation_invalid_argument(
+        "id",
+        format!("activity item not found: {id}"),
+        Some(id.to_string()),
+        Some(vec![
+            "Run `homeboy activity` to list active and recent work.".to_string(),
+        ]),
+    )
+}
+
+pub fn show_activity(id: &str) -> Result<ActivityReport> {
+    let Some(item) = resolve_activity_item(id)? else {
+        return Err(activity_item_not_found(id));
     };
-    let mut result = report_from_items(vec![item.clone()], "activity.show");
-    result.agent_task_record_health = report.agent_task_record_health;
+    let mut result = report_from_items(vec![item], "activity.show");
+    // Preserve the record-health field the full-report path attached. This is a
+    // single bounded provider probe, not a corpus scan.
+    result.agent_task_record_health = agent_task_provider::agent_task_record_health()?;
     Ok(result)
 }
 
 pub fn resolve_activity(id: &str) -> Result<ActivityItem> {
-    let report = activity_report(ActivityScope::All, 1000)?;
-    resolve_item(&report.items, id).cloned().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "id",
-            format!("activity item not found: {id}"),
-            Some(id.to_string()),
-            Some(vec![
-                "Run `homeboy activity` to list active and recent work.".to_string(),
-            ]),
-        )
-    })
+    resolve_activity_item(id)?.ok_or_else(|| activity_item_not_found(id))
 }
 
 fn resolve_item<'a>(items: &'a [ActivityItem], id: &str) -> Option<&'a ActivityItem> {
@@ -481,6 +506,17 @@ fn ms_to_rfc3339(ms: u64) -> String {
 mod observation {
     use super::*;
 
+    /// Resolve a single observation-run activity item by id without scanning the
+    /// full corpus. Matches the persisted run id directly (indexed `get_run`),
+    /// so `activity show <run-id>` returns immediately for a known run (#9762).
+    pub(super) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
+        let store = ObservationStore::open_initialized()?;
+        match store.get_run(id)? {
+            Some(run) => Ok(Some(item_from_run(&store, run)?)),
+            None => Ok(None),
+        }
+    }
+
     pub(super) fn collect(collector: &mut ActivityCollector, limit: usize) -> Result<()> {
         let store = ObservationStore::open_initialized()?;
         let mut records = store.list_runs(RunListFilter {
@@ -582,6 +618,25 @@ mod observation {
 
 mod daemon_jobs {
     use super::*;
+
+    /// Resolve a single daemon-job activity item by id without listing every
+    /// job. The daemon job id is a UUID; when `id` parses as one, look it up
+    /// directly. Non-UUID ids (run labels, etc.) resolve through other providers
+    /// or the full-scan fallback (#9762).
+    pub(super) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
+        let Ok(job_id) = uuid::Uuid::parse_str(id) else {
+            return Ok(None);
+        };
+        let path = paths::daemon_jobs_file()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let store = api_jobs::JobStore::open_without_reconciliation(path)?;
+        match store.get(job_id) {
+            Ok(job) => Ok(Some(item_from_job(&store, job)?)),
+            Err(_) => Ok(None),
+        }
+    }
 
     pub(super) fn collect(collector: &mut ActivityCollector) -> Result<()> {
         let path = paths::daemon_jobs_file()?;
@@ -1027,6 +1082,58 @@ mod tests {
             let items = collector.items(ActivityScope::All, 10);
 
             assert!(items.iter().any(|item| item.id == active.id));
+        });
+    }
+
+    #[test]
+    fn show_activity_resolves_run_id_through_targeted_probe() {
+        // #9762: `activity show <run-id>` for a known observation run must
+        // resolve via the indexed probe (get_run) rather than a full corpus
+        // scan. Seed one active run and assert show() returns exactly it.
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("bench").build())
+                .expect("run");
+
+            // The targeted probe resolves the run directly.
+            let probed = observation::probe_by_id(&run.id).expect("probe");
+            assert_eq!(probed.map(|item| item.id), Some(run.id.clone()));
+
+            // show_activity surfaces exactly that item.
+            let report = show_activity(&run.id).expect("show");
+            assert_eq!(report.items.len(), 1);
+            assert_eq!(report.items[0].id, run.id);
+        });
+    }
+
+    #[test]
+    fn observation_probe_returns_none_for_unknown_id() {
+        with_isolated_home(|_| {
+            ObservationStore::open_initialized().expect("store");
+            assert!(observation::probe_by_id("no-such-run")
+                .expect("probe")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn daemon_probe_ignores_non_uuid_ids() {
+        // Run labels / non-UUID ids are never daemon job ids; the probe must
+        // short-circuit without touching the job store.
+        with_isolated_home(|_| {
+            assert!(daemon_jobs::probe_by_id("cook-issue-9762")
+                .expect("probe")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn resolve_activity_errors_for_unknown_id() {
+        with_isolated_home(|_| {
+            ObservationStore::open_initialized().expect("store");
+            let error = resolve_activity("missing-id").expect_err("unknown id errors");
+            assert!(error.to_string().contains("activity item not found"));
         });
     }
 
