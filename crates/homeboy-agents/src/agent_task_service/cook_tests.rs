@@ -1192,6 +1192,24 @@ impl CandidateAdoptionFixture {
         no_finalize: bool,
         dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
     ) -> Self {
+        Self::new_with_execution_budget(
+            cook_id,
+            max_attempts,
+            max_attempts,
+            max_same_provider_retries,
+            no_finalize,
+            dispatcher,
+        )
+    }
+
+    fn new_with_execution_budget(
+        cook_id: &str,
+        max_attempts: u32,
+        max_provider_executions: u32,
+        max_same_provider_retries: u32,
+        no_finalize: bool,
+        dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
+    ) -> Self {
         let temp = tempfile::tempdir().expect("temporary adoption repositories");
         let source = temp.path().join("source");
         let target = temp.path().join("target");
@@ -1262,7 +1280,7 @@ impl CandidateAdoptionFixture {
         options.max_attempts = max_attempts;
         options.initial_plan.options.execution_budget =
             crate::agent_task_scheduler::AgentTaskExecutionBudget::new(
-                max_attempts,
+                max_provider_executions,
                 max_same_provider_retries,
                 0,
             );
@@ -2635,14 +2653,78 @@ fn pre_provider_adoption_retries_only_the_missing_form_binds_model_and_reaches_r
 }
 
 #[test]
-fn adoption_budget_failure_is_terminal_non_green_and_replay_does_not_dispatch() {
+fn adoption_review_uses_one_bounded_execution_after_the_source_budget_is_consumed() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let fixture = CandidateAdoptionFixture::new_with_execution_budget(
+            "cook-9575-consumed-source-budget",
+            2,
+            1,
+            0,
+            false,
+            None,
+        );
+        let mut aggregate = agent_task_lifecycle::read_aggregate(&fixture.run_id).unwrap();
+        aggregate
+            .events
+            .push(crate::agent_task_scheduler::AgentTaskProgressEvent {
+                task_id: "cook-homeboy".to_string(),
+                state: AgentTaskState::Running,
+                attempt: 1,
+                message: Some("historical provider execution".to_string()),
+            });
+        let aggregate_path = agent_task_lifecycle::status(&fixture.run_id)
+            .unwrap()
+            .aggregate_path
+            .expect("fixture aggregate path");
+        std::fs::write(
+            aggregate_path,
+            serde_json::to_vec_pretty(&aggregate).unwrap(),
+        )
+        .unwrap();
+        let mut backend = CaptureBackend {
+            hydrate_run_id: Some(fixture.run_id.clone()),
+            ..Default::default()
+        };
+
+        let result = fixture
+            .adopt(|_| Ok(None), ReviewFormOnlyExecutor, &mut backend)
+            .expect("adoption review has a separate bounded execution allowance");
+
+        assert_eq!(result.value.status, "review_ready");
+        let follow_up_plan = agent_task_lifecycle::load_plan(
+            result
+                .value
+                .latest_run_id
+                .as_deref()
+                .expect("follow-up run id"),
+        )
+        .unwrap();
+        assert_eq!(
+            follow_up_plan.tasks[0].inputs["cook_loop"]["execution_budget_authority"]["kind"],
+            "candidate_adoption_review"
+        );
+        assert_eq!(
+            follow_up_plan.tasks[0].inputs["cook_loop"]["execution_budget_authority"]
+                ["max_provider_executions"],
+            2
+        );
+        assert_eq!(
+            follow_up_plan.options.execution_budget,
+            crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 0, 0)
+        );
+        assert!(backend.committed && backend.pushed && backend.created);
+    });
+}
+
+#[test]
+fn adoption_review_allowance_is_terminal_and_replay_does_not_dispatch() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let fixture = CandidateAdoptionFixture::new("cook-9575-budget", 2, 0, true, None);
         let mut backend = CaptureBackend::default();
 
         let first = fixture
             .adopt(|_| Ok(None), ReviewFormOnlyExecutor, &mut backend)
-            .expect("budget exhaustion returns a durable report");
+            .expect("adoption review consumes its bounded allowance");
         let replay = fixture
             .adopt(
                 |_| panic!("terminal adoption must not reconstruct a dispatcher"),
@@ -2651,19 +2733,19 @@ fn adoption_budget_failure_is_terminal_non_green_and_replay_does_not_dispatch() 
             )
             .expect("identical adoption replays its terminal result");
 
-        assert_eq!(first.exit_code, 1);
-        assert_eq!(first.value.status, "execution_budget_exhausted");
-        assert_eq!(replay.exit_code, 1);
-        assert_eq!(replay.value.status, "execution_budget_exhausted");
-        assert_ne!(replay.value.status, "green_no_finalize");
+        assert_eq!(first.exit_code, 0);
+        assert_eq!(first.value.status, "green_no_finalize");
+        assert_eq!(replay.exit_code, 0);
+        assert_eq!(replay.value.status, "green_no_finalize");
         assert!(!backend.created);
         let record = agent_task_lifecycle::status(&fixture.run_id).unwrap();
-        assert_eq!(record.candidate_adoption.unwrap().state, "failed");
-        assert!(agent_task_lifecycle::cook_index(&fixture.cook_id)
+        assert_eq!(record.candidate_adoption.unwrap().state, "completed");
+        let attempts = agent_task_lifecycle::cook_index(&fixture.cook_id)
             .unwrap()
-            .attempts
-            .iter()
-            .all(|attempt| attempt.run_id == fixture.run_id));
+            .attempts;
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].run_id, fixture.run_id);
+        assert_eq!(attempts[1].run_id, first.value.latest_run_id.unwrap());
     });
 }
 
@@ -2804,7 +2886,7 @@ fn adoption_replays_provider_discovery_failure_in_the_same_recipe_attempt() {
 }
 
 #[test]
-fn repeated_provider_discovery_failures_exhaust_the_execution_budget() {
+fn repeated_provider_discovery_failures_exhaust_the_adoption_review_allowance() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let dispatcher = Arc::new(ProviderDiscoveryReplayDispatcher {
             dispatches: AtomicUsize::new(0),

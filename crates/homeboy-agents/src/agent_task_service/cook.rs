@@ -565,6 +565,12 @@ pub(crate) enum CookFollowUpDispatch {
     PolicyFailure { reason: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CookFollowUpBudgetScope {
+    Cook,
+    CandidateAdoptionReview,
+}
+
 /// Append and dispatch one remediation attempt from an authenticated promoted
 /// candidate. Both ordinary Cook feedback and external candidate adoption use
 /// this boundary so their budget, provenance, and baseline authority match.
@@ -579,6 +585,7 @@ pub(crate) fn dispatch_cook_follow_up<E>(
     promotion: &AgentTaskPromotionReport,
     mut follow_up_request: crate::agent_task::AgentTaskRequest,
     known_same_executor: bool,
+    budget_scope: CookFollowUpBudgetScope,
     budget_limit: &AgentTaskExecutionBudget,
     budget_used: ExecutionBudgetUsage,
     remediation_category_usage: &mut ExecutionBudgetUsage,
@@ -603,7 +610,16 @@ where
                 && retryable_provider_discovery_failure(&recipe_attempt.run_id)
         })
         .cloned();
-    let mut durable_budget_used = budget_used;
+    // The review plan itself permits one execution. The owning dispatch budget
+    // also permits one replay when executor startup cannot discover a provider.
+    let candidate_adoption_review_budget = AgentTaskExecutionBudget::new(2, 1, 0);
+    let (budget_limit, mut durable_budget_used) = match budget_scope {
+        CookFollowUpBudgetScope::Cook => (budget_limit, budget_used),
+        CookFollowUpBudgetScope::CandidateAdoptionReview => (
+            &candidate_adoption_review_budget,
+            ExecutionBudgetUsage::default(),
+        ),
+    };
     for recipe_attempt in related_attempts.clone() {
         if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recipe_attempt.run_id) {
             durable_budget_used.add(execution_budget_usage(&aggregate));
@@ -668,6 +684,15 @@ where
         "source_task_id": promotion.source.task_id,
         "source_patch_artifact_sha256": promotion.patch_artifact.sha256,
     });
+    if budget_scope == CookFollowUpBudgetScope::CandidateAdoptionReview {
+        follow_up_request.inputs["cook_loop"]["execution_budget_authority"] = serde_json::json!({
+            "kind": "candidate_adoption_review",
+            "max_provider_executions": 2,
+            "max_same_provider_retries": 1,
+            "max_provider_rotations": 0,
+            "review_plan_provider_executions": 1,
+        });
+    }
     let (next_attempt, next_run_id, mut follow_up_plan, replaced_run_id) = match replay {
         Some(recipe_attempt) => (
             recipe_attempt.attempt,
@@ -1513,6 +1538,7 @@ where
                     &promotion,
                     follow_up_request,
                     false,
+                    CookFollowUpBudgetScope::Cook,
                     budget_limit,
                     budget_used,
                     &mut remediation_category_usage,
