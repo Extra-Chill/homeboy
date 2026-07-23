@@ -27,6 +27,8 @@ assert.doesNotMatch(descriptorSource, /run-agent-task', '--help/);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'wp-codebox.json'), 'utf8'));
 assert.equal(manifest.component_path_defaults, undefined);
+assert.equal(manifest.agent_task_executors[0].cli.default_ai_disclosure, 'OpenCode');
+assert.equal(Object.hasOwn(manifest.agent_task_executors[0].cli, 'profiles'), false);
 const runtimePreflightCheck = manifest.agent_task_executors[0].runtime_contract.preflight_checks.find((check) => check.id === 'wp-codebox.provider_plugin.runtime_package_shadow');
 assert.equal(runtimePreflightCheck.enforcement, 'error');
 assert.deepEqual(runtimePreflightCheck.target.component.metadata_equals, { loadAs: 'plugin' });

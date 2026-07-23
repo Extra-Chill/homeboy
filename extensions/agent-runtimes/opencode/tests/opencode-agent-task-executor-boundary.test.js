@@ -86,7 +86,7 @@ assert.equal(Object.hasOwn(provider.lifecycle, 'max_concurrency_default'), false
 assert.equal(provider.lifecycle.cancellation, 'provider_signal');
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, OPENCODE_SECRET_ENV);
 assert.deepEqual(provider.provider_defaults.codex.secret_env, OPENCODE_SECRET_ENV);
-assert.equal(provider.provider_defaults.codex.model, 'gpt-5.5');
+assert.equal(Object.hasOwn(provider.provider_defaults.codex, 'model'), false);
 assert.deepEqual(provider.provider_defaults.codex.secret_env_sources, OPENCODE_PROVIDER_DEFAULTS.codex.secret_env_sources);
 assert.deepEqual(provider.provider_preflight, OPENCODE_PROVIDER_PREFLIGHT);
 assert.deepEqual(provider.runner_readiness, OPENCODE_RUNNER_READINESS);
@@ -105,6 +105,7 @@ assert.equal(manifest.id, 'opencode');
 assert.equal(manifest.name, 'OpenCode');
 assert.equal(manifest.agent_task_executors.length, 1);
 assert.equal(manifest.agent_task_executors[0].capabilities.includes('nested_orchestrator'), true);
+assert.equal(Object.hasOwn(manifest.agent_task_executors[0].provider_defaults.codex, 'model'), false);
 const packageJson = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'package.json'), 'utf8'));
 assert.equal(packageJson.name, 'homeboy-agent-runtime-opencode');
 assert.equal(packageJson.homeboy.agent_runtime_manifest, 'opencode.json');
@@ -131,6 +132,7 @@ try {
 	fs.writeFileSync(mockCliPath, `#!/usr/bin/env node
 const assert = require('node:assert/strict');
 assert.equal(process.argv[2], 'run');
+assert.equal(process.argv.includes('--model'), false);
 assert.equal(process.argv.at(-1), 'Prove the OpenCode provider boundary without leaking secrets.');
 assert.equal(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN, 'refresh-token-must-not-leak');
 assert.equal(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN, 'access-token-must-not-leak');

@@ -161,7 +161,6 @@ const OPENCODE_ROLE_ALIASES = {
 
 const OPENCODE_PROVIDER_DEFAULTS = {
 	codex: {
-		model: 'gpt-5.5',
 		secret_env: [...OPENCODE_SECRET_ENV],
 		secret_env_sources: {
 			AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: {

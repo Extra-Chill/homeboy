@@ -62,7 +62,6 @@ function providerContract(options = {}) {
 		},
 		provider_defaults: {
 			codex: {
-				model: 'gpt-5.5',
 				command: CODEX_DEFAULT_COMMAND,
 				command_args: [...CODEX_DEFAULT_COMMAND_ARGS],
 				secret_env: [...CODEX_SECRET_ENV],
@@ -115,11 +114,14 @@ const { execute: executeCodexAgentTask, outcome, validationFailure } = createCli
 	artifactProvider: 'codex',
 	collectArtifacts: true,
 	resolveCommandSpec,
-	buildArgs: (request, config, commandSpec) => [
-		...commandSpec.args,
-		...(config.model ? ['--model', config.model] : []),
-		request.instructions,
-	],
+	buildArgs: (request, config, commandSpec) => {
+		const model = config.model || request.executor?.model || request.model;
+		return [
+			...commandSpec.args,
+			...(model ? ['--model', model] : []),
+			request.instructions,
+		];
+	},
 	buildSpawn: (request, config, options) => ({
 		env: cliAgentTaskSpawnEnv(request, options, {
 			allowlist: ['HOMEBOY_CODEX_COMMAND', 'HOMEBOY_CODEX_COMMAND_ARGS'],

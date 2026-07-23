@@ -43,7 +43,7 @@ assert.equal(Object.hasOwn(provider.lifecycle, 'max_concurrency_default'), false
 assert.equal(provider.lifecycle.cancellation, 'provider_signal');
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, CODEX_SECRET_ENV);
 assert.deepEqual(provider.provider_defaults.codex.secret_env, CODEX_SECRET_ENV);
-assert.equal(provider.provider_defaults.codex.model, 'gpt-5.5');
+assert.equal(Object.hasOwn(provider.provider_defaults.codex, 'model'), false);
 assert.equal(provider.provider_defaults.codex.command, CODEX_DEFAULT_COMMAND);
 assert.deepEqual(provider.provider_defaults.codex.command_args, CODEX_DEFAULT_COMMAND_ARGS);
 assert.equal(provider.redacted_metadata_keys.includes('codex_auth'), true);
@@ -56,6 +56,7 @@ const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'codex.json')
 assert.equal(manifest.id, 'codex');
 assert.equal(manifest.name, 'Codex');
 assert.equal(manifest.agent_task_executors.length, 1);
+assert.equal(Object.hasOwn(manifest.agent_task_executors[0].provider_defaults.codex, 'model'), false);
 
 const registry = runtimeRegistry({ repoRoot });
 assert.equal(registry.codex.id, 'codex');
@@ -84,6 +85,12 @@ try {
 	assert.equal(fs.existsSync(scriptPath), true, `provider command target should exist: ${scriptPath}`);
 
 	const mockCliPath = path.join(root, 'mock-codex.cjs');
+	const omittedModelCliPath = path.join(root, 'mock-codex-without-model.cjs');
+	fs.writeFileSync(omittedModelCliPath, `#!/usr/bin/env node
+const assert = require('node:assert/strict');
+assert.deepEqual(process.argv.slice(2), ['exec', 'Run without selecting a model.']);
+process.exit(0);
+`);
 	fs.writeFileSync(mockCliPath, `#!/usr/bin/env node
 const assert = require('node:assert/strict');
 assert.equal(process.argv[2], 'exec');
@@ -116,6 +123,21 @@ process.exit(0);
 		},
 		instructions: 'Prove the Codex runtime boundary without leaking secrets.',
 	};
+	const omittedModelResult = executeCodexAgentTask({
+		...request,
+		task_id: 'codex-without-model',
+		executor: {
+			...request.executor,
+			config: {
+				provider: 'codex',
+				command: process.execPath,
+				command_args: [omittedModelCliPath, 'exec'],
+				artifacts_path: path.join(root, 'omitted-model-artifacts'),
+			},
+		},
+		instructions: 'Run without selecting a model.',
+	});
+	assert.equal(omittedModelResult.status, 'succeeded', JSON.stringify(omittedModelResult.diagnostics));
 	const runResult = spawnSync(process.execPath, [scriptPath], {
 		encoding: 'utf8',
 		env: {

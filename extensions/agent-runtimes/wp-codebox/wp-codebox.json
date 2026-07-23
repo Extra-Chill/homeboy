@@ -2,7 +2,7 @@
   "schema": "homeboy/agent-runtime-manifest/v1",
   "id": "wp-codebox",
   "name": "WP Codebox",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "WP Codebox agent runtime for Homeboy agent tasks.",
   "contract_producers": [
     {
@@ -229,15 +229,7 @@
       },
       "cli": {
         "reserved_selector_hints": ["opencode", "codex", "claude-code"],
-        "profiles": [
-          {
-            "name": "opencode-codex-gpt55",
-            "backend": "opencode",
-            "model": "gpt-5.5",
-            "ai_disclosure": "OpenCode (GPT-5.5)"
-          }
-        ],
-        "default_ai_disclosure": "OpenCode (GPT-5.5)"
+        "default_ai_disclosure": "OpenCode"
       },
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1",
