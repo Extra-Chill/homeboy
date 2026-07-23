@@ -485,6 +485,33 @@ fn persist_lab_staging_recipe_for_transport(
     .map(|attachment| attachment.payload)
 }
 
+fn ensure_current_controller_daemon() -> Result<homeboy_core::daemon::DaemonStartResult> {
+    let daemon = homeboy_core::daemon::ensure_running(homeboy_core::daemon::DEFAULT_ADDR)?;
+    let status = homeboy_core::daemon::read_status()?;
+    let Some(state) = status.state else {
+        return Err(Error::internal_unexpected(
+            "controller daemon did not publish a lease after startup",
+        ));
+    };
+    let expected = homeboy_core::build_identity::current().display;
+    if state.build_identity.display == expected {
+        return Ok(daemon);
+    }
+    if !status.active_job_recovery_evidence.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "controller_daemon",
+            "controller daemon build does not match the submitting Homeboy binary while durable jobs are active",
+            Some(state.build_identity.display),
+            Some(vec!["Wait for the listed controller jobs to finish before retrying the Lab handoff.".to_string()]),
+        ));
+    }
+
+    // A private staging recipe is a typed protocol payload. Replace an idle
+    // stale daemon before it can read a newer attachment with an older schema.
+    homeboy_core::daemon::stop_for_lease(&state.lease_id)?;
+    homeboy_core::daemon::ensure_running(homeboy_core::daemon::DEFAULT_ADDR)
+}
+
 /// Controller-owned admission for a detached agent-task attempt.
 /// No workspace side effect occurs before this returns an accepted controller job.
 pub(crate) fn submit_detached_staging(
@@ -501,6 +528,7 @@ pub(crate) fn submit_detached_staging(
             None,
         ));
     }
+    let daemon = ensure_current_controller_daemon()?;
     let recipe = persist_lab_staging_recipe_for_transport(
         run_id,
         runner_id,
@@ -527,7 +555,6 @@ pub(crate) fn submit_detached_staging(
         ));
     }
 
-    let daemon = homeboy_core::daemon::ensure_running(homeboy_core::daemon::DEFAULT_ADDR)?;
     let endpoint = format!("http://{}", daemon.address);
     let client = Client::builder()
         .no_proxy()
@@ -4753,6 +4780,67 @@ mod tests {
             )
             .public_projection();
             assert!(!public.to_string().contains("private-marker"));
+        });
+    }
+
+    #[test]
+    fn private_recipe_preserves_runtime_materialization_sources() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "private-runtime-sources";
+            submit_recipe_run(run_id);
+            let plan = json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "private-runtime-sources-plan",
+                "tasks": [{
+                    "task_id": "task-1",
+                    "executor": { "config": {
+                        "provider_plugin_paths": ["/controller/provider/plugin"],
+                        "runtime_overlays": [{
+                            "kind": "bundled-library",
+                            "library": "runtime-library",
+                            "source": "/controller/runtime-library",
+                            "strategy": "scoped-bundle"
+                        }]
+                    }},
+                    "metadata": { "resolved_runtime_identity": {
+                        "materialization_plan": { "runtime_sources": [{
+                            "id": "controller-runtime",
+                            "locator": { "kind": "local_path", "path": "/controller/runtime" },
+                            "destination_path": "runtime"
+                        }]
+                    }}}
+                }]
+            });
+            let args = vec![
+                "agent-task".to_string(),
+                "run-plan".to_string(),
+                "--plan".to_string(),
+                plan.to_string(),
+            ];
+            let recipe = persist_lab_staging_recipe(
+                run_id,
+                "lab-1",
+                &recipe_request(Some(recipe_command()), &args, HashMap::new()),
+            )
+            .expect("persist private recipe");
+            let loaded = load_lab_staging_recipe(run_id).expect("load private recipe");
+
+            assert_eq!(loaded.recipe, recipe);
+            let stored: Value =
+                serde_json::from_str(&loaded.recipe.normalized_args[3]).expect("stored plan JSON");
+            assert_eq!(
+                stored["tasks"][0]["executor"]["config"]["provider_plugin_paths"][0],
+                "/controller/provider/plugin"
+            );
+            assert_eq!(
+                stored["tasks"][0]["executor"]["config"]["runtime_overlays"][0]["source"],
+                "/controller/runtime-library"
+            );
+            assert_eq!(
+                stored["tasks"][0]["metadata"]["resolved_runtime_identity"]["materialization_plan"]
+                    ["runtime_sources"][0]["locator"]["path"],
+                "/controller/runtime"
+            );
         });
     }
 
