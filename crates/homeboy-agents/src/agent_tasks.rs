@@ -212,8 +212,9 @@ pub mod dispatch_service {
 /// PR finalization contracts and backends.
 pub mod finalization {
     pub use super::super::agent_task_finalization::{
-        finalize_pr, finalize_pr_with_backend, validate_publication_intent, AgentTaskGateResult,
-        AgentTaskPrEvidence, AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions,
+        finalize_pr, finalize_pr_with_backend, preflight_pr, preflight_pr_with_backend,
+        validate_publication_intent, AgentTaskGateResult, AgentTaskPrEvidence,
+        AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions,
         AgentTaskPrFinalizationOutcome, AgentTaskPrFinalizationReport, AgentTaskPrRef,
         AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship, AgentTaskPrVerification,
         AgentTaskPublicationIntent, AgentTaskPublicationProof, AgentTaskPublicationTarget,
@@ -227,14 +228,14 @@ pub mod finalization {
 pub mod review_dossier {
     pub use super::super::agent_task_review_dossier::{
         default_profile, enrich_dossier, homeboy_tool_disclosure, render_review_dossier,
-        resolve_review_profile, validate_profile, AgentTaskExternalUsageEvidence,
-        AgentTaskExternalUsageStatus, AgentTaskPublicContract, AgentTaskPublicContractEvidence,
-        AgentTaskReviewAdditionalSection, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
-        AgentTaskReviewEvidence, AgentTaskReviewIssueRelationship,
-        AgentTaskReviewIssueRelationshipKind, AgentTaskReviewOverride,
-        AgentTaskReviewOverrideTarget, AgentTaskReviewProfile, AgentTaskReviewSectionId,
-        AgentTaskReviewTestStep, AiFilledReviewForm, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
-        AI_REVIEW_FORM_OUTPUT_KEY,
+        resolve_review_profile, validate_issue_reference, validate_profile,
+        AgentTaskExternalUsageEvidence, AgentTaskExternalUsageStatus, AgentTaskPublicContract,
+        AgentTaskPublicContractEvidence, AgentTaskReviewAdditionalSection,
+        AgentTaskReviewAiAssistance, AgentTaskReviewDossier, AgentTaskReviewEvidence,
+        AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind,
+        AgentTaskReviewOverride, AgentTaskReviewOverrideTarget, AgentTaskReviewProfile,
+        AgentTaskReviewSectionId, AgentTaskReviewTestStep, AiFilledReviewForm,
+        AGENT_TASK_REVIEW_DOSSIER_SCHEMA, AI_REVIEW_FORM_OUTPUT_KEY,
     };
 }
 
@@ -385,10 +386,10 @@ pub mod service {
         evidence_ref_task_id, hydrate_evidence_ref, hydrate_evidence_summary, logs,
         normalize_plan_workspaces, offloaded_status_remediation, persist_initial_recipe,
         persist_provider_boundary_replay_evidence, promotion_source, read_plan,
-        reconcile_terminal_artifact_projection, resume, resume_cook_batch, retry, run_cook,
-        run_cook_batch, run_loaded_plan, run_next, run_next_with_cook_dispatcher, run_status,
-        run_submitted, run_submitted_with_timeout, source_worktree_path, status, submit_plan_spec,
-        validate_initial_recipe_compatibility, AgentTaskCandidateAdoptionOptions,
+        reconcile_terminal_artifact_projection, recover_cook_pr, resume, resume_cook_batch, retry,
+        run_cook, run_cook_batch, run_loaded_plan, run_next, run_next_with_cook_dispatcher,
+        run_status, run_submitted, run_submitted_with_timeout, source_worktree_path, status,
+        submit_plan_spec, validate_initial_recipe_compatibility, AgentTaskCandidateAdoptionOptions,
         AgentTaskCookAttemptReport, AgentTaskCookBatchCellReport, AgentTaskCookBatchOptions,
         AgentTaskCookBatchReport, AgentTaskCookReport, AgentTaskCookServiceOptions,
         AgentTaskDiscoveryCommands, AgentTaskDiscoveryCounts, AgentTaskDiscoveryFilter,

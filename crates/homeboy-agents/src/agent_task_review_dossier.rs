@@ -928,7 +928,7 @@ fn builtin_section_name(id: &str) -> bool {
 fn issue_pattern() -> Regex {
     Regex::new(r"^(?:#\d+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/\d+)$").expect("valid issue regex")
 }
-fn validate_issue_reference(value: &str) -> Result<()> {
+pub fn validate_issue_reference(value: &str) -> Result<()> {
     if issue_pattern().is_match(value) {
         Ok(())
     } else {

@@ -31,13 +31,35 @@ pub fn finalize_pr(
     finalize_pr_with_backend(options, &mut RealAgentTaskPrFinalizationBackend)
 }
 
+/// Validate a finalization dossier and its durable candidate without mutation.
+pub fn preflight_pr(
+    options: AgentTaskPrFinalizationOptions,
+) -> Result<AgentTaskPrFinalizationReport> {
+    preflight_pr_with_backend(options, &mut RealAgentTaskPrFinalizationBackend)
+}
+
 fn validate_real_candidate_fingerprint(options: &AgentTaskPrFinalizationOptions) -> Result<()> {
     backend::validate_real_candidate_fingerprint(options)
 }
 
 pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
+    options: AgentTaskPrFinalizationOptions,
+    backend: &mut B,
+) -> Result<AgentTaskPrFinalizationReport> {
+    finalize_pr_with_backend_mode(options, backend, true)
+}
+
+pub fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
+    options: AgentTaskPrFinalizationOptions,
+    backend: &mut B,
+) -> Result<AgentTaskPrFinalizationReport> {
+    finalize_pr_with_backend_mode(options, backend, false)
+}
+
+fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     mut options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
+    publish: bool,
 ) -> Result<AgentTaskPrFinalizationReport> {
     let mut durable_changed_files = Vec::new();
     if !options.manual_finalization {
@@ -178,6 +200,22 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     }
     // An identity mismatch must not create a commit, push, or PR mutation.
     let git_identity = backend.validate_publication_identity(&options.path)?;
+    if !publish {
+        return Ok(report(
+            &options,
+            intent,
+            &head,
+            "validated",
+            "none",
+            None,
+            None,
+            changed_files,
+            Some(proof),
+            false,
+            false,
+            Some(git_identity),
+        ));
+    }
     if commit_required {
         backend.commit_all(&options.path, &options.commit_message)?;
     }

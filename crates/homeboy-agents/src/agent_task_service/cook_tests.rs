@@ -10,9 +10,10 @@ use super::super::cook_baseline::git_output;
 use super::super::cook_promotion::{
     cook_report, finalize_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend,
     moving_base_recovery_for_run, moving_base_recovery_from_promotion, moving_base_recovery_report,
-    next_moving_base_recovery, persisted_promotion_for_attempt, recover_moving_base_cook_candidate,
-    refreshed_moving_base_recovery, MovingBaseCookRecovery,
+    next_moving_base_recovery, persisted_promotion_for_attempt, recover_cook_pr_with_backend,
+    recover_moving_base_cook_candidate, refreshed_moving_base_recovery, MovingBaseCookRecovery,
 };
+use super::super::cook_recipe::persist_initial_recipe;
 use super::*;
 use crate::agent_task::{
     AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
@@ -3369,6 +3370,58 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             );
         }
         assert!(backend.committed && backend.pushed && backend.created);
+    });
+}
+
+#[test]
+fn recovery_hydrates_durable_cook_evidence_and_can_preflight_without_mutation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-9750";
+        let run_id = "cook-9750-attempt-1";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        options.head = Some("fix/8058".to_string());
+        options.gates = VerifyGateOptions {
+            verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
+            ..Default::default()
+        };
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
+        seed_review_form_aggregate(run_id, &options.initial_plan);
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(promotion(run_id)).unwrap(),
+        )
+        .unwrap();
+
+        let mut preflight_backend = CaptureBackend::default();
+        let preflight =
+            recover_cook_pr_with_backend(cook_id, Vec::new(), true, &mut preflight_backend)
+                .unwrap();
+        assert_eq!(preflight["status"], "validated");
+        assert!(!preflight_backend.committed);
+        assert!(!preflight_backend.pushed);
+        assert!(!preflight_backend.created);
+
+        let mut publish_backend = CaptureBackend::default();
+        let report = recover_cook_pr_with_backend(
+            run_id,
+            vec![crate::agent_task_review_dossier::AgentTaskReviewOverride {
+                target: crate::agent_task_review_dossier::AgentTaskReviewOverrideTarget::Summary,
+                value: "Recovered from durable Cook evidence.".to_string(),
+                provenance: "reviewed issue #9750".to_string(),
+            }],
+            false,
+            &mut publish_backend,
+        )
+        .unwrap();
+        assert_eq!(report["status"], "review_ready");
+        assert_eq!(report["run_id"], run_id);
+        assert_eq!(report["changed_files"], serde_json::json!(["src/lib.rs"]));
+        assert!(publish_backend.committed && publish_backend.pushed && publish_backend.created);
+        assert!(publish_backend
+            .body
+            .contains("Recovered from durable Cook evidence."));
     });
 }
 
