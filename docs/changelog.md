@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.310.3] - 2026-07-23
+
+### Fixed
+- scope provenance identity requirement
+- downgrade stale-heartbeat running rows from active totals
+
 ## [0.310.2] - 2026-07-23
 
 ### Fixed
