@@ -3212,14 +3212,42 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
             host: "git.example.test".to_string(),
             name: "Homeboy Bot".to_string(),
             email: "bot@example.test".to_string(),
+            committer_name: "Homeboy Bot".to_string(),
+            committer_email: "bot@example.test".to_string(),
+            commit_sha: None,
             scope: "repository_local".to_string(),
         })
+    }
+    fn validate_committed_publication_identity(
+        &mut self,
+        _path: &str,
+        expected: Option<&homeboy_core::git::GitIdentityProof>,
+    ) -> Result<homeboy_core::git::GitIdentityProof> {
+        let mut proof = expected
+            .cloned()
+            .unwrap_or(homeboy_core::git::GitIdentityProof {
+                host: "git.example.test".to_string(),
+                name: "Homeboy Bot".to_string(),
+                email: "bot@example.test".to_string(),
+                committer_name: "Homeboy Bot".to_string(),
+                committer_email: "bot@example.test".to_string(),
+                commit_sha: None,
+                scope: "commit_host_policy".to_string(),
+            });
+        proof.commit_sha = Some("candidate-sha".to_string());
+        proof.scope = "commit_host_policy".to_string();
+        Ok(proof)
     }
     fn commit_all(&mut self, _path: &str, _message: &str) -> Result<()> {
         self.committed = true;
         Ok(())
     }
-    fn push_branch(&mut self, _path: &str, head: &str) -> Result<AgentTaskPublicationGitTracking> {
+    fn push_branch(
+        &mut self,
+        _path: &str,
+        _commit_sha: &str,
+        head: &str,
+    ) -> Result<AgentTaskPublicationGitTracking> {
         self.pushed = true;
         Ok(AgentTaskPublicationGitTracking {
             local_branch: head.to_string(),

@@ -116,17 +116,35 @@ pub struct GitIdentity {
     pub email: String,
 }
 
-/// Evidence that the repository-local identity matched its origin-host policy.
+/// Evidence that an effective or committed identity matched its origin-host policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GitIdentityProof {
     pub host: String,
     pub name: String,
     pub email: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub committer_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub committer_email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
     pub scope: String,
 }
 
-/// Validate the repository-local identity selected for the origin host.
+/// Validate the effective author and committer Git would use for a new commit.
 pub fn validate_publication_identity(path: &str) -> crate::error::Result<GitIdentityProof> {
+    let author = effective_identity(path, "GIT_AUTHOR_IDENT")?;
+    let committer = effective_identity(path, "GIT_COMMITTER_IDENT")?;
+    validate_identities(path, author, committer, None, "effective")
+}
+
+fn validate_identities(
+    path: &str,
+    author: GitIdentity,
+    committer: GitIdentity,
+    commit_sha: Option<String>,
+    scope: &str,
+) -> crate::error::Result<GitIdentityProof> {
     let remote = git_config(path, &["config", "--get", "remote.origin.url"])?;
     let host = remote_host(&remote).ok_or_else(|| {
         identity_error(
@@ -138,9 +156,12 @@ pub fn validate_publication_identity(path: &str) -> crate::error::Result<GitIden
     let Some(expected) = config.git_hosts.get(&host) else {
         return Ok(GitIdentityProof {
             host,
-            name: git_config(path, &["config", "--get", "user.name"])?,
-            email: git_config(path, &["config", "--get", "user.email"])?,
-            scope: "effective_unrestricted".to_string(),
+            name: author.name,
+            email: author.email,
+            committer_name: committer.name,
+            committer_email: committer.email,
+            commit_sha,
+            scope: format!("{scope}_unrestricted"),
         });
     };
     if expected.name.trim().is_empty() || expected.email.trim().is_empty() {
@@ -150,15 +171,20 @@ pub fn validate_publication_identity(path: &str) -> crate::error::Result<GitIden
         ));
     }
 
-    let name = git_config(path, &["config", "--local", "--get", "user.name"])?;
-    let email = git_config(path, &["config", "--local", "--get", "user.email"])?;
-    if name != expected.name || email != expected.email {
+    if author.name != expected.name
+        || author.email != expected.email
+        || committer.name != expected.name
+        || committer.email != expected.email
+    {
         return Err(identity_error(
-            "effective repository-local Git identity does not match the origin host policy",
+            "effective Git author or committer does not match the origin host policy",
             json!({
                 "host": host,
                 "expected": { "name": expected.name, "email": expected.email },
-                "actual": { "name": name, "email": email },
+                "actual": {
+                    "author": { "name": author.name, "email": author.email },
+                    "committer": { "name": committer.name, "email": committer.email }
+                },
                 "remediation": [{
                     "kind": "configure_repository_local_identity",
                     "commands": [
@@ -171,10 +197,103 @@ pub fn validate_publication_identity(path: &str) -> crate::error::Result<GitIden
     }
     Ok(GitIdentityProof {
         host,
-        name,
-        email,
-        scope: "repository_local".to_string(),
+        name: author.name,
+        email: author.email,
+        committer_name: committer.name,
+        committer_email: committer.email,
+        commit_sha,
+        scope: if scope == "effective" {
+            "repository_local".to_string()
+        } else {
+            format!("{scope}_host_policy")
+        },
     })
+}
+
+/// Validate the immutable author and committer stored in `HEAD`.
+pub fn validate_committed_publication_identity(
+    path: &str,
+    expected: Option<&GitIdentityProof>,
+) -> crate::error::Result<GitIdentityProof> {
+    let output = git_config(
+        path,
+        &["show", "-s", "--format=%H%n%an%n%ae%n%cn%n%ce", "HEAD"],
+    )?;
+    let mut lines = output.lines();
+    let sha = lines.next().unwrap_or_default().to_string();
+    let author = GitIdentity {
+        name: lines.next().unwrap_or_default().to_string(),
+        email: lines.next().unwrap_or_default().to_string(),
+    };
+    let committer = GitIdentity {
+        name: lines.next().unwrap_or_default().to_string(),
+        email: lines.next().unwrap_or_default().to_string(),
+    };
+    if sha.is_empty()
+        || author.name.is_empty()
+        || author.email.is_empty()
+        || committer.name.is_empty()
+        || committer.email.is_empty()
+    {
+        return Err(identity_error(
+            "HEAD does not contain a complete commit identity",
+            json!({ "remediation": [] }),
+        ));
+    }
+    if let Some(expected) = expected {
+        if author.name != expected.name
+            || author.email != expected.email
+            || committer.name != expected.committer_name
+            || committer.email != expected.committer_email
+        {
+            return Err(identity_error(
+                "committed Git identity differs from the identity validated before commit",
+                json!({
+                    "expected": {
+                        "author": { "name": expected.name, "email": expected.email },
+                        "committer": {
+                            "name": expected.committer_name,
+                            "email": expected.committer_email
+                        }
+                    },
+                    "actual": {
+                        "author": { "name": author.name, "email": author.email },
+                        "committer": { "name": committer.name, "email": committer.email }
+                    },
+                    "commit_sha": sha,
+                    "remediation": []
+                }),
+            ));
+        }
+    }
+    validate_identities(path, author, committer, Some(sha), "commit")
+}
+
+fn effective_identity(path: &str, variable: &str) -> crate::error::Result<GitIdentity> {
+    let value = git_config(path, &["var", variable])?;
+    let Some(email_end) = value.rfind('>') else {
+        return Err(identity_error(
+            "Git could not resolve a complete prospective identity",
+            json!({ "identity": variable, "remediation": [] }),
+        ));
+    };
+    let Some(email_start) = value[..email_end].rfind(" <") else {
+        return Err(identity_error(
+            "Git could not resolve a complete prospective identity",
+            json!({ "identity": variable, "remediation": [] }),
+        ));
+    };
+    let identity = GitIdentity {
+        name: value[..email_start].trim().to_string(),
+        email: value[email_start + 2..email_end].trim().to_string(),
+    };
+    if identity.name.is_empty() || identity.email.is_empty() {
+        return Err(identity_error(
+            "Git could not resolve a complete prospective identity",
+            json!({ "identity": variable, "remediation": [] }),
+        ));
+    }
+    Ok(identity)
 }
 
 fn git_config(path: &str, args: &[&str]) -> crate::error::Result<String> {
@@ -319,6 +438,7 @@ mod identity_tests {
     use crate::test_support::with_isolated_home;
     use std::collections::HashMap;
     use std::process::Command;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     #[test]
     fn bot_shorthand() {
@@ -378,24 +498,24 @@ mod identity_tests {
             assert_eq!(proof.host, "git.example.test");
             assert_eq!(proof.name, "Existing Author");
             assert_eq!(proof.email, "author@example.test");
+            assert_eq!(proof.committer_name, "Existing Author");
+            assert_eq!(proof.committer_email, "author@example.test");
             assert_eq!(proof.scope, "effective_unrestricted");
         });
     }
 
     #[test]
-    fn publication_identity_configured_host_requires_repository_local_identity() {
+    fn publication_identity_configured_host_requires_complete_effective_identity() {
         with_isolated_home(|_| {
             let temp = identity_test_repo();
             save_identity_policy();
 
-            let error = validate_publication_identity(temp.path().to_str().expect("path"))
-                .expect_err("repository-local identity is required");
+            let error = with_identity_environment(("", ""), ("", ""), || {
+                validate_publication_identity(temp.path().to_str().expect("path"))
+                    .expect_err("effective identity is required")
+            });
 
-            assert_eq!(error.details["host"], "git.example.test");
-            assert_eq!(
-                error.details["remediation"][0]["kind"],
-                "configure_repository_local_identity"
-            );
+            assert!(error.message.contains("prospective identity"));
         });
     }
 
@@ -410,7 +530,7 @@ mod identity_tests {
             let error = validate_publication_identity(temp.path().to_str().expect("path"))
                 .expect_err("incorrect identity");
 
-            assert_eq!(error.details["actual"]["name"], "Wrong Author");
+            assert_eq!(error.details["actual"]["author"]["name"], "Wrong Author");
             assert_eq!(error.details["expected"]["name"], "Expected Author");
         });
     }
@@ -431,8 +551,163 @@ mod identity_tests {
 
             assert_eq!(proof.name, "Expected Author");
             assert_eq!(proof.email, "expected@example.test");
+            assert_eq!(proof.committer_name, "Expected Author");
             assert_eq!(proof.scope, "repository_local");
         });
+    }
+
+    #[test]
+    fn publication_identity_accepts_allowed_environment_overrides() {
+        with_isolated_home(|_| {
+            let temp = identity_test_repo();
+            save_identity_policy();
+            run_identity_git(temp.path(), &["config", "user.name", "Wrong Author"]);
+            run_identity_git(temp.path(), &["config", "user.email", "wrong@example.test"]);
+
+            with_identity_environment(
+                ("Expected Author", "expected@example.test"),
+                ("Expected Author", "expected@example.test"),
+                || {
+                    let proof = validate_publication_identity(temp.path().to_str().expect("path"))
+                        .expect("allowed environment identity");
+                    assert_eq!(proof.name, "Expected Author");
+                    assert_eq!(proof.committer_name, "Expected Author");
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn publication_identity_rejects_environment_override() {
+        with_isolated_home(|_| {
+            let temp = identity_test_repo();
+            save_identity_policy();
+            run_identity_git(temp.path(), &["config", "user.name", "Expected Author"]);
+            run_identity_git(
+                temp.path(),
+                &["config", "user.email", "expected@example.test"],
+            );
+
+            with_identity_environment(
+                ("Override Author", "override@example.test"),
+                ("Expected Author", "expected@example.test"),
+                || {
+                    let error = validate_publication_identity(temp.path().to_str().expect("path"))
+                        .expect_err("rejected environment identity");
+                    assert_eq!(
+                        error.details["actual"]["author"]["email"],
+                        "override@example.test"
+                    );
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn publication_identity_rejects_different_author_and_committer() {
+        with_isolated_home(|_| {
+            let temp = identity_test_repo();
+            save_identity_policy();
+
+            with_identity_environment(
+                ("Expected Author", "expected@example.test"),
+                ("Other Committer", "other@example.test"),
+                || {
+                    let error = validate_publication_identity(temp.path().to_str().expect("path"))
+                        .expect_err("different committer");
+                    assert_eq!(
+                        error.details["actual"]["committer"]["name"],
+                        "Other Committer"
+                    );
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn committed_publication_identity_is_bound_to_head_sha() {
+        with_isolated_home(|_| {
+            let temp = identity_test_repo();
+            save_identity_policy();
+            run_identity_git(temp.path(), &["config", "user.name", "Expected Author"]);
+            run_identity_git(
+                temp.path(),
+                &["config", "user.email", "expected@example.test"],
+            );
+            run_identity_git(temp.path(), &["commit", "--allow-empty", "-m", "candidate"]);
+
+            let proof =
+                validate_committed_publication_identity(temp.path().to_str().expect("path"), None)
+                    .expect("committed identity");
+            let head = git_config(temp.path().to_str().expect("path"), &["rev-parse", "HEAD"])
+                .expect("head");
+
+            assert_eq!(proof.commit_sha.as_deref(), Some(head.as_str()));
+            assert_eq!(proof.name, "Expected Author");
+            assert_eq!(proof.committer_name, "Expected Author");
+            assert_eq!(proof.scope, "commit_host_policy");
+        });
+    }
+
+    #[test]
+    fn committed_publication_identity_must_match_validated_intent() {
+        with_isolated_home(|_| {
+            let temp = identity_test_repo();
+            run_identity_git(temp.path(), &["config", "user.name", "Intended Author"]);
+            run_identity_git(
+                temp.path(),
+                &["config", "user.email", "intended@example.test"],
+            );
+            let intended = validate_publication_identity(temp.path().to_str().expect("path"))
+                .expect("prospective identity");
+
+            with_identity_environment(
+                ("Different Author", "different@example.test"),
+                ("Different Committer", "different-committer@example.test"),
+                || run_identity_git(temp.path(), &["commit", "--allow-empty", "-m", "candidate"]),
+            );
+            let error = validate_committed_publication_identity(
+                temp.path().to_str().expect("path"),
+                Some(&intended),
+            )
+            .expect_err("commit identity drift");
+
+            assert!(error
+                .message
+                .contains("differs from the identity validated"));
+            assert_eq!(
+                error.details["actual"]["author"]["name"],
+                "Different Author"
+            );
+            assert!(!error.details["commit_sha"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty());
+        });
+    }
+
+    #[test]
+    fn git_identity_proof_deserializes_legacy_serialized_evidence() {
+        let proof: GitIdentityProof = serde_json::from_value(serde_json::json!({
+            "host": "git.example.test",
+            "name": "Existing Author",
+            "email": "author@example.test",
+            "scope": "repository_local"
+        }))
+        .expect("legacy identity proof");
+
+        assert!(proof.committer_name.is_empty());
+        assert!(proof.committer_email.is_empty());
+        assert_eq!(proof.commit_sha, None);
+        assert_eq!(
+            serde_json::to_value(proof).expect("serialize legacy identity proof"),
+            serde_json::json!({
+                "host": "git.example.test",
+                "name": "Existing Author",
+                "email": "author@example.test",
+                "scope": "repository_local"
+            })
+        );
     }
 
     fn identity_test_repo() -> tempfile::TempDir {
@@ -471,6 +746,64 @@ mod identity_tests {
             .status()
             .expect("run git");
         assert!(status.success());
+    }
+
+    fn with_identity_environment<R>(
+        author: (&str, &str),
+        committer: (&str, &str),
+        test: impl FnOnce() -> R,
+    ) -> R {
+        let _environment = IdentityEnvironment::new(author, committer);
+        test()
+    }
+
+    static IDENTITY_ENVIRONMENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct IdentityEnvironment {
+        _lock: MutexGuard<'static, ()>,
+        previous: [Option<String>; 4],
+    }
+
+    impl IdentityEnvironment {
+        fn new(author: (&str, &str), committer: (&str, &str)) -> Self {
+            let lock = IDENTITY_ENVIRONMENT_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let values = [
+                ("GIT_AUTHOR_NAME", author.0),
+                ("GIT_AUTHOR_EMAIL", author.1),
+                ("GIT_COMMITTER_NAME", committer.0),
+                ("GIT_COMMITTER_EMAIL", committer.1),
+            ];
+            let previous = values.map(|(key, _)| std::env::var(key).ok());
+            for (key, value) in values {
+                std::env::set_var(key, value);
+            }
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for IdentityEnvironment {
+        fn drop(&mut self) {
+            for (key, value) in [
+                "GIT_AUTHOR_NAME",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_COMMITTER_NAME",
+                "GIT_COMMITTER_EMAIL",
+            ]
+            .into_iter()
+            .zip(self.previous.iter())
+            {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 }
 
