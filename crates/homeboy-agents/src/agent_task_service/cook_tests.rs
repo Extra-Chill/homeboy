@@ -19,7 +19,7 @@ use crate::agent_task::{
 };
 use crate::agent_task_finalization::{
     AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend, AgentTaskPrRef,
-    RealAgentTaskPrFinalizationBackend,
+    AgentTaskPublicationGitTracking, RealAgentTaskPrFinalizationBackend,
 };
 use crate::agent_task_scheduler::AgentTaskState;
 use homeboy_core::run_lifecycle_record::{
@@ -3200,9 +3200,14 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         self.committed = true;
         Ok(())
     }
-    fn push_branch(&mut self, _path: &str, _head: &str) -> Result<()> {
+    fn push_branch(&mut self, _path: &str, head: &str) -> Result<AgentTaskPublicationGitTracking> {
         self.pushed = true;
-        Ok(())
+        Ok(AgentTaskPublicationGitTracking {
+            local_branch: head.to_string(),
+            remote: "origin".to_string(),
+            upstream_ref: format!("refs/remotes/origin/{head}"),
+            verified_remote_sha: "candidate-sha".to_string(),
+        })
     }
     fn find_open_pr(
         &mut self,

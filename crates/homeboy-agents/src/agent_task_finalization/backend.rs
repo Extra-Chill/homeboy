@@ -1,6 +1,7 @@
 use super::{
     AgentTaskPrCandidateState, AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend,
     AgentTaskPrFinalizationOptions, AgentTaskPrRef, AgentTaskPrResolvedBase,
+    AgentTaskPublicationGitTracking,
 };
 use crate::agent_task_promotion::{AgentTaskPromotionCandidate, AgentTaskPromotionReport};
 use homeboy_core::error::{Error, Result};
@@ -286,7 +287,8 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         Ok(())
     }
 
-    fn push_branch(&mut self, path: &str, head: &str) -> Result<()> {
+    fn push_branch(&mut self, path: &str, head: &str) -> Result<AgentTaskPublicationGitTracking> {
+        let local_sha = git_output(path, &["rev-parse", "HEAD"])?;
         let output = push_at(
             None,
             PushOptions {
@@ -301,7 +303,37 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 output.stderr
             )));
         }
-        Ok(())
+        let verified_remote_sha = remote_branch_head(path, head)?.ok_or_else(|| {
+            Error::git_command_failed(format!("pushed origin head `{head}` could not be verified"))
+        })?;
+        if verified_remote_sha != local_sha {
+            return Err(Error::git_command_failed(format!(
+                "pushed origin head `{head}` resolved to `{verified_remote_sha}` instead of `{local_sha}`"
+            )));
+        }
+
+        let upstream_ref = format!("refs/remotes/origin/{head}");
+        let existing_upstream =
+            git_output(path, &["rev-parse", "--symbolic-full-name", "@{upstream}"]).ok();
+        git_output(path, &["update-ref", &upstream_ref, &verified_remote_sha])?;
+        if existing_upstream.as_deref() != Some(upstream_ref.as_str()) {
+            git_output(
+                path,
+                &[
+                    "branch",
+                    "--set-upstream-to",
+                    &format!("origin/{head}"),
+                    head,
+                ],
+            )?;
+        }
+
+        Ok(AgentTaskPublicationGitTracking {
+            local_branch: head.to_string(),
+            remote: "origin".to_string(),
+            upstream_ref,
+            verified_remote_sha,
+        })
     }
 
     fn find_open_pr(
@@ -490,6 +522,137 @@ mod remote_base_tests {
             reference: reference.to_string(),
             sha: sha.to_string(),
         }
+    }
+
+    fn publication_repo() -> (tempfile::TempDir, tempfile::TempDir) {
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        let repo = repo();
+        git(
+            repo.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        git(repo.path(), &["push", "-u", "origin", "main"]);
+        git(repo.path(), &["checkout", "-b", "feature"]);
+        std::fs::write(repo.path().join("feature.txt"), "feature").unwrap();
+        git(repo.path(), &["add", "feature.txt"]);
+        git(repo.path(), &["commit", "-m", "feature"]);
+        (repo, origin)
+    }
+
+    fn upstream(path: &std::path::Path) -> Result<String> {
+        git_output(
+            path.to_str().unwrap(),
+            &["rev-parse", "--symbolic-full-name", "@{upstream}"],
+        )
+    }
+
+    #[test]
+    fn pushed_branch_without_upstream_tracks_verified_remote_head() {
+        let (repo, _origin) = publication_repo();
+
+        let tracking = RealAgentTaskPrFinalizationBackend
+            .push_branch(repo.path().to_str().unwrap(), "feature")
+            .expect("branch published");
+
+        assert_eq!(
+            upstream(repo.path()).unwrap(),
+            "refs/remotes/origin/feature"
+        );
+        assert_eq!(tracking.local_branch, "feature");
+        assert_eq!(tracking.remote, "origin");
+        assert_eq!(tracking.upstream_ref, "refs/remotes/origin/feature");
+        assert_eq!(
+            tracking.verified_remote_sha,
+            git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap()
+        );
+        assert_eq!(
+            git_output(repo.path().to_str().unwrap(), &["rev-parse", "@{upstream}"]).unwrap(),
+            tracking.verified_remote_sha
+        );
+    }
+
+    #[test]
+    fn pushed_branch_replaces_stale_base_upstream_after_verification() {
+        let (repo, _origin) = publication_repo();
+        git(
+            repo.path(),
+            &["branch", "--set-upstream-to", "origin/main", "feature"],
+        );
+
+        RealAgentTaskPrFinalizationBackend
+            .push_branch(repo.path().to_str().unwrap(), "feature")
+            .expect("branch published");
+
+        assert_eq!(
+            upstream(repo.path()).unwrap(),
+            "refs/remotes/origin/feature"
+        );
+        assert_eq!(
+            git_output(repo.path().to_str().unwrap(), &["rev-parse", "@{upstream}"]).unwrap(),
+            git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap()
+        );
+    }
+
+    #[test]
+    fn pushed_branch_preserves_already_correct_upstream() {
+        let (repo, _origin) = publication_repo();
+        git(repo.path(), &["push", "-u", "origin", "feature"]);
+        std::fs::write(repo.path().join("second.txt"), "second").unwrap();
+        git(repo.path(), &["add", "second.txt"]);
+        git(repo.path(), &["commit", "-m", "second feature commit"]);
+        let remote = git_output(
+            repo.path().to_str().unwrap(),
+            &["config", "branch.feature.remote"],
+        )
+        .unwrap();
+        let merge = git_output(
+            repo.path().to_str().unwrap(),
+            &["config", "branch.feature.merge"],
+        )
+        .unwrap();
+
+        RealAgentTaskPrFinalizationBackend
+            .push_branch(repo.path().to_str().unwrap(), "feature")
+            .expect("branch published");
+
+        assert_eq!(
+            upstream(repo.path()).unwrap(),
+            "refs/remotes/origin/feature"
+        );
+        assert_eq!(
+            git_output(repo.path().to_str().unwrap(), &["rev-parse", "@{upstream}"]).unwrap(),
+            git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap()
+        );
+        assert_eq!(
+            git_output(
+                repo.path().to_str().unwrap(),
+                &["config", "branch.feature.remote"]
+            )
+            .unwrap(),
+            remote
+        );
+        assert_eq!(
+            git_output(
+                repo.path().to_str().unwrap(),
+                &["config", "branch.feature.merge"]
+            )
+            .unwrap(),
+            merge
+        );
+    }
+
+    #[test]
+    fn failed_push_does_not_mutate_branch_tracking() {
+        let (repo, origin) = publication_repo();
+        drop(origin);
+
+        let error = RealAgentTaskPrFinalizationBackend
+            .push_branch(repo.path().to_str().unwrap(), "feature")
+            .expect_err("push fails");
+
+        assert!(error.message.contains("git push failed"));
+        assert!(upstream(repo.path()).is_err());
     }
 
     #[test]

@@ -1234,6 +1234,8 @@ mod tests {
             synthetic_checkout_commit: None,
             synthetic_checkout_ref: None,
             synthetic_checkout_tree: None,
+            prepared_workspace_original_snapshot_identity: None,
+            prepared_workspace_update_lineage: Vec::new(),
             snapshot_hash: "sha256:verified".to_string(),
             synced_at: "2026-01-01T00:00:00Z".to_string(),
             sync_excludes: vec![".git".to_string(), ".git/**".to_string()],

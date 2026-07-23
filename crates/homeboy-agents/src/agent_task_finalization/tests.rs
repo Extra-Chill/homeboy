@@ -179,13 +179,18 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         Ok(())
     }
 
-    fn push_branch(&mut self, _path: &str, _head: &str) -> Result<()> {
+    fn push_branch(&mut self, _path: &str, head: &str) -> Result<AgentTaskPublicationGitTracking> {
         if self.push_error {
             return Err(Error::git_command_failed("git push failed"));
         }
         self.pushed = true;
         self.push_calls += 1;
-        Ok(())
+        Ok(AgentTaskPublicationGitTracking {
+            local_branch: head.to_string(),
+            remote: "origin".to_string(),
+            upstream_ref: format!("refs/remotes/origin/{head}"),
+            verified_remote_sha: "candidate-sha".to_string(),
+        })
     }
 
     fn find_open_pr(
@@ -309,6 +314,14 @@ fn creates_new_pr_after_green_gates() {
             .as_ref()
             .map(|proof| proof.host.as_str()),
         Some("git.example.test")
+    );
+    assert_eq!(
+        report
+            .publication_proof
+            .git_tracking
+            .as_ref()
+            .map(|tracking| tracking.upstream_ref.as_str()),
+        Some("refs/remotes/origin/fix/cook")
     );
 }
 

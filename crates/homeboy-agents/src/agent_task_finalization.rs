@@ -170,6 +170,7 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             false,
             false,
             None,
+            None,
         ));
     }
 
@@ -181,9 +182,11 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     if commit_required {
         backend.commit_all(&options.path, &options.commit_message)?;
     }
-    if push_required {
-        backend.push_branch(&options.path, &head)?;
-    }
+    let git_tracking = if push_required {
+        Some(backend.push_branch(&options.path, &head)?)
+    } else {
+        None
+    };
     let existing = backend.find_open_pr(&options.path, &options.base, &head)?;
     let publication_base_sha = backend.publication_base_sha(&options.path, &options.base)?;
     intent.target.publication_base_sha = publication_base_sha.clone();
@@ -238,6 +241,7 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         commit_required,
         push_required,
         Some(git_identity),
+        git_tracking,
     ))
 }
 
@@ -454,6 +458,7 @@ fn publication_proof(
     adapter_action: &str,
     adapter_ref: Option<String>,
     git_identity: Option<homeboy_core::git::GitIdentityProof>,
+    git_tracking: Option<AgentTaskPublicationGitTracking>,
 ) -> AgentTaskPublicationProof {
     let mut target = intent.target.clone();
     target.url = adapter_ref.clone();
@@ -466,6 +471,7 @@ fn publication_proof(
         adapter_action: (adapter_action != "none").then(|| adapter_action.to_string()),
         adapter_ref,
         git_identity,
+        git_tracking,
         proof: intent.proof.clone(),
     }
 }
@@ -483,6 +489,7 @@ fn report(
     committed: bool,
     pushed: bool,
     git_identity: Option<homeboy_core::git::GitIdentityProof>,
+    git_tracking: Option<AgentTaskPublicationGitTracking>,
 ) -> AgentTaskPrFinalizationReport {
     let normalized_gate_results = options.normalized_gate_results.clone();
     let proof =
@@ -494,6 +501,7 @@ fn report(
         pr_action,
         pr_url.clone(),
         git_identity,
+        git_tracking,
     );
     let finalization_outcome = finalization_outcome(
         &publication_intent,
