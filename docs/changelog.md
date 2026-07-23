@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.307.0] - 2026-07-23
+
+### Added
+- dedupe runner-exec mirrors and add list filters
+
+### Changed
+- Run refresh ancestry checks on runners
+- Reuse changed-scope audit analysis
+
+### Fixed
+- resolve module paths for the extracted code_audit crate
+- recover Lab reviews through controller snapshots
+
 ## [0.306.2] - 2026-07-23
 
 ### Fixed
