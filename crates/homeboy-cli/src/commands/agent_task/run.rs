@@ -229,10 +229,12 @@ where
                 args.dispatch.selector.as_deref(),
                 args.dispatch.model.as_deref(),
             ),
-            ai_model: args
-                .dispatch
-                .model
-                .or_else(|| agent_task_service::ai_model_from_tool(&args.ai_tool)),
+            // Model identity comes only from explicit/config/rotation selection
+            // (`--model`, provider profile). Disclosure text like
+            // `OpenCode (GPT-5.5)` is presentation, not execution provenance, and
+            // must not be reverse-parsed into a model — an omitted model stays
+            // omitted so finalization records only real model identity (#9789).
+            ai_model: args.dispatch.model,
             ai_used_for: args.ai_used_for,
             attempt_dispatcher,
             harvest_context:
