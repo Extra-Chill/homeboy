@@ -1,9 +1,11 @@
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 pub const SOURCE_SNAPSHOT_METADATA_ENV: &str = "HOMEBOY_SOURCE_SNAPSHOT_JSON";
 pub const LAB_OFFLOAD_METADATA_ENV: &str = "HOMEBOY_LAB_OFFLOAD_JSON";
 pub const PREVIEW_METADATA_ENV: &str = "HOMEBOY_PREVIEW_JSON";
 pub const PREVIEW_PUBLIC_URL_ENV: &str = "HOMEBOY_PREVIEW_PUBLIC_URL";
+pub const PROVENANCE_REFERENCE_SCHEMA: &str = "homeboy/provenance-reference/v1";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunContext {
@@ -80,10 +82,28 @@ impl RunProvenance {
     }
 }
 
-fn env_json(name: &str) -> Option<serde_json::Value> {
+pub fn env_json(name: &str) -> Option<serde_json::Value> {
     std::env::var(name)
         .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|raw| resolve_json_value(&raw))
+}
+
+/// Resolve inline JSON or a content-addressed provenance file reference. The
+/// reference keeps `execve` bounded without changing the established env names.
+pub fn resolve_json_value(raw: &str) -> Option<serde_json::Value> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some(PROVENANCE_REFERENCE_SCHEMA)
+    {
+        return Some(value);
+    }
+
+    let path = value.get("path")?.as_str()?;
+    let expected_hash = value.get("sha256")?.as_str()?;
+    let contents = std::fs::read(path).ok()?;
+    let actual_hash = format!("{:x}", Sha256::digest(&contents));
+    (actual_hash == expected_hash)
+        .then(|| serde_json::from_slice::<serde_json::Value>(&contents).ok())
+        .flatten()
 }
 
 fn preview_metadata_from_env() -> Option<serde_json::Value> {
@@ -102,7 +122,11 @@ fn preview_metadata_from_env() -> Option<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunContext, PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
+    use super::{
+        resolve_json_value, RunContext, PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV,
+        PROVENANCE_REFERENCE_SCHEMA,
+    };
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn subprocess_context_reads_generic_preview_metadata_with_public_url_overlay() {
@@ -129,5 +153,34 @@ mod tests {
 
         std::env::remove_var(PREVIEW_METADATA_ENV);
         std::env::remove_var(PREVIEW_PUBLIC_URL_ENV);
+    }
+
+    #[test]
+    fn provenance_resolver_preserves_inline_json_and_rejects_tampered_references() {
+        let inline = r#"{"schema":"fixture/v1","value":"inline"}"#;
+        assert_eq!(
+            resolve_json_value(inline),
+            serde_json::from_str(inline).ok()
+        );
+
+        let directory = tempfile::tempdir().expect("provenance directory");
+        let path = directory.path().join("payload.json");
+        let payload = br#"{"schema":"fixture/v1","value":"staged"}"#;
+        std::fs::write(&path, payload).expect("stage provenance");
+        let reference = serde_json::json!({
+            "schema": PROVENANCE_REFERENCE_SCHEMA,
+            "path": path,
+            "sha256": format!("{:x}", Sha256::digest(payload)),
+        })
+        .to_string();
+
+        assert_eq!(
+            resolve_json_value(&reference),
+            serde_json::from_slice(payload).ok()
+        );
+
+        std::fs::write(&path, br#"{"schema":"fixture/v1","value":"tampered"}"#)
+            .expect("tamper provenance");
+        assert_eq!(resolve_json_value(&reference), None);
     }
 }

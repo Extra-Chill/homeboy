@@ -405,12 +405,7 @@ fn materialize_snapshot_git_baseline(envelope: &RunnerExecutionEnvelope) -> Resu
     else {
         return Ok(());
     };
-    let lab: serde_json::Value = serde_json::from_str(lab).map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("parse reverse worker Lab offload metadata".to_string()),
-        )
-    })?;
+    let lab = reverse_worker_lab_offload(lab)?;
     if !matches!(
         lab.get("sync_mode").and_then(serde_json::Value::as_str),
         Some("snapshot" | "filesystem_snapshot")
@@ -435,6 +430,15 @@ fn materialize_snapshot_git_baseline(envelope: &RunnerExecutionEnvelope) -> Resu
     // re-attempt rather than terminalizing the cook as a provider failure
     // (#9399).
     .map_err(|message| Error::internal_unexpected(message).with_retryable(true))
+}
+
+fn reverse_worker_lab_offload(raw: &str) -> Result<serde_json::Value> {
+    homeboy_core::observation::resolve_json_value(raw).ok_or_else(|| {
+        Error::internal_json(
+            "invalid inline or referenced Lab offload metadata",
+            Some("parse reverse worker Lab offload metadata".to_string()),
+        )
+    })
 }
 
 /// Materialize broker-owned command files in the worker's durable data root and
@@ -651,4 +655,29 @@ fn non_empty_run_id(run_id: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|run_id| !run_id.is_empty())
         .map(ToString::to_string)
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::reverse_worker_lab_offload;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn reverse_worker_resolves_referenced_lab_offload_metadata() {
+        let directory = tempfile::tempdir().expect("transport directory");
+        let path = directory.path().join("lab-offload.json");
+        let payload = br#"{"schema":"fixture/lab-offload/v1","sync_mode":"snapshot"}"#;
+        std::fs::write(&path, payload).expect("write Lab offload metadata");
+        let reference = serde_json::json!({
+            "schema": homeboy_core::observation::PROVENANCE_REFERENCE_SCHEMA,
+            "path": path,
+            "sha256": format!("{:x}", Sha256::digest(payload)),
+        })
+        .to_string();
+
+        assert_eq!(
+            reverse_worker_lab_offload(&reference).expect("referenced Lab metadata")["sync_mode"],
+            "snapshot"
+        );
+    }
 }

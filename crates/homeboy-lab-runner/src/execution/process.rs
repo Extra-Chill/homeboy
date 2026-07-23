@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +15,7 @@ use homeboy_core::runner_execution_envelope::{
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::server::{self, SshClient};
 use homeboy_core::source_snapshot::SourceSnapshot;
+use sha2::{Digest, Sha256};
 
 use super::super::normalize_runner_command_env_for_homeboy_path;
 use super::super::resource_metrics::{
@@ -424,7 +427,7 @@ pub(crate) fn prepare_daemon_local_process(
 pub(crate) fn execute_runner_process(plan: &PreparedRunnerProcess) -> Result<ProcessOutput> {
     let mut command = std::process::Command::new(&plan.command[0]);
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
-    apply_runner_process_env(&mut command, plan);
+    apply_runner_process_env(&mut command, plan)?;
 
     command_output(&mut command, plan.runner.settings.concurrency_limit)
 }
@@ -438,7 +441,7 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
 ) -> Result<ProcessOutput> {
     let mut command = std::process::Command::new(&plan.command[0]);
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
-    apply_runner_process_env(&mut command, plan);
+    apply_runner_process_env(&mut command, plan)?;
 
     command_output_until_cancelled_with_progress(
         &mut command,
@@ -452,10 +455,252 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    const GUTENBERG_LAB_OFFLOAD_BYTES: usize = 142_952;
+    const GUTENBERG_SOURCE_SNAPSHOT_BYTES: usize = 44_680;
+    const GUTENBERG_EXECUTION_BUNDLE_BYTES: usize = 8_552;
+    const SAFE_CHILD_PROVENANCE_ENV_BYTES: usize = 16 * 1024;
+
+    fn json_payload(bytes: usize) -> String {
+        let mut value = serde_json::json!({ "payload": "" });
+        let base = serde_json::to_string(&value)
+            .expect("JSON serializes")
+            .len();
+        value["payload"] = serde_json::Value::String("x".repeat(bytes - base));
+        let serialized = serde_json::to_string(&value).expect("JSON serializes");
+        assert_eq!(serialized.len(), bytes);
+        serialized
+    }
+
+    fn execution_bundle(bytes: usize, provenance_dir: &Path) -> String {
+        let mut value = serde_json::json!({
+            "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
+            "binary": {
+                "path": "/runner/bin/homeboy",
+                "build_identity": homeboy_core::build_identity::current().display,
+            },
+            "provenance_dir": provenance_dir,
+            "admission": { "daemon_lease_id": "lease", "reservation_job_id": "job" },
+            "extension_runtime_home": "/runner/job/home",
+            "extensions": [{ "id": "fixture", "remote_path": "/runner/job/fixture", "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }],
+            "padding": "",
+        });
+        let base = serde_json::to_string(&value)
+            .expect("bundle serializes")
+            .len();
+        value["padding"] = serde_json::Value::String("x".repeat(bytes - base));
+        let serialized = serde_json::to_string(&value).expect("bundle serializes");
+        assert_eq!(serialized.len(), bytes);
+        serialized
+    }
+
+    #[test]
+    fn oversized_lab_provenance_is_staged_within_a_safe_child_environment_budget() {
+        let stage = tempfile::tempdir().expect("provenance stage");
+        let provenance_dir = stage.path().join("run-artifacts/provenance");
+        fs::create_dir_all(provenance_dir.parent().expect("artifact root")).expect("artifact root");
+        let lab_offload = json_payload(GUTENBERG_LAB_OFFLOAD_BYTES);
+        let source_snapshot = json_payload(GUTENBERG_SOURCE_SNAPSHOT_BYTES);
+        let bundle = execution_bundle(GUTENBERG_EXECUTION_BUNDLE_BYTES, &provenance_dir);
+        assert_eq!(
+            (lab_offload.len(), source_snapshot.len(), bundle.len()),
+            (
+                GUTENBERG_LAB_OFFLOAD_BYTES,
+                GUTENBERG_SOURCE_SNAPSHOT_BYTES,
+                GUTENBERG_EXECUTION_BUNDLE_BYTES,
+            )
+        );
+
+        let mut env = HashMap::from([
+            (
+                homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV.to_string(),
+                lab_offload.clone(),
+            ),
+            (
+                crate::execution_bundle::LAB_EXECUTION_BUNDLE_ENV.to_string(),
+                bundle.clone(),
+            ),
+            (
+                "HOMEBOY_EXISTING_BEHAVIOR".to_string(),
+                "preserved".to_string(),
+            ),
+        ]);
+        env = child_provenance_env(env, source_snapshot.clone()).expect("stage env");
+
+        let provenance_names = [
+            homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV,
+            homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            crate::execution_bundle::LAB_EXECUTION_BUNDLE_ENV,
+        ];
+        let child_provenance_bytes = provenance_names
+            .iter()
+            .map(|name| env.get(*name).expect("child provenance key").len())
+            .sum::<usize>();
+        assert!(child_provenance_bytes < SAFE_CHILD_PROVENANCE_ENV_BYTES);
+        assert_eq!(env["HOMEBOY_EXISTING_BEHAVIOR"], "preserved");
+        assert_eq!(
+            homeboy_core::observation::resolve_json_value(
+                env.get(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV)
+                    .expect("offload reference"),
+            ),
+            serde_json::from_str::<serde_json::Value>(&lab_offload).ok(),
+        );
+        assert_eq!(
+            homeboy_core::observation::resolve_json_value(
+                env.get(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV)
+                    .expect("snapshot reference"),
+            ),
+            serde_json::from_str::<serde_json::Value>(&source_snapshot).ok(),
+        );
+        assert!(crate::execution_bundle::validate_bundle_env(
+            &env,
+            &["/runner/bin/homeboy".to_string(), "fuzz".to_string()],
+            &["fixture".to_string()],
+        ));
+        assert_eq!(
+            fs::read_dir(stage.path().join("run-artifacts/provenance"))
+                .expect("staged files")
+                .count(),
+            3
+        );
+        assert!(!stage.path().join("provenance").exists());
+    }
+
+    #[test]
+    fn concurrent_staging_atomically_reuses_one_valid_hash_file() {
+        let root = tempfile::tempdir().expect("run artifact root");
+        let provenance_dir = root.path().join("provenance");
+        let payload = json_payload(GUTENBERG_LAB_OFFLOAD_BYTES);
+        let bundle = serde_json::json!({
+            "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
+            "binary": {
+                "path": "/runner/bin/homeboy",
+                "build_identity": homeboy_core::build_identity::current().display,
+            },
+            "provenance_dir": provenance_dir,
+            "admission": { "daemon_lease_id": "lease", "reservation_job_id": "job" },
+        });
+        let env = HashMap::from([
+            (
+                crate::execution_bundle::LAB_EXECUTION_BUNDLE_ENV.to_string(),
+                bundle.to_string(),
+            ),
+            (
+                homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV.to_string(),
+                payload.clone(),
+            ),
+        ]);
+        let barrier = Arc::new(Barrier::new(8));
+        let handles = (0..8)
+            .map(|_| {
+                let env = env.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    child_provenance_env(env, "{}".to_string()).expect("concurrent stage")
+                })
+            })
+            .collect::<Vec<_>>();
+        let references = handles
+            .into_iter()
+            .map(|handle| {
+                handle.join().expect("staging thread")
+                    [homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV]
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(references
+            .iter()
+            .all(|reference| reference == &references[0]));
+        let files = fs::read_dir(root.path().join("provenance"))
+            .expect("provenance files")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("directory entries");
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            fs::read(files[0].path()).expect("published payload"),
+            payload.as_bytes()
+        );
+    }
+
+    #[test]
+    fn mixed_build_does_not_replace_established_inline_json() {
+        let root = tempfile::tempdir().expect("run artifact root");
+        let payload = json_payload(GUTENBERG_LAB_OFFLOAD_BYTES);
+        let env = HashMap::from([
+            (
+                crate::execution_bundle::LAB_EXECUTION_BUNDLE_ENV.to_string(),
+                serde_json::json!({
+                    "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
+                    "binary": { "path": "/runner/bin/homeboy", "build_identity": "homeboy older-build" },
+                    "provenance_dir": root.path().join("provenance"),
+                    "admission": { "daemon_lease_id": "lease", "reservation_job_id": "job" },
+                }).to_string(),
+            ),
+            (
+                homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV.to_string(),
+                payload,
+            ),
+        ]);
+
+        let error = child_provenance_env(env, "{}".to_string())
+            .expect_err("mixed build must fail before replacement");
+        assert!(error
+            .message
+            .contains("does not support provenance references"));
+        assert!(!root.path().join("provenance").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_rejects_a_symlinked_provenance_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("run artifact root");
+        let outside = tempfile::tempdir().expect("outside directory");
+        let provenance_dir = root.path().join("provenance");
+        symlink(outside.path(), &provenance_dir).expect("symlink provenance directory");
+        let env = HashMap::from([
+            (
+                crate::execution_bundle::LAB_EXECUTION_BUNDLE_ENV.to_string(),
+                serde_json::json!({
+                    "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
+                    "binary": {
+                        "path": "/runner/bin/homeboy",
+                        "build_identity": homeboy_core::build_identity::current().display,
+                    },
+                    "provenance_dir": provenance_dir,
+                    "admission": { "daemon_lease_id": "lease", "reservation_job_id": "job" },
+                })
+                .to_string(),
+            ),
+            (
+                homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV.to_string(),
+                json_payload(GUTENBERG_LAB_OFFLOAD_BYTES),
+            ),
+        ]);
+
+        let error = child_provenance_env(env, "{}".to_string())
+            .expect_err("symlinked stage directory must fail closed");
+        assert!(error.message.contains("not a real directory"));
+        assert_eq!(
+            fs::read_dir(outside.path())
+                .expect("outside directory")
+                .count(),
+            0
+        );
+    }
+}
+
 pub(super) fn apply_runner_process_env(
     command: &mut std::process::Command,
     plan: &PreparedRunnerProcess,
-) {
+) -> Result<()> {
     command.env_clear();
     for key in inherited_runner_process_env_keys() {
         if !plan.env.contains_key(*key) {
@@ -464,11 +709,210 @@ pub(super) fn apply_runner_process_env(
             }
         }
     }
-    preserve_durable_homeboy_data_dir(command, &plan.env);
-    command.envs(plan.env.iter()).env(
-        homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+    let env = child_provenance_env(
+        plan.env.clone(),
         serde_json::to_string(&plan.source_snapshot).unwrap_or_default(),
+    )?;
+    preserve_durable_homeboy_data_dir(command, &env);
+    command.envs(env.iter());
+    Ok(())
+}
+
+const PROVENANCE_ENV_INLINE_MAX_BYTES: usize = 8 * 1024;
+
+fn child_provenance_env(
+    mut env: HashMap<String, String>,
+    source_snapshot: String,
+) -> Result<HashMap<String, String>> {
+    env.insert(
+        homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV.to_string(),
+        source_snapshot,
     );
+    let provenance_names = [
+        homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV,
+        homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+        crate::execution_bundle::LAB_EXECUTION_BUNDLE_ENV,
+    ];
+    if !provenance_names.iter().any(|name| {
+        env.get(*name)
+            .is_some_and(|raw| raw.len() > PROVENANCE_ENV_INLINE_MAX_BYTES)
+    }) {
+        return Ok(env);
+    }
+    let bundle = env
+        .get(crate::execution_bundle::LAB_EXECUTION_BUNDLE_ENV)
+        .and_then(|raw| homeboy_core::observation::resolve_json_value(raw))
+        .ok_or_else(|| provenance_reference_error("execution bundle is missing or invalid"))?;
+    let child_identity = bundle
+        .pointer("/binary/build_identity")
+        .and_then(serde_json::Value::as_str)
+        .filter(|identity| !identity.trim().is_empty())
+        .ok_or_else(|| provenance_reference_error("child build identity is unavailable"))?;
+    if child_identity.trim() != homeboy_core::build_identity::current().display {
+        return Err(provenance_reference_error(&format!(
+            "child build `{child_identity}` does not support provenance references from runner build `{}`",
+            homeboy_core::build_identity::current().display
+        )));
+    }
+    let stage_dir = bundle
+        .get("provenance_dir")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            provenance_reference_error("run-owned provenance directory is unavailable")
+        })?;
+    ensure_restricted_stage_dir(&stage_dir)?;
+
+    for name in provenance_names {
+        let Some(raw) = env.get(name).cloned() else {
+            continue;
+        };
+        if raw.len() <= PROVENANCE_ENV_INLINE_MAX_BYTES {
+            continue;
+        }
+        let hash = format!("{:x}", Sha256::digest(raw.as_bytes()));
+        let path = stage_dir.join(format!("{hash}.json"));
+        publish_provenance(&stage_dir, &path, raw.as_bytes(), &hash)?;
+        let reference = serde_json::json!({
+            "schema": homeboy_core::observation::PROVENANCE_REFERENCE_SCHEMA,
+            "path": path,
+            "sha256": hash,
+        });
+        env.insert(
+            name.to_string(),
+            serde_json::to_string(&reference).expect("provenance reference serializes"),
+        );
+    }
+    Ok(env)
+}
+
+fn provenance_reference_error(reason: &str) -> Error {
+    Error::validation_invalid_argument(
+        "provenance_transport",
+        format!("cannot safely bound child provenance environment: {reason}"),
+        None,
+        Some(vec![
+            "Run the child with the admitted Homeboy build or refresh the runner before retrying."
+                .to_string(),
+        ]),
+    )
+}
+
+fn ensure_restricted_stage_dir(path: &Path) -> Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("inspect provenance directory".to_string()),
+                )
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(provenance_reference_error(
+                    "run-owned provenance path is not a real directory",
+                ));
+            }
+        }
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some("create run-owned provenance directory".to_string()),
+            ));
+        }
+    }
+    restrict_provenance_permissions(path, 0o700)
+}
+
+fn publish_provenance(stage_dir: &Path, path: &Path, payload: &[u8], hash: &str) -> Result<()> {
+    if path.exists() {
+        return validate_published_provenance(path, hash);
+    }
+    let temp_path = stage_dir.join(format!(".{hash}.{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut temp = options.open(&temp_path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create exclusive provenance temp file".to_string()),
+        )
+    })?;
+    let publish = (|| {
+        temp.write_all(payload).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("write provenance temp file".to_string()),
+            )
+        })?;
+        temp.sync_all().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("sync provenance temp file".to_string()),
+            )
+        })?;
+        drop(temp);
+        match fs::hard_link(&temp_path, path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                validate_published_provenance(path, hash)
+            }
+            Err(error) => Err(Error::internal_io(
+                error.to_string(),
+                Some("atomically publish provenance file".to_string()),
+            )),
+        }
+    })();
+    let _ = fs::remove_file(temp_path);
+    publish
+}
+
+fn validate_published_provenance(path: &Path, expected_hash: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("inspect published provenance".to_string()),
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(provenance_reference_error(
+            "published provenance path is not a regular file",
+        ));
+    }
+    let contents = fs::read(path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read published provenance".to_string()),
+        )
+    })?;
+    let actual_hash = format!("{:x}", Sha256::digest(&contents));
+    if actual_hash != expected_hash {
+        return Err(provenance_reference_error(
+            "existing content-addressed provenance file failed hash verification",
+        ));
+    }
+    restrict_provenance_permissions(path, 0o600)
+}
+
+#[cfg(unix)]
+fn restrict_provenance_permissions(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("restrict provenance permissions".to_string()),
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn restrict_provenance_permissions(_path: &Path, _mode: u32) -> Result<()> {
+    Ok(())
 }
 
 fn preserve_durable_homeboy_data_dir(

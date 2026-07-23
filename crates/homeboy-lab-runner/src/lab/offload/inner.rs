@@ -79,9 +79,13 @@ pub(crate) fn ensure_remote_lab_artifact_dir(runner_id: &str, output_file: &str)
         .rsplit_once('/')
         .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
         .unwrap_or(".");
+    ensure_remote_lab_artifact_directory(runner_id, parent)
+}
+
+fn ensure_remote_lab_artifact_directory(runner_id: &str, directory: &str) -> Result<()> {
     lab_runner_file_transfer(runner_id)?
-        .ensure_directory(parent)
-        .map_err(|err| lab_artifact_directory_error(runner_id, parent, err))?;
+        .ensure_directory(directory)
+        .map_err(|err| lab_artifact_directory_error(runner_id, directory, err))?;
     Ok(())
 }
 
@@ -128,7 +132,7 @@ where
     F: FnMut() -> Result<()>,
 {
     check_cancelled()?;
-    ensure_remote_lab_artifact_dir(runner.id.as_str(), &remote_lab_artifact_dir(remote_cwd))?;
+    ensure_remote_lab_artifact_directory(runner.id.as_str(), &remote_lab_artifact_dir(remote_cwd))?;
     check_cancelled()?;
 
     let candidate_rig_registry_root = remote_lab_rig_registry_root(remote_cwd);
@@ -1895,6 +1899,9 @@ pub(crate) fn run_lab_offload_inner(
             "build_identity": runner_homeboy.get("job_command_binary_build_identity")
                 .or_else(|| runner_homeboy.get("active_daemon_build_identity")),
         },
+        // The materialized workspace deletes this artifact root on every known
+        // terminal result, bounding content-addressed transport retention.
+        "provenance_dir": format!("{}/provenance", remote_lab_artifact_dir(&remote_cwd)),
         "admission": {
             "daemon_lease_id": admission
                 .as_ref()
