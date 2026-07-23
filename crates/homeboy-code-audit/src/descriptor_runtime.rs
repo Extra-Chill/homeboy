@@ -8,7 +8,7 @@ use super::detectors::{
     test_topology, test_wiring, thin_command_adapter, unbounded_output_capture, wrapper_inference,
 };
 use super::doc_drift::detect_doc_drift;
-use super::reference::{fingerprint_component_reference_files, fingerprint_reference_paths};
+use super::reference::DeadCodeReferenceAnalysis;
 use super::{
     comment_hygiene, compiler_warnings, dead_code, fingerprint, shadow_modules, structural,
     time_audit_detector, AuditExecutionPlan, AuditTiming, DetectorDescriptor, DetectorRuntime,
@@ -36,8 +36,7 @@ pub(super) struct DetectorRunContext<'a> {
     /// Shared source snapshot for whole-tree detectors. `None` only on the
     /// root-only fast path when no snapshot-backed detector is enabled.
     pub(super) source_snapshot: Option<&'a CodebaseSnapshot>,
-    /// External reference codebases included in dead-code cross-referencing.
-    pub(super) reference_paths: &'a [String],
+    pub(super) dead_code_references: Option<&'a DeadCodeReferenceAnalysis>,
 }
 
 fn run_fingerprint_descriptor(
@@ -167,11 +166,13 @@ fn run_generic_descriptor(
 /// enabled. The dispatch only invokes this runner for an enabled descriptor, so
 /// the walk stays gated exactly as it was when hand-wired in `engine.rs`.
 fn run_dead_code(context: &DetectorRunContext<'_>) -> Vec<Finding> {
-    let ref_fingerprints = fingerprint_reference_paths(context.reference_paths);
-    let component_ref_fingerprints = fingerprint_component_reference_files(context.root);
-    let ref_fp_refs: Vec<&fingerprint::FileFingerprint> = ref_fingerprints
+    let references = context
+        .dead_code_references
+        .expect("dead-code detector receives repository reference analysis when enabled");
+    let ref_fp_refs: Vec<&fingerprint::FileFingerprint> = references
+        .external
         .iter()
-        .chain(component_ref_fingerprints.iter())
+        .chain(references.component.iter())
         .collect();
     dead_code::analyze_dead_code_with_config(
         context.all_fingerprints,
@@ -326,7 +327,7 @@ mod tests {
             all_fingerprints: &[],
             per_file_fingerprints: &[],
             source_snapshot: None,
-            reference_paths: &[],
+            dead_code_references: None,
         };
 
         let plan = AuditExecutionPlan::from_profile_and_filters(AuditProfile::Full, &[], &[]);
@@ -427,7 +428,7 @@ mod tests {
             all_fingerprints: &fingerprints,
             per_file_fingerprints: &fingerprints,
             source_snapshot: None,
-            reference_paths: &[],
+            dead_code_references: None,
         };
         let plan = AuditExecutionPlan::from_profile_and_filters(AuditProfile::Full, &[], &[]);
         let mut timing = AuditTiming::default();

@@ -69,6 +69,7 @@ pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeA
         &ref_paths,
         &AuditExecutionPlan::full(),
         &[],
+        None,
     )
     .map(|audit| audit.result)
 }
@@ -119,6 +120,7 @@ pub(crate) fn audit_path_with_id_with_plan_and_analysis(
         reference_paths,
         plan,
         extension_overrides,
+        None,
     )
 }
 
@@ -147,6 +149,7 @@ pub fn audit_path_scoped(
         &ref_paths,
         &AuditExecutionPlan::full(),
         &[],
+        None,
     )
     .map(|audit| audit.result)
 }
@@ -159,6 +162,7 @@ pub(crate) fn audit_path_scoped_with_plan_and_analysis(
     plan: &AuditExecutionPlan,
     reference_paths: &[String],
     extension_overrides: &[String],
+    dead_code_references: Option<super::reference::DeadCodeReferenceAnalysis>,
 ) -> Result<AuditWithAnalysis> {
     audit_internal(
         component_id,
@@ -168,6 +172,7 @@ pub(crate) fn audit_path_scoped_with_plan_and_analysis(
         reference_paths,
         plan,
         extension_overrides,
+        dead_code_references,
     )
 }
 
