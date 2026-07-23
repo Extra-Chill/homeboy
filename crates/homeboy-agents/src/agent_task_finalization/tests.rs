@@ -326,6 +326,41 @@ fn creates_new_pr_after_green_gates() {
 }
 
 #[test]
+fn preflight_validates_without_publishing_or_git_tracking() {
+    // #9798 / #9802: the validation-only (`!publish`) finalization path performs
+    // no commit/push, so its publication proof must record no git tracking. This
+    // guards the report(...) call that regressed to a missing git_tracking arg
+    // and locks the "validated" projection's contract.
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        ..Default::default()
+    };
+
+    let report = preflight_pr_with_backend(options(), &mut backend).expect("preflight validated");
+
+    assert_eq!(report.status, "validated");
+    assert_eq!(report.pr_action, "none");
+    assert_eq!(report.pr_number, None);
+    assert!(report.pr_url.is_none());
+
+    // No publication mutation happened.
+    assert!(!backend.committed);
+    assert!(!backend.pushed);
+    assert!(!backend.created);
+    assert_eq!(backend.commit_calls, 0);
+    assert_eq!(backend.push_calls, 0);
+    assert!(!report.finalization_outcome.published);
+
+    // Identity is still proven (validation resolves it), but there is no
+    // publication git tracking because nothing was pushed.
+    assert!(report.publication_proof.git_identity.is_some());
+    assert!(
+        report.publication_proof.git_tracking.is_none(),
+        "validation-only publication proof must not carry git tracking"
+    );
+}
+
+#[test]
 fn finalization_rejects_identity_mismatch_before_any_publication_mutation() {
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
