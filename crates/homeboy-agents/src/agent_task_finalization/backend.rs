@@ -276,6 +276,14 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         homeboy_core::git::validate_publication_identity(path)
     }
 
+    fn validate_committed_publication_identity(
+        &mut self,
+        path: &str,
+        expected: Option<&homeboy_core::git::GitIdentityProof>,
+    ) -> Result<homeboy_core::git::GitIdentityProof> {
+        homeboy_core::git::validate_committed_publication_identity(path, expected)
+    }
+
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()> {
         let output = commit_at(None, Some(message), CommitOptions::default(), Some(path))?;
         if !output.success {
@@ -287,12 +295,16 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         Ok(())
     }
 
-    fn push_branch(&mut self, path: &str, head: &str) -> Result<AgentTaskPublicationGitTracking> {
-        let local_sha = git_output(path, &["rev-parse", "HEAD"])?;
+    fn push_branch(
+        &mut self,
+        path: &str,
+        commit_sha: &str,
+        head: &str,
+    ) -> Result<AgentTaskPublicationGitTracking> {
         let output = push_at(
             None,
             PushOptions {
-                refspec: Some(format!("HEAD:refs/heads/{}", head)),
+                refspec: Some(format!("{commit_sha}:refs/heads/{head}")),
                 ..Default::default()
             },
             Some(path),
@@ -306,9 +318,9 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         let verified_remote_sha = remote_branch_head(path, head)?.ok_or_else(|| {
             Error::git_command_failed(format!("pushed origin head `{head}` could not be verified"))
         })?;
-        if verified_remote_sha != local_sha {
+        if verified_remote_sha != commit_sha {
             return Err(Error::git_command_failed(format!(
-                "pushed origin head `{head}` resolved to `{verified_remote_sha}` instead of `{local_sha}`"
+                "pushed origin head `{head}` resolved to `{verified_remote_sha}` instead of `{commit_sha}`"
             )));
         }
 
@@ -550,9 +562,10 @@ mod remote_base_tests {
     #[test]
     fn pushed_branch_without_upstream_tracks_verified_remote_head() {
         let (repo, _origin) = publication_repo();
+        let commit_sha = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
 
         let tracking = RealAgentTaskPrFinalizationBackend
-            .push_branch(repo.path().to_str().unwrap(), "feature")
+            .push_branch(repo.path().to_str().unwrap(), &commit_sha, "feature")
             .expect("branch published");
 
         assert_eq!(
@@ -575,13 +588,14 @@ mod remote_base_tests {
     #[test]
     fn pushed_branch_replaces_stale_base_upstream_after_verification() {
         let (repo, _origin) = publication_repo();
+        let commit_sha = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
         git(
             repo.path(),
             &["branch", "--set-upstream-to", "origin/main", "feature"],
         );
 
         RealAgentTaskPrFinalizationBackend
-            .push_branch(repo.path().to_str().unwrap(), "feature")
+            .push_branch(repo.path().to_str().unwrap(), &commit_sha, "feature")
             .expect("branch published");
 
         assert_eq!(
@@ -611,9 +625,10 @@ mod remote_base_tests {
             &["config", "branch.feature.merge"],
         )
         .unwrap();
+        let commit_sha = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
 
         RealAgentTaskPrFinalizationBackend
-            .push_branch(repo.path().to_str().unwrap(), "feature")
+            .push_branch(repo.path().to_str().unwrap(), &commit_sha, "feature")
             .expect("branch published");
 
         assert_eq!(
@@ -645,10 +660,11 @@ mod remote_base_tests {
     #[test]
     fn failed_push_does_not_mutate_branch_tracking() {
         let (repo, origin) = publication_repo();
+        let commit_sha = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
         drop(origin);
 
         let error = RealAgentTaskPrFinalizationBackend
-            .push_branch(repo.path().to_str().unwrap(), "feature")
+            .push_branch(repo.path().to_str().unwrap(), &commit_sha, "feature")
             .expect_err("push fails");
 
         assert!(error.message.contains("git push failed"));

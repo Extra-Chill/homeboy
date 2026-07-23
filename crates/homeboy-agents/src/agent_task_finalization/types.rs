@@ -316,10 +316,22 @@ pub trait AgentTaskPrFinalizationBackend {
             AgentTaskPrCandidateState::Dirty { changed_files }
         })
     }
-    /// Validates the host-scoped repository-local identity before publication mutates Git state.
+    /// Validates the effective prospective identity before commit mutation.
     fn validate_publication_identity(&mut self, path: &str) -> Result<GitIdentityProof>;
+    /// Validates and reports the immutable identity stored in the candidate commit.
+    fn validate_committed_publication_identity(
+        &mut self,
+        path: &str,
+        expected: Option<&GitIdentityProof>,
+    ) -> Result<GitIdentityProof>;
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()>;
-    fn push_branch(&mut self, path: &str, head: &str) -> Result<AgentTaskPublicationGitTracking>;
+    /// Pushes the verified commit SHA to the candidate branch.
+    fn push_branch(
+        &mut self,
+        path: &str,
+        commit_sha: &str,
+        head: &str,
+    ) -> Result<AgentTaskPublicationGitTracking>;
     fn find_open_pr(
         &mut self,
         path: &str,

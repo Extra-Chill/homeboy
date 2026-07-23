@@ -32,6 +32,7 @@ struct MockBackend {
     create_error: bool,
     push_error: bool,
     identity_error: bool,
+    committed_identity_error: bool,
     hydrate_error: bool,
     hydrate_run_id: Option<String>,
     lifecycle: Option<RunLifecycleRecord>,
@@ -44,6 +45,7 @@ struct MockBackend {
     changed_files_calls: u8,
     commit_calls: u8,
     push_calls: u8,
+    pushed_commit_sha: Option<String>,
     updated: bool,
     last_body: String,
 }
@@ -169,8 +171,40 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
             host: "git.example.test".to_string(),
             name: "Homeboy Bot".to_string(),
             email: "bot@example.test".to_string(),
+            committer_name: "Homeboy Bot".to_string(),
+            committer_email: "bot@example.test".to_string(),
+            commit_sha: None,
             scope: "repository_local".to_string(),
         })
+    }
+
+    fn validate_committed_publication_identity(
+        &mut self,
+        _path: &str,
+        expected: Option<&homeboy_core::git::GitIdentityProof>,
+    ) -> Result<homeboy_core::git::GitIdentityProof> {
+        if self.committed_identity_error {
+            return Err(Error::validation_invalid_argument(
+                "git_identity",
+                "committed Git identity differs from the identity validated before commit",
+                None,
+                None,
+            ));
+        }
+        let mut proof = expected
+            .cloned()
+            .unwrap_or(homeboy_core::git::GitIdentityProof {
+                host: "git.example.test".to_string(),
+                name: "Homeboy Bot".to_string(),
+                email: "bot@example.test".to_string(),
+                committer_name: "Homeboy Bot".to_string(),
+                committer_email: "bot@example.test".to_string(),
+                commit_sha: None,
+                scope: "commit_host_policy".to_string(),
+            });
+        proof.commit_sha = Some("candidate-sha".to_string());
+        proof.scope = "commit_host_policy".to_string();
+        Ok(proof)
     }
 
     fn commit_all(&mut self, _path: &str, _message: &str) -> Result<()> {
@@ -179,12 +213,18 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         Ok(())
     }
 
-    fn push_branch(&mut self, _path: &str, head: &str) -> Result<AgentTaskPublicationGitTracking> {
+    fn push_branch(
+        &mut self,
+        _path: &str,
+        commit_sha: &str,
+        head: &str,
+    ) -> Result<AgentTaskPublicationGitTracking> {
         if self.push_error {
             return Err(Error::git_command_failed("git push failed"));
         }
         self.pushed = true;
         self.push_calls += 1;
+        self.pushed_commit_sha = Some(commit_sha.to_string());
         Ok(AgentTaskPublicationGitTracking {
             local_branch: head.to_string(),
             remote: "origin".to_string(),
@@ -257,6 +297,7 @@ fn creates_new_pr_after_green_gates() {
     assert_eq!(backend.changed_files_calls, 0);
     assert_eq!(backend.commit_calls, 1);
     assert_eq!(backend.push_calls, 1);
+    assert_eq!(backend.pushed_commit_sha.as_deref(), Some("candidate-sha"));
     assert!(backend.last_body.contains("## AI assistance"));
     assert!(backend.last_body.contains("## Summary"));
     assert!(backend.last_body.contains("## How to test"));
@@ -323,6 +364,14 @@ fn creates_new_pr_after_green_gates() {
             .map(|tracking| tracking.upstream_ref.as_str()),
         Some("refs/remotes/origin/fix/cook")
     );
+    assert_eq!(
+        report
+            .publication_proof
+            .git_identity
+            .as_ref()
+            .and_then(|proof| proof.commit_sha.as_deref()),
+        Some("candidate-sha")
+    );
 }
 
 #[test]
@@ -337,6 +386,25 @@ fn finalization_rejects_identity_mismatch_before_any_publication_mutation() {
 
     assert!(error.message.contains("repository-local Git identity"));
     assert!(!backend.committed);
+    assert!(!backend.pushed);
+    assert!(!backend.created);
+}
+
+#[test]
+fn finalization_rejects_committed_identity_mismatch_before_push() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        committed_identity_error: true,
+        ..Default::default()
+    };
+
+    let error =
+        finalize_pr_with_backend(options(), &mut backend).expect_err("committed identity mismatch");
+
+    assert!(error
+        .message
+        .contains("differs from the identity validated"));
+    assert!(backend.committed);
     assert!(!backend.pushed);
     assert!(!backend.created);
 }
@@ -649,6 +717,7 @@ fn publishes_clean_committed_candidate_without_committing() {
     assert_eq!(report.changed_files, vec!["deleted.rs", "renamed.rs"]);
     assert!(!backend.committed);
     assert!(backend.pushed);
+    assert_eq!(backend.pushed_commit_sha.as_deref(), Some("candidate-sha"));
     assert!(backend.created);
     assert!(!report.finalization_outcome.committed);
     assert!(report.finalization_outcome.pushed);

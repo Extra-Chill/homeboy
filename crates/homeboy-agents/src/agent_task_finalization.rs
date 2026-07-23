@@ -199,9 +199,17 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     if !options.manual_finalization {
         backend.validate_candidate(&options)?;
     }
-    // An identity mismatch must not create a commit, push, or PR mutation.
-    let git_identity = backend.validate_publication_identity(&options.path)?;
+    // Validate intent before commit mutation, then bind evidence to immutable HEAD before push.
+    let prospective_identity = if commit_required {
+        Some(backend.validate_publication_identity(&options.path)?)
+    } else {
+        None
+    };
     if !publish {
+        let git_identity = match prospective_identity {
+            Some(git_identity) => git_identity,
+            None => backend.validate_committed_publication_identity(&options.path, None)?,
+        };
         return Ok(report(
             &options,
             intent,
@@ -223,8 +231,18 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     if commit_required {
         backend.commit_all(&options.path, &options.commit_message)?;
     }
+    let git_identity = backend
+        .validate_committed_publication_identity(&options.path, prospective_identity.as_ref())?;
+    let commit_sha = git_identity.commit_sha.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "git_identity",
+            "committed Git identity proof must be bound to a commit SHA before publication",
+            None,
+            None,
+        )
+    })?;
     let git_tracking = if push_required {
-        Some(backend.push_branch(&options.path, &head)?)
+        Some(backend.push_branch(&options.path, commit_sha, &head)?)
     } else {
         None
     };
