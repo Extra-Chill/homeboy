@@ -275,7 +275,12 @@ impl LabStagingRecipe {
 struct LabHandoffHomeboyIdentity {
     requested_build_identity: String,
     configured_command_build_identity: String,
-    daemon_build_identity: String,
+    /// The daemon (session) build identity is advisory pre-dispatch evidence and
+    /// is legitimately absent when a controller-owned handoff runs before any
+    /// daemon has attached. Admission authority rests on the command binary
+    /// identity; an unreported daemon does not block the handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    daemon_build_identity: Option<String>,
     /// This is populated only when the command execution itself reports it.
     /// Session and configured-binary identities are pre-dispatch evidence.
     executed_command_build_identity: Option<String>,
@@ -297,6 +302,30 @@ fn canonical_homeboy_identity(identity: &str) -> &str {
         .trim()
         .strip_prefix("homeboy ")
         .unwrap_or(identity.trim())
+}
+
+/// Decide whether a Lab handoff may proceed given the runner's command-binary
+/// (`configured`) and daemon (session) build identities against the immutably
+/// `requested` build.
+///
+/// The command binary is authoritative: it must positively match `requested`,
+/// so a stale/mismatched binary fails closed (the intent of #9626). The daemon
+/// identity is advisory — it is legitimately unreported (`None`) when a
+/// controller-owned handoff runs before any daemon has attached (e.g. the
+/// in-process reverse-cook path). An absent daemon identity must NOT block
+/// admission; only a daemon that is present AND positively disagrees with
+/// `requested` indicates a stale runtime worth refusing.
+fn handoff_identities_match(
+    requested: &str,
+    configured: Option<&str>,
+    daemon: Option<&str>,
+) -> bool {
+    let requested = canonical_homeboy_identity(requested);
+    let command_matches =
+        configured.is_some_and(|identity| canonical_homeboy_identity(identity) == requested);
+    let daemon_disagrees =
+        daemon.is_some_and(|identity| canonical_homeboy_identity(identity) != requested);
+    command_matches && !daemon_disagrees
 }
 
 fn handoff_build_reference(identity: &str) -> String {
@@ -1574,14 +1603,7 @@ impl ProductionLabStagingOperations {
             .session
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.clone());
-        let identities_match = |configured: Option<&str>, daemon: Option<&str>| {
-            configured.is_some_and(|identity| {
-                canonical_homeboy_identity(identity) == canonical_homeboy_identity(requested)
-            }) && daemon.is_some_and(|identity| {
-                canonical_homeboy_identity(identity) == canonical_homeboy_identity(requested)
-            })
-        };
-        if !identities_match(configured.as_deref(), daemon.as_deref())
+        if !handoff_identities_match(requested, configured.as_deref(), daemon.as_deref())
             && automatic_handoff_convergence_allowed(&runner)
             && status.active_jobs.is_empty()
             && status.active_job_state == crate::RunnerActiveJobState::Available
@@ -1616,7 +1638,7 @@ impl ProductionLabStagingOperations {
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.clone());
         let configured = crate::configured_runner_homeboy_build_identity(&runner, &command)?;
-        if !identities_match(configured.as_deref(), daemon.as_deref()) {
+        if !handoff_identities_match(requested, configured.as_deref(), daemon.as_deref()) {
             return Err(handoff_identity_error(
                 &request.recipe.runner_id,
                 requested,
@@ -1629,7 +1651,7 @@ impl ProductionLabStagingOperations {
             configured_command_build_identity: configured
                 .clone()
                 .expect("checked configured identity"),
-            daemon_build_identity: daemon.expect("checked daemon identity"),
+            daemon_build_identity: daemon,
             executed_command_build_identity: None,
         }))
     }
@@ -3797,7 +3819,7 @@ mod tests {
         let identity = LabHandoffHomeboyIdentity {
             requested_build_identity: "homeboy 1.2.3+required".to_string(),
             configured_command_build_identity: "homeboy 1.2.3+required".to_string(),
-            daemon_build_identity: "homeboy 1.2.3+required".to_string(),
+            daemon_build_identity: Some("homeboy 1.2.3+required".to_string()),
             executed_command_build_identity: None,
         };
 
@@ -3890,6 +3912,46 @@ mod tests {
             error.details["homeboy_handoff_identity"]["executed_command_build_identity"],
             serde_json::Value::Null
         );
+    }
+
+    #[test]
+    fn handoff_admitted_when_command_matches_and_daemon_identity_unavailable() {
+        // Regression for #9626: a controller-owned handoff (e.g. the in-process
+        // reverse-cook path) runs before any daemon has attached, so the daemon
+        // build identity is legitimately unreported. Admission must still proceed
+        // as long as the command binary positively matches the required build.
+        assert!(handoff_identities_match(
+            "homeboy 1.2.3+required",
+            Some("homeboy 1.2.3+required"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn handoff_refused_when_command_binary_is_stale_even_if_daemon_absent() {
+        // The command binary remains authoritative: a stale/mismatched binary
+        // fails closed regardless of daemon availability (#9626 intent).
+        assert!(!handoff_identities_match(
+            "homeboy 1.2.3+required",
+            Some("homeboy 1.2.2+stale"),
+            None,
+        ));
+        assert!(!handoff_identities_match(
+            "homeboy 1.2.3+required",
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn handoff_refused_when_daemon_positively_disagrees() {
+        // A daemon that is present AND reports a different build indicates a
+        // stale runtime worth refusing, even if the command binary matches.
+        assert!(!handoff_identities_match(
+            "homeboy 1.2.3+required",
+            Some("homeboy 1.2.3+required"),
+            Some("homeboy 1.2.2+stale"),
+        ));
     }
 
     #[test]
