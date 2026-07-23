@@ -36,7 +36,7 @@ use homeboy_core::{Error, Result};
 use super::cook::{
     dispatch_cook_follow_up, gate_feedback_current_diff, AgentTaskCandidateAdoptionOptions,
     AgentTaskCookAttemptDispatcher, AgentTaskCookAttemptReport, AgentTaskCookReport,
-    CookFollowUpDispatch,
+    CookFollowUpBudgetScope, CookFollowUpDispatch,
 };
 use super::cook_promotion::{
     cook_report, finalize_or_load_cook_pr_with_backend, persisted_promotion_for_attempt,
@@ -519,6 +519,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
             &promotion,
             follow_up_request,
             true,
+            CookFollowUpBudgetScope::CandidateAdoptionReview,
             &budget,
             super::cook_budget::execution_budget_usage(&aggregate),
             &mut remediation_usage,
