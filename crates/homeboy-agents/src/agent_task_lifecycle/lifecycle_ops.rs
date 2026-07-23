@@ -2564,8 +2564,44 @@ pub fn record_cook_attempt(
     store::write_cook_index_attempt(cook_id, attempt, run_id, recorded_at)
 }
 
+/// Record the controller-owned boundary that a resumed Cook must advance.
+/// Provider terminal evidence and promotion reports remain separate so a later
+/// failed attempt cannot replace the source candidate's recovery checkpoint.
+pub fn record_cook_recovery_checkpoint(
+    run_id: &str,
+    phase: &str,
+    next_command: &str,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let checkpoint = json!({
+        "schema": "homeboy/agent-task-cook-recovery-checkpoint/v1",
+        "phase": phase,
+        "next_command": next_command,
+    });
+    let record = store::mutate_record(&run_id, |record| {
+        if record.metadata.get("cook_recovery_checkpoint") == Some(&checkpoint) {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        record
+            .ensure_metadata_object()
+            .insert("cook_recovery_checkpoint".to_string(), checkpoint.clone());
+        true
+    })?;
+    match record {
+        Some(record) => Ok(record),
+        None => store::read_record(&run_id),
+    }
+}
+
 pub fn cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
     store::read_cook_index(&sanitize_run_id(cook_id))
+}
+
+/// Read one durable attempt without resolving a cook ID through its latest
+/// index entry. Recovery must inspect historical source attempts directly.
+pub fn exact_record(run_id: &str) -> Result<AgentTaskRunRecord> {
+    store::read_record(&sanitize_run_id(run_id))
 }
 
 fn resolve_run_id(run_id: &str) -> Result<String> {
@@ -2584,6 +2620,14 @@ pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRe
         }
         record.updated_at = Some(now_timestamp());
         let metadata = record.ensure_metadata_object();
+        // The first post-apply checkpoint is immutable recovery authority. Later
+        // gate/finalization reports advance `latest_promotion` without obscuring
+        // the exact candidate that may be resumed after a coordinator loss.
+        if promotion.get("status").and_then(Value::as_str) == Some("verification_pending") {
+            metadata
+                .entry("cook_recovery_source_checkpoint".to_string())
+                .or_insert_with(|| promotion.clone());
+        }
         let promotions = metadata
             .entry("promotions".to_string())
             .or_insert_with(|| json!([]));
