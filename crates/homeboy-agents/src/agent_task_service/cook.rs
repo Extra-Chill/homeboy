@@ -38,7 +38,7 @@ use super::cook_promotion::{
     is_moving_base_finalization_error, moving_base_recovery_for_run,
     moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
     persisted_promotion_for_attempt, promote_or_load_attempt, recover_moving_base_cook_candidate,
-    refreshed_moving_base_recovery, MovingBaseCookRecovery,
+    refreshed_moving_base_recovery, retryable_provider_discovery_failure, MovingBaseCookRecovery,
 };
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
@@ -585,7 +585,41 @@ pub(crate) fn dispatch_cook_follow_up<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    let Some(remaining_budget) = budget_remaining(budget_limit, budget_used) else {
+    let recipe = super::load_recipe(cook_id)?;
+    let related_attempts = recipe.attempts.iter().filter(|recipe_attempt| {
+        recipe_attempt.plan.tasks.len() == 1
+            && recipe_attempt.plan.tasks[0].inputs["cook_loop"]["artifact_provenance"]
+                ["source_run_id"]
+                .as_str()
+                == Some(source_run_id)
+    });
+    let replay = related_attempts
+        .clone()
+        .max_by_key(|recipe_attempt| recipe_attempt.attempt)
+        .filter(|recipe_attempt| recipe_attempt.attempt > attempt)
+        .filter(|recipe_attempt| {
+            recipe_attempt.plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true
+                && retryable_provider_discovery_failure(&recipe_attempt.run_id)
+        })
+        .cloned();
+    let mut durable_budget_used = budget_used;
+    for recipe_attempt in related_attempts.clone() {
+        if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recipe_attempt.run_id) {
+            durable_budget_used.add(execution_budget_usage(&aggregate));
+        }
+    }
+    if known_same_executor {
+        durable_budget_used.same_provider_retries =
+            durable_budget_used.same_provider_retries.saturating_add(
+                related_attempts
+                    .map(|recipe_attempt| recipe_attempt.attempt)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    .try_into()
+                    .unwrap_or(u32::MAX),
+            );
+    }
+    let Some(remaining_budget) = budget_remaining(budget_limit, durable_budget_used) else {
         return Ok(CookFollowUpDispatch::BudgetExhausted {
             reason: "max_provider_executions".to_string(),
         });
@@ -615,47 +649,66 @@ where
                 .to_string(),
         });
     };
-    let reservation = match reserve_remediation_budget(&remaining_budget, same_provider) {
-        Ok(reservation) => reservation,
-        Err(reason) => {
-            return Ok(CookFollowUpDispatch::BudgetExhausted {
-                reason: reason.to_string(),
-            })
+    let reservation = if replay.is_some() {
+        ExecutionBudgetUsage::default()
+    } else {
+        match reserve_remediation_budget(&remaining_budget, same_provider) {
+            Ok(reservation) => reservation,
+            Err(reason) => {
+                return Ok(CookFollowUpDispatch::BudgetExhausted {
+                    reason: reason.to_string(),
+                })
+            }
         }
     };
-    let next_attempt = super::load_recipe(cook_id)?
-        .attempts
-        .iter()
-        .map(|recipe_attempt| recipe_attempt.attempt)
-        .max()
-        .unwrap_or(attempt)
-        .max(attempt)
-        .checked_add(1)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "cook_recipe.attempts",
-                "durable cook attempt sequence is exhausted",
-                Some(cook_id.to_string()),
-                None,
-            )
-        })?;
-    let next_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt);
     // This is reviewable lineage, not the process-local baseline capability.
     follow_up_request.inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
         "source_run_id": source_run_id,
         "source_task_id": promotion.source.task_id,
         "source_patch_artifact_sha256": promotion.patch_artifact.sha256,
     });
-    let mut follow_up_plan = AgentTaskPlan::new(
-        format!("{cook_id}-cook-attempt-{next_attempt}"),
-        vec![follow_up_request],
-    );
-    follow_up_plan.options = plan.options.clone();
-    follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
-    follow_up_plan.options.retry.max_attempts = 1;
+    let (next_attempt, next_run_id, mut follow_up_plan, replaced_run_id) = match replay {
+        Some(recipe_attempt) => (
+            recipe_attempt.attempt,
+            agent_task_lifecycle::cook_attempt_run_id(cook_id, recipe_attempt.attempt),
+            recipe_attempt.plan.clone(),
+            Some(recipe_attempt.run_id.clone()),
+        ),
+        None => {
+            let next_attempt = recipe
+                .attempts
+                .iter()
+                .map(|recipe_attempt| recipe_attempt.attempt)
+                .max()
+                .unwrap_or(attempt)
+                .max(attempt)
+                .checked_add(1)
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "cook_recipe.attempts",
+                        "durable cook attempt sequence is exhausted",
+                        Some(cook_id.to_string()),
+                        None,
+                    )
+                })?;
+            let next_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt);
+            let mut follow_up_plan = AgentTaskPlan::new(
+                format!("{cook_id}-cook-attempt-{next_attempt}"),
+                vec![follow_up_request],
+            );
+            follow_up_plan.options = plan.options.clone();
+            follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
+            follow_up_plan.options.retry.max_attempts = 1;
+            (next_attempt, next_run_id, follow_up_plan, None)
+        }
+    };
     let review_form_only =
         follow_up_plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true;
-    super::record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
+    if let Some(replaced_run_id) = replaced_run_id {
+        super::record_recipe_attempt_replacement(cook_id, &replaced_run_id, &next_run_id)?;
+    } else {
+        super::record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
+    }
     if attempt_needs_execution(&next_run_id) {
         let baseline = materialize_follow_up_baseline(
             promotion,

@@ -223,6 +223,20 @@ pub(crate) fn attempt_needs_execution(run_id: &str) -> bool {
         .unwrap_or(true)
 }
 
+pub(crate) fn retryable_provider_discovery_failure(run_id: &str) -> bool {
+    agent_task_lifecycle::status(run_id)
+        .is_ok_and(|record| record.state == agent_task_lifecycle::AgentTaskRunState::Failed)
+        && agent_task_lifecycle::read_aggregate(run_id).is_ok_and(|aggregate| {
+            !aggregate.outcomes.is_empty()
+                && aggregate.outcomes.iter().all(|outcome| {
+                    outcome
+                        .diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.class == "agent_task.provider_missing")
+                })
+        })
+}
+
 pub(crate) fn is_moving_base_finalization_error(error: &Error) -> bool {
     error.code == homeboy_core::ErrorCode::ValidationInvalidArgument
         && error

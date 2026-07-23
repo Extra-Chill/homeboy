@@ -811,6 +811,86 @@ impl AgentTaskExecutorAdapter for ReviewFormOnlyExecutor {
     }
 }
 
+#[derive(Clone)]
+struct ProviderMissingExecutor;
+
+impl AgentTaskExecutorAdapter for ProviderMissingExecutor {
+    fn execute(
+        &self,
+        request: crate::agent_task::AgentTaskRequest,
+        _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> crate::agent_task::AgentTaskOutcome {
+        crate::agent_task::AgentTaskOutcome {
+            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
+            summary: Some("no extension agent-task provider found".to_string()),
+            failure_classification: Some(
+                crate::agent_task::AgentTaskFailureClassification::CapabilityMissing,
+            ),
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: vec![crate::agent_task::AgentTaskDiagnostic {
+                class: "agent_task.provider_missing".to_string(),
+                message: "no extension agent-task provider found".to_string(),
+                data: Value::Null,
+            }],
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ProviderDiscoveryReplayDispatcher {
+    dispatches: AtomicUsize,
+    provider_missing_before_success: usize,
+}
+
+impl AgentTaskCookAttemptDispatcher for ProviderDiscoveryReplayDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(serde_json::json!({ "kind": "test-provider-discovery-replay" }))
+    }
+
+    fn dispatch_attempt(
+        &self,
+        plan: AgentTaskPlan,
+        run_id: &str,
+        derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        let dispatch = self.dispatches.fetch_add(1, Ordering::SeqCst);
+        let provider_missing = dispatch < self.provider_missing_before_success;
+        let result = if provider_missing {
+            run_loaded_plan_with_derived_cook_baseline(
+                plan,
+                Some(run_id),
+                ProviderMissingExecutor,
+                derived_cook_baseline,
+                None,
+            )?
+        } else {
+            run_loaded_plan_with_derived_cook_baseline(
+                plan,
+                Some(run_id),
+                ReviewFormOnlyExecutor,
+                derived_cook_baseline,
+                None,
+            )?
+        };
+        if provider_missing {
+            assert_eq!(result.exit_code, 1);
+            return Err(Error::internal_unexpected(
+                "fixture runner reported provider discovery failure",
+            ));
+        }
+        assert_eq!(result.exit_code, 0);
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct BatchAttemptDispatcher {
     barrier: Arc<Barrier>,
@@ -2621,6 +2701,138 @@ fn adoption_of_historical_attempt_appends_after_the_latest_recipe_attempt() {
         assert_eq!(recipe.attempts.len(), 3);
         assert_eq!(recipe.attempts[2].attempt, 3);
         assert_eq!(recipe.attempts[2].run_id, result.value.attempts[1].run_id);
+    });
+}
+
+#[test]
+fn adoption_replays_provider_discovery_failure_in_the_same_recipe_attempt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let dispatcher = Arc::new(ProviderDiscoveryReplayDispatcher {
+            dispatches: AtomicUsize::new(0),
+            provider_missing_before_success: 1,
+        });
+        let fixture = CandidateAdoptionFixture::new(
+            "cook-9575-provider-replay",
+            2,
+            1,
+            true,
+            Some(dispatcher.clone()),
+        );
+        let mut backend = CaptureBackend::default();
+
+        fixture
+            .adopt(
+                |_| Ok(Some(dispatcher.clone())),
+                UnusedExecutor,
+                &mut backend,
+            )
+            .expect_err("runner provider discovery failure interrupts adoption");
+        let failed_recipe = super::super::load_recipe(&fixture.cook_id).unwrap();
+        assert_eq!(failed_recipe.attempts.len(), 2);
+        let failed_run_id = failed_recipe.attempts[1].run_id.clone();
+        assert!(retryable_provider_discovery_failure(&failed_run_id));
+        agent_task_lifecycle::rewrite_record_for_test(&fixture.run_id, |record| {
+            record
+                .candidate_adoption
+                .as_mut()
+                .expect("durable adoption owner")
+                .owner_pid = u32::MAX;
+        })
+        .unwrap();
+        assert_eq!(
+            agent_task_lifecycle::status(&fixture.run_id)
+                .unwrap()
+                .candidate_adoption
+                .unwrap()
+                .state,
+            "interrupted"
+        );
+
+        let result = fixture
+            .adopt(
+                |_| Ok(Some(dispatcher.clone())),
+                UnusedExecutor,
+                &mut backend,
+            )
+            .expect("provider discovery repair replays the durable attempt");
+
+        assert_eq!(result.value.status, "green_no_finalize");
+        assert_eq!(dispatcher.dispatches.load(Ordering::SeqCst), 2);
+        assert_eq!(result.value.attempts[1].attempt, 2);
+        assert_ne!(result.value.attempts[1].run_id, failed_run_id);
+        let replayed_recipe = super::super::load_recipe(&fixture.cook_id).unwrap();
+        assert_eq!(replayed_recipe.attempts.len(), 3);
+        assert_eq!(replayed_recipe.attempts[1].run_id, failed_run_id);
+        assert_eq!(replayed_recipe.attempts[2].attempt, 2);
+        assert_eq!(
+            replayed_recipe.attempts[2].run_id,
+            result.value.attempts[1].run_id
+        );
+        let next_run_id = agent_task_lifecycle::cook_attempt_run_id(&fixture.cook_id, 3);
+        super::super::record_recipe_attempt(
+            &fixture.cook_id,
+            3,
+            &next_run_id,
+            &replayed_recipe.attempts[2].plan,
+        )
+        .expect("replacement entries do not consume the next logical attempt number");
+        let extended_recipe = super::super::load_recipe(&fixture.cook_id).unwrap();
+        assert_eq!(extended_recipe.attempts[3].attempt, 3);
+    });
+}
+
+#[test]
+fn repeated_provider_discovery_failures_exhaust_the_execution_budget() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let dispatcher = Arc::new(ProviderDiscoveryReplayDispatcher {
+            dispatches: AtomicUsize::new(0),
+            provider_missing_before_success: usize::MAX,
+        });
+        let fixture = CandidateAdoptionFixture::new(
+            "cook-9575-provider-replay-budget",
+            2,
+            1,
+            true,
+            Some(dispatcher.clone()),
+        );
+        let mut backend = CaptureBackend::default();
+
+        for expected_dispatches in 1..=2 {
+            fixture
+                .adopt(
+                    |_| Ok(Some(dispatcher.clone())),
+                    UnusedExecutor,
+                    &mut backend,
+                )
+                .expect_err("provider discovery failure interrupts adoption");
+            assert_eq!(
+                dispatcher.dispatches.load(Ordering::SeqCst),
+                expected_dispatches
+            );
+            agent_task_lifecycle::rewrite_record_for_test(&fixture.run_id, |record| {
+                record
+                    .candidate_adoption
+                    .as_mut()
+                    .expect("durable adoption owner")
+                    .owner_pid = u32::MAX;
+            })
+            .unwrap();
+            agent_task_lifecycle::status(&fixture.run_id).unwrap();
+        }
+
+        let exhausted = fixture
+            .adopt(
+                |_| Ok(Some(dispatcher.clone())),
+                UnusedExecutor,
+                &mut backend,
+            )
+            .expect("budget exhaustion is a durable Cook result");
+        assert_eq!(exhausted.value.status, "execution_budget_exhausted");
+        assert_eq!(dispatcher.dispatches.load(Ordering::SeqCst), 2);
+        let recipe = super::super::load_recipe(&fixture.cook_id).unwrap();
+        assert_eq!(recipe.attempts.len(), 3);
+        assert_eq!(recipe.attempts[1].attempt, 2);
+        assert_eq!(recipe.attempts[2].attempt, 2);
     });
 }
 
