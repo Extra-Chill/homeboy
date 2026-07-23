@@ -20,7 +20,7 @@ use crate::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJo
 use crate::lab_contract::LabRunnerWorkload;
 use crate::paths;
 use crate::process::{
-    pid_has_environment_value, pid_is_running, terminate_pid_with_sigterm_and_wait,
+    pid_has_ownership_token, pid_is_running, terminate_pid_with_sigterm_and_wait,
 };
 use crate::runner_execution_envelope::PathMaterializationPlan;
 use crate::secret_env_plan::SecretEnvPlan;
