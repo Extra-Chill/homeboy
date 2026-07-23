@@ -104,8 +104,13 @@ try {
     metadata: { provenance: { revision: 'fedcba9876543210' } },
   }]);
   assert.ok(recipe.workflow.steps.some((step) => step.command === 'wordpress.bench'));
-  assert.ok(recipe.workflow.steps.some((step) => step.command === 'wordpress.browser-scenario'));
-  assert.ok(recipe.workflow.steps.some((step) => step.command === 'wordpress.browser-scenario' && step.args.includes('route-host=localhost')));
+  const browserSteps = recipe.workflow.steps.filter((step) => ['wordpress.browser-probe', 'wordpress.browser-actions', 'wordpress.browser-scenario'].includes(step.command));
+  assert.ok(browserSteps.some((step) => step.command === 'wordpress.browser-scenario'));
+  for (const step of browserSteps) {
+    assert.ok(step.args.includes('route-host=localhost'));
+    assert.ok(step.args.includes('network-policy=block'));
+    assert.ok(step.args.includes('allow-host=localhost'));
+  }
   assert.ok(recipe.workflow.steps.some((step) => step.command === 'wordpress.browser-probe'));
   assert.ok(recipe.workflow.steps.some((step) => step.command === 'wordpress.browser-actions'));
   const seedIndex = recipe.workflow.steps.findIndex((step) => step.args?.some((arg) => arg.includes('network-seed.php')));
