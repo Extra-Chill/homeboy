@@ -2717,6 +2717,55 @@ fn adoption_review_uses_one_bounded_execution_after_the_source_budget_is_consume
 }
 
 #[test]
+fn legacy_adoption_budget_failure_reenters_once_through_review_authority() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let fixture = CandidateAdoptionFixture::new("cook-9847-legacy-budget", 2, 0, true, None);
+        agent_task_lifecycle::start_candidate_adoption(
+            &fixture.run_id,
+            &fixture.candidate,
+            "openai/gpt-5.6-terra",
+            "historical gate",
+        )
+        .unwrap();
+        agent_task_lifecycle::finish_candidate_adoption(
+            &fixture.run_id,
+            Some("candidate remediation budget exhausted".to_string()),
+        )
+        .unwrap();
+        agent_task_lifecycle::record_candidate_adoption_result(
+            &fixture.run_id,
+            serde_json::json!({
+                "status": "execution_budget_exhausted",
+                "stop_reason": "provider execution stopped because max_provider_executions was exhausted",
+            }),
+        )
+        .unwrap();
+        let mut backend = CaptureBackend::default();
+
+        let result = fixture
+            .adopt(|_| Ok(None), ReviewFormOnlyExecutor, &mut backend)
+            .expect("legacy budget failure re-enters through repaired review authority");
+
+        assert_eq!(result.value.status, "green_no_finalize");
+        let follow_up = result.value.latest_run_id.as_deref().unwrap();
+        let follow_up_plan = agent_task_lifecycle::load_plan(follow_up).unwrap();
+        assert_eq!(
+            follow_up_plan.tasks[0].inputs["cook_loop"]["execution_budget_authority"]["kind"],
+            "candidate_adoption_review"
+        );
+        let record = agent_task_lifecycle::status(&fixture.run_id).unwrap();
+        let replacements = record.metadata["candidate_adoption_replacements"]
+            .as_array()
+            .expect("legacy terminal adoption retained for audit");
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(
+            replacements[0]["result"]["status"],
+            "execution_budget_exhausted"
+        );
+    });
+}
+
+#[test]
 fn adoption_review_allowance_is_terminal_and_replay_does_not_dispatch() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let fixture = CandidateAdoptionFixture::new("cook-9575-budget", 2, 0, true, None);

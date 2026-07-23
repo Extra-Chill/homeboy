@@ -154,6 +154,9 @@ pub fn start_candidate_adoption_with_policy(
                 conflict = true;
                 return false;
             }
+            if replacement.is_none() && existing.state == "failed" {
+                replacement = Some(existing.clone());
+            }
         }
         if let Some(replacement) = replacement {
             let metadata = record.ensure_metadata_object();

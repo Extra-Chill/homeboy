@@ -61,6 +61,22 @@ fn persist_adoption_terminal_result(run_id: &str, report: &AgentTaskCookReport) 
     )
 }
 
+fn legacy_adoption_budget_failure(
+    recipe: &super::AgentTaskCookRecipe,
+    source_run_id: &str,
+    result: Option<&Value>,
+) -> bool {
+    result.is_some_and(|result| result["status"] == "execution_budget_exhausted")
+        && !recipe.attempts.iter().any(|attempt| {
+            attempt.plan.tasks.iter().any(|task| {
+                task.inputs["cook_loop"]["artifact_provenance"]["source_run_id"].as_str()
+                    == Some(source_run_id)
+                    && task.inputs["cook_loop"]["execution_budget_authority"]["kind"]
+                        == "candidate_adoption_review"
+            })
+        })
+}
+
 /// Read the AI-authored review form off an adopted candidate's terminal
 /// outcome. The candidate was produced by an earlier cook attempt, so any form
 /// the original agent emitted is recorded on its aggregate. Absent/invalid here
@@ -234,12 +250,19 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
     } else {
         options.gates.verify.join(" && ")
     };
+    let persisted_adoption_result = record
+        .candidate_adoption
+        .as_ref()
+        .and_then(|adoption| adoption.result.as_ref());
     if !options.gates.rerun_completed_gates
         && record.candidate_adoption.as_ref().is_some_and(|adoption| {
             adoption.candidate_sha == candidate_sha
                 && adoption.ai_model == adoption_ai_model
                 && (adoption.state == "completed" || adoption.result.is_some())
         })
+        // Pre-authority budget failures may enter the repaired path once. The
+        // failed attempt is archived when the new adoption starts.
+        && !legacy_adoption_budget_failure(&recipe, &run_id, persisted_adoption_result)
     {
         if let Some(result) = record
             .candidate_adoption
