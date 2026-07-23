@@ -2473,7 +2473,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             assert!(output.status.success());
             String::from_utf8(output.stdout).unwrap().trim().to_string()
         };
-        git(&source, &["init"]);
+        git(&source, &["init", "-b", "main"]);
         git(&source, &["config", "user.email", "agent@example.test"]);
         git(&source, &["config", "user.name", "Agent"]);
         std::fs::write(source.join("lib.rs"), "base\n").unwrap();
@@ -2564,9 +2564,27 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         let follow_up_promotion = persisted_promotion_for_attempt(follow_up_run_id)
             .unwrap()
             .expect("form-only continuation carries promoted candidate");
+        let alias_promotion = persisted_promotion_for_attempt(cook_id)
+            .unwrap()
+            .expect("Cook alias carries the same promoted candidate");
+        let replayed_alias_promotion = persisted_promotion_for_attempt(cook_id)
+            .unwrap()
+            .expect("Cook alias recovery is idempotent");
         assert_eq!(
             follow_up_promotion.provenance["cook_follow_up"]["kind"],
             "review_form_only"
+        );
+        assert_eq!(
+            alias_promotion.source.run_id,
+            follow_up_promotion.source.run_id
+        );
+        assert_eq!(
+            alias_promotion.patch_artifact.id,
+            follow_up_promotion.patch_artifact.id
+        );
+        assert_eq!(
+            replayed_alias_promotion.source.run_id,
+            follow_up_promotion.source.run_id
         );
         assert_eq!(
             std::fs::read_to_string(target.join("lib.rs")).unwrap(),
@@ -3257,37 +3275,55 @@ fn promotion(run_id: &str) -> AgentTaskPromotionReport {
 }
 
 #[test]
-fn restarted_cook_uses_only_its_exact_persisted_promotion() {
+fn restarted_cook_alias_and_exact_id_reuse_the_same_persisted_promotion() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let plan = AgentTaskPlan::new("cook-persisted", Vec::new());
-        agent_task_lifecycle::submit_plan(&plan, Some("run-persisted")).unwrap();
+        let cook_id = "cook-persisted";
+        let run_id = "run-persisted";
+        let plan = AgentTaskPlan::new(cook_id, Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).unwrap();
         agent_task_lifecycle::record_promotion(
-            "run-persisted",
-            serde_json::to_value(promotion("run-persisted")).unwrap(),
+            run_id,
+            serde_json::to_value(promotion(run_id)).unwrap(),
         )
         .unwrap();
 
-        let restored = persisted_promotion_for_attempt("run-persisted")
+        let exact = persisted_promotion_for_attempt(run_id)
             .unwrap()
             .expect("durable promotion");
-        assert_eq!(restored.source.run_id.as_deref(), Some("run-persisted"));
-        assert_eq!(restored.patch_artifact.id, "patch");
+        let alias = persisted_promotion_for_attempt(cook_id)
+            .unwrap()
+            .expect("durable promotion through Cook alias");
+        let replayed_exact = persisted_promotion_for_attempt(run_id)
+            .unwrap()
+            .expect("idempotent exact recovery");
+        assert_eq!(exact.source.run_id.as_deref(), Some(run_id));
+        assert_eq!(alias.source.run_id, exact.source.run_id);
+        assert_eq!(alias.patch_artifact.id, exact.patch_artifact.id);
+        assert_eq!(replayed_exact.source.run_id, exact.source.run_id);
     });
 }
 
 #[test]
 fn persisted_promotion_from_another_attempt_is_rejected() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let plan = AgentTaskPlan::new("cook-persisted", Vec::new());
-        agent_task_lifecycle::submit_plan(&plan, Some("run-persisted")).unwrap();
+        let cook_id = "cook-persisted";
+        let run_id = "run-persisted";
+        let plan = AgentTaskPlan::new(cook_id, Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).unwrap();
         agent_task_lifecycle::record_promotion(
-            "run-persisted",
+            run_id,
             serde_json::to_value(promotion("different-run")).unwrap(),
         )
         .unwrap();
 
-        let error = persisted_promotion_for_attempt("run-persisted").unwrap_err();
+        let error = persisted_promotion_for_attempt(cook_id).unwrap_err();
         assert!(error.message.contains("does not belong to this attempt"));
+        assert_eq!(error.details["requested_run_id"], cook_id);
+        assert_eq!(error.details["resolved_run_id"], run_id);
+        assert_eq!(error.details["promotion_run_id"], "different-run");
+        assert!(persisted_promotion_for_attempt(run_id).is_err());
     });
 }
 

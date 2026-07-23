@@ -196,13 +196,17 @@ pub(crate) fn persisted_promotion_for_attempt(
                 None,
             )
         })?;
-    if promotion.source.run_id.as_deref() != Some(run_id) {
-        return Err(Error::validation_invalid_argument(
+    if promotion.source.run_id.as_deref() != Some(record.run_id.as_str()) {
+        let mut error = Error::validation_invalid_argument(
             "latest_promotion.source.run_id",
             "persisted cook promotion does not belong to this attempt",
             Some(run_id.to_string()),
             None,
-        ));
+        );
+        error.details["requested_run_id"] = serde_json::json!(run_id);
+        error.details["resolved_run_id"] = serde_json::json!(record.run_id);
+        error.details["promotion_run_id"] = serde_json::json!(promotion.source.run_id);
+        return Err(error);
     }
     Ok(Some(promotion))
 }
