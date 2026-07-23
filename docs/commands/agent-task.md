@@ -106,7 +106,7 @@ an exhausted run records which budget stopped further execution.
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
 | `adopt <run-or-cook-id> --candidate-ref <sha>` | Adopt an immutable commit candidate through the recorded cook gates and finalization policy. |
-| `finalize-pr` | Finalize a green cook run into a review-ready pull request. |
+| `finalize-pr` | Finalize a green run, or recover publication from a durable Cook record. |
 | `gate-feedback` | Convert deterministic gate results into a cook retry or stop decision. |
 
 `adopt` accepts only immutable commits from the recorded cook source workspace.
@@ -129,6 +129,36 @@ structured contracts:
 
 Extensions and lab runners should delegate PR creation/update and proof assembly
 to this command instead of recreating GitHub publication logic locally.
+
+Recovery hydrates the run, worktree, base snapshot, candidate, changed files,
+gates, source references, model/tool disclosure, and accepted review form from
+the durable Cook recipe and applied promotion. It fails closed when either
+record is absent, malformed, belongs to another attempt, or no longer matches
+the candidate. `--preflight` performs the same hydration and complete validation
+without commit, push, or pull-request mutation:
+
+```bash
+homeboy agent-task finalize-pr --recover cook-9750 --preflight
+homeboy agent-task finalize-pr --recover cook-9750 \
+  --review-override 'compatibility=No public compatibility impact.@reviewed issue #9750'
+```
+
+Strict repeated-value shapes are `--gate-result NAME=STATUS[:DETAIL]`,
+`--test-step COMMAND=>EXPECTED`, `--changed-public-contract ID=>SUMMARY`, and
+`--review-override TARGET=VALUE@PROVENANCE`. Issue references accept `#NUMBER`,
+`OWNER/REPO#NUMBER`, or an HTTPS `github.com/OWNER/REPO/issues/NUMBER` URL.
+Declaring a changed public contract requires one complete evidence bundle:
+
+```bash
+homeboy agent-task finalize-pr ... \
+  --changed-public-contract 'cli.finalize-pr=>Adds durable recovery input' \
+  --compatibility-impact 'Additive CLI input; existing manual mode remains supported.' \
+  --external-consumer-impact 'External runtimes may replace reconstructed commands.' \
+  --external-usage-status completed \
+  --external-usage-source 'repository call-site search and CLI integration tests' \
+  --external-usage-limitations 'No consumers outside indexed repositories were inspected.' \
+  --external-usage-url 'https://github.com/Extra-Chill/homeboy/issues/9750'
+```
 
 #### Review Dossier Migration
 

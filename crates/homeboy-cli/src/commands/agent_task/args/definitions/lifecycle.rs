@@ -266,10 +266,17 @@ pub struct AdoptArgs {
 }
 #[derive(Args, Debug)]
 pub struct FinalizePrArgs {
-    #[arg(long, value_name = "ID")]
-    pub run_id: String,
-    #[arg(long, value_name = "PATH")]
-    pub path: String,
+    /// Hydrate finalization from a durable Cook recipe and its applied promotion.
+    #[arg(
+        long,
+        value_name = "RUN_OR_COOK_ID",
+        conflicts_with = "manual_finalization"
+    )]
+    pub recover: Option<String>,
+    #[arg(long, value_name = "ID", required_unless_present = "recover")]
+    pub run_id: Option<String>,
+    #[arg(long, value_name = "PATH", required_unless_present = "recover")]
+    pub path: Option<String>,
     #[arg(long, default_value = "main", value_name = "BRANCH")]
     pub base: String,
     /// Immutable base commit SHA recorded before the declared verification gates ran.
@@ -277,10 +284,10 @@ pub struct FinalizePrArgs {
     pub verified_base_sha: Option<String>,
     #[arg(long, value_name = "BRANCH")]
     pub head: Option<String>,
-    #[arg(long, value_name = "TEXT")]
-    pub title: String,
-    #[arg(long, value_name = "TEXT")]
-    pub commit_message: String,
+    #[arg(long, value_name = "TEXT", required_unless_present = "recover")]
+    pub title: Option<String>,
+    #[arg(long, value_name = "TEXT", required_unless_present = "recover")]
+    pub commit_message: Option<String>,
     #[command(flatten)]
     pub evidence: review::FinalizePrEvidenceArgs,
     #[arg(long = "gate-result", value_name = "NAME=STATUS[:DETAIL]")]
@@ -295,16 +302,22 @@ pub struct FinalizePrArgs {
     pub summary: Option<String>,
     #[arg(long = "what-changed", value_name = "TEXT")]
     pub what_changed: Vec<String>,
-    #[arg(long = "test-step", value_name = "TEXT")]
+    /// Reviewer test step. Strict shape: COMMAND=>EXPECTED.
+    #[arg(long = "test-step", value_name = "COMMAND=>EXPECTED")]
     pub test_steps: Vec<String>,
     #[arg(long, value_name = "TEXT")]
     pub compatibility: Option<String>,
-    #[arg(long = "closes", value_name = "REF")]
+    /// Closing issue reference: #NUMBER, OWNER/REPO#NUMBER, or a github.com issue URL.
+    #[arg(long = "closes", value_name = "ISSUE_REF")]
     pub closes: Vec<String>,
-    #[arg(long = "relates-to", value_name = "REF")]
+    /// Related issue reference: #NUMBER, OWNER/REPO#NUMBER, or a github.com issue URL.
+    #[arg(long = "relates-to", value_name = "ISSUE_REF")]
     pub relates_to: Vec<String>,
     #[arg(long = "review-override", value_name = "TARGET=VALUE@PROVENANCE")]
     pub review_overrides: Vec<String>,
+    /// Validate the complete hydrated dossier and candidate without publishing.
+    #[arg(long)]
+    pub preflight: bool,
     #[arg(long)]
     pub manual_finalization: bool,
 }

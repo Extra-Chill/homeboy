@@ -15,11 +15,12 @@ use homeboy::agents::agent_tasks::provider::{
     AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
-    homeboy_tool_disclosure, resolve_review_profile, AgentTaskExternalUsageEvidence,
-    AgentTaskExternalUsageStatus, AgentTaskPublicContract, AgentTaskPublicContractEvidence,
-    AgentTaskReviewAiAssistance, AgentTaskReviewDossier, AgentTaskReviewIssueRelationship,
-    AgentTaskReviewIssueRelationshipKind, AgentTaskReviewOverride, AgentTaskReviewOverrideTarget,
-    AgentTaskReviewTestStep, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
+    homeboy_tool_disclosure, resolve_review_profile, validate_issue_reference,
+    AgentTaskExternalUsageEvidence, AgentTaskExternalUsageStatus, AgentTaskPublicContract,
+    AgentTaskPublicContractEvidence, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
+    AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind,
+    AgentTaskReviewOverride, AgentTaskReviewOverrideTarget, AgentTaskReviewTestStep,
+    AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
 };
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::agents::agent_tasks::{
@@ -106,7 +107,7 @@ pub struct FinalizePrEvidenceArgs {
     #[arg(long = "nearby-contract-preserved", value_name = "TEXT")]
     pub nearby_contracts_preserved: Vec<String>,
 
-    /// Declared changed public contract as ID=>SUMMARY. Repeatable.
+    /// Declared changed public contract as ID=>SUMMARY. Requires the complete compatibility/external-usage evidence bundle below.
     #[arg(long = "changed-public-contract", value_name = "ID=>SUMMARY")]
     pub changed_public_contracts: Vec<String>,
 
@@ -410,6 +411,28 @@ pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
 }
 
 pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
+    validate_finalize_inputs(&args)?;
+    if let Some(run_or_cook_id) = args.recover.as_deref() {
+        let overrides = args
+            .review_overrides
+            .iter()
+            .map(|raw| parse_override(raw))
+            .collect::<homeboy::core::Result<Vec<_>>>()?;
+        let value = agent_task_service::recover_cook_pr(run_or_cook_id, overrides, args.preflight)?;
+        let success = value
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| matches!(status, "review_ready" | "validated"));
+        return Ok((value, i32::from(!success)));
+    }
+    let run_id = args
+        .run_id
+        .expect("clap requires --run-id without --recover");
+    let path = args.path.expect("clap requires --path without --recover");
+    let title = args.title.expect("clap requires --title without --recover");
+    let commit_message = args
+        .commit_message
+        .expect("clap requires --commit-message without --recover");
     let gate_results = parse_gate_results(&args.gate_results)?;
     let normalized_gate_results: Vec<HomeboyGateResult> = gate_results
         .iter()
@@ -448,7 +471,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     };
     let mut review_dossier = AgentTaskReviewDossier {
         schema: AGENT_TASK_REVIEW_DOSSIER_SCHEMA.to_string(),
-        summary: args.summary.clone().unwrap_or_else(|| args.title.clone()),
+        summary: args.summary.clone().unwrap_or_else(|| title.clone()),
         what_changed: if args.what_changed.is_empty() {
             vec![evidence.attempt_summary.clone()]
         } else {
@@ -493,15 +516,15 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
             .collect::<homeboy::core::Result<Vec<_>>>()?,
     };
     review_dossier.apply_overrides()?;
-    let review_profile = resolve_review_profile(&args.path)?;
-    let report = finalize_pr(AgentTaskPrFinalizationOptions {
-        path: args.path,
-        run_id: args.run_id,
+    let review_profile = resolve_review_profile(&path)?;
+    let options = AgentTaskPrFinalizationOptions {
+        path,
+        run_id,
         base: args.base,
         verified_base_sha: args.verified_base_sha,
         head: args.head,
-        title: args.title,
-        commit_message: args.commit_message,
+        title,
+        commit_message,
         gate_results,
         normalized_gate_results,
         changed_files: args.changed_files,
@@ -511,8 +534,13 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         review_profile,
         manual_finalization: args.manual_finalization,
         protected_branches: args.protected_branches,
-    })?;
-    let exit_code = if report.status == "review_ready" {
+    };
+    let report = if args.preflight {
+        homeboy::agents::agent_tasks::finalization::preflight_pr(options)?
+    } else {
+        finalize_pr(options)?
+    };
+    let exit_code = if matches!(report.status.as_str(), "review_ready" | "validated") {
         0
     } else {
         1
@@ -524,6 +552,58 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     Ok((value, exit_code))
 }
 
+fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> {
+    let mut errors = Vec::new();
+    for raw in &args.gate_results {
+        if let Err(error) = parse_gate_results(std::slice::from_ref(raw)) {
+            errors.push(error);
+        }
+    }
+    for raw in &args.evidence.changed_public_contracts {
+        if let Err(error) = parse_public_contract(raw) {
+            errors.push(error);
+        }
+    }
+    if let Err(error) = public_contract_evidence(&args.evidence) {
+        errors.push(error);
+    }
+    for raw in &args.test_steps {
+        if let Err(error) = parse_test_step(raw) {
+            errors.push(error);
+        }
+    }
+    for raw in &args.review_overrides {
+        if let Err(error) = parse_override(raw) {
+            errors.push(error);
+        }
+    }
+    for reference in args.closes.iter().chain(&args.relates_to) {
+        if let Err(error) = validate_issue_reference(reference) {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let diagnostics: Vec<Value> = errors
+        .iter()
+        .map(|error| {
+            serde_json::json!({
+            "code": format!("{:?}", error.code),
+                "message": error.message,
+                "details": error.details,
+            })
+        })
+        .collect();
+    let mut error = errors.remove(0);
+    error.message = format!(
+        "finalize-pr input validation failed with {} independent error(s)",
+        diagnostics.len()
+    );
+    error.details = serde_json::json!({ "diagnostics": diagnostics });
+    Err(error)
+}
+
 fn parse_public_contract(raw: &str) -> homeboy::core::Result<AgentTaskPublicContract> {
     let (id, summary) = raw.split_once("=>").ok_or_else(|| {
         homeboy::core::Error::validation_invalid_argument(
@@ -533,9 +613,19 @@ fn parse_public_contract(raw: &str) -> homeboy::core::Result<AgentTaskPublicCont
             None,
         )
     })?;
+    let id = id.trim();
+    let summary = summary.trim();
+    if id.is_empty() || summary.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "changed-public-contract",
+            "contract identifier and summary must be non-empty",
+            None,
+            None,
+        ));
+    }
     Ok(AgentTaskPublicContract {
-        id: id.trim().to_string(),
-        summary: summary.trim().to_string(),
+        id: id.to_string(),
+        summary: summary.to_string(),
     })
 }
 
@@ -588,9 +678,19 @@ fn parse_test_step(raw: &str) -> homeboy::core::Result<AgentTaskReviewTestStep> 
             None,
         )
     })?;
+    let command = command.trim();
+    let expected = expected.trim();
+    if command.is_empty() || expected.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "test-step",
+            "command and expected result must be non-empty",
+            None,
+            None,
+        ));
+    }
     Ok(AgentTaskReviewTestStep {
-        command: command.trim().to_string(),
-        expected: expected.trim().to_string(),
+        command: command.to_string(),
+        expected: expected.to_string(),
     })
 }
 
@@ -624,10 +724,18 @@ fn parse_override(raw: &str) -> homeboy::core::Result<AgentTaskReviewOverride> {
             ))
         }
     };
+    if value.trim().is_empty() || provenance.trim().is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "review-override",
+            "override value and provenance must be non-empty",
+            None,
+            None,
+        ));
+    }
     Ok(AgentTaskReviewOverride {
         target,
-        value: value.to_string(),
-        provenance: provenance.to_string(),
+        value: value.trim().to_string(),
+        provenance: provenance.trim().to_string(),
     })
 }
 
@@ -980,14 +1088,8 @@ fn review_next_actions(
     actions
 }
 
-fn promotion_handoff(report: &AgentTaskPromotionReport, to_worktree: &str) -> Value {
+fn promotion_handoff(report: &AgentTaskPromotionReport, _to_worktree: &str) -> Value {
     let patch_promoted = report.status.patch_promoted();
-    let finalize_path = report
-        .provenance
-        .get("worktree_path")
-        .and_then(Value::as_str)
-        .unwrap_or(to_worktree);
-    let verified_base = report.verified_base.as_ref();
     let mut next_actions = Vec::new();
     if report.status.gate_failed() {
         next_actions.push(
@@ -1011,9 +1113,8 @@ fn promotion_handoff(report: &AgentTaskPromotionReport, to_worktree: &str) -> Va
             "pr_opened": false
         },
         "boundary": report.status.handoff_boundary(),
-        "finalize_command": verified_base.map(|verified_base| format!(
-            "homeboy agent-task finalize-pr --run-id <run-id> --path {finalize_path} --base {} --verified-base-sha {} --title <title> --commit-message <message>",
-            verified_base.base, verified_base.sha
+        "finalize_command": report.source.run_id.as_ref().map(|run_id| format!(
+            "homeboy agent-task finalize-pr --recover {run_id}"
         )),
         "next_actions": next_actions
     })
@@ -1249,6 +1350,8 @@ mod tests {
         assert_eq!(step.command, "cargo test dossier");
         assert_eq!(step.expected, "all tests pass");
         assert!(parse_test_step("cargo test dossier").is_err());
+        assert!(parse_test_step("=>all tests pass").is_err());
+        assert!(parse_test_step("cargo test dossier=>").is_err());
 
         let override_ = parse_override("summary=Reviewed summary@operator").expect("override");
         assert!(matches!(
@@ -1257,6 +1360,9 @@ mod tests {
         ));
         assert_eq!(override_.provenance, "operator");
         assert!(parse_override("evidence=nope@operator").is_err());
+        assert!(parse_override("summary=@operator").is_err());
+        assert!(parse_override("summary=Reviewed summary@").is_err());
+        assert!(parse_public_contract("cli.finalize-pr=>").is_err());
     }
 
     #[test]
@@ -1342,16 +1448,10 @@ mod tests {
         assert_eq!(handoff["states"]["patch_promoted"], true);
         assert_eq!(handoff["states"]["pr_opened"], false);
         assert_eq!(handoff["boundary"], "patch_promoted_no_pr");
-        assert!(handoff["finalize_command"]
-            .as_str()
-            .expect("finalize command")
-            .contains("--path /Users/user/Developer/homeboy@fix-runtime"));
-        assert!(handoff["finalize_command"]
-            .as_str()
-            .expect("finalize command")
-            .contains(
-                "--base release --verified-base-sha 0123456789012345678901234567890123456789"
-            ));
+        assert_eq!(
+            handoff["finalize_command"],
+            "homeboy agent-task finalize-pr --recover agent-task-run-1"
+        );
     }
 
     #[test]

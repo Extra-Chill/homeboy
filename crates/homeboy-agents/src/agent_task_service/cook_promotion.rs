@@ -13,9 +13,9 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::agent_task_finalization::{
-    finalize_pr_with_backend, AgentTaskPrEvidence, AgentTaskPrFinalizationBackend,
-    AgentTaskPrFinalizationOptions, AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship,
-    AgentTaskPrVerification, RealAgentTaskPrFinalizationBackend,
+    finalize_pr_with_backend, preflight_pr_with_backend, AgentTaskPrEvidence,
+    AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions, AgentTaskPrRuntimeGuardrails,
+    AgentTaskPrSourceRelationship, AgentTaskPrVerification, RealAgentTaskPrFinalizationBackend,
 };
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
@@ -24,7 +24,7 @@ use crate::agent_task_promotion::{
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
-    AgentTaskReviewEvidence, AgentTaskReviewTestStep,
+    AgentTaskReviewEvidence, AgentTaskReviewOverride, AgentTaskReviewTestStep,
 };
 use homeboy_core::{config, Error, Result};
 
@@ -581,6 +581,22 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             None,
         ));
     }
+    crate::agent_task_lifecycle::record_promotion(
+        successful_run_id,
+        serde_json::to_value(promotion).unwrap_or(Value::Null),
+    )?;
+    let finalization =
+        cook_finalization_options(options, successful_run_id, promotion, Vec::new())?;
+    finalize_pr_with_backend(finalization, backend)
+        .map(|report| serde_json::to_value(report).unwrap_or(Value::Null))
+}
+
+fn cook_finalization_options(
+    options: &AgentTaskCookServiceOptions,
+    successful_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    overrides: Vec<AgentTaskReviewOverride>,
+) -> Result<AgentTaskPrFinalizationOptions> {
     let path = promotion
         .provenance
         .get("worktree_path")
@@ -615,54 +631,143 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
                 None,
             )
         })?;
-    crate::agent_task_lifecycle::record_promotion(
-        successful_run_id,
-        serde_json::to_value(promotion).unwrap_or(Value::Null),
-    )?;
-    let report = finalize_pr_with_backend(
-        AgentTaskPrFinalizationOptions {
-            path: path.clone(),
-            run_id: successful_run_id.to_string(),
-            base: options.base.clone(),
-            verified_base_sha: Some(verified_base.sha.clone()),
-            head: options.head.clone(),
-            title: options.title.clone(),
-            commit_message: options.commit_message.clone(),
-            gate_results: Vec::new(),
-            normalized_gate_results: promotion.gate_results.clone(),
-            changed_files: promotion.changed_files.clone(),
-            evidence: AgentTaskPrEvidence {
-                source_refs,
-                artifact_refs,
-                attempt_summary: format!(
-                    "{} deterministic cook gate attempt(s) completed green",
-                    promotion.deterministic_gates.len()
-                ),
-                ai_tool: options.ai_tool.clone(),
-                ai_model: options.ai_model.clone(),
-                source_relationship: AgentTaskPrSourceRelationship::default(),
-                verification: AgentTaskPrVerification {
-                    targeted_checks_run: options.gates.verify.clone(),
-                    targeted_checks_unavailable: None,
-                    ci_expected: vec!["Homeboy CI after push".to_string()],
-                    manual_reviewer_check: None,
-                },
-                runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
-                changed_public_contracts: Vec::new(),
-                public_contract_evidence: None,
-                lifecycle: crate::agent_task_lifecycle::status(successful_run_id)
-                    .ok()
-                    .map(|record| record.lifecycle),
+    let mut review_dossier = cook_review_dossier(options, promotion, successful_run_id)?;
+    review_dossier.overrides = overrides;
+    Ok(AgentTaskPrFinalizationOptions {
+        path: path.clone(),
+        run_id: successful_run_id.to_string(),
+        base: options.base.clone(),
+        verified_base_sha: Some(verified_base.sha.clone()),
+        head: options.head.clone(),
+        title: options.title.clone(),
+        commit_message: options.commit_message.clone(),
+        gate_results: Vec::new(),
+        normalized_gate_results: promotion.gate_results.clone(),
+        changed_files: promotion.changed_files.clone(),
+        evidence: AgentTaskPrEvidence {
+            source_refs,
+            artifact_refs,
+            attempt_summary: format!(
+                "{} deterministic cook gate attempt(s) completed green",
+                promotion.deterministic_gates.len()
+            ),
+            ai_tool: options.ai_tool.clone(),
+            ai_model: options.ai_model.clone(),
+            source_relationship: AgentTaskPrSourceRelationship::default(),
+            verification: AgentTaskPrVerification {
+                targeted_checks_run: options.gates.verify.clone(),
+                targeted_checks_unavailable: None,
+                ci_expected: vec!["Homeboy CI after push".to_string()],
+                manual_reviewer_check: None,
             },
-            ai_used_for: options.ai_used_for.clone(),
-            review_dossier: cook_review_dossier(options, promotion, successful_run_id)?,
-            review_profile: resolve_review_profile(&path)?,
-            manual_finalization: false,
-            protected_branches: options.protected_branches.clone(),
+            runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
+            changed_public_contracts: Vec::new(),
+            public_contract_evidence: None,
+            lifecycle: crate::agent_task_lifecycle::status(successful_run_id)
+                .ok()
+                .map(|record| record.lifecycle),
         },
-        backend,
-    )?;
-    Ok(serde_json::to_value(report).unwrap_or(Value::Null))
+        ai_used_for: options.ai_used_for.clone(),
+        review_dossier,
+        review_profile: resolve_review_profile(&path)?,
+        manual_finalization: false,
+        protected_branches: options.protected_branches.clone(),
+    })
+}
+
+/// Recover publication from the durable Cook recipe and applied promotion.
+pub fn recover_cook_pr(
+    run_or_cook_id: &str,
+    overrides: Vec<AgentTaskReviewOverride>,
+    preflight: bool,
+) -> Result<Value> {
+    recover_cook_pr_with_backend(
+        run_or_cook_id,
+        overrides,
+        preflight,
+        &mut RealAgentTaskPrFinalizationBackend,
+    )
+}
+
+pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
+    run_or_cook_id: &str,
+    overrides: Vec<AgentTaskReviewOverride>,
+    preflight: bool,
+    backend: &mut B,
+) -> Result<Value> {
+    let recipe = if super::cook_recipe::recipe_exists(run_or_cook_id)? {
+        super::cook_recipe::load_recipe(run_or_cook_id)?
+    } else {
+        super::cook_recipe::load_recipe_for_attempt(run_or_cook_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_or_cook_id",
+                "no durable Cook recipe contains this run or cook id",
+                Some(run_or_cook_id.to_string()),
+                None,
+            )
+        })?
+    };
+    let run_id = if recipe
+        .attempts
+        .iter()
+        .any(|attempt| attempt.run_id == run_or_cook_id)
+    {
+        run_or_cook_id.to_string()
+    } else {
+        let mut applied_run_id = None;
+        for attempt in recipe.attempts.iter().rev() {
+            if persisted_promotion_for_attempt(&attempt.run_id)?
+                .is_some_and(|promotion| promotion.status == AgentTaskPromotionStatus::Applied)
+            {
+                applied_run_id = Some(attempt.run_id.clone());
+                break;
+            }
+        }
+        applied_run_id.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_or_cook_id",
+                "durable Cook recipe has no attempt with an applied promotion",
+                Some(run_or_cook_id.to_string()),
+                None,
+            )
+        })?
+    };
+    let promotion = persisted_promotion_for_attempt(&run_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "latest_promotion",
+            "recovery requires the attempt's persisted applied promotion",
+            Some(run_id.clone()),
+            None,
+        )
+    })?;
+    if promotion.status != AgentTaskPromotionStatus::Applied {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.status",
+            "recovery requires an applied promotion with green gates",
+            Some(run_id),
+            None,
+        ));
+    }
+    if !preflight {
+        if let Some(finalization) = agent_task_lifecycle::status(&run_id)?
+            .metadata
+            .get("cook_finalization")
+        {
+            return Ok(finalization.clone());
+        }
+    }
+    let options = super::cook_recipe::reconstruct_adoption_options(&recipe)?;
+    let finalization = cook_finalization_options(&options, &run_id, &promotion, overrides)?;
+    let report = if preflight {
+        preflight_pr_with_backend(finalization, backend)?
+    } else {
+        finalize_pr_with_backend(finalization, backend)?
+    };
+    let value = serde_json::to_value(report).unwrap_or(Value::Null);
+    if !preflight {
+        agent_task_lifecycle::record_cook_finalization(&run_id, value.clone())?;
+    }
+    Ok(value)
 }
 
 fn cook_review_dossier(
