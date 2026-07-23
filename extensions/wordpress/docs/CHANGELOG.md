@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.30.1] - 2026-07-23
+
+### Fixed
+- hydrate Codebox fuzz readiness
+
 ## [3.30.0] - 2026-07-22
 
 ### Added
