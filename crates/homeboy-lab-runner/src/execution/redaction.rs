@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::shell_quote::shell_arg;
 use serde_json::Value;
 
 use homeboy_core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
@@ -159,16 +160,6 @@ pub(super) fn runner_exec_diagnostics(
         homeboy_binaries: None,
         hints,
     })
-}
-
-fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub(super) fn runner_result(

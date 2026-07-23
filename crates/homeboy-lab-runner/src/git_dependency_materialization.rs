@@ -4,6 +4,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::shell_quote::shell_arg;
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 use homeboy_rig::spec::DependencyCacheSpec;
@@ -801,16 +802,6 @@ fn terminal_dependency_error(
         ),
         Some(hints),
     )
-}
-
-fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn run_git(local_path: &Path, args: &[&str]) -> Result<()> {

@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::shell_quote::shell_arg;
 use homeboy_core::{Error, Result};
 
 use super::super::{
@@ -218,16 +219,6 @@ pub(super) fn validate_installed_rig_source(
             "Run `homeboy rig sources list` to inspect installed rig sources.".to_string(),
         ]),
     ))
-}
-
-fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
