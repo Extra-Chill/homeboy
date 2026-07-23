@@ -479,10 +479,10 @@ mod tests {
     fn execution_bundle(bytes: usize, provenance_dir: &Path) -> String {
         let mut value = serde_json::json!({
             "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
-            "binary": {
-                "path": "/runner/bin/homeboy",
-                "build_identity": homeboy_core::build_identity::current().display,
-            },
+            "binary": crate::execution_bundle::binary(
+                "/runner/bin/homeboy",
+                Some(homeboy_core::build_identity::current().display.as_str()),
+            ),
             "provenance_dir": provenance_dir,
             "admission": { "daemon_lease_id": "lease", "reservation_job_id": "job" },
             "extension_runtime_home": "/runner/job/home",
@@ -653,6 +653,34 @@ mod tests {
         assert!(error
             .message
             .contains("does not support provenance references"));
+        assert!(!root.path().join("provenance").exists());
+    }
+
+    #[test]
+    fn missing_verified_build_identity_does_not_replace_oversized_json() {
+        let root = tempfile::tempdir().expect("run artifact root");
+        let env = HashMap::from([
+            (
+                crate::execution_bundle::LAB_EXECUTION_BUNDLE_ENV.to_string(),
+                serde_json::json!({
+                    "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
+                    "binary": crate::execution_bundle::binary("/runner/bin/homeboy", None),
+                    "provenance_dir": root.path().join("provenance"),
+                    "admission": { "daemon_lease_id": "lease", "reservation_job_id": "job" },
+                })
+                .to_string(),
+            ),
+            (
+                homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV.to_string(),
+                json_payload(GUTENBERG_LAB_OFFLOAD_BYTES),
+            ),
+        ]);
+
+        let error = child_provenance_env(env, "{}".to_string())
+            .expect_err("missing verified identity must fail before replacement");
+        assert!(error
+            .message
+            .contains("child build identity is unavailable"));
         assert!(!root.path().join("provenance").exists());
     }
 

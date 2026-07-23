@@ -5,6 +5,13 @@ use std::collections::HashMap;
 pub(crate) const LAB_EXECUTION_BUNDLE_ENV: &str = "HOMEBOY_LAB_EXECUTION_BUNDLE";
 pub(crate) const LAB_EXECUTION_BUNDLE_SCHEMA: &str = "homeboy/lab-execution-bundle/v1";
 
+pub(crate) fn binary(path: &str, verified_build_identity: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "path": path,
+        "build_identity": verified_build_identity,
+    })
+}
+
 /// Validate the authority passed to the runner process. This is deliberately
 /// stricter than checking for an environment key: only a complete bundle can
 /// replace runner-global extension resolution.
@@ -77,6 +84,14 @@ pub(crate) fn bundle_env(bundle: &serde_json::Value) -> HashMap<String, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_uses_the_verified_configured_identity_without_status_fallbacks() {
+        let binary = binary("/runner/bin/homeboy", Some("homeboy 1.2.3+abc123"));
+
+        assert_eq!(binary["path"], "/runner/bin/homeboy");
+        assert_eq!(binary["build_identity"], "homeboy 1.2.3+abc123");
+    }
 
     #[test]
     fn bundle_requires_matching_command_admission_and_private_extension_snapshot() {
