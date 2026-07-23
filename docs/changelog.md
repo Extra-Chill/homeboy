@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.310.0] - 2026-07-23
+
+### Added
+- report controller-scratch bytes eligible by default vs override
+
+### Changed
+- split god-file into focused submodules
+
+### Fixed
+- fix(agent-task): parse changed files from patch content when metadata absent
+- bound provenance environment payloads
+- admit handoff when daemon identity is unavailable
+- Fix Lab rig checkout root fallback
+
 ## [0.309.0] - 2026-07-23
 
 ### Added
