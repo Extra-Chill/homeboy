@@ -257,6 +257,9 @@ pub struct AdoptArgs {
     /// Concrete model that prepared the externally supplied candidate.
     #[arg(long, value_name = "MODEL")]
     pub ai_model: Option<String>,
+    /// Replace a stale interrupted adoption while retaining its lifecycle evidence.
+    #[arg(long)]
+    pub replace_interrupted: bool,
     /// Return the complete cook adoption report, including nested gate evidence.
     #[arg(long)]
     pub full: bool,

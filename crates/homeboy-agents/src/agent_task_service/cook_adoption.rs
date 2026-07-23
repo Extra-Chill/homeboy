@@ -309,12 +309,13 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
     let attempt_dispatcher =
         reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
     options.attempt_dispatcher = attempt_dispatcher;
-    agent_task_lifecycle::start_candidate_adoption_with_rerun_policy(
+    agent_task_lifecycle::start_candidate_adoption_with_policy(
         &record.run_id,
         &candidate_sha,
         &adoption_ai_model,
         &gate_identity,
         options.gates.rerun_completed_gates,
+        adoption.replace_interrupted,
     )?;
     let gate_run_id = record.run_id.clone();
     let promotion = crate::agent_task_promotion::with_gate_supervision(

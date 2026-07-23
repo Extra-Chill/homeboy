@@ -261,6 +261,62 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
 }
 
 #[test]
+fn interrupted_candidate_adoption_can_be_explicitly_replaced_with_audit_history() {
+    with_isolated_home(|_| {
+        let record = submit_plan(&test_plan(), Some("adoption-replacement")).expect("submit");
+        let original = "a3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1";
+        let replacement = "b3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1";
+        start_candidate_adoption(
+            &record.run_id,
+            original,
+            "openai/gpt-5.6-terra",
+            "cargo test",
+        )
+        .expect("start original adoption");
+        assert!(start_candidate_adoption_with_policy(
+            &record.run_id,
+            replacement,
+            "openai/gpt-5.6-sol",
+            "cargo test",
+            false,
+            true,
+        )
+        .is_err());
+
+        rewrite_record_for_test(&record.run_id, |record| {
+            record
+                .candidate_adoption
+                .as_mut()
+                .expect("original adoption")
+                .owner_pid = u32::MAX;
+        })
+        .unwrap();
+        status(&record.run_id).expect("reconcile stale owner");
+        let replaced = start_candidate_adoption_with_policy(
+            &record.run_id,
+            replacement,
+            "openai/gpt-5.6-sol",
+            "cargo test",
+            false,
+            true,
+        )
+        .expect("explicitly replace interrupted adoption");
+
+        let current = replaced.candidate_adoption.expect("replacement adoption");
+        assert_eq!(current.candidate_sha, replacement);
+        assert_eq!(current.ai_model, "openai/gpt-5.6-sol");
+        assert_eq!(
+            replaced.metadata["candidate_adoption_replacements"][0]["candidate_sha"],
+            original
+        );
+        assert_eq!(
+            replaced.metadata["candidate_adoption_replacements"][0]["state"],
+            "interrupted"
+        );
+    });
+}
+
+#[test]
 fn candidate_adoption_gate_heartbeats_are_durable() {
     with_isolated_home(|_| {
         let record = submit_plan(&test_plan(), Some("adoption-gate-supervision")).expect("submit");

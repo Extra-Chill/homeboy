@@ -1353,6 +1353,7 @@ impl CandidateAdoptionFixture {
             &self.candidate,
             AgentTaskCandidateAdoptionOptions {
                 ai_model: Some("openai/gpt-5.6-terra".to_string()),
+                replace_interrupted: false,
             },
             dispatcher,
             executor,
@@ -2360,6 +2361,7 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
                 &candidate_for_thread,
                 AgentTaskCandidateAdoptionOptions {
                     ai_model: Some("openai/gpt-5.6-sol".to_string()),
+                    replace_interrupted: false,
                 },
                 |_| Ok(None),
                 ReviewFormOnlyExecutor,
@@ -2530,6 +2532,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             &candidate,
             AgentTaskCandidateAdoptionOptions {
                 ai_model: Some("openai/gpt-5.6-terra".to_string()),
+                replace_interrupted: false,
             },
             |_| Ok(None),
             ReviewFormOnlyExecutor,

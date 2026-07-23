@@ -135,6 +135,7 @@ pub struct AgentTaskCookServiceOptions {
 #[derive(Debug, Clone, Default)]
 pub struct AgentTaskCandidateAdoptionOptions {
     pub ai_model: Option<String>,
+    pub replace_interrupted: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
