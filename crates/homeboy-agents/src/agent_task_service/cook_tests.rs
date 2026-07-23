@@ -1258,8 +1258,18 @@ impl CandidateAdoptionFixture {
         executor: E,
         backend: &mut CaptureBackend,
     ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+        self.adopt_run(&self.run_id, dispatcher, executor, backend)
+    }
+
+    fn adopt_run<E: AgentTaskExecutorAdapter + Clone>(
+        &self,
+        run_id: &str,
+        dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+        executor: E,
+        backend: &mut CaptureBackend,
+    ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
         adopt_cook_candidate_with_dispatcher_and_backend(
-            &self.run_id,
+            run_id,
             &self.candidate,
             AgentTaskCandidateAdoptionOptions {
                 ai_model: Some("openai/gpt-5.6-terra".to_string()),
@@ -2581,6 +2591,36 @@ fn adoption_of_attempt_n_appends_n_plus_one_and_resumes_that_attempt() {
         assert_eq!(recipe.attempts.len(), 4);
         assert_eq!(recipe.attempts[3].attempt, 4);
         assert_eq!(recipe.attempts[3].run_id, result.value.attempts[1].run_id);
+    });
+}
+
+#[test]
+fn adoption_of_historical_attempt_appends_after_the_latest_recipe_attempt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture = CandidateAdoptionFixture::new("cook-9575-historical", 3, 1, true, None);
+        let historical_run_id = fixture.run_id.clone();
+        fixture.append_adoptable_attempt(2);
+        let mut backend = CaptureBackend::default();
+
+        let result = fixture
+            .adopt_run(
+                &historical_run_id,
+                |_| Ok(None),
+                ReviewFormOnlyExecutor,
+                &mut backend,
+            )
+            .expect("historical attempt adoption allocates after the durable recipe tail");
+
+        assert_eq!(result.value.status, "green_no_finalize");
+        assert_eq!(result.value.attempts[0].attempt, 1);
+        assert_eq!(result.value.attempts[1].attempt, 3);
+        assert!(result.value.attempts[1]
+            .run_id
+            .starts_with("cook-9575-historical-attempt-3"));
+        let recipe = super::super::load_recipe(&fixture.cook_id).unwrap();
+        assert_eq!(recipe.attempts.len(), 3);
+        assert_eq!(recipe.attempts[2].attempt, 3);
+        assert_eq!(recipe.attempts[2].run_id, result.value.attempts[1].run_id);
     });
 }
 

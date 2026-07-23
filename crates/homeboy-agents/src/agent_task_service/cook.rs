@@ -623,7 +623,22 @@ where
             })
         }
     };
-    let next_attempt = attempt + 1;
+    let next_attempt = super::load_recipe(cook_id)?
+        .attempts
+        .iter()
+        .map(|recipe_attempt| recipe_attempt.attempt)
+        .max()
+        .unwrap_or(attempt)
+        .max(attempt)
+        .checked_add(1)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "durable cook attempt sequence is exhausted",
+                Some(cook_id.to_string()),
+                None,
+            )
+        })?;
     let next_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt);
     // This is reviewable lineage, not the process-local baseline capability.
     follow_up_request.inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
