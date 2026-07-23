@@ -4,6 +4,31 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.308.0] - 2026-07-23
+
+### Added
+- coalesce heartbeats and bound compact job-log projection
+- feat(agent-task): hydrate finalize-pr recovery
+
+### Changed
+- Allow explicit interrupted adoption replacement
+- Replay provider discovery failures durably
+- Allocate adoption retries after recipe tail
+- Resolve adoption attempts through Cook recipes
+
+### Fixed
+- correlate Lab artifacts across nested and flat job-id metadata
+- pass git_tracking to validation-only finalization report
+- accept prepared workspace provenance
+- stop inferring AI model from disclosure text
+- remove duplicate snapshot fixture fields
+- fix(agent-task): track finalized review branch
+- fix(agent-task): resolve Cook promotion ownership
+- fix(agent-task): reconcile runner truth before cancellation
+- fix(agent-task): restore logical terminal artifacts
+- Fix durable fanout resume recovery
+- dispatch campaign children with concrete workload, not parent profile
+
 ## [0.307.0] - 2026-07-23
 
 ### Added
