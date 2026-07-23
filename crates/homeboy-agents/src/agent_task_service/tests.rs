@@ -886,6 +886,45 @@ fn reconcile_cancels_stale_running_record_without_manual_edit() {
 }
 
 #[test]
+fn dead_owner_process_run_is_classified_stale_and_reconciled() {
+    // Regression for #9718: a `running` record whose owner process is dead but
+    // whose `runner_pid` is merely PRESENT (and heartbeat not yet age-stale)
+    // was classified Active by discovery and so was never terminalized by
+    // `active --reconcile`. It must now classify Stale and reconcile to
+    // Cancelled without a manual `cancel`.
+    with_isolated_home(|_| {
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-dead-owner"))
+            .expect("submitted");
+        agent_task_lifecycle::rewrite_record_for_test("run-dead-owner", |record| {
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
+            record.tasks[0].state = AgentTaskState::Running;
+            // Fresh update timestamp + a present-but-dead owner pid, and NO
+            // runner job (local controller-owned run). A very large PID is not
+            // a live process on this host.
+            record.metadata = serde_json::json!({
+                "runner_pid": u32::MAX,
+            });
+        })
+        .expect("dead-owner record stored");
+
+        let report = discover_runs(AgentTaskDiscoveryFilter::Active).expect("active listed");
+        let ghost = report
+            .runs
+            .iter()
+            .find(|run| run.run_id == "run-dead-owner")
+            .expect("ghost listed");
+        assert_eq!(ghost.liveness, Some(AgentTaskLiveness::Stale));
+
+        let reconciled = reconcile_stale_active_runs(false).expect("reconciled");
+        assert_eq!(reconciled.reconciled, 1);
+        assert_eq!(reconciled.failed, 0);
+
+        let record = lifecycle_status("run-dead-owner").expect("status");
+        assert_eq!(record.state, AgentTaskRunState::Cancelled);
+    });
+}
+
+#[test]
 fn discovery_latest_returns_only_newest_run() {
     with_isolated_home(|_| {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-latest-a"))

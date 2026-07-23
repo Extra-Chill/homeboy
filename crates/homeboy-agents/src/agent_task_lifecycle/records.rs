@@ -465,7 +465,7 @@ impl AgentTaskRunRecord {
         RunExecutionState::from(self.state) == self.lifecycle.execution.state
     }
 
-    fn has_fresh_update(&self) -> bool {
+    pub(crate) fn has_fresh_update(&self) -> bool {
         self.updated_at
             .as_deref()
             .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
