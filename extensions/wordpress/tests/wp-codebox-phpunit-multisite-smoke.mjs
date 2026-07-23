@@ -106,6 +106,8 @@ try {
 
   const defaultDatabase = await resolvedOptions({ pluginPhp: singleSitePlugin });
   assert.equal('databaseType' in defaultDatabase, false, 'omitted database_type preserves WP Codebox defaults');
+  assert.equal(defaultDatabase.extra_plugins.length, 1, 'no dependencies only emits the primary plugin');
+  assert.equal(defaultDatabase.extra_plugins[0].activate, false, 'primary plugin remains inactive for the managed PHPUnit bootstrap');
 
   const mysqlDatabase = await resolvedOptions({ pluginPhp: singleSitePlugin, settings: { database_type: 'mysql' } });
   assert.equal(mysqlDatabase.databaseType, 'mysql', 'database_type maps to the WP Codebox databaseType contract');
