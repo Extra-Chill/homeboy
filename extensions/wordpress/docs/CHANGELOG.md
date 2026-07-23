@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.31.4] - 2026-07-23
+
+### Fixed
+- forward PHPUnit runtime PHP version
+
 ## [3.31.3] - 2026-07-23
 
 ### Fixed
