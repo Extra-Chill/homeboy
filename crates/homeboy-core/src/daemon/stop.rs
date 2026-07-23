@@ -87,7 +87,7 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
             termination_evidence: None,
         });
     }
-    if !pid_has_environment_value(state.pid, DAEMON_STARTUP_TOKEN_ENV, &state.startup_token)? {
+    if !pid_has_ownership_token(state.pid, DAEMON_STARTUP_TOKEN_ENV, &state.startup_token)? {
         return Err(Error::validation_invalid_argument(
             "daemon_lease",
             format!(

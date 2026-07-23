@@ -185,6 +185,76 @@ pub fn pid_has_environment_value(pid: u32, key: &str, value: &str) -> Result<boo
     }
 }
 
+/// Prove that a process owns a persisted startup token before it is signaled.
+/// Linux reads the authoritative environment; other Unix platforms inspect the
+/// explicit `--startup-token` daemon argument with `ps`.
+pub fn pid_has_ownership_token(pid: u32, key: &str, value: &str) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        return pid_has_environment_value(pid, key, value);
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return Err(Error::validation_invalid_argument(
+                "pid",
+                "recorded process PID is invalid",
+                Some(pid.to_string()),
+                None,
+            ));
+        }
+        if key.is_empty()
+            || key.contains('=')
+            || key.chars().any(char::is_whitespace)
+            || value.chars().any(char::is_whitespace)
+        {
+            return Err(Error::validation_invalid_argument(
+                "process_environment",
+                "process environment ownership checks require a non-empty key and whitespace-free value",
+                Some(key.to_string()),
+                None,
+            ));
+        }
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "command="])
+            .output()
+            .map_err(|error| {
+                Error::internal_unexpected(format!(
+                    "inspect process {pid} command for ownership token: {error}"
+                ))
+            })?;
+        if !output.status.success() {
+            return Ok(false);
+        }
+        return Ok(command_has_option_value(
+            &String::from_utf8_lossy(&output.stdout),
+            "--startup-token",
+            value,
+        ));
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (key, value);
+        Err(Error::validation_invalid_argument(
+            "pid",
+            "exact process ownership checks are unsupported on this platform",
+            Some(pid.to_string()),
+            None,
+        ))
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn command_has_option_value(command: &str, option: &str, expected: &str) -> bool {
+    command
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|arguments| arguments == [option, expected])
+}
+
 #[cfg(target_os = "linux")]
 fn environment_contains_assignment(environment: &[u8], expected: &[u8]) -> bool {
     environment
@@ -756,6 +826,32 @@ mod tests {
         assert!(!environment_contains_assignment(
             environment,
             b"HOMEBOY_DAEMON_STARTUP_TOKEN=lease"
+        ));
+    }
+}
+
+#[cfg(all(test, unix, not(target_os = "linux")))]
+mod ownership_token_tests {
+    use super::*;
+
+    #[test]
+    fn non_linux_ownership_checks_require_the_exact_startup_token_argument() {
+        let command = "homeboy daemon supervise --startup-token lease-token --addr 127.0.0.1:0";
+
+        assert!(command_has_option_value(
+            command,
+            "--startup-token",
+            "lease-token"
+        ));
+        assert!(!command_has_option_value(
+            command,
+            "--startup-token",
+            "lease"
+        ));
+        assert!(!command_has_option_value(
+            "homeboy daemon supervise --startup-token=lease-token",
+            "--startup-token",
+            "lease-token"
         ));
     }
 }
