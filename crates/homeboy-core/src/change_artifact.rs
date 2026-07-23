@@ -277,8 +277,6 @@ mod tests {
             synthetic_checkout_commit: None,
             synthetic_checkout_ref: None,
             synthetic_checkout_tree: None,
-            prepared_workspace_original_snapshot_identity: None,
-            prepared_workspace_update_lineage: Vec::new(),
             snapshot_hash: "sha256:snapshot".to_string(),
             synced_at: "2026-05-31T00:00:00Z".to_string(),
             sync_excludes: Vec::new(),
