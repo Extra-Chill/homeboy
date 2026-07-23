@@ -132,7 +132,8 @@ pub fn sync_workspace(
                 WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
             )?;
             let git_backed_snapshot = git_output(&local_path, &["rev-parse", "HEAD"]).is_ok();
-            let synthetic_checkout = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit
+            let (synthetic_checkout, fallback_reason) = if options.mode
+                == RunnerWorkspaceSyncMode::SnapshotGit
                 && git_backed_snapshot
             {
                 match materialize_git_snapshot_from_controller_bundle(
@@ -143,11 +144,26 @@ pub fn sync_workspace(
                 ) {
                     Ok(provenance) => {
                         materialization_plan.controller_git_bundle = provenance;
-                        None
+                        (None, None)
                     }
-                    Err(error) => {
+                    Err(_) => {
                         rollback_materialized_workspace(&runner, workspace_root, &remote_path);
-                        return Err(error);
+                        if let Err(snapshot_error) =
+                            materialize_snapshot(&runner, &local_path, &remote_path, &excludes)
+                        {
+                            rollback_materialized_workspace(&runner, workspace_root, &remote_path);
+                            return Err(snapshot_error);
+                        }
+                        materialization_plan.snapshot_transfer =
+                            Some(super::types::SnapshotTransferStats {
+                                reused: ByteFileCounts::default(),
+                                transferred: stats.clone(),
+                                final_size: stats.clone(),
+                            });
+                        (
+                            None,
+                            Some("snapshot_git_checkout_and_controller_bundle_failed".to_string()),
+                        )
                     }
                 }
             } else if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
@@ -158,7 +174,7 @@ pub fn sync_workspace(
                     &excludes,
                     &snapshot,
                 ) {
-                    Ok(identity) => Some(identity),
+                    Ok(identity) => (Some(identity), None),
                     Err(error) => {
                         rollback_materialized_workspace(&runner, workspace_root, &remote_path);
                         return Err(error);
@@ -200,25 +216,25 @@ pub fn sync_workspace(
                         }
                     }
                 });
-                None
+                (None, None)
             };
-            if options.mode == RunnerWorkspaceSyncMode::SnapshotGit && git_backed_snapshot {
+            if fallback_reason.is_some() || options.mode == RunnerWorkspaceSyncMode::Snapshot {
+                materialization_plan.actual_materialization_mode =
+                    Some("filesystem_snapshot".to_string());
+            } else if options.mode == RunnerWorkspaceSyncMode::SnapshotGit && git_backed_snapshot {
                 // Snapshot-git deliberately retains Git metadata for callers
                 // that need a checkout baseline.
                 materialization_plan.actual_materialization_mode =
                     Some(RunnerWorkspaceSyncMode::SnapshotGit.label().to_string());
-            } else if options.mode == RunnerWorkspaceSyncMode::Snapshot {
-                // Plain snapshot mode is a readable filesystem transfer. It
-                // must not require a Git object closure from partial clones.
-                materialization_plan.actual_materialization_mode =
-                    Some("filesystem_snapshot".to_string());
             }
+            materialization_plan.fallback_reason = fallback_reason;
             let metadata = workspace_metadata(
                 &runner.id,
                 &local_path,
                 &remote_path,
                 options.mode,
                 materialization_plan.actual_materialization_mode.as_deref(),
+                materialization_plan.fallback_reason.as_deref(),
                 &snapshot,
                 &excludes,
                 Some(content_manifest),
@@ -362,6 +378,7 @@ pub fn sync_workspace(
                 &local_path,
                 &remote_path,
                 RunnerWorkspaceSyncMode::Git,
+                None,
                 None,
                 &git.head,
                 &excludes,
@@ -517,6 +534,7 @@ pub fn update_workspace(
         &snapshot.remote_path,
         RunnerWorkspaceSyncMode::Snapshot,
         Some("prepared_workspace_delta"),
+        None,
         &resulting_snapshot_identity,
         &excludes,
         Some(manifest),
@@ -1002,6 +1020,7 @@ fn workspace_metadata(
     remote_path: &str,
     sync_mode: RunnerWorkspaceSyncMode,
     actual_materialization_mode: Option<&str>,
+    fallback_reason: Option<&str>,
     snapshot_identity: &str,
     snapshot_excludes: &[String],
     content_manifest: Option<super::snapshot::WorkspaceContentManifest>,
@@ -1019,6 +1038,7 @@ fn workspace_metadata(
         remote_path: remote_path.to_string(),
         sync_mode: sync_mode.label().to_string(),
         actual_materialization_mode: actual_materialization_mode.map(str::to_string),
+        fallback_reason: fallback_reason.map(str::to_string),
         snapshot_identity: snapshot_identity.to_string(),
         workspace_lease: Some(new_workspace_lease()),
         workspace_generation: 0,

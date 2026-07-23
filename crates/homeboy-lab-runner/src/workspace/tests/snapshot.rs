@@ -263,6 +263,114 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
 }
 
 #[test]
+fn snapshot_git_falls_back_to_filesystem_snapshot_when_git_closure_is_unavailable() {
+    let _path_guard = PATH_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("PATH lock");
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source workspace");
+        let runner_root = tempfile::tempdir().expect("runner root");
+        fs::create_dir_all(source.path().join("components/demo")).expect("component root");
+        fs::write(
+            source.path().join("components/demo/component.txt"),
+            "component\n",
+        )
+        .expect("component file");
+        fs::write(source.path().join("dirty.txt"), "committed\n").expect("source file");
+        git(source.path(), &["init", "-b", "main"]);
+        git(source.path(), &["config", "user.email", "test@example.com"]);
+        git(source.path(), &["config", "user.name", "Test User"]);
+        git(source.path(), &["add", "."]);
+        git(source.path(), &["commit", "-m", "source"]);
+        git(
+            source.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "file:///definitely-not-a-runner-accessible-repository",
+            ],
+        );
+        fs::write(source.path().join("dirty.txt"), "dirty\n").expect("dirty change");
+
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-snapshot-git-fallback","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let shim_root = tempfile::tempdir().expect("git shim root");
+        let shim = shim_root.path().join("git");
+        fs::write(
+            &shim,
+            "#!/bin/sh\nfor arg in \"$@\"; do [ \"$arg\" = \"rev-list\" ] && { echo 'missing promisor object' >&2; exit 91; }; done\nexec /usr/bin/git \"$@\"\n",
+        )
+        .expect("write git shim");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))
+                .expect("make git shim executable");
+        }
+        let original_path = std::env::var_os("PATH").expect("PATH");
+        let mut paths = vec![shim_root.path().to_path_buf()];
+        paths.extend(std::env::split_paths(&original_path));
+        std::env::set_var("PATH", std::env::join_paths(paths).expect("PATH value"));
+        let result = sync_workspace(
+            "lab-snapshot-git-fallback",
+            RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::SnapshotGit,
+                ..Default::default()
+            },
+        );
+        std::env::set_var("PATH", original_path);
+
+        let (synced, exit_code) = result.expect("filesystem fallback");
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            synced
+                .materialization_plan
+                .actual_materialization_mode
+                .as_deref(),
+            Some("filesystem_snapshot")
+        );
+        assert!(synced.materialization_plan.controller_git_bundle.is_none());
+        assert_eq!(
+            synced.materialization_plan.fallback_reason.as_deref(),
+            Some("snapshot_git_checkout_and_controller_bundle_failed")
+        );
+        let remote = Path::new(&synced.remote_path);
+        assert_eq!(
+            fs::read_to_string(remote.join("dirty.txt")).unwrap(),
+            "dirty\n"
+        );
+        assert!(!remote.join(".git").exists());
+        let component = std::process::Command::new("sh")
+            .args(["-c", "test -f components/demo/component.txt && pwd"])
+            .current_dir(remote)
+            .output()
+            .expect("execute from remote component workspace");
+        assert!(component.status.success());
+        let metadata: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(remote.join(".homeboy/runner-workspace.json")).expect("metadata"),
+        )
+        .expect("parse metadata");
+        assert_eq!(
+            metadata["actual_materialization_mode"],
+            "filesystem_snapshot"
+        );
+        assert_eq!(
+            metadata["fallback_reason"],
+            "snapshot_git_checkout_and_controller_bundle_failed"
+        );
+    });
+}
+
+#[test]
 fn snapshot_command_failure_keeps_exit_status_and_silent_transport_cause() {
     let error =
         super::super::util::run_shell_command("exit 23", "materialize SSH workspace snapshot")

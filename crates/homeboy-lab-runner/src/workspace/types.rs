@@ -105,6 +105,8 @@ pub struct RunnerWorkspaceMaterializationContract {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual_materialization_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_transfer: Option<SnapshotTransferStats>,
 }
 
@@ -227,6 +229,7 @@ impl RunnerWorkspaceMaterializationContract {
             output_paths: RunnerWorkspaceOutputPaths::for_remote_path(&workspace_root, remote_path),
             controller_git_bundle: None,
             actual_materialization_mode: None,
+            fallback_reason: None,
             snapshot_transfer: None,
         }
     }
@@ -420,6 +423,8 @@ pub struct RunnerWorkspaceSnapshotEntry {
     pub sync_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual_materialization_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
     pub snapshot_identity: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_lease: Option<String>,
@@ -462,6 +467,8 @@ pub(super) struct RunnerWorkspaceMetadata {
     pub sync_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual_materialization_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
     pub snapshot_identity: String,
     /// Opaque, single-generation capability for a prepared workspace. Older
     /// metadata intentionally has no lease and is ineligible for mutation.

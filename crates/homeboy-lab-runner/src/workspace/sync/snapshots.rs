@@ -440,6 +440,7 @@ fn workspace_snapshot_entry(
         remote_path: metadata.remote_path,
         sync_mode: metadata.sync_mode,
         actual_materialization_mode: metadata.actual_materialization_mode,
+        fallback_reason: metadata.fallback_reason,
         snapshot_identity: metadata.snapshot_identity,
         workspace_lease: metadata.workspace_lease,
         workspace_generation: metadata.workspace_generation,
