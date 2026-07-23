@@ -30,6 +30,7 @@ const dependencies = dependencyPaths(settings).map((source) => {
 await requireHarness(harnessSource);
 const options = clean({
   wordpressVersion: settings.wordpress_runtime_version,
+  phpVersion: settings.wordpress_runtime_php_version,
   databaseType: settings.database_type,
   pluginSlug: slug,
   extra_plugins: [

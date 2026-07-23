@@ -109,6 +109,12 @@ try {
 
   const mysqlDatabase = await resolvedOptions({ pluginPhp: singleSitePlugin, settings: { database_type: 'mysql' } });
   assert.equal(mysqlDatabase.databaseType, 'mysql', 'database_type maps to the WP Codebox databaseType contract');
+
+  const defaultPhp = await resolvedOptions({ pluginPhp: singleSitePlugin });
+  assert.equal('phpVersion' in defaultPhp, false, 'omitted runtime PHP version preserves WP Codebox defaults');
+
+  const configuredPhp = await resolvedOptions({ pluginPhp: singleSitePlugin, settings: { wordpress_runtime_php_version: '8.4' } });
+  assert.equal(configuredPhp.phpVersion, '8.4', 'configured runtime PHP version maps to the WP Codebox phpVersion contract');
 } finally {
   await rm(root, { recursive: true, force: true });
 }
