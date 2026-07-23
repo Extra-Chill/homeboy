@@ -1181,8 +1181,41 @@ fn terminal_executor_artifacts_are_projected_under_logical_ids() {
             sha256: Some(homeboy_core::artifact_metadata::sha256_file(&patch).expect("sha")),
             metadata: json!({ "executor_artifact_finalized": true }),
         });
+        for (id, kind, bytes) in [
+            ("transcript", "transcript", b"transcript bytes".as_slice()),
+            (
+                "agent-result",
+                "agent-result",
+                b"agent result bytes".as_slice(),
+            ),
+        ] {
+            let artifact = root.path().join(id);
+            std::fs::write(&artifact, bytes).expect("write terminal artifact");
+            aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+                schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: id.to_string(),
+                kind: kind.to_string(),
+                name: None,
+                label: None,
+                role: None,
+                semantic_key: None,
+                path: Some(artifact.display().to_string()),
+                url: None,
+                mime: Some("text/plain".to_string()),
+                size_bytes: Some(bytes.len() as u64),
+                sha256: Some(homeboy_core::artifact_metadata::sha256_file(&artifact).expect("sha")),
+                metadata: json!({ "executor_artifact_finalized": true }),
+            });
+        }
         submit_plan(&plan, Some("projection-parity")).expect("submit");
         record_run_aggregate("projection-parity", &plan, &aggregate).expect("record aggregate");
+        reconcile_terminal_artifact_projection("projection-parity").expect("idempotent projection");
+        let record = status("projection-parity").expect("terminal record");
+        assert_eq!(
+            record.metadata["artifact_projection"]["status"], "complete",
+            "{:#}",
+            record.metadata
+        );
 
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
         let artifact = homeboy_core::observation::runs_service::resolve_artifact_for_run(
@@ -1210,6 +1243,65 @@ fn terminal_executor_artifacts_are_projected_under_logical_ids() {
         assert_eq!(
             std::fs::read(fetched.output_path).expect("retrieved bytes"),
             b"patch bytes"
+        );
+        for (id, bytes) in [
+            ("transcript", b"transcript bytes".as_slice()),
+            ("agent-result", b"agent result bytes".as_slice()),
+        ] {
+            let artifact = homeboy_core::observation::runs_service::resolve_artifact_for_run(
+                &store,
+                "projection-parity",
+                id,
+            )
+            .expect("resolve logical terminal artifact");
+            assert_eq!(
+                std::fs::read(artifact.path).expect("projected bytes"),
+                bytes
+            );
+        }
+    });
+}
+
+#[test]
+fn terminal_executor_artifact_projection_rejects_mismatched_bytes() {
+    with_isolated_home(|_| {
+        let root = tempfile::tempdir().expect("executor artifact root");
+        let patch = root.path().join("patch.diff");
+        std::fs::write(&patch, "expected patch").expect("write patch");
+        let plan = test_plan();
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "patch".to_string(),
+            kind: "patch".to_string(),
+            name: None,
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: Some(patch.display().to_string()),
+            url: None,
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some("expected patch".len() as u64),
+            sha256: Some(homeboy_core::artifact_metadata::sha256_file(&patch).expect("sha")),
+            metadata: json!({ "executor_artifact_finalized": true }),
+        });
+        std::fs::write(&patch, "tampered patch").expect("tamper patch");
+        submit_plan(&plan, Some("projection-tampered")).expect("submit");
+        record_run_aggregate("projection-tampered", &plan, &aggregate).expect("record aggregate");
+
+        let record = status("projection-tampered").expect("terminal record");
+        assert_eq!(record.metadata["artifact_projection"]["status"], "pending");
+        assert!(record.metadata["artifact_projection"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("does not match")));
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        assert!(
+            homeboy_core::observation::runs_service::resolve_artifact_for_run(
+                &store,
+                "projection-tampered",
+                "patch",
+            )
+            .is_err()
         );
     });
 }
