@@ -102,7 +102,11 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
 /// job snapshot and cannot dispatch or resume provider work.
 pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
-    if !record.state.is_terminal() {
+    homeboy_core::controller_runtime::validate_for_mutation(
+        &record.metadata,
+        &homeboy_core::build_identity::current().display,
+    )?;
+    if !record.state.is_terminal() || !is_authenticated_transport_recovery_record(&record) {
         return Ok(false);
     }
     let (Some(runner_id), Some(runner_job_id)) = (
@@ -125,6 +129,16 @@ pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
     reconcile_runner_job_snapshot(&mut record, &snapshot)?;
     store::write_record(&record)?;
     Ok(store::read_aggregate(&record.run_id).is_ok())
+}
+
+fn is_authenticated_transport_recovery_record(record: &AgentTaskRunRecord) -> bool {
+    record.lab_handoff.as_ref().is_some_and(|handoff| {
+        handoff.validation_error().is_none()
+            && handoff.state == AgentTaskLabHandoffState::Accepted
+            && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
+            && record.runner_id() == Some(handoff.runner_id.as_str())
+            && record.runner_job_id() == handoff.runner_job_id.as_deref()
+    })
 }
 
 /// Resume an unbound proxy where the controller never learned the runner job

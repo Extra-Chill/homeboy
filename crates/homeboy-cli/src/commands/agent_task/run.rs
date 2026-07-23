@@ -323,10 +323,13 @@ where
     E: AgentTaskExecutorAdapter,
 {
     let result = agent_task_service::run_loaded_plan(plan, record_run_id, executor)?;
-    Ok((
-        super::status::compact_aggregate_summary(&result.value, record_run_id),
-        result.exit_code,
-    ))
+    let value =
+        if std::env::var_os(homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV).is_some() {
+            aggregate_value_with_failure_reasons(&result.value)
+        } else {
+            super::status::compact_aggregate_summary(&result.value, record_run_id)
+        };
+    Ok((value, result.exit_code))
 }
 
 pub(super) fn run_submitted(args: RunArgs) -> CmdResult<Value> {
@@ -406,17 +409,19 @@ pub(super) fn run_resume_with_executor_and_bridge<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
-    if bridge {
-        // Reconcile before `resume` reads terminal evidence so a historical Lab
-        // aggregate receives its controller projection through the explicit
-        // recovery path rather than relying on incidental status reads.
-        agent_task_service::reconcile_terminal_artifact_projection(&run_id)?;
+    let needs_transport_recovery =
+        bridge && agent_task_service::terminal_transport_recovery_required(&run_id);
+    if needs_transport_recovery {
+        // Recover the authenticated terminal runner snapshot before `resume`
+        // can short-circuit on a previously persisted lossy aggregate.
+        agent_task_service::recover_terminal_transport_proxy_evidence(&run_id)?;
     }
     let result = agent_task_service::resume(run_id.clone(), executor)?;
     if bridge {
-        // This is a terminal-only recovery operation. It reuses the persisted
-        // controller plan, aggregate, and runner identity; it cannot rerun a
-        // provider or reinterpret runner event envelopes.
+        // Resume first imports authoritative terminal runner evidence when the
+        // local aggregate is absent. Reproject only after that shared recovery
+        // contract has persisted the aggregate and identity.
+        agent_task_service::reconcile_terminal_artifact_projection(&run_id)?;
         let status = agent_task_service::run_status(&run_id, since_cursor)?;
         return Ok((
             serde_json::to_value(status).unwrap_or(Value::Null),

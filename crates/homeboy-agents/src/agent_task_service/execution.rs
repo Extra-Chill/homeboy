@@ -277,6 +277,28 @@ pub fn reconcile_terminal_artifact_projection(run_id: &str) -> Result<bool> {
     agent_task_lifecycle::reconcile_terminal_artifact_projection(run_id)
 }
 
+/// Replay an authenticated terminal runner snapshot without resuming provider work.
+pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
+    agent_task_lifecycle::recover_terminal_transport_proxy_evidence(run_id)
+}
+
+pub fn terminal_transport_recovery_required(run_id: &str) -> bool {
+    agent_task_lifecycle::read_aggregate(run_id).map_or(true, |aggregate| {
+        aggregate.outcomes.is_empty()
+            && (aggregate.totals.queued
+                + aggregate.totals.running
+                + aggregate.totals.blocked
+                + aggregate.totals.skipped
+                + aggregate.totals.succeeded
+                + aggregate.totals.failed
+                + aggregate.totals.cancelled
+                + aggregate.totals.timed_out
+                + aggregate.totals.candidate_recoverable
+                + aggregate.totals.recoverable_candidates)
+                > 0
+    })
+}
+
 /// Return durable terminal evidence instead of attempting to transition a
 /// completed child run back into execution during controller reconciliation.
 pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {

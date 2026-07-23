@@ -1195,7 +1195,7 @@ fn run_plan_record_run_id_persists_running_status_before_executor_runs() {
             observed_status: Arc::clone(&observed_status),
         };
 
-        let (_value, exit_code) =
+        let (value, exit_code) =
             run_loaded_plan(test_plan(), Some(run_id), executor).expect("run-plan completed");
 
         let observed = observed_status
@@ -1204,6 +1204,9 @@ fn run_plan_record_run_id_persists_running_status_before_executor_runs() {
             .clone()
             .expect("executor observed durable status");
         assert_eq!(exit_code, 0);
+        assert_eq!(value["view"], "summary");
+        assert!(value.get("tasks").is_some());
+        assert!(value.get("outcomes").is_none());
         assert_eq!(observed.state, AgentTaskRunState::Running);
         assert_eq!(observed.tasks[0].state, AgentTaskState::Running);
         assert_eq!(observed.metadata["runner_pid"], std::process::id());
@@ -1213,6 +1216,35 @@ fn run_plan_record_run_id_persists_running_status_before_executor_runs() {
         assert_eq!(completed.state, AgentTaskRunState::Succeeded);
         assert_eq!(completed.tasks[0].state, AgentTaskState::Succeeded);
         assert!(completed.aggregate_path.is_some());
+    });
+}
+
+#[test]
+fn run_plan_lab_context_returns_lossless_terminal_aggregate() {
+    with_temp_home(|| {
+        let env = homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV;
+        let previous = std::env::var_os(env);
+        std::env::set_var(env, "homeboy-lab");
+
+        let result = run_loaded_plan(
+            test_plan(),
+            Some("run-plan-lab-terminal"),
+            CapturingExecutor::default(),
+        );
+
+        match previous {
+            Some(value) => std::env::set_var(env, value),
+            None => std::env::remove_var(env),
+        }
+        let (value, exit_code) = result.expect("Lab run-plan completed");
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["schema"], "homeboy/agent-task-aggregate/v1");
+        assert!(value.get("view").is_none());
+        assert!(value
+            .get("outcomes")
+            .and_then(Value::as_array)
+            .is_some_and(|outcomes| !outcomes.is_empty()));
+        assert!(value.get("tasks").is_none());
     });
 }
 
