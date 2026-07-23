@@ -166,6 +166,30 @@ pub(super) fn resolve_profile_workload_id(
     let Some(profile) = profile else {
         return Ok(explicit_workload_id.map(str::to_string));
     };
+    let workload_ids = resolve_profile_workload_ids(rig_spec, profile)?;
+    if workload_ids.len() != 1 {
+        let spec = rig_spec.expect("profile resolution requires a rig");
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "profile",
+            format!(
+                "fuzz profile '{}' in rig '{}' resolves to {} workloads; `homeboy fuzz run` requires exactly one workload",
+                profile,
+                spec.id,
+                workload_ids.len()
+            ),
+            Some(profile.to_string()),
+            Some(workload_ids.clone()),
+        )
+        .with_hint("Select one workload with `--workload <id>` or use a campaign command for multi-workload profiles."));
+    }
+
+    Ok(workload_ids.first().cloned())
+}
+
+pub(super) fn resolve_profile_workload_ids(
+    rig_spec: Option<&RigSpec>,
+    profile: &str,
+) -> homeboy::core::Result<Vec<String>> {
     let Some(spec) = rig_spec else {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "profile",
@@ -191,22 +215,7 @@ pub(super) fn resolve_profile_workload_id(
             spec.id
         )));
     };
-    if workload_ids.len() != 1 {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "profile",
-            format!(
-                "fuzz profile '{}' in rig '{}' resolves to {} workloads; `homeboy fuzz run` requires exactly one workload",
-                profile,
-                spec.id,
-                workload_ids.len()
-            ),
-            Some(profile.to_string()),
-            Some(workload_ids.clone()),
-        )
-        .with_hint("Select one workload with `--workload <id>` or use a campaign command for multi-workload profiles."));
-    }
-
-    Ok(workload_ids.first().cloned())
+    Ok(workload_ids.clone())
 }
 
 fn rig_component_path(spec: &RigSpec, component_id: &str) -> Option<String> {
