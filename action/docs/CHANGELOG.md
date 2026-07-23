@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.20] - 2026-07-23
+
+### Fixed
+- normalize refactor lint commands
+
 ## [2.8.19] - 2026-07-20
 
 ### Fixed
