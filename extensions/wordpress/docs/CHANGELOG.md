@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.31.2] - 2026-07-23
+
+### Fixed
+- isolate multisite browser scenarios
+
 ## [3.31.1] - 2026-07-23
 
 ### Fixed
