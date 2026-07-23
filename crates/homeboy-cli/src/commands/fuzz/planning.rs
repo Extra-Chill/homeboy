@@ -15,7 +15,7 @@ use super::execution::fuzz_runner_contract;
 use super::execution::run_run;
 use super::types::{
     FuzzCampaignDispatchRecordOutput, FuzzCampaignRunOutput, FuzzPlanArgs, FuzzPlanOutput,
-    FuzzPlanStrategy,
+    FuzzPlanStrategy, FuzzRunArgs,
 };
 use super::types_extra::{
     FuzzCampaignPlanEntryOutput, FuzzCampaignPlanIsolationOutput, FuzzCampaignPlanOutput,
@@ -190,9 +190,7 @@ pub(super) fn run_campaign(
             continue;
         }
 
-        let mut run_args = args.run.clone();
-        run_args.workload_id = Some(entry.workload_id.clone());
-        run_args.run_id = Some(entry.run_id.clone());
+        let run_args = campaign_child_run_args(&args.run, &entry.workload_id, &entry.run_id);
         let (run_output, entry_exit) = run_run(run_args)?;
         if entry_exit != 0 && exit_code == 0 {
             exit_code = entry_exit;
@@ -520,6 +518,27 @@ fn campaign_entry_metadata(
         );
     }
     metadata
+}
+
+/// Build the child `fuzz run` args for one expanded campaign entry.
+///
+/// The campaign already resolved the parent multi-workload `--profile` into
+/// concrete entries, so each child dispatches with its own `--workload` and no
+/// `--profile`: the single-workload `fuzz run` primitive rejects a profile that
+/// resolves to more than one workload, and `--profile`/`--workload` cannot be
+/// combined (#9778). All other shared campaign policy — gates, tracker refs,
+/// isolation, destructive permission, seed, artifacts — is inherited unchanged
+/// from the parent run args.
+pub(super) fn campaign_child_run_args(
+    parent: &FuzzRunArgs,
+    workload_id: &str,
+    run_id: &str,
+) -> FuzzRunArgs {
+    let mut run_args = parent.clone();
+    run_args.profile = None;
+    run_args.workload_id = Some(workload_id.to_string());
+    run_args.run_id = Some(run_id.to_string());
+    run_args
 }
 
 fn campaign_run_command(

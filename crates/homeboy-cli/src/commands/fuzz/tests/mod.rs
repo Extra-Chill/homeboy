@@ -10,8 +10,8 @@ use super::execution::{
     run_fuzz_artifact_postprocess, FuzzRunEvidenceInput,
 };
 use super::planning::{
-    build_campaign_plan, load_or_default_isolation_proof, plan_inventory_selection, run_campaign,
-    run_plan,
+    build_campaign_plan, campaign_child_run_args, load_or_default_isolation_proof,
+    plan_inventory_selection, run_campaign, run_plan,
 };
 use super::replay::{run_minimize, run_replay};
 use super::report::{

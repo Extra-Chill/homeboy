@@ -413,6 +413,65 @@ fn fuzz_campaign_plan_emits_deterministic_run_entries_from_manifest_and_cli_work
 }
 
 #[test]
+fn campaign_child_run_args_drops_parent_profile_and_pins_concrete_workload() {
+    // #9778: a multi-workload parent profile is expanded into concrete entries,
+    // so each child dispatch must carry its own --workload and drop the parent
+    // --profile. Forwarding the profile makes the single-workload `fuzz run`
+    // primitive reject the entry (profile resolves to multiple workloads, and
+    // --profile/--workload cannot be combined). Shared policy must survive.
+    let mut parent = planner_args().run;
+    parent.profile = Some("full-surface".to_string());
+    parent.workload_id = None;
+    parent.run_id = Some("parent-run".to_string());
+    parent.allow_destructive = true;
+    parent.isolation = FuzzIsolationArg::Isolated;
+    parent.gate_profile = FuzzGateProfileArg::Evidence;
+    parent.tracker_refs = vec![homeboy::core::evidence_manifest::TrackerRef {
+        kind: "github_issue".to_string(),
+        id: "Extra-Chill/homeboy#9778".to_string(),
+        url: None,
+        title: None,
+        state: None,
+    }];
+
+    let child = campaign_child_run_args(&parent, "db-fuzz", "campaign-1-db-fuzz");
+
+    // Parent multi-workload profile is dropped; the concrete workload is pinned.
+    assert_eq!(child.profile, None);
+    assert_eq!(child.workload_id.as_deref(), Some("db-fuzz"));
+    assert_eq!(child.run_id.as_deref(), Some("campaign-1-db-fuzz"));
+
+    // The child now resolves to exactly one workload with no profile conflict,
+    // matching the `fuzz run` primitive's contract.
+    assert_eq!(
+        resolve_profile_workload_id(None, child.rig_profile(), child.workload_id.as_deref())
+            .expect("child resolves without profile/workload conflict"),
+        Some("db-fuzz".to_string())
+    );
+
+    // Shared campaign policy is preserved on the child.
+    assert!(child.allow_destructive);
+    assert_eq!(child.isolation, FuzzIsolationArg::Isolated);
+    assert_eq!(child.gate_profile, FuzzGateProfileArg::Evidence);
+    assert_eq!(child.tracker_refs, parent.tracker_refs);
+}
+
+#[test]
+fn direct_run_with_multi_workload_profile_and_workload_is_still_rejected() {
+    // The acceptance guard: `fuzz run --profile <multi> --workload <id>` (i.e.
+    // a profile combined with an explicit workload) must remain rejected. Only
+    // the campaign expansion path is allowed to resolve profiles into workloads.
+    let error = resolve_profile_workload_id(None, Some("full-surface"), Some("db-fuzz"))
+        .expect_err("profile + explicit workload must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("--profile and --workload cannot be combined"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn generic_lab_profile_expands_safe_destructive_evidence_defaults() {
     let cli = FuzzCli::try_parse_from([
         "fuzz",
