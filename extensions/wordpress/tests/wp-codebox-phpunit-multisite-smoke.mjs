@@ -36,7 +36,7 @@ if (args[0] === 'recipe-run') {
 await chmod(cli, 0o755);
 
 let scenario = 0;
-async function resolvedMultisite({ pluginPhp, settings = {}, env = {} }) {
+async function resolvedOptions({ pluginPhp, settings = {}, env = {} }) {
   scenario += 1;
   const component = path.join(root, `plugin-${scenario}`);
   const observed = path.join(root, `observed-${scenario}.jsonl`);
@@ -58,7 +58,7 @@ async function resolvedMultisite({ pluginPhp, settings = {}, env = {} }) {
   });
   assert.equal(result.status, 0, result.stderr);
   const captured = (await readFile(observed, 'utf8')).trim().split('\n').map(JSON.parse);
-  return captured[0].options.multisite;
+  return captured[0].options;
 }
 
 try {
@@ -67,42 +67,48 @@ try {
 
   // Default: no signal anywhere -> single-site.
   assert.equal(
-    await resolvedMultisite({ pluginPhp: singleSitePlugin }),
+    (await resolvedOptions({ pluginPhp: singleSitePlugin })).multisite,
     false,
     'no signal defaults to single-site',
   );
 
   // Plugin header Network: true auto-enables multisite with zero config.
   assert.equal(
-    await resolvedMultisite({ pluginPhp: networkPlugin }),
+    (await resolvedOptions({ pluginPhp: networkPlugin })).multisite,
     true,
     'Network: true plugin header auto-enables multisite',
   );
 
   // wp_codebox_multisite setting enables multisite for a single-site plugin.
   assert.equal(
-    await resolvedMultisite({ pluginPhp: singleSitePlugin, settings: { wp_codebox_multisite: true } }),
+    (await resolvedOptions({ pluginPhp: singleSitePlugin, settings: { wp_codebox_multisite: true } })).multisite,
     true,
     'wp_codebox_multisite setting enables multisite',
   );
 
   // Setting can also explicitly force single-site even for a Network plugin.
   assert.equal(
-    await resolvedMultisite({ pluginPhp: networkPlugin, settings: { wp_codebox_multisite: false } }),
+    (await resolvedOptions({ pluginPhp: networkPlugin, settings: { wp_codebox_multisite: false } })).multisite,
     false,
     'explicit wp_codebox_multisite=false overrides Network header',
   );
 
   // Env var takes precedence over everything.
   assert.equal(
-    await resolvedMultisite({
+    (await resolvedOptions({
       pluginPhp: singleSitePlugin,
       settings: { wp_codebox_multisite: false },
       env: { HOMEBOY_WORDPRESS_MULTISITE: '1' },
-    }),
+    })).multisite,
     true,
     'HOMEBOY_WORDPRESS_MULTISITE env overrides settings',
   );
+
+  const defaultDatabase = await resolvedOptions({ pluginPhp: singleSitePlugin });
+  assert.equal('databaseType' in defaultDatabase, false, 'omitted database_type preserves WP Codebox defaults');
+
+  const mysqlDatabase = await resolvedOptions({ pluginPhp: singleSitePlugin, settings: { database_type: 'mysql' } });
+  assert.equal(mysqlDatabase.databaseType, 'mysql', 'database_type maps to the WP Codebox databaseType contract');
 } finally {
   await rm(root, { recursive: true, force: true });
 }
