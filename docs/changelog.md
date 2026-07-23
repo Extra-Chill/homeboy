@@ -4,6 +4,24 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.309.0] - 2026-07-23
+
+### Added
+- resolve show/watch by id via targeted indexed probes
+
+### Changed
+- Resume historical candidate adoption
+- cover validation-only finalization leaves git_tracking unset
+
+### Fixed
+- converge controller-scratch retention and bound skip rows
+- fix(agent-task): resume durable promotion checkpoints
+- make module-surface test self-contained with grammar fixture
+- fix(agent-task): integrate verified push tracking
+- fix(agent-task): bind publication identity to commit
+- fix(agent-task): restore validation-only finalization build
+- recover Git-backed Lab reviews with snapshots
+
 ## [0.308.0] - 2026-07-23
 
 ### Added
