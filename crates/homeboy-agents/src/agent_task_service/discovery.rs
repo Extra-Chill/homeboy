@@ -319,6 +319,19 @@ fn classify_liveness(
         return AgentTaskLiveness::Stale;
     }
 
+    // A record can carry a stale-running condition that has not yet been
+    // annotated onto its metadata (annotation happens on the `status` path, not
+    // at rest). Detect a dead owner process directly here so discovery agrees
+    // with `status` and `reconcile_stale_active_runs` actually terminalizes the
+    // ghost `running` record instead of classifying it Active because the
+    // owner_pid is merely PRESENT (#9718). A runner-backed job with a fresh
+    // heartbeat is authoritative liveness and is deliberately left alone.
+    let owner_process_dead = record.owner_pid().is_some() && !record.owner_process_is_running();
+    let runner_backed_and_fresh = record.runner_job_id().is_some() && record.has_fresh_update();
+    if owner_process_dead && !runner_backed_and_fresh {
+        return AgentTaskLiveness::Stale;
+    }
+
     let stale_by_age =
         last_update_age_minutes.is_some_and(|age| age >= STALE_UPDATE_THRESHOLD_MINUTES);
 
