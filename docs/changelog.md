@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.306.1] - 2026-07-23
+
+### Changed
+- consolidate canonical-JSON into homeboy-engine-primitives
+- refactor(lab-runner): consolidate duplicated allowlist shell_arg
+
+### Fixed
+- recommend narrowest --skip-checks bypass on gate failure
+- fix(agent-task): restore durable Cook retry baselines
+
 ## [0.306.0] - 2026-07-22
 
 ### Added
