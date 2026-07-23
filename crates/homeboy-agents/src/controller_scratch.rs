@@ -11,6 +11,12 @@ use homeboy_core::{git, paths, Error, Result};
 pub const CONTROLLER_SCRATCH_SCHEMA: &str = "homeboy/controller-scratch/v1";
 const INTERRUPTED_RETENTION: &str = "P1D";
 const RETENTION_OWNER_SUMMARY_LIMIT: usize = 20;
+/// Upper bound on the number of materialized `skipped` rows returned by a single
+/// cleanup invocation. The aggregate `skipped_count` and `retention_reasons`
+/// summary remain complete; this only bounds the rendered per-resource rows so a
+/// cleanup on a huge scratch index (thousands of retained resources) does not
+/// emit thousands of rows. Independent of the eligible-candidate `limit`.
+const MAX_SKIPPED_ROWS: usize = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControllerScratchResource {
@@ -255,6 +261,16 @@ pub struct ControllerScratchRetentionOwner {
 pub struct ControllerScratchCleanupOptions {
     pub apply: bool,
     pub limit: usize,
+    /// Optional override for the terminal-run retention window, in seconds.
+    ///
+    /// `None` (default) uses each resource's own configured retention window
+    /// (e.g. `P7D`), preserving historical behavior. `Some(0)` lets released,
+    /// clean, terminal scratch converge immediately once finalized — this is the
+    /// disk-pressure path exposed by `--older-than-days`. The override ONLY
+    /// affects the retention time-window comparison; it never bypasses the
+    /// still-active-run, running-owner, not-finalized, orphaned-transition, or
+    /// dirty/unpushed guards, which continue to protect in-use resources.
+    pub retention_override_seconds: Option<i64>,
 }
 
 /// Read-only lifecycle inventory used by retained-storage reporting. Unlike
@@ -461,6 +477,10 @@ fn cleanup_unlocked(
     // Only durably registered resources are cleanup candidates. In particular,
     // do not infer ownership by scanning a shared system temporary directory.
     let mut skipped = Vec::new();
+    // Complete, lightweight (reason, run_id) record of every skipped resource,
+    // used to compute an accurate `skipped_count` and `retention_reasons`
+    // summary even when the materialized `skipped` rows are capped.
+    let mut all_skips: Vec<(String, Option<String>)> = Vec::new();
     let mut applied_count = 0;
     let mut reclaimed_bytes = 0;
     let now = chrono::Utc::now();
@@ -473,17 +493,25 @@ fn cleanup_unlocked(
         }
         let lifecycle_state = resource.lifecycle_state.clone();
         let interrupted_at = resource.interrupted_at.clone();
-        let reason = cleanup_block_reason(resource, &path, now)?;
+        let reason =
+            cleanup_block_reason(resource, &path, now, options.retention_override_seconds)?;
         reconciled |= resource.lifecycle_state != lifecycle_state
             || resource.interrupted_at != interrupted_at;
         if let Some(reason) = reason {
-            skipped.push(ControllerScratchSkipped {
-                path: resource.path.clone(),
-                run_id: Some(resource.run_id.clone()),
-                owner_pid: Some(resource.owner_pid),
-                lifecycle_state: Some(resource.lifecycle_state.clone()),
-                reason,
-            });
+            // Record every skip in the lightweight aggregate so `skipped_count`
+            // and the `retention_reasons` summary stay complete, but bound the
+            // rich materialized `skipped` rows (independent of the eligible
+            // `limit`) so a huge scratch index does not render thousands of rows.
+            all_skips.push((reason.clone(), Some(resource.run_id.clone())));
+            if skipped.len() < MAX_SKIPPED_ROWS {
+                skipped.push(ControllerScratchSkipped {
+                    path: resource.path.clone(),
+                    run_id: Some(resource.run_id.clone()),
+                    owner_pid: Some(resource.owner_pid),
+                    lifecycle_state: Some(resource.lifecycle_state.clone()),
+                    reason,
+                });
+            }
             continue;
         }
         let size_bytes = path_size(&path)?;
@@ -511,18 +539,24 @@ fn cleanup_unlocked(
     let has_more = remaining_candidate_count > 0;
     for candidate in eligible.into_iter().take(options.limit) {
         if options.apply {
-            match remove_candidate(&candidate, now)? {
+            match remove_candidate(&candidate, now, options.retention_override_seconds)? {
                 Some(bytes) => {
                     applied_count += 1;
                     reclaimed_bytes += bytes;
                 }
-                None => skipped.push(ControllerScratchSkipped {
-                    path: candidate.path.clone(),
-                    run_id: Some(candidate.run_id.clone()),
-                    owner_pid: Some(candidate.owner_pid),
-                    lifecycle_state: Some(candidate.lifecycle_state.clone()),
-                    reason: "resource changed or disappeared before deletion".to_string(),
-                }),
+                None => {
+                    let reason = "resource changed or disappeared before deletion".to_string();
+                    all_skips.push((reason.clone(), Some(candidate.run_id.clone())));
+                    if skipped.len() < MAX_SKIPPED_ROWS {
+                        skipped.push(ControllerScratchSkipped {
+                            path: candidate.path.clone(),
+                            run_id: Some(candidate.run_id.clone()),
+                            owner_pid: Some(candidate.owner_pid),
+                            lifecycle_state: Some(candidate.lifecycle_state.clone()),
+                            reason,
+                        });
+                    }
+                }
             }
         }
         candidates.push(candidate);
@@ -532,11 +566,11 @@ fn cleanup_unlocked(
         mode: if options.apply { "apply" } else { "dry_run" },
         candidate_count,
         applied_count,
-        skipped_count: skipped.len(),
+        skipped_count: all_skips.len(),
         estimated_bytes,
         reclaimed_bytes,
         candidates,
-        retention_reasons: summarize_retention(&skipped),
+        retention_reasons: summarize_retention(&all_skips),
         skipped,
         remaining_candidate_count,
         remaining_candidate_bytes,
@@ -545,20 +579,24 @@ fn cleanup_unlocked(
         drain_command: cleanup_command(ControllerScratchCleanupOptions {
             apply: true,
             limit: options.limit.saturating_mul(10).max(1),
+            retention_override_seconds: options.retention_override_seconds,
         }),
     })
 }
 
+/// Summarize every skipped resource by reason and owning run. Takes the complete
+/// lightweight `(reason, run_id)` record (not the capped materialized rows) so
+/// the aggregate counts stay accurate even when `skipped` rows are bounded.
 fn summarize_retention(
-    skipped: &[ControllerScratchSkipped],
+    all_skips: &[(String, Option<String>)],
 ) -> Vec<ControllerScratchRetentionReason> {
     let mut reasons = BTreeMap::<String, BTreeMap<String, usize>>::new();
-    for retained in skipped {
-        let Some(run_id) = retained.run_id.as_deref() else {
+    for (reason, run_id) in all_skips {
+        let Some(run_id) = run_id.as_deref() else {
             continue;
         };
         *reasons
-            .entry(retained.reason.clone())
+            .entry(reason.clone())
             .or_default()
             .entry(run_id.to_string())
             .or_default() += 1;
@@ -596,6 +634,7 @@ fn cleanup_block_reason(
     resource: &mut ControllerScratchResource,
     path: &Path,
     now: chrono::DateTime<chrono::Utc>,
+    retention_override_seconds: Option<i64>,
 ) -> Result<Option<String>> {
     if !resource.reconstructable {
         return Ok(Some(
@@ -643,7 +682,15 @@ fn cleanup_block_reason(
             "resource has not been finalized by its owning run".to_string(),
         ));
     }
-    let retention = if matches!(
+    // Only the time-window comparison honors the override. All the guards above
+    // (still-active run, running owner, active→orphaned transition, not yet
+    // finalized) have already returned, and the dirty/unpushed guard below still
+    // applies — so an aggressive override can only converge released, clean,
+    // finalized, terminal scratch, never in-use resources.
+    let override_retention = retention_override_seconds.map(|seconds| format!("{seconds}s"));
+    let retention = if let Some(override_retention) = override_retention.as_deref() {
+        override_retention
+    } else if matches!(
         resource.lifecycle_state.as_str(),
         "interrupted" | "orphaned"
     ) {
@@ -693,6 +740,7 @@ fn retention_expired(
 fn remove_candidate(
     candidate: &ControllerScratchCandidate,
     now: chrono::DateTime<chrono::Utc>,
+    retention_override_seconds: Option<i64>,
 ) -> Result<Option<u64>> {
     let mut index = read_index_unlocked()?;
     let Some(resource) = index.resources.iter_mut().find(|resource| {
@@ -703,7 +751,12 @@ fn remove_candidate(
         return Ok(None);
     };
     let path = PathBuf::from(&resource.path);
-    if !path.exists() || cleanup_block_reason(resource, &path, now)?.is_some() {
+    // Re-validate with the SAME retention override used for eligibility, so a
+    // candidate that qualified under `--older-than-days` is not spuriously
+    // re-blocked here (which would leave it un-deleted forever).
+    if !path.exists()
+        || cleanup_block_reason(resource, &path, now, retention_override_seconds)?.is_some()
+    {
         write_index_unlocked(&index)?;
         return Ok(None);
     }
@@ -1050,7 +1103,7 @@ mod tests {
         resource.owner_pid = std::process::id();
 
         assert_eq!(
-            cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now()).expect("check"),
+            cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), None).expect("check"),
             Some("owner process is still running".to_string())
         );
     }
@@ -1070,7 +1123,8 @@ mod tests {
             resource.finalized_at = None;
 
             assert_eq!(
-                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now()).expect("check"),
+                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), None)
+                    .expect("check"),
                 Some("owning run is still active".to_string())
             );
             assert_eq!(resource.lifecycle_state, "active");
@@ -1093,6 +1147,7 @@ mod tests {
             let output = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                retention_override_seconds: None,
             })
             .expect("reconcile");
             assert_eq!(output.candidate_count, 0);
@@ -1152,12 +1207,11 @@ mod tests {
     #[test]
     fn retention_summary_is_bounded_and_groups_owners_by_reason() {
         let skipped = (0..=RETENTION_OWNER_SUMMARY_LIMIT)
-            .map(|index| ControllerScratchSkipped {
-                path: format!("/scratch/{index}"),
-                run_id: Some(format!("run-{index:02}")),
-                owner_pid: None,
-                lifecycle_state: None,
-                reason: "retention has not expired".to_string(),
+            .map(|index| {
+                (
+                    "retention has not expired".to_string(),
+                    Some(format!("run-{index:02}")),
+                )
             })
             .collect::<Vec<_>>();
 
@@ -1347,6 +1401,7 @@ mod tests {
             let output = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                retention_override_seconds: None,
             })
             .expect("cleanup inventory");
 
@@ -1367,9 +1422,129 @@ mod tests {
         resource.retention = "P7D".to_string();
 
         assert_eq!(
-            cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now()).expect("check"),
+            cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), None).expect("check"),
             Some("retention has not expired".to_string())
         );
+    }
+
+    #[test]
+    fn retention_override_lets_clean_released_resource_converge() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            // A finalized, clean, terminal resource WITHIN its P7D window is
+            // skipped by default but becomes eligible with `Some(0)` override.
+            let root = tempfile::tempdir().expect("root");
+            let scratch = root.path().join("scratch");
+            fs::create_dir(&scratch).expect("scratch");
+            let mut resource = resource(&scratch, root.path());
+            resource.lifecycle_state = "released".to_string();
+            resource.retention = "P7D".to_string();
+
+            // Default: still within the 7-day window, so it is retained.
+            assert_eq!(
+                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), None)
+                    .expect("default check"),
+                Some("retention has not expired".to_string())
+            );
+
+            // Pressure override (expire-immediately): now eligible (no block).
+            assert_eq!(
+                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), Some(0))
+                    .expect("override check"),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn retention_override_does_not_bypass_dirty_guard() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            // A dirty/unpushed resource stays skipped EVEN with an aggressive
+            // override — the override only relaxes the time window, never the
+            // dirty/unpushed safety guard.
+            let root = tempfile::tempdir().expect("root");
+            let scratch = root.path().join("scratch");
+            fs::create_dir(&scratch).expect("scratch");
+            run_git(&scratch, &["init", "-b", "main"]);
+            fs::write(scratch.join("untracked.txt"), "dirty").expect("dirty file");
+            let mut resource = resource(&scratch, root.path());
+            resource.lifecycle_state = "released".to_string();
+
+            assert_eq!(
+                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), Some(0))
+                    .expect("override check"),
+                Some("git checkout has dirty or unpushed state".to_string())
+            );
+            assert!(scratch.exists());
+        });
+    }
+
+    #[test]
+    fn retention_override_does_not_bypass_running_owner_guard() {
+        // A resource whose owner process is still running stays skipped even
+        // with the override — the override never relaxes the running-owner guard.
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        let mut resource = resource(&scratch, root.path());
+        resource.lifecycle_state = "released".to_string();
+        resource.owner_pid = std::process::id();
+
+        assert_eq!(
+            cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), Some(0))
+                .expect("override check"),
+            Some("owner process is still running".to_string())
+        );
+    }
+
+    #[test]
+    fn skipped_rows_are_capped_while_count_stays_complete() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            // Register more retained (within-window) resources than the skipped
+            // row cap and assert the materialized rows are bounded while the
+            // aggregate `skipped_count` reflects the true total.
+            let root = tempfile::tempdir().expect("root");
+            let total = MAX_SKIPPED_ROWS + 25;
+            let mut resources = Vec::with_capacity(total);
+            for index in 0..total {
+                let scratch = root.path().join(format!("scratch-{index}"));
+                fs::create_dir(&scratch).expect("scratch");
+                let mut resource = resource(&scratch, root.path());
+                resource.run_id = format!("run-{index}");
+                resource.lease_id = format!("lease-{index}");
+                resource.lifecycle_state = "released".to_string();
+                // Within the retention window, so every resource is skipped.
+                resource.retention = "P7D".to_string();
+                resources.push(resource);
+            }
+            write_index(&ControllerScratchIndex {
+                schema: schema(),
+                resources,
+            })
+            .expect("resource index");
+
+            let output = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+                retention_override_seconds: None,
+            })
+            .expect("cleanup");
+
+            assert_eq!(output.candidate_count, 0);
+            // True total is preserved even though rendered rows are bounded.
+            assert_eq!(output.skipped_count, total);
+            assert!(
+                output.skipped.len() <= MAX_SKIPPED_ROWS,
+                "materialized skipped rows must be capped: got {}",
+                output.skipped.len()
+            );
+            // The aggregate summary still accounts for every retained resource.
+            let summarized: usize = output
+                .retention_reasons
+                .iter()
+                .map(|reason| reason.resource_count)
+                .sum();
+            assert_eq!(summarized, total);
+        });
     }
 
     #[test]
@@ -1384,7 +1559,8 @@ mod tests {
             resource.lifecycle_state = "released".to_string();
 
             assert_eq!(
-                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now()).expect("check"),
+                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), None)
+                    .expect("check"),
                 Some("git checkout has dirty or unpushed state".to_string())
             );
             assert!(scratch.exists());
@@ -1432,6 +1608,7 @@ mod tests {
             let inventory = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                retention_override_seconds: None,
             })
             .expect("inventory");
             assert_eq!(inventory.candidate_count, 1);
@@ -1444,6 +1621,7 @@ mod tests {
             let applied = cleanup(ControllerScratchCleanupOptions {
                 apply: true,
                 limit: 1,
+                retention_override_seconds: None,
             })
             .expect("apply");
             assert_eq!(applied.applied_count, 1);
@@ -1461,6 +1639,7 @@ mod tests {
             let repeated = cleanup(ControllerScratchCleanupOptions {
                 apply: true,
                 limit: 1,
+                retention_override_seconds: None,
             })
             .expect("repeated apply");
             assert_eq!(repeated.applied_count, 0);
@@ -1503,7 +1682,7 @@ mod tests {
             .expect("live index");
 
             assert_eq!(
-                remove_candidate(&candidate, chrono::Utc::now()).expect("remove"),
+                remove_candidate(&candidate, chrono::Utc::now(), None).expect("remove"),
                 None
             );
             assert!(scratch.exists());
@@ -1545,6 +1724,7 @@ mod tests {
             let output = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                retention_override_seconds: None,
             })
             .expect("preview");
             assert_eq!(output.candidate_count, 2);
