@@ -62,6 +62,30 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
             continue;
         }
 
+        // A runner-backed record is only a local projection. Refresh it from
+        // the daemon before treating a dead controller owner as authority: the
+        // daemon may still be active or may have already published the terminal
+        // aggregate and artifacts while the controller caller was gone.
+        if run.runner_id.is_some() && run.runner_job_id.is_some() {
+            match agent_task_lifecycle::status(&run.run_id) {
+                Ok(refreshed) if refreshed.state.is_terminal() => continue,
+                Ok(refreshed) if !refreshed.is_stale_running() => continue,
+                Ok(_) => {}
+                Err(error) => {
+                    failed += 1;
+                    runs.push(AgentTaskReconcileRun {
+                        run_id: run.run_id,
+                        liveness,
+                        source: run.source,
+                        stale_reason: run.stale_reason,
+                        action: "failed",
+                        error: Some(error.message),
+                    });
+                    continue;
+                }
+            }
+        }
+
         let expired_handoff =
             agent_task_lifecycle::has_expired_unaccepted_lab_handoff(&run.run_id)?;
         if dry_run {
