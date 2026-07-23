@@ -311,15 +311,10 @@ To skip only this gate: homeboy release <component> --skip-checks=lint",
 fn quality_error(field: &str, message: String) -> Error {
     homeboy_core::log_status!("release", "Code quality check failed: {}", message);
 
-    Error::validation_invalid_argument(
-        field,
-        message,
-        None,
-        Some(vec![
-            "Fix the issue above before releasing".to_string(),
-            "To bypass: homeboy release <component> --skip-checks".to_string(),
-        ]),
-    )
+    let mut tried = vec!["Fix the issue above before releasing".to_string()];
+    tried.extend(scoped_skip_guidance(field));
+
+    Error::validation_invalid_argument(field, message, None, Some(tried))
 }
 
 /// Like [`quality_error`] but attaches captured [`CommandEvidence`] so the
@@ -335,17 +330,60 @@ fn quality_error_with_evidence(field: &str, message: String, evidence: CommandEv
         evidence.exit_code
     );
 
+    let mut tried = vec![
+        "Inspect error_details.command_evidence for the failing command, cwd, exit code, and captured stdout/stderr".to_string(),
+        "Reproduce in isolation: homeboy test <component>".to_string(),
+    ];
+    tried.extend(scoped_skip_guidance(field));
+
     Error::validation_invalid_argument_with_evidence(
         field,
         message,
         None,
-        Some(vec![
-            "Inspect error_details.command_evidence for the failing command, cwd, exit code, and captured stdout/stderr".to_string(),
-            "Reproduce in isolation: homeboy test <component>".to_string(),
-            "To bypass: homeboy release <component> --skip-checks".to_string(),
-        ]),
+        Some(tried),
         Some(evidence),
     )
+}
+
+/// Recovery guidance recommending the narrowest supported release-gate bypass
+/// for the gate that failed (#9641).
+///
+/// A failing gate should point operators at `--skip-checks=<gate>` (which keeps
+/// every other safety gate enabled) rather than the bare `--skip-checks` that
+/// disables audit, lint, AND test. This matters most for autonomous agents,
+/// which should preserve every green gate while making an explicit decision
+/// about the single known baseline failure.
+///
+/// The `field` is the failing gate identity ("lint"/"test"). Unknown gates fall
+/// back to the scoped-then-broad ordering without a specific gate name.
+fn scoped_skip_guidance(field: &str) -> Vec<String> {
+    // Only audit/lint/test are valid `--skip-checks=<check>` values.
+    let gate = match field.to_ascii_lowercase().as_str() {
+        "lint" => Some("lint"),
+        "test" | "tests" => Some("test"),
+        "audit" => Some("audit"),
+        _ => None,
+    };
+
+    match gate {
+        Some(gate) => {
+            let remaining: Vec<&str> = ["audit", "lint", "test"]
+                .into_iter()
+                .filter(|check| *check != gate)
+                .collect();
+            vec![
+                format!(
+                    "To skip only this gate: homeboy release <component> --skip-checks={gate} (keeps {} enabled)",
+                    remaining.join(", ")
+                ),
+                "Last resort — bare `--skip-checks` disables ALL audit/lint/test gates: homeboy release <component> --skip-checks".to_string(),
+            ]
+        }
+        None => vec![
+            "To skip only the failing gate: homeboy release <component> --skip-checks=<audit|lint|test>".to_string(),
+            "Last resort — bare `--skip-checks` disables ALL audit/lint/test gates: homeboy release <component> --skip-checks".to_string(),
+        ],
+    }
 }
 
 fn code_quality_failure_message(check: &str, output: &extension::RunnerOutput) -> String {
@@ -688,6 +726,95 @@ mod tests {
         assert!(message.contains("harness exited 1 with zero findings"));
         assert!(message.contains("homeboy lint <component>"));
         assert!(message.contains("--skip-checks=lint"));
+    }
+
+    #[test]
+    fn lint_failure_recommends_scoped_skip_checks_lint() {
+        // #9641: a failing lint gate must recommend the narrowest bypass
+        // (--skip-checks=lint), state which gates stay enabled, and present the
+        // bare --skip-checks only as an explicit last resort.
+        let hints = super::scoped_skip_guidance("lint");
+
+        let scoped = hints
+            .iter()
+            .find(|h| h.contains("--skip-checks=lint"))
+            .expect("lint failure must recommend --skip-checks=lint");
+        assert!(
+            scoped.contains("audit") && scoped.contains("test"),
+            "scoped hint must name the gates that stay enabled: {scoped}"
+        );
+        let last_resort = hints
+            .iter()
+            .find(|h| h.contains("Last resort"))
+            .expect("bare --skip-checks must be flagged as a last resort");
+        assert!(
+            last_resort.contains("disables ALL"),
+            "bare --skip-checks must warn it disables all gates: {last_resort}"
+        );
+        // The last-resort broad bypass must appear after the scoped one.
+        let scoped_idx = hints.iter().position(|h| h == scoped).unwrap();
+        let broad_idx = hints.iter().position(|h| h == last_resort).unwrap();
+        assert!(
+            scoped_idx < broad_idx,
+            "scoped bypass must be recommended before the broad last resort"
+        );
+    }
+
+    #[test]
+    fn test_failure_recommends_scoped_skip_checks_test() {
+        let hints = super::scoped_skip_guidance("test");
+        let scoped = hints
+            .iter()
+            .find(|h| h.contains("--skip-checks=test"))
+            .expect("test failure must recommend --skip-checks=test");
+        assert!(
+            scoped.contains("audit") && scoped.contains("lint"),
+            "scoped hint must name the gates that stay enabled: {scoped}"
+        );
+    }
+
+    #[test]
+    fn audit_failure_recommends_scoped_skip_checks_audit() {
+        let hints = super::scoped_skip_guidance("audit");
+        let scoped = hints
+            .iter()
+            .find(|h| h.contains("--skip-checks=audit"))
+            .expect("audit failure must recommend --skip-checks=audit");
+        assert!(
+            scoped.contains("lint") && scoped.contains("test"),
+            "scoped hint must name the gates that stay enabled: {scoped}"
+        );
+    }
+
+    #[test]
+    fn unknown_gate_falls_back_to_generic_scoped_guidance() {
+        let hints = super::scoped_skip_guidance("mystery");
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains("--skip-checks=<audit|lint|test>")),
+            "unknown gate should still steer toward a scoped bypass: {hints:?}"
+        );
+        assert!(
+            hints.iter().any(|h| h.contains("Last resort")),
+            "unknown gate should still flag bare --skip-checks as a last resort: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn quality_error_tried_hints_prefer_scoped_bypass() {
+        // The full error hint list (not just the helper) must carry the scoped
+        // command and flag the broad bypass as a last resort.
+        let err = super::quality_error("lint", "Lint failed (exit code 1)".to_string());
+        let rendered = format!("{:?}", err);
+        assert!(
+            rendered.contains("--skip-checks=lint"),
+            "error tried hints must include the scoped bypass: {rendered}"
+        );
+        assert!(
+            rendered.contains("Last resort"),
+            "error tried hints must flag bare --skip-checks as a last resort: {rendered}"
+        );
     }
 
     #[test]
