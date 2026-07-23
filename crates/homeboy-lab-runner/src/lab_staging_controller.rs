@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use homeboy_core::daemon::controller_job_driver::{
     self, ControllerJobDriver, ControllerJobHandle, ControllerJobPublicError,
 };
+use homeboy_core::engine::canonical_json::canonical_json_bytes;
 use homeboy_core::lab_contract::{
     LabRigWorkloadKind, LabRoutingPolicy, LabRunnerWorkloadCapability, LabSecretEnvSource,
     LabSourcePathMode, LabWorkspaceModePolicy,
@@ -623,33 +624,8 @@ pub struct LabStagingRecipeRef {
     pub canonical_plan_digest: String,
 }
 
-fn canonicalize_json(value: Value) -> Value {
-    match value {
-        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize_json).collect()),
-        Value::Object(values) => {
-            let mut fields: Vec<_> = values.into_iter().collect();
-            fields.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-            Value::Object(
-                fields
-                    .into_iter()
-                    .map(|(key, value)| (key, canonicalize_json(value)))
-                    .collect(),
-            )
-        }
-        value => value,
-    }
-}
-
 fn canonical_digest<T: Serialize>(value: &T) -> Result<String> {
-    let bytes = serde_json::to_vec(&canonicalize_json(serde_json::to_value(value).map_err(
-        |error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("serialize durable Lab workspace state".to_string()),
-            )
-        },
-    )?))
-    .map_err(|error| {
+    let bytes = canonical_json_bytes(value).map_err(|error| {
         Error::internal_json(
             error.to_string(),
             Some("serialize canonical durable Lab workspace state".to_string()),

@@ -4,8 +4,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use homeboy_core::engine::canonical_json::canonical_json_bytes;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -62,30 +62,8 @@ fn attachment_path(run_id: &str, kind: &str) -> Result<PathBuf> {
 
 /// Version 1 digests recursively canonicalized JSON: object keys are sorted and
 /// all persistence serializes that same canonical envelope.
-fn canonical_json<T: Serialize>(value: &T) -> Result<Value> {
-    let value = serde_json::to_value(value)
-        .map_err(|_| Error::internal_json("serialize private run attachment", None))?;
-    Ok(canonicalize(value))
-}
-
-fn canonicalize(value: Value) -> Value {
-    match value {
-        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize).collect()),
-        Value::Object(values) => {
-            let mut keys: Vec<_> = values.into_iter().collect();
-            keys.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-            Value::Object(
-                keys.into_iter()
-                    .map(|(key, value)| (key, canonicalize(value)))
-                    .collect(),
-            )
-        }
-        value => value,
-    }
-}
-
 fn canonical_bytes<T: Serialize>(payload: &T) -> Result<Vec<u8>> {
-    serde_json::to_vec(&canonical_json(payload)?)
+    canonical_json_bytes(payload)
         .map_err(|_| Error::internal_json("serialize private run attachment", None))
 }
 

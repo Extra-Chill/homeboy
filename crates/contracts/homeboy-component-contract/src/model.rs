@@ -7,6 +7,7 @@ use crate::config::{
     GithubConfig, ScopeConfig, ScopedExtensionConfig, VersionTarget,
 };
 use homeboy_audit_contract::AuditConfig;
+use homeboy_engine_primitives::canonical_json::canonical_json;
 
 /// Lifecycle state of a component.
 ///
@@ -349,7 +350,8 @@ impl Component {
     /// Return a stable serialization suitable for comparing resolved component
     /// configuration across independently loaded snapshots.
     pub fn canonical_identity(&self) -> serde_json::Result<String> {
-        serde_json::to_value(self).and_then(|value| serde_json::to_string(&canonical_json(value)))
+        serde_json::to_value(self)
+            .and_then(|value| serde_json::to_string(&canonical_json(value)))
     }
 
     /// Return a stable identity for comparing a component's *configured*
@@ -531,23 +533,6 @@ impl Component {
                 "Homeboy does not execute component-level build_command.".to_string(),
             ]),
         ))
-    }
-}
-
-fn canonical_json(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.into_iter().map(canonical_json).collect())
-        }
-        serde_json::Value::Object(values) => serde_json::Value::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| (key, canonical_json(value)))
-                .collect::<std::collections::BTreeMap<_, _>>()
-                .into_iter()
-                .collect(),
-        ),
-        value => value,
     }
 }
 
